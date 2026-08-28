@@ -64,6 +64,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
+type PostReloadFinalizer = Arc<dyn Fn(&mut CommandRegistry) + Send + Sync>;
+
 /// Verbatim TS metadata (`reload-skills/index.ts`, v2.1.198).
 const DESCRIPTION: &str = "Pick up skills added or changed on disk during this session";
 
@@ -93,6 +95,13 @@ pub struct ReloadSkillsHandler {
     /// empty: reload may invalidate stale entries but must not rediscover
     /// on-disk customization that boot intentionally disabled.
     safe_mode: bool,
+    /// Mobile-only opt-in: also reload legacy `.lingxi/commands/*.md` entries
+    /// inside the same locked mutation so decoy command names cannot surface
+    /// between disk reload and bundled restoration.
+    reload_legacy_commands: bool,
+    /// Optional synchronous finalizer that runs while the registry write lock is
+    /// still held, after disk-backed prompt commands have been reloaded.
+    post_reload_finalizer: Option<PostReloadFinalizer>,
 }
 
 impl ReloadSkillsHandler {
@@ -111,6 +120,8 @@ impl ReloadSkillsHandler {
                 additional_skill_dirs: Vec::new(),
             },
             safe_mode: false,
+            reload_legacy_commands: false,
+            post_reload_finalizer: None,
         }
     }
 
@@ -139,7 +150,22 @@ impl ReloadSkillsHandler {
                 additional_skill_dirs,
             },
             safe_mode,
+            reload_legacy_commands: false,
+            post_reload_finalizer: None,
         }
+    }
+
+    /// Opt into reloading legacy `.lingxi/commands/*.md` entries and then run a
+    /// synchronous finalizer before releasing the registry write lock.
+    #[must_use]
+    pub fn with_locked_post_reload_finalizer(
+        mut self,
+        reload_legacy_commands: bool,
+        finalizer: PostReloadFinalizer,
+    ) -> Self {
+        self.reload_legacy_commands = reload_legacy_commands;
+        self.post_reload_finalizer = Some(finalizer);
+        self
     }
 }
 
@@ -222,7 +248,25 @@ impl BuiltinCommandHandler for ReloadSkillsHandler {
         {
             let mut reg = self.registry.write().await;
             reg.unregister_loaded_from("skills");
+            if self.reload_legacy_commands {
+                reg.unregister_loaded_from("commands_DEPRECATED");
+            }
             if !self.safe_mode {
+                if self.reload_legacy_commands {
+                    let no_managed = self
+                        .roots
+                        .lingxi_home
+                        .join("__lingxi_no_managed_settings__");
+                    let managed_dir = self.roots.managed_dir.as_deref().unwrap_or(&no_managed);
+                    crate::custom_commands::load_and_register_custom_commands(
+                        &mut reg,
+                        &self.roots.cwd,
+                        &self.roots.lingxi_home,
+                        managed_dir,
+                        &self.roots.home,
+                    )
+                    .await;
+                }
                 crate::custom_commands::load_and_register_skill_commands_with_roots(
                     &mut reg,
                     &self.roots.cwd,
@@ -232,6 +276,9 @@ impl BuiltinCommandHandler for ReloadSkillsHandler {
                     &self.roots.additional_skill_dirs,
                 )
                 .await;
+            }
+            if let Some(finalizer) = &self.post_reload_finalizer {
+                finalizer(&mut reg);
             }
         }
 
@@ -267,7 +314,11 @@ impl BuiltinCommandHandler for ReloadSkillsHandler {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use command_api::model::{CommandFrontmatter, CommandSource, SlashCommand, SlashCommandKind};
     use std::fs;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Condvar, Mutex};
+    use std::time::Duration;
 
     fn tmp_root(name: &str) -> PathBuf {
         let nanos = std::time::SystemTime::now()
@@ -297,6 +348,20 @@ mod tests {
             name: "reload-skills".to_string(),
             raw_args: String::new(),
             positional_args: Vec::new(),
+        }
+    }
+
+    fn bundled_cmd(name: &str) -> SlashCommand {
+        SlashCommand {
+            name: name.to_string(),
+            description: format!("{name} bundled"),
+            source: CommandSource::Bundled,
+            kind: SlashCommandKind::Bundled {
+                frontmatter: CommandFrontmatter::default(),
+                prompt_fn: None,
+            },
+            loaded_from: Some("bundled".into()),
+            ..SlashCommand::default()
         }
     }
 
@@ -506,5 +571,99 @@ mod tests {
         let out = run(&h).await;
         assert!(out.starts_with("Reloaded skills: "));
         assert!(out.contains(" available ("));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn locked_post_reload_finalizer_blocks_readers_until_bundled_restore_finishes() {
+        let root = tmp_root("atomic");
+        let cwd = root.join("repo");
+        let home = root.join("home");
+        let lingxi_home = home.join(".lingxi");
+        let commands = cwd.join(".lingxi").join("commands");
+        let skills = cwd.join(".lingxi").join("skills");
+        fs::create_dir_all(cwd.join(".git")).expect("git marker");
+        fs::create_dir_all(&lingxi_home).expect("lingxi home");
+        fs::create_dir_all(&commands).expect("commands dir");
+        fs::write(
+            commands.join("demo.md"),
+            "---\ndescription: decoy command\n---\nDECOY\n",
+        )
+        .expect("write decoy command");
+        write_skill(&skills, "demo", "Demo skill");
+
+        let registry = Arc::new(RwLock::new(CommandRegistry::new()));
+        let finalizer_entered = Arc::new((Mutex::new(false), Condvar::new()));
+        let finalizer_release = Arc::new((Mutex::new(false), Condvar::new()));
+        let reader_finished = Arc::new(AtomicBool::new(false));
+        let reader_finished_flag = reader_finished.clone();
+        let entered_wait = finalizer_entered.clone();
+        let release_wait = finalizer_release.clone();
+        let handler = ReloadSkillsHandler::with_all_roots(
+            registry.clone(),
+            cwd,
+            lingxi_home,
+            None,
+            home,
+            Vec::new(),
+            false,
+        )
+        .with_locked_post_reload_finalizer(
+            true,
+            Arc::new(move |reg| {
+                reg.register_command(bundled_cmd("demo"));
+                let (entered_lock, entered_cv) = &*entered_wait;
+                *entered_lock.lock().expect("entered lock") = true;
+                entered_cv.notify_one();
+
+                let (release_lock, release_cv) = &*release_wait;
+                let mut released = release_lock.lock().expect("release lock");
+                while !*released {
+                    released = release_cv.wait(released).expect("release wait");
+                }
+            }),
+        );
+
+        let handler_task = tokio::spawn(async move { run(&handler).await });
+        tokio::task::spawn_blocking(move || {
+            let (entered_lock, entered_cv) = &*finalizer_entered;
+            let entered = entered_lock.lock().expect("entered lock");
+            let (_entered, timeout) = entered_cv
+                .wait_timeout_while(entered, Duration::from_secs(5), |entered| !*entered)
+                .expect("wait finalizer entered");
+            assert!(
+                !timeout.timed_out(),
+                "finalizer did not enter within the timeout"
+            );
+        })
+        .await
+        .expect("wait for finalizer");
+
+        let read_registry = registry.clone();
+        let reader = tokio::spawn(async move {
+            let reg = read_registry.read().await;
+            reader_finished_flag.store(true, Ordering::SeqCst);
+            reg.resolve("demo")
+                .and_then(|cmd| cmd.loaded_from.clone())
+                .expect("demo resolves")
+        });
+        tokio::task::yield_now().await;
+        assert!(
+            !reader_finished.load(Ordering::SeqCst),
+            "reader must stay blocked until the locked finalizer returns"
+        );
+
+        let (release_lock, release_cv) = &*finalizer_release;
+        *release_lock.lock().expect("release lock") = true;
+        release_cv.notify_one();
+        assert_eq!(
+            handler_task.await.expect("handler task"),
+            "Reloaded skills: 0 skills available (no changes)"
+        );
+        assert_eq!(
+            reader.await.expect("reader task"),
+            "bundled".to_string(),
+            "reader must only observe the post-finalizer bundled winner"
+        );
+        fs::remove_dir_all(root).ok();
     }
 }

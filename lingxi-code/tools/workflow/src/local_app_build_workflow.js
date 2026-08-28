@@ -13,10 +13,35 @@ const CONTRACT = [
   '- Edit ONLY files under app/, src/, components/, lib/, styles/, public/ in the current workspace.',
   '- The host has already scaffolded the workspace, checked in the locked package manifests, and pinned the root build contract before this workflow starts. Do not run npm, npx, node, Vite scaffolds, Shell-driven package installs, or any alternate project generator in any phase.',
   '- Root infrastructure is locked: do not edit package.json, pnpm-lock.yaml, pnpm-workspace.yaml, index.html, vite.config.*, jsconfig.json, host metadata under .lingxi/, lib/device-context.js, lib/lingxi-bridge.js, lib/lingxi-provider.jsx, lib/platform-adapter.js, or styles/foundation.css.',
-  '- Generate only editable source and assets, starting from the entry point the scaffold already put there: app/screens/home-screen.jsx for a routed app, app/screens/game-screen.jsx for a drawn surface. Read what is on disk rather than assuming; the two scaffolds do not share a screen.',
+  '- Generate only editable source and assets, starting from the entry point the scaffold already put there: app/screens/home-screen.jsx for this routed app. Read what is on disk rather than assuming, and do not import or reference canvas-only entry points such as app/screens/game-screen.jsx from this workflow.',
   '- The UI kit is Ionic. Import components from the @ionic/react barrel and NEVER from @ionic/core/components: the per-component entry points dynamically import one another and the pinned iife build rejects that outright. There is no Tailwind and no shadcn/ui — use Ionic CSS variables (--ion-color-primary, --ion-background-color, --ion-color-step-*), Ionic utility classes (ion-padding, ion-margin, ion-text-center, ion-justify-content-*, ion-hide-*), and app/globals.css for anything else.',
   '- The platform look is already chosen: the checked-in provider calls setupIonicReact with the host OS, so components render iOS or Material chrome on their own. Do not branch on the user agent and do not hard-code the metrics of one platform.',
   '- A routed app puts routes inside IonRouterOutlet using react-router 6 Routes/Route, and every routed screen renders IonPage as its ROOT element — without that the outlet has nothing to animate and the platform back gesture never attaches. Navigate with routerLink rather than an onClick handler.',
+  '- The host draws NO chrome around a running app: no title bar, no back button, no navigation of any kind. Whatever bars this app renders are the only bars the user gets. Every routed screen therefore renders its own IonHeader/IonToolbar with an IonTitle, and every screen that can be pushed onto also renders its own IonBackButton inside IonButtons slot="start" with a defaultHref, because nothing outside the page offers a way back. The web view keeps the TOP safe-area inset, so a header already sits below the status bar: do not add status-bar padding of your own on top of it.',
+  // The keep-clear square below is DERIVED from the two clients, not guessed.
+  // Collapsed footprint, measured out from the safe-area corner as
+  // (leading across) x (bottom up):
+  //   Android -- LocalAppsScreen.kt RunPill: call-site `.padding(16.dp)` at
+  //     `Modifier.align(Alignment.BottomStart)`, Row `padding(horizontal = 4.dp)`,
+  //     one `IconButton` at `RunPillTapTarget` = 48.dp.
+  //     16 + 4 + 48 + 4 = 72dp across, 16 + 48 = 64dp up.
+  //   iOS -- LocalAppDetailView.swift LocalAppRunControl: call-site `.padding(16)`,
+  //     HStack `.padding(.horizontal, 4)`, one button at `tapTarget` = 44.
+  //     16 + 4 + 44 + 4 = 68pt across, 16 + 44 = 60pt up.
+  // Android is the larger client on both axes, so take its 72 x 64 and round up
+  // to 80, published as one square (80 across, 80 up). The previous 64 x 64 was
+  // SHORT of the leading extent on BOTH clients (68 and 72), i.e. it told
+  // generated apps that a strip the host control actually covers was theirs.
+  //
+  // EXPANDED the control is three buttons wide and the same height:
+  //   Android 16 + 4 + 48 + 4 + 48 + 4 + 48 + 4 = 176dp across, 64dp up.
+  //   iOS     16 + 4 + 44 + 2 + 44 + 2 + 44 + 4 = 160pt across, 60pt up.
+  // The published square covers the COLLAPSED footprint only. Expansion is
+  // user-initiated and collapses again on the next tap, so reserving ~180pt of
+  // every generated app's bottom edge permanently would sterilize a whole strip
+  // for a state that is transient by construction. The contract line still warns
+  // about that strip so nothing time-critical lands there.
+  '- The host floats ONE control over the running page in the BOTTOM-LEADING corner: a 44-48pt target, inset 16pt from the safe area, painted ON TOP of the page. Anything the app puts under it is covered and untappable. Keep that corner clear, the leading 80pt by the bottom 80pt measured from the safe area (foundation.css exposes --safe-area-bottom and --safe-area-left). Tapping the control expands it along the bottom edge to about 180pt for as long as it is held open, so keep anything time-critical off that strip too; only the square has to be reserved permanently. IonFab defaults to the bottom-END corner, which is clear: leave it there and never place one at horizontal="start" with vertical="bottom". An IonTabBar spans the FULL width of an IonPage, so its leading-most tab lands under the control: prefer navigation in the header (IonSegment on an IonToolbar), or, when a bottom tab bar really is the right shape, reserve the leading edge of the bar with padding-inline-start so that no tab sits in that square.',
   '- @ionic/react-router exports EXACTLY three router components — IonReactRouter, IonReactHashRouter, IonReactMemoryRouter — and no hooks. Every Ionic hook, useIonRouter included, comes from the @ionic/react barrel. Importing a hook from @ionic/react-router fails the build with MISSING_EXPORT, and it fails while rendering chunks rather than while transforming, so the message names the package and not your screen.',
   '- Keep Vite\'s official dist/ output default. Do not redirect build.outDir. The host mounts this workspace as the sole writable build root (guest-visible as the project path), excludes prior .lingxi-build-state/build-output/dist/, runs with --outDir dist --emptyOutDir, and serves only the atomically promoted build/store/dist/.',
   '- The page reaches host data/network/device ONLY through window.lingxi.v2 and the checked-in bridge adapter.',
@@ -26,9 +51,9 @@ const CONTRACT = [
   '- For page storage, import queryCollection, upsertRecord, and deleteRecord from the locked bridge. Read app fields from records[].document. Never invent action/create/record mutation shapes.',
   '- localStorage must never be authoritative for a declared collection and must not hide a failed native write. Do not swallow bridge errors; surface a recoverable UI error and keep failed state retryable.',
   '- Dependencies are fixed by the host-owned template and lockfile set. The host may prepare the workspace dependencies when needed, but this workflow may not add, remove, install, reconcile, or re-lock packages itself.',
-  '- For a drawn surface — a game, a 3D scene, a custom visualization — render into a <canvas> and own the frame loop yourself with requestAnimationFrame inside an effect, cancelling it on unmount. The canvas scaffold already ships src/game/frame-loop.js, which sizes the drawing buffer to the device pixel ratio, resizes on rotation and iPad multitasking, clamps the first frame after a resume, and cancels itself: use it rather than re-deriving those three. Keep per-frame simulation state in a ref, never in the store — pushing positions through React re-renders every frame. 2D needs no dependency. For 3D, three@0.185.1 is in the locked set: import it directly and drive the renderer from your own loop. Nothing outside the locked set can be installed, so do not design around a game engine, a physics library, or a WebGL wrapper that is not there.',
+  '- Whole drawn surfaces route to the dedicated canvas workflows, not this routed DOM one. When a routed screen still embeds a <canvas> or WebGL region for a chart, simulation, or custom visualization, own exactly one requestAnimationFrame loop inside an effect and cancel it in that effect’s cleanup. Size the drawing buffer to the device pixel ratio, resize it when the viewport or layout changes, clamp the first delta after a resume/background return, and keep per-frame state in refs rather than the store — pushing positions through React re-renders every frame. Do not import the canvas-only lib/frame-loop.js helper here; that profile-managed helper is scaffolded only for whole-surface Canvas2D/Three apps routed elsewhere. 2D needs no dependency. For 3D, three@0.185.1 is in the locked set: import it directly and drive the scene updates and WebGL draw calls from that owned loop. Nothing outside the locked set can be installed, so do not design around a game engine, a physics library, or a WebGL wrapper that is not there.',
   '- Source versioning uses ordinary workspace Git history. Use the existing Git capability when available; do not add a second version store or command surface.',
-  '- Data collections, network domains, capabilities, target OS, and form factor must be confirmed before source generation.',
+  '- Data collections, network domains, capabilities, target OS, and form factor must be confirmed before source generation. The mobile host replaces expected_writable_collections with every id in the materialized manifest; every declared collection therefore needs a real UI write path, or remove it from the manifest before building.',
 ].join('\n');
 
 const DESIGN_RESULT_SCHEMA = {
@@ -41,13 +66,80 @@ const DESIGN_RESULT_SCHEMA = {
         properties: {
           os: { type: 'string' },
           form_factor: { type: 'string' },
+          presentation: { type: 'string' },
+          navigation: { type: 'string' },
         },
-        required: ['os', 'form_factor'],
+        required: ['os', 'form_factor', 'presentation', 'navigation'],
       },
     },
+    information_architecture: {
+      type: 'object',
+      properties: {
+        screens: { type: 'array', items: { type: 'string' } },
+        states: {
+          type: 'object',
+          properties: {
+            loading: { type: 'string' },
+            empty: { type: 'string' },
+            error: { type: 'string' },
+            success: { type: 'string' },
+            permission: { type: 'string' },
+          },
+          required: ['loading', 'empty', 'error', 'success', 'permission'],
+        },
+      },
+      required: ['screens', 'states'],
+    },
+    visual_system: {
+      type: 'object',
+      properties: {
+        design_direction: { type: 'string' },
+        tokens: {
+          type: 'object',
+          properties: {
+            color: { type: 'array', items: { type: 'string' } },
+            typography: { type: 'array', items: { type: 'string' } },
+            spacing: { type: 'array', items: { type: 'string' } },
+            radius: { type: 'array', items: { type: 'string' } },
+            elevation: { type: 'array', items: { type: 'string' } },
+            motion: { type: 'array', items: { type: 'string' } },
+            safe_area: { type: 'array', items: { type: 'string' } },
+          },
+          required: ['color', 'typography', 'spacing', 'radius', 'elevation', 'motion', 'safe_area'],
+        },
+      },
+      required: ['design_direction', 'tokens'],
+    },
+    interaction_model: {
+      type: 'object',
+      properties: {
+        pointer_touch: { type: 'array', items: { type: 'string' } },
+        keyboard_mouse: { type: 'array', items: { type: 'string' } },
+        back: { type: 'array', items: { type: 'string' } },
+        reduced_motion: { type: 'array', items: { type: 'string' } },
+      },
+      required: ['pointer_touch', 'keyboard_mouse', 'back', 'reduced_motion'],
+    },
+    adapter_boundary: {
+      type: 'object',
+      properties: {
+        shared_logic: { type: 'array', items: { type: 'string' } },
+        platform_specific_shell: { type: 'array', items: { type: 'string' } },
+      },
+      required: ['shared_logic', 'platform_specific_shell'],
+    },
+    acceptance_checks: { type: 'array', items: { type: 'string' } },
     summary: { type: 'string' },
   },
-  required: ['targets', 'summary'],
+  required: [
+    'targets',
+    'information_architecture',
+    'visual_system',
+    'interaction_model',
+    'adapter_boundary',
+    'acceptance_checks',
+    'summary',
+  ],
 };
 
 const VERIFICATION_RESULT_SCHEMA = {
@@ -153,26 +245,30 @@ const VERIFICATION_RESULT_SCHEMA = {
 /// two workflows that started identical end up disagreeing about when a build
 /// has failed.
 const SHAPE = {
-  designPrompt: ({ appId, confirmedSpec, strategyContext, revision }) => [
+  allowedRuntimeProfileFamilies: ['react_dom'],
+  designPrompt: ({ appId, confirmedSpec, strategyContext, revision, runtimeProfile }) => [
       'Act as the local app design lead by invoking $frontend-design.',
       `Prepare the implementation design for local app "${appId}" from this confirmed request:`,
       confirmedSpec,
       strategyContext,
       revision ? `Revision feedback:\n${revision}` : '',
       '',
-      'Return a concrete, machine-readable design brief containing targets as an array of {os, form_factor} entries (iPhone, Android phone, iPad/tablet, Android tablet, or desktop), how each target was confirmed or inferred from the fixed Mobile Runtime Environment reminder (Host OS, Device class, Execution target, Launch mode), screen hierarchy, navigation/back behavior, complete UI states, design tokens, and the platform adapter strategy. If multiple targets are requested, describe distinct platform presentations sharing business logic.',
+      `The persisted runtime profile is ${runtimeProfile.family} revision ${runtimeProfile.revision} with contract ${runtimeProfile.contract_sha256}. This routed workflow only applies to runtime_profile.family="react_dom"; preserve that family and do not infer another runtime from the brief, imports, or package wishes.`,
+      'Return a concrete, machine-readable design brief matching the supplied design schema: every target is an {os, form_factor, presentation, navigation} entry, and the result must include information_architecture with screens plus loading/empty/error/success/permission states, visual_system with design_direction and structured tokens, interaction_model with pointer_touch/keyboard_mouse/back/reduced_motion, adapter_boundary with shared_logic/platform_specific_shell, acceptance_checks, and summary. Explain how each target was confirmed or inferred from the fixed Mobile Runtime Environment reminder (Host OS, Device class, Execution target, Launch mode). If multiple targets are requested, describe distinct platform presentations sharing business logic.',
+      'The host draws no title bar and no back button around a running app, and it floats one small control over the BOTTOM-LEADING corner of the page. Design each screen to carry its own header and its own back affordance, and keep the bottom-leading corner free of app furniture: a full-width bottom tab bar puts a tab underneath that control.',
       'Do not treat viewport, safe-area, color-scheme, reduced-motion, or input-mode as prompt facts. Those are dynamic runtime values that the generated app must read from window.lingxi.v2.deviceContext.',
       'Assume the host already scaffolded the workspace and pinned the package/runtime contract. Design against the existing project shape; do not request package, template, scaffold, fallback, or toolchain decisions.',
       'If the confirmed brief needs an original bitmap asset (photo, illustration, texture, hero, or background), conditionally detect ImageGen; when ready, record prompt/source/use and generate under public/. If unavailable, ask once whether to configure it or skip, then continue with CSS, gradients, user assets, or a placeholder without treating ImageGen as a hard dependency. Never use ImageGen for ordinary UI icons.',
       'Do not propose package changes or any root-file edits in the design result. The build root, package graph, and locked infra are host-owned.',
       ],
-  generatePrompt: ({ appId, confirmedSpec, strategyContext, design, strategyPolicy }) => [
+  generatePrompt: ({ appId, confirmedSpec, strategyContext, design, strategyPolicy, runtimeProfile }) => [
     strategyPolicy.runDesign
-      ? 'Generate the complete React implementation. Invoke $accessibility and $react-best-practices as independent reviewers while writing the source.'
-      : 'Generate the complete React implementation from the confirmed spec. Use the compact design decisions in this prompt and invoke $accessibility and $react-best-practices as independent reviewers while writing the source.',
+      ? 'Generate the complete React implementation. Invoke $ionic-react-local-app for the routed DOM implementation, then invoke $accessibility and $react-best-practices as independent reviewers while writing the source.'
+      : 'Generate the complete React implementation from the confirmed spec. Use the compact design decisions in this prompt and invoke $ionic-react-local-app for the routed DOM implementation, then invoke $accessibility and $react-best-practices as independent reviewers while writing the source.',
     `Implement local app "${appId}" from the confirmed request and design:`,
     confirmedSpec,
     strategyContext,
+    `Persisted runtime profile: ${runtimeProfile.family} r${runtimeProfile.revision} (${runtimeProfile.contract_sha256}). Preserve it exactly; this workflow is only for react_dom.`,
     JSON.stringify(design || { summary: 'Use the confirmed spec as the compact design brief.' }),
     '',
     CONTRACT,
@@ -191,32 +287,50 @@ const SHAPE = {
     'STOP once the build succeeds and the runtime is started. Do not verify your own output here: do not walk the UI with LocalAppInspectUi, do not drive it with LocalAppActOnUi, do not capture frames, and do not Sleep waiting for it to settle. A separate Verify stage does all of that afterwards with a budget of its own. Confirming the build succeeded and the runtime returned a preview URL is where this stage ends.',
     'Return the structured build result only after generation, build, and runtime start have all completed.',
     ],
-  verifyPrompt: ({ appId, build, strategyContext, verificationBreadth, design }) => [
+  verifyPrompt: ({
+    appId,
+    build,
+    strategyContext,
+    verificationBreadth,
+    design,
+    runtimeProfile,
+    confirmedSpec,
+    expectedWritableCollections,
+  }) => [
       'Invoke $frontend-qa for deterministic local-app verification.',
       `Verify local app "${appId}" using the preview from the build result:`,
       JSON.stringify(build),
-      strategyContext,
-      verificationBreadth,
-      JSON.stringify(design || { summary: 'Use the confirmed spec and generated app as the design reference.' }),
+    strategyContext,
+    verificationBreadth,
+    'Confirmed product specification (source of truth; do not infer a different product contract):',
+    confirmedSpec,
+    `Host-materialized expected_writable_collections (authoritative manifest ids): ${JSON.stringify(expectedWritableCollections)}. Verify every id in this list; every declared collection must have a real core UI write path. If an id has no such path, remove that declaration and rebuild rather than treating it as optional. If the list is non-empty, data_roundtrip.status=not_applicable, missing, or any non-passed status is a blocking finding.`,
+    `Persisted runtime profile: ${runtimeProfile.family} r${runtimeProfile.revision} (${runtimeProfile.contract_sha256}). Do not route this DOM verification through a canvas runtime or infer another engine from source imports.`,
+    JSON.stringify(design || { summary: 'Use the confirmed spec and generated app as the design reference.' }),
       '',
       'Use Browser when the capability exists for the selected verification breadth. A narrow viewport alone does not prove a platform. Then use the real Local App WebView LocalAppInspectUi/LocalAppActOnUi/LocalAppLogs path to verify bridge/data/device context/system back semantics.',
-      `For every declared collection that a core UI path writes, perform that real UI action, then call LocalAppQueryData with {"app_id":"${appId}","collection":"<id>"} and verify the persisted record under records[].document. A localStorage-only value, optimistic UI state, or swallowed bridge rejection is a failed data roundtrip. Return data_roundtrip.status=passed only with this host-query evidence, not_applicable only when the app has no writable collection UI, otherwise failed and set ok=false.`,
+      `For every host-materialized expected_writable_collections id, perform its real core UI write action, then call LocalAppQueryData with {"app_id":"${appId}","collection":"<id>"} and verify the persisted record under records[].document. A declared collection with no UI write path is a defect: remove it from the manifest and rebuild. A localStorage-only value, optimistic UI state, or swallowed bridge rejection is a failed data roundtrip. Return data_roundtrip.status=passed only with this host-query evidence and include every expected id in collections. Return not_applicable only when the host-materialized expected_writable_collections is empty; otherwise failed and set ok=false.`,
       'If Browser is unavailable, use the existing LocalAppInspectUi/LocalAppActOnUi/LocalAppLogs path and report verification as degraded rather than claiming full visual QA.',
       'If this app draws to a canvas or WebGL surface, the DOM path above is BLIND to it: LocalAppInspectUi returns an empty element list whether the app is rendering correctly, rendering nothing, or has crashed, so an empty snapshot is NOT evidence of anything. Call LocalAppCaptureUi to see the actual frame, and drive it with LocalAppActOnUi action "pointer" (value "x,y" or "x,y,phase" in CSS pixels; phase tap|down|move|up) or action "key" (value "<key>" or "<key>,phase"; phase press|down|up). A canvas app verified only through inspect_ui has not been verified.',
       'Also return render_check {status, canvas_surfaces, frames_captured, interactions_driven, evidence}. canvas_surfaces is the canvasCount field from your LAST LocalAppInspectUi, frames_captured is how many frames LocalAppCaptureUi actually returned, and interactions_driven lists the pointer/key actions you actually drove. Set status=passed only when you have looked at a captured frame and confirmed it shows the app rendering; not_applicable ONLY when canvas_surfaces is 0 and the DOM snapshot already carried the evidence; failed when the frame shows a blank, broken or crashed render. If canvas_surfaces is 1 or more you may not answer not_applicable: part of the app draws itself and inspect_ui cannot see it, however many buttons surround it.',
       'findings is the list of UNRESOLVED DEFECTS that still need a source change, each with its evidence and the file to change. It is not a record of what you checked and it is not a summary: every entry you put there sends the app into another repair round and, once the rounds run out, fails the build quoting your own text back. A verification that found nothing wrong returns findings as an empty array no matter how much it verified. What you checked goes in checked_matrix, what you concluded goes in summary, and what a capture showed goes in render_check.evidence.',
       'Return ok, findings, checked matrix, browser_available, webview_checked, degraded_verification, and data_roundtrip {status, collections, evidence}. Do not repair source in this pass.',
       ],
-  repairPrompt: ({ appId, verification, renderFindings, strategyContext }) => [
+  repairPrompt: ({ appId, verification, renderFindings, strategyContext, confirmedSpec, design, runtimeProfile }) => [
       `Repair the findings from frontend-qa for local app "${appId}".`,
       JSON.stringify(verification),
       // The gate's own findings are DERIVED, not written by the verifier, so
       // they are absent from the JSON above. Without this line a render-gate
       // repair round arrives with `findings: []` and nothing to act on.
       ...(renderFindings.length > 0
-        ? [`Additional blocking findings from the render gate: ${renderFindings.join('; ')}`]
+        ? [`Additional blocking findings derived by workflow gates: ${renderFindings.join('; ')}`]
         : []),
       strategyContext,
+      'Confirmed product specification (source of truth; do not infer a different product contract):',
+      confirmedSpec,
+      `Persisted runtime profile: ${runtimeProfile.family} r${runtimeProfile.revision} (${runtimeProfile.contract_sha256}). Preserve this routed react_dom shape; do not switch to a canvas runtime or add a runtime-specific dependency path.`,
+      'Authoritative design brief (source of truth): preserve its information architecture, visual system, interaction model, adapter boundary, and acceptance checks while repairing the source. This is a routed DOM workflow; preserve its route and component shape.',
+      JSON.stringify(design || { summary: 'No standalone design brief was produced; preserve the confirmed request.' }),
       CONTRACT,
       'Fix the smallest source-level cause. Do not install packages, change root infra files, or edit workspace package files, and do not claim verification yet.',
       `After repairing, call LocalAppBuild with {"app_id":"${appId}"}. Let the host prepare locked dependencies if needed. If the build fails, read the build log, fix only editable source files, and retry once.`,

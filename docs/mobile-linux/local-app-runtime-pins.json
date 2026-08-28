@@ -1241,8 +1241,8 @@
     "yarn"
   ],
   "local_app_runtime": {
-    "lockfile": "lingxi-code/local-apps/templates/vite-react-static-v1/pnpm-lock.yaml",
-    "lockfile_sha256": "e82b19b0b466009b878c532a9d97511d0545c6cff6dc0aff3d5e5534a0dd7757",
+    "lockfile": "lingxi-code/local-apps/templates/runtime-profiles/react-dom/r1/pnpm-lock.yaml",
+    "lockfile_sha256": "ff805143f51e7a9cc31a935495b64f3515a54a6ebb8d4b7374f1d5e33869aabb",
     "lightningcss": "1.33.0",
     "lightningcss_bindings": {
       "lightningcss-linux-arm64-musl": "1.33.0",
@@ -1251,12 +1251,17 @@
     "node": "24.18.1",
     "react": "19.2.8",
     "react_dom": "19.2.8",
-    "rolldown": "1.2.4",
+    "rolldown": "1.2.6",
     "rolldown_bindings": {
-      "@rolldown/binding-linux-arm64-musl": "1.2.4",
-      "@rolldown/binding-linux-x64-musl": "1.2.4"
+      "@rolldown/binding-linux-arm64-musl": "1.2.6",
+      "@rolldown/binding-linux-x64-musl": "1.2.6"
     },
-    "template": "lingxi-code/local-apps/templates/vite-react-static-v1",
+    "rollup": "4.44.0",
+    "rollup_bindings": {
+      "@rollup/rollup-linux-arm64-musl": "4.44.0",
+      "@rollup/rollup-linux-x64-musl": "4.44.0"
+    },
+    "template": "lingxi-code/local-apps/templates/runtime-profiles/react-dom/r1",
     "vite": "8.2.1"
   },
   "pnpm": {

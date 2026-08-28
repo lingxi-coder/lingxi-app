@@ -507,6 +507,7 @@ function validateAppManifest(v: unknown): void {
   const o = rec(v);
   assert.ok(
     isNumber(o['schema_version']) &&
+      isNumber(o['runtime_api_version']) &&
       isString(o['app_id']) &&
       isString(o['name']) &&
       isNumber(o['design_revision']),
@@ -527,13 +528,33 @@ function validateAppManifest(v: unknown): void {
         context['formFactor'] as string,
       ),
     );
-    const viewport = rec(context['viewport']);
-    assert.ok(isNumber(viewport['width']) && isNumber(viewport['height']));
-    const safeArea = rec(context['safeArea']);
-    for (const side of ['top', 'right', 'bottom', 'left']) assert.ok(isNumber(safeArea[side]));
-    assert.ok(['light', 'dark', 'unknown'].includes(context['colorScheme'] as string));
-    assert.ok(isBool(context['reducedMotion']));
-    assert.ok(['touch', 'pointer', 'hybrid', 'unknown'].includes(context['inputMode'] as string));
+  }
+  if ('surface' in o) {
+    assert.ok(['dom', 'canvas'].includes(o['surface'] as string));
+  }
+  if ('runtime_profile' in o) {
+    const profile = rec(o['runtime_profile']);
+    assert.ok(
+      ['react_dom', 'canvas_2d', 'three_3d', 'phaser_2d', 'babylon_3d'].includes(
+        profile['family'] as string,
+      ) &&
+        isNumber(profile['revision']) &&
+        isString(profile['contractSha256']),
+    );
+  }
+  if ('dependency_snapshot' in o) {
+    const snapshot = rec(o['dependency_snapshot']);
+    for (const key of [
+      'requestedSha256',
+      'packageSha256',
+      'lockfileSha256',
+      'dependencyTreeSha256',
+      'sbomSha256',
+      'toolchainKey',
+      'verifiedProfileContractSha256',
+    ]) {
+      assert.ok(isString(snapshot[key]), `invalid dependency snapshot ${key}`);
+    }
   }
 }
 
@@ -608,6 +629,56 @@ function validateAppCapabilityRequest(v: unknown): void {
   if ('domain' in o) assert.ok(isString(o['domain']));
 }
 
+function validateRuntimeProfileSelectionRequest(v: unknown): void {
+  const o = rec(v);
+  assert.ok(isString(o['requestId']) && isString(o['appId']) && isString(o['reason']));
+  if ('recommendedFamily' in o) assert.ok(isString(o['recommendedFamily']));
+  assert.ok(Array.isArray(o['options']));
+  for (const rawOption of o['options'] as unknown[]) {
+    const option = rec(rawOption);
+    assert.ok(
+      isString(option['family']) &&
+        isNumber(option['revision']) &&
+        isString(option['surface']) &&
+        Array.isArray(option['corePackages']) &&
+        isString(option['cacheStatus']) &&
+        isString(option['downloadStatus']) &&
+        isBool(option['available']),
+    );
+    assert.ok(isString(option['contractSha256']));
+    for (const rawPackage of option['corePackages'] as unknown[]) {
+      const pkg = rec(rawPackage);
+      assert.ok(isString(pkg['name']) && isString(pkg['version']));
+    }
+    if ('reason' in option) assert.ok(isString(option['reason']));
+  }
+}
+
+function validateDependencyChangeConfirmationRequest(v: unknown): void {
+  const o = rec(v);
+  assert.ok(
+    isString(o['requestId']) &&
+      isString(o['appId']) &&
+      isString(o['reason']) &&
+      isString(o['licenseRisk']) &&
+      isString(o['sbomRisk']) &&
+      isBool(o['lifecycleScriptsBlocked']) &&
+      isBool(o['nativeAddonsBlocked']) &&
+      isString(o['rollbackPolicy']),
+  );
+  assert.ok(Array.isArray(o['changes']));
+  for (const rawChange of o['changes'] as unknown[]) {
+    const change = rec(rawChange);
+    assert.ok(
+      ['add', 'update', 'remove'].includes(String(change['kind'])) &&
+        isString(change['package']) &&
+        isString(change['cacheStatus']) &&
+        isString(change['downloadStatus']),
+    );
+    if ('version' in change) assert.ok(isString(change['version']));
+  }
+}
+
 function validateAppAuthorizationDecision(v: unknown): void {
   assert.ok(['deny', 'allow_once', 'allow_session', 'allow_always'].includes(v as string));
 }
@@ -641,6 +712,19 @@ function validateAppDetails(v: unknown): void {
   const o = rec(v);
   validateAppRecord(o['app']);
   if ('manifest' in o) validateAppManifest(o['manifest']);
+  if ('runtime_profile_status' in o) {
+    assert.ok(
+      [
+        'verified',
+        'dependencies_dirty',
+        'core_dependency_drift',
+        'rebuild_required',
+        'migration_available',
+        'runtime_bundle_missing',
+        'runtime_contract_corrupt',
+      ].includes(o['runtime_profile_status'] as string),
+    );
+  }
   validateAppRuntimeDetails(o['runtime']);
   assert.ok(Array.isArray(o['checkpoints']));
   for (const c of o['checkpoints'] as unknown[]) validateAppCheckpoint(c);
@@ -679,6 +763,12 @@ function validateAppEvent(v: unknown): void {
       break;
     case 'app_capability_requested':
       validateAppCapabilityRequest(o['request']);
+      break;
+    case 'app_runtime_profile_selection_requested':
+      validateRuntimeProfileSelectionRequest(o['request']);
+      break;
+    case 'app_dependency_change_confirmation_requested':
+      validateDependencyChangeConfirmationRequest(o['request']);
       break;
     case 'app_checkpoints_changed':
       assert.ok(isString(o['app_id']) && Array.isArray(o['checkpoints']));
@@ -906,6 +996,13 @@ function validateCommand(name: string, v: unknown): void {
     case 'resolve_app_capability_request':
       assert.ok(isString(o['request_id']));
       validateAppAuthorizationDecision(o['decision']);
+      break;
+    case 'resolve_app_runtime_profile_selection':
+      assert.ok(isString(o['request_id']));
+      if ('selected_family' in o) assert.ok(isString(o['selected_family']));
+      break;
+    case 'resolve_app_dependency_change_confirmation':
+      assert.ok(isString(o['request_id']) && isBool(o['approved']));
       break;
     case 'resolve_app_profile_proposal':
       assert.ok(
@@ -1334,7 +1431,7 @@ function validateError(v: unknown): void {
 
 test('every command snapshot parses as ClientCommand', () => {
   const files = listSnapshots('command');
-  assert.equal(files.length, 48, `expected 48 command snapshots, found ${files.length}`);
+  assert.equal(files.length, 50, `expected 50 command snapshots, found ${files.length}`);
   for (const file of files) {
     validateCommand(file, loadSnapshot('command', file));
   }
@@ -1372,7 +1469,7 @@ test('workflow model metadata and paused task status pass the wire guards', () =
 
 test('every event snapshot parses as ClientEvent', () => {
   const files = listSnapshots('event');
-  assert.equal(files.length, 63, `expected 63 event snapshots, found ${files.length}`);
+  assert.equal(files.length, 65, `expected 65 event snapshots, found ${files.length}`);
   for (const file of files) {
     validateEvent(file, loadSnapshot('event', file));
   }

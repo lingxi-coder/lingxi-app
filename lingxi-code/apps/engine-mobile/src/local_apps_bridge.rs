@@ -30,16 +30,17 @@ use client_adapter::ClientEventSink;
 use client_protocol::events::ClientEvent;
 use client_protocol::local_apps::{
     AppCapabilityKindDto, AppCheckpointDto, AppCheckpointKindDto, AppCreateOriginDto,
-    AppDataCollectionDto, AppDataFieldDto, AppDataFieldTypeDto, AppDetailsDto, AppErrorCodeDto,
-    AppEventDto, AppManifestDto, AppRecordDto, AppRuntimeDetailsDto, AppRuntimeModeDto,
-    AppRuntimeRecoveryStateDto, AppRuntimeStateDto, AppSurfaceDto, AppWorkflowStateDto,
-    DeviceContextDto,
+    AppDataCollectionDto, AppDataFieldDto, AppDataFieldTypeDto, AppDependencySnapshotDto,
+    AppDetailsDto, AppErrorCodeDto, AppEventDto, AppManifestDto, AppRecordDto,
+    AppRuntimeDetailsDto, AppRuntimeModeDto, AppRuntimeProfileBindingDto, AppRuntimeProfileDto,
+    AppRuntimeProfileStatusDto, AppRuntimeRecoveryStateDto, AppRuntimeStateDto, AppSurfaceDto,
+    AppWorkflowStateDto, DeviceContextDto,
 };
 use local_apps::{
-    load_manifest, AppCapability, AppCheckpoint, AppCheckpointKind, AppError, AppErrorCode,
-    AppEvent, AppEventObserver, AppLayout, AppManifest, AppRecord, AppRuntimeRecord,
-    AppRuntimeState, AppService, AppSurface, AppWorkflowState, DataCollectionSchema, DataFieldKind,
-    DataFieldSchema,
+    load_manifest, AppCapability, AppCheckpoint, AppCheckpointKind, AppDependencySnapshot,
+    AppError, AppErrorCode, AppEvent, AppEventObserver, AppLayout, AppManifest, AppRecord,
+    AppRuntimeProfile, AppRuntimeProfileBinding, AppRuntimeRecord, AppRuntimeState, AppService,
+    AppSurface, AppWorkflowState, DataCollectionSchema, DataFieldKind, DataFieldSchema,
 };
 use tokio::sync::{mpsc, oneshot};
 
@@ -392,6 +393,71 @@ fn lower_capability(capability: AppCapability) -> AppCapabilityKindDto {
     }
 }
 
+fn lower_runtime_profile_family(profile: AppRuntimeProfile) -> AppRuntimeProfileDto {
+    match profile {
+        AppRuntimeProfile::ReactDom => AppRuntimeProfileDto::ReactDom,
+        AppRuntimeProfile::Canvas2d => AppRuntimeProfileDto::Canvas2d,
+        AppRuntimeProfile::Three3d => AppRuntimeProfileDto::Three3d,
+        AppRuntimeProfile::Phaser2d => AppRuntimeProfileDto::Phaser2d,
+        AppRuntimeProfile::Babylon3d => AppRuntimeProfileDto::Babylon3d,
+    }
+}
+
+fn lower_runtime_profile_binding(binding: AppRuntimeProfileBinding) -> AppRuntimeProfileBindingDto {
+    AppRuntimeProfileBindingDto {
+        family: lower_runtime_profile_family(binding.family),
+        revision: binding.revision,
+        contract_sha256: binding.contract_sha256,
+    }
+}
+
+fn lower_surface(surface: AppSurface) -> AppSurfaceDto {
+    match surface {
+        AppSurface::Dom => AppSurfaceDto::Dom,
+        AppSurface::Canvas => AppSurfaceDto::Canvas,
+    }
+}
+
+fn lower_runtime_profile_status(
+    status: crate::local_apps_build::AppRuntimeProfileStatus,
+) -> AppRuntimeProfileStatusDto {
+    match status {
+        crate::local_apps_build::AppRuntimeProfileStatus::Verified => {
+            AppRuntimeProfileStatusDto::Verified
+        }
+        crate::local_apps_build::AppRuntimeProfileStatus::DependenciesDirty => {
+            AppRuntimeProfileStatusDto::DependenciesDirty
+        }
+        crate::local_apps_build::AppRuntimeProfileStatus::CoreDependencyDrift => {
+            AppRuntimeProfileStatusDto::CoreDependencyDrift
+        }
+        crate::local_apps_build::AppRuntimeProfileStatus::RebuildRequired => {
+            AppRuntimeProfileStatusDto::RebuildRequired
+        }
+        crate::local_apps_build::AppRuntimeProfileStatus::MigrationAvailable => {
+            AppRuntimeProfileStatusDto::MigrationAvailable
+        }
+        crate::local_apps_build::AppRuntimeProfileStatus::RuntimeBundleMissing => {
+            AppRuntimeProfileStatusDto::RuntimeBundleMissing
+        }
+        crate::local_apps_build::AppRuntimeProfileStatus::RuntimeContractCorrupt => {
+            AppRuntimeProfileStatusDto::RuntimeContractCorrupt
+        }
+    }
+}
+
+fn lower_dependency_snapshot(snapshot: AppDependencySnapshot) -> AppDependencySnapshotDto {
+    AppDependencySnapshotDto {
+        requested_sha256: snapshot.requested_sha256,
+        package_sha256: snapshot.package_sha256,
+        lockfile_sha256: snapshot.lockfile_sha256,
+        dependency_tree_sha256: snapshot.dependency_tree_sha256,
+        sbom_sha256: snapshot.sbom_sha256,
+        toolchain_key: snapshot.toolchain_key,
+        verified_profile_contract_sha256: snapshot.verified_profile_contract_sha256,
+    }
+}
+
 pub(crate) fn lower_runtime_details(runtime: &AppRuntimeRecord) -> AppRuntimeDetailsDto {
     AppRuntimeDetailsDto {
         state: lower_runtime_state(runtime.state),
@@ -421,7 +487,7 @@ pub(crate) fn lower_runtime_details(runtime: &AppRuntimeRecord) -> AppRuntimeDet
 pub(crate) fn lower_manifest(manifest: AppManifest) -> AppManifestDto {
     AppManifestDto {
         schema_version: manifest.schema_version,
-        runtime_api_version: Some(manifest.runtime_api_version),
+        runtime_api_version: manifest.runtime_api_version,
         app_id: manifest.app_id,
         name: manifest.name,
         design_revision: manifest.revision,
@@ -441,6 +507,9 @@ pub(crate) fn lower_manifest(manifest: AppManifest) -> AppManifestDto {
             os: context.os,
             form_factor: context.form_factor,
         }),
+        surface: manifest.surface.map(lower_surface),
+        runtime_profile: manifest.runtime_profile.map(lower_runtime_profile_binding),
+        dependency_snapshot: manifest.dependency_snapshot.map(lower_dependency_snapshot),
     }
 }
 
@@ -468,6 +537,10 @@ pub(crate) fn lower_details(
     Ok(AppDetailsDto {
         app: lower_record(record),
         manifest: load_manifest_snapshot(root, &record.id)?,
+        runtime_profile_status: crate::local_apps_build::derive_runtime_profile_status(
+            root, record,
+        )
+        .map(lower_runtime_profile_status),
         runtime: lower_runtime_details(runtime),
         checkpoints: checkpoints.iter().map(lower_checkpoint).collect(),
     })
@@ -542,7 +615,6 @@ mod tests {
     use super::*;
     use local_apps::AppWorkflowState;
 
-    #[test]
     #[test]
     fn file_capabilities_lower_to_distinct_wire_kinds() {
         assert_eq!(

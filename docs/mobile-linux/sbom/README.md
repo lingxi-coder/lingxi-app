@@ -33,11 +33,11 @@ Evidence shape enforced by CI:
 An Android release must fail closed when any of these artifacts is missing or
 does not match the staged native/rootfs bytes.
 
-Regenerate and verify the local-app pnpm lock evidence with:
+Regenerate and verify the bundled engine-free local-app seed evidence with:
 
 ```text
 python3 lingxi-code/scripts/mobile-linux/generate-local-app-sbom.py \
-  --lock lingxi-code/local-apps/templates/vite-react-static-v1/pnpm-lock.yaml \
+  --lock lingxi-code/local-apps/templates/runtime-profiles/react-dom/r1/pnpm-lock.yaml \
   --output docs/mobile-linux/sbom/local-app-runtime.spdx.json
 bash lingxi-code/scripts/mobile-linux/test-local-app-supply-chain.sh
 ```

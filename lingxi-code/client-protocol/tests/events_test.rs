@@ -18,9 +18,12 @@ use client_protocol::events::{ClientEvent, CostDto, TurnOutcomeDto};
 use client_protocol::listings::SessionAgentSummaryDto;
 use client_protocol::local_apps::{
     AppBridgeResponseDto, AppCapabilityKindDto, AppCapabilityRequestDto, AppCheckpointDto,
-    AppCheckpointKindDto, AppErrorCodeDto, AppEventDto, AppRecordDto, AppRuntimeModeDto,
-    AppRuntimeRecoveryStateDto, AppRuntimeStateDto, AppRuntimeSuspensionReasonDto,
-    AppUiActionKindDto, AppUiRequestDto, AppWorkflowStateDto,
+    AppCheckpointKindDto, AppDependencyChangeConfirmationRequestDto, AppDependencyChangeDto,
+    AppDependencyChangeKindDto, AppErrorCodeDto, AppEventDto, AppRecordDto, AppRuntimeModeDto,
+    AppRuntimeProfileDto, AppRuntimeProfileOptionDto, AppRuntimeProfilePackageDto,
+    AppRuntimeProfileSelectionRequestDto, AppRuntimeRecoveryStateDto, AppRuntimeStateDto,
+    AppRuntimeSuspensionReasonDto, AppSurfaceDto, AppUiActionKindDto, AppUiRequestDto,
+    AppWorkflowStateDto,
 };
 use client_protocol::message::{MessageBlockDto, MessageDto};
 use client_protocol::permission::PermissionResolutionDto;
@@ -600,6 +603,48 @@ fn extended_local_app_events_round_trip() {
             },
         },
         ClientEvent::AppEvent {
+            event: AppEventDto::AppRuntimeProfileSelectionRequested {
+                request: AppRuntimeProfileSelectionRequestDto {
+                    request_id: "runtime-1".to_string(),
+                    app_id: "habits-1a2b".to_string(),
+                    reason: "Choose a runtime profile".to_string(),
+                    recommended_family: Some(AppRuntimeProfileDto::ReactDom),
+                    options: vec![
+                        AppRuntimeProfileOptionDto {
+                            family: AppRuntimeProfileDto::ReactDom,
+                            revision: 1,
+                            contract_sha256: "abc123".to_string(),
+                            surface: AppSurfaceDto::Dom,
+                            core_packages: vec![AppRuntimeProfilePackageDto {
+                                name: "react".to_string(),
+                                version: "19.0.0".to_string(),
+                            }],
+                            cache_status: "bundled".to_string(),
+                            download_status: "bundled".to_string(),
+                            available: true,
+                            reason: None,
+                        },
+                        AppRuntimeProfileOptionDto {
+                            family: AppRuntimeProfileDto::Babylon3d,
+                            revision: 1,
+                            contract_sha256:
+                                "a908c3b2ffcf8c61f526238e0325b45125c795ea38406029b99708f2fea86c16"
+                                    .to_string(),
+                            surface: AppSurfaceDto::Canvas,
+                            core_packages: vec![AppRuntimeProfilePackageDto {
+                                name: "@babylonjs/core".to_string(),
+                                version: "9.22.1".to_string(),
+                            }],
+                            cache_status: "unavailable".to_string(),
+                            download_status: "gated".to_string(),
+                            available: false,
+                            reason: Some("Pending device validation".to_string()),
+                        },
+                    ],
+                },
+            },
+        },
+        ClientEvent::AppEvent {
             event: AppEventDto::AppCheckpointsChanged {
                 app_id: "habits-1a2b".to_string(),
                 checkpoints: vec![],
@@ -632,17 +677,22 @@ fn extended_local_app_events_round_trip() {
         "app_bridge_response",
         "app_ui_request",
         "app_capability_requested",
+        "app_runtime_profile_selection_requested",
         "app_checkpoints_changed",
         "app_record_changed",
     ];
     // One leaf field name per variant, so a renamed FIELD (not just a renamed
     // variant tag) is caught too.
-    let expected_leaves: [(&str, serde_json::Value); 5] = [
+    let expected_leaves: [(&str, serde_json::Value); 6] = [
         ("/event/response/result_json", serde_json::Value::from("[]")),
         ("/event/request/action", serde_json::Value::from("inspect")),
         (
             "/event/request/capability",
             serde_json::Value::from("network_domain"),
+        ),
+        (
+            "/event/request/recommendedFamily",
+            serde_json::Value::from("react_dom"),
         ),
         ("/event/app_id", serde_json::Value::from("habits-1a2b")),
         (
@@ -754,6 +804,42 @@ fn app_operation_failed_round_trips() {
     let back_g: ClientEvent =
         serde_json::from_value(json_g).expect("deserialize global AppOperationFailed");
     assert_eq!(back_g, ev_global);
+}
+
+#[test]
+fn dependency_change_confirmation_round_trips_with_supply_chain_policy() {
+    let ev = ClientEvent::AppEvent {
+        event: AppEventDto::AppDependencyChangeConfirmationRequested {
+            request: AppDependencyChangeConfirmationRequestDto {
+                request_id: "dependency-request-1".to_string(),
+                app_id: "habits-1a2b".to_string(),
+                reason: "pre_resolution_no_network".to_string(),
+                changes: vec![AppDependencyChangeDto {
+                    kind: AppDependencyChangeKindDto::Add,
+                    package: "dayjs".to_string(),
+                    version: Some("1.11.13".to_string()),
+                    cache_status: "unknown_until_resolution".to_string(),
+                    download_status: "may_be_required".to_string(),
+                }],
+                license_risk: "unknown_until_resolution".to_string(),
+                sbom_risk: "unknown_until_resolution".to_string(),
+                lifecycle_scripts_blocked: true,
+                native_addons_blocked: true,
+                rollback_policy: "rollback_on_validation_failure".to_string(),
+            },
+        },
+    };
+    let json = serde_json::to_value(&ev).expect("serialize dependency confirmation");
+    assert_eq!(
+        json["event"]["type"],
+        "app_dependency_change_confirmation_requested"
+    );
+    assert_eq!(json["event"]["request"]["changes"][0]["package"], "dayjs");
+    assert_eq!(json["event"]["request"]["lifecycleScriptsBlocked"], true);
+    assert_eq!(
+        serde_json::from_value::<ClientEvent>(json).expect("deserialize dependency confirmation"),
+        ev
+    );
 }
 
 /// Enumerate every `TurnOutcomeDto` variant and assert the `snake_case` wire

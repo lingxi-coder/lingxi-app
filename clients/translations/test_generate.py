@@ -53,6 +53,31 @@ def test_android_resources(tmp_path):
     xml = open(tmp_path / "values-en" / "strings.xml").read()
     assert '<string name="app_name">Lingxi</string>' in xml
 
+def test_bundled_local_app_descriptions_are_canonical_and_generated(tmp_path):
+    locales = load_locales(os.path.dirname(__file__))
+    keys = [
+        "settings_skill_bundled_ionic_react_local_app_desc",
+        "settings_skill_bundled_canvas_2d_local_app_desc",
+        "settings_skill_bundled_threejs_local_app_desc",
+    ]
+    for locale in ["zh-Hans", "zh-Hant", "en", "ja", "ko"]:
+        for key in keys:
+            assert locales[locale][key]
+
+    ios_out = tmp_path / "ios"
+    android_out = tmp_path / "android"
+    write_ios(locales, ios_out)
+    write_android(locales, android_out)
+
+    catalog = json.loads((ios_out / "Localizable.xcstrings").read_text(encoding="utf-8"))
+    for key in keys:
+        assert set(catalog["strings"][key]["localizations"]) == {"zh-Hans", "zh-Hant", "en", "ja", "ko"}
+
+    for values_dir in ["values", "values-zh-rTW", "values-en", "values-ja", "values-ko"]:
+        xml = (android_out / values_dir / "strings.xml").read_text(encoding="utf-8")
+        for key in keys:
+            assert f'<string name="{key}">' in xml
+
 def test_android_escaping(tmp_path):
     locales = {
         "zh-Hans": {

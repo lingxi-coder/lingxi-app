@@ -12,6 +12,9 @@
 #![forbid(unsafe_code)]
 
 use async_trait::async_trait;
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::Arc;
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
@@ -39,6 +42,40 @@ pub trait SkillListingProvider: Send + Sync {
     /// Return the eligible skill entries (already filtered to model-invocable
     /// prompt skills). May be empty.
     async fn skill_entries(&self) -> Vec<SkillListingEntry>;
+}
+
+/// A provider whose entries are loaded on demand from a host-owned source.
+///
+/// Composition roots use this to bridge their live command registry without
+/// making the orchestrator depend on `command-api`. The closure is invoked for
+/// every listing request, so registry/plugin mutations made after orchestrator
+/// construction are visible to the next turn.
+pub struct LazySkillListingProvider {
+    loader:
+        Arc<dyn Fn() -> Pin<Box<dyn Future<Output = Vec<SkillListingEntry>> + Send>> + Send + Sync>,
+}
+
+impl LazySkillListingProvider {
+    /// Wrap an async loader as a [`SkillListingProvider`].
+    pub fn new<F, Fut>(loader: F) -> Self
+    where
+        F: Fn() -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Vec<SkillListingEntry>> + Send + 'static,
+    {
+        let loader = Arc::new(
+            move || -> Pin<Box<dyn Future<Output = Vec<SkillListingEntry>> + Send>> {
+                Box::pin(loader())
+            },
+        );
+        Self { loader }
+    }
+}
+
+#[async_trait]
+impl SkillListingProvider for LazySkillListingProvider {
+    async fn skill_entries(&self) -> Vec<SkillListingEntry> {
+        (self.loader)().await
+    }
 }
 
 // prompt.ts:20-29
@@ -213,6 +250,20 @@ mod tests {
             when_to_use: when.map(str::to_string),
             is_bundled: bundled,
         }
+    }
+
+    #[tokio::test]
+    async fn lazy_provider_invokes_loader_for_each_listing_request() {
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let calls_for_loader = calls.clone();
+        let provider = LazySkillListingProvider::new(move || {
+            calls_for_loader.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            async { vec![entry("live", "loaded from the current source", None, false)] }
+        });
+
+        assert_eq!(provider.skill_entries().await[0].name, "live");
+        assert_eq!(provider.skill_entries().await[0].name, "live");
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
     }
 
     #[test]

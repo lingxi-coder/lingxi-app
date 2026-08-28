@@ -55,10 +55,20 @@ class SettingsMockTest {
     }
 
     @Test
-    fun bundledSkills_areTheFiveLocalAppSkills() {
+    fun bundledSkills_areTheEightLocalAppSkills() {
         val skills = SettingsMock.bundledSkills()
+        assertEquals(8, skills.size)
         assertEquals(
-            listOf("create-local-app", "frontend-design", "frontend-qa", "accessibility", "react-best-practices"),
+            listOf(
+                "create-local-app",
+                "frontend-design",
+                "ionic-react-local-app",
+                "canvas-2d-local-app",
+                "threejs-local-app",
+                "frontend-qa",
+                "accessibility",
+                "react-best-practices",
+            ),
             skills.map { it.id },
         )
         assertTrue(skills.all { it.builtin && it.enabled && it.author == "官方" })

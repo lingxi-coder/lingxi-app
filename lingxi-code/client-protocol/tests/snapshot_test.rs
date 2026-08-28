@@ -64,11 +64,14 @@ use client_protocol::local_apps::{
     AppAgentProfileProposalDto, AppAuthorizationDecisionDto, AppBridgeOperationDto,
     AppBridgeRequestDto, AppBridgeResponseDto, AppCapabilityKindDto, AppCapabilityRequestDto,
     AppCheckpointDto, AppCheckpointKindDto, AppCreateOriginDto, AppDataCollectionDto,
-    AppDataFieldDto, AppDataFieldTypeDto, AppDetailsDto, AppErrorCodeDto, AppEventDto,
-    AppManifestDto, AppRecordDto, AppRuntimeDetailsDto, AppRuntimeModeDto,
+    AppDataFieldDto, AppDataFieldTypeDto, AppDependencyChangeConfirmationRequestDto,
+    AppDependencyChangeDto, AppDependencyChangeKindDto, AppDependencySnapshotDto, AppDetailsDto,
+    AppErrorCodeDto, AppEventDto, AppManifestDto, AppRecordDto, AppRuntimeDetailsDto,
+    AppRuntimeModeDto, AppRuntimeProfileBindingDto, AppRuntimeProfileDto,
+    AppRuntimeProfileOptionDto, AppRuntimeProfilePackageDto, AppRuntimeProfileSelectionRequestDto,
     AppRuntimeRecoveryStateDto, AppRuntimeStateDto, AppRuntimeSuspensionReasonDto,
     AppSessionKindDto, AppSessionRowDto, AppSurfaceDto, AppUiActionKindDto, AppUiRequestDto,
-    AppWorkflowStateDto,
+    AppWorkflowStateDto, DeviceContextDto,
 };
 use client_protocol::message::{MessageBlockDto, MessageDto};
 use client_protocol::permission::{
@@ -687,6 +690,81 @@ fn event_goldens() -> Vec<(&'static str, ClientEvent)> {
             },
         ),
         (
+            "event/app_runtime_profile_selection_requested.json",
+            ClientEvent::AppEvent {
+                event: AppEventDto::AppRuntimeProfileSelectionRequested {
+                    request: AppRuntimeProfileSelectionRequestDto {
+                        request_id: "runtime-00000001".to_string(),
+                        app_id: "habits-1a2b".to_string(),
+                        reason: "Choose the runtime profile before scaffold".to_string(),
+                        recommended_family: Some(AppRuntimeProfileDto::Three3d),
+                        options: vec![
+                            AppRuntimeProfileOptionDto {
+                                family: AppRuntimeProfileDto::ReactDom,
+                                revision: 1,
+                                contract_sha256: "react-contract-sha".to_string(),
+                                surface: AppSurfaceDto::Dom,
+                                core_packages: vec![
+                                    AppRuntimeProfilePackageDto {
+                                        name: "react".to_string(),
+                                        version: "19.0.0".to_string(),
+                                    },
+                                    AppRuntimeProfilePackageDto {
+                                        name: "ionic".to_string(),
+                                        version: "9.0.0".to_string(),
+                                    },
+                                ],
+                                cache_status: "bundled".to_string(),
+                                download_status: "bundled".to_string(),
+                                available: true,
+                                reason: None,
+                            },
+                            AppRuntimeProfileOptionDto {
+                                family: AppRuntimeProfileDto::Babylon3d,
+                                revision: 1,
+                                contract_sha256:
+                                    "a908c3b2ffcf8c61f526238e0325b45125c795ea38406029b99708f2fea86c16"
+                                        .to_string(),
+                                surface: AppSurfaceDto::Canvas,
+                                core_packages: vec![AppRuntimeProfilePackageDto {
+                                    name: "@babylonjs/core".to_string(),
+                                    version: "9.22.1".to_string(),
+                                }],
+                                cache_status: "unavailable".to_string(),
+                                download_status: "gated".to_string(),
+                                available: false,
+                                reason: Some("Pending iOS/Android device spike".to_string()),
+                            },
+                        ],
+                    },
+                },
+            },
+        ),
+        (
+            "event/app_dependency_change_confirmation_requested.json",
+            ClientEvent::AppEvent {
+                event: AppEventDto::AppDependencyChangeConfirmationRequested {
+                    request: AppDependencyChangeConfirmationRequestDto {
+                        request_id: "dependency-00000001".to_string(),
+                        app_id: "habits-1a2b".to_string(),
+                        reason: "pre_resolution_no_network".to_string(),
+                        changes: vec![AppDependencyChangeDto {
+                            kind: AppDependencyChangeKindDto::Add,
+                            package: "dayjs".to_string(),
+                            version: Some("1.11.13".to_string()),
+                            cache_status: "unknown_until_resolution".to_string(),
+                            download_status: "may_be_required".to_string(),
+                        }],
+                        license_risk: "unknown_until_resolution".to_string(),
+                        sbom_risk: "unknown_until_resolution".to_string(),
+                        lifecycle_scripts_blocked: true,
+                        native_addons_blocked: true,
+                        rollback_policy: "rollback_on_validation_failure".to_string(),
+                    },
+                },
+            },
+        ),
+        (
             "event/app_sessions_changed.json",
             ClientEvent::AppSessionsChanged {
                 app_id: "habits-1a2b".to_string(),
@@ -1057,6 +1135,20 @@ fn command_goldens() -> Vec<(&'static str, ClientCommand)> {
             ClientCommand::ResolveAppCapabilityRequest {
                 request_id: "cap-00000001".to_string(),
                 decision: AppAuthorizationDecisionDto::AllowAlways,
+            },
+        ),
+        (
+            "command/resolve_app_runtime_profile_selection.json",
+            ClientCommand::ResolveAppRuntimeProfileSelection {
+                request_id: "runtime-00000001".to_string(),
+                selected_family: Some(AppRuntimeProfileDto::Three3d),
+            },
+        ),
+        (
+            "command/resolve_app_dependency_change_confirmation.json",
+            ClientCommand::ResolveAppDependencyChangeConfirmation {
+                request_id: "dependency-00000001".to_string(),
+                approved: true,
             },
         ),
         (
@@ -1577,8 +1669,8 @@ fn canonical_app_record() -> AppRecordDto {
 /// `skip_serializing_if` drops the key and that whole guard never executes.
 fn canonical_app_manifest() -> AppManifestDto {
     AppManifestDto {
-        schema_version: 1,
-        runtime_api_version: None,
+        schema_version: 2,
+        runtime_api_version: 2,
         app_id: "habits-1a2b".to_string(),
         name: "Habits".to_string(),
         design_revision: 4,
@@ -1598,7 +1690,25 @@ fn canonical_app_manifest() -> AppManifestDto {
         // One representative device capability so the golden pins the
         // manifest-context wire spelling of the new enum family.
         capabilities: vec![AppCapabilityKindDto::Camera],
-        device_context: None,
+        device_context: Some(DeviceContextDto {
+            os: "ios".to_string(),
+            form_factor: "iphone".to_string(),
+        }),
+        surface: Some(AppSurfaceDto::Dom),
+        runtime_profile: Some(AppRuntimeProfileBindingDto {
+            family: AppRuntimeProfileDto::ReactDom,
+            revision: 1,
+            contract_sha256: "a".repeat(64),
+        }),
+        dependency_snapshot: Some(AppDependencySnapshotDto {
+            requested_sha256: "b".repeat(64),
+            package_sha256: "c".repeat(64),
+            lockfile_sha256: "d".repeat(64),
+            dependency_tree_sha256: "e".repeat(64),
+            sbom_sha256: "f".repeat(64),
+            toolchain_key: "pnpm@11.22.0/node@24.18.1".to_string(),
+            verified_profile_contract_sha256: "a".repeat(64),
+        }),
     }
 }
 
@@ -1606,6 +1716,9 @@ fn canonical_app_details() -> AppDetailsDto {
     AppDetailsDto {
         app: canonical_app_record(),
         manifest: Some(canonical_app_manifest()),
+        runtime_profile_status: Some(
+            client_protocol::local_apps::AppRuntimeProfileStatusDto::Verified,
+        ),
         runtime: AppRuntimeDetailsDto {
             state: AppRuntimeStateDto::Stopped,
             mode: Some(AppRuntimeModeDto::StaticExport),

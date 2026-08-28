@@ -48,6 +48,34 @@ pub trait LocalAppsMcpHost: Send + Sync {
     /// Start or retry the host-owned dependency install task for one app's
     /// workspace-local `node_modules`.
     async fn install_dependencies(&self, input: Value) -> Result<Value, String>;
+    /// List the published runtime profile catalog for this host build.
+    async fn runtime_profiles(&self, input: Value) -> Result<Value, String> {
+        let _ = input;
+        Err("runtime profile catalog is unavailable in this host build".into())
+    }
+    /// Confirm one runtime profile for one unscaffolded app and mint a short-lived receipt.
+    async fn confirm_runtime_profile(&self, input: Value) -> Result<Value, String> {
+        let _ = input;
+        Err("runtime profile confirmation is unavailable in this host build".into())
+    }
+    /// Confirm a dependency change proposal before the host mutates package state.
+    async fn confirm_dependency_change(&self, input: Value) -> Result<Value, String> {
+        let _ = input;
+        Err("dependency change confirmation is unavailable in this host build".into())
+    }
+    /// Apply one confirmed dependency change proposal.
+    async fn update_dependencies(&self, input: Value) -> Result<Value, String> {
+        let _ = input;
+        Err("dependency updates are unavailable in this host build".into())
+    }
+    /// Apply one explicit same-family runtime profile migration.
+    async fn migrate_runtime_profile(&self, input: Value) -> Result<Value, String> {
+        let _ = input;
+        Err("runtime profile migration is unavailable in this host build".into())
+    }
+    /// Write the guided shell contract for a newly created unscaffolded app
+    /// before the app becomes visible.
+    async fn prepare_shell_app(&self, record: local_apps::AppRecord) -> Result<(), String>;
     /// Update the app manifest's declared `collections` / `allowed_domains` /
     /// `capabilities` (v3: the plan-derived reconciliation is gone; the agent
     /// declares schema explicitly). Destructive data migrations still require
@@ -140,13 +168,14 @@ pub trait LocalAppsMcpHost: Send + Sync {
     /// created app so the workflow can edit source immediately without any
     /// package-manager or template bootstrap step.
     ///
-    /// `surface` picks which scaffold is materialized and is recorded on the
-    /// manifest before any file is written. It is decided ONCE, here: the
-    /// workspace on disk is the scaffold, so it can never be revised later.
+    /// `runtime_profile` is the pinned runtime authority. `surface` is carried
+    /// separately so legacy callers that only know the shape can still request
+    /// the engine-free default (`dom -> react_dom`, `canvas -> canvas_2d`).
     async fn scaffold_app(
         &self,
         record: local_apps::AppRecord,
         surface: local_apps::AppSurface,
+        runtime_profile: Option<local_apps::AppRuntimeProfile>,
     ) -> Result<(), String>;
 
     /// Run the whole `LocalAppScaffold` transaction (§C.1) for an app the
@@ -200,7 +229,14 @@ pub type InitSessionMinter = dyn Fn(
 ///   conversation is not the mistake this gate exists to catch; what it
 ///   catches is building, installing into, running or driving a workspace
 ///   that has no source tree yet.
-const SHELL_ALLOWED_OPERATIONS: &[&str] = &["scaffold", "list", "get", "create"];
+const SHELL_ALLOWED_OPERATIONS: &[&str] = &[
+    "scaffold",
+    "list",
+    "get",
+    "create",
+    "runtime_profiles",
+    "confirm_runtime_profile",
+];
 
 /// Stable machine-readable prefix on the shell gate's refusal.
 ///
@@ -830,24 +866,36 @@ impl LocalAppsMcpTransport {
                 json!({"type":"object","properties":{"app_id":app_id.clone()},"required":["app_id"],"additionalProperties":false}),
             ),
             Self::tool(
+                "runtime_profiles",
+                "List the scaffoldable Local App runtime profiles this host knows about. Read this before choosing a non-default runtime_profile. The catalog is authoritative: do not infer profile availability from source code or package names.",
+                json!({"type":"object","properties":{},"additionalProperties":false}),
+            ),
+            Self::tool(
+                "confirm_runtime_profile",
+                "Open the native runtime-profile selector for an unscaffolded app. The caller may provide a recommendation, but only the family the user selects in the native UI can mint the short-lived receipt consumed by LocalAppScaffold.",
+                json!({"type":"object","properties":{
+                    "app_id":app_id.clone(),
+                    "recommended_profile":{"type":"string","enum":["react_dom","canvas_2d","three_3d","phaser_2d","babylon_3d"],"description":"Optional model recommendation highlighted by the native selector; it is not authoritative."}
+                },"required":["app_id"],"additionalProperties":false}),
+            ),
+            Self::tool(
                 "create",
-                "Create a local app record and host metadata, then let the host scaffold the workspace before generation; dependencies are already pinned by the host. It queues a locked workspace-local `pnpm install` in the background, and the app remains editable while dependencies prepare.",
+                "Create a local app record, an empty workspace, and the guided `LINGXI.md` contract that drives the follow-up interview inside the app's own session. This call does not scaffold source, install dependencies, or bind a runtime profile; those happen later through native runtime-profile confirmation plus `scaffold`.",
                 json!({"type":"object","properties":{
                     "brief":{"type":"string","minLength":1,"maxLength":2000},
-                    "name":{"type":"string","minLength":1,"maxLength":200},
-                    "surface":{"enum":["dom","canvas"],"description":"Which interface shape to scaffold, decided from the confirmed specification and FIXED at creation. Use \"canvas\" when the whole interface is one drawn surface that owns a frame loop — a game, a 3D scene, a live visualization. Use \"dom\" for everything built from screens, lists and forms. Defaults to \"dom\". This cannot be changed later; an app that needs the other shape has to be created again."}
+                    "name":{"type":"string","minLength":1,"maxLength":200}
                 },"required":["brief"],"additionalProperties":false}),
             ),
             Self::tool(
                 "scaffold",
-                "Commit the confirmed display name, one-line brief and interface shape onto an app the user created as an empty workspace, then lay down its source tree. Call this ONLY after the user has confirmed all three in the conversation; it is the single step that turns an empty workspace into a buildable app, and until it succeeds every build, dependency, runtime and UI operation on that app refuses. The shape is FIXED here and can never be changed: use \"canvas\" when the whole interface is one drawn surface that owns a frame loop — a game, a 3D scene, a live visualization — and \"dom\" for everything built from screens, lists and forms. Anything already written into the workspace is replaced.",
+                "Commit the confirmed display name, one-line brief, and runtime identity onto an app the user created as an empty workspace, then lay down its source tree. Call this ONLY after native runtime-profile confirmation has produced a short-lived `runtime_profile_receipt`; the host derives the immutable surface from that receipt and rejects model-supplied overrides. It is the single step that turns an empty workspace into a buildable app, and until it succeeds every build, dependency, runtime and UI operation on that app refuses. Anything already written into the workspace is replaced.",
                 json!({"type":"object","properties":{
                     "app_id":app_id.clone(),
                     "name":{"type":"string","minLength":1,"maxLength":local_apps::service::MAX_NAME_BYTES,"description":"The display name the user confirmed."},
                     "brief":{"type":"string","minLength":1,"maxLength":local_apps::service::MAX_BRIEF_BYTES,"description":"One line describing what the app does, as the user confirmed it."},
-                    "surface":{"type":"string","enum":["dom","canvas"],"description":"dom = an interface of screens, lists and forms; canvas = a single drawn surface owning a frame loop (games, 3D, live visualization). Immutable once committed."},
+                    "runtime_profile_receipt":{"type":"string","minLength":1,"description":"Short-lived receipt from native runtime-profile confirmation. It is authoritative; the host derives the immutable runtime binding and surface from it and rejects model-supplied overrides."},
                     "workflow_model":{"type":"string","minLength":1,"maxLength":local_apps::service::MAX_WORKFLOW_MODEL_BYTES,"description":"Optional model id to record for this app's own generation runs; omit to keep the device default."}
-                },"required":["app_id","name","brief","surface"],"additionalProperties":false}),
+                },"required":["app_id","name","brief","runtime_profile_receipt"],"additionalProperties":false}),
             ),
             Self::tool(
                 "manage_runtime",
@@ -863,6 +911,21 @@ impl LocalAppsMcpTransport {
                 "install_dependencies",
                 "Start or retry the host-managed `pnpm install` task that prepares this app's workspace-local `node_modules`. Use `wait=true` when you need the final dependency state before continuing.",
                 json!({"type":"object","properties":{"app_id":app_id.clone(),"wait":{"type":"boolean"}},"required":["app_id"],"additionalProperties":false}),
+            ),
+            Self::tool(
+                "confirm_dependency_change",
+                "Validate and confirm a proposed npm-registry dependency change for one scaffolded app, then mint a short-lived receipt. Core runtime packages remain immutable here and can only change through runtime-profile migration.",
+                json!({"type":"object","properties":{"app_id":app_id.clone(),"changes":{"type":"array"}},"required":["app_id","changes"],"additionalProperties":false}),
+            ),
+            Self::tool(
+                "update_dependencies",
+                "Apply one confirmed dependency change receipt. The host resolves the new lockfile in staging, publishes a dependency snapshot, runs the offline production build and profile launch smoke, then commits the verified package/lock, node_modules and build together. Any failure restores the previous dependency and build state.",
+                json!({"type":"object","properties":{"app_id":app_id.clone(),"receipt_id":{"type":"string","minLength":1}},"required":["app_id","receipt_id"],"additionalProperties":false}),
+            ),
+            Self::tool(
+                "migrate_runtime_profile",
+                "Apply one explicit same-family runtime profile migration receipt. This host currently fails closed unless runtime-profile migration is fully available.",
+                json!({"type":"object","properties":{"app_id":app_id.clone(),"receipt_id":{"type":"string","minLength":1}},"required":["app_id","receipt_id"],"additionalProperties":false}),
             ),
             Self::tool(
                 "create_checkpoint",
@@ -1407,9 +1470,13 @@ impl LocalAppsMcpTransport {
                 let checkpoints = service.list_checkpoints(app_id).await.map_err(|error| {
                     McpError::Internal(format!("failed to list checkpoints: {error}"))
                 })?;
+                let runtime_profile_status =
+                    crate::local_apps_build::derive_runtime_profile_status(&self.root, &record)
+                        .map(|status| status.as_str());
                 Self::result(json!({
                     "app": record,
                     "runtime": runtime,
+                    "runtime_profile_status": runtime_profile_status,
                     "dependencies": dependencies,
                     "checkpoints": checkpoints
                 }))
@@ -1417,17 +1484,11 @@ impl LocalAppsMcpTransport {
             "create" => {
                 let brief = Self::required_string(&input, "brief")?;
                 let name = input.get("name").and_then(Value::as_str);
-                // Absent means a routed interface, which is what most apps are.
-                // A bad value is rejected rather than defaulted: silently
-                // scaffolding the wrong shape would only surface much later, as
-                // generated source that does not match the workspace.
-                let surface = match input.get("surface").and_then(Value::as_str) {
-                    Some(value) => match local_apps::AppSurface::parse(value) {
-                        Ok(surface) => surface,
-                        Err(error) => return Ok(Self::app_error(error)),
-                    },
-                    None => local_apps::AppSurface::Dom,
-                };
+                if input.get("runtime_profile").is_some() || input.get("surface").is_some() {
+                    return Ok(Self::tool_error(
+                        "create no longer accepts runtime_profile or surface; create the shell first, confirm the runtime profile natively, then call scaffold with the receipt".to_string(),
+                    ));
+                }
                 // The origin conversation is ENGINE-injected (the live session
                 // uuid at call time), never read from the model's input — see
                 // `SessionIdProvider`. `None` (provider unattached, e.g. a
@@ -1453,14 +1514,14 @@ impl LocalAppsMcpTransport {
                         conversation_id,
                         git_enabled,
                         workflow_model.as_deref(),
-                        local_apps::CreateMode::Scaffolded,
+                        local_apps::CreateMode::Shell,
                         // The `LocalAppCreate` tool path has no request to
                         // correlate — see `local-apps::AppEvent::AppCreated`.
                         None,
                         move |record| {
                             let host = Arc::clone(&initializer_host);
                             async move {
-                                host.scaffold_app(record, surface)
+                                host.prepare_shell_app(record)
                                     .await
                                     .map_err(AppError::Io)
                             }
@@ -1474,27 +1535,6 @@ impl LocalAppsMcpTransport {
                         return Ok(Self::app_error(error));
                     }
                 };
-                // Dependency installation is independent of init-session
-                // pinning, so start it immediately and overlap the two host
-                // operations while the create response is being assembled.
-                let background_host = Arc::clone(&host);
-                let background_app_id = record.id.clone();
-                let warning_app_id = background_app_id.clone();
-                tokio::spawn(async move {
-                    if let Err(error) = background_host
-                        .install_dependencies(json!({
-                            "app_id": background_app_id,
-                            "wait": false,
-                        }))
-                        .await
-                    {
-                        tracing::warn!(
-                            app_id = %warning_app_id,
-                            error = %error,
-                            "local-app dependency install did not start"
-                        );
-                    }
-                });
                 // v3 Phase 4: pin the init session through the connection-
                 // scoped minter (fork of the origin chat, or an empty
                 // anchor). Session pinning remains best-effort because boot
@@ -1559,6 +1599,14 @@ impl LocalAppsMcpTransport {
                 Ok(value) => Self::result(value),
                 Err(message) => Self::tool_error(message),
             },
+            "runtime_profiles" => match self.host()?.runtime_profiles(input).await {
+                Ok(value) => Self::result(value),
+                Err(message) => Self::tool_error(message),
+            },
+            "confirm_runtime_profile" => match self.host()?.confirm_runtime_profile(input).await {
+                Ok(value) => Self::result(value),
+                Err(message) => Self::tool_error(message),
+            },
             "manage_runtime" => match self.host()?.manage_runtime(input).await {
                 Ok(value) => Self::result(value),
                 Err(message) => Self::tool_error(message),
@@ -1568,6 +1616,20 @@ impl LocalAppsMcpTransport {
                 Err(message) => Self::tool_error(message),
             },
             "install_dependencies" => match self.host()?.install_dependencies(input).await {
+                Ok(value) => Self::result(value),
+                Err(message) => Self::tool_error(message),
+            },
+            "confirm_dependency_change" => {
+                match self.host()?.confirm_dependency_change(input).await {
+                    Ok(value) => Self::result(value),
+                    Err(message) => Self::tool_error(message),
+                }
+            }
+            "update_dependencies" => match self.host()?.update_dependencies(input).await {
+                Ok(value) => Self::result(value),
+                Err(message) => Self::tool_error(message),
+            },
+            "migrate_runtime_profile" => match self.host()?.migrate_runtime_profile(input).await {
                 Ok(value) => Self::result(value),
                 Err(message) => Self::tool_error(message),
             },
@@ -1903,9 +1965,12 @@ mod tests {
     use local_apps::mailbox::{load_mailbox, save_mailbox, AppMailbox};
     use local_apps::test_support::FixedClock;
     use local_apps::{
-        load_manifest, load_permissions, save_manifest, save_permissions, AppCapability, AppLayout,
-        AppService, NoopAppEventObserver,
+        load_manifest, load_permissions, save_manifest, save_permissions, AppCapability,
+        AppDependencyRecord, AppDependencyState, AppLayout, AppService, NoopAppEventObserver,
+        APPS_SCHEMA_VERSION,
     };
+    use sha2::Digest;
+    use std::path::Path;
     use tempfile::TempDir;
 
     #[test]
@@ -1952,10 +2017,11 @@ mod tests {
             .await
             .expect("service"),
         );
-        let record = service
-            .create_app(Some("Mailbox"), "an mcp test app", None)
+        let shell = service
+            .create_app_with_mode(None, "", None, local_apps::CreateMode::Shell, None)
             .await
             .expect("create app");
+        let record = prepare_formed_runtime_fixture(&service, &shell, root.path()).await;
         let layout = AppLayout::new(root.path().to_path_buf(), record.id.clone()).expect("layout");
         let mut mailbox = AppMailbox::default();
         for i in 0..count {
@@ -2207,11 +2273,16 @@ mod tests {
             [
                 "list",
                 "get",
+                "runtime_profiles",
+                "confirm_runtime_profile",
                 "create",
                 "scaffold",
                 "manage_runtime",
                 "build",
                 "install_dependencies",
+                "confirm_dependency_change",
+                "update_dependencies",
+                "migrate_runtime_profile",
                 "create_checkpoint",
                 "update_manifest",
                 "query_data",
@@ -2257,17 +2328,17 @@ mod tests {
             "create takes a brief: {create_schema}"
         );
         assert!(
-            create
-                .description
-                .contains("host scaffold the workspace before generation"),
-            "create must describe the host-scaffolded workspace contract: {}",
+            create.description.contains("empty workspace")
+                && create.description.contains("guided `LINGXI.md` contract"),
+            "create must describe the shell workspace contract: {}",
             create.description
         );
         assert!(
-            create
-                .description
-                .contains("dependencies are already pinned by the host"),
-            "create must describe the pinned dependency contract: {}",
+            create.description.contains("does not scaffold source")
+                && create
+                    .description
+                    .contains("native runtime-profile confirmation plus `scaffold`"),
+            "create must describe the deferred scaffold contract: {}",
             create.description
         );
         let descriptions = tools
@@ -2444,13 +2515,16 @@ mod tests {
             .await
             .expect("service"),
         );
-        let record = service
-            .create_app(Some("Agent Inbox"), "agent inbox", None)
+        let shell = service
+            .create_app_with_mode(None, "", None, local_apps::CreateMode::Shell, None)
             .await
             .expect("create app");
+        let record = prepare_formed_runtime_fixture(&service, &shell, root.path()).await;
         let layout = AppLayout::new(root.path().to_path_buf(), record.id.clone()).expect("layout");
         let mut manifest = load_manifest(&layout).expect("manifest");
-        manifest.capabilities.push(AppCapability::Llm);
+        if !manifest.capabilities.contains(&AppCapability::Llm) {
+            manifest.capabilities.push(AppCapability::Llm);
+        }
         save_manifest(&layout, &manifest).expect("save manifest");
         let mut permissions = load_permissions(&layout).expect("permissions");
         permissions.grant(AppCapability::Llm);
@@ -2877,9 +2951,8 @@ mod tests {
         assert_eq!(app["brief"], "一个记事本 app");
     }
 
-    /// A minimal [`LocalAppsMcpHost`] double that only records
-    /// `scaffold_app` calls — every other method is unreachable from
-    /// the `create` tool and panics if ever called.
+    /// Minimal [`LocalAppsMcpHost`] doubles used by `create` tests record the
+    /// shell-preparation call. Every unrelated method is unreachable there.
     /// A host that hands back a frame, so the dispatch layer's image handling
     /// can be exercised without a device.
     struct FrameHost {
@@ -2929,6 +3002,9 @@ mod tests {
         async fn update_manifest(&self, _input: Value) -> Result<Value, String> {
             unreachable!("not exercised by these tests")
         }
+        async fn prepare_shell_app(&self, _record: local_apps::AppRecord) -> Result<(), String> {
+            unreachable!("not exercised by these tests")
+        }
         async fn read_app_events(&self, _input: Value) -> Result<Value, String> {
             unreachable!("not exercised by these tests")
         }
@@ -2936,6 +3012,7 @@ mod tests {
             &self,
             _record: local_apps::AppRecord,
             _surface: local_apps::AppSurface,
+            _runtime_profile: Option<local_apps::AppRuntimeProfile>,
         ) -> Result<(), String> {
             unreachable!("not exercised by these tests")
         }
@@ -3106,6 +3183,10 @@ mod tests {
         async fn install_dependencies(&self, _input: Value) -> Result<Value, String> {
             Ok(json!({"ok": true}))
         }
+        async fn prepare_shell_app(&self, record: local_apps::AppRecord) -> Result<(), String> {
+            self.calls.lock().expect("lock").push(record.id);
+            self.failure.map_or(Ok(()), |message| Err(message.into()))
+        }
         async fn update_manifest(&self, _input: Value) -> Result<Value, String> {
             unreachable!("not exercised by these tests")
         }
@@ -3116,6 +3197,7 @@ mod tests {
             &self,
             record: local_apps::AppRecord,
             _surface: local_apps::AppSurface,
+            _runtime_profile: Option<local_apps::AppRuntimeProfile>,
         ) -> Result<(), String> {
             self.calls.lock().expect("lock").push(record.id);
             self.failure.map_or(Ok(()), |message| Err(message.into()))
@@ -3126,13 +3208,10 @@ mod tests {
         async fn emit_create_failure(&self, _error: &AppError) {}
     }
 
-    /// `create` must reach the attached host's `scaffold_app` with the NEW
-    /// app's id before the record becomes visible — the tool's own
-    /// description claims the workspace exists afterwards, so an agent that
-    /// believed it and started editing files would otherwise write into a
-    /// directory nothing scaffolded.
+    /// `create` must reach the attached host's shell preparation hook with
+    /// the NEW app's id before the record becomes visible.
     #[tokio::test]
-    async fn create_scaffolds_via_the_attached_host() {
+    async fn create_prepares_the_shell_via_the_attached_host() {
         let root = tempfile::tempdir().unwrap();
         let (transport, _service) = attached_transport(root.path()).await;
         let host = Arc::new(RecordingScaffoldHost {
@@ -3155,14 +3234,14 @@ mod tests {
         assert_eq!(
             host.calls.lock().expect("lock").as_slice(),
             &[app_id],
-            "create must scaffold the workspace for the app it is preparing to commit"
+            "create must write the shell contract before the app is committed"
         );
     }
 
     /// A missing host is a pre-commit creation failure, not a degraded app
     /// shape. No app record or index entry should become visible.
     #[tokio::test]
-    async fn create_fails_before_commit_when_no_host_is_attached_to_scaffold() {
+    async fn create_fails_before_commit_when_no_host_is_attached_to_prepare_the_shell() {
         let root = tempfile::tempdir().unwrap();
         let (transport, service) = attached_transport(root.path()).await;
         let result = transport
@@ -3184,7 +3263,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn create_fails_before_commit_when_required_scaffold_materialization_fails() {
+    async fn create_fails_before_commit_when_required_shell_preparation_fails() {
         let root = tempfile::tempdir().unwrap();
         let (transport, service) = attached_transport(root.path()).await;
         let host = Arc::new(RecordingScaffoldHost {
@@ -3314,6 +3393,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn create_rejects_runtime_profile_and_surface_overrides() {
+        let root = tempfile::tempdir().unwrap();
+        let (transport, _service) = attached_transport(root.path()).await;
+        assert!(transport
+            .attach_host(Arc::new(RecordingScaffoldHost {
+                calls: StdMutex::new(Vec::new()),
+                failure: None,
+            }))
+            .is_ok());
+
+        for input in [
+            json!({"brief": "app", "runtime_profile": "react_dom"}),
+            json!({"brief": "app", "surface": "dom"}),
+        ] {
+            let result = transport.call("create", input).await.expect("tool result");
+            assert!(result.is_error, "got {result:?}");
+            assert!(
+                result
+                    .content
+                    .to_string()
+                    .contains("create no longer accepts runtime_profile or surface"),
+                "got {:?}",
+                result.content
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn list_reports_truncation_instead_of_claiming_a_complete_library() {
         let root = tempfile::tempdir().unwrap();
         let (transport, _service) = attached_transport(root.path()).await;
@@ -3388,26 +3495,170 @@ mod tests {
             .await
             .expect("service"),
         );
-        // A shell carries no brief yet — that is what the conversation is for.
-        let brief = match mode {
-            local_apps::CreateMode::Shell => "",
-            local_apps::CreateMode::Scaffolded => "a gate fixture app",
-        };
-        let record = service
-            .create_app_with_mode(None, brief, None, mode, None)
+        let shell = service
+            .create_app_with_mode(None, "", None, local_apps::CreateMode::Shell, None)
             .await
             .expect("create app");
-        assert_eq!(
-            record.scaffolded,
-            mode == local_apps::CreateMode::Scaffolded,
-            "the fixture must actually be in the state this test names"
-        );
+        let record = match mode {
+            local_apps::CreateMode::Shell => {
+                assert!(
+                    !shell.scaffolded,
+                    "the fixture must actually be the shell state this test names"
+                );
+                shell
+            }
+            local_apps::CreateMode::Scaffolded => {
+                prepare_formed_runtime_fixture(&service, &shell, root.path()).await
+            }
+        };
         let transport = LocalAppsMcpTransport::new(root.path().to_path_buf());
         assert!(
             transport.attach_service(Arc::clone(&service)).is_ok(),
             "attach service"
         );
         (root, transport, service, record.id)
+    }
+
+    async fn prepare_formed_runtime_fixture(
+        service: &Arc<AppService>,
+        shell: &local_apps::AppRecord,
+        root: &Path,
+    ) -> local_apps::AppRecord {
+        let binding = crate::local_app_runtime_profiles::current_binding_for_family(
+            local_apps::AppRuntimeProfile::ReactDom,
+        )
+        .expect("react dom binding");
+        let layout = AppLayout::new(root.to_path_buf(), shell.id.clone()).expect("layout");
+        let workspace = root.join(layout.workspace_rel());
+        crate::local_apps_build::scaffold_workspace_initialized(
+            &layout,
+            crate::local_apps_build::LocalAppBuildTarget::ReactDomR1,
+            true,
+        )
+        .expect("scaffold workspace");
+        let scaffold = crate::local_app_runtime_profiles::scaffold_artifacts_for_binding(&binding)
+            .expect("runtime profile scaffold");
+        for (relative, bytes) in &scaffold.files {
+            let path = workspace.join(relative);
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).expect("create scaffold parent");
+            }
+            std::fs::write(path, bytes).expect("write scaffold file");
+        }
+        let requested_bytes =
+            std::fs::read(workspace.join(crate::local_app_runtime_profiles::REQUESTED_FILE_REL))
+                .expect("read requested dependencies");
+        let package_bytes = std::fs::read(
+            workspace.join(crate::local_app_runtime_profiles::EFFECTIVE_PACKAGE_FILE_REL),
+        )
+        .expect("read effective package");
+        let lockfile_bytes =
+            std::fs::read(workspace.join(crate::local_app_runtime_profiles::LOCKFILE_FILE_REL))
+                .expect("read lockfile");
+        let sbom_bytes = br#"{
+  "spdxVersion": "SPDX-2.3",
+  "SPDXID": "SPDXRef-DOCUMENT",
+  "name": "mcp-fixture",
+  "dataLicense": "CC0-1.0",
+  "documentNamespace": "https://example.invalid/spdx/mcp-fixture"
+}
+"#;
+        let snapshot = crate::local_app_runtime_profiles::snapshot_artifacts_for_binding(
+            &binding,
+            crate::local_app_runtime_profiles::hash_bytes(&requested_bytes),
+            crate::local_app_runtime_profiles::hash_bytes(&package_bytes),
+            crate::local_app_runtime_profiles::hash_bytes(&lockfile_bytes),
+            crate::local_app_runtime_profiles::hash_bytes(b"mcp-fixture-tree"),
+            sbom_bytes,
+        )
+        .expect("dependency snapshot");
+        for (relative, bytes) in &snapshot.files {
+            let path = workspace.join(relative);
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).expect("create snapshot parent");
+            }
+            std::fs::write(path, bytes).expect("write snapshot file");
+        }
+        let mut manifest = load_manifest(&layout).expect("manifest");
+        manifest.surface = Some(local_apps::AppSurface::Dom);
+        manifest.runtime_profile = Some(binding);
+        manifest.dependency_snapshot = Some(snapshot.snapshot);
+        save_manifest(&layout, &manifest).expect("save runtime manifest");
+        local_apps::storage::save_dependency_record(
+            root,
+            &AppDependencyRecord {
+                schema_version: APPS_SCHEMA_VERSION,
+                app_id: shell.id.clone(),
+                state: AppDependencyState::Ready,
+                lockfile_sha256: manifest
+                    .dependency_snapshot
+                    .as_ref()
+                    .map(|snapshot| snapshot.lockfile_sha256.clone()),
+                toolchain_key: manifest
+                    .dependency_snapshot
+                    .as_ref()
+                    .map(|snapshot| snapshot.toolchain_key.clone()),
+                install_attempts: 1,
+                last_error: None,
+                updated_at_ms: shell.updated_at_ms,
+            },
+        )
+        .expect("save dependency record");
+
+        let build_root = root.join(layout.build_rel(false));
+        let output_root = build_root.join(crate::local_apps_build::VITE_OUTPUT_DIR);
+        std::fs::create_dir_all(&output_root).expect("dist");
+        std::fs::write(output_root.join("index.html"), "<html>ok</html>").expect("index");
+        let build_receipt = json!({
+            "version": 3,
+            "buildKey": "mcp-fixture",
+            "runtimeContractSha256": manifest.runtime_contract_hash().expect("runtime hash"),
+            "dependencySnapshotSha256": manifest
+                .dependency_snapshot_hash()
+                .expect("dependency hash"),
+            "outputSha256": digest_tree(&output_root),
+        });
+        std::fs::write(
+            build_root.join("build.json"),
+            serde_json::to_vec_pretty(&build_receipt).expect("serialize build receipt"),
+        )
+        .expect("write build receipt");
+
+        service
+            .commit_scaffold(&shell.id, "Gate Fixture", "a gate fixture app", None)
+            .await
+            .expect("commit formed fixture")
+    }
+
+    fn digest_tree(root: &Path) -> String {
+        let mut files = Vec::new();
+        collect_tree_files(root, &mut files);
+        files.sort();
+        let mut hasher = sha2::Sha256::new();
+        for path in files {
+            let relative = path.strip_prefix(root).expect("relative output path");
+            hasher.update(relative.to_string_lossy().replace('\\', "/").as_bytes());
+            hasher.update([0]);
+            hasher.update(std::fs::read(&path).expect("read output file"));
+            hasher.update([0]);
+        }
+        format!("{:x}", hasher.finalize())
+    }
+
+    fn collect_tree_files(root: &Path, files: &mut Vec<std::path::PathBuf>) {
+        let metadata = std::fs::symlink_metadata(root).expect("inspect output");
+        assert!(
+            !metadata.file_type().is_symlink(),
+            "fixture output must not contain symlinks: {}",
+            root.display()
+        );
+        if metadata.is_dir() {
+            for entry in std::fs::read_dir(root).expect("read output directory") {
+                collect_tree_files(&entry.expect("tree entry").path(), files);
+            }
+        } else {
+            files.push(root.to_path_buf());
+        }
     }
 
     /// Attach a REAL host broker over the fixture's root, sharing its service.
@@ -3522,7 +3773,7 @@ mod tests {
         let outcome = transport
             .call(
                 "scaffold",
-                json!({"app_id": app_id, "name": "A", "brief": "b", "surface": "dom"}),
+                json!({"app_id": app_id, "name": "A", "brief": "b"}),
             )
             .await;
         assert!(
@@ -3535,9 +3786,8 @@ mod tests {
              {outcome:?}"
         );
         assert!(
-            service.record(&app_id).await.expect("record").scaffolded,
-            "the call must have run the real transaction, not merely been \
-             allowed past the gate"
+            format!("{outcome:?}").contains("runtime_profile_receipt"),
+            "the handler must reject missing native confirmation rather than being blocked by the shell gate: {outcome:?}"
         );
     }
 
@@ -3606,5 +3856,26 @@ mod tests {
             .call("read_logs", json!({"app_id": "zzzzzzzz"}))
             .await;
         assert!(!was_gated(&outcome), "got {outcome:?}");
+    }
+
+    #[tokio::test]
+    async fn get_exposes_the_host_derived_runtime_profile_status() {
+        let (_root, transport, _service, shell_id) =
+            transport_with_app(local_apps::CreateMode::Shell).await;
+        let shell = transport
+            .call("get", json!({"app_id": shell_id}))
+            .await
+            .expect("shell details");
+        assert_eq!(structured(&shell)["runtime_profile_status"], Value::Null);
+
+        // A formed fixture carries the same persisted runtime facts as a real
+        // scaffolded app, so the host-derived status should be the healthy one.
+        let (_root, transport, _service, formed_id) =
+            transport_with_app(local_apps::CreateMode::Scaffolded).await;
+        let formed = transport
+            .call("get", json!({"app_id": formed_id}))
+            .await
+            .expect("formed details");
+        assert_eq!(structured(&formed)["runtime_profile_status"], "verified");
     }
 }

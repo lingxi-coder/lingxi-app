@@ -79,6 +79,15 @@ struct LocalAppSummary: Identifiable, Hashable, Sendable {
     /// exceptional state and has to be asked for explicitly.
     var scaffolded: Bool = true
 
+    /// The last host-derived health snapshot for the pinned runtime profile.
+    ///
+    /// App list records do not carry this detail, so it is populated when a
+    /// details snapshot arrives and retained until the next authoritative
+    /// details snapshot. `nil` is intentional for shells and for formed apps
+    /// whose details have not been loaded yet; the UI must not infer health
+    /// from source files or the app's visual/runtime state.
+    var runtimeProfileStatus: LocalAppRuntimeProfileStatus? = nil
+
     /// `true` while this app is still an unscaffolded shell.
     ///
     /// The single predicate every render point branches on, so "does this
@@ -282,6 +291,8 @@ struct LocalAppPermissionPrompt: Identifiable, Hashable, Sendable {
         case uiControl
         case networkDomain
         case restoreCheckpoint
+        case runtimeProfileSelection
+        case dependencyChange
         case camera
         case photoLibrary
         case microphone
@@ -311,12 +322,23 @@ struct LocalAppPermissionPrompt: Identifiable, Hashable, Sendable {
     let reason: String
     let domain: String?
 
+    var allowsPersistentGrant: Bool {
+        switch kind {
+        case .runtimeProfileSelection, .dependencyChange:
+            false
+        default:
+            true
+        }
+    }
+
     var title: String {
         switch kind {
         case .dataMutation: String(localized: "local_apps_permission_data_mutation")
         case .uiControl: String(localized: "local_apps_permission_ui_control")
         case .networkDomain: String(localized: "local_apps_permission_network")
         case .restoreCheckpoint: String(localized: "local_apps_permission_restore")
+        case .runtimeProfileSelection: String(localized: "local_apps_permission_runtime_profile_selection")
+        case .dependencyChange: String(localized: "local_apps_permission_dependency_change")
         case .camera: String(localized: "local_apps_permission_camera")
         case .photoLibrary: String(localized: "local_apps_permission_photo_library")
         case .microphone: String(localized: "local_apps_permission_microphone")
@@ -349,4 +371,133 @@ struct LocalAppPermissionPrompt: Identifiable, Hashable, Sendable {
         case let .uiAction(action): String(localized: "local_apps_permission_ui_action \(action)")
         }
     }
+}
+
+enum LocalAppRuntimeProfileFamily: String, CaseIterable, Identifiable, Hashable, Sendable {
+    case reactDom
+    case canvas2d
+    case three3d
+    case phaser2d
+    case babylon3d
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .reactDom: String(localized: "local_apps_runtime_profile_family_react_dom")
+        case .canvas2d: String(localized: "local_apps_runtime_profile_family_canvas_2d")
+        case .three3d: String(localized: "local_apps_runtime_profile_family_three_3d")
+        case .phaser2d: String(localized: "local_apps_runtime_profile_family_phaser_2d")
+        case .babylon3d: String(localized: "local_apps_runtime_profile_family_babylon_3d")
+        }
+    }
+}
+
+enum LocalAppRuntimeProfileSurface: Hashable, Sendable {
+    case dom
+    case canvas
+
+    var title: String {
+        switch self {
+        case .dom: String(localized: "local_apps_runtime_profile_surface_dom")
+        case .canvas: String(localized: "local_apps_runtime_profile_surface_canvas")
+        }
+    }
+}
+
+/// Host-derived health of one app's pinned runtime profile. The raw values
+/// are the protocol wire values; keeping them stable lets cache-only cards and
+/// detail views share the same finite status vocabulary without parsing host
+/// error prose.
+enum LocalAppRuntimeProfileStatus: String, CaseIterable, Hashable, Sendable {
+    case verified
+    case dependenciesDirty = "dependencies_dirty"
+    case coreDependencyDrift = "core_dependency_drift"
+    case rebuildRequired = "rebuild_required"
+    case migrationAvailable = "migration_available"
+    case runtimeBundleMissing = "runtime_bundle_missing"
+    case runtimeContractCorrupt = "runtime_contract_corrupt"
+
+    var title: String {
+        switch self {
+        case .verified: String(localized: "local_apps_runtime_profile_health_verified")
+        case .dependenciesDirty: String(localized: "local_apps_runtime_profile_health_dependencies_dirty")
+        case .coreDependencyDrift: String(localized: "local_apps_runtime_profile_health_core_dependency_drift")
+        case .rebuildRequired: String(localized: "local_apps_runtime_profile_health_rebuild_required")
+        case .migrationAvailable: String(localized: "local_apps_runtime_profile_health_migration_available")
+        case .runtimeBundleMissing: String(localized: "local_apps_runtime_profile_health_runtime_bundle_missing")
+        case .runtimeContractCorrupt: String(localized: "local_apps_runtime_profile_health_runtime_contract_corrupt")
+        }
+    }
+
+    var systemImageName: String {
+        switch self {
+        case .verified: "checkmark.seal.fill"
+        case .dependenciesDirty, .migrationAvailable: "arrow.triangle.2.circlepath"
+        case .coreDependencyDrift, .runtimeContractCorrupt: "exclamationmark.shield.fill"
+        case .rebuildRequired: "hammer.fill"
+        case .runtimeBundleMissing: "shippingbox.fill"
+        }
+    }
+}
+
+struct LocalAppRuntimeProfilePackage: Hashable, Sendable {
+    let name: String
+    let version: String
+}
+
+struct LocalAppRuntimeProfileOption: Identifiable, Hashable, Sendable {
+    let family: LocalAppRuntimeProfileFamily
+    let revision: UInt32
+    let contractSHA256: String
+    let surface: LocalAppRuntimeProfileSurface
+    let corePackages: [LocalAppRuntimeProfilePackage]
+    let cacheStatus: String
+    let downloadStatus: String
+    let available: Bool
+    let reason: String?
+
+    var id: String { family.rawValue }
+}
+
+struct LocalAppRuntimeProfileSelectionPrompt: Identifiable, Hashable, Sendable {
+    let id: String
+    let appID: String
+    let reason: String
+    let recommendedFamily: LocalAppRuntimeProfileFamily?
+    let options: [LocalAppRuntimeProfileOption]
+}
+
+enum LocalAppDependencyChangeKind: String, Hashable, Sendable {
+    case add
+    case update
+    case remove
+
+    var title: String {
+        switch self {
+        case .add: String(localized: "local_apps_dependency_change_add")
+        case .update: String(localized: "local_apps_dependency_change_update")
+        case .remove: String(localized: "local_apps_dependency_change_remove")
+        }
+    }
+}
+
+struct LocalAppDependencyChange: Hashable, Sendable {
+    let kind: LocalAppDependencyChangeKind
+    let package: String
+    let version: String?
+    let cacheStatus: String
+    let downloadStatus: String
+}
+
+struct LocalAppDependencyChangeConfirmationPrompt: Identifiable, Hashable, Sendable {
+    let id: String
+    let appID: String
+    let reason: String
+    let changes: [LocalAppDependencyChange]
+    let licenseRisk: String
+    let sbomRisk: String
+    let lifecycleScriptsBlocked: Bool
+    let nativeAddonsBlocked: Bool
+    let rollbackPolicy: String
 }

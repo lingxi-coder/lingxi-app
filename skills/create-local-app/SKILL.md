@@ -8,6 +8,10 @@ description: Orchestrate a confirmed, local-capability-first app design, React g
 This skill is the coordinator. Keep the product brief and confirmation short;
 delegate specialist work to `$frontend-design`, `$accessibility`,
 `$react-best-practices`, and `$frontend-qa` instead of duplicating their rules.
+The build workflow routes DOM implementation through `$ionic-react-local-app`
+and routes a drawn surface through the persisted runtime-profile-matched
+specialist: `$canvas-2d-local-app`, `$threejs-local-app`,
+`$phaser-2d-local-app`, or `$babylon-3d-local-app`.
 
 ## Entry and confirmation
 
@@ -35,39 +39,79 @@ shape yet. Settling what the app IS is your work in that conversation:
 2. Read what they wrote and settle whatever it already settles. Infer every
    point the description and the host device context determine, state the
    inference, and move on — do not ask back something they have already told
-   you. Ask ONE `AskUserQuestion` round, of one to three focused questions,
-   only for a point that is still open, would change what gets built, and is a
-   choice between options you can name. A description that already answers
-   everything material earns no clarifying round at all: go straight to step 3.
-3. Propose a display **name**, a one-line **brief**, and a **surface** (`dom` or
-   `canvas`, chosen by the rules below), and put all three in ONE
-   `AskUserQuestion` round for the user to confirm or edit. The surface is
-   immutable once committed, so it is the user's call to confirm, never an
-   assumption you commit on their behalf.
-4. Only after the user confirms, call `LocalAppScaffold`:
+   you. Ask at most ONE clarification `AskUserQuestion` round: omit the round
+   if none are material; otherwise ask 1-3 focused questions, never padding a
+   quota, then use the answers in step 3.
+3. Call `LocalAppRuntimeProfiles`, then propose a display **name**, a one-line
+   **brief**, and one available **runtime profile**. Show its derived surface,
+   core engine, revision, and recommendation reason in the same final
+   confirmation. Profile family is immutable once committed, so it is the
+   user's call to confirm.
+4. After the conversational confirmation, call
+   `LocalAppConfirmRuntimeProfile` with the conversational choice only as
+   `recommended_profile`. Its native one-shot selector shows every catalog
+   option and returns a short-lived receipt for the family the user selects;
+   the recommendation is not authoritative. Then call `LocalAppScaffold` with
+   that receipt; never send a model-authored surface/profile override:
 
 ```json
-{"app_id":"<the id LINGXI.md names>","name":"<confirmed display name>","brief":"<confirmed one-line brief>","surface":"dom"}
+{"app_id":"<the id LINGXI.md names>","name":"<confirmed display name>","brief":"<confirmed one-line brief>","runtime_profile_receipt":"<receipt id>"}
 ```
 
 5. Re-read `LINGXI.md`. `LocalAppScaffold` overwrites the guided text with the
    app's formal workspace contract — editable roots, host-managed files, the
-   entry points that now exist, and which build workflow this surface takes —
+   entry points that now exist, and which build workflow the persisted profile takes —
    and that contract, not this step list, governs everything after it.
+
+### Ambiguity routing
+
+After the opening description, classify only unresolved decisions that could
+materially change the result. Group related decisions so the single
+clarification `AskUserQuestion` round contains 1-3 real questions; omit the
+round if no material decision remains:
+
+- **Product / process** — resolve the primary job, audience, success condition,
+  or the required flow when the brief leaves more than one plausible product.
+- **Target platform** — resolve OS or form factor only when the host context and
+  brief do not determine it; otherwise state the inferred target for the final
+  confirmation.
+- **Data / capabilities** — resolve writable collections, permissions, host
+  capabilities, or an explicitly requested external service when alternatives
+  would change the implementation or privacy boundary.
+- **UI / visual style** — ask only when the visual choice would significantly
+  change the result and cannot be inferred from the brief. Otherwise propose a
+  concrete design direction, tokens, and platform treatment in the final
+  confirmation so the user can edit that proposal.
+- **Interaction / accessibility** — resolve a material input, navigation,
+  assistive-technology, reduced-motion, or non-pointer requirement that is not
+  already implied by the product and target.
+- **Canvas mechanics / runtime profile** — first choose `canvas` when the whole
+  app is a drawn surface. Prefer `canvas-2d-local-app` for an ordinary 2D app
+  or game, and `threejs-local-app` for an explicitly described Three.js scene.
+  Use `phaser-2d-local-app` or `babylon-3d-local-app` only when the product
+  clearly calls for those runtimes and the host/runtime contract already offers
+  them; do not infer availability from package wishes. Ask which runtime family
+  only when the brief is genuinely ambiguous among valid options. The later
+  canvas design and build steps must preserve the persisted runtime profile.
+
+The final confirmation always includes the inferred or proposed answers,
+whether or not a clarification round was needed. Visual platform presentation
+remains separate from this technical runtime profile.
 
 Two things hold for as long as the app is a shell:
 
 - **Do not write source before the scaffold lands.** The first scaffold WIPES
   the editable surface. Source written beforehand is deleted, not merged, so
   the turn that wrote it is lost work rather than a head start.
-- **Most local-app tools refuse an app that has no shape.** Exactly four reach
-  their handler: `LocalAppScaffold`, `LocalAppList`, `LocalAppGet` and
-  `LocalAppCreate`. Every other one — build, dependency install, runtime, logs,
+- **Most local-app tools refuse an app that has no shape.** The shell may list
+  and inspect records, read `LocalAppRuntimeProfiles`, request
+  `LocalAppConfirmRuntimeProfile`, and finally call `LocalAppScaffold`. Every
+  other one — build, dependency install, runtime, logs,
   manifest, UI inspection/capture/action, data, checkpoints, app events,
   background flows — returns a refusal that names `LocalAppScaffold` as the way
   out. `LocalAppManifest` included: collections and capabilities are declared
   after the scaffold, not before it. That refusal is the contract, not a
-  transient failure, so settle the name, brief and surface instead of retrying
+  transient failure, so settle the name, brief and profile instead of retrying
   or routing around it.
 
 Do not call `LocalAppCreate` from inside a shell conversation. The shell app
@@ -75,15 +119,11 @@ already exists and is the one the user is looking at; creating a second app
 leaves that one empty forever.
 
 `LocalAppCreate` is for a conversation that is NOT an app's: a global or project
-chat where the user asks for an app. There it creates AND scaffolds in one call,
-which is why it takes `name`, `brief` and `surface` itself, and there it ENDS
-the work. After it returns, do not write source, do not call `LocalAppBuild`,
-and do not start a build workflow from that conversation. It is not rooted in
-the new app: its working directory belongs to the project, so everything written
-there lands outside the app, and a build launched from it edits whatever happens
-to sit in that directory. Report that the app is ready and stop. The app has its
-own workspace and its own session, and the build runs there — with `LINGXI.md`
-auto-loaded and the pinned foundation already in place.
+chat where the user asks for an app. It creates the same EMPTY SHELL and app
+session as the library entry; it does not persist a runtime profile. Continue
+the interview and confirmation in that app session, where `LINGXI.md` is
+auto-loaded. Do not write app source or launch a build from the global/project
+working directory.
 
 The build orchestration below therefore applies only inside an app's OWN
 conversation, the one whose `LINGXI.md` names the app id you are building, and
@@ -94,7 +134,8 @@ Inside a shell there is no brief yet to sharpen — the interview above produces
 it. Inside an app that already has a shape, read `LINGXI.md` and sharpen the
 brief it carries. In a global chat, gather the product, screens, data,
 capabilities, and visual intent before creating the app. When a material decision is unresolved, call `AskUserQuestion`
-with one short round of one to three focused questions. Never ask unresolved questions in ordinary assistant text.
+with one short round of 1-3 focused questions; omit the round when there are
+none. Never ask unresolved questions in ordinary assistant text.
 The one exception is the opening turn of a shell conversation (step 1 above),
 where you have no options to offer and need the user's own description; that
 exception covers that turn only, and does not extend to any later question in
@@ -111,6 +152,9 @@ specification containing:
   are runtime inputs only; do not treat them as prompt facts. The generated app
   must read them from `window.lingxi.v2.deviceContext`;
 - pages, navigation/back semantics, complete states, data/permissions;
+- for a `canvas` surface, the confirmed runtime profile (`canvas_2d`,
+  `three_3d`, `phaser_2d`, or `babylon_3d`) and the mechanics, phase model,
+  and input paths that make that choice appropriate;
 - design direction, platform tokens, responsive/adaptive behavior, and any
   source-only implementation constraints required by the locked host scaffold;
 - which host-provided data, LLM, device, and agent capabilities satisfy each
@@ -120,55 +164,74 @@ specification containing:
 Before the final confirmation, classify the confirmed specification without
 starting another agent. Score screens/routes, data complexity, host or external
 capability groups, target count, multi-step/error-state complexity, and original
-raster assets. Use this rubric: screens 0/1/2 points for 1/2-3/4+ or nested
-routes; data 0/1/2 for none or read-only/one simple writable collection/multiple
-or concurrency-sensitive collections; capabilities +1 per distinct group up to
-3; targets +1 for multiple form factors and +1 for multiple operating systems;
-interaction/state +1 for multi-step, offline, or complex permission/error
-flows; raster assets +1. Scores 0-2 suggest `fast`, 3-5 suggest `balanced`,
-and 6+ suggest `thorough`. Multi-OS, background scheduling, or two or more
-sensitive capability groups should recommend `thorough`; confidence below 0.75
-should recommend `balanced`.
+raster assets. For a `dom` surface, use this rubric: screens 0/1/2 points for
+1/2-3/4+ or nested routes; data 0/1/2 for none or read-only/one simple writable
+collection/multiple or concurrency-sensitive collections; capabilities +1 per
+distinct group up to 3; targets +1 for multiple form factors and +1 for
+multiple operating systems; interaction/state +1 for multi-step, offline, or
+complex permission/error flows; raster assets +1. Scores 0-2 suggest `fast`,
+3-5 suggest `balanced`, and 6+ suggest `thorough`. Multi-OS, background
+scheduling, or two or more sensitive capability groups should recommend
+`thorough`; confidence below 0.75 should recommend `balanced`.
 
 The screen axis measures the wrong thing for an app whose interface is a single
 drawn surface — a game or any canvas/WebGL app scores 0 on screens and usually
-0-1 on data, so the rubric lands on `fast`, which is the ONE strategy that skips
-the design stage. That is backwards: such an app has almost no navigation and
+0-1 on data, which would put it in the DOM-only `fast` band that skips the
+design stage. That is backwards: such an app has almost no navigation and
 almost all of its difficulty in mechanics, state machine and frame loop, which
-is exactly what the design stage exists to settle. Score a drawn-surface app on
-its simulation instead: +1 for real-time animation or a frame loop, +1 for
-collision, physics or pathfinding, +1 for persistent progression, +1 for input
-beyond a single tap (drag, hold, multi-key). Never recommend `fast` for one.
+is exactly what the design stage exists to settle. For a `canvas` surface,
+replace the screen axis with its simulation instead: +1 for real-time animation
+or a frame loop, +1 for collision, physics or pathfinding, +1 for persistent
+progression, and +1 for input beyond a single tap (drag, hold, multi-key).
+Clamp any base recommendation to the canvas strategies: a `fast` band becomes
+`balanced`, while `balanced` and `thorough` remain as scored (subject to the
+stronger multi-target/capability overrides above). Never advertise or pass
+`fast` for a canvas surface.
 
 Include the score, reasons, confidence, estimated agent stages, and the
-recommended strategy in the same confirmation round. Let the user select
-`fast`, `balanced`, or `thorough`; put the recommendation first and describe
-the speed/coverage trade-off in each option. This is a task-local workflow
-choice, not an app persistence field. On a revision, rescore the revised
-confirmed specification instead of inheriting a stale strategy. Never launch
-a separate classifier agent just to make this recommendation.
+recommended strategy in the same confirmation round. For a `dom` surface, let
+the user select `fast`, `balanced`, or `thorough`; for a `canvas` surface, offer
+only `balanced` or `thorough` because the drawn-surface workflow requires its
+simulation Design stage and never accepts `fast`. Put the recommendation first
+and describe the speed/coverage trade-off in each option shown. This is a
+task-local workflow choice, not an app persistence field. On a revision, rescore
+the revised confirmed specification instead of inheriting a stale strategy.
+Never launch a separate classifier agent just to make this recommendation.
 
 Do not silently add a package, capability, domain, platform, or image asset.
 The same business logic may serve multiple targets, but each target must use a
 platform adapter/tokens layer rather than a width-only conditional.
 
-From a global or project chat, create a new app with:
+For a non-core npm-registry package, propose an add/update/remove with a reason.
+Add/update must go through `LocalAppConfirmDependencyChange` and its native
+one-shot receipt, then `LocalAppUpdateDependencies`; removal still uses the
+host update tool but needs no extra native approval. Never edit package/lock or
+run npm, npx, Yarn, or pnpm directly. React, Ionic, Vite, renderer engines, and
+other Catalog core packages can change only through a same-family Runtime
+Profile migration.
+
+From a global or project chat, create a new shell with:
 
 ```json
-{"brief":"<confirmed one-line brief>","name":"<display name>","surface":"dom"}
+{"brief":"<initial user brief>","name":"<optional provisional name>"}
 ```
 
-using `LocalAppCreate`. Inside a shell conversation the same three confirmed
-fields go to `LocalAppScaffold` alongside the existing `app_id` instead; that
-call is the shell's only way forward, and `LocalAppCreate` there would build a
-second app. Either way, declare collections, domains, capabilities, and the
-confirmed `device_context` with `LocalAppManifest` before generated source
-relies on them. Inside an app that already has a shape, call neither again.
+using `LocalAppCreate`. Inside the app session, obtain a native runtime-profile
+receipt and send the confirmed name/brief plus that receipt to
+`LocalAppScaffold`; calling `LocalAppCreate` there would create a second app.
+Then declare collections, domains, and capabilities with `LocalAppManifest`
+before generated source
+relies on them. Derive `expected_writable_collections` from the confirmed core
+UI paths that write those manifest collections. On mobile, the host reads the
+materialized manifest and overwrites the workflow's list with every declared
+collection id, so the caller's list is advisory only; every declared collection
+must have a real UI write path, or be removed from the manifest before building.
+Inside an app that already has a shape, call neither again.
 
-`surface` picks which scaffold is materialized and CANNOT be changed afterwards
-— the workspace on disk is the scaffold, so an app that needs the other shape
-has to be created again. Whichever call commits it, decide it from the confirmed
-specification:
+The persisted Runtime Profile picks the scaffold and derives its surface.
+Profile family CANNOT be changed afterwards — the workspace on disk is that
+profile's scaffold, so an app that needs another family must be created again.
+Choose it from the confirmed specification and the host catalog:
 
 - `canvas` when the whole interface is one drawn surface that owns a frame
   loop: a game, a simulation, a 3D scene, a live visualization. The workspace
@@ -177,21 +240,17 @@ specification:
 - `dom` for everything assembled from screens, lists and forms. This is the
   default and the common case.
 
-A drawn surface with a settings page is still `canvas`; a dashboard that embeds
-one chart is still `dom`. From a shell conversation the surface always goes into
-the confirmation round, because committing it is irreversible and the user is
-the one who has to live with it — read the brief, put your reading forward as
-the proposed answer, and let them correct it. From a global chat, where
-`LocalAppCreate` commits the surface in the same call that creates the app, ask
-which one the user means only when the brief is genuinely ambiguous between them
-— "make me something fun with physics" is ambiguous, "a brick-breaker game" is
-not. Either way, ask it in the same `AskUserQuestion` round as everything else
-you need.
+A drawn surface with a settings page is still a Canvas-family profile; a
+dashboard that embeds one chart is still `react_dom`. The runtime profile
+always appears in the final confirmation because committing it is irreversible.
+Read the brief, put your recommendation forward, and let the user correct it;
+only ask an earlier clarification when valid catalog profiles remain materially
+ambiguous.
 
 `name` is yours to write, not the user's brief truncated. Take the brief's
 subject and give it a short, specific display name — two to four words, no
 trailing punctuation, in the language the user wrote their brief in. From a
-shell conversation, show that name in the confirmation round with the surface,
+shell conversation, show that name in the confirmation round with the runtime profile,
 so the user can accept or replace it. From a global chat, reserve
 `AskUserQuestion` for a name only when the brief names no subject at all.
 
@@ -300,40 +359,64 @@ and enable immediately if ready. Use inline SVG or CSS for ordinary icons.
 
 ## Build orchestration
 
-Call the build workflow once with the confirmed spec. Which workflow follows
-the app's `surface`, and the two are not interchangeable:
+Call the build workflow once with the confirmed spec. The host reads the
+persisted Runtime Profile and enforces the matching workflow; callers cannot
+override it:
 
-- `surface: "dom"` → **`local-app-build`**
-- `surface: "canvas"` → **`local-canvas-build`**
+- `react_dom` → **`local-app-build`**
+- `canvas_2d`, `three_3d`, `phaser_2d`, `babylon_3d` →
+  **`local-canvas-build`**
 
 They differ in what they ask of you and in what they accept as proof. The DOM
-workflow designs a screen hierarchy and gates on a native data round-trip; the
-canvas workflow designs a simulation — loop, phases, inputs, end conditions —
-and gates on captured frames that show the surface rendering AND moving, because
-a drawn app usually declares no collection and would pass the data gate
-unobserved. `local-canvas-build` also refuses `fast`, which is the one strategy
-that skips Design.
+workflow accepts `fast`, `balanced`, or `thorough`, designs a screen hierarchy
+for the latter two, and gates on a native data round-trip. The canvas workflow
+accepts only `balanced` or `thorough`, always designs a simulation — loop,
+phases, inputs, end conditions — and gates on captured frames that show the
+surface rendering AND moving, because a drawn app usually declares no
+collection and would pass the data gate unobserved. Never advertise or pass
+`fast` to `local-canvas-build`; the workflow rejects it before any agent starts.
 
 When the create-flow kickoff includes a provider-qualified workflow model
 override, pass it byte-for-byte as `args.model`; otherwise omit `model` so every
 phase inherits the current session's live provider/model selection:
 
 ```json
-{"name":"local-app-build","args":{"app_id":"<id>","spec":"<confirmed spec>","strategy":"balanced","complexity":{"score":4,"band":"medium","confidence":0.9,"reasons":["three screens","one writable collection"]},"model":"<optional provider/model>"}}
+{"name":"local-app-build","args":{"app_id":"<id>","spec":"<confirmed spec>","strategy":"balanced","expected_writable_collections":["items"],"complexity":{"score":4,"band":"medium","confidence":0.9,"reasons":["three screens","one writable collection"]},"model":"<optional provider/model>"}}
 ```
 
 ```json
-{"name":"local-canvas-build","args":{"app_id":"<id>","spec":"<confirmed spec>","strategy":"balanced","complexity":{"score":5,"band":"medium","confidence":0.9,"reasons":["real-time frame loop","collision"]},"model":"<optional provider/model>"}}
+{"name":"local-canvas-build","args":{"app_id":"<id>","spec":"<confirmed spec>","strategy":"balanced","expected_writable_collections":[],"complexity":{"score":5,"band":"medium","confidence":0.9,"reasons":["real-time frame loop","collision"]},"model":"<optional provider/model>"}}
 ```
 
+In both calls, `args.expected_writable_collections` is task-local and advisory
+on mobile: the host reads the materialized manifest and overwrites it with every
+declared collection ID before the workflow runs. Every declared collection must
+therefore have a real core UI write path, or be removed from the manifest before
+building. The host-derived list is passed into Verify so a declared collection
+cannot be reported `not_applicable`; it is empty only when the materialized
+manifest declares no collections. Do not infer it from incidental generated
+source or omit a declared collection because the UI never writes it.
+
+Do not supply `args.runtime_profile` as an authority. On mobile the launcher
+overwrites it from the materialized Manifest and rejects a workflow whose DOM
+or Canvas shape does not match the pinned family. That host-derived
+`family/revision/contract_sha256` is preserved through design, generation,
+verification, and repair.
+
 The workflow is deterministic and adapts its phases from the confirmed
-strategy. Missing strategy defaults to `balanced`; unsupported values are
-rejected before any agent starts. `fast` skips the standalone Design agent and
-uses one smoke verification pass with at most one repair; `balanced` keeps
-Design/Generate & Build/Verify with at most one repair; `thorough` keeps the
-full target matrix and at most two repairs. Every strategy still requires a
-successful host build, runtime preview URL, fatal-error smoke check, and real
-native data round-trip evidence for every writable declared collection.
+strategy. Missing strategy defaults to `balanced` on either surface; unsupported
+values are rejected before any agent starts. On `dom`, `fast` skips the
+standalone Design agent and uses one smoke verification pass with at most one
+repair; `balanced` keeps Design/Generate & Build/Verify with at most one repair;
+`thorough` keeps the full target matrix and at most two repairs. On `canvas`,
+only `balanced` and `thorough` are valid, because the simulation Design stage is
+required; never advertise or pass `fast`. Every accepted strategy still
+requires a successful host build, runtime preview URL, fatal-error smoke check,
+and real native data round-trip evidence for every collection declared in the
+host-materialized manifest (while a canvas app with an empty materialized list
+relies on its captured render and motion gates). A declared collection without a
+real UI write path is a defect: remove it from the manifest rather than hiding
+it with an empty caller list.
 
 The workflow phases are:
 
@@ -348,12 +431,14 @@ see it at the `project/` path), excludes prior
 `build/store/dist/`. Never configure another `build.outDir`, inspect host
 staging paths, or copy generated output back into editable source.
 
-1. **Design** — for `balanced` and `thorough`, invoke `$frontend-design` and
-   produce/confirm platform and form factor, page structure, tokens, adapters,
-   interactions, and asset decision. For `fast`, fold those compact decisions
-   into the Generate & Build prompt. Assume the project scaffold and dependency
-   graph are already present and locked by the host. Do not propose template
-   choices, npm operations, fallback scaffold modes, or root-file edits.
+1. **Design** — for `dom`, invoke `$frontend-design` for `balanced` and
+   `thorough`, while `fast` folds compact decisions into Generate & Build. For
+   `canvas`, invoke `$frontend-design` for both accepted strategies; its
+   confirmation never includes `fast`. Produce/confirm platform and form
+   factor, page structure, tokens, adapters, interactions, and asset decision.
+   Assume the project scaffold and dependency graph are already present and
+   locked by the host. Do not propose template choices, npm operations,
+   fallback scaffold modes, or root-file edits.
 2. **Generate** — invoke `$accessibility` and `$react-best-practices`; consume
    the host-provided LingXi bridge, `deviceContext`, source policy/manifest
    integration, and platform adapter while writing complete React source and
@@ -361,30 +446,50 @@ staging paths, or copy generated output back into editable source.
    `deleteRecord` from the locked bridge for declared collection data; read
    fields from `records[].document` and do not swallow rejected native writes.
    Stay within the shipped dependency set; if an idea would require package or
-   root-infra changes, redesign it as a source-only implementation. A drawn
-   surface — a game, a 3D scene, a custom visualization — renders into a
-   `<canvas>` with a `requestAnimationFrame` loop you own and cancel on unmount;
-   2D needs no dependency and 3D uses `three@0.185.1`, which is in the locked
-   set. No other engine, physics or WebGL wrapper can be installed.
+   root-infra changes, redesign it as a source-only implementation. For a
+   whole-surface `surface: canvas` app, hand off to the matched runtime
+   specialist. For `canvas_2d` or `three_3d`, use the profile-managed
+   `createFrameLoop` helper from `lib/frame-loop.js`; never call
+   `requestAnimationFrame` directly or hand-write a replacement loop. Phaser
+   and Babylon use their profile-managed engine lifecycle adapter instead of a
+   second frame loop. For a routed `surface: dom` app that only
+   embeds a canvas or WebGL region, own exactly one
+   `requestAnimationFrame` loop for that region, cancel it in the effect
+   cleanup, make that loop's lifecycle responsible for DPR-aware buffer
+   sizing, viewport or layout resize, and clamping or resetting the first
+   delta after resume, and keep per-frame state out of React state and Zustand
+   stores. `canvas_2d` uses no extra engine and `three_3d` uses
+   `three@0.185.1`, which is in the locked set. `phaser_2d` and `babylon_3d`
+   are valid only when the persisted runtime profile already names those
+   host-managed stacks. No other engine, physics or WebGL wrapper can be
+   installed.
 3. **Build** — call `LocalAppBuild`; the host runs the production
    `vite build --outDir dist --emptyOutDir` equivalent offline from the
    workspace-backed writable mount with the fixed runtime and the app's
    materialized dependency snapshot. The output is staged under private
    `.lingxi-build-state/build-output/` before atomic promotion to
    `build/store/dist/`.
-4. **Verify** — invoke `$frontend-qa`. `fast` checks the confirmed primary
-   target, root render, fatal console errors, primary interaction, and native
-   WebView path; `balanced` covers all confirmed targets and app states;
-   `thorough` covers the full phone/tablet/desktop matrix. Use Browser when
-   available for the selected breadth, then use native WebView inspect/act/log
-   tools for bridge, data, system back, and device context. For every declared
-   collection written by a core UI path, perform the real UI write and then
-   call `LocalAppQueryData`; the returned `records[].document` must
-   contain the value. A local-only value or swallowed bridge failure is not
-   persistence.
+4. **Verify** — invoke `$frontend-qa`. For `dom`, `fast` checks the confirmed
+   primary target, root render, fatal console errors, primary interaction, and
+   native WebView path; `balanced` covers all confirmed targets and app states;
+   `thorough` covers the full phone/tablet/desktop matrix. For `canvas`,
+   `balanced` covers the confirmed simulation, captured render, motion, and
+   input paths; `thorough` adds the full target matrix and all declared states.
+   Use Browser when available for the selected breadth, then use native WebView
+   inspect/act/log tools for bridge, data, system back, and device context. For
+   every declared collection listed in `expected_writable_collections`, perform
+   the real UI write and then call `LocalAppQueryData`; the returned
+   `records[].document` must contain the value. On mobile, the host derives the
+   list from every collection in the materialized manifest and overwrites any
+   caller-provided list before Verify, so a non-empty list cannot be reported as
+   `not_applicable`. A declared collection without a UI write path must be
+   removed from the manifest and rebuilt. A local-only value or swallowed bridge
+   failure is not persistence.
 
 On a verification finding, repair, rebuild, and re-verify according to the
-selected strategy: at most once for `fast`/`balanced`, twice for `thorough`.
+selected surface strategy: for `dom`, at most once for `fast`/`balanced` and
+twice for `thorough`; for `canvas`, at most once for `balanced` and twice for
+`thorough`.
 If issues remain, return them with evidence and the reduced verification level;
 never claim full Browser or native QA that was not run.
 

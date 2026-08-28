@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
-# Resolve the pinned local-app template's dependencies INSIDE the local-app
-# Alpine rootfs and emit the resulting `node_modules` tree.
+# Resolve the pinned engine-free local-app seed dependencies INSIDE the
+# local-app Alpine rootfs and emit the resulting `node_modules` tree.
 #
 # This is the producer stage that `validate-local-app-build-assets.sh` has been
 # asking for: its failure message says "Set LINGXI_LOCAL_APP_NODE_MODULES and
@@ -11,7 +11,7 @@
 #
 # Why a container and not the host: the tree ships to a device where Vite runs
 # under musl on the guest's Node, so `@rolldown/binding-linux-<arch>-musl`,
-# `lightningcss-linux-<arch>-musl` and `@tailwindcss/oxide-linux-<arch>-musl`
+# `@rollup/rollup-linux-<arch>-musl`, and `lightningcss-linux-<arch>-musl`
 # are the bindings that must be resolved. A macOS `pnpm install` resolves the
 # darwin bindings instead and `stage-local-app-runtime.py` rejects it -- late,
 # and with a message about bindings rather than about the wrong builder.
@@ -141,17 +141,25 @@ VITE="${WORK}/project/node_modules/vite/bin/vite.js"
 # Guard the reason this runs in a container at all. `stage-local-app-runtime.py`
 # checks the same thing, but it reports "one real native binding" without saying
 # the tree was built on the wrong operating system.
-# Two families, not three: Tailwind left the pinned set with the move to Ionic,
-# and `@tailwindcss/oxide` went with it. Both survivors are Vite 8's own native
-# toolchain, so they stay as long as the build does.
+# Three families, all owned by the fixed Vite 8 toolchain. The bundled seed is
+# deliberately engine-free: Three/Phaser/Babylon stay out of the base lock so
+# React/Canvas apps can adopt it offline without carrying an unused renderer.
 MUSL_BINDINGS=(
   "node_modules/@rolldown/binding-linux-${IMAGE_ARCH/amd64/x64}-musl"
+  "node_modules/@rollup/rollup-linux-${IMAGE_ARCH/amd64/x64}-musl"
   "node_modules/lightningcss-linux-${IMAGE_ARCH/amd64/x64}-musl"
 )
 for binding in "${MUSL_BINDINGS[@]}"; do
   if [[ ! -d "${WORK}/project/${binding}" ]]; then
     echo "[node_modules:${ARCH}] resolved tree is missing ${binding}" >&2
     echo "       The tree was built for the wrong platform; rebuild inside the rootfs." >&2
+    exit 1
+  fi
+done
+for forbidden in node_modules/three node_modules/phaser node_modules/@babylonjs; do
+  if [[ -e "${WORK}/project/${forbidden}" ]]; then
+    echo "[node_modules:${ARCH}] resolved tree unexpectedly contains ${forbidden}" >&2
+    echo "       The bundled seed must remain engine-free; use a runtime-profile-specific lock instead." >&2
     exit 1
   fi
 done

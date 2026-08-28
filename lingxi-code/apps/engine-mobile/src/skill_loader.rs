@@ -1,28 +1,21 @@
-//! Disk-backed `Skill`-tool loader for the mobile engine (audit fix #14).
+//! Live-registry `Skill`-tool loader for the mobile engine.
 //!
-//! Makes the mobile `Skill` tool functional. It discovers on-disk
-//! `.lingxi/commands/**.md` + directory-format `.lingxi/skills/<name>/SKILL.md`
-//! under the device's app-private root (`app_files_root` = Android `filesDir`,
-//! with `lingxi_home = <app_files_root>/.claude`) and resolves a model-supplied
-//! skill name to a real prompt [`SkillDescriptor`] — the mobile analog of
-//! engine-desktop's `CommandRegistrySkillLoader` (which is apps-local and so
-//! cannot be reused across the `app → app` dependency boundary).
+//! Mobile now shares ONE `Arc<RwLock<CommandRegistry>>` across the slash
+//! dispatcher, skill listing provider, and the `Skill` tool. That keeps bundled
+//! skills, programmatic bundled prompts such as `/loop`, and on-disk
+//! `.lingxi/commands/**.md` / `.lingxi/skills/<name>/SKILL.md` in one live
+//! command set, so boot-time loading and later `/reload-skills` refreshes are
+//! visible everywhere instead of freezing the `Skill` tool at construction.
 //!
-//! ## Why a self-contained registry
-//!
-//! Desktop shares ONE `Arc<RwLock<CommandRegistry>>` between the loader and the
-//! slash dispatcher. This loader instead owns a registry built ONCE from disk at
-//! construction, which confines the change to the Skill-tool seam — no reordering
-//! of `build_mobile_inner`'s composition root. The cost is reading the
-//! command/skill dirs once for the tool; mobile does not yet surface on-disk
-//! slash commands through the dispatcher, so there is nothing to share with.
-//!
-//! The `to_descriptor` projection is byte-faithful to the desktop loader's, so a
-//! disk-authored skill resolves identically on both platforms.
+//! The `to_descriptor` projection stays byte-faithful to the desktop
+//! `CommandRegistrySkillLoader`, so a prompt command resolves identically on both
+//! platforms.
 
 use std::path::Path;
+use std::sync::Arc;
 
 use command_api::{CommandRegistry, SlashCommand, SlashCommandKind};
+use tokio::sync::RwLock;
 use tool_api::tool_trait::ToolError;
 use tool_skill::skill::{SkillCommandType, SkillDescriptor, SkillLoader};
 
@@ -33,8 +26,6 @@ use tool_skill::skill::{SkillCommandType, SkillDescriptor, SkillLoader};
 fn to_descriptor(cmd: &SlashCommand, session_id: Option<&str>) -> SkillDescriptor {
     let session_id = session_id.map(str::to_owned);
     match &cmd.kind {
-        // Markdown-defined (project/user/managed) or plugin-shipped markdown
-        // commands are the model-invocable prompt skills.
         SlashCommandKind::Markdown {
             frontmatter,
             prompt_template,
@@ -55,20 +46,14 @@ fn to_descriptor(cmd: &SlashCommand, session_id: Option<&str>) -> SkillDescripto
             disallowed_tools: frontmatter.disallowed_tools.clone().unwrap_or_default(),
             argument_names: frontmatter.argument_names.clone(),
             shell: frontmatter.shell,
-            // On-disk / plugin markdown is NOT MCP-sourced, so shell expansion runs.
             skip_shell_expansion: false,
             skill_root: cmd.skill_root.clone(),
-            // Forked-skill declarations from the markdown frontmatter — these
-            // are what make `context: fork` reach the Skill tool at all.
             context: frontmatter.context.clone(),
             background: frontmatter.background,
             agent: frontmatter.agent.clone(),
             session_id,
             dynamic_body: None,
         },
-        // Bundled programmatic skills (the `/loop` family, port of
-        // `registerBundledSkill`). Prompt-typed; body produced dynamically by
-        // `prompt_fn` at call time (`getPromptForCommand`, loop.ts:84).
         SlashCommandKind::Bundled {
             frontmatter,
             prompt_fn,
@@ -91,7 +76,6 @@ fn to_descriptor(cmd: &SlashCommand, session_id: Option<&str>) -> SkillDescripto
             session_id,
             dynamic_body: prompt_fn.clone(),
         },
-        // Builtin handlers are not prompt-based skills.
         SlashCommandKind::Builtin { .. } => SkillDescriptor {
             name: cmd.name.clone(),
             description: cmd.description.clone(),
@@ -100,7 +84,6 @@ fn to_descriptor(cmd: &SlashCommand, session_id: Option<&str>) -> SkillDescripto
             session_id,
             ..SkillDescriptor::default()
         },
-        // MCP-prompt bridges are not prompt-based skills AND are remote/untrusted.
         SlashCommandKind::Mcp { .. } => SkillDescriptor {
             name: cmd.name.clone(),
             description: cmd.description.clone(),
@@ -113,121 +96,79 @@ fn to_descriptor(cmd: &SlashCommand, session_id: Option<&str>) -> SkillDescripto
     }
 }
 
-/// Project a compiled-in [`skill_api::Skill`] onto the descriptor the `Skill`
-/// tool consumes — the bundled analog of [`to_descriptor`] (which projects
-/// disk-loaded [`SlashCommand`]s and cannot be reused here because bundled
-/// skills never pass through the command registry's frontmatter type).
-fn bundled_to_descriptor(skill: &skill_api::Skill, session_id: Option<&str>) -> SkillDescriptor {
-    let fm = &skill.frontmatter;
-    SkillDescriptor {
-        name: skill.name.clone(),
-        description: skill.description.clone(),
-        body: skill.content.clone(),
-        disable_model_invocation: fm.disable_model_invocation,
-        command_type: SkillCommandType::Prompt,
-        model: fm.model.clone(),
-        allowed_tools: fm.allowed_tools.clone().unwrap_or_default(),
-        disallowed_tools: fm.disallowed_tools.clone().unwrap_or_default(),
-        argument_names: fm.named_arguments.clone().unwrap_or_default(),
-        // skill-api keeps `shell` as the raw frontmatter string; the command
-        // registry's typed variants are Bash | PowerShell with Bash the
-        // default, so anything except an explicit powershell selector maps to
-        // the default route.
-        shell: fm.shell.as_deref().map(|shell| {
-            if shell.eq_ignore_ascii_case("powershell") {
-                command_api::FrontmatterShell::PowerShell
-            } else {
-                command_api::FrontmatterShell::Bash
-            }
-        }),
-        // Compiled-in markdown is first-party, so shell expansion runs (same
-        // stance as the disk Markdown arm above).
-        skip_shell_expansion: false,
-        // `<bundled:name>` is a marker, not a directory — no skill root to
-        // resolve relative file references against.
-        skill_root: None,
-        context: fm.context.clone(),
-        background: fm.background,
-        agent: fm.agent.clone(),
-        session_id: session_id.map(str::to_owned),
-        dynamic_body: None,
-    }
-}
-
-/// [`SkillLoader`] backed by the compiled-in mobile skill set plus a registry
-/// built once from the device's on-disk `.lingxi/commands` + `.lingxi/skills`
-/// layers.
+/// [`SkillLoader`] backed by the shared live mobile [`CommandRegistry`].
 pub struct MobileDiskSkillLoader {
-    /// Compiled-in mobile skills (`skill_api::register_mobile` — e.g.
-    /// `create-local-app`). Resolved BEFORE the disk layers, mirroring the
-    /// workflow launcher's `resolve_script` precedence (builtins → project →
-    /// user): the skill a release ships must not be shadowed by a stale
-    /// on-device file.
-    bundled: skill_api::SkillRegistry,
-    registry: CommandRegistry,
-    /// Per-session id stamped on resolved descriptors (`${LINGXI_SESSION_ID}`),
-    /// or `None` to leave the token un-substituted.
+    registry: Arc<RwLock<CommandRegistry>>,
     session_id: Option<String>,
 }
 
 impl MobileDiskSkillLoader {
-    /// Build the loader by discovering on-disk custom commands + directory-format
-    /// skills under `cwd` (project) and `lingxi_home` (user). `home` is the
-    /// home-walk root the loader uses for the user layer; on a device pass `cwd`
-    /// so `home/.claude` resolves to the same app-private `.claude` as
-    /// `lingxi_home` (the underlying loaders dedup by name across layers, so the
-    /// collision is harmless). Mobile has no managed-settings layer, so a
-    /// non-existent managed dir is passed (the loader skips missing dirs).
+    #[must_use]
+    pub fn new(registry: Arc<RwLock<CommandRegistry>>) -> Self {
+        Self {
+            registry,
+            session_id: None,
+        }
+    }
+
+    #[must_use]
+    pub fn with_session_id(registry: Arc<RwLock<CommandRegistry>>, session_id: String) -> Self {
+        Self {
+            session_id: Some(session_id),
+            ..Self::new(registry)
+        }
+    }
+
+    /// Back-compat helper for tests that want a disk-populated live registry in
+    /// one call.
     pub async fn load_from_disk(
         cwd: &Path,
         lingxi_home: &Path,
         home: &Path,
         session_id: Option<String>,
     ) -> Self {
-        let mut registry = CommandRegistry::new();
-        // Mobile has no managed (enterprise policy) settings dir; a path that does
-        // not exist makes the loader's managed layer a no-op.
-        let no_managed = lingxi_home.join("__lingxi_no_managed_settings__");
-        command_core::load_and_register_custom_commands(
-            &mut registry,
-            cwd,
-            lingxi_home,
-            &no_managed,
-            home,
-        )
-        .await;
-        command_core::load_and_register_skill_commands_with_roots(
-            &mut registry,
-            cwd,
-            lingxi_home,
-            None,
-            home,
-            &[],
-        )
-        .await;
-        let mut bundled = skill_api::SkillRegistry::new();
-        skill_api::register_mobile(&mut bundled);
+        let registry = Arc::new(RwLock::new(CommandRegistry::new()));
+        {
+            let mut reg = registry.write().await;
+            load_mobile_disk_commands_into_registry(&mut reg, cwd, lingxi_home, home).await;
+        }
         Self {
-            bundled,
             registry,
             session_id,
         }
     }
 }
 
+/// Load the mobile on-disk prompt commands into `registry`.
+///
+/// Callers that need bundled mobile skills to stay authoritative over same-name
+/// disk entries must re-register those bundled commands after this function
+/// returns.
+pub async fn load_mobile_disk_commands_into_registry(
+    registry: &mut CommandRegistry,
+    cwd: &Path,
+    lingxi_home: &Path,
+    home: &Path,
+) {
+    let no_managed = lingxi_home.join("__lingxi_no_managed_settings__");
+    command_core::load_and_register_custom_commands(registry, cwd, lingxi_home, &no_managed, home)
+        .await;
+    command_core::load_and_register_skill_commands_with_roots(
+        registry,
+        cwd,
+        lingxi_home,
+        None,
+        home,
+        &[],
+    )
+    .await;
+}
+
 #[async_trait::async_trait]
 impl SkillLoader for MobileDiskSkillLoader {
     async fn load(&self, name: &str) -> Result<Option<SkillDescriptor>, ToolError> {
-        // Bundled first (see the field doc for the precedence rationale),
-        // then `resolve` follows aliases (findCommand over name + aliases).
-        if let Some(skill) = self.bundled.get(name) {
-            return Ok(Some(bundled_to_descriptor(
-                skill,
-                self.session_id.as_deref(),
-            )));
-        }
-        Ok(self
-            .registry
+        let reg = self.registry.read().await;
+        Ok(reg
             .resolve(name)
             .map(|cmd| to_descriptor(cmd, self.session_id.as_deref())))
     }
@@ -253,10 +194,13 @@ mod tests {
         .await
         .unwrap();
 
-        // Mirror the mobile host wiring: lingxi_home = <root>/.claude, home = root
-        // (so home/.claude == lingxi_home; the loaders dedup by name across layers).
-        let loader =
-            MobileDiskSkillLoader::load_from_disk(root, &root.join(".lingxi"), root, None).await;
+        let registry = Arc::new(RwLock::new(CommandRegistry::new()));
+        {
+            let mut reg = registry.write().await;
+            load_mobile_disk_commands_into_registry(&mut reg, root, &root.join(".lingxi"), root)
+                .await;
+        }
+        let loader = MobileDiskSkillLoader::new(registry);
 
         let desc = loader
             .load("review-pr")
@@ -270,8 +214,6 @@ mod tests {
             "body carries the markdown prompt template: {:?}",
             desc.body
         );
-
-        // Unknown skill → None (would surface as "Unknown skill" at the tool).
         assert!(loader
             .load("does-not-exist")
             .await
@@ -279,21 +221,14 @@ mod tests {
             .is_none());
     }
 
-    /// QA regression (2026-08-10): the device showed `Unknown skill:
-    /// create-local-app` because the loader consulted ONLY the disk layers —
-    /// the compiled-in mobile skill set was registered for the listing but
-    /// never for resolution. An empty-disk loader must resolve it.
     #[tokio::test]
     async fn resolves_bundled_create_local_app_with_an_empty_disk() {
-        let tmp = tempfile::tempdir().unwrap();
-        let root = tmp.path();
-        let loader = MobileDiskSkillLoader::load_from_disk(
-            root,
-            &root.join(".lingxi"),
-            root,
-            Some("session-1".into()),
-        )
-        .await;
+        let registry = Arc::new(RwLock::new(CommandRegistry::new()));
+        {
+            let mut reg = registry.write().await;
+            crate::register_mobile_skill_commands(&mut reg);
+        }
+        let loader = MobileDiskSkillLoader::with_session_id(registry, "session-1".into());
 
         let desc = loader
             .load("create-local-app")
@@ -303,15 +238,105 @@ mod tests {
         assert_eq!(desc.name, "create-local-app");
         assert_eq!(desc.command_type, SkillCommandType::Prompt);
         assert!(!desc.disable_model_invocation);
+        let built = desc
+            .dynamic_body
+            .as_ref()
+            .expect("bundled mobile skills build their prompt dynamically")
+            .build("");
+        assert!(built.contains("local-app-build"));
         assert!(
-            desc.body.contains("local-app-build"),
-            "the bundled body is the v3 flow (names the build workflow)"
+            built.contains(concat!(
+                "For a\n",
+                "   whole-surface `surface: canvas` app, hand off to the matched runtime\n",
+                "   specialist. For `canvas_2d` or `three_3d`, use the profile-managed\n",
+                "   `createFrameLoop` helper from `lib/frame-loop.js`; never call\n",
+                "   `requestAnimationFrame` directly or hand-write a replacement loop."
+            )),
+            "whole-surface canvas guidance must require the shipped frame-loop helper: {:?}",
+            built
+        );
+        assert!(
+            built.contains(
+                concat!(
+                    "For a routed `surface: dom` app that only\n",
+                    "   embeds a canvas or WebGL region, own exactly one\n",
+                    "   `requestAnimationFrame` loop for that region, cancel it in the effect\n",
+                    "   cleanup, make that loop's lifecycle responsible for DPR-aware buffer\n",
+                    "   sizing, viewport or layout resize, and clamping or resetting the first\n",
+                    "   delta after resume, and keep per-frame state out of React state and Zustand\n",
+                    "   stores."
+                )
+            ),
+            "dom embedded-canvas guidance must retain the scoped requestAnimationFrame fallback: {:?}",
+            built
+        );
+        assert!(
+            !built.contains(
+                "A drawn surface — a game, a 3D scene, a custom visualization — renders into a `<canvas>` with a `requestAnimationFrame` loop you own and cancel on unmount;"
+            ),
+            "the old unscoped canvas sentence must be absent: {:?}",
+            built
         );
     }
 
-    /// Bundled precedence mirrors the workflow launcher's `resolve_script`
-    /// (builtins → project → user): a stale on-device file with the same name
-    /// must not shadow the skill the release ships.
+    #[tokio::test]
+    async fn resolves_bundled_local_app_specialists_with_router_profiles() {
+        let registry = Arc::new(RwLock::new(CommandRegistry::new()));
+        {
+            let mut reg = registry.write().await;
+            crate::register_mobile_skill_commands(&mut reg);
+        }
+        let loader = MobileDiskSkillLoader::new(registry);
+
+        for (name, profile) in [
+            (
+                "ionic-react-local-app",
+                "references/profiles/app-shell-and-routing.md",
+            ),
+            (
+                "canvas-2d-local-app",
+                "references/profiles/game-loop-and-state.md",
+            ),
+            (
+                "threejs-local-app",
+                "references/profiles/lifecycle-and-performance.md",
+            ),
+            (
+                "phaser-2d-local-app",
+                "references/profiles/scene-lifecycle-and-input.md",
+            ),
+            (
+                "babylon-3d-local-app",
+                "references/profiles/engine-lifecycle-and-performance.md",
+            ),
+        ] {
+            let desc = loader
+                .load(name)
+                .await
+                .expect("load ok")
+                .expect("bundled local-app specialist resolves without disk state");
+            assert_eq!(desc.name, name);
+            assert_eq!(desc.command_type, SkillCommandType::Prompt);
+            let built = desc
+                .dynamic_body
+                .as_ref()
+                .expect("bundled mobile skills build their prompt dynamically")
+                .build("");
+            assert!(
+                built.contains("## Bundled resource: `references/router.md`"),
+                "{name} body must include the router resource"
+            );
+            assert!(
+                built.contains("Follow `references/router.md` first"),
+                "{name} body must retain the router-first selection guard"
+            );
+            assert!(
+                built.contains(&format!("## Bundled resource: `{profile}`")),
+                "{name} body must include its routed profile resource"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn bundled_skill_shadows_a_same_named_disk_command() {
         let tmp = tempfile::tempdir().unwrap();
@@ -325,17 +350,28 @@ mod tests {
         .await
         .unwrap();
 
-        let loader =
-            MobileDiskSkillLoader::load_from_disk(root, &root.join(".lingxi"), root, None).await;
+        let registry = Arc::new(RwLock::new(CommandRegistry::new()));
+        {
+            let mut reg = registry.write().await;
+            load_mobile_disk_commands_into_registry(&mut reg, root, &root.join(".lingxi"), root)
+                .await;
+            crate::register_mobile_skill_commands(&mut reg);
+        }
+        let loader = MobileDiskSkillLoader::new(registry);
         let desc = loader
             .load("create-local-app")
             .await
             .expect("load ok")
             .expect("resolves");
+        let built = desc
+            .dynamic_body
+            .as_ref()
+            .expect("bundled mobile skills build their prompt dynamically")
+            .build("");
         assert!(
-            !desc.body.contains("DECOY BODY"),
+            !built.contains("DECOY BODY"),
             "the compiled-in skill wins over the on-disk decoy"
         );
-        assert!(desc.body.contains("local-app-build"));
+        assert!(built.contains("local-app-build"));
     }
 }

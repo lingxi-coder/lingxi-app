@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 
 /// Schema version stamped on every persisted local-apps file.
-pub const APPS_SCHEMA_VERSION: u32 = 1;
+pub const APPS_SCHEMA_VERSION: u32 = 2;
 
 /// New apps use Git-backed source version control unless the user opts out
 /// during creation. Missing values on older records deserialize as enabled.
@@ -130,6 +130,60 @@ impl AppDependencyState {
 }
 
 impl fmt::Display for AppDependencyState {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// One fixed runtime family from the global local-app catalog.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AppRuntimeProfile {
+    /// Routed Ionic/React DOM application scaffold.
+    #[serde(rename = "react_dom")]
+    ReactDom,
+    /// Canvas 2D drawn-surface scaffold.
+    #[serde(rename = "canvas_2d")]
+    Canvas2d,
+    /// Three.js 3D drawn-surface scaffold.
+    #[serde(rename = "three_3d")]
+    Three3d,
+    /// Phaser 2D drawn-surface scaffold.
+    #[serde(rename = "phaser_2d")]
+    Phaser2d,
+    /// Babylon.js 3D drawn-surface scaffold.
+    #[serde(rename = "babylon_3d")]
+    Babylon3d,
+}
+
+impl AppRuntimeProfile {
+    /// Canonical `snake_case` persisted/wire spelling.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ReactDom => "react_dom",
+            Self::Canvas2d => "canvas_2d",
+            Self::Three3d => "three_3d",
+            Self::Phaser2d => "phaser_2d",
+            Self::Babylon3d => "babylon_3d",
+        }
+    }
+
+    /// Parse the persisted or tool spelling of one runtime profile family.
+    pub fn parse(value: &str) -> Result<Self, crate::error::AppError> {
+        match value {
+            "react_dom" => Ok(Self::ReactDom),
+            "canvas_2d" => Ok(Self::Canvas2d),
+            "three_3d" => Ok(Self::Three3d),
+            "phaser_2d" => Ok(Self::Phaser2d),
+            "babylon_3d" => Ok(Self::Babylon3d),
+            other => Err(crate::error::AppError::InvalidRequest(format!(
+                "unknown app runtime profile {other:?}; expected react_dom, canvas_2d, three_3d, phaser_2d, or babylon_3d"
+            ))),
+        }
+    }
+}
+
+impl fmt::Display for AppRuntimeProfile {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.as_str())
     }
@@ -308,6 +362,10 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&AppDependencyState::Installing).unwrap(),
             "\"installing\""
+        );
+        assert_eq!(
+            serde_json::to_string(&AppRuntimeProfile::Babylon3d).unwrap(),
+            "\"babylon_3d\""
         );
         assert_eq!(
             serde_json::to_string(&AppCheckpointKind::PreRestore).unwrap(),

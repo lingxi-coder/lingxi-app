@@ -1,25 +1,23 @@
 ---
 name: react-best-practices
-description: Generate maintainable React local apps with clear component boundaries, stable state, complete UI states, predictable effects, and production-safe performance patterns.
+description: Apply React 19 client-side rules for LingXi local apps, focusing on component boundaries, state and effect discipline, cleanup, error handling, and render performance.
 ---
 
 # React best practices
 
-Keep the app a real, usable React project. Split the shell, feature regions,
-state helpers, and repeated primitives into focused modules; keep `App` as
-composition glue. Model loading, empty, error, success, and permission states
-explicitly instead of hiding them behind optimistic placeholders.
+This skill is only for the client-side React layer inside the pinned local-app
+runtime.
 
-Prefer derived values over duplicated state, stable keys over array indexes,
-event handlers over effects for user actions, and cleanup for subscriptions,
-timers, and bridge requests. Avoid render-time side effects, unnecessary
-memoization, monolithic components, and platform conditionals scattered
-through JSX. Put platform differences behind token/adapter modules supplied by
-the confirmed design spec.
+Use it to keep the app:
 
-Use CSS or the Web Animations API only for purposeful motion and honor reduced
-motion. Use accessible inline SVG or CSS for ordinary UI icons; do not turn
-icons into generated bitmap assets. Load [references/react-checklist.md](references/react-checklist.md)
-for a final pass. This skill does not install packages or change root
-infrastructure; stay within the host-scaffolded dependency set for the current
-local app.
+- split into clear component, hook, and adapter boundaries;
+- explicit about loading, empty, error, success, and permission states;
+- disciplined about effects, cleanup, and bridge lifecycles;
+- performant without pushing per-frame simulation state into React or Zustand.
+
+Routing is load-mode aware: bundled runtimes must use the `Bundled resource`
+section below and must not read from the app workspace (`references/router.md`
+or its profiles). File-backed runtimes follow the markdown link
+[references/router.md](references/router.md) first. Exclude Next.js, SSR, Server
+Components, route loaders owned by other frameworks, and platform design rules
+that belong in `$frontend-design`.

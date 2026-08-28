@@ -4,7 +4,9 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
 TOOL="${SCRIPT_DIR}/verify-local-app-supply-chain.py"
-TEMPLATE="${REPO_ROOT}/lingxi-code/local-apps/templates/vite-react-static-v1"
+PROFILE_ROOT="${REPO_ROOT}/lingxi-code/local-apps/templates/runtime-profiles"
+REACT_PROFILE="${PROFILE_ROOT}/react-dom/r1"
+CANVAS_PROFILE="${PROFILE_ROOT}/canvas-2d/r1"
 TEMP_ROOT="$(mktemp -d)"
 
 # A negative test must fail for the reason it names, not merely fail.
@@ -47,6 +49,7 @@ IOS_STAGED_OUTPUT="${REPO_ROOT}/clients/ios/build/local-app-supply-chain-test-${
 trap 'chmod -R u+w "${TEMP_ROOT}" "${STAGED_OUTPUT}" "${IOS_STAGED_OUTPUT}" 2>/dev/null || true; rm -rf "${TEMP_ROOT}" "${STAGED_OUTPUT}" "${IOS_STAGED_OUTPUT}"' EXIT
 
 python3 "${TOOL}" --repo-root "${REPO_ROOT}"
+python3 "${TOOL}" --repo-root "${REPO_ROOT}" --profile babylon-3d
 
 python3 - "${REPO_ROOT}/docs/mobile-linux/local-app-runtime-policy.json" <<'PY'
 import json
@@ -59,13 +62,12 @@ assert "node_modules_mount" not in policy
 assert "scaffold" not in policy
 assert "package_manager_policy" not in policy
 assert policy["vite_executable"] == "/var/lingxi/local-app-build/{app_id}/{channel}/project/node_modules/vite/bin/vite.js"
-assert policy["dependency_snapshot"] == {
-    "source": "embedded:vite-react-static-v1/pnpm-lock.yaml",
-    "materialize_into": "/var/lingxi/local-app-build/{app_id}/{channel}/project/node_modules",
-    "guest_mount": "forbidden",
-    "selection_policy": "locked_template_only",
-    "install_command": "pnpm install --frozen-lockfile --ignore-scripts --no-runtime --prefer-offline",
-}
+dependency_snapshot = policy["dependency_snapshot"]
+assert dependency_snapshot["source"] == "embedded:runtime-profiles/react-dom/r1/pnpm-lock.yaml"
+assert dependency_snapshot["materialize_into"] == "/var/lingxi/local-app-build/{app_id}/{channel}/project/node_modules"
+assert dependency_snapshot["guest_mount"] == "forbidden"
+assert dependency_snapshot["selection_policy"] == "exact_lock_only"
+assert "pnpm install --frozen-lockfile --ignore-scripts --no-runtime --prefer-offline" in dependency_snapshot["install_command"]
 assert policy["build_mount"] == {
     "kind": "LocalAppBuild",
     "count": 1,
@@ -130,8 +132,8 @@ assert ish_policy["local_app_build_mount_layout"] == "single_root_materialized_s
 assert ish_policy["nested_bind_mount_resolution"] == "longest_guest_prefix"
 PY
 
-cp -R "${TEMPLATE}" "${TEMP_ROOT}/vite-compressed-size"
-python3 - "${TEMP_ROOT}/vite-compressed-size/vite.config.mjs" <<'PY'
+cp -R "${REACT_PROFILE}" "${TEMP_ROOT}/react-dom-compressed-size"
+python3 - "${TEMP_ROOT}/react-dom-compressed-size/vite.config.mjs" <<'PY'
 import pathlib
 import sys
 
@@ -148,11 +150,11 @@ path.write_text(
 )
 PY
 expect_rejection "Vite compressed-size reporting to fail validation" \
-  python3 "${TOOL}" --repo-root "${REPO_ROOT}" \
-  --vite-template "${TEMP_ROOT}/vite-compressed-size"
+  python3 "${TOOL}" --repo-root "${REPO_ROOT}" --profile react-dom \
+  --template "${TEMP_ROOT}/react-dom-compressed-size"
 
 python3 "${SCRIPT_DIR}/generate-local-app-sbom.py" \
-  --lock "${TEMPLATE}/pnpm-lock.yaml" \
+  --lock "${REACT_PROFILE}/pnpm-lock.yaml" \
   --output "${TEMP_ROOT}/local-app-runtime.spdx.json"
 cmp "${TEMP_ROOT}/local-app-runtime.spdx.json" \
   "${REPO_ROOT}/docs/mobile-linux/sbom/local-app-runtime.spdx.json"
@@ -160,8 +162,8 @@ cmp "${TEMP_ROOT}/local-app-runtime.spdx.json" \
 expect_rejection "release validation to remain fail-closed" \
   python3 "${TOOL}" --repo-root "${REPO_ROOT}" --release
 
-cp -R "${TEMPLATE}" "${TEMP_ROOT}/dependency-drift"
-python3 - "${TEMP_ROOT}/dependency-drift/package.json" <<'PY'
+cp -R "${REACT_PROFILE}" "${TEMP_ROOT}/react-dom-dependency-drift"
+python3 - "${TEMP_ROOT}/react-dom-dependency-drift/package.json" <<'PY'
 import json
 import pathlib
 import sys
@@ -172,30 +174,74 @@ value["dependencies"]["vite"] = "8.2.2"
 path.write_text(json.dumps(value), encoding="utf-8")
 PY
 expect_rejection "dependency drift to fail validation" \
-  python3 "${TOOL}" --repo-root "${REPO_ROOT}" --template "${TEMP_ROOT}/dependency-drift"
+  python3 "${TOOL}" --repo-root "${REPO_ROOT}" --profile react-dom \
+  --template "${TEMP_ROOT}/react-dom-dependency-drift"
 
-cp -R "${TEMPLATE}" "${TEMP_ROOT}/network-bypass"
-printf '\nfetch("https://example.com");\n' >> "${TEMP_ROOT}/network-bypass/app/main.jsx"
+cp -R "${REACT_PROFILE}" "${TEMP_ROOT}/react-dom-network-bypass"
+printf '\nfetch("https://example.com");\n' >> "${TEMP_ROOT}/react-dom-network-bypass/app/main.jsx"
 expect_rejection "direct network access to fail validation" \
-  python3 "${TOOL}" --repo-root "${REPO_ROOT}" --template "${TEMP_ROOT}/network-bypass"
+  python3 "${TOOL}" --repo-root "${REPO_ROOT}" --profile react-dom \
+  --template "${TEMP_ROOT}/react-dom-network-bypass"
 
-cp -R "${TEMPLATE}" "${TEMP_ROOT}/symlink"
-ln -s /tmp "${TEMP_ROOT}/symlink/public/escape"
+cp -R "${REACT_PROFILE}" "${TEMP_ROOT}/react-dom-symlink"
+ln -s /tmp "${TEMP_ROOT}/react-dom-symlink/public/escape"
 expect_rejection "a template symlink to fail validation" \
-  python3 "${TOOL}" --repo-root "${REPO_ROOT}" --template "${TEMP_ROOT}/symlink"
+  python3 "${TOOL}" --repo-root "${REPO_ROOT}" --profile react-dom \
+  --template "${TEMP_ROOT}/react-dom-symlink"
 
-cp -R "${TEMPLATE}" "${TEMP_ROOT}/path-escape"
-printf 'console.log("outside policy");\n' > "${TEMP_ROOT}/path-escape/server.js"
+cp -R "${REACT_PROFILE}" "${TEMP_ROOT}/react-dom-path-escape"
+printf 'console.log("outside policy");\n' > "${TEMP_ROOT}/react-dom-path-escape/server.js"
 expect_rejection "a source file outside writable roots to fail validation" \
-  python3 "${TOOL}" --repo-root "${REPO_ROOT}" --template "${TEMP_ROOT}/path-escape"
+  python3 "${TOOL}" --repo-root "${REPO_ROOT}" --profile react-dom \
+  --template "${TEMP_ROOT}/react-dom-path-escape"
 
-cp -R "${TEMPLATE}" "${TEMP_ROOT}/lock-drift"
-printf '\n' >> "${TEMP_ROOT}/lock-drift/pnpm-lock.yaml"
+cp -R "${REACT_PROFILE}" "${TEMP_ROOT}/react-dom-lock-drift"
+printf '\n' >> "${TEMP_ROOT}/react-dom-lock-drift/pnpm-lock.yaml"
 expect_rejection "pnpm-lock byte drift to fail validation" \
-  python3 "${TOOL}" --repo-root "${REPO_ROOT}" --template "${TEMP_ROOT}/lock-drift"
+  python3 "${TOOL}" --repo-root "${REPO_ROOT}" --profile react-dom \
+  --template "${TEMP_ROOT}/react-dom-lock-drift"
 
-cp -R "${TEMPLATE}" "${TEMP_ROOT}/external-script"
-python3 - "${TEMP_ROOT}/external-script/index.html" <<'PY'
+python3 - "${REACT_PROFILE}" "${CANVAS_PROFILE}" "${PROFILE_ROOT}/three-3d/r1" "${PROFILE_ROOT}/phaser-2d/r1" "${PROFILE_ROOT}/babylon-3d/r1" <<'PY'
+import hashlib
+import json
+import pathlib
+import sys
+
+react = pathlib.Path(sys.argv[1])
+canvas = pathlib.Path(sys.argv[2])
+three = pathlib.Path(sys.argv[3])
+phaser = pathlib.Path(sys.argv[4])
+babylon = pathlib.Path(sys.argv[5])
+
+def lock_sha(path: pathlib.Path) -> str:
+    return hashlib.sha256((path / "pnpm-lock.yaml").read_bytes()).hexdigest()
+
+react_sha = lock_sha(react)
+assert react_sha == lock_sha(canvas)
+assert react_sha != lock_sha(three)
+assert react_sha != lock_sha(phaser)
+assert react_sha != lock_sha(babylon)
+deps = json.loads((react / "package.json").read_text(encoding="utf-8"))["dependencies"]
+for forbidden in ["three", "phaser", "@babylonjs/core", "@babylonjs/loaders", "@babylonjs/havok"]:
+    assert forbidden not in deps, forbidden
+PY
+
+cp -R "${REACT_PROFILE}" "${TEMP_ROOT}/react-dom-engine-lock-drift"
+python3 - "${TEMP_ROOT}/react-dom-engine-lock-drift/pnpm-lock.yaml" <<'PY'
+import pathlib
+import sys
+path = pathlib.Path(sys.argv[1])
+text = path.read_text(encoding="utf-8")
+needle = "@rollup/rollup-linux-x64-musl@4.44.0"
+assert needle in text
+path.write_text(text.replace(needle, needle + "-drift", 1), encoding="utf-8")
+PY
+expect_rejection "a base seed lock containing engine/runtime drift to fail validation" \
+  python3 "${TOOL}" --repo-root "${REPO_ROOT}" --profile react-dom \
+  --template "${TEMP_ROOT}/react-dom-engine-lock-drift"
+
+cp -R "${REACT_PROFILE}" "${TEMP_ROOT}/react-dom-external-script"
+python3 - "${TEMP_ROOT}/react-dom-external-script/index.html" <<'PY'
 import pathlib
 import sys
 
@@ -209,7 +255,25 @@ path.write_text(
 )
 PY
 expect_rejection "an external script tag to fail validation" \
-  python3 "${TOOL}" --repo-root "${REPO_ROOT}" --template "${TEMP_ROOT}/external-script"
+  python3 "${TOOL}" --repo-root "${REPO_ROOT}" --profile react-dom \
+  --template "${TEMP_ROOT}/react-dom-external-script"
+
+cp -R "${CANVAS_PROFILE}" "${TEMP_ROOT}/canvas-missing-frame-loop"
+python3 - "${TEMP_ROOT}/canvas-missing-frame-loop/.lingxi/source-policy.json" <<'PY'
+import json
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+value = json.loads(path.read_text(encoding="utf-8"))
+value["host_managed_paths"] = [
+    entry for entry in value["host_managed_paths"] if entry != "lib/frame-loop.js"
+]
+path.write_text(json.dumps(value, indent=2) + "\n", encoding="utf-8")
+PY
+expect_rejection "a canvas runtime profile missing frame-loop in source policy to fail validation" \
+  python3 "${TOOL}" --repo-root "${REPO_ROOT}" --profile canvas-2d \
+  --template "${TEMP_ROOT}/canvas-missing-frame-loop"
 
 NODE_MODULES="${TEMP_ROOT}/node_modules"
 mkdir -p "${NODE_MODULES}"
@@ -228,10 +292,13 @@ verify = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(verify)
 packages = dict(verify.EXPECTED_DEPENDENCIES)
 packages.update({
-    "rolldown": "1.2.4",
+    "rolldown": "1.2.6",
+    "rollup": "4.44.0",
     "lightningcss": "1.33.0",
-    "@rolldown/binding-linux-arm64-musl": "1.2.4",
-    "@rolldown/binding-linux-x64-musl": "1.2.4",
+    "@rolldown/binding-linux-arm64-musl": "1.2.6",
+    "@rolldown/binding-linux-x64-musl": "1.2.6",
+    "@rollup/rollup-linux-arm64-musl": "4.44.0",
+    "@rollup/rollup-linux-x64-musl": "4.44.0",
     "lightningcss-linux-arm64-musl": "1.33.0",
     "lightningcss-linux-x64-musl": "1.33.0",
 })
@@ -246,6 +313,8 @@ for name, version in packages.items():
 (root / "vite/bin/vite.js").write_text("#!/usr/bin/env node\n", encoding="utf-8")
 (root / "@rolldown/binding-linux-arm64-musl/rolldown-binding.linux-arm64-musl.node").write_bytes(bytes.fromhex("7f454c46") + b"fixture")
 (root / "@rolldown/binding-linux-x64-musl/rolldown-binding.linux-x64-musl.node").write_bytes(bytes.fromhex("7f454c46") + b"fixture")
+(root / "@rollup/rollup-linux-arm64-musl/rollup.linux-arm64-musl.node").write_bytes(bytes.fromhex("7f454c46") + b"fixture")
+(root / "@rollup/rollup-linux-x64-musl/rollup.linux-x64-musl.node").write_bytes(bytes.fromhex("7f454c46") + b"fixture")
 (root / "lightningcss-linux-arm64-musl/lightningcss.linux-arm64-musl.node").write_bytes(bytes.fromhex("7f454c46") + b"fixture")
 (root / "lightningcss-linux-x64-musl/lightningcss.linux-x64-musl.node").write_bytes(bytes.fromhex("7f454c46") + b"fixture")
 PY
@@ -286,6 +355,10 @@ manifest = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
 assert manifest["resolved_rolldown_bindings"] == [
     "@rolldown/binding-linux-arm64-musl",
     "@rolldown/binding-linux-x64-musl",
+], manifest
+assert manifest["resolved_rollup_bindings"] == [
+    "@rollup/rollup-linux-arm64-musl",
+    "@rollup/rollup-linux-x64-musl",
 ], manifest
 assert manifest["resolved_lightningcss_bindings"] == [
     "lightningcss-linux-arm64-musl",
@@ -332,10 +405,25 @@ expect_rejection "staged runtime to reject Next/SWC drift" \
   --platform android \
   --variant play
 
+ADDON_DRIFT_NODE_MODULES="${TEMP_ROOT}/node-modules-addon-drift"
+cp -R "${NODE_MODULES}" "${ADDON_DRIFT_NODE_MODULES}"
+mkdir -p "${ADDON_DRIFT_NODE_MODULES}/left-pad"
+printf '{"name":"left-pad","version":"1.3.0"}\n' \
+  > "${ADDON_DRIFT_NODE_MODULES}/left-pad/package.json"
+printf '\177ELFfixture' > "${ADDON_DRIFT_NODE_MODULES}/left-pad/left-pad.node"
+expect_rejection "staged runtime to reject an arbitrary native addon" \
+  python3 "${SCRIPT_DIR}/stage-local-app-runtime.py" \
+  --repo-root "${REPO_ROOT}" \
+  --node-modules "${ADDON_DRIFT_NODE_MODULES}" \
+  --output "${TEMP_ROOT}/addon-drift-output" \
+  --platform android \
+  --variant play
+
 IOS_NODE_MODULES="${TEMP_ROOT}/node_modules-ios"
 cp -R "${NODE_MODULES}" "${IOS_NODE_MODULES}"
 rm -rf \
   "${IOS_NODE_MODULES}/@rolldown/binding-linux-x64-musl" \
+  "${IOS_NODE_MODULES}/@rollup/rollup-linux-x64-musl" \
   "${IOS_NODE_MODULES}/lightningcss-linux-x64-musl"
 python3 "${SCRIPT_DIR}/stage-local-app-runtime.py" \
   --repo-root "${REPO_ROOT}" \
@@ -350,6 +438,7 @@ import sys
 
 manifest = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
 assert manifest["resolved_rolldown_bindings"] == ["@rolldown/binding-linux-arm64-musl"], manifest
+assert manifest["resolved_rollup_bindings"] == ["@rollup/rollup-linux-arm64-musl"], manifest
 assert manifest["resolved_lightningcss_bindings"] == ["lightningcss-linux-arm64-musl"], manifest
 assert "resolved_oxide_bindings" not in manifest, manifest
 PY

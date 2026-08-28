@@ -347,7 +347,7 @@ object SettingsMock {
     /**
      * The mobile bundled catalog. This mirrors the engine's compiled registry
      * (`skill-api`'s `BUILTIN_MOBILE`) instead of inventing Android-only
-     * placeholder rows, so the settings surface exposes the same five Local
+     * placeholder rows, so the settings surface exposes the same eight Local
      * Apps skills as slash discovery.
      *
      * [resolve] carries the same (string resource id, zh-Hans fallback)
@@ -381,6 +381,42 @@ object SettingsMock {
                 "为目标平台和 form factor 设计原生前端方向",
             ),
             listOf("/frontend-design"),
+            enabled = true,
+            builtin = true,
+        ),
+        Skill(
+            "ionic-react-local-app",
+            "ionic-react-local-app",
+            "官方",
+            resolve(
+                R.string.settings_skill_bundled_ionic_react_local_app_desc,
+                "在固定的 Ionic React 脚手架中实现本地应用，并遵守原生 WebView 桥接约束",
+            ),
+            listOf("/ionic-react-local-app"),
+            enabled = true,
+            builtin = true,
+        ),
+        Skill(
+            "canvas-2d-local-app",
+            "canvas-2d-local-app",
+            "官方",
+            resolve(
+                R.string.settings_skill_bundled_canvas_2d_local_app_desc,
+                "用确定性 Canvas 2D 场景和原生感覆盖层构建本地应用",
+            ),
+            listOf("/canvas-2d-local-app"),
+            enabled = true,
+            builtin = true,
+        ),
+        Skill(
+            "threejs-local-app",
+            "threejs-local-app",
+            "官方",
+            resolve(
+                R.string.settings_skill_bundled_threejs_local_app_desc,
+                "用 Three.js 构建本地应用，明确处理生命周期、输入和资源释放",
+            ),
+            listOf("/threejs-local-app"),
             enabled = true,
             builtin = true,
         ),

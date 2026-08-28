@@ -104,6 +104,8 @@ enum LocalAppsProtocolAdapter {
         case .uiControl: .uiControl
         case .networkDomain: .networkDomain
         case .restoreCheckpoint: .restoreCheckpoint
+        case .runtimeProfileSelection: .runtimeProfileSelection
+        case .dependencyChange: .dependencyChange
         case .camera: .camera
         case .photoLibrary: .photoLibrary
         case .microphone: .microphone
@@ -169,6 +171,101 @@ enum LocalAppsProtocolAdapter {
         case .previewApproved: "preview"
         case .userApproved: "user"
         case .preRestore: "pre_restore"
+        }
+    }
+
+    static func runtimeProfileFamily(_ dto: AppRuntimeProfileDto) -> LocalAppRuntimeProfileFamily {
+        switch dto {
+        case .reactDom: .reactDom
+        case .canvas2d: .canvas2d
+        case .three3d: .three3d
+        case .phaser2d: .phaser2d
+        case .babylon3d: .babylon3d
+        }
+    }
+
+    static func runtimeProfileFamilyDto(_ family: LocalAppRuntimeProfileFamily) -> AppRuntimeProfileDto {
+        switch family {
+        case .reactDom: .reactDom
+        case .canvas2d: .canvas2d
+        case .three3d: .three3d
+        case .phaser2d: .phaser2d
+        case .babylon3d: .babylon3d
+        }
+    }
+
+    static func runtimeProfileStatus(_ dto: AppRuntimeProfileStatusDto) -> LocalAppRuntimeProfileStatus {
+        switch dto {
+        case .verified: .verified
+        case .dependenciesDirty: .dependenciesDirty
+        case .coreDependencyDrift: .coreDependencyDrift
+        case .rebuildRequired: .rebuildRequired
+        case .migrationAvailable: .migrationAvailable
+        case .runtimeBundleMissing: .runtimeBundleMissing
+        case .runtimeContractCorrupt: .runtimeContractCorrupt
+        }
+    }
+
+    static func runtimeProfileSelection(
+        _ dto: AppRuntimeProfileSelectionRequestDto
+    ) -> LocalAppRuntimeProfileSelectionPrompt {
+        LocalAppRuntimeProfileSelectionPrompt(
+            id: dto.requestId,
+            appID: dto.appId,
+            reason: dto.reason,
+            recommendedFamily: dto.recommendedFamily.map(runtimeProfileFamily),
+            options: dto.options.map { option in
+                LocalAppRuntimeProfileOption(
+                    family: runtimeProfileFamily(option.family),
+                    revision: option.revision,
+                    contractSHA256: option.contractSha256,
+                    surface: option.surface == .dom ? .dom : .canvas,
+                    corePackages: option.corePackages.map { package in
+                        LocalAppRuntimeProfilePackage(
+                            name: package.name,
+                            version: package.version
+                        )
+                    },
+                    cacheStatus: option.cacheStatus,
+                    downloadStatus: option.downloadStatus,
+                    available: option.available,
+                    reason: option.reason
+                )
+            }
+        )
+    }
+
+    static func dependencyChangeConfirmation(
+        _ dto: AppDependencyChangeConfirmationRequestDto
+    ) -> LocalAppDependencyChangeConfirmationPrompt {
+        LocalAppDependencyChangeConfirmationPrompt(
+            id: dto.requestId,
+            appID: dto.appId,
+            reason: dto.reason,
+            changes: dto.changes.map { change in
+                LocalAppDependencyChange(
+                    kind: dependencyChangeKind(change.kind),
+                    package: change.package,
+                    version: change.version,
+                    cacheStatus: change.cacheStatus,
+                    downloadStatus: change.downloadStatus
+                )
+            },
+            licenseRisk: dto.licenseRisk,
+            sbomRisk: dto.sbomRisk,
+            lifecycleScriptsBlocked: dto.lifecycleScriptsBlocked,
+            nativeAddonsBlocked: dto.nativeAddonsBlocked,
+            rollbackPolicy: dto.rollbackPolicy
+        )
+    }
+
+    private static func dependencyChangeKind(
+        _ kind: AppDependencyChangeKindDto
+    ) -> LocalAppDependencyChangeKind {
+        switch kind {
+        case .add: .add
+        case .update: .update
+        case .remove: .remove
         }
     }
 }

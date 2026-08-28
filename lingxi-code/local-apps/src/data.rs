@@ -541,7 +541,7 @@ impl AppDataStore {
                 self.layout.app_id()
             )));
         }
-        let new_hash = manifest.hash()?;
+        let new_hash = manifest.data_contract_hash()?;
         let (old_hash, old_json): (String, String) = self
             .connection
             .query_row(
@@ -696,7 +696,7 @@ impl AppDataStore {
                 self.layout.app_id()
             )));
         }
-        let expected = manifest.hash()?;
+        let expected = manifest.data_contract_hash()?;
         let actual: String = self
             .connection
             .query_row(
@@ -1500,6 +1500,8 @@ mod tests {
             capabilities: vec![],
             device_context: None,
             surface: None,
+            runtime_profile: None,
+            dependency_snapshot: None,
         }
     }
 

@@ -23,7 +23,7 @@ use client_protocol::controls::ReasoningSelectionDto;
 use client_protocol::listings::TaskStatusDto;
 use client_protocol::local_apps::{
     AppAuthorizationDecisionDto, AppBridgeOperationDto, AppBridgeRequestDto, AppCreateOriginDto,
-    AppSurfaceDto,
+    AppRuntimeProfileDto, AppSurfaceDto,
 };
 use client_protocol::permission::PermissionResponseDto;
 
@@ -561,6 +561,10 @@ fn extended_local_app_commands_round_trip() {
             request_id: "cap-1".to_string(),
             decision: AppAuthorizationDecisionDto::AllowAlways,
         },
+        ClientCommand::ResolveAppRuntimeProfileSelection {
+            request_id: "runtime-1".to_string(),
+            selected_family: Some(AppRuntimeProfileDto::Three3d),
+        },
         ClientCommand::ResetAppPermissions {
             app_id: "habits-1a2b".to_string(),
         },
@@ -571,6 +575,7 @@ fn extended_local_app_commands_round_trip() {
         "execute_app_bridge_request",
         "resolve_app_ui_request",
         "resolve_app_capability_request",
+        "resolve_app_runtime_profile_selection",
         "reset_app_permissions",
     ];
     for (command, expected_type) in commands.into_iter().zip(expected_types) {
@@ -758,6 +763,30 @@ fn delete_app_round_trips() {
     assert_eq!(back, cmd);
 }
 
+#[test]
+fn dependency_change_confirmation_resolution_round_trips() {
+    for approved in [true, false] {
+        let command = ClientCommand::ResolveAppDependencyChangeConfirmation {
+            request_id: "dependency-request-1".to_string(),
+            approved,
+        };
+        let json = serde_json::to_value(&command).expect("serialize dependency resolution");
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "type": "resolve_app_dependency_change_confirmation",
+                "request_id": "dependency-request-1",
+                "approved": approved,
+            })
+        );
+        assert_eq!(
+            serde_json::from_value::<ClientCommand>(json)
+                .expect("deserialize dependency resolution"),
+            command
+        );
+    }
+}
+
 /// THE LIFECYCLE LOCK (decision §0.5). For EVERY `ClientCommand` variant except
 /// `ResumeSession`, serialize a canonical instance and assert the wire frame
 /// carries NO `session_id` key. `ResumeSession` is the ONE allowed occurrence —
@@ -853,6 +882,10 @@ fn no_live_command_carries_session_id() {
             app_id: "habits-1a2b".to_string(),
         },
         ClientCommand::RequestExit,
+        ClientCommand::ResolveAppDependencyChangeConfirmation {
+            request_id: "dependency-request-1".to_string(),
+            approved: true,
+        },
     ];
 
     for cmd in &commands {

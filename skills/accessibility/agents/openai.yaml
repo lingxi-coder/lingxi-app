@@ -1,4 +1,4 @@
 interface:
   display_name: "Accessibility"
-  short_description: "Make generated UI usable by everyone"
-  default_prompt: "Use $accessibility to audit and repair semantics, focus, contrast, touch targets, and motion in this local app."
+  short_description: "Enforce local app a11y across DOM and canvas"
+  default_prompt: "Use $accessibility to define or audit the accessibility contract for this LingXi local app across iOS, Android, and desktop targets."

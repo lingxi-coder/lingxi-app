@@ -64,8 +64,10 @@ data class LocalAppItem(
      * serde default": a default would let a construction site silently mint a
      * shell as a formed app, and the placeholder would leak from wherever that
      * site feeds.
-     */
+    */
     val scaffolded: Boolean,
+    /** Last host-derived health snapshot; absent until details are loaded. */
+    val runtimeProfileStatus: LocalAppRuntimeProfileStatus? = null,
 )
 
 /** Title and subtitle a library card renders for one app. */
@@ -132,6 +134,21 @@ enum class LocalAppWorkflow { Draft, Ready }
 
 enum class LocalAppRuntimeState { Stopped, Starting, Running, Stopping, Failed }
 
+/**
+ * Host-derived health of the app's pinned runtime profile. The wire values
+ * are intentionally represented as a finite type so cards and details never
+ * parse host error prose or invent a status from source files.
+ */
+enum class LocalAppRuntimeProfileStatus {
+    Verified,
+    DependenciesDirty,
+    CoreDependencyDrift,
+    RebuildRequired,
+    MigrationAvailable,
+    RuntimeBundleMissing,
+    RuntimeContractCorrupt,
+}
+
 enum class LocalAppRuntimeMode { StaticExport, ViteStatic }
 
 @Immutable
@@ -187,6 +204,8 @@ data class LocalAppDetails(
     val allowedDomains: List<String> = emptyList(),
     val checkpoints: List<LocalAppCheckpoint> = emptyList(),
     val runtime: LocalAppRuntime = LocalAppRuntime(),
+    /** Host-derived profile health from the same detail snapshot. */
+    val runtimeProfileStatus: LocalAppRuntimeProfileStatus? = null,
 )
 
 /**
@@ -227,7 +246,77 @@ data class LocalAppAuthorizationRequest(
     val title: String,
     val reason: String,
     val isUiControl: Boolean,
+    val allowsPersistentGrant: Boolean = true,
     val uiAction: LocalAppUiAutomationAction? = null,
+)
+
+enum class LocalAppRuntimeProfileFamily {
+    ReactDom,
+    Canvas2d,
+    Three3d,
+    Phaser2d,
+    Babylon3d,
+}
+
+enum class LocalAppRuntimeProfileSurface {
+    Dom,
+    Canvas,
+}
+
+@Immutable
+data class LocalAppRuntimeProfilePackage(
+    val name: String,
+    val version: String,
+)
+
+@Immutable
+data class LocalAppRuntimeProfileOption(
+    val family: LocalAppRuntimeProfileFamily,
+    val revision: UInt,
+    val contractSha256: String,
+    val surface: LocalAppRuntimeProfileSurface,
+    val corePackages: List<LocalAppRuntimeProfilePackage>,
+    val cacheStatus: String,
+    val downloadStatus: String,
+    val available: Boolean,
+    val reason: String? = null,
+)
+
+@Immutable
+data class LocalAppRuntimeProfileSelectionRequest(
+    val requestId: String,
+    val appId: String,
+    val reason: String,
+    val recommendedFamily: LocalAppRuntimeProfileFamily?,
+    val options: List<LocalAppRuntimeProfileOption>,
+)
+
+enum class LocalAppDependencyChangeKind {
+    Add,
+    Update,
+    Remove,
+}
+
+@Immutable
+data class LocalAppDependencyChange(
+    val kind: LocalAppDependencyChangeKind,
+    val packageName: String,
+    val version: String?,
+    val cacheStatus: String,
+    val downloadStatus: String,
+)
+
+@Immutable
+data class LocalAppDependencyChangeConfirmationRequest(
+    val requestId: String,
+    val appId: String,
+    val reason: String,
+    val changes: List<LocalAppDependencyChange>,
+    val licenseRisk: String,
+    val sbomRisk: String,
+    val lifecycleScriptsBlocked: Boolean,
+    val nativeAddonsBlocked: Boolean,
+    val rollbackPolicy: String,
 )
 
 @Immutable
@@ -293,6 +382,8 @@ data class LocalAppsUiState(
     val selectedAppId: String? = null,
     val selectedDetailsTab: LocalAppDetailsTab = LocalAppDetailsTab.Sessions,
     val pendingAuthorization: LocalAppAuthorizationRequest? = null,
+    val pendingRuntimeProfileSelection: LocalAppRuntimeProfileSelectionRequest? = null,
+    val pendingDependencyChangeConfirmation: LocalAppDependencyChangeConfirmationRequest? = null,
     val pendingProfileProposal: LocalAppProfileProposal? = null,
     val bridgeResults: Map<LocalAppBridgeRequestKey, LocalAppBridgeResult> = emptyMap(),
     val pendingUiAction: LocalAppPendingUiAction? = null,
@@ -354,6 +445,8 @@ sealed interface LocalAppsAction {
     data class BridgeRequest(val message: LocalAppBridgeMessage) : LocalAppsAction
     data class AcknowledgeBridgeResult(val appId: String, val requestId: String) : LocalAppsAction
     data class ResolveAuthorization(val decision: LocalAppAuthorizationDecision) : LocalAppsAction
+    data class ResolveRuntimeProfileSelection(val family: LocalAppRuntimeProfileFamily?) : LocalAppsAction
+    data class ResolveDependencyChangeConfirmation(val approved: Boolean) : LocalAppsAction
     data class ResolveProfileProposal(val approved: Boolean) : LocalAppsAction
     data class UiActionHandled(
         val requestId: String,

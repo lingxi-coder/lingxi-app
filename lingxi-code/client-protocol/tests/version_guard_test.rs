@@ -750,6 +750,30 @@ fn current_contract_index() -> ContractIndex {
         "AppAuthorizationDecisionDto",
     );
     put(
+        "ClientCommand::ResolveAppRuntimeProfileSelection",
+        "resolve_app_runtime_profile_selection",
+    );
+    put(
+        "ClientCommand::ResolveAppRuntimeProfileSelection.request_id",
+        "String",
+    );
+    put(
+        "ClientCommand::ResolveAppRuntimeProfileSelection.selected_family",
+        "Option<AppRuntimeProfileDto>",
+    );
+    put(
+        "ClientCommand::ResolveAppDependencyChangeConfirmation",
+        "resolve_app_dependency_change_confirmation",
+    );
+    put(
+        "ClientCommand::ResolveAppDependencyChangeConfirmation.request_id",
+        "String",
+    );
+    put(
+        "ClientCommand::ResolveAppDependencyChangeConfirmation.approved",
+        "bool",
+    );
+    put(
         "ClientCommand::ResolveAppProfileProposal",
         "resolve_app_profile_proposal",
     );
@@ -1369,6 +1393,10 @@ fn current_contract_index() -> ContractIndex {
     put("AppRuntimeRecoveryStateDto::Failed", "failed");
 
     put("AppManifestDto.schema_version", "u32");
+    // Pre-existing omission, closed here so the struct this change edits is
+    // covered field-for-field: a partially indexed record is worse than an
+    // unindexed one, because the rows that ARE present imply the rest are too.
+    put("AppManifestDto.runtime_api_version", "u16");
     put("AppManifestDto.app_id", "String");
     put("AppManifestDto.name", "String");
     put("AppManifestDto.design_revision", "u64");
@@ -1376,6 +1404,128 @@ fn current_contract_index() -> ContractIndex {
     put("AppManifestDto.allowed_domains", "Vec<String>");
     put("AppManifestDto.capabilities", "Vec<AppCapabilityKindDto>");
     put("AppManifestDto.device_context", "Option<DeviceContextDto>");
+    put("AppManifestDto.surface", "Option<AppSurfaceDto>");
+    // The two records `version.rs` names as the whole reason for the 9.0.0
+    // major bump. Omitting them here leaves the guard blind to exactly the
+    // seam the bump was taken for: a later rename of `runtimeProfile` or a
+    // retype of `contract_sha256` is a BREAKING wire change, and with no row
+    // in the index `breaking_entries` would be empty and it would ship green.
+    put(
+        "AppManifestDto.runtime_profile",
+        "Option<AppRuntimeProfileBindingDto>",
+    );
+    put(
+        "AppManifestDto.dependency_snapshot",
+        "Option<AppDependencySnapshotDto>",
+    );
+
+    // ── AppRuntimeProfileDto / bindings (local_apps.rs) ───────────────────
+    put("AppRuntimeProfileDto::ReactDom", "react_dom");
+    put("AppRuntimeProfileDto::Canvas2d", "canvas_2d");
+    put("AppRuntimeProfileDto::Three3d", "three_3d");
+    put("AppRuntimeProfileDto::Phaser2d", "phaser_2d");
+    put("AppRuntimeProfileDto::Babylon3d", "babylon_3d");
+    put("AppRuntimeProfileBindingDto.family", "AppRuntimeProfileDto");
+    put("AppRuntimeProfileBindingDto.revision", "u32");
+    put("AppRuntimeProfileBindingDto.contract_sha256", "String");
+    put("AppRuntimeProfileStatusDto::Verified", "verified");
+    put(
+        "AppRuntimeProfileStatusDto::DependenciesDirty",
+        "dependencies_dirty",
+    );
+    put(
+        "AppRuntimeProfileStatusDto::CoreDependencyDrift",
+        "core_dependency_drift",
+    );
+    put(
+        "AppRuntimeProfileStatusDto::RebuildRequired",
+        "rebuild_required",
+    );
+    put(
+        "AppRuntimeProfileStatusDto::MigrationAvailable",
+        "migration_available",
+    );
+    put(
+        "AppRuntimeProfileStatusDto::RuntimeBundleMissing",
+        "runtime_bundle_missing",
+    );
+    put(
+        "AppRuntimeProfileStatusDto::RuntimeContractCorrupt",
+        "runtime_contract_corrupt",
+    );
+    put("AppRuntimeProfilePackageDto.name", "String");
+    put("AppRuntimeProfilePackageDto.version", "String");
+    put("AppRuntimeProfileOptionDto.family", "AppRuntimeProfileDto");
+    put("AppRuntimeProfileOptionDto.revision", "u32");
+    put("AppRuntimeProfileOptionDto.contract_sha256", "String");
+    put("AppRuntimeProfileOptionDto.surface", "AppSurfaceDto");
+    put(
+        "AppRuntimeProfileOptionDto.core_packages",
+        "Vec<AppRuntimeProfilePackageDto>",
+    );
+    put("AppRuntimeProfileOptionDto.cache_status", "String");
+    put("AppRuntimeProfileOptionDto.download_status", "String");
+    put("AppRuntimeProfileOptionDto.available", "bool");
+    put("AppRuntimeProfileOptionDto.reason", "Option<String>");
+    put("AppRuntimeProfileSelectionRequestDto.request_id", "String");
+    put("AppRuntimeProfileSelectionRequestDto.app_id", "String");
+    put("AppRuntimeProfileSelectionRequestDto.reason", "String");
+    put(
+        "AppRuntimeProfileSelectionRequestDto.recommended_family",
+        "Option<AppRuntimeProfileDto>",
+    );
+    put(
+        "AppRuntimeProfileSelectionRequestDto.options",
+        "Vec<AppRuntimeProfileOptionDto>",
+    );
+    put("AppDependencyChangeKindDto::Add", "add");
+    put("AppDependencyChangeKindDto::Update", "update");
+    put("AppDependencyChangeKindDto::Remove", "remove");
+    put("AppDependencyChangeDto.kind", "AppDependencyChangeKindDto");
+    put("AppDependencyChangeDto.package", "String");
+    put("AppDependencyChangeDto.version", "Option<String>");
+    put("AppDependencyChangeDto.cache_status", "String");
+    put("AppDependencyChangeDto.download_status", "String");
+    put(
+        "AppDependencyChangeConfirmationRequestDto.request_id",
+        "String",
+    );
+    put("AppDependencyChangeConfirmationRequestDto.app_id", "String");
+    put("AppDependencyChangeConfirmationRequestDto.reason", "String");
+    put(
+        "AppDependencyChangeConfirmationRequestDto.changes",
+        "Vec<AppDependencyChangeDto>",
+    );
+    put(
+        "AppDependencyChangeConfirmationRequestDto.license_risk",
+        "String",
+    );
+    put(
+        "AppDependencyChangeConfirmationRequestDto.sbom_risk",
+        "String",
+    );
+    put(
+        "AppDependencyChangeConfirmationRequestDto.lifecycle_scripts_blocked",
+        "bool",
+    );
+    put(
+        "AppDependencyChangeConfirmationRequestDto.native_addons_blocked",
+        "bool",
+    );
+    put(
+        "AppDependencyChangeConfirmationRequestDto.rollback_policy",
+        "String",
+    );
+    put("AppDependencySnapshotDto.requested_sha256", "String");
+    put("AppDependencySnapshotDto.package_sha256", "String");
+    put("AppDependencySnapshotDto.lockfile_sha256", "String");
+    put("AppDependencySnapshotDto.dependency_tree_sha256", "String");
+    put("AppDependencySnapshotDto.sbom_sha256", "String");
+    put("AppDependencySnapshotDto.toolchain_key", "String");
+    put(
+        "AppDependencySnapshotDto.verified_profile_contract_sha256",
+        "String",
+    );
 
     // Only the stable target pair: viewport, safe area, color scheme,
     // reduced motion and input mode were removed because they are live values
@@ -1399,6 +1549,10 @@ fn current_contract_index() -> ContractIndex {
 
     put("AppDetailsDto.app", "AppRecordDto");
     put("AppDetailsDto.manifest", "Option<AppManifestDto>");
+    put(
+        "AppDetailsDto.runtime_profile_status",
+        "Option<AppRuntimeProfileStatusDto>",
+    );
     put("AppDetailsDto.runtime", "AppRuntimeDetailsDto");
     put("AppDetailsDto.checkpoints", "Vec<AppCheckpointDto>");
 
@@ -1500,6 +1654,14 @@ fn current_contract_index() -> ContractIndex {
         "AppCapabilityKindDto::RestoreCheckpoint",
         "restore_checkpoint",
     );
+    put(
+        "AppCapabilityKindDto::RuntimeProfileSelection",
+        "runtime_profile_selection",
+    );
+    put(
+        "AppCapabilityKindDto::DependencyChange",
+        "dependency_change",
+    );
     put("AppCapabilityKindDto::Camera", "camera");
     put("AppCapabilityKindDto::PhotoLibrary", "photo_library");
     put("AppCapabilityKindDto::Microphone", "microphone");
@@ -1563,6 +1725,22 @@ fn current_contract_index() -> ContractIndex {
     put(
         "AppEventDto::AppCapabilityRequested.request",
         "AppCapabilityRequestDto",
+    );
+    put(
+        "AppEventDto::AppRuntimeProfileSelectionRequested",
+        "app_runtime_profile_selection_requested",
+    );
+    put(
+        "AppEventDto::AppRuntimeProfileSelectionRequested.request",
+        "AppRuntimeProfileSelectionRequestDto",
+    );
+    put(
+        "AppEventDto::AppDependencyChangeConfirmationRequested",
+        "app_dependency_change_confirmation_requested",
+    );
+    put(
+        "AppEventDto::AppDependencyChangeConfirmationRequested.request",
+        "AppDependencyChangeConfirmationRequestDto",
     );
     put(
         "AppEventDto::AppCheckpointsChanged",
@@ -1873,9 +2051,13 @@ fn contract_index_covers_every_dto() {
         AppAuthorizationDecisionDto, AppBridgeOperationDto, AppBridgeRequestDto,
         AppBridgeResponseDto, AppCapabilityKindDto, AppCapabilityRequestDto, AppCheckpointDto,
         AppCheckpointKindDto, AppCreateOriginDto, AppDataCollectionDto, AppDataFieldDto,
-        AppDataFieldTypeDto, AppDetailsDto, AppErrorCodeDto, AppEventDto, AppManifestDto,
-        AppRecordDto, AppRuntimeDetailsDto, AppRuntimeModeDto, AppRuntimeRecoveryStateDto,
-        AppRuntimeStateDto, AppRuntimeSuspensionReasonDto, AppUiActionKindDto, AppUiRequestDto,
+        AppDataFieldTypeDto, AppDependencyChangeConfirmationRequestDto, AppDependencyChangeDto,
+        AppDependencyChangeKindDto, AppDependencySnapshotDto, AppDetailsDto, AppErrorCodeDto,
+        AppEventDto, AppManifestDto, AppRecordDto, AppRuntimeDetailsDto, AppRuntimeModeDto,
+        AppRuntimeProfileBindingDto, AppRuntimeProfileDto, AppRuntimeProfileOptionDto,
+        AppRuntimeProfilePackageDto, AppRuntimeProfileSelectionRequestDto,
+        AppRuntimeProfileStatusDto, AppRuntimeRecoveryStateDto, AppRuntimeStateDto,
+        AppRuntimeSuspensionReasonDto, AppSurfaceDto, AppUiActionKindDto, AppUiRequestDto,
         AppUiTargetDto, AppWorkflowStateDto, DeviceContextDto,
     };
     use client_protocol::message::{MessageBlockDto, MessageDto};
@@ -2242,7 +2424,7 @@ fn contract_index_covers_every_dto() {
     };
     let _app_manifest = AppManifestDto {
         schema_version: 0,
-        runtime_api_version: None,
+        runtime_api_version: 2,
         app_id: String::new(),
         name: String::new(),
         design_revision: 0,
@@ -2250,7 +2432,41 @@ fn contract_index_covers_every_dto() {
         allowed_domains: Vec::new(),
         capabilities: Vec::new(),
         device_context: Some(device_context),
+        surface: Some(AppSurfaceDto::Dom),
+        runtime_profile: Some(AppRuntimeProfileBindingDto {
+            family: AppRuntimeProfileDto::ReactDom,
+            revision: 0,
+            contract_sha256: String::new(),
+        }),
+        dependency_snapshot: Some(AppDependencySnapshotDto {
+            requested_sha256: String::new(),
+            package_sha256: String::new(),
+            lockfile_sha256: String::new(),
+            dependency_tree_sha256: String::new(),
+            sbom_sha256: String::new(),
+            toolchain_key: String::new(),
+            verified_profile_contract_sha256: String::new(),
+        }),
     };
+    // One value per `AppRuntimeProfileDto` variant. Nothing else in this file
+    // forces these tags to exist, so without this list a wire rename of a
+    // family is a breaking change the guard cannot see.
+    let _app_runtime_profiles: Vec<AppRuntimeProfileDto> = vec![
+        AppRuntimeProfileDto::ReactDom,
+        AppRuntimeProfileDto::Canvas2d,
+        AppRuntimeProfileDto::Three3d,
+        AppRuntimeProfileDto::Phaser2d,
+        AppRuntimeProfileDto::Babylon3d,
+    ];
+    let _app_runtime_profile_statuses: Vec<AppRuntimeProfileStatusDto> = vec![
+        AppRuntimeProfileStatusDto::Verified,
+        AppRuntimeProfileStatusDto::DependenciesDirty,
+        AppRuntimeProfileStatusDto::CoreDependencyDrift,
+        AppRuntimeProfileStatusDto::RebuildRequired,
+        AppRuntimeProfileStatusDto::MigrationAvailable,
+        AppRuntimeProfileStatusDto::RuntimeBundleMissing,
+        AppRuntimeProfileStatusDto::RuntimeContractCorrupt,
+    ];
     let _app_runtime_details = AppRuntimeDetailsDto {
         state: AppRuntimeStateDto::Stopped,
         mode: Some(AppRuntimeModeDto::StaticExport),
@@ -2274,6 +2490,7 @@ fn contract_index_covers_every_dto() {
             scaffolded: false,
         },
         manifest: None,
+        runtime_profile_status: None,
         runtime: AppRuntimeDetailsDto {
             state: AppRuntimeStateDto::Stopped,
             mode: None,
@@ -2317,8 +2534,45 @@ fn contract_index_covers_every_dto() {
         domain: None,
         reason: String::new(),
     };
+    let app_runtime_profile_selection = AppRuntimeProfileSelectionRequestDto {
+        request_id: String::new(),
+        app_id: String::new(),
+        reason: String::new(),
+        recommended_family: Some(AppRuntimeProfileDto::ReactDom),
+        options: vec![AppRuntimeProfileOptionDto {
+            family: AppRuntimeProfileDto::ReactDom,
+            revision: 1,
+            contract_sha256: String::new(),
+            surface: AppSurfaceDto::Dom,
+            core_packages: vec![AppRuntimeProfilePackageDto {
+                name: String::new(),
+                version: String::new(),
+            }],
+            cache_status: String::new(),
+            download_status: String::new(),
+            available: true,
+            reason: None,
+        }],
+    };
+    let app_dependency_change_confirmation = AppDependencyChangeConfirmationRequestDto {
+        request_id: String::new(),
+        app_id: String::new(),
+        reason: String::new(),
+        changes: vec![AppDependencyChangeDto {
+            kind: AppDependencyChangeKindDto::Add,
+            package: String::new(),
+            version: Some(String::new()),
+            cache_status: String::new(),
+            download_status: String::new(),
+        }],
+        license_risk: String::new(),
+        sbom_risk: String::new(),
+        lifecycle_scripts_blocked: false,
+        native_addons_blocked: false,
+        rollback_policy: String::new(),
+    };
     let _app_authorization_decision = AppAuthorizationDecisionDto::AllowOnce;
-    // One value per `AppEventDto` variant — TWELVE of them; count against the
+    // One value per `AppEventDto` variant — FOURTEEN of them; count against the
     // enum in `local_apps.rs`, not against this comment. The envelope is a
     // single `ClientEvent::AppEvent`, so nothing else in this file forces these
     // tags to exist, and a variant omitted here is a variant whose rename the
@@ -2340,6 +2594,12 @@ fn contract_index_covers_every_dto() {
         },
         AppEventDto::AppCapabilityRequested {
             request: app_capability_request,
+        },
+        AppEventDto::AppRuntimeProfileSelectionRequested {
+            request: app_runtime_profile_selection,
+        },
+        AppEventDto::AppDependencyChangeConfirmationRequested {
+            request: app_dependency_change_confirmation,
         },
         AppEventDto::AppCheckpointsChanged {
             app_id: String::new(),

@@ -63,5 +63,15 @@
 ///   caller that started a creation can recognise its own outcome instead of
 ///   inferring it from whatever record appeared last.
 ///
-/// `snapshots/blessed_major.txt` is re-blessed to 8 in lockstep.
-pub const CLIENT_PROTOCOL_VERSION: &str = "8.0.0";
+/// `snapshots/blessed_major.txt` is re-blessed in lockstep with EVERY
+/// `contract_index.json` bless, additive ones included — its job is to answer
+/// "what major was checked in", and a sidecar left behind at the previous
+/// major silently satisfies the next breaking change's `current > blessed`
+/// check with no bump at all.
+///
+/// Bumped to 9.0.0 for runtime-profile persistence. This is breaking under the
+/// F1-09 guard because `AppManifestDto` now carries two new optional records
+/// (`runtime_profile`, `dependency_snapshot`) whose UniFFI layout changes the
+/// native bindings. The wire JSON is additive, but the mobile bindings are
+/// positional and must version-lock with the host.
+pub const CLIENT_PROTOCOL_VERSION: &str = "9.0.0";

@@ -33,6 +33,7 @@ pub mod ids;
 pub mod mailbox;
 pub mod manifest;
 pub mod permissions;
+pub mod runtime_migration;
 pub mod runtime_v2;
 pub mod service;
 pub mod state;
@@ -57,12 +58,18 @@ pub use events::{
     RecordingAppEventObserver,
 };
 pub use manifest::{
-    load_manifest, save_manifest, AppLayout, AppManifest, AppSurface, DataCollectionSchema,
-    DataFieldKind, DataFieldSchema, DeviceContext, WORKSPACE_SETTINGS_LOCAL_FILE,
+    load_manifest, save_manifest, AppDependencySnapshot, AppLayout, AppManifest,
+    AppRuntimeProfileBinding, AppSurface, DataCollectionSchema, DataFieldKind, DataFieldSchema,
+    DeviceContext, WORKSPACE_SETTINGS_LOCAL_FILE,
 };
 pub use permissions::{
     load_permissions, save_permissions, save_workspace_permission_settings, AppCapability,
     AppPermissions, PermissionDecision, SessionPermissions,
+};
+pub use runtime_migration::{
+    delete_runtime_profile_migration_journal, load_runtime_profile_migration_journal,
+    save_runtime_profile_migration_journal, RuntimeProfileMigrationEdge,
+    RuntimeProfileMigrationJournal, RuntimeProfileMigrationStatus, RUNTIME_PROFILE_MIGRATION_EDGES,
 };
 pub use runtime_v2::{
     allowed_for_origin, allowed_for_synchronous_flow, apply_approved_profile,
@@ -79,6 +86,6 @@ pub use service::{AppService, CreateMode, PLACEHOLDER_APP_NAME};
 pub use state::{runtime_transition_allowed, AppState};
 pub use types::{
     AppCheckpoint, AppCheckpointKind, AppDependencyRecord, AppDependencyState, AppRecord,
-    AppRuntimeMode, AppRuntimeRecord, AppRuntimeState, AppWorkflowState, APPS_SCHEMA_VERSION,
-    DEFAULT_GIT_VERSION_CONTROL,
+    AppRuntimeMode, AppRuntimeProfile, AppRuntimeRecord, AppRuntimeState, AppWorkflowState,
+    APPS_SCHEMA_VERSION, DEFAULT_GIT_VERSION_CONTROL,
 };

@@ -54,6 +54,7 @@ pub const LOCAL_APP_TOOLS: &[(&str, &str, bool)] = &[
     // Read-only.
     ("LocalAppList", "list", true),
     ("LocalAppGet", "get", true),
+    ("LocalAppRuntimeProfiles", "runtime_profiles", true),
     ("LocalAppLogs", "read_logs", true),
     ("LocalAppQueryData", "query_data", true),
     ("LocalAppCheckpointList", "list_checkpoints", true),
@@ -913,7 +914,7 @@ mod tests {
             .expect("LocalAppScaffold");
         let decision = scaffold
             .check_permissions(
-                &serde_json::json!({"app_id": "app-a", "name": "N", "brief": "b", "surface": "dom"}),
+                &serde_json::json!({"app_id": "app-a", "name": "N", "brief": "b", "runtime_profile_receipt": "receipt-a"}),
                 &tool_api::test_support::fresh_ctx(),
             )
             .await;
@@ -996,14 +997,14 @@ mod tests {
                 "description names `{banned}`: {description}"
             );
         }
-        // The surface vocabulary the whole flow is built on must actually
-        // reach the model.
-        let enum_values = scaffold.input_schema()["properties"]["surface"]["enum"]
-            .as_array()
-            .expect("surface is an enum")
-            .iter()
-            .filter_map(serde_json::Value::as_str)
-            .collect::<Vec<_>>();
-        assert_eq!(enum_values, ["dom", "canvas"]);
+        // Runtime identity is no longer model-selectable at scaffold time.
+        // The native confirmation receipt is the only authority that reaches
+        // this tool, and direct surface/profile fields remain absent.
+        assert!(scaffold.input_schema()["properties"]["surface"].is_null());
+        assert!(scaffold.input_schema()["properties"]["runtime_profile"].is_null());
+        assert_eq!(
+            scaffold.input_schema()["required"],
+            serde_json::json!(["app_id", "name", "brief", "runtime_profile_receipt"])
+        );
     }
 }

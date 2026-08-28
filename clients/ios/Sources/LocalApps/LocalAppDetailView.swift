@@ -325,6 +325,13 @@ private struct LocalAppOverviewSection: View {
                     if let brief = app.displayBrief {
                         LabeledContent("local_apps_brief", value: brief)
                     }
+                    if let profileStatus = app.runtimeProfileStatus {
+                        LabeledContent("local_apps_runtime_profile_health_title") {
+                            Label(profileStatus.title, systemImage: profileStatus.systemImageName)
+                                .foregroundStyle(runtimeProfileStatusColor(profileStatus))
+                                .multilineTextAlignment(.trailing)
+                        }
+                    }
                     LabeledContent("local_apps_updated_at") {
                         Text(app.updatedAt, format: .relative(presentation: .named))
                     }
@@ -355,6 +362,14 @@ private struct LocalAppOverviewSection: View {
         case .failed: theme.danger
         case .starting, .stopping: .orange
         case .stopped, .suspended: theme.text3
+        }
+    }
+
+    private func runtimeProfileStatusColor(_ status: LocalAppRuntimeProfileStatus) -> Color {
+        switch status {
+        case .verified: .green
+        case .dependenciesDirty, .migrationAvailable, .rebuildRequired: .orange
+        case .coreDependencyDrift, .runtimeBundleMissing, .runtimeContractCorrupt: .red
         }
     }
 }

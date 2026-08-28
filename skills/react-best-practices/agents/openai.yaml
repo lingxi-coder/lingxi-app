@@ -1,4 +1,4 @@
 interface:
   display_name: "React Best Practices"
-  short_description: "Keep generated React clear and complete"
-  default_prompt: "Use $react-best-practices to improve the generated React structure, state handling, and performance without changing its approved design."
+  short_description: "Apply React 19 client-state and effect rules"
+  default_prompt: "Use $react-best-practices to tighten the React 19 client architecture, state, effects, and render performance of this local app."

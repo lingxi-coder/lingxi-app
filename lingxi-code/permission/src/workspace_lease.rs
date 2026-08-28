@@ -609,10 +609,12 @@ fn is_host_owned_path_or_container(root: &Path, target: &Path) -> bool {
 }
 
 fn host_owned_relative(relative: &Path) -> bool {
-    if relative
-        .components()
-        .any(|component| matches!(component, Component::Normal(name) if name == ".lingxi"))
-    {
+    if relative.components().any(|component| {
+        matches!(
+            component,
+            Component::Normal(name) if name == ".lingxi" || name == ".lingxi-build-state"
+        )
+    }) {
         return true;
     }
     // Any BUILD-CONFIG file the toolchain AUTO-DISCOVERS and then executes as
@@ -695,6 +697,9 @@ fn host_owned_relative(relative: &Path) -> bool {
                     | ".gitignore"
                     | "jsconfig.json"
                     | "lib/lingxi-provider.jsx"
+                    | "lib/frame-loop.js"
+                    | "lib/phaser-runtime.js"
+                    | "lib/babylon-runtime.js"
                     | "styles/foundation.css"
                     // Copied into the install staging tree by
                     // `prepare_dependency_staging`, and the install runs with
@@ -1000,6 +1005,17 @@ mod tests {
             ),
             "a leased workflow must not rewrite host-owned package.json"
         );
+        assert!(
+            registry.denies_host_owned_for_token(
+                Some(lease.token()),
+                "Edit",
+                &serde_json::json!({
+                    "file_path":"/workspace/local-app-app-a/.lingxi-build-state/dependency-update-recovery.json"
+                }),
+                &fs
+            ),
+            "a leased workflow must not forge dependency recovery state"
+        );
 
         // Generated source under the same lease stays writable.
         assert!(
@@ -1259,6 +1275,9 @@ mod tests {
             ".gitignore",
             "jsconfig.json",
             "lib/lingxi-provider.jsx",
+            "lib/frame-loop.js",
+            "lib/phaser-runtime.js",
+            "lib/babylon-runtime.js",
             "styles/foundation.css",
             "vite.config.js",
             "vite.config.mjs",

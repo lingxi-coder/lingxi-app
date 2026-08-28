@@ -17,6 +17,11 @@ final class LocalAppsStore {
 
     private(set) var apps: [LocalAppSummary] = []
     private(set) var runtimes: [String: LocalAppRuntimeStatus] = [:]
+    /// Host-derived runtime-profile health cached from the latest details
+    /// snapshot. App list records intentionally do not duplicate this field;
+    /// retaining the cache lets cards show a known status without making the
+    /// list endpoint guess or rescan the app workspace.
+    private(set) var runtimeProfileStatuses: [String: LocalAppRuntimeProfileStatus] = [:]
     /// Manifest-declared data collections per app (v3: the manifest is the
     /// only surviving structured description of an app's data model — the
     /// LLM-derived plan is gone).
@@ -67,6 +72,8 @@ final class LocalAppsStore {
 
     private(set) var pendingWidgetSetup: PendingWidgetSetup?
     private(set) var pendingPermission: LocalAppPermissionPrompt?
+    private(set) var pendingRuntimeProfileSelection: LocalAppRuntimeProfileSelectionPrompt?
+    private(set) var pendingDependencyChangeConfirmation: LocalAppDependencyChangeConfirmationPrompt?
     private(set) var pendingProfileProposal: LocalAppProfileProposal?
     private(set) var requestedPresentationAppID: String?
     /// requestId → appID for every UI request still awaiting a decision.
@@ -144,6 +151,8 @@ final class LocalAppsStore {
             prompt: LocalAppPermissionPrompt,
             source: PendingPermissionSource
         )] = []
+        @ObservationIgnored private var runtimeProfileSelectionQueue: [LocalAppRuntimeProfileSelectionPrompt] = []
+        @ObservationIgnored private var dependencyChangeConfirmationQueue: [LocalAppDependencyChangeConfirmationPrompt] = []
     #endif
     @ObservationIgnored private var approvedUIAutomation: [String: LocalAppCapabilityDecision] = [:]
     @ObservationIgnored private var runtimeLastUsedAt: [String: Date] = [:]
@@ -211,9 +220,15 @@ final class LocalAppsStore {
         func handle(event: ClientEvent) {
             switch event {
             case let .appsChanged(records):
-                let updatedApps = records.map(LocalAppsProtocolAdapter.app).sorted {
+                let updatedApps = records.map { record in
+                    var summary = LocalAppsProtocolAdapter.app(record)
+                    summary.runtimeProfileStatus = runtimeProfileStatuses[record.id]
+                    return summary
+                }.sorted {
                     $0.updatedAt > $1.updatedAt
                 }
+                let liveAppIDs = Set(updatedApps.map(\.id))
+                runtimeProfileStatuses = runtimeProfileStatuses.filter { liveAppIDs.contains($0.key) }
                 apps = updatedApps
                 scheduleWidgetSnapshotPublish()
                 scheduleWebsiteDataCleanup(activeAppIDs: Set(updatedApps.map(\.id)))
@@ -768,10 +783,16 @@ final class LocalAppsStore {
             // However this one resolves — including the early return on a denied
             // UI request — the next queued request has to reach the sheet.
             defer { presentNextPermission() }
-            let authorization = LocalAppsProtocolAdapter.authorizationDecision(decision)
+            let normalizedDecision: LocalAppCapabilityDecision
+            if prompt.allowsPersistentGrant || decision == .deny || decision == .once {
+                normalizedDecision = decision
+            } else {
+                normalizedDecision = .once
+            }
+            let authorization = LocalAppsProtocolAdapter.authorizationDecision(normalizedDecision)
             switch source {
             case let .ui(request):
-                if decision == .deny {
+                if normalizedDecision == .deny {
                     await resolveUIRequest(
                         requestID: request.requestId,
                         decision: authorization,
@@ -780,8 +801,8 @@ final class LocalAppsStore {
                     )
                     return
                 }
-                if decision == .session || decision == .always {
-                    approvedUIAutomation[request.appId] = decision
+                if normalizedDecision == .session || normalizedDecision == .always {
+                    approvedUIAutomation[request.appId] = normalizedDecision
                 }
                 let result = await executeUIRequestInPreview(request)
                 await resolveUIRequest(
@@ -791,8 +812,8 @@ final class LocalAppsStore {
                     error: result.error
                 )
             case let .capability(appID, kind):
-                if kind == .uiControl, decision != .deny {
-                    approvedUIAutomation[appID] = decision
+                if kind == .uiControl, normalizedDecision != .deny {
+                    approvedUIAutomation[appID] = normalizedDecision
                 }
                 _ = await send(
                     .resolveAppCapabilityRequest(
@@ -801,6 +822,34 @@ final class LocalAppsStore {
                     )
                 )
             }
+        #endif
+    }
+
+    func resolvePendingRuntimeProfileSelection(_ family: LocalAppRuntimeProfileFamily?) async {
+        guard let prompt = pendingRuntimeProfileSelection else { return }
+        pendingRuntimeProfileSelection = nil
+        #if canImport(engine_mobileFFI)
+            defer { presentNextRuntimeProfileSelection() }
+            _ = await send(
+                .resolveAppRuntimeProfileSelection(
+                    requestId: prompt.id,
+                    selectedFamily: family.map(LocalAppsProtocolAdapter.runtimeProfileFamilyDto)
+                )
+            )
+        #endif
+    }
+
+    func resolvePendingDependencyChangeConfirmation(_ approved: Bool) async {
+        guard let prompt = pendingDependencyChangeConfirmation else { return }
+        pendingDependencyChangeConfirmation = nil
+        #if canImport(engine_mobileFFI)
+            defer { presentNextDependencyChangeConfirmation() }
+            _ = await send(
+                .resolveAppDependencyChangeConfirmation(
+                    requestId: prompt.id,
+                    approved: approved
+                )
+            )
         #endif
     }
 
@@ -925,7 +974,8 @@ final class LocalAppsStore {
                 // create in another conversation, a create this store already
                 // resolved, anything arriving after a reconnect cleared the
                 // pending id — falls through to `break` and is ignored.
-                let summary = LocalAppsProtocolAdapter.app(record)
+                var summary = LocalAppsProtocolAdapter.app(record)
+                summary.runtimeProfileStatus = runtimeProfileStatuses[record.id]
                 upsertApp(summary)
                 guard let pending = pendingCreateRequestID,
                       let requestId,
@@ -958,7 +1008,10 @@ final class LocalAppsStore {
                 )
 
             case let .appDetailsChanged(details):
-                let summary = LocalAppsProtocolAdapter.app(details.app)
+                let status = details.runtimeProfileStatus.map(LocalAppsProtocolAdapter.runtimeProfileStatus)
+                runtimeProfileStatuses[details.app.id] = status
+                var summary = LocalAppsProtocolAdapter.app(details.app)
+                summary.runtimeProfileStatus = status
                 upsertApp(summary)
                 collections[summary.id] = details.manifest.map {
                     $0.collections.map(LocalAppsProtocolAdapter.collection)
@@ -973,7 +1026,8 @@ final class LocalAppsStore {
                 scheduleWidgetSnapshotPublish()
 
             case let .appRecordChanged(record):
-                let summary = LocalAppsProtocolAdapter.app(record)
+                var summary = LocalAppsProtocolAdapter.app(record)
+                summary.runtimeProfileStatus = runtimeProfileStatuses[record.id]
                 upsertApp(summary)
                 // The create handshake's second half: the pin the engine minted
                 // right after `AppCreated`. Publishing the landing HERE — with
@@ -1083,6 +1137,16 @@ final class LocalAppsStore {
                     source: .capability(appID: request.appId, kind: request.capability)
                 )
 
+            case let .appRuntimeProfileSelectionRequested(request):
+                enqueueRuntimeProfileSelection(
+                    LocalAppsProtocolAdapter.runtimeProfileSelection(request)
+                )
+
+            case let .appDependencyChangeConfirmationRequested(request):
+                enqueueDependencyChangeConfirmation(
+                    LocalAppsProtocolAdapter.dependencyChangeConfirmation(request)
+                )
+
             case let .appCheckpointsChanged(appId, checkpoints):
                 replaceCheckpoints(checkpoints, appID: appId)
 
@@ -1137,6 +1201,40 @@ final class LocalAppsStore {
             let next = permissionQueue.removeFirst()
             pendingPermission = next.prompt
             pendingPermissionSource = next.source
+        }
+
+        private func enqueueRuntimeProfileSelection(
+            _ prompt: LocalAppRuntimeProfileSelectionPrompt
+        ) {
+            guard pendingRuntimeProfileSelection != nil else {
+                pendingRuntimeProfileSelection = prompt
+                return
+            }
+            runtimeProfileSelectionQueue.append(prompt)
+        }
+
+        private func presentNextRuntimeProfileSelection() {
+            guard pendingRuntimeProfileSelection == nil, !runtimeProfileSelectionQueue.isEmpty else {
+                return
+            }
+            pendingRuntimeProfileSelection = runtimeProfileSelectionQueue.removeFirst()
+        }
+
+        private func enqueueDependencyChangeConfirmation(
+            _ prompt: LocalAppDependencyChangeConfirmationPrompt
+        ) {
+            guard pendingDependencyChangeConfirmation != nil else {
+                pendingDependencyChangeConfirmation = prompt
+                return
+            }
+            dependencyChangeConfirmationQueue.append(prompt)
+        }
+
+        private func presentNextDependencyChangeConfirmation() {
+            guard pendingDependencyChangeConfirmation == nil,
+                  !dependencyChangeConfirmationQueue.isEmpty
+            else { return }
+            pendingDependencyChangeConfirmation = dependencyChangeConfirmationQueue.removeFirst()
         }
 
         private func resolveUIRequest(

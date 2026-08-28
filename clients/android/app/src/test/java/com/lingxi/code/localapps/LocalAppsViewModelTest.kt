@@ -5,11 +5,23 @@ import com.lingxi.code.bindings.AppBridgeResponseDto
 import com.lingxi.code.bindings.AppCapabilityKindDto
 import com.lingxi.code.bindings.AppCreateModeDto
 import com.lingxi.code.bindings.AppCreateOriginDto
+import com.lingxi.code.bindings.AppDependencyChangeConfirmationRequestDto
+import com.lingxi.code.bindings.AppDependencyChangeDto
+import com.lingxi.code.bindings.AppDependencyChangeKindDto
+import com.lingxi.code.bindings.AppDetailsDto
 import com.lingxi.code.bindings.AppErrorCodeDto
 import com.lingxi.code.bindings.AppCapabilityRequestDto
 import com.lingxi.code.bindings.AppRecordDto
+import com.lingxi.code.bindings.AppRuntimeProfileDto
+import com.lingxi.code.bindings.AppRuntimeProfileOptionDto
+import com.lingxi.code.bindings.AppRuntimeProfilePackageDto
+import com.lingxi.code.bindings.AppRuntimeProfileSelectionRequestDto
+import com.lingxi.code.bindings.AppRuntimeProfileStatusDto
+import com.lingxi.code.bindings.AppRuntimeDetailsDto
+import com.lingxi.code.bindings.AppRuntimeStateDto
 import com.lingxi.code.bindings.AppSessionKindDto
 import com.lingxi.code.bindings.AppSessionRowDto
+import com.lingxi.code.bindings.AppSurfaceDto
 import com.lingxi.code.bindings.AppUiActionKindDto
 import com.lingxi.code.bindings.AppUiRequestDto
 import com.lingxi.code.bindings.AppUiTargetDto
@@ -1602,6 +1614,275 @@ class LocalAppsViewModelTest {
             runCurrent()
             assertEquals("ui-2", viewModel.uiState.value.pendingUiAction?.requestId)
             assertNull(viewModel.uiState.value.pendingAuthorization)
+        } finally {
+            releaseMain()
+        }
+    }
+
+    @Test
+    fun `runtime profile approval falls back to allow once`() = runTest {
+        Dispatchers.setMain(StandardTestDispatcher(testScheduler))
+        try {
+            val source = RecordingSource()
+            val viewModel = LocalAppsViewModel(
+                sourceFlow = MutableStateFlow<ConversationSource>(source),
+                distributionChannel = "full",
+            )
+            runCurrent()
+
+            source.emit(
+                ClientEvent.AppEvent(
+                    AppEventDto.AppCapabilityRequested(
+                        AppCapabilityRequestDto(
+                            requestId = "cap-runtime-1",
+                            appId = APP_ID,
+                            capability = AppCapabilityKindDto.RUNTIME_PROFILE_SELECTION,
+                            domain = null,
+                            reason = "Choose the runtime profile",
+                        ),
+                    ),
+                ),
+            )
+            runCurrent()
+
+            assertEquals("cap-runtime-1", viewModel.uiState.value.pendingAuthorization?.requestId)
+            assertEquals(false, viewModel.uiState.value.pendingAuthorization?.allowsPersistentGrant)
+
+            viewModel.onAction(LocalAppsAction.ResolveAuthorization(LocalAppAuthorizationDecision.AllowAlways))
+            runCurrent()
+
+            val resolution = source.commands
+                .filterIsInstance<ClientCommand.ResolveAppCapabilityRequest>()
+                .single()
+            assertEquals("cap-runtime-1", resolution.requestId)
+            assertEquals(AppAuthorizationDecisionDto.ALLOW_ONCE, resolution.decision)
+        } finally {
+            releaseMain()
+        }
+    }
+
+    @Test
+    fun `runtime profile selection request returns the chosen family`() = runTest {
+        Dispatchers.setMain(StandardTestDispatcher(testScheduler))
+        try {
+            val source = RecordingSource()
+            val viewModel = LocalAppsViewModel(
+                sourceFlow = MutableStateFlow<ConversationSource>(source),
+                distributionChannel = "full",
+            )
+            runCurrent()
+
+            source.emit(
+                ClientEvent.AppEvent(
+                    AppEventDto.AppRuntimeProfileSelectionRequested(
+                        AppRuntimeProfileSelectionRequestDto(
+                            requestId = "runtime-select-1",
+                            appId = APP_ID,
+                            reason = "Pick the runtime profile before scaffold",
+                            recommendedFamily = AppRuntimeProfileDto.THREE3D,
+                            options = listOf(
+                                AppRuntimeProfileOptionDto(
+                                    family = AppRuntimeProfileDto.THREE3D,
+                                    revision = 1u,
+                                    contractSha256 = "three-contract",
+                                    surface = AppSurfaceDto.CANVAS,
+                                    corePackages = listOf(
+                                        AppRuntimeProfilePackageDto("three", "0.185.1"),
+                                    ),
+                                    cacheStatus = "bundled",
+                                    downloadStatus = "bundled",
+                                    available = true,
+                                    reason = null,
+                                ),
+                                AppRuntimeProfileOptionDto(
+                                    family = AppRuntimeProfileDto.BABYLON3D,
+                                    revision = 1u,
+                                    contractSha256 = "babylon-contract",
+                                    surface = AppSurfaceDto.CANVAS,
+                                    corePackages = listOf(
+                                        AppRuntimeProfilePackageDto("@babylonjs/core", "9.22.1"),
+                                    ),
+                                    cacheStatus = "unavailable",
+                                    downloadStatus = "gated",
+                                    available = false,
+                                    reason = "Pending device validation",
+                                ),
+                            ),
+                        ),
+                    ),
+                ),
+            )
+            runCurrent()
+
+            assertEquals("runtime-select-1", viewModel.uiState.value.pendingRuntimeProfileSelection?.requestId)
+            assertEquals(LocalAppRuntimeProfileFamily.Three3d, viewModel.uiState.value.pendingRuntimeProfileSelection?.recommendedFamily)
+            assertEquals(2, viewModel.uiState.value.pendingRuntimeProfileSelection?.options?.size)
+            assertEquals(false, viewModel.uiState.value.pendingRuntimeProfileSelection?.options?.last()?.available)
+
+            viewModel.onAction(LocalAppsAction.ResolveRuntimeProfileSelection(LocalAppRuntimeProfileFamily.Three3d))
+            runCurrent()
+
+            val resolution = source.commands
+                .filterIsInstance<ClientCommand.ResolveAppRuntimeProfileSelection>()
+                .single()
+            assertEquals("runtime-select-1", resolution.requestId)
+            assertEquals(AppRuntimeProfileDto.THREE3D, resolution.selectedFamily)
+            assertNull(viewModel.uiState.value.pendingRuntimeProfileSelection)
+        } finally {
+            releaseMain()
+        }
+    }
+
+    @Test
+    fun `app details projects runtime profile status to card and details state`() = runTest {
+        Dispatchers.setMain(StandardTestDispatcher(testScheduler))
+        try {
+            val source = RecordingSource()
+            val viewModel = LocalAppsViewModel(
+                sourceFlow = MutableStateFlow<ConversationSource>(source),
+                distributionChannel = "full",
+            )
+            runCurrent()
+
+            source.emit(
+                ClientEvent.AppEvent(
+                    AppEventDto.AppDetailsChanged(
+                        AppDetailsDto(
+                            app = appRecord(id = APP_ID, workflow = AppWorkflowStateDto.READY),
+                            manifest = null,
+                            runtimeProfileStatus = AppRuntimeProfileStatusDto.RUNTIME_CONTRACT_CORRUPT,
+                            runtime = AppRuntimeDetailsDto(
+                                state = AppRuntimeStateDto.STOPPED,
+                                mode = null,
+                                loopbackUrl = null,
+                                suspensionReason = null,
+                                recoveryState = null,
+                                lastError = null,
+                            ),
+                            checkpoints = emptyList(),
+                        ),
+                    ),
+                ),
+            )
+            runCurrent()
+
+            assertEquals(
+                LocalAppRuntimeProfileStatus.RuntimeContractCorrupt,
+                viewModel.uiState.value.apps.single { it.id == APP_ID }.runtimeProfileStatus,
+            )
+            assertEquals(
+                LocalAppRuntimeProfileStatus.RuntimeContractCorrupt,
+                viewModel.uiState.value.details[APP_ID]?.runtimeProfileStatus,
+            )
+        } finally {
+            releaseMain()
+        }
+    }
+
+    @Test
+    fun `dependency change confirmation shows policy and returns approval`() = runTest {
+        Dispatchers.setMain(StandardTestDispatcher(testScheduler))
+        try {
+            val source = RecordingSource()
+            val viewModel = LocalAppsViewModel(
+                sourceFlow = MutableStateFlow<ConversationSource>(source),
+                distributionChannel = "full",
+            )
+            runCurrent()
+
+            source.emit(
+                ClientEvent.AppEvent(
+                    AppEventDto.AppDependencyChangeConfirmationRequested(
+                        AppDependencyChangeConfirmationRequestDto(
+                            requestId = "dependency-confirm-1",
+                            appId = APP_ID,
+                            reason = "pre_resolution_no_network",
+                            changes = listOf(
+                                AppDependencyChangeDto(
+                                    kind = AppDependencyChangeKindDto.ADD,
+                                    `package` = "dayjs",
+                                    version = "1.11.13",
+                                    cacheStatus = "unknown_until_resolution",
+                                    downloadStatus = "may_be_required",
+                                ),
+                            ),
+                            licenseRisk = "unknown_until_resolution",
+                            sbomRisk = "unknown_until_resolution",
+                            lifecycleScriptsBlocked = true,
+                            nativeAddonsBlocked = true,
+                            rollbackPolicy = "rollback_on_validation_failure",
+                        ),
+                    ),
+                ),
+            )
+            runCurrent()
+
+            val request = viewModel.uiState.value.pendingDependencyChangeConfirmation
+            assertEquals("dependency-confirm-1", request?.requestId)
+            assertEquals("dayjs", request?.changes?.single()?.packageName)
+            assertEquals("unknown_until_resolution", request?.licenseRisk)
+            assertTrue(request?.lifecycleScriptsBlocked == true)
+            assertTrue(request?.nativeAddonsBlocked == true)
+
+            viewModel.onAction(LocalAppsAction.ResolveDependencyChangeConfirmation(true))
+            runCurrent()
+
+            val resolution = source.commands
+                .filterIsInstance<ClientCommand.ResolveAppDependencyChangeConfirmation>()
+                .single()
+            assertEquals("dependency-confirm-1", resolution.requestId)
+            assertTrue(resolution.approved)
+            assertNull(viewModel.uiState.value.pendingDependencyChangeConfirmation)
+        } finally {
+            releaseMain()
+        }
+    }
+
+    @Test
+    fun `dependency change confirmation queues and cancellation advances`() = runTest {
+        Dispatchers.setMain(StandardTestDispatcher(testScheduler))
+        try {
+            val source = RecordingSource()
+            val viewModel = LocalAppsViewModel(
+                sourceFlow = MutableStateFlow<ConversationSource>(source),
+                distributionChannel = "full",
+            )
+            runCurrent()
+
+            fun request(id: String) = AppDependencyChangeConfirmationRequestDto(
+                requestId = id,
+                appId = APP_ID,
+                reason = "pre_resolution_no_network",
+                changes = listOf(
+                    AppDependencyChangeDto(
+                        kind = AppDependencyChangeKindDto.UPDATE,
+                        `package` = "zod",
+                        version = "4.4.3",
+                        cacheStatus = "unknown_until_resolution",
+                        downloadStatus = "may_be_required",
+                    ),
+                ),
+                licenseRisk = "unknown_until_resolution",
+                sbomRisk = "unknown_until_resolution",
+                lifecycleScriptsBlocked = true,
+                nativeAddonsBlocked = true,
+                rollbackPolicy = "rollback_on_validation_failure",
+            )
+
+            source.emit(ClientEvent.AppEvent(AppEventDto.AppDependencyChangeConfirmationRequested(request("dependency-confirm-a"))))
+            source.emit(ClientEvent.AppEvent(AppEventDto.AppDependencyChangeConfirmationRequested(request("dependency-confirm-b"))))
+            runCurrent()
+            assertEquals("dependency-confirm-a", viewModel.uiState.value.pendingDependencyChangeConfirmation?.requestId)
+
+            viewModel.onAction(LocalAppsAction.ResolveDependencyChangeConfirmation(false))
+            runCurrent()
+
+            val resolution = source.commands
+                .filterIsInstance<ClientCommand.ResolveAppDependencyChangeConfirmation>()
+                .single()
+            assertEquals("dependency-confirm-a", resolution.requestId)
+            assertFalse(resolution.approved)
+            assertEquals("dependency-confirm-b", viewModel.uiState.value.pendingDependencyChangeConfirmation?.requestId)
         } finally {
             releaseMain()
         }

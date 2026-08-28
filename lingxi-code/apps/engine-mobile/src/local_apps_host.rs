@@ -11,22 +11,25 @@ use client_adapter::ClientEventSink;
 use client_protocol::events::ClientEvent;
 use client_protocol::local_apps::{
     AppAuthorizationDecisionDto, AppBridgeOperationDto, AppBridgeRequestDto, AppBridgeResponseDto,
-    AppCapabilityKindDto, AppCapabilityRequestDto, AppEventDto, AppUiActionKindDto,
-    AppUiRequestDto, AppUiTargetDto,
+    AppCapabilityKindDto, AppCapabilityRequestDto, AppDependencyChangeConfirmationRequestDto,
+    AppDependencyChangeDto, AppDependencyChangeKindDto, AppEventDto, AppRuntimeProfileDto,
+    AppRuntimeProfileOptionDto, AppRuntimeProfilePackageDto, AppRuntimeProfileSelectionRequestDto,
+    AppSurfaceDto, AppUiActionKindDto, AppUiRequestDto, AppUiTargetDto,
 };
 use futures_util::StreamExt;
 use local_apps::{
     load_manifest, load_permissions, save_permissions, AppCapability, AppDataStore,
-    AppDependencyState, AppLayout, AppPermissions, AppRuntimeMode, AppRuntimeState, AppService,
-    BackgroundTaskStatus, DataMigrationPreview, DataMutation, DataQuery, DataSortDirection,
-    DataSortKey, PermissionDecision, SessionPermissions,
+    AppDependencyState, AppLayout, AppPermissions, AppRuntimeMode, AppRuntimeProfile,
+    AppRuntimeState, AppService, BackgroundTaskStatus, DataMigrationPreview, DataMutation,
+    DataQuery, DataSortDirection, DataSortKey, PermissionDecision, SessionPermissions,
 };
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::io::{self, Read};
 use std::net::{IpAddr, SocketAddr};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock, RwLock};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -39,6 +42,7 @@ use traits::{
 };
 
 const APPROVAL_TIMEOUT: Duration = Duration::from_secs(5 * 60);
+const RUNTIME_PROFILE_RECEIPT_TTL: Duration = Duration::from_secs(10 * 60);
 const UI_TIMEOUT: Duration = Duration::from_secs(2 * 60);
 const MAX_HTTP_REQUEST_BYTES: usize = 16 * 1024;
 const MAX_STATIC_ASSET_BYTES: u64 = 32 * 1024 * 1024;
@@ -49,9 +53,13 @@ const STATIC_ACCEPT_RETRY: Duration = Duration::from_millis(50);
 const RUNTIME_SEED_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const DEPENDENCY_INSTALL_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const DEPENDENCY_INSTALL_TIMEOUT: Duration = Duration::from_secs(10 * 60);
-const PNPM_TOOLCHAIN_KEY: &str = "pnpm@11.22.0/node@24.18.1";
+const PNPM_TOOLCHAIN_KEY: &str = crate::local_app_runtime_profiles::RUNTIME_PROFILE_TOOLCHAIN_KEY;
 const DEPENDENCY_SNAPSHOT_VERSION: u8 = 2;
 const DEPENDENCY_SNAPSHOT_READY_FILE: &str = ".lingxi-dependency-ready";
+const DEPENDENCY_UPDATE_RECOVERY_FILE_REL: &str =
+    ".lingxi-build-state/dependency-update-recovery.json";
+const DEPENDENCY_UPDATE_RECOVERY_SCHEMA_VERSION: u32 = 1;
+const MAX_DEPENDENCY_UPDATE_RECOVERY_BYTES: usize = 16 * 1024 * 1024;
 /// Emitted by `stage-local-app-runtime.py` beside the staged `node_modules`.
 const BUNDLED_SEED_MANIFEST_FILE: &str = "runtime-manifest.json";
 const WORKSPACE_DEPENDENCY_ATTESTATION_FILE: &str = ".lingxi-build-state/dependency-attestation";
@@ -73,6 +81,27 @@ const LOCAL_APP_BRIDGE_LLM_BYTES: usize = 8 * 1024 * 1024;
 const LOCAL_APP_BRIDGE_FILE_BYTES: usize = files_ops::MAX_APP_FILE_BYTES.div_ceil(3) * 4 + 1024;
 const FLOW_EXECUTION_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 const FLOW_STEP_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Availability of the exact profile dependency lock on this host. The
+/// selector distinguishes a reusable shared snapshot from a device-bundled
+/// seed; both avoid a network download but carry different provenance.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RuntimeProfileDependencyAvailability {
+    Cached,
+    Bundled,
+    DownloadRequired,
+}
+
+impl RuntimeProfileDependencyAvailability {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Cached => "cached",
+            Self::Bundled => "bundled",
+            Self::DownloadRequired => "download_required",
+        }
+    }
+}
+
 static LOCAL_APP_BUILD_LOCK: OnceLock<Arc<Mutex<()>>> = OnceLock::new();
 static DEPENDENCY_SNAPSHOT_DIGESTS: OnceLock<std::sync::Mutex<HashMap<PathBuf, String>>> =
     OnceLock::new();
@@ -104,6 +133,123 @@ struct UiResolution {
     decision: AppAuthorizationDecisionDto,
     result_json: Option<String>,
     error: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+struct PendingRuntimeProfileReceipt {
+    receipt_id: String,
+    app_id: String,
+    binding: local_apps::AppRuntimeProfileBinding,
+    issued_at_ms: u64,
+    expires_at_ms: u64,
+    claimed: bool,
+}
+
+#[derive(Clone, Debug)]
+struct PendingDependencyChangeReceipt {
+    receipt_id: String,
+    app_id: String,
+    baseline: DependencyBaselineIdentity,
+    requested_json: Vec<u8>,
+    effective_package_json: Vec<u8>,
+    issued_at_ms: u64,
+    expires_at_ms: u64,
+    summary: Vec<DependencyChange>,
+    claimed: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct DependencyBaselineIdentity {
+    dependency_snapshot_sha256: String,
+    requested_sha256: String,
+    package_sha256: String,
+    lockfile_sha256: String,
+    toolchain_key: String,
+    contract_sha256: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum DependencyChangeKind {
+    Add,
+    Update,
+    Remove,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DependencyChange {
+    kind: DependencyChangeKind,
+    package: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    version: Option<String>,
+}
+
+fn dependency_change_kind_dto(kind: &DependencyChangeKind) -> AppDependencyChangeKindDto {
+    match kind {
+        DependencyChangeKind::Add => AppDependencyChangeKindDto::Add,
+        DependencyChangeKind::Update => AppDependencyChangeKindDto::Update,
+        DependencyChangeKind::Remove => AppDependencyChangeKindDto::Remove,
+    }
+}
+
+fn dependency_change_cache_status(kind: &DependencyChangeKind) -> String {
+    match kind {
+        DependencyChangeKind::Remove => "not_needed".into(),
+        DependencyChangeKind::Add | DependencyChangeKind::Update => {
+            // A ready app tree says nothing about whether this particular
+            // package/version is in the pnpm store.  Do not inspect or mutate
+            // that store before approval; expose an honest unknown status.
+            "unknown_until_resolution".into()
+        }
+    }
+}
+
+struct DependencyInstallCompletion {
+    lockfile_sha256: String,
+    toolchain_key: String,
+}
+
+#[derive(Debug)]
+struct DependencyUpdateFileBackup {
+    relative: &'static str,
+    bytes: Option<Vec<u8>>,
+}
+
+#[derive(Debug)]
+struct DependencyUpdateRollback {
+    previous_dependency: local_apps::AppDependencyRecord,
+    files: Vec<DependencyUpdateFileBackup>,
+    manifest_bytes: Vec<u8>,
+    node_modules_backup: Option<PathBuf>,
+    build_backup: Option<PathBuf>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum DependencyUpdateRecoveryStatus {
+    InProgress,
+    Committed,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DependencyUpdateRecoveryFile {
+    relative: String,
+    bytes: Option<Vec<u8>>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DependencyUpdateRecoveryJournal {
+    schema_version: u32,
+    app_id: String,
+    status: DependencyUpdateRecoveryStatus,
+    previous_dependency: local_apps::AppDependencyRecord,
+    files: Vec<DependencyUpdateRecoveryFile>,
+    manifest_bytes: Vec<u8>,
+    node_modules_backup: Option<String>,
+    build_backup: Option<String>,
 }
 
 enum RuntimeHandle {
@@ -695,7 +841,7 @@ pub(crate) async fn reconcile_app_init_session_title(
 /// response). Handing off to it is what puts the agent in the right cwd with the
 /// right `LINGXI.md` auto-loaded.
 pub(crate) fn create_next_step_guidance() -> String {
-    "The app now exists and is EMPTY, and this conversation is not rooted in it. Stop here: do not write source, do not call LocalAppBuild, and do not start a build workflow from this conversation — its working directory is not the app's workspace, so anything written here lands outside the app. The app has its own workspace and its own session (init_session_id in this result); building happens there, where the workspace contract and the pinned Vite + Ionic foundation are already in place. Tell the user the app is ready and let them open it. Do not recreate the app scaffold or run a package-manager scaffold command; a host-owned `pnpm install` prepares workspace-local dependencies in the background.".into()
+    "The app now exists as an EMPTY shell, and this conversation is not rooted in it. Stop here: do not write source, do not call LocalAppBuild, and do not start a build workflow from this conversation — its working directory is not the app's workspace, so anything written here lands outside the app. The app has its own workspace and its own session (init_session_id in this result); continue there, where the guided workspace contract explains the interview and scaffold steps. Do not recreate the app, do not run a package-manager scaffold command, and do not install dependencies yet: runtime-profile confirmation and LocalAppScaffold happen first.".into()
 }
 
 struct LocalAppsRuntimeConfiguration {
@@ -774,7 +920,12 @@ pub(crate) struct LocalAppsHostBroker {
     /// them. Weak so a watcher can never be what keeps the broker alive.
     self_ref: OnceLock<std::sync::Weak<LocalAppsHostBroker>>,
     pending_capabilities: Mutex<HashMap<String, oneshot::Sender<AppAuthorizationDecisionDto>>>,
+    pending_runtime_profile_selections:
+        Mutex<HashMap<String, oneshot::Sender<Option<AppRuntimeProfileDto>>>>,
+    pending_dependency_change_confirmations: Mutex<HashMap<String, oneshot::Sender<bool>>>,
     pending_ui: Mutex<HashMap<String, oneshot::Sender<UiResolution>>>,
+    pending_runtime_profile_receipts: Mutex<HashMap<String, PendingRuntimeProfileReceipt>>,
+    pending_dependency_change_receipts: Mutex<HashMap<String, PendingDependencyChangeReceipt>>,
     session_permissions: Mutex<SessionPermissions>,
     runtimes: Arc<Mutex<HashMap<String, RuntimeEntry>>>,
     /// See [`PortLeases`].  Broker-scoped because a profile's apps are what
@@ -869,6 +1020,13 @@ impl LocalAppsHostBroker {
         runtime_root: Option<PathBuf>,
         physical_memory_bytes: u64,
     ) -> Arc<Self> {
+        if let Err(error) = Self::recover_dependency_updates_on_boot(&root) {
+            tracing::warn!(
+                root = %root.display(),
+                %error,
+                "dependency update recovery deferred until the next profile load"
+            );
+        }
         let broker = Arc::new(Self {
             root,
             event_sink,
@@ -894,7 +1052,11 @@ impl LocalAppsHostBroker {
             recording_start: Mutex::new(()),
             self_ref: OnceLock::new(),
             pending_capabilities: Mutex::new(HashMap::new()),
+            pending_runtime_profile_selections: Mutex::new(HashMap::new()),
+            pending_dependency_change_confirmations: Mutex::new(HashMap::new()),
             pending_ui: Mutex::new(HashMap::new()),
+            pending_runtime_profile_receipts: Mutex::new(HashMap::new()),
+            pending_dependency_change_receipts: Mutex::new(HashMap::new()),
             session_permissions: Mutex::new(SessionPermissions::default()),
             runtimes: Arc::new(Mutex::new(HashMap::new())),
             port_leases: Arc::new(std::sync::Mutex::new(HashMap::new())),
@@ -1041,6 +1203,166 @@ impl LocalAppsHostBroker {
         format!("{prefix}-{id}")
     }
 
+    async fn issue_runtime_profile_receipt(
+        &self,
+        app_id: &str,
+        binding: local_apps::AppRuntimeProfileBinding,
+    ) -> Result<PendingRuntimeProfileReceipt, String> {
+        let issued_at_ms = now_ms();
+        let expires_at_ms = issued_at_ms + RUNTIME_PROFILE_RECEIPT_TTL.as_millis() as u64;
+        let mut receipts = self.pending_runtime_profile_receipts.lock().await;
+        if let Some(current) = receipts.get(app_id) {
+            if current.claimed && current.expires_at_ms >= issued_at_ms {
+                return Err(format!(
+                    "runtime profile receipt {} is already in use for app {}",
+                    current.receipt_id, app_id
+                ));
+            }
+        }
+        let receipt = PendingRuntimeProfileReceipt {
+            receipt_id: uuid::Uuid::new_v4().to_string(),
+            app_id: app_id.to_string(),
+            binding,
+            issued_at_ms,
+            expires_at_ms,
+            claimed: false,
+        };
+        receipts.insert(app_id.to_string(), receipt.clone());
+        Ok(receipt)
+    }
+
+    async fn claim_runtime_profile_receipt(
+        &self,
+        app_id: &str,
+        receipt_id: &str,
+    ) -> Result<local_apps::AppRuntimeProfileBinding, String> {
+        let mut receipts = self.pending_runtime_profile_receipts.lock().await;
+        let Some(current) = receipts.get_mut(app_id) else {
+            return Err(format!(
+                "runtime profile receipt {receipt_id} is missing or was already consumed for app {app_id}"
+            ));
+        };
+        if current.receipt_id != receipt_id {
+            return Err(format!(
+                "runtime profile receipt {receipt_id} is stale or superseded for app {app_id}"
+            ));
+        }
+        if current.expires_at_ms < now_ms() {
+            return Err(format!(
+                "runtime profile receipt {receipt_id} expired for app {app_id}"
+            ));
+        }
+        if current.claimed {
+            return Err(format!(
+                "runtime profile receipt {receipt_id} is already in use for app {app_id}"
+            ));
+        }
+        current.claimed = true;
+        Ok(current.binding.clone())
+    }
+
+    async fn release_runtime_profile_receipt_claim(&self, app_id: &str, receipt_id: &str) {
+        let mut receipts = self.pending_runtime_profile_receipts.lock().await;
+        if let Some(current) = receipts.get_mut(app_id) {
+            if current.receipt_id == receipt_id {
+                current.claimed = false;
+            }
+        }
+    }
+
+    async fn consume_runtime_profile_receipt(&self, app_id: &str, receipt_id: &str) {
+        let mut receipts = self.pending_runtime_profile_receipts.lock().await;
+        if receipts
+            .get(app_id)
+            .is_some_and(|current| current.receipt_id == receipt_id)
+        {
+            receipts.remove(app_id);
+        }
+    }
+
+    async fn issue_dependency_change_receipt(
+        &self,
+        app_id: &str,
+        baseline: DependencyBaselineIdentity,
+        requested_json: Vec<u8>,
+        effective_package_json: Vec<u8>,
+        summary: Vec<DependencyChange>,
+    ) -> Result<PendingDependencyChangeReceipt, String> {
+        let issued_at_ms = now_ms();
+        let expires_at_ms = issued_at_ms + RUNTIME_PROFILE_RECEIPT_TTL.as_millis() as u64;
+        let mut receipts = self.pending_dependency_change_receipts.lock().await;
+        if let Some(current) = receipts.get(app_id) {
+            if current.claimed && current.expires_at_ms >= issued_at_ms {
+                return Err(format!(
+                    "dependency change receipt {} is already in use for app {}",
+                    current.receipt_id, app_id
+                ));
+            }
+        }
+        let receipt = PendingDependencyChangeReceipt {
+            receipt_id: uuid::Uuid::new_v4().to_string(),
+            app_id: app_id.to_string(),
+            baseline,
+            requested_json,
+            effective_package_json,
+            issued_at_ms,
+            expires_at_ms,
+            summary,
+            claimed: false,
+        };
+        receipts.insert(app_id.to_string(), receipt.clone());
+        Ok(receipt)
+    }
+
+    async fn claim_dependency_change_receipt(
+        &self,
+        app_id: &str,
+        receipt_id: &str,
+    ) -> Result<PendingDependencyChangeReceipt, String> {
+        let mut receipts = self.pending_dependency_change_receipts.lock().await;
+        let Some(current) = receipts.get_mut(app_id) else {
+            return Err(format!(
+                "dependency change receipt {receipt_id} is missing or was already consumed for app {app_id}"
+            ));
+        };
+        if current.receipt_id != receipt_id {
+            return Err(format!(
+                "dependency change receipt {receipt_id} is stale or superseded for app {app_id}"
+            ));
+        }
+        if current.expires_at_ms < now_ms() {
+            return Err(format!(
+                "dependency change receipt {receipt_id} expired for app {app_id}"
+            ));
+        }
+        if current.claimed {
+            return Err(format!(
+                "dependency change receipt {receipt_id} is already in use for app {app_id}"
+            ));
+        }
+        current.claimed = true;
+        Ok(current.clone())
+    }
+
+    async fn release_dependency_change_receipt_claim(&self, app_id: &str, receipt_id: &str) {
+        let mut receipts = self.pending_dependency_change_receipts.lock().await;
+        if let Some(current) = receipts.get_mut(app_id) {
+            if current.receipt_id == receipt_id {
+                current.claimed = false;
+            }
+        }
+    }
+
+    async fn consume_dependency_change_receipt(&self, app_id: &str, receipt_id: &str) {
+        let mut receipts = self.pending_dependency_change_receipts.lock().await;
+        if receipts
+            .get(app_id)
+            .is_some_and(|current| current.receipt_id == receipt_id)
+        {
+            receipts.remove(app_id);
+        }
+    }
+
     fn layout(&self, app_id: &str) -> Result<AppLayout, String> {
         AppLayout::new(&self.root, app_id).map_err(|error| error.to_string())
     }
@@ -1053,10 +1375,17 @@ impl LocalAppsHostBroker {
     }
 
     fn dependency_store_root(&self) -> PathBuf {
+        let toolchain_key_dir = PNPM_TOOLCHAIN_KEY
+            .chars()
+            .map(|ch| match ch {
+                'a'..='z' | 'A'..='Z' | '0'..='9' | '.' | '-' => ch,
+                _ => '_',
+            })
+            .collect::<String>();
         self.root
             .join("dependency-cache")
             .join("pnpm")
-            .join("11.22.0")
+            .join(toolchain_key_dir)
     }
 
     fn dependency_snapshot_root(&self, lock_digest: &str) -> PathBuf {
@@ -1085,17 +1414,54 @@ impl LocalAppsHostBroker {
         Ok(format!("{:x}", Sha256::digest(bytes)))
     }
 
-    fn dependency_inputs_match(workspace: &Path) -> Result<bool, String> {
-        for (relative, expected) in
-            crate::local_apps_build::VITE_LOCKED_FILES
-                .iter()
-                .filter(|(relative, _)| {
-                    matches!(
-                        *relative,
-                        "package.json" | "pnpm-lock.yaml" | "pnpm-workspace.yaml"
-                    )
-                })
-        {
+    fn dependency_inputs_match(layout: &AppLayout) -> Result<bool, String> {
+        let workspace = layout.root().join(layout.workspace_rel());
+        let manifest = load_manifest(layout).map_err(|error| error.to_string())?;
+        let expected_files: Vec<(&'static str, Vec<u8>)> = match manifest.runtime_profile.as_ref() {
+            Some(binding) => {
+                let contract = crate::local_app_runtime_profiles::contract_for_binding(binding)
+                    .map_err(|error| error.to_string())?;
+                let has_snapshot = manifest.dependency_snapshot.is_some();
+                contract
+                    .managed_files
+                    .iter()
+                    .copied()
+                    .filter(|(relative, _)| {
+                        matches!(
+                            *relative,
+                            "package.json" | "pnpm-lock.yaml" | "pnpm-workspace.yaml"
+                        )
+                    })
+                    .map(|(relative, bytes)| {
+                        let expected = match (relative, has_snapshot) {
+                            ("package.json", true) => std::fs::read(workspace.join(
+                                crate::local_app_runtime_profiles::EFFECTIVE_PACKAGE_FILE_REL,
+                            ))
+                            .map_err(|error| {
+                                format!(
+                                    "read {}: {error}",
+                                    crate::local_app_runtime_profiles::EFFECTIVE_PACKAGE_FILE_REL
+                                )
+                            })?,
+                            ("pnpm-lock.yaml", true) => std::fs::read(
+                                workspace
+                                    .join(crate::local_app_runtime_profiles::LOCKFILE_FILE_REL),
+                            )
+                            .map_err(|error| {
+                                format!(
+                                    "read {}: {error}",
+                                    crate::local_app_runtime_profiles::LOCKFILE_FILE_REL
+                                )
+                            })?,
+                            _ => bytes.to_vec(),
+                        };
+                        Ok((relative, expected))
+                    })
+                    .collect::<Result<Vec<_>, String>>()?
+            }
+            None => return Ok(false),
+        };
+        for (relative, expected) in expected_files {
             let path = workspace.join(relative);
             let metadata = match std::fs::symlink_metadata(&path) {
                 Ok(metadata) => metadata,
@@ -1112,12 +1478,355 @@ impl LocalAppsHostBroker {
             }
             if std::fs::read(&path)
                 .map_err(|error| format!("read dependency input {}: {error}", path.display()))?
-                != *expected
+                != expected
             {
                 return Ok(false);
             }
         }
         Ok(true)
+    }
+
+    fn validate_dependency_package_name(package: &str) -> Result<(), String> {
+        if package.is_empty() || package.len() > 214 {
+            return Err(format!("invalid package name {package:?}"));
+        }
+        let chars: Vec<char> = package.chars().collect();
+        if package.starts_with('@') {
+            let slash_count = chars.iter().filter(|&&ch| ch == '/').count();
+            if slash_count != 1 {
+                return Err(format!(
+                    "scoped package name must contain one slash: {package:?}"
+                ));
+            }
+        } else if chars.iter().filter(|&&ch| ch == '/').count() != 0 {
+            return Err(format!(
+                "unscoped package name must not contain slash: {package:?}"
+            ));
+        }
+        if chars.iter().any(|&ch| {
+            !(ch.is_ascii_lowercase()
+                || ch.is_ascii_digit()
+                || matches!(ch, '@' | '/' | '.' | '_' | '-'))
+        }) {
+            return Err(format!(
+                "package name {package:?} must use lowercase npm characters only"
+            ));
+        }
+        Ok(())
+    }
+
+    fn validate_dependency_version(version: &str) -> Result<(), String> {
+        let trimmed = version.trim();
+        if trimmed.is_empty() {
+            return Err("dependency version must not be empty".into());
+        }
+        let lowered = trimmed.to_ascii_lowercase();
+        for forbidden in [
+            "file:",
+            "link:",
+            "portal:",
+            "patch:",
+            "workspace:",
+            "catalog:",
+            "catalogs:",
+            "npm:",
+            "git+",
+            "github:",
+            "http://",
+            "https://",
+            "../",
+            "./",
+            "/",
+            "\\",
+        ] {
+            if lowered.contains(forbidden) {
+                return Err(format!(
+                    "dependency version {version:?} must resolve from the npm registry only"
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn dependency_manifest_bytes(
+        contract: &crate::local_app_runtime_profiles::RuntimeProfileContract,
+    ) -> Result<&'static [u8], String> {
+        contract
+            .managed_files
+            .iter()
+            .find(|(relative, _)| *relative == "package.json")
+            .map(|(_, bytes)| *bytes)
+            .ok_or_else(|| {
+                format!(
+                    "runtime profile {} r{} is missing package.json",
+                    contract.family, contract.revision
+                )
+            })
+    }
+
+    fn load_requested_dependency_map(workspace: &Path) -> Result<BTreeMap<String, String>, String> {
+        let bytes = Self::read_regular_dependency_input_bytes(
+            workspace,
+            crate::local_app_runtime_profiles::REQUESTED_FILE_REL,
+        )?;
+        let path = workspace.join(crate::local_app_runtime_profiles::REQUESTED_FILE_REL);
+        let value: Value = serde_json::from_slice(&bytes)
+            .map_err(|error| format!("parse {}: {error}", path.display()))?;
+        let dependencies = value
+            .get("dependencies")
+            .and_then(Value::as_object)
+            .ok_or_else(|| format!("{} must contain an object `dependencies`", path.display()))?;
+        let mut map = BTreeMap::new();
+        for (package, version) in dependencies {
+            let version = version.as_str().ok_or_else(|| {
+                format!(
+                    "{} dependency {package:?} must map to a string version",
+                    path.display()
+                )
+            })?;
+            map.insert(package.clone(), version.to_string());
+        }
+        Ok(map)
+    }
+
+    fn read_regular_dependency_input_bytes(
+        workspace: &Path,
+        relative: &str,
+    ) -> Result<Vec<u8>, String> {
+        let path = workspace.join(relative);
+        let metadata = std::fs::symlink_metadata(&path)
+            .map_err(|error| format!("inspect {}: {error}", path.display()))?;
+        if !metadata.is_file() || metadata.file_type().is_symlink() {
+            return Err(format!(
+                "dependencies_dirty: dependency input must be a regular file: {}",
+                path.display()
+            ));
+        }
+        std::fs::read(&path).map_err(|error| format!("read {}: {error}", path.display()))
+    }
+
+    fn load_trusted_dependency_baseline(
+        layout: &AppLayout,
+        dependency_record: &local_apps::AppDependencyRecord,
+    ) -> Result<
+        (
+            local_apps::AppRuntimeProfileBinding,
+            &'static crate::local_app_runtime_profiles::RuntimeProfileContract,
+            BTreeMap<String, String>,
+            DependencyBaselineIdentity,
+        ),
+        String,
+    > {
+        let manifest = load_manifest(layout).map_err(|error| error.to_string())?;
+        let binding = manifest.runtime_profile.clone().ok_or_else(|| {
+            format!(
+                "app {} has no runtime profile yet; scaffold it before editing dependencies",
+                layout.app_id()
+            )
+        })?;
+        let snapshot = manifest.dependency_snapshot.clone().ok_or_else(|| {
+            format!(
+                "app {} has no verified dependency snapshot; rerun scaffold or dependency install before editing dependencies",
+                layout.app_id()
+            )
+        })?;
+        if snapshot.verified_profile_contract_sha256 != binding.contract_sha256 {
+            return Err(format!(
+                "runtime_contract_corrupt: app {} dependency snapshot no longer matches runtime profile {}",
+                layout.app_id(),
+                binding.family
+            ));
+        }
+        if dependency_record.lockfile_sha256.as_deref() != Some(snapshot.lockfile_sha256.as_str())
+            || dependency_record.toolchain_key.as_deref() != Some(snapshot.toolchain_key.as_str())
+        {
+            return Err(format!(
+                "dependencies_dirty: app {} dependency record no longer matches the verified snapshot; run LocalAppUpdateDependencies to refresh it",
+                layout.app_id()
+            ));
+        }
+        let contract = crate::local_app_runtime_profiles::contract_for_binding(&binding)
+            .map_err(|error| error.to_string())?;
+        let workspace = layout.root().join(layout.workspace_rel());
+        let requested_bytes = Self::read_regular_dependency_input_bytes(
+            &workspace,
+            crate::local_app_runtime_profiles::REQUESTED_FILE_REL,
+        )?;
+        if crate::local_app_runtime_profiles::hash_bytes(&requested_bytes)
+            != snapshot.requested_sha256
+        {
+            return Err(format!(
+                "dependencies_dirty: app {} requested dependency baseline was modified outside the host-managed dependency flow",
+                layout.app_id()
+            ));
+        }
+        let effective_package_bytes = Self::read_regular_dependency_input_bytes(
+            &workspace,
+            crate::local_app_runtime_profiles::EFFECTIVE_PACKAGE_FILE_REL,
+        )?;
+        if crate::local_app_runtime_profiles::hash_bytes(&effective_package_bytes)
+            != snapshot.package_sha256
+        {
+            return Err(format!(
+                "dependencies_dirty: app {} effective dependency baseline drifted from the verified snapshot",
+                layout.app_id()
+            ));
+        }
+        let lockfile_bytes = Self::read_regular_dependency_input_bytes(
+            &workspace,
+            crate::local_app_runtime_profiles::LOCKFILE_FILE_REL,
+        )?;
+        if crate::local_app_runtime_profiles::hash_bytes(&lockfile_bytes)
+            != snapshot.lockfile_sha256
+        {
+            return Err(format!(
+                "dependencies_dirty: app {} lockfile baseline drifted from the verified snapshot",
+                layout.app_id()
+            ));
+        }
+        let requested_dependencies = Self::load_requested_dependency_map(&workspace)?;
+        let expected_package_json =
+            Self::build_effective_package_json(contract, &requested_dependencies)?;
+        if effective_package_bytes != expected_package_json {
+            return Err(format!(
+                "dependencies_dirty: app {} package.json no longer matches the committed dependency baseline",
+                layout.app_id()
+            ));
+        }
+        let baseline = DependencyBaselineIdentity {
+            dependency_snapshot_sha256: manifest
+                .dependency_snapshot_hash()
+                .map_err(|error| error.to_string())?,
+            requested_sha256: snapshot.requested_sha256,
+            package_sha256: snapshot.package_sha256,
+            lockfile_sha256: snapshot.lockfile_sha256,
+            toolchain_key: snapshot.toolchain_key,
+            contract_sha256: binding.contract_sha256.clone(),
+        };
+        Ok((binding, contract, requested_dependencies, baseline))
+    }
+
+    fn serialize_requested_dependency_map(
+        dependencies: &BTreeMap<String, String>,
+    ) -> Result<Vec<u8>, String> {
+        let dependencies = dependencies
+            .iter()
+            .map(|(package, version)| (package.clone(), Value::String(version.clone())))
+            .collect::<Map<String, Value>>();
+        let mut bytes = serde_json::to_vec_pretty(&Value::Object(Map::from_iter([(
+            "dependencies".to_string(),
+            Value::Object(dependencies),
+        )])))
+        .map_err(|error| format!("serialize requested dependency manifest: {error}"))?;
+        bytes.push(b'\n');
+        Ok(bytes)
+    }
+
+    fn build_effective_package_json(
+        contract: &crate::local_app_runtime_profiles::RuntimeProfileContract,
+        requested_dependencies: &BTreeMap<String, String>,
+    ) -> Result<Vec<u8>, String> {
+        let template = Self::dependency_manifest_bytes(contract)?;
+        let mut package_json: Value = serde_json::from_slice(template)
+            .map_err(|error| format!("parse runtime profile package.json: {error}"))?;
+        let package_object = package_json
+            .as_object_mut()
+            .ok_or_else(|| "runtime profile package.json must be an object".to_string())?;
+        let mut dependencies = contract
+            .core_packages
+            .iter()
+            .map(|(package, version)| (package.to_string(), Value::String((*version).to_string())))
+            .collect::<BTreeMap<_, _>>();
+        for (package, version) in requested_dependencies {
+            dependencies.insert(package.clone(), Value::String(version.clone()));
+        }
+        package_object.insert(
+            "dependencies".to_string(),
+            Value::Object(Map::from_iter(dependencies)),
+        );
+        let mut bytes = serde_json::to_vec_pretty(&package_json)
+            .map_err(|error| format!("serialize effective package.json: {error}"))?;
+        bytes.push(b'\n');
+        Ok(bytes)
+    }
+
+    fn prepare_dependency_change(
+        layout: &AppLayout,
+        dependency_record: &local_apps::AppDependencyRecord,
+        changes_value: &Value,
+    ) -> Result<
+        (
+            local_apps::AppRuntimeProfileBinding,
+            DependencyBaselineIdentity,
+            Vec<DependencyChange>,
+            Vec<u8>,
+            Vec<u8>,
+        ),
+        String,
+    > {
+        let changes: Vec<DependencyChange> = serde_json::from_value(changes_value.clone())
+            .map_err(|error| {
+                format!("invalid_argument: changes must be an array of objects: {error}")
+            })?;
+        if changes.is_empty() {
+            return Err("invalid_argument: changes must not be empty".into());
+        }
+        let (binding, contract, mut requested_dependencies, baseline) =
+            Self::load_trusted_dependency_baseline(layout, dependency_record)?;
+        let original = requested_dependencies.clone();
+        let core_packages = contract
+            .core_packages
+            .iter()
+            .map(|(package, _)| *package)
+            .collect::<std::collections::HashSet<_>>();
+        for change in &changes {
+            Self::validate_dependency_package_name(&change.package)?;
+            if core_packages.contains(change.package.as_str()) {
+                return Err(format!(
+                    "dependency {} is core to runtime profile {} and can only change through runtime profile migration",
+                    change.package, binding.family
+                ));
+            }
+            match change.kind {
+                DependencyChangeKind::Add | DependencyChangeKind::Update => {
+                    let version = change.version.as_deref().ok_or_else(|| {
+                        format!(
+                            "dependency {} requires a version for {:?}",
+                            change.package, change.kind
+                        )
+                    })?;
+                    Self::validate_dependency_version(version)?;
+                    requested_dependencies.insert(change.package.clone(), version.to_string());
+                }
+                DependencyChangeKind::Remove => {
+                    if change.version.is_some() {
+                        return Err(format!(
+                            "dependency {} remove must not include a version",
+                            change.package
+                        ));
+                    }
+                    if requested_dependencies.remove(&change.package).is_none() {
+                        return Err(format!(
+                            "dependency {} is not currently requested by this app",
+                            change.package
+                        ));
+                    }
+                }
+            }
+        }
+        if requested_dependencies == original {
+            return Err("dependency change makes no observable change".into());
+        }
+        let requested_json = Self::serialize_requested_dependency_map(&requested_dependencies)?;
+        let effective_package_json =
+            Self::build_effective_package_json(contract, &requested_dependencies)?;
+        Ok((
+            binding,
+            baseline,
+            changes,
+            requested_json,
+            effective_package_json,
+        ))
     }
 
     fn prepare_dependency_staging(layout: &AppLayout) -> Result<PathBuf, String> {
@@ -1153,6 +1862,121 @@ impl LocalAppsHostBroker {
                 .map_err(|error| format!("stage dependency input {}: {error}", source.display()))?;
         }
         Ok(staging)
+    }
+
+    fn reset_dependency_staging_node_modules(staging: &Path) -> Result<(), String> {
+        let node_modules = staging.join("node_modules");
+        Self::remove_owned_path(&node_modules)?;
+        std::fs::create_dir_all(&node_modules).map_err(|error| {
+            format!(
+                "recreate dependency staging node_modules {}: {error}",
+                node_modules.display()
+            )
+        })
+    }
+
+    fn dependency_install_request(
+        build_mount: &MountSpec,
+        store_mount: &MountSpec,
+        dependency_staging_guest_path: String,
+        build_state_root: &str,
+        memory_mb: u32,
+        network: NetworkPolicy,
+        frozen_lockfile: bool,
+        lockfile_only: bool,
+        no_runtime: bool,
+    ) -> LinuxCommandRequest {
+        let mut env = BTreeMap::new();
+        env.insert("CI".into(), "1".into());
+        env.insert("HOME".into(), format!("{build_state_root}/home"));
+        env.insert("TMPDIR".into(), format!("{build_state_root}/tmp"));
+        env.insert("TMP".into(), format!("{build_state_root}/tmp"));
+        env.insert("TEMP".into(), format!("{build_state_root}/tmp"));
+        env.insert(
+            "XDG_CACHE_HOME".into(),
+            format!("{build_state_root}/xdg-cache"),
+        );
+        env.insert(
+            "XDG_CONFIG_HOME".into(),
+            format!("{build_state_root}/xdg-config"),
+        );
+        env.insert(
+            "XDG_DATA_HOME".into(),
+            format!("{build_state_root}/xdg-data"),
+        );
+        env.insert("PNPM_HOME".into(), format!("{build_state_root}/pnpm-home"));
+        env.insert(
+            "COREPACK_HOME".into(),
+            format!("{build_state_root}/corepack"),
+        );
+
+        let mut args = vec!["install".into()];
+        if lockfile_only {
+            args.push("--lockfile-only".into());
+        }
+        args.push(if frozen_lockfile {
+            "--frozen-lockfile".into()
+        } else {
+            "--no-frozen-lockfile".into()
+        });
+        args.push("--ignore-scripts".into());
+        if no_runtime {
+            args.push("--no-runtime".into());
+        }
+        args.extend([
+            "--prefer-offline".into(),
+            "--store-dir".into(),
+            guest_paths::LOCAL_APP_DEPENDENCY_STORE.to_string(),
+            "--reporter=append-only".into(),
+        ]);
+
+        LinuxCommandRequest {
+            command: "/usr/bin/pnpm".into(),
+            args,
+            cwd: Some(dependency_staging_guest_path),
+            env,
+            stdin: None,
+            timeout_ms: Some(DEPENDENCY_INSTALL_TIMEOUT.as_millis() as u64),
+            network,
+            resource_limits: ResourceLimits {
+                max_memory_mb: Some(memory_mb),
+                ..ResourceLimits::default()
+            },
+            mounts: vec![build_mount.clone(), store_mount.clone()],
+        }
+    }
+
+    async fn run_dependency_install_command(
+        runtime: &dyn MobileLinuxRuntime,
+        request: LinuxCommandRequest,
+    ) -> Result<(), String> {
+        let network = request.network;
+        let resource_limits = request.resource_limits;
+        match runtime.run_isolated(request).await {
+            Ok(result) => {
+                result
+                    .enforcement
+                    .ensure_for(network, resource_limits)
+                    .map_err(|error| error.to_string())?;
+                if result.timed_out || result.cancelled || result.exit_code != 0 {
+                    let detail = if !result.stderr.trim().is_empty() {
+                        result.stderr
+                    } else {
+                        result.stdout
+                    };
+                    Err(format!(
+                        "pnpm install failed (exit_code={}, timed_out={}, cancelled={}): {}",
+                        result.exit_code,
+                        result.timed_out,
+                        result.cancelled,
+                        detail.chars().take(8_000).collect::<String>()
+                    ))
+                } else {
+                    Ok(())
+                }
+            }
+            Err(error) => Err(format!("dependency install worker failed: {error}")),
+        }
     }
 
     fn remove_owned_path(path: &Path) -> Result<(), String> {
@@ -1520,11 +2344,22 @@ impl LocalAppsHostBroker {
             .map_err(|error| error.to_string())?;
         let layout = self.layout(app_id)?;
         let workspace = layout.root().join(layout.workspace_rel());
-        if !Self::dependency_inputs_match(&workspace)? {
-            let target = crate::local_apps_build::detect_build_target(&layout)
-                .map_err(|error| error.to_string())?;
-            crate::local_apps_build::restore_host_managed_files(&workspace, target)
-                .map_err(|error| error.to_string())?;
+        if !Self::dependency_inputs_match(&layout)? {
+            if load_manifest(&layout)
+                .map_err(|error| error.to_string())?
+                .runtime_profile
+                .is_some()
+            {
+                return Err(
+                    "dependencies_dirty: workspace package.json or pnpm-lock.yaml differs from the host-owned dependency snapshot; use LocalAppConfirmDependencyChange and LocalAppUpdateDependencies"
+                        .into(),
+                );
+            } else {
+                let target = crate::local_apps_build::detect_build_target(&layout)
+                    .map_err(|error| error.to_string())?;
+                crate::local_apps_build::restore_host_managed_files(&workspace, target)
+                    .map_err(|error| error.to_string())?;
+            }
         }
         let dependency = service
             .dependency_record(app_id)
@@ -1600,12 +2435,10 @@ impl LocalAppsHostBroker {
 
     async fn finalize_dependency_install(
         &self,
-        service: &Arc<AppService>,
         layout: &AppLayout,
-        app_id: &str,
         dependency_staging: &Path,
         expected_lock_digest: &str,
-    ) -> Result<(), String> {
+    ) -> Result<DependencyInstallCompletion, String> {
         let workspace = layout.root().join(layout.workspace_rel());
         // The lockfile is host-managed, but re-check it immediately before
         // promotion so a concurrent restore/edit cannot publish a tree built
@@ -1637,15 +2470,887 @@ impl LocalAppsHostBroker {
             true,
         )
         .map_err(|error| error.to_string())?;
-        service
-            .complete_dependency_install_with_metadata(
-                app_id,
-                Some(actual_lock_digest),
-                Some(PNPM_TOOLCHAIN_KEY.to_string()),
+        refresh_runtime_profile_snapshot(layout, &tree_digest)?;
+        Ok(DependencyInstallCompletion {
+            lockfile_sha256: actual_lock_digest,
+            toolchain_key: PNPM_TOOLCHAIN_KEY.to_string(),
+        })
+    }
+
+    fn capture_dependency_update_rollback(
+        &self,
+        layout: &AppLayout,
+        previous_dependency: local_apps::AppDependencyRecord,
+    ) -> Result<DependencyUpdateRollback, String> {
+        let workspace = layout.root().join(layout.workspace_rel());
+        let mut files = Vec::new();
+        for relative in [
+            crate::local_app_runtime_profiles::REQUESTED_FILE_REL,
+            crate::local_app_runtime_profiles::EFFECTIVE_PACKAGE_FILE_REL,
+            crate::local_app_runtime_profiles::LOCKFILE_FILE_REL,
+            crate::local_app_runtime_profiles::TREE_PROOF_FILE_REL,
+            crate::local_app_runtime_profiles::SBOM_FILE_REL,
+            crate::local_app_runtime_profiles::SNAPSHOT_FILE_REL,
+            "package.json",
+            "pnpm-lock.yaml",
+            WORKSPACE_DEPENDENCY_ATTESTATION_FILE,
+        ] {
+            let path = workspace.join(relative);
+            let bytes = match std::fs::read(&path) {
+                Ok(bytes) => Some(bytes),
+                Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+                Err(error) => {
+                    return Err(format!(
+                        "read dependency rollback source {}: {error}",
+                        path.display()
+                    ))
+                }
+            };
+            files.push(DependencyUpdateFileBackup { relative, bytes });
+        }
+        let manifest_path = layout.root().join(layout.manifest_rel());
+        let manifest_bytes = std::fs::read(&manifest_path).map_err(|error| {
+            format!(
+                "read dependency rollback manifest {}: {error}",
+                manifest_path.display()
             )
+        })?;
+        let node_modules = workspace.join("node_modules");
+        let node_modules_backup = match std::fs::symlink_metadata(&node_modules) {
+            Ok(metadata) => {
+                if metadata.file_type().is_symlink() {
+                    return Err("workspace node_modules must not be a symlink".into());
+                }
+                if metadata.is_dir() {
+                    let stamp = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|duration| duration.as_nanos())
+                        .unwrap_or_default();
+                    let backup = workspace
+                        .join(".lingxi-build-state")
+                        .join(format!("dependency-update-rollback-node_modules-{stamp}"));
+                    Self::remove_owned_path(&backup)?;
+                    clone_or_copy_tree(&node_modules, &backup).map_err(|error| {
+                        format!("backup dependency tree {}: {error}", node_modules.display())
+                    })?;
+                    Some(backup)
+                } else {
+                    None
+                }
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+            Err(error) => {
+                return Err(format!(
+                    "inspect dependency rollback tree {}: {error}",
+                    node_modules.display()
+                ))
+            }
+        };
+        let build_root = layout.root().join(layout.build_rel(false));
+        let build_backup_result = (|| -> Result<Option<PathBuf>, String> {
+            match std::fs::symlink_metadata(&build_root) {
+                Ok(metadata) => {
+                    if metadata.file_type().is_symlink() {
+                        return Err("promoted build root must not be a symlink".into());
+                    }
+                    if !metadata.is_dir() {
+                        return Ok(None);
+                    }
+                    let stamp = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|duration| duration.as_nanos())
+                        .unwrap_or_default();
+                    let backup = workspace
+                        .join(".lingxi-build-state")
+                        .join(format!("dependency-update-rollback-build-{stamp}"));
+                    Self::remove_owned_path(&backup)?;
+                    clone_or_copy_tree(&build_root, &backup).map_err(|error| {
+                        format!("backup promoted build {}: {error}", build_root.display())
+                    })?;
+                    Ok(Some(backup))
+                }
+                Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+                Err(error) => Err(format!(
+                    "inspect dependency rollback build {}: {error}",
+                    build_root.display()
+                )),
+            }
+        })();
+        let build_backup = match build_backup_result {
+            Ok(backup) => backup,
+            Err(error) => {
+                if let Some(backup) = &node_modules_backup {
+                    let _ = Self::remove_owned_path(backup);
+                }
+                return Err(error);
+            }
+        };
+        Ok(DependencyUpdateRollback {
+            previous_dependency,
+            files,
+            manifest_bytes,
+            node_modules_backup,
+            build_backup,
+        })
+    }
+
+    fn dependency_update_recovery_path(layout: &AppLayout) -> PathBuf {
+        layout
+            .root()
+            .join(layout.workspace_rel())
+            .join(DEPENDENCY_UPDATE_RECOVERY_FILE_REL)
+    }
+
+    fn dependency_update_workspace(layout: &AppLayout) -> Result<PathBuf, String> {
+        let workspace = layout.root().join(layout.workspace_rel());
+        let metadata = std::fs::symlink_metadata(&workspace).map_err(|error| {
+            format!(
+                "inspect dependency update workspace {}: {error}",
+                workspace.display()
+            )
+        })?;
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            return Err(format!(
+                "dependency update workspace is not a real directory: {}",
+                workspace.display()
+            ));
+        }
+        Ok(workspace)
+    }
+
+    fn dependency_update_file_is_allowed(relative: &str) -> bool {
+        matches!(
+            relative,
+            crate::local_app_runtime_profiles::REQUESTED_FILE_REL
+                | crate::local_app_runtime_profiles::EFFECTIVE_PACKAGE_FILE_REL
+                | crate::local_app_runtime_profiles::LOCKFILE_FILE_REL
+                | crate::local_app_runtime_profiles::TREE_PROOF_FILE_REL
+                | crate::local_app_runtime_profiles::SBOM_FILE_REL
+                | crate::local_app_runtime_profiles::SNAPSHOT_FILE_REL
+                | "package.json"
+                | "pnpm-lock.yaml"
+                | WORKSPACE_DEPENDENCY_ATTESTATION_FILE
+        )
+    }
+
+    fn dependency_update_backup_name(
+        layout: &AppLayout,
+        backup: &Path,
+        kind: &str,
+    ) -> Result<String, String> {
+        let state_root = layout
+            .root()
+            .join(layout.workspace_rel())
+            .join(".lingxi-build-state");
+        let relative = backup.strip_prefix(&state_root).map_err(|_| {
+            format!(
+                "dependency rollback backup is outside the build state: {}",
+                backup.display()
+            )
+        })?;
+        let mut components = relative.components();
+        let Some(Component::Normal(name)) = components.next() else {
+            return Err(format!(
+                "dependency rollback backup is not a single safe path: {}",
+                backup.display()
+            ));
+        };
+        if components.next().is_some() {
+            return Err(format!(
+                "dependency rollback backup is not a single safe path: {}",
+                backup.display()
+            ));
+        }
+        let name = name.to_str().ok_or_else(|| {
+            format!(
+                "dependency rollback backup name is not UTF-8: {}",
+                backup.display()
+            )
+        })?;
+        if !name.starts_with(kind) || name.len() == kind.len() {
+            return Err(format!(
+                "dependency rollback backup has an invalid name: {}",
+                backup.display()
+            ));
+        }
+        Ok(name.to_string())
+    }
+
+    fn dependency_update_recovery_journal(
+        layout: &AppLayout,
+        rollback: &DependencyUpdateRollback,
+        status: DependencyUpdateRecoveryStatus,
+    ) -> Result<DependencyUpdateRecoveryJournal, String> {
+        let files = rollback
+            .files
+            .iter()
+            .map(|file| DependencyUpdateRecoveryFile {
+                relative: file.relative.to_string(),
+                bytes: file.bytes.clone(),
+            })
+            .collect();
+        let journal = DependencyUpdateRecoveryJournal {
+            schema_version: DEPENDENCY_UPDATE_RECOVERY_SCHEMA_VERSION,
+            app_id: layout.app_id().to_string(),
+            status,
+            previous_dependency: rollback.previous_dependency.clone(),
+            files,
+            manifest_bytes: rollback.manifest_bytes.clone(),
+            node_modules_backup: rollback
+                .node_modules_backup
+                .as_deref()
+                .map(|backup| {
+                    Self::dependency_update_backup_name(
+                        layout,
+                        backup,
+                        "dependency-update-rollback-node_modules-",
+                    )
+                })
+                .transpose()?,
+            build_backup: rollback
+                .build_backup
+                .as_deref()
+                .map(|backup| {
+                    Self::dependency_update_backup_name(
+                        layout,
+                        backup,
+                        "dependency-update-rollback-build-",
+                    )
+                })
+                .transpose()?,
+        };
+        Self::validate_dependency_update_recovery_journal(layout, &journal)?;
+        Ok(journal)
+    }
+
+    fn dependency_update_backup_path(
+        layout: &AppLayout,
+        name: &str,
+        kind: &str,
+    ) -> Result<PathBuf, String> {
+        if name.is_empty() || !name.starts_with(kind) || name.len() == kind.len() {
+            return Err(format!("invalid dependency rollback backup name: {name:?}"));
+        }
+        let path = Path::new(name);
+        let mut components = path.components();
+        if !matches!(components.next(), Some(Component::Normal(_))) || components.next().is_some() {
+            return Err(format!(
+                "dependency rollback backup must be a single path component: {name:?}"
+            ));
+        }
+        let state_root = layout
+            .root()
+            .join(layout.workspace_rel())
+            .join(".lingxi-build-state");
+        Ok(state_root.join(name))
+    }
+
+    fn validate_dependency_update_recovery_journal(
+        layout: &AppLayout,
+        journal: &DependencyUpdateRecoveryJournal,
+    ) -> Result<(), String> {
+        if journal.schema_version != DEPENDENCY_UPDATE_RECOVERY_SCHEMA_VERSION {
+            return Err(format!(
+                "dependency update recovery journal schemaVersion {} is unsupported (expected {})",
+                journal.schema_version, DEPENDENCY_UPDATE_RECOVERY_SCHEMA_VERSION
+            ));
+        }
+        if journal.app_id != layout.app_id() {
+            return Err(format!(
+                "dependency update recovery journal belongs to app {}, expected {}",
+                journal.app_id,
+                layout.app_id()
+            ));
+        }
+        if journal.previous_dependency.app_id != layout.app_id() {
+            return Err(format!(
+                "dependency update recovery record belongs to app {}, expected {}",
+                journal.previous_dependency.app_id,
+                layout.app_id()
+            ));
+        }
+        if journal.previous_dependency.schema_version != local_apps::APPS_SCHEMA_VERSION {
+            return Err(format!(
+                "dependency update recovery record schemaVersion {} is unsupported (expected {})",
+                journal.previous_dependency.schema_version,
+                local_apps::APPS_SCHEMA_VERSION
+            ));
+        }
+        if journal.files.len() > 16 {
+            return Err("dependency update recovery journal has too many files".into());
+        }
+        let mut total_bytes = journal.manifest_bytes.len();
+        let mut seen = std::collections::HashSet::new();
+        for file in &journal.files {
+            if !Self::dependency_update_file_is_allowed(&file.relative) {
+                return Err(format!(
+                    "dependency update recovery journal contains an unexpected file: {}",
+                    file.relative
+                ));
+            }
+            let path = Path::new(&file.relative);
+            if file.relative.is_empty()
+                || path
+                    .components()
+                    .any(|component| !matches!(component, Component::Normal(_)))
+                || !seen.insert(file.relative.as_str())
+            {
+                return Err(format!(
+                    "dependency update recovery journal contains an unsafe or duplicate file: {}",
+                    file.relative
+                ));
+            }
+            total_bytes = total_bytes.saturating_add(file.bytes.as_ref().map_or(0, Vec::len));
+            if total_bytes > MAX_DEPENDENCY_UPDATE_RECOVERY_BYTES {
+                return Err("dependency update recovery journal is too large".into());
+            }
+        }
+        for expected in [
+            crate::local_app_runtime_profiles::REQUESTED_FILE_REL,
+            crate::local_app_runtime_profiles::EFFECTIVE_PACKAGE_FILE_REL,
+            crate::local_app_runtime_profiles::LOCKFILE_FILE_REL,
+            crate::local_app_runtime_profiles::TREE_PROOF_FILE_REL,
+            crate::local_app_runtime_profiles::SBOM_FILE_REL,
+            crate::local_app_runtime_profiles::SNAPSHOT_FILE_REL,
+            "package.json",
+            "pnpm-lock.yaml",
+            WORKSPACE_DEPENDENCY_ATTESTATION_FILE,
+        ] {
+            if !seen.iter().any(|relative| *relative == expected) {
+                return Err(format!(
+                    "dependency update recovery journal is missing file: {expected}"
+                ));
+            }
+        }
+        let manifest: local_apps::AppManifest = serde_json::from_slice(&journal.manifest_bytes)
+            .map_err(|error| format!("parse dependency update recovery manifest: {error}"))?;
+        if manifest.app_id != layout.app_id() {
+            return Err(format!(
+                "dependency update recovery manifest belongs to app {}, expected {}",
+                manifest.app_id,
+                layout.app_id()
+            ));
+        }
+        manifest
+            .validate()
+            .map_err(|error| format!("validate dependency update recovery manifest: {error}"))?;
+        if let Some(name) = &journal.node_modules_backup {
+            Self::dependency_update_backup_path(
+                layout,
+                name,
+                "dependency-update-rollback-node_modules-",
+            )?;
+        }
+        if let Some(name) = &journal.build_backup {
+            Self::dependency_update_backup_path(layout, name, "dependency-update-rollback-build-")?;
+        }
+        Ok(())
+    }
+
+    fn write_dependency_update_recovery_journal(
+        layout: &AppLayout,
+        journal: &DependencyUpdateRecoveryJournal,
+    ) -> Result<(), String> {
+        Self::validate_dependency_update_recovery_journal(layout, journal)?;
+        let mut bytes = serde_json::to_vec(journal)
+            .map_err(|error| format!("serialize dependency update recovery journal: {error}"))?;
+        bytes.push(b'\n');
+        if bytes.len() > MAX_DEPENDENCY_UPDATE_RECOVERY_BYTES {
+            return Err("dependency update recovery journal is too large".into());
+        }
+        let workspace = Self::dependency_update_workspace(layout)?;
+        crate::local_apps_build::write_file(
+            &workspace,
+            DEPENDENCY_UPDATE_RECOVERY_FILE_REL,
+            &bytes,
+            true,
+        )
+        .map_err(|error| format!("write dependency update recovery journal: {error}"))
+    }
+
+    fn load_dependency_update_recovery_journal(
+        layout: &AppLayout,
+    ) -> Result<Option<DependencyUpdateRecoveryJournal>, String> {
+        let _workspace = Self::dependency_update_workspace(layout)?;
+        let path = Self::dependency_update_recovery_path(layout);
+        let metadata = match std::fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => {
+                return Err(format!(
+                    "inspect dependency update recovery journal {}: {error}",
+                    path.display()
+                ))
+            }
+        };
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            return Err(format!(
+                "dependency update recovery journal is not a regular file: {}",
+                path.display()
+            ));
+        }
+        if metadata.len() > MAX_DEPENDENCY_UPDATE_RECOVERY_BYTES as u64 {
+            return Err(format!(
+                "dependency update recovery journal is too large: {}",
+                path.display()
+            ));
+        }
+        let bytes = std::fs::read(&path).map_err(|error| {
+            format!(
+                "read dependency update recovery journal {}: {error}",
+                path.display()
+            )
+        })?;
+        if bytes.len() > MAX_DEPENDENCY_UPDATE_RECOVERY_BYTES {
+            return Err(format!(
+                "dependency update recovery journal is too large: {}",
+                path.display()
+            ));
+        }
+        let journal: DependencyUpdateRecoveryJournal = serde_json::from_slice(&bytes)
+            .map_err(|error| format!("parse dependency update recovery journal: {error}"))?;
+        Self::validate_dependency_update_recovery_journal(layout, &journal)?;
+        Ok(Some(journal))
+    }
+
+    fn remove_dependency_update_recovery_journal(layout: &AppLayout) -> Result<(), String> {
+        Self::remove_owned_path(&Self::dependency_update_recovery_path(layout))
+    }
+
+    fn restore_dependency_update_recovery_files(
+        layout: &AppLayout,
+        journal: &DependencyUpdateRecoveryJournal,
+    ) -> Result<(), String> {
+        Self::validate_dependency_update_recovery_journal(layout, journal)?;
+        let workspace = Self::dependency_update_workspace(layout)?;
+        for file in &journal.files {
+            let path = workspace.join(&file.relative);
+            match &file.bytes {
+                Some(bytes) => {
+                    crate::local_apps_build::write_file(&workspace, &file.relative, bytes, true)
+                        .map_err(|error| error.to_string())?
+                }
+                None => {
+                    if std::fs::symlink_metadata(&path).is_ok() {
+                        Self::remove_owned_path(&path)?;
+                    }
+                }
+            }
+        }
+        let manifest: local_apps::AppManifest = serde_json::from_slice(&journal.manifest_bytes)
+            .map_err(|error| format!("parse dependency rollback manifest: {error}"))?;
+        local_apps::save_manifest(layout, &manifest).map_err(|error| error.to_string())?;
+
+        let node_modules = workspace.join("node_modules");
+        if std::fs::symlink_metadata(&node_modules).is_ok() {
+            Self::remove_owned_path(&node_modules)?;
+        }
+        if let Some(name) = &journal.node_modules_backup {
+            let backup = Self::dependency_update_backup_path(
+                layout,
+                name,
+                "dependency-update-rollback-node_modules-",
+            )?;
+            let metadata = std::fs::symlink_metadata(&backup).map_err(|error| {
+                format!(
+                    "inspect dependency rollback tree {}: {error}",
+                    backup.display()
+                )
+            })?;
+            if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                return Err(format!(
+                    "dependency rollback tree is not a real directory: {}",
+                    backup.display()
+                ));
+            }
+            clone_or_copy_tree(&backup, &node_modules).map_err(|error| {
+                format!(
+                    "restore dependency rollback tree {}: {error}",
+                    node_modules.display()
+                )
+            })?;
+        }
+
+        let build_root = layout.root().join(layout.build_rel(false));
+        if std::fs::symlink_metadata(&build_root).is_ok() {
+            Self::remove_owned_path(&build_root)?;
+        }
+        if let Some(name) = &journal.build_backup {
+            let backup = Self::dependency_update_backup_path(
+                layout,
+                name,
+                "dependency-update-rollback-build-",
+            )?;
+            let metadata = std::fs::symlink_metadata(&backup).map_err(|error| {
+                format!(
+                    "inspect dependency rollback build {}: {error}",
+                    backup.display()
+                )
+            })?;
+            if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                return Err(format!(
+                    "dependency rollback build is not a real directory: {}",
+                    backup.display()
+                ));
+            }
+            clone_or_copy_tree(&backup, &build_root).map_err(|error| {
+                format!(
+                    "restore dependency rollback build {}: {error}",
+                    build_root.display()
+                )
+            })?;
+        }
+        local_apps::storage::save_dependency_record(layout.root(), &journal.previous_dependency)
+            .map_err(|error| format!("restore dependency record: {error}"))
+    }
+
+    fn cleanup_dependency_update_recovery(
+        layout: &AppLayout,
+        journal: &DependencyUpdateRecoveryJournal,
+    ) -> Result<(), String> {
+        Self::validate_dependency_update_recovery_journal(layout, journal)?;
+        let workspace = Self::dependency_update_workspace(layout)?;
+        let staging = workspace.join(".lingxi-build-state/dependency-staging");
+        Self::remove_owned_path(&staging)?;
+        if let Some(name) = &journal.node_modules_backup {
+            let path = Self::dependency_update_backup_path(
+                layout,
+                name,
+                "dependency-update-rollback-node_modules-",
+            )?;
+            Self::remove_owned_path(&path)?;
+        }
+        if let Some(name) = &journal.build_backup {
+            let path = Self::dependency_update_backup_path(
+                layout,
+                name,
+                "dependency-update-rollback-build-",
+            )?;
+            Self::remove_owned_path(&path)?;
+        }
+        Self::remove_dependency_update_recovery_journal(layout)
+    }
+
+    pub(crate) fn recover_dependency_updates_on_boot(root: &Path) -> Result<(), String> {
+        let apps_root = root.join("apps");
+        let metadata = match std::fs::symlink_metadata(&apps_root) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(format!("inspect local apps directory: {error}")),
+        };
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            return Err(format!(
+                "local apps directory is not a real directory: {}",
+                apps_root.display()
+            ));
+        }
+        let mut first_error = None;
+        let entries = std::fs::read_dir(&apps_root)
+            .map_err(|error| format!("read local apps directory: {error}"))?;
+        for entry in entries {
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(error) => {
+                    if first_error.is_none() {
+                        first_error = Some(format!("read local app entry: {error}"));
+                    }
+                    continue;
+                }
+            };
+            let app_path = entry.path();
+            let app_metadata = match std::fs::symlink_metadata(&app_path) {
+                Ok(metadata) => metadata,
+                Err(error) => {
+                    if first_error.is_none() {
+                        first_error = Some(format!(
+                            "inspect local app entry {}: {error}",
+                            app_path.display()
+                        ));
+                    }
+                    continue;
+                }
+            };
+            if app_metadata.file_type().is_symlink() || !app_metadata.is_dir() {
+                continue;
+            }
+            let app_name = entry.file_name();
+            let Some(app_id) = app_name.to_str() else {
+                continue;
+            };
+            let Ok(layout) = AppLayout::new(root.to_path_buf(), app_id.to_string()) else {
+                continue;
+            };
+            let has_journal =
+                match std::fs::symlink_metadata(Self::dependency_update_recovery_path(&layout)) {
+                    Ok(_) => true,
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => false,
+                    Err(error) => {
+                        if first_error.is_none() {
+                            first_error = Some(format!(
+                                "inspect dependency update recovery journal for {app_id}: {error}"
+                            ));
+                        }
+                        false
+                    }
+                };
+            if !has_journal {
+                continue;
+            }
+            let recovery_result = (|| -> Result<(), String> {
+                let _build_lock =
+                    local_apps::storage::lock_app_build(root, app_id).map_err(|error| {
+                        format!("lock app {app_id} for dependency recovery: {error}")
+                    })?;
+                let Some(journal) = Self::load_dependency_update_recovery_journal(&layout)? else {
+                    return Ok(());
+                };
+                match journal.status {
+                    DependencyUpdateRecoveryStatus::InProgress => {
+                        Self::restore_dependency_update_recovery_files(&layout, &journal)?;
+                        // Once all authoritative old state is restored, make
+                        // cleanup idempotent across another crash. A committed
+                        // journal means "keep what is on disk"; the on-disk
+                        // state is now the old state.
+                        let mut cleaned = journal.clone();
+                        cleaned.status = DependencyUpdateRecoveryStatus::Committed;
+                        Self::write_dependency_update_recovery_journal(&layout, &cleaned)?;
+                        Self::cleanup_dependency_update_recovery(&layout, &cleaned)
+                    }
+                    DependencyUpdateRecoveryStatus::Committed => {
+                        Self::cleanup_dependency_update_recovery(&layout, &journal)
+                    }
+                }
+            })();
+            if let Err(error) = recovery_result {
+                if first_error.is_none() {
+                    first_error = Some(error);
+                }
+            }
+        }
+        match first_error {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
+    }
+
+    async fn restore_dependency_update_rollback(
+        &self,
+        service: &Arc<AppService>,
+        app_id: &str,
+        layout: &AppLayout,
+        rollback: &DependencyUpdateRollback,
+    ) -> Result<(), String> {
+        if rollback.previous_dependency.app_id != app_id {
+            return Err(format!(
+                "dependency rollback record belongs to app {}, expected {app_id}",
+                rollback.previous_dependency.app_id
+            ));
+        }
+        let journal = Self::dependency_update_recovery_journal(
+            layout,
+            rollback,
+            DependencyUpdateRecoveryStatus::InProgress,
+        )?;
+        Self::restore_dependency_update_recovery_files(layout, &journal)?;
+        service
+            .restore_dependency_record(rollback.previous_dependency.clone())
             .await
             .map_err(|error| error.to_string())?;
         Ok(())
+    }
+
+    fn discard_dependency_update_rollback(rollback: DependencyUpdateRollback) {
+        if let Some(backup) = rollback.node_modules_backup {
+            if let Err(error) = Self::remove_owned_path(&backup) {
+                tracing::warn!(path = %backup.display(), error = %error, "failed to remove dependency rollback tree after commit");
+            }
+        }
+        if let Some(backup) = rollback.build_backup {
+            if let Err(error) = Self::remove_owned_path(&backup) {
+                tracing::warn!(path = %backup.display(), error = %error, "failed to remove build rollback tree after commit");
+            }
+        }
+    }
+
+    async fn dependency_install_once(
+        &self,
+        layout: &AppLayout,
+        app_id: &str,
+    ) -> Result<DependencyInstallCompletion, String> {
+        let workspace = layout.root().join(layout.workspace_rel());
+        let lock_digest = match Self::dependency_lock_digest(&layout) {
+            Ok(digest) => digest,
+            Err(error) => return Err(error),
+        };
+        let snapshot_root = self.dependency_snapshot_root(&lock_digest);
+        let snapshot_lock = self.dependency_snapshot_lock(&lock_digest).await;
+        let _snapshot_guard = snapshot_lock.lock().await;
+        let dependency_staging = match Self::prepare_dependency_staging(&layout) {
+            Ok(path) => path,
+            Err(error) => return Err(error),
+        };
+        let mut snapshot_ready =
+            match Self::dependency_snapshot_is_ready(&snapshot_root, &lock_digest) {
+                Ok(ready) => ready,
+                Err(error) => {
+                    let _ = Self::remove_owned_path(&dependency_staging);
+                    return Err(error);
+                }
+            };
+        if !snapshot_ready {
+            // First install on this device: the app bundle already carries a
+            // tree resolved from the pinned template lockfile, so adopt it
+            // instead of resolving the same 169 packages over the network
+            // inside the Linux guest.
+            //
+            // A seed that cannot be adopted is never fatal. Store builds ship
+            // none at all, an app whose lockfile has drifted legitimately needs
+            // a real install, and a damaged bundle should degrade to the slow
+            // path rather than make app creation impossible -- so failures are
+            // recorded and fall through.
+            if let Ok(runtime_root) = self.configured_runtime_root() {
+                match Self::adopt_bundled_dependency_seed(
+                    &runtime_root,
+                    &lock_digest,
+                    &snapshot_root,
+                ) {
+                    Ok(adopted) => snapshot_ready = adopted,
+                    Err(error) => {
+                        tracing::warn!(app_id = %app_id, error = %error, "bundled dependency seed could not be adopted");
+                    }
+                }
+            }
+        }
+        if snapshot_ready {
+            if let Err(error) =
+                Self::materialize_dependency_snapshot(&snapshot_root, &dependency_staging)
+            {
+                let _ = Self::remove_owned_path(&dependency_staging);
+                return Err(error);
+            }
+            return self
+                .finalize_dependency_install(&layout, &dependency_staging, &lock_digest)
+                .await;
+        }
+        let Some(runtime) = self.mobile_linux() else {
+            let _ = Self::remove_owned_path(&dependency_staging);
+            return Err(
+                "the mobile Node runtime is unavailable for dependency installation".into(),
+            );
+        };
+        let build_mount = MountSpec {
+            host_path: workspace.clone(),
+            guest_path: guest_paths::local_app_build_project(&app_id, "store"),
+            read_only: false,
+            purpose: MountPurpose::LocalAppBuild,
+        };
+        let dependency_store = self.dependency_store_root();
+        if let Err(error) = std::fs::create_dir_all(&dependency_store) {
+            let message = format!("create pnpm dependency store: {error}");
+            let _ = Self::remove_owned_path(&dependency_staging);
+            return Err(message);
+        }
+        let store_mount = MountSpec {
+            host_path: dependency_store,
+            guest_path: guest_paths::LOCAL_APP_DEPENDENCY_STORE.to_string(),
+            read_only: false,
+            purpose: MountPurpose::Shared,
+        };
+        let project_guest_path = build_mount.guest_path.clone();
+        let dependency_staging_guest_path =
+            format!("{project_guest_path}/.lingxi-build-state/dependency-staging");
+        let build_state_root = format!("{project_guest_path}/.lingxi-build-state");
+        let memory_mb =
+            crate::local_apps_build::build_memory_budget_mb(self.physical_memory_bytes());
+        let request = Self::dependency_install_request(
+            &build_mount,
+            &store_mount,
+            dependency_staging_guest_path,
+            &build_state_root,
+            memory_mb,
+            NetworkPolicy::Allowed,
+            true,
+            false,
+            true,
+        );
+        let outcome = Self::run_dependency_install_command(runtime.as_ref(), request).await;
+        match outcome {
+            Ok(()) => {
+                if let Err(error) = Self::publish_dependency_snapshot(
+                    &dependency_staging.join("node_modules"),
+                    &snapshot_root,
+                    &lock_digest,
+                ) {
+                    let _ = Self::remove_owned_path(&dependency_staging);
+                    return Err(error);
+                }
+                self.finalize_dependency_install(&layout, &dependency_staging, &lock_digest)
+                    .await
+            }
+            Err(error) => {
+                let _ = Self::remove_owned_path(&dependency_staging);
+                Err(error)
+            }
+        }
+    }
+
+    async fn install_scaffold_dependencies(
+        &self,
+        service: &Arc<AppService>,
+        app_id: &str,
+        layout: &AppLayout,
+    ) -> Result<(), String> {
+        service
+            .start_dependency_install(app_id)
+            .await
+            .map_err(|error| error.to_string())?;
+        match self.dependency_install_once(layout, app_id).await {
+            Ok(completion) => service
+                .complete_dependency_install_with_metadata(
+                    app_id,
+                    Some(completion.lockfile_sha256),
+                    Some(completion.toolchain_key),
+                )
+                .await
+                .map(|_| ())
+                .map_err(|error| error.to_string()),
+            Err(error) => {
+                let _ = service.fail_dependency_install(app_id, error.clone()).await;
+                Err(error)
+            }
+        }
+    }
+
+    async fn install_uncommitted_create_dependencies(
+        &self,
+        record: &local_apps::AppRecord,
+        layout: &AppLayout,
+    ) -> Result<(), String> {
+        update_uncommitted_dependency_record(&self.root, record, |dependency| {
+            dependency.state = local_apps::AppDependencyState::Installing;
+            dependency.install_attempts = dependency.install_attempts.saturating_add(1);
+            dependency.last_error = None;
+            dependency.updated_at_ms = now_ms();
+        })?;
+        match self.dependency_install_once(layout, &record.id).await {
+            Ok(completion) => {
+                update_uncommitted_dependency_record(&self.root, record, |dependency| {
+                    dependency.state = local_apps::AppDependencyState::Ready;
+                    dependency.lockfile_sha256 = Some(completion.lockfile_sha256);
+                    dependency.toolchain_key = Some(completion.toolchain_key);
+                    dependency.last_error = None;
+                    dependency.updated_at_ms = now_ms();
+                })
+            }
+            Err(error) => {
+                let _ = update_uncommitted_dependency_record(&self.root, record, |dependency| {
+                    dependency.state = local_apps::AppDependencyState::Failed;
+                    dependency.last_error = Some(error.clone());
+                    dependency.updated_at_ms = now_ms();
+                });
+                Err(error)
+            }
+        }
     }
 
     async fn run_dependency_install(&self, app_id: String) {
@@ -1681,244 +3386,11 @@ impl LocalAppsHostBroker {
                 return;
             }
         };
-        let workspace = layout.root().join(layout.workspace_rel());
-        let lock_digest = match Self::dependency_lock_digest(&layout) {
-            Ok(digest) => digest,
-            Err(error) => {
-                let _ = service
-                    .fail_dependency_install(&app_id, error.clone())
-                    .await;
-                tracing::warn!(app_id = %app_id, error = %error, "dependency lock digest failed");
-                return;
-            }
-        };
-        let snapshot_root = self.dependency_snapshot_root(&lock_digest);
-        let snapshot_lock = self.dependency_snapshot_lock(&lock_digest).await;
-        let _snapshot_guard = snapshot_lock.lock().await;
-        let dependency_staging = match Self::prepare_dependency_staging(&layout) {
-            Ok(path) => path,
-            Err(error) => {
-                let _ = service
-                    .fail_dependency_install(&app_id, error.clone())
-                    .await;
-                tracing::warn!(app_id = %app_id, error = %error, "dependency install staging failed");
-                return;
-            }
-        };
-        let mut snapshot_ready = match Self::dependency_snapshot_is_ready(
-            &snapshot_root,
-            &lock_digest,
-        ) {
-            Ok(ready) => ready,
-            Err(error) => {
-                let _ = Self::remove_owned_path(&dependency_staging);
-                let _ = service
-                    .fail_dependency_install(&app_id, error.clone())
-                    .await;
-                tracing::warn!(app_id = %app_id, error = %error, "dependency snapshot validation failed");
-                return;
-            }
-        };
-        if !snapshot_ready {
-            // First install on this device: the app bundle already carries a
-            // tree resolved from the pinned template lockfile, so adopt it
-            // instead of resolving the same 169 packages over the network
-            // inside the Linux guest.
-            //
-            // A seed that cannot be adopted is never fatal. Store builds ship
-            // none at all, an app whose lockfile has drifted legitimately needs
-            // a real install, and a damaged bundle should degrade to the slow
-            // path rather than make app creation impossible -- so failures are
-            // recorded and fall through.
-            if let Ok(runtime_root) = self.configured_runtime_root() {
-                match Self::adopt_bundled_dependency_seed(
-                    &runtime_root,
-                    &lock_digest,
-                    &snapshot_root,
-                ) {
-                    Ok(adopted) => snapshot_ready = adopted,
-                    Err(error) => {
-                        tracing::warn!(app_id = %app_id, error = %error, "bundled dependency seed could not be adopted");
-                    }
-                }
-            }
-        }
-        if snapshot_ready {
-            if let Err(error) =
-                Self::materialize_dependency_snapshot(&snapshot_root, &dependency_staging)
-            {
-                let _ = Self::remove_owned_path(&dependency_staging);
-                let _ = service
-                    .fail_dependency_install(&app_id, error.clone())
-                    .await;
-                tracing::warn!(app_id = %app_id, error = %error, "dependency snapshot promotion failed");
-                return;
-            }
-            if let Err(error) = self
-                .finalize_dependency_install(
-                    &service,
-                    &layout,
-                    &app_id,
-                    &dependency_staging,
-                    &lock_digest,
-                )
-                .await
-            {
-                let _ = service
-                    .fail_dependency_install(&app_id, error.clone())
-                    .await;
-                tracing::warn!(app_id = %app_id, error = %error, "dependency snapshot verification failed");
-            }
-            return;
-        }
-        let Some(runtime) = self.mobile_linux() else {
-            let error = "the mobile Node runtime is unavailable for dependency installation";
-            let _ = service
-                .fail_dependency_install(&app_id, error.to_string())
-                .await;
-            tracing::warn!(app_id = %app_id, error, "dependency install has no mobile runtime");
-            return;
-        };
-        let build_mount = MountSpec {
-            host_path: workspace.clone(),
-            guest_path: guest_paths::local_app_build_project(&app_id, "store"),
-            read_only: false,
-            purpose: MountPurpose::LocalAppBuild,
-        };
-        let dependency_store = self.dependency_store_root();
-        if let Err(error) = std::fs::create_dir_all(&dependency_store) {
-            let message = format!("create pnpm dependency store: {error}");
-            let _ = Self::remove_owned_path(&dependency_staging);
-            let _ = service
-                .fail_dependency_install(&app_id, message.clone())
-                .await;
-            tracing::warn!(app_id = %app_id, error = %message, "dependency install could not create store");
-            return;
-        }
-        let store_mount = MountSpec {
-            host_path: dependency_store,
-            guest_path: guest_paths::LOCAL_APP_DEPENDENCY_STORE.to_string(),
-            read_only: false,
-            purpose: MountPurpose::Shared,
-        };
-        let project_guest_path = build_mount.guest_path.clone();
-        let dependency_staging_guest_path =
-            format!("{project_guest_path}/.lingxi-build-state/dependency-staging");
-        let build_state_root = format!("{project_guest_path}/.lingxi-build-state");
-        let mut env = std::collections::BTreeMap::new();
-        env.insert("CI".into(), "1".into());
-        env.insert("HOME".into(), format!("{build_state_root}/home"));
-        env.insert("TMPDIR".into(), format!("{build_state_root}/tmp"));
-        env.insert("TMP".into(), format!("{build_state_root}/tmp"));
-        env.insert("TEMP".into(), format!("{build_state_root}/tmp"));
-        env.insert(
-            "XDG_CACHE_HOME".into(),
-            format!("{build_state_root}/xdg-cache"),
-        );
-        env.insert(
-            "XDG_CONFIG_HOME".into(),
-            format!("{build_state_root}/xdg-config"),
-        );
-        env.insert(
-            "XDG_DATA_HOME".into(),
-            format!("{build_state_root}/xdg-data"),
-        );
-        env.insert("PNPM_HOME".into(), format!("{build_state_root}/pnpm-home"));
-        env.insert(
-            "COREPACK_HOME".into(),
-            format!("{build_state_root}/corepack"),
-        );
-        let pnpm_store_root = guest_paths::LOCAL_APP_DEPENDENCY_STORE.to_string();
-        let memory_mb =
-            crate::local_apps_build::build_memory_budget_mb(self.physical_memory_bytes());
-        let resource_limits = ResourceLimits {
-            max_memory_mb: Some(memory_mb),
-            ..ResourceLimits::default()
-        };
-        let request = LinuxCommandRequest {
-            command: "/usr/bin/pnpm".into(),
-            args: vec![
-                "install".into(),
-                "--frozen-lockfile".into(),
-                "--ignore-scripts".into(),
-                "--no-runtime".into(),
-                "--prefer-offline".into(),
-                "--store-dir".into(),
-                pnpm_store_root,
-                "--reporter=append-only".into(),
-            ],
-            cwd: Some(dependency_staging_guest_path),
-            env,
-            stdin: None,
-            timeout_ms: Some(DEPENDENCY_INSTALL_TIMEOUT.as_millis() as u64),
-            network: NetworkPolicy::Allowed,
-            resource_limits,
-            mounts: vec![build_mount, store_mount],
-        };
-        let install = runtime.run_isolated(request).await;
-        let outcome = match install {
-            Ok(result) => {
-                if let Err(error) = result
-                    .enforcement
-                    .ensure_for(NetworkPolicy::Allowed, resource_limits)
-                {
-                    Err(error.to_string())
-                } else if result.timed_out || result.cancelled || result.exit_code != 0 {
-                    let detail = if !result.stderr.trim().is_empty() {
-                        result.stderr
-                    } else {
-                        result.stdout
-                    };
-                    Err(format!(
-                        "pnpm install failed (exit_code={}, timed_out={}, cancelled={}): {}",
-                        result.exit_code,
-                        result.timed_out,
-                        result.cancelled,
-                        detail.chars().take(8_000).collect::<String>()
-                    ))
-                } else {
-                    Ok(())
-                }
-            }
-            Err(error) => Err(format!("dependency install worker failed: {error}")),
-        };
-        match outcome {
-            Ok(()) => {
-                if let Err(error) = Self::publish_dependency_snapshot(
-                    &dependency_staging.join("node_modules"),
-                    &snapshot_root,
-                    &lock_digest,
-                ) {
-                    let _ = Self::remove_owned_path(&dependency_staging);
-                    let _ = service
-                        .fail_dependency_install(&app_id, error.clone())
-                        .await;
-                    tracing::warn!(app_id = %app_id, error = %error, "dependency snapshot publication failed");
-                    return;
-                }
-                if let Err(error) = self
-                    .finalize_dependency_install(
-                        &service,
-                        &layout,
-                        &app_id,
-                        &dependency_staging,
-                        &lock_digest,
-                    )
-                    .await
-                {
-                    let _ = service
-                        .fail_dependency_install(&app_id, error.clone())
-                        .await;
-                    tracing::warn!(app_id = %app_id, error = %error, "dependency install verification failed");
-                }
-            }
-            Err(error) => {
-                let _ = Self::remove_owned_path(&dependency_staging);
-                let _ = service
-                    .fail_dependency_install(&app_id, error.clone())
-                    .await;
-                tracing::warn!(app_id = %app_id, error = %error, "dependency install failed");
-            }
+        if let Err(error) = self
+            .install_scaffold_dependencies(&service, &app_id, &layout)
+            .await
+        {
+            tracing::warn!(app_id = %app_id, error = %error, "dependency install failed");
         }
     }
 
@@ -2132,6 +3604,34 @@ impl LocalAppsHostBroker {
             .await
             .remove(request_id)
             .is_some_and(|sender| sender.send(decision).is_ok())
+    }
+
+    pub(crate) async fn resolve_runtime_profile_selection(
+        &self,
+        request_id: &str,
+        selected_family: Option<AppRuntimeProfileDto>,
+    ) -> bool {
+        self.pending_runtime_profile_selections
+            .lock()
+            .await
+            .remove(request_id)
+            .is_some_and(|sender| sender.send(selected_family).is_ok())
+    }
+
+    /// Resolve one native dependency-change confirmation request.  This is a
+    /// separate one-shot channel from generic capability approvals so the
+    /// package diff and supply-chain policy shown by the client cannot be
+    /// replaced by a generic allow/deny response.
+    pub(crate) async fn resolve_dependency_change_confirmation(
+        &self,
+        request_id: &str,
+        approved: bool,
+    ) -> bool {
+        self.pending_dependency_change_confirmations
+            .lock()
+            .await
+            .remove(request_id)
+            .is_some_and(|sender| sender.send(approved).is_ok())
     }
 
     pub(crate) async fn resolve_ui(
@@ -2358,6 +3858,217 @@ impl LocalAppsHostBroker {
             return Err("user denied destructive manifest migration".into());
         }
         Ok(())
+    }
+
+    async fn runtime_profiles_value(&self, _input: Value) -> Result<Value, String> {
+        Ok(json!({
+            "profiles": crate::local_app_runtime_profiles::list_runtime_profiles()
+                .into_iter()
+                .map(|entry| {
+                    let dependency_status = if entry.available {
+                        self.runtime_profile_dependency_availability(entry.family, entry.revision)
+                    } else {
+                        RuntimeProfileDependencyAvailability::DownloadRequired
+                    };
+                    json!({
+                        "family": entry.family.as_str(),
+                        "revision": entry.revision,
+                        "surface": entry.surface.as_str(),
+                        "toolchain_key": entry.toolchain_key,
+                        "core_packages": entry.core_packages,
+                        "contract_sha256": entry.contract_sha256,
+                        "available": entry.available,
+                        "availability_reason": entry.availability_reason,
+                        // Cache/download both describe the exact dependency
+                        // provenance. A compiled source bundle is not a
+                        // dependency cache: only a verified shared snapshot
+                        // is `cached`, a matching configured seed is
+                        // `bundled`, and neither is `download_required`.
+                        "cache_status": if !entry.available { "unavailable" } else {
+                            dependency_status.as_str()
+                        },
+                        "download_status": if !entry.available { "gated" } else {
+                            dependency_status.as_str()
+                        },
+                        "available_migrations": local_apps::RUNTIME_PROFILE_MIGRATION_EDGES
+                            .iter()
+                            .filter(|edge| edge.family == entry.family && edge.from_revision == entry.revision)
+                            .map(|edge| json!({
+                                "family": edge.family.as_str(),
+                                "from_revision": edge.from_revision,
+                                "to_revision": edge.to_revision,
+                                "rebuild_compatible": edge.rebuild_compatible,
+                            }))
+                            .collect::<Vec<_>>(),
+                    })
+                })
+                .collect::<Vec<_>>(),
+        }))
+    }
+
+    fn read_json_object(path: &Path) -> Option<Value> {
+        let metadata = std::fs::symlink_metadata(path).ok()?;
+        if !metadata.is_file() || metadata.file_type().is_symlink() {
+            return None;
+        }
+        let bytes = std::fs::read(path).ok()?;
+        let value: Value = serde_json::from_slice(bytes.as_slice()).ok()?;
+        let _ = value.as_object()?;
+        Some(value)
+    }
+
+    /// Whether this host already has a verified dependency tree for the exact
+    /// profile lock, either in the shared cache or in the configured bundled
+    /// runtime seed. Read-only: unlike `adopt_bundled_dependency_seed`, this
+    /// helper never publishes a cache entry.
+    fn runtime_profile_dependency_availability(
+        &self,
+        family: AppRuntimeProfile,
+        revision: u32,
+    ) -> RuntimeProfileDependencyAvailability {
+        let Ok(binding) = crate::local_app_runtime_profiles::current_binding_for_family(family)
+        else {
+            return RuntimeProfileDependencyAvailability::DownloadRequired;
+        };
+        if binding.revision != revision {
+            return RuntimeProfileDependencyAvailability::DownloadRequired;
+        }
+        let Ok(contract) = crate::local_app_runtime_profiles::contract_for_binding(&binding) else {
+            return RuntimeProfileDependencyAvailability::DownloadRequired;
+        };
+        let lock_digest = crate::local_app_runtime_profiles::lockfile_sha256(contract);
+        let snapshot_root = self.dependency_snapshot_root(&lock_digest);
+        if Self::dependency_snapshot_is_ready(&snapshot_root, &lock_digest).unwrap_or(false) {
+            return RuntimeProfileDependencyAvailability::Cached;
+        }
+        let Ok(runtime_root) = self.configured_runtime_root() else {
+            return RuntimeProfileDependencyAvailability::DownloadRequired;
+        };
+        let Some(manifest) = Self::read_json_object(&runtime_root.join(BUNDLED_SEED_MANIFEST_FILE))
+        else {
+            return RuntimeProfileDependencyAvailability::DownloadRequired;
+        };
+        if manifest.get("pnpm_lock_sha256").and_then(Value::as_str) != Some(lock_digest.as_str()) {
+            return RuntimeProfileDependencyAvailability::DownloadRequired;
+        }
+        let Ok(metadata) = std::fs::symlink_metadata(runtime_root.join("node_modules")) else {
+            return RuntimeProfileDependencyAvailability::DownloadRequired;
+        };
+        if metadata.is_dir() && !metadata.file_type().is_symlink() {
+            RuntimeProfileDependencyAvailability::Bundled
+        } else {
+            RuntimeProfileDependencyAvailability::DownloadRequired
+        }
+    }
+
+    async fn confirm_runtime_profile_value(&self, input: Value) -> Result<Value, String> {
+        let app_id = required_string(&input, "app_id")?.to_string();
+        let recommended = input
+            .get("recommended_profile")
+            .and_then(Value::as_str)
+            .map(local_apps::AppRuntimeProfile::parse)
+            .transpose()
+            .map_err(|error| format!("invalid_argument: {error}"))?;
+        let service = self.service()?;
+        let record = service
+            .record(&app_id)
+            .await
+            .map_err(|error| error.to_string())?;
+        if record.scaffolded {
+            return Err(format!(
+                "app {app_id} is already scaffolded; runtime profile is immutable after scaffold"
+            ));
+        }
+        let options = crate::local_app_runtime_profiles::list_runtime_profiles()
+            .into_iter()
+            .map(|entry| {
+                let dependency_status = if entry.available {
+                    self.runtime_profile_dependency_availability(entry.family, entry.revision)
+                } else {
+                    RuntimeProfileDependencyAvailability::DownloadRequired
+                };
+                AppRuntimeProfileOptionDto {
+                    family: lower_runtime_profile_family(entry.family),
+                    revision: entry.revision,
+                    contract_sha256: entry.contract_sha256.clone(),
+                    surface: lower_surface(entry.surface),
+                    core_packages: entry
+                        .core_packages
+                        .into_iter()
+                        .map(|(name, version)| AppRuntimeProfilePackageDto {
+                            name: name.to_string(),
+                            version: version.to_string(),
+                        })
+                        .collect(),
+                    cache_status: if entry.available {
+                        dependency_status.as_str()
+                    } else {
+                        "unavailable"
+                    }
+                    .into(),
+                    download_status: if entry.available {
+                        dependency_status.as_str()
+                    } else {
+                        "gated"
+                    }
+                    .into(),
+                    available: entry.available,
+                    reason: entry.availability_reason.map(str::to_string),
+                }
+            })
+            .collect::<Vec<_>>();
+        let request_id = self.request_id("app-runtime-profile-selection");
+        let (sender, receiver) = oneshot::channel();
+        self.pending_runtime_profile_selections
+            .lock()
+            .await
+            .insert(request_id.clone(), sender);
+        self.event_sink
+            .emit(ClientEvent::AppEvent {
+                event: AppEventDto::AppRuntimeProfileSelectionRequested {
+                    request: AppRuntimeProfileSelectionRequestDto {
+                        request_id: request_id.clone(),
+                        app_id: app_id.clone(),
+                        reason: "Choose the immutable runtime family for this Local App. The family cannot be changed after scaffold; later upgrades require an explicit same-family migration.".into(),
+                        recommended_family: recommended.map(lower_runtime_profile_family),
+                        options,
+                    },
+                },
+            })
+            .await;
+        let selected = match timeout(APPROVAL_TIMEOUT, receiver).await {
+            Ok(Ok(Some(selected))) => raise_runtime_profile_family(selected)?,
+            Ok(Ok(None)) => return Err("user cancelled runtime profile selection".into()),
+            Ok(Err(_)) => return Err("runtime profile selection was cancelled".into()),
+            Err(_) => {
+                self.pending_runtime_profile_selections
+                    .lock()
+                    .await
+                    .remove(&request_id);
+                return Err("runtime profile selection timed out".into());
+            }
+        };
+        let binding = crate::local_app_runtime_profiles::current_binding_for_family(selected)
+            .map_err(|error| format!("selected runtime profile is unavailable: {error}"))?;
+        let receipt = self
+            .issue_runtime_profile_receipt(&app_id, binding.clone())
+            .await?;
+        Ok(json!({
+            "ok": true,
+            "app_id": app_id,
+            "runtime_profile": {
+                "family": binding.family.as_str(),
+                "revision": binding.revision,
+                "contract_sha256": binding.contract_sha256,
+                "surface": binding.family.surface().as_str(),
+            },
+            "receipt": {
+                "id": receipt.receipt_id,
+                "app_id": receipt.app_id,
+                "issued_at_ms": receipt.issued_at_ms,
+                "expires_at_ms": receipt.expires_at_ms,
+            }
+        }))
     }
 
     async fn query_data_value(&self, input: Value) -> Result<Value, String> {
@@ -2961,6 +4672,11 @@ impl LocalAppsHostBroker {
                 )
                 .await;
         }
+        if let Err(error) = crate::local_apps_build::validate_build_for_launch(&layout) {
+            return self
+                .fail_reserved_runtime_start(app_id, generation, None, error.to_string())
+                .await;
+        }
         let static_root = layout
             .root()
             .join(layout.build_rel(false))
@@ -3454,50 +5170,44 @@ impl LocalAppsHostBroker {
         &self,
         record: &local_apps::AppRecord,
         surface: local_apps::AppSurface,
+        runtime_profile: Option<local_apps::AppRuntimeProfile>,
     ) -> Result<(), String> {
         let layout = self.layout(&record.id)?;
-        let target = crate::local_apps_build::LocalAppBuildTarget::from_surface(surface);
-        // Record the scaffold BEFORE writing a single file.
-        //
-        // `create_app_with_initializer` has already saved the manifest, so it
-        // exists to be amended. The ordering matters: `detect_build_target`
-        // reads this field on every later build, and a workspace that was
-        // materialized but never stamped would be indistinguishable from an app
-        // created by the removed scaffold — unbuildable, with its source
-        // already on disk. Stamping first means a crash between the two steps
-        // leaves an app that can be scaffolded again, not one that cannot.
+        let requested_binding = runtime_profile
+            .map(crate::local_app_runtime_profiles::current_binding_for_family)
+            .transpose()
+            .map_err(|error| error.to_string())?;
+        let (build_lock, recovery_lock, recovery) = self
+            .land_scaffold(record, surface, requested_binding)
+            .await?;
+        if let Err(error) = self
+            .install_uncommitted_create_dependencies(record, &layout)
+            .await
         {
-            let mut manifest = local_apps::load_manifest(&layout).map_err(|e| e.to_string())?;
-            manifest.surface = Some(surface);
-            local_apps::save_manifest(&layout, &manifest).map_err(|e| e.to_string())?;
+            let recovery_error = recovery.rollback().err();
+            drop(build_lock);
+            drop(recovery_lock);
+            return Err(match recovery_error {
+                Some(recovery_error) => {
+                    format!("{error}; scaffold rollback failed: {recovery_error}")
+                }
+                None => error,
+            });
         }
-        // Write the per-app LINGXI.md context file at the workspace root:
-        // every session rooted in this workspace auto-loads it into the
-        // system context (`orchestrator::prompt::real_provider`), so the
-        // agent starts with the brief + the workspace contract without any
-        // prompt plumbing. It sits OUTSIDE the writable roots, so the agent
-        // cannot edit its own contract.
-        let workspace = layout.root().join(layout.workspace_rel());
-        let context = formal_workspace_contract(record, surface);
-        tokio::task::spawn_blocking(move || {
-            crate::local_apps_build::scaffold_workspace_initialized(&layout, target, true)?;
-            std::fs::write(workspace.join("LINGXI.md"), context).map_err(|error| {
-                local_apps::AppError::Io(format!("write workspace LINGXI.md: {error}"))
-            })
-        })
-        .await
-        .map_err(|error| format!("join workspace scaffold worker: {error}"))?
-        .map_err(|error| error.to_string())?;
-        // Stamp the native target the app is being generated for. Done here,
-        // on the manifest `create_app_with_initializer` already wrote, so an
-        // app carries its target from creation whether or not the agent ever
-        // calls `LocalAppManifest`.
-        if let Some(device_context) = self.host_device_context() {
-            let layout = self.layout(&record.id)?;
-            let mut manifest = local_apps::load_manifest(&layout).map_err(|e| e.to_string())?;
-            manifest.device_context = Some(device_context);
-            local_apps::save_manifest(&layout, &manifest).map_err(|e| e.to_string())?;
+        if let Err(error) = recovery.commit() {
+            // This path is the initializer for the create-with-scaffold
+            // transaction. AppService still owns the outer index commit, so
+            // cleanup failure must not turn a successfully landed workspace
+            // into a false failure. A committed mirror lets the next load
+            // discard any leftover recovery material safely.
+            tracing::warn!(
+                app_id = %record.id,
+                %error,
+                "scaffold recovery cleanup deferred after initializer success"
+            );
         }
+        drop(build_lock);
+        drop(recovery_lock);
         Ok(())
     }
 
@@ -3541,64 +5251,133 @@ impl LocalAppsHostBroker {
                 local_apps::service::MAX_BRIEF_BYTES
             ));
         }
-        let surface = local_apps::AppSurface::parse(required_string(&input, "surface")?)
-            .map_err(|error| format!("invalid_argument: {error}"))?;
-        let workflow_model = match input.get("workflow_model") {
-            None | Some(Value::Null) => None,
-            Some(value) => {
-                let model = value
-                    .as_str()
-                    .ok_or_else(|| "invalid_argument: workflow_model must be a string".to_string())?
-                    .trim();
-                if model.is_empty() {
-                    None
-                } else if model.len() > local_apps::service::MAX_WORKFLOW_MODEL_BYTES {
-                    return Err(format!(
-                        "invalid_argument: workflow_model is {} bytes (limit {})",
-                        model.len(),
-                        local_apps::service::MAX_WORKFLOW_MODEL_BYTES
-                    ));
-                } else {
-                    Some(model.to_string())
+        let runtime_profile_receipt = input
+            .get("runtime_profile_receipt")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+            .ok_or_else(|| {
+                "invalid_argument: runtime_profile_receipt is required; native runtime-profile confirmation must happen before scaffold".to_string()
+            })?;
+        if input.get("runtime_profile").is_some() || input.get("surface").is_some() {
+            return Err(
+                "invalid_argument: runtime_profile_receipt is authoritative; do not also send runtime_profile or surface".into(),
+            );
+        }
+        let receipt_binding = self
+            .claim_runtime_profile_receipt(&app_id, &runtime_profile_receipt)
+            .await?;
+        let scaffolded = async {
+            let surface = receipt_binding.family.surface();
+            let workflow_model = match input.get("workflow_model") {
+                None | Some(Value::Null) => None,
+                Some(value) => {
+                    let model = value
+                        .as_str()
+                        .ok_or_else(|| {
+                            "invalid_argument: workflow_model must be a string".to_string()
+                        })?
+                        .trim();
+                    if model.is_empty() {
+                        None
+                    } else if model.len() > local_apps::service::MAX_WORKFLOW_MODEL_BYTES {
+                        return Err(format!(
+                            "invalid_argument: workflow_model is {} bytes (limit {})",
+                            model.len(),
+                            local_apps::service::MAX_WORKFLOW_MODEL_BYTES
+                        ));
+                    } else {
+                        Some(model.to_string())
+                    }
+                }
+            };
+
+            let service = self.service()?;
+            let record = service
+                .record(&app_id)
+                .await
+                .map_err(|error| error.to_string())?;
+            let original_dependency = service
+                .dependency_record(&app_id)
+                .await
+                .map_err(|error| error.to_string())?;
+            if record.scaffolded {
+                return Err(format!(
+                    "app {app_id} is already scaffolded; its shape and name were fixed when it was \
+                     formed and cannot be changed"
+                ));
+            }
+
+            let mut proposed = record.clone();
+            proposed.name = name.clone();
+            proposed.brief = brief.clone();
+            if let Some(model) = &workflow_model {
+                proposed.workflow_model = Some(model.clone());
+            }
+            let (build_lock, recovery_lock, recovery) = self
+                .land_scaffold(&proposed, surface, Some(receipt_binding.clone()))
+                .await?;
+            let layout = self.layout(&app_id)?;
+            let result: Result<local_apps::AppRecord, String> = async {
+                self.install_scaffold_dependencies(&service, &app_id, &layout)
+                    .await?;
+                service
+                    .commit_scaffold(&app_id, &name, &brief, workflow_model.as_deref())
+                    .await
+                    .map_err(|error| error.to_string())
+            }
+            .await;
+            match result {
+                Ok(committed) => {
+                    if let Err(error) = recovery.commit() {
+                        tracing::warn!(
+                            app_id = %app_id,
+                            %error,
+                            "scaffold recovery cleanup deferred after commit"
+                        );
+                    }
+                    drop(build_lock);
+                    drop(recovery_lock);
+                    Ok(committed)
+                }
+                Err(error) => {
+                    let recovery_error = recovery.rollback().err();
+                    let dependency_error = service
+                        .restore_dependency_record(original_dependency.clone())
+                        .await
+                        .err()
+                        .map(|error| error.to_string());
+                    drop(build_lock);
+                    drop(recovery_lock);
+                    match (recovery_error, dependency_error) {
+                        (Some(recovery_error), Some(dependency_error)) => Err(format!(
+                            "{error}; scaffold rollback failed: {recovery_error}; dependency rollback failed: {dependency_error}"
+                        )),
+                        (Some(recovery_error), None) => {
+                            Err(format!("{error}; scaffold rollback failed: {recovery_error}"))
+                        }
+                        (None, Some(dependency_error)) => {
+                            Err(format!("{error}; dependency rollback failed: {dependency_error}"))
+                        }
+                        (None, None) => Err(error),
+                    }
                 }
             }
+        }
+        .await;
+        let committed = match scaffolded {
+            Ok(committed) => {
+                self.consume_runtime_profile_receipt(&app_id, &runtime_profile_receipt)
+                    .await;
+                committed
+            }
+            Err(error) => {
+                self.release_runtime_profile_receipt_claim(&app_id, &runtime_profile_receipt)
+                    .await;
+                return Err(error);
+            }
         };
-
-        let service = self.service()?;
-        let record = service
-            .record(&app_id)
-            .await
-            .map_err(|error| error.to_string())?;
-        // A formed app is refused BEFORE the landing, not only by the commit
-        // point's CAS: its workspace holds the user's own source and step 3
-        // would wipe it before the CAS ever ran.
-        if record.scaffolded {
-            return Err(format!(
-                "app {app_id} is already scaffolded; its shape and name were fixed when it was \
-                 formed and cannot be changed"
-            ));
-        }
-
-        // STEP 3 — land. NOTHING here is persisted to the record: `proposed`
-        // is a stack value, and the four fields it carries reach disk only at
-        // step 4. Half-committing `name` here would put a record in the user's
-        // library under a real name that still opens the interview.
-        let mut proposed = record.clone();
-        proposed.name = name.clone();
-        proposed.brief = brief.clone();
-        if let Some(model) = &workflow_model {
-            proposed.workflow_model = Some(model.clone());
-        }
-        let build_lock = self.land_scaffold(&proposed, surface).await?;
-
-        // STEP 4 — the commit point, still under the build lock so a delete
-        // cannot land between the files and the record. ONE `with_app`
-        // closure, set-once on `scaffolded`.
-        let committed = service
-            .commit_scaffold(&app_id, &name, &brief, workflow_model.as_deref())
-            .await;
-        drop(build_lock);
-        let committed = committed.map_err(|error| error.to_string())?;
 
         // STEP 5 — the pinned init session's title, AFTER the commit and
         // deliberately outside it. The interview ran in a session titled
@@ -3654,57 +5433,106 @@ impl LocalAppsHostBroker {
     /// reclaims. Returning the guard, rather than dropping it here, is what
     /// keeps it held across the commit point.
     ///
-    /// ⚠️ `manifest.surface` is stamped BEFORE any file is written, and
-    /// `record.scaffolded` is written LAST (step 4). The opposite orders are
-    /// both deliberate and must not be "harmonised": stamping the manifest
-    /// first means a crash between the two leaves an app that can be
-    /// scaffolded again rather than one that cannot, while `scaffolded` is the
-    /// outer completion flag and must not claim a landing that did not finish.
+    /// ⚠️ A durable shell snapshot/journal is written BEFORE the manifest or
+    /// workspace is changed. `manifest.surface` is stamped before the seed,
+    /// and `record.scaffolded` is written LAST (step 4). These orders are
+    /// deliberate: a crash before the record commit is rolled back from the
+    /// journal before the next service load, while a committed record causes
+    /// only recovery-material cleanup.
     async fn land_scaffold(
         &self,
         proposed: &local_apps::AppRecord,
         surface: local_apps::AppSurface,
-    ) -> Result<traits::rooted_fs::RootedFileLock, String> {
+        requested_binding: Option<local_apps::AppRuntimeProfileBinding>,
+    ) -> Result<
+        (
+            traits::rooted_fs::RootedFileLock,
+            traits::rooted_fs::RootedFileLock,
+            local_apps::storage::ScaffoldRecoveryHandle,
+        ),
+        String,
+    > {
         let layout = self.layout(&proposed.id)?;
-        let target = crate::local_apps_build::LocalAppBuildTarget::from_surface(surface);
+        let artifacts = scaffold_runtime_profile(requested_binding, surface)?;
+        let target =
+            crate::local_apps_build::LocalAppBuildTarget::from_runtime_binding(&artifacts.binding)
+                .map_err(|error| error.to_string())?;
         // Rendered from the PROPOSED record — the confirmed name and brief.
         // Rendering it from the creation record writes `# Local App: untitled`
         // with an empty brief, permanently: see `formal_workspace_contract`.
-        let context = formal_workspace_contract(proposed, surface);
+        let context = formal_workspace_contract(proposed, &artifacts.binding);
         let name = proposed.name.clone();
+        let brief = proposed.brief.clone();
         let device_context = self.host_device_context();
         let root = self.root.clone();
         let app_id = proposed.id.clone();
         tokio::task::spawn_blocking(
-            move || -> Result<traits::rooted_fs::RootedFileLock, String> {
-                // 3a — the lock, first, and held until the caller drops it.
+            move ||
+                -> Result<
+                    (
+                        traits::rooted_fs::RootedFileLock,
+                        traits::rooted_fs::RootedFileLock,
+                        local_apps::storage::ScaffoldRecoveryHandle,
+                    ),
+                    String,
+                > {
+                // 3a — take the global recovery lock before the per-app build
+                // lock. Store loading takes this global lock before its index
+                // lock, preventing an index/build inversion while recovering.
+                let recovery_lock = local_apps::storage::lock_scaffold_recovery(&root)
+                    .map_err(|error| error.to_string())?;
                 let build_lock = local_apps::storage::lock_app_build(&root, &app_id)
                     .map_err(|error| error.to_string())?;
-                // 3c — the manifest's `surface` and `name`, under the §C.1.4
-                // invariant.
-                stamp_scaffold_identity(&layout, &name, surface)?;
-                // 3d — wipe the editable surface, then seed it. `true` is the
-                // first-scaffold flag: everything an agent wrote during the
-                // interview is removed before the seed lands, because a
-                // pre-written `app/app.js` would out-resolve the seeded
-                // `app/app.jsx` and the seed would become dead code.
-                crate::local_apps_build::scaffold_workspace_initialized(&layout, target, true)
-                    .map_err(|error| error.to_string())?;
-                // 3e — the formal contract, overwriting the guided one.
-                let workspace = layout.root().join(layout.workspace_rel());
-                std::fs::write(workspace.join("LINGXI.md"), context)
-                    .map_err(|error| format!("write workspace LINGXI.md: {error}"))?;
-                // The native target, on the same manifest, so a formed app
-                // carries it whether or not the agent ever calls
-                // `LocalAppManifest`. Same first-write window as the name.
-                if let Some(device_context) = device_context {
-                    let mut manifest =
-                        local_apps::load_manifest(&layout).map_err(|error| error.to_string())?;
-                    manifest.device_context = Some(device_context);
-                    local_apps::save_manifest(&layout, &manifest)
+                // The complete shell snapshot and journal are durable before
+                // any manifest/workspace mutation. A crash after this point is
+                // therefore recoverable before the next service load.
+                let recovery = local_apps::storage::begin_scaffold_recovery(
+                    &root,
+                    &app_id,
+                    &name,
+                    &brief,
+                )
+                .map_err(|error| error.to_string())?;
+                let landed: Result<(), String> = (|| {
+                    // 3c — the manifest's `surface` and `name`, under the
+                    // §C.1.4 invariant.
+                    stamp_scaffold_identity(&layout, &name, &artifacts)?;
+                    // 3d — wipe the editable surface, then seed it. `true` is
+                    // the first-scaffold flag: everything an agent wrote during
+                    // the interview is removed before the seed lands, because
+                    // a pre-written `app/app.js` would out-resolve the seeded
+                    // `app/app.jsx` and the seed would become dead code.
+                    crate::local_apps_build::scaffold_workspace_initialized(&layout, target, true)
                         .map_err(|error| error.to_string())?;
+                    // 3e — the formal contract, overwriting the guided one.
+                    let workspace = layout.root().join(layout.workspace_rel());
+                    persist_runtime_profile_files(&workspace, &artifacts)?;
+                    std::fs::write(workspace.join("LINGXI.md"), &context)
+                        .map_err(|error| format!("write workspace LINGXI.md: {error}"))?;
+                    // The native target, on the same manifest, so a formed app
+                    // carries it whether or not the agent ever calls
+                    // `LocalAppManifest`. Same first-write window as the name.
+                    if let Some(device_context) = device_context {
+                        let mut manifest = local_apps::load_manifest(&layout)
+                            .map_err(|error| error.to_string())?;
+                        manifest.device_context = Some(device_context);
+                        local_apps::save_manifest(&layout, &manifest)
+                            .map_err(|error| error.to_string())?;
+                    }
+                    Ok(())
+                })();
+                if let Err(error) = landed {
+                    let recovery_error = recovery.rollback().err();
+                    drop(build_lock);
+                    drop(recovery_lock);
+                    return match recovery_error {
+                        Some(recovery_error) => Err(format!(
+                            "{error}; scaffold rollback failed: {recovery_error}"
+                        )),
+                        None => Err(error),
+                    };
                 }
-                Ok(build_lock)
+                Ok((build_lock, recovery_lock, recovery))
             },
         )
         .await
@@ -3729,7 +5557,7 @@ impl LocalAppsHostBroker {
 fn stamp_scaffold_identity(
     layout: &AppLayout,
     name: &str,
-    surface: local_apps::AppSurface,
+    artifacts: &crate::local_app_runtime_profiles::RuntimeProfileScaffoldArtifacts,
 ) -> Result<(), String> {
     let database = layout.database_path();
     if database.exists() {
@@ -3742,9 +5570,362 @@ fn stamp_scaffold_identity(
         ));
     }
     let mut manifest = local_apps::load_manifest(layout).map_err(|error| error.to_string())?;
-    manifest.surface = Some(surface);
+    manifest.surface = Some(artifacts.binding.family.surface());
+    manifest.runtime_profile = Some(artifacts.binding.clone());
+    manifest.dependency_snapshot = None;
     manifest.name = name.to_string();
     local_apps::save_manifest(layout, &manifest).map_err(|error| error.to_string())
+}
+
+fn scaffold_runtime_profile(
+    requested_binding: Option<local_apps::AppRuntimeProfileBinding>,
+    surface: local_apps::AppSurface,
+) -> Result<crate::local_app_runtime_profiles::RuntimeProfileScaffoldArtifacts, String> {
+    let binding = requested_binding.ok_or_else(|| {
+        "runtime profile binding is required; scaffold must consume a native confirmation receipt"
+            .to_string()
+    })?;
+    if binding.family.surface() != surface {
+        return Err(format!(
+            "runtime profile {} requires the {} surface, but scaffold requested {}",
+            binding.family,
+            binding.family.surface().as_str(),
+            surface.as_str()
+        ));
+    }
+    crate::local_app_runtime_profiles::scaffold_artifacts_for_binding(&binding)
+        .map_err(|error| error.to_string())
+}
+
+fn persist_runtime_profile_files(
+    workspace: &Path,
+    artifacts: &crate::local_app_runtime_profiles::RuntimeProfileScaffoldArtifacts,
+) -> Result<(), String> {
+    for (relative, bytes) in &artifacts.files {
+        crate::local_apps_build::write_file(workspace, relative, bytes, true)
+            .map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
+fn canonicalize_json(value: Value) -> Value {
+    match value {
+        Value::Object(object) => {
+            let ordered = object
+                .into_iter()
+                .map(|(key, value)| (key, canonicalize_json(value)))
+                .collect::<BTreeMap<_, _>>();
+            Value::Object(Map::from_iter(ordered))
+        }
+        Value::Array(values) => Value::Array(values.into_iter().map(canonicalize_json).collect()),
+        other => other,
+    }
+}
+
+fn installed_package_manifest(path: &Path) -> bool {
+    if path.file_name().and_then(|name| name.to_str()) != Some("package.json") {
+        return false;
+    }
+    let Some(package_dir) = path.parent() else {
+        return false;
+    };
+    let Some(parent) = package_dir.parent() else {
+        return false;
+    };
+    if parent.file_name().and_then(|name| name.to_str()) == Some("node_modules") {
+        return true;
+    }
+    let Some(grandparent) = parent.parent() else {
+        return false;
+    };
+    grandparent.file_name().and_then(|name| name.to_str()) == Some("node_modules")
+        && parent
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with('@'))
+}
+
+fn package_license_string(value: &Value) -> Option<String> {
+    match value {
+        Value::String(value) => Some(value.trim().to_string()).filter(|value| !value.is_empty()),
+        Value::Object(object) => object
+            .get("type")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string),
+        _ => None,
+    }
+}
+
+fn collect_installed_packages(
+    root: &Path,
+    packages: &mut BTreeMap<(String, String), Option<String>>,
+) -> Result<(), String> {
+    let entries = std::fs::read_dir(root)
+        .map_err(|error| format!("read dependency tree {}: {error}", root.display()))?;
+    for entry in entries {
+        let entry = entry.map_err(|error| format!("read dependency tree entry: {error}"))?;
+        let path = entry.path();
+        let file_type = entry.file_type().map_err(|error| {
+            format!("inspect dependency tree entry {}: {error}", path.display())
+        })?;
+        if file_type.is_symlink() {
+            continue;
+        }
+        if file_type.is_dir() {
+            collect_installed_packages(&path, packages)?;
+            continue;
+        }
+        if !file_type.is_file() || !installed_package_manifest(&path) {
+            continue;
+        }
+        let body = std::fs::read(&path).map_err(|error| {
+            format!(
+                "read installed package manifest {}: {error}",
+                path.display()
+            )
+        })?;
+        let manifest: Value = serde_json::from_slice(&body).map_err(|error| {
+            format!(
+                "parse installed package manifest {}: {error}",
+                path.display()
+            )
+        })?;
+        let name = manifest
+            .get("name")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| {
+                format!(
+                    "installed package manifest {} is missing name",
+                    path.display()
+                )
+            })?
+            .to_string();
+        let version = manifest
+            .get("version")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| {
+                format!(
+                    "installed package manifest {} is missing version",
+                    path.display()
+                )
+            })?
+            .to_string();
+        let license = manifest.get("license").and_then(package_license_string);
+        packages.entry((name, version)).or_insert(license);
+    }
+    Ok(())
+}
+
+fn spdx_ref_for_package(name: &str, version: &str) -> String {
+    let normalized = format!("{name}-{version}")
+        .chars()
+        .map(|ch| match ch {
+            'A'..='Z' | 'a'..='z' | '0'..='9' => ch,
+            _ => '-',
+        })
+        .collect::<String>();
+    let identity = format!("{name}\0{version}");
+    let digest = format!("{:x}", Sha256::digest(identity.as_bytes()));
+    format!("SPDXRef-Package-{normalized}-{digest}")
+}
+
+fn installed_dependency_sbom(
+    node_modules_root: &Path,
+    binding: &local_apps::AppRuntimeProfileBinding,
+    tree_sha256: &str,
+) -> Result<Vec<u8>, String> {
+    let mut packages = BTreeMap::<(String, String), Option<String>>::new();
+    collect_installed_packages(node_modules_root, &mut packages)?;
+    if packages.is_empty() {
+        return Err(format!(
+            "dependency snapshot cannot be verified because {} contains no installed package manifests",
+            node_modules_root.display()
+        ));
+    }
+    let root_id = format!(
+        "SPDXRef-LingXiRuntime-{}-r{}",
+        binding.family.as_str(),
+        binding.revision
+    );
+    let mut package_values = vec![canonicalize_json(Value::Object(Map::from_iter([
+        ("SPDXID".to_string(), Value::String(root_id.clone())),
+        (
+            "name".to_string(),
+            Value::String(format!(
+                "LingXi Local App Installed Dependencies {} r{}",
+                binding.family.as_str(),
+                binding.revision
+            )),
+        ),
+        (
+            "versionInfo".to_string(),
+            Value::String(format!("{}+{}", binding.contract_sha256, tree_sha256)),
+        ),
+        (
+            "downloadLocation".to_string(),
+            Value::String("NOASSERTION".to_string()),
+        ),
+        (
+            "licenseConcluded".to_string(),
+            Value::String("NOASSERTION".to_string()),
+        ),
+        (
+            "licenseDeclared".to_string(),
+            Value::String("NOASSERTION".to_string()),
+        ),
+        (
+            "copyrightText".to_string(),
+            Value::String("NOASSERTION".to_string()),
+        ),
+    ])))];
+    let mut relationships = Vec::new();
+    for ((name, version), license) in packages {
+        let package_id = spdx_ref_for_package(&name, &version);
+        let license = license.unwrap_or_else(|| "NOASSERTION".to_string());
+        package_values.push(canonicalize_json(Value::Object(Map::from_iter([
+            ("SPDXID".to_string(), Value::String(package_id.clone())),
+            ("name".to_string(), Value::String(name)),
+            ("versionInfo".to_string(), Value::String(version)),
+            (
+                "downloadLocation".to_string(),
+                Value::String("NOASSERTION".to_string()),
+            ),
+            (
+                "licenseConcluded".to_string(),
+                Value::String("NOASSERTION".to_string()),
+            ),
+            ("licenseDeclared".to_string(), Value::String(license)),
+            (
+                "copyrightText".to_string(),
+                Value::String("NOASSERTION".to_string()),
+            ),
+        ]))));
+        relationships.push(canonicalize_json(Value::Object(Map::from_iter([
+            ("spdxElementId".to_string(), Value::String(root_id.clone())),
+            (
+                "relationshipType".to_string(),
+                Value::String("DEPENDS_ON".to_string()),
+            ),
+            ("relatedSpdxElement".to_string(), Value::String(package_id)),
+        ]))));
+    }
+    let document = canonicalize_json(Value::Object(Map::from_iter([
+        (
+            "spdxVersion".to_string(),
+            Value::String("SPDX-2.3".to_string()),
+        ),
+        (
+            "dataLicense".to_string(),
+            Value::String("CC0-1.0".to_string()),
+        ),
+        (
+            "SPDXID".to_string(),
+            Value::String("SPDXRef-DOCUMENT".to_string()),
+        ),
+        (
+            "name".to_string(),
+            Value::String(format!(
+                "LingXi Installed Dependency SBOM {} r{}",
+                binding.family.as_str(),
+                binding.revision
+            )),
+        ),
+        (
+            "documentNamespace".to_string(),
+            Value::String(format!(
+                "https://lingxi.local/app-dependencies/{}/r{}/{}/{}",
+                binding.family.as_str(),
+                binding.revision,
+                binding.contract_sha256,
+                tree_sha256,
+            )),
+        ),
+        (
+            "creationInfo".to_string(),
+            Value::Object(Map::from_iter([
+                (
+                    "created".to_string(),
+                    Value::String("2026-08-27T00:00:00Z".to_string()),
+                ),
+                (
+                    "creators".to_string(),
+                    Value::Array(vec![Value::String(
+                        "Tool: lingxi-local-app-installed-dependencies".to_string(),
+                    )]),
+                ),
+            ])),
+        ),
+        (
+            "documentDescribes".to_string(),
+            Value::Array(vec![Value::String(root_id.clone())]),
+        ),
+        ("packages".to_string(), Value::Array(package_values)),
+        ("relationships".to_string(), Value::Array(relationships)),
+        ("files".to_string(), Value::Array(vec![])),
+    ])));
+    let mut bytes = serde_json::to_vec_pretty(&document)
+        .map_err(|error| format!("serialize dependency SBOM: {error}"))?;
+    bytes.push(b'\n');
+    Ok(bytes)
+}
+
+fn refresh_runtime_profile_snapshot(
+    layout: &AppLayout,
+    tree_sha256: &str,
+) -> Result<local_apps::AppDependencySnapshot, String> {
+    let mut manifest = local_apps::load_manifest(layout).map_err(|error| error.to_string())?;
+    let binding = manifest.runtime_profile.clone().ok_or_else(|| {
+        format!(
+            "app {} is missing its runtime profile binding",
+            layout.app_id()
+        )
+    })?;
+    let workspace = layout.root().join(layout.workspace_rel());
+    let requested_bytes =
+        std::fs::read(workspace.join(crate::local_app_runtime_profiles::REQUESTED_FILE_REL))
+            .map_err(|error| format!("read requested dependency snapshot input: {error}"))?;
+    let package_bytes = std::fs::read(
+        workspace.join(crate::local_app_runtime_profiles::EFFECTIVE_PACKAGE_FILE_REL),
+    )
+    .map_err(|error| format!("read effective dependency package: {error}"))?;
+    let lockfile_bytes =
+        std::fs::read(workspace.join(crate::local_app_runtime_profiles::LOCKFILE_FILE_REL))
+            .map_err(|error| format!("read dependency lockfile: {error}"))?;
+    let sbom = installed_dependency_sbom(&workspace.join("node_modules"), &binding, tree_sha256)?;
+    let artifacts = crate::local_app_runtime_profiles::snapshot_artifacts_for_binding(
+        &binding,
+        crate::local_app_runtime_profiles::hash_bytes(&requested_bytes),
+        crate::local_app_runtime_profiles::hash_bytes(&package_bytes),
+        crate::local_app_runtime_profiles::hash_bytes(&lockfile_bytes),
+        tree_sha256.to_string(),
+        &sbom,
+    )
+    .map_err(|error| error.to_string())?;
+    for (relative, bytes) in &artifacts.files {
+        crate::local_apps_build::write_file(&workspace, relative, bytes, true)
+            .map_err(|error| error.to_string())?;
+    }
+    manifest.dependency_snapshot = Some(artifacts.snapshot.clone());
+    local_apps::save_manifest(layout, &manifest).map_err(|error| error.to_string())?;
+    Ok(artifacts.snapshot)
+}
+
+fn update_uncommitted_dependency_record(
+    root: &Path,
+    record: &local_apps::AppRecord,
+    op: impl FnOnce(&mut local_apps::AppDependencyRecord),
+) -> Result<(), String> {
+    let mut dependency = local_apps::storage::load_dependency_record(root, record)
+        .map_err(|error| error.to_string())?;
+    op(&mut dependency);
+    local_apps::storage::save_dependency_record(root, &dependency)
+        .map_err(|error| error.to_string())
 }
 
 /// What to tell the agent immediately after `LocalAppScaffold` commits.
@@ -3777,31 +5958,65 @@ fn scaffold_next_step_guidance() -> String {
 /// to carry it.
 fn formal_workspace_contract(
     record: &local_apps::AppRecord,
-    surface: local_apps::AppSurface,
+    binding: &local_apps::AppRuntimeProfileBinding,
 ) -> String {
     // Two scaffolds, two contracts. The shared clauses are repeated rather
     // than composed: this text is the agent's whole picture of the
     // workspace, and a reader that has to assemble it from fragments is how
     // "edit home-screen.jsx" survived into a workspace that has no such
     // file.
-    let setup_path = match surface {
-        local_apps::AppSurface::Dom => "- This app's surface is `dom`, so its build workflow is `local-app-build`. The surface is fixed at creation and is NOT readable from any tool result — this line is where you learn it, so do not infer it from the source and do not launch the other workflow.\n\
-         - This workspace already contains the repository-verified Vite + Ionic foundation. The host prepares app-local dependencies in `workspace/node_modules`. Do not run `npm create vite`, do not create a second scaffold, do not add a wrapper build layer, and do not run a package manager in this local-app workspace.\n\
-         - Host-managed files are `.gitignore`, `package.json`, `pnpm-lock.yaml`, `pnpm-workspace.yaml`, `jsconfig.json`, `index.html`, `vite.config.mjs`, `.lingxi/source-policy.json`, `lib/lingxi-bridge.js`, `lib/device-context.js`, `lib/platform-adapter.js`, `lib/lingxi-provider.jsx`, and `styles/foundation.css`. Do not edit them.\n\
-         - Default editable entry points are `app/screens/home-screen.jsx`, `app/screens/detail-screen.jsx`, and `app/globals.css`. You may edit files under `app/`, `src/`, `styles/`, `public/`, and add non-host-managed helpers under `lib/`.\n\
-         - The UI kit is Ionic. Import components from `@ionic/react`; never from `@ionic/core/components`, which cannot be bundled here. There is no Tailwind: use Ionic's CSS variables and its utility classes (`ion-padding`, `ion-margin`, `ion-text-center`, `ion-justify-content-*`, `ion-hide-*`), and put anything else in `app/globals.css`.\n\
-         - Routing is `IonRouterOutlet` with react-router 6 `Routes`/`Route`. Every routed screen must render `IonPage` as its ROOT element, or the outlet has nothing to animate and the platform back gesture does not attach. Navigate with `routerLink`, not an onClick handler.\n\
-         - The platform look is chosen for you: the checked-in provider calls `setupIonicReact` with the host's OS, so components already render iOS or Material chrome. Do not branch on the user agent and do not hard-code one platform's metrics.\n\
-         - Use repo tools exposed in this workspace for source status, diff, and checkpoint versioning when available; checkpoints are workspace Git history. The host rebuilds directly from this workspace as the sole writable mount, keeps temporary output under `.lingxi-build-state/`, and promotes only the validated output.\n",
-        local_apps::AppSurface::Canvas => "- This app's surface is `canvas`, so its build workflow is `local-canvas-build` — NOT `local-app-build`. The surface is fixed at creation and is NOT readable from any tool result, so this line is where you learn it. `local-app-build` designs a screen hierarchy this workspace does not have and gates on a data round-trip a drawn app answers `not_applicable`, so it would verify nothing.\n\
-         - This workspace already contains the repository-verified Vite + Ionic foundation, scaffolded for a single DRAWN SURFACE rather than a set of screens. The host prepares app-local dependencies in `workspace/node_modules`. Do not run `npm create vite`, do not create a second scaffold, do not add a wrapper build layer, and do not run a package manager in this local-app workspace.\n\
-         - Host-managed files are `.gitignore`, `package.json`, `pnpm-lock.yaml`, `pnpm-workspace.yaml`, `jsconfig.json`, `index.html`, `vite.config.mjs`, `.lingxi/source-policy.json`, `lib/lingxi-bridge.js`, `lib/device-context.js`, `lib/platform-adapter.js`, `lib/lingxi-provider.jsx`, and `styles/foundation.css`. Do not edit them.\n\
-         - Default editable entry points are `app/screens/game-screen.jsx`, `src/game/frame-loop.js`, `src/stores/game-store.js`, and `app/globals.css`. You may edit files under `app/`, `src/`, `styles/`, `public/`, and add non-host-managed helpers under `lib/`.\n\
-         - There is NO router: this app is one surface plus overlays. Menus, pause and game-over are Ionic components layered on top of the canvas, not separate pages.\n\
-         - Own the frame loop through the checked-in `createFrameLoop` helper: it sizes the drawing buffer to the device pixel ratio, resizes on rotation and iPad multitasking, clamps the first frame after a resume, and cancels itself on unmount. Start it in an effect and stop it in that effect's cleanup.\n\
-         - Keep per-frame simulation state in a ref, NOT in the store. Pushing positions through React re-renders the tree every frame and turns the app into a slideshow; the store is for the phase machine, the score and settings.\n\
-         - 2D needs no dependency. For 3D, `three` is in the locked set: import it directly and drive the renderer from your own loop. Nothing outside the locked set can be installed, so do not design around a game engine, a physics library, or a WebGL wrapper that is not there.\n\
-         - Use repo tools exposed in this workspace for source status, diff, and checkpoint versioning when available; checkpoints are workspace Git history. The host rebuilds directly from this workspace as the sole writable mount, keeps temporary output under `.lingxi-build-state/`, and promotes only the validated output.\n",
+    let profile_identity = format!(
+        "- This app is permanently bound to runtime profile `{}` revision `{}` with contract SHA-256 `{}`. This line is an informational mirror for the agent; the persisted manifest binding and host catalog are authoritative. Do not infer or replace the profile from imports or package files.\n",
+        binding.family.as_str(),
+        binding.revision,
+        binding.contract_sha256,
+    );
+    let setup_path = match binding.family {
+        local_apps::AppRuntimeProfile::ReactDom => format!(
+            "{profile_identity}\
+             - This app's surface is `dom`, so its build workflow is `local-app-build`. The surface and runtime profile are fixed at creation; do not infer them from source or launch the other workflow.\n\
+             - This workspace already contains the repository-verified Vite + Ionic foundation. The host prepares app-local dependencies in `workspace/node_modules`. Do not run `npm create vite`, do not create a second scaffold, do not add a wrapper build layer, and do not run a package manager in this local-app workspace.\n\
+             - Host-managed files are `.gitignore`, `package.json`, `pnpm-lock.yaml`, `pnpm-workspace.yaml`, `jsconfig.json`, `index.html`, `vite.config.mjs`, `.lingxi/source-policy.json`, `lib/lingxi-bridge.js`, `lib/device-context.js`, `lib/platform-adapter.js`, `lib/lingxi-provider.jsx`, and `styles/foundation.css`. Do not edit them.\n\
+             - Default editable entry points are `app/screens/home-screen.jsx`, `app/screens/detail-screen.jsx`, and `app/globals.css`. You may edit files under `app/`, `src/`, `styles/`, `public/`, and add non-host-managed helpers under `lib/`.\n\
+             - The UI kit is Ionic. Import components from `@ionic/react`; never from `@ionic/core/components`, which cannot be bundled here. There is no Tailwind: use Ionic's CSS variables and its utility classes (`ion-padding`, `ion-margin`, `ion-text-center`, `ion-justify-content-*`, `ion-hide-*`), and put anything else in `app/globals.css`.\n\
+             - Routing is `IonRouterOutlet` with react-router 6 `Routes`/`Route`. Every routed screen must render `IonPage` as its ROOT element, or the outlet has nothing to animate and the platform back gesture does not attach. Navigate with `routerLink`, not an onClick handler.\n\
+             - The platform look is chosen for you: the checked-in provider calls `setupIonicReact` with the host's OS, so components already render iOS or Material chrome. Do not branch on the user agent and do not hard-code one platform's metrics.\n\
+             - Use repo tools exposed in this workspace for source status, diff, and checkpoint versioning when available; checkpoints are workspace Git history. The host rebuilds directly from this workspace as the sole writable mount, keeps temporary output under `.lingxi-build-state/`, and promotes only the validated output.\n"
+        ),
+        local_apps::AppRuntimeProfile::Canvas2d
+        | local_apps::AppRuntimeProfile::Three3d
+        | local_apps::AppRuntimeProfile::Phaser2d
+        | local_apps::AppRuntimeProfile::Babylon3d => {
+            let helper = match binding.family {
+                local_apps::AppRuntimeProfile::Canvas2d
+                | local_apps::AppRuntimeProfile::Three3d => "lib/frame-loop.js",
+                local_apps::AppRuntimeProfile::Phaser2d => "lib/phaser-runtime.js",
+                local_apps::AppRuntimeProfile::Babylon3d => "lib/babylon-runtime.js",
+                local_apps::AppRuntimeProfile::ReactDom => unreachable!(),
+            };
+            let engine_rule = match binding.family {
+                local_apps::AppRuntimeProfile::Canvas2d =>
+                    "- This is a Canvas 2D profile: use the checked-in `lib/frame-loop.js` helper and the Canvas 2D APIs; do not add a game engine or physics library.",
+                local_apps::AppRuntimeProfile::Three3d =>
+                    "- This is a Three.js profile: import the locked `three` package directly and use the checked-in `lib/frame-loop.js` helper; do not add React Three Fiber, drei, or an external physics library.",
+                local_apps::AppRuntimeProfile::Phaser2d =>
+                    "- This is a Phaser profile: use the locked `phaser` package through the checked-in `lib/phaser-runtime.js` adapter; do not replace it with `createFrameLoop`, another engine, or an external physics library.",
+                local_apps::AppRuntimeProfile::Babylon3d =>
+                    "- This is a Babylon.js profile: use the locked Babylon packages through the checked-in `lib/babylon-runtime.js` adapter; do not replace it with `createFrameLoop`, React Three Fiber, or an external physics library.",
+                local_apps::AppRuntimeProfile::ReactDom => unreachable!(),
+            };
+            format!(
+                "{profile_identity}\
+                 - This app's surface is `canvas`, so its build workflow is `local-canvas-build` — NOT `local-app-build`. It is one drawn surface plus overlays; do not infer a screen hierarchy or launch the DOM workflow.\n\
+                 - This workspace already contains the repository-verified Vite + Ionic foundation, scaffolded for a single DRAWN SURFACE. The host prepares app-local dependencies in `workspace/node_modules`. Do not run `npm create vite`, do not create a second scaffold, do not add a wrapper build layer, and do not run a package manager in this local-app workspace.\n\
+                 - Host-managed files are `.gitignore`, `package.json`, `pnpm-lock.yaml`, `pnpm-workspace.yaml`, `jsconfig.json`, `index.html`, `vite.config.mjs`, `.lingxi/source-policy.json`, `lib/lingxi-bridge.js`, `lib/device-context.js`, `lib/platform-adapter.js`, `lib/lingxi-provider.jsx`, `{helper}`, and `styles/foundation.css`. Do not edit them; `{helper}` is the profile's checked-in runtime adapter.\n\
+                 - Default editable entry points are `app/screens/game-screen.jsx`, `src/stores/game-store.js`, and `app/globals.css`. You may edit files under `app/`, `src/`, `styles/`, `public/`, and add non-host-managed helpers under `lib/`, but never edit the managed adapter `{helper}`.\n\
+                 - There is NO router: menus, pause and game-over are Ionic components layered on top of the canvas, not separate pages.\n\
+                 {engine_rule}\n\
+                 - Keep per-frame simulation state in a ref, NOT in React or the store. The store is for the phase machine, score and settings; pushing positions through React re-renders turns the app into a slideshow.\n\
+                 - Use repo tools exposed in this workspace for source status, diff, and checkpoint versioning when available; checkpoints are workspace Git history. The host rebuilds directly from this workspace as the sole writable mount, keeps temporary output under `.lingxi-build-state/`, and promotes only the validated output.\n"
+            )
+        }
     };
     // `format!`, not a bare `&str`: this string is interpolated into the
     // enclosing `format!` as a VALUE, so its own `{{` and `{id}` would be
@@ -3905,20 +6120,21 @@ fn guided_workspace_contract(record: &local_apps::AppRecord) -> String {
          `LocalAppGet` 去重新发现或确认它，也不要再调一次 `LocalAppCreate`。\n\n\
          你现在的任务是引导用户，不是写代码。**你现在写下的任何源文件都会在脚手架落地时被删除**，\
          写了也是白写。\n\n\
-         本地应用工具里，此刻只有 `LocalAppScaffold` 对你有意义；构建、安装依赖、运行时、\
-         界面检查那一类都会拒绝你并告诉你原因。\n\n\
+         此刻先不要构建、安装依赖或操作运行时；在应用定形态并落脚手架之前，这些步骤都没有意义。\n\n\
          步骤：\n\
          1. **用普通对话文本**问用户想做什么，一句开放式的话，然后等他回答。\
          这一轮**不要用 `AskUserQuestion`**：它弹的是选择器，而此刻你对这个应用一无所知，\
          能填进选项里的只有你对用户想法的猜测——把猜测做成菜单，恰好挤掉了你真正需要的那段描述。\n\
          2. 读他的描述，能自己定的就自己定，别把他已经说过的再问一遍。\
          只有当某一点仍然悬着、**会改变最终做出来的东西**、而且是可以列出选项的选择时，\
-         才用 `AskUserQuestion` 问一轮（1-3 个聚焦问题）。描述已经说清楚的，直接进第 3 步。\n\
+         才用 `AskUserQuestion` 问一轮，提出 1-3 个聚焦问题；没有未决事项就省略这一轮。\n\
+         描述已经说清楚的，直接进第 3 步。\n\
          3. 用 `AskUserQuestion` 把提议的**名称**与**形态**交给用户确认或修改：\n\
          \u{20}  - `dom` —— 多屏界面（表单、列表、页面导航）\n\
          \u{20}  - `canvas` —— 单一绘制面（游戏、3D、可视化）\n\
-         4. 用户确认后调 `LocalAppScaffold`（`app_id` 用 `{id}`）。\n\
-         5. 重读本文件，按新合约继续。\n\n\
+         4. 如需运行时细分，先读 `LocalAppRuntimeProfiles`，再用运行时确认工具为 `{id}` 取得短时 receipt。\n\
+         5. 用户确认后调 `LocalAppScaffold`（`app_id` 用 `{id}`，并带上 runtime profile receipt）。\n\
+         6. 重读本文件，按新合约继续。\n\n\
          形态一旦落地不可更改，所以必须让用户确认，不要自作主张。\n",
         id = record.id,
     )
@@ -4171,6 +6387,14 @@ impl LocalAppsMcpHost for LocalAppsHostBroker {
         create_next_step_guidance()
     }
 
+    async fn runtime_profiles(&self, input: Value) -> Result<Value, String> {
+        self.runtime_profiles_value(input).await
+    }
+
+    async fn confirm_runtime_profile(&self, input: Value) -> Result<Value, String> {
+        self.confirm_runtime_profile_value(input).await
+    }
+
     async fn manage_runtime(&self, input: Value) -> Result<Value, String> {
         self.manage_runtime_value(input).await
     }
@@ -4230,6 +6454,468 @@ impl LocalAppsMcpHost for LocalAppsHostBroker {
 
     async fn install_dependencies(&self, input: Value) -> Result<Value, String> {
         self.install_dependencies_value(input).await
+    }
+
+    async fn confirm_dependency_change(&self, _input: Value) -> Result<Value, String> {
+        let app_id = required_string(&_input, "app_id")?.to_string();
+        let service = self.service()?;
+        service
+            .record(&app_id)
+            .await
+            .map_err(|error| error.to_string())?;
+        let dependency_record = service
+            .dependency_record(&app_id)
+            .await
+            .map_err(|error| error.to_string())?;
+        let layout = self.layout(&app_id)?;
+        let (_binding, baseline, changes, requested_json, effective_package_json) =
+            Self::prepare_dependency_change(
+                &layout,
+                &dependency_record,
+                _input
+                    .get("changes")
+                    .ok_or_else(|| "invalid_argument: changes is required".to_string())?,
+            )?;
+        if changes
+            .iter()
+            .any(|change| !matches!(change.kind, DependencyChangeKind::Remove))
+        {
+            // These statuses intentionally describe what can be proven before
+            // resolution.  Looking in the pnpm store or touching the registry
+            // here would make a supposedly review-only call perform network or
+            // cache work before the user's approval.
+            let confirmation_changes = changes
+                .iter()
+                .map(|change| AppDependencyChangeDto {
+                    kind: dependency_change_kind_dto(&change.kind),
+                    package: change.package.clone(),
+                    version: change.version.clone(),
+                    cache_status: dependency_change_cache_status(&change.kind),
+                    download_status: match change.kind {
+                        DependencyChangeKind::Remove => "not_required".to_string(),
+                        DependencyChangeKind::Add | DependencyChangeKind::Update => {
+                            "may_be_required".to_string()
+                        }
+                    },
+                })
+                .collect();
+            let request_id = self.request_id("app-dependency-change");
+            let (sender, receiver) = oneshot::channel();
+            self.pending_dependency_change_confirmations
+                .lock()
+                .await
+                .insert(request_id.clone(), sender);
+            self.event_sink
+                .emit(ClientEvent::AppEvent {
+                    event: AppEventDto::AppDependencyChangeConfirmationRequested {
+                        request: AppDependencyChangeConfirmationRequestDto {
+                            request_id: request_id.clone(),
+                            app_id: app_id.clone(),
+                            // Stable codes keep native clients localized while
+                            // still making the policy explicit on the wire.
+                            reason: "pre_resolution_no_network".into(),
+                            changes: confirmation_changes,
+                            license_risk: "unknown_until_resolution".into(),
+                            sbom_risk: "unknown_until_resolution".into(),
+                            lifecycle_scripts_blocked: true,
+                            native_addons_blocked: true,
+                            rollback_policy: "rollback_on_validation_failure".into(),
+                        },
+                    },
+                })
+                .await;
+            let approved = match timeout(APPROVAL_TIMEOUT, receiver).await {
+                Ok(Ok(approved)) => approved,
+                Ok(Err(_)) => {
+                    self.pending_dependency_change_confirmations
+                        .lock()
+                        .await
+                        .remove(&request_id);
+                    return Err("dependency change confirmation was cancelled".into());
+                }
+                Err(_) => {
+                    self.pending_dependency_change_confirmations
+                        .lock()
+                        .await
+                        .remove(&request_id);
+                    return Err("dependency change confirmation timed out".into());
+                }
+            };
+            if !approved {
+                return Err("user denied dependency changes".into());
+            }
+        }
+        let build_lock = self.build_lock();
+        let _build_guard = build_lock.lock().await;
+        let _process_build_guard =
+            local_apps::storage::lock_app_build(layout.root(), layout.app_id())
+                .map_err(|error| error.to_string())?;
+        let current_dependency = service
+            .dependency_record(&app_id)
+            .await
+            .map_err(|error| error.to_string())?;
+        let (_, current_baseline, _, _, _) = Self::prepare_dependency_change(
+            &layout,
+            &current_dependency,
+            _input.get("changes").unwrap(),
+        )?;
+        if current_baseline != baseline {
+            return Err(
+                "dependencies_dirty: dependency baseline changed while waiting for confirmation; reconfirm before updating"
+                    .into(),
+            );
+        }
+        let receipt = self
+            .issue_dependency_change_receipt(
+                &app_id,
+                baseline,
+                requested_json,
+                effective_package_json,
+                changes.clone(),
+            )
+            .await?;
+        Ok(json!({
+            "ok": true,
+            "app_id": app_id,
+            "changes": changes,
+            "receipt": {
+                "id": receipt.receipt_id,
+                "app_id": receipt.app_id,
+                "issued_at_ms": receipt.issued_at_ms,
+                "expires_at_ms": receipt.expires_at_ms,
+            }
+        }))
+    }
+
+    async fn update_dependencies(&self, input: Value) -> Result<Value, String> {
+        let app_id = required_string(&input, "app_id")?.to_string();
+        let receipt_id = required_string(&input, "receipt_id")?.to_string();
+        let service = self.service()?;
+        let layout = self.layout(&app_id)?;
+        // Keep the same lock order as LocalAppBuilder: broker-wide async
+        // mutex first, then the per-app cross-process lock. The dependency
+        // snapshot, production build and any rollback therefore form one
+        // transaction without deadlocking the builder.
+        let build_lock = self.build_lock();
+        let _build_guard = build_lock.lock().await;
+        let _process_build_guard =
+            local_apps::storage::lock_app_build(layout.root(), layout.app_id())
+                .map_err(|error| error.to_string())?;
+        let previous_dependency = service
+            .dependency_record(&app_id)
+            .await
+            .map_err(|error| error.to_string())?;
+        let receipt = self
+            .claim_dependency_change_receipt(&app_id, &receipt_id)
+            .await?;
+        let current_baseline =
+            match Self::load_trusted_dependency_baseline(&layout, &previous_dependency) {
+                Ok((_, _, _, baseline)) => baseline,
+                Err(error) => {
+                    self.consume_dependency_change_receipt(&app_id, &receipt_id)
+                        .await;
+                    return Err(error);
+                }
+            };
+        if current_baseline != receipt.baseline {
+            self.consume_dependency_change_receipt(&app_id, &receipt_id)
+                .await;
+            return Err(
+                "dependencies_dirty: dependency confirmation became stale before update; reconfirm before applying it"
+                    .into(),
+            );
+        }
+        let rollback = match self.capture_dependency_update_rollback(&layout, previous_dependency) {
+            Ok(rollback) => rollback,
+            Err(error) => {
+                self.release_dependency_change_receipt_claim(&app_id, &receipt_id)
+                    .await;
+                return Err(error);
+            }
+        };
+        let recovery_journal = match Self::dependency_update_recovery_journal(
+            &layout,
+            &rollback,
+            DependencyUpdateRecoveryStatus::InProgress,
+        ) {
+            Ok(journal) => journal,
+            Err(error) => {
+                Self::discard_dependency_update_rollback(rollback);
+                self.release_dependency_change_receipt_claim(&app_id, &receipt_id)
+                    .await;
+                return Err(error);
+            }
+        };
+        if let Err(error) =
+            Self::write_dependency_update_recovery_journal(&layout, &recovery_journal)
+        {
+            let _ = Self::remove_dependency_update_recovery_journal(&layout);
+            Self::discard_dependency_update_rollback(rollback);
+            self.release_dependency_change_receipt_claim(&app_id, &receipt_id)
+                .await;
+            return Err(error);
+        }
+        let result: Result<Value, String> = async {
+            service
+                .record(&app_id)
+                .await
+                .map_err(|error| error.to_string())?;
+            let current = service
+                .dependency_record(&app_id)
+                .await
+                .map_err(|error| error.to_string())?;
+            if current.state == AppDependencyState::Installing {
+                return Err(format!(
+                    "app {app_id} already has a dependency install in progress"
+                ));
+            }
+            let workspace = layout.root().join(layout.workspace_rel());
+            let runtime = self.mobile_linux().ok_or_else(|| {
+                "the mobile Node runtime is unavailable for dependency updates".to_string()
+            })?;
+            let dependency_staging = Self::prepare_dependency_staging(&layout)?;
+            crate::local_apps_build::write_file(
+                &dependency_staging,
+                "package.json",
+                &receipt.effective_package_json,
+                true,
+            )
+            .map_err(|error| error.to_string())?;
+            if current.state == AppDependencyState::Ready {
+                service
+                    .queue_dependency_install(&app_id)
+                    .await
+                    .map_err(|error| error.to_string())?;
+            }
+            service
+                .start_dependency_install(&app_id)
+                .await
+                .map_err(|error| error.to_string())?;
+            let dependency_store = self.dependency_store_root();
+            std::fs::create_dir_all(&dependency_store)
+                .map_err(|error| format!("create pnpm dependency store: {error}"))?;
+            let build_mount = MountSpec {
+                host_path: workspace.clone(),
+                guest_path: guest_paths::local_app_build_project(&app_id, "store"),
+                read_only: false,
+                purpose: MountPurpose::LocalAppBuild,
+            };
+            let store_mount = MountSpec {
+                host_path: dependency_store,
+                guest_path: guest_paths::LOCAL_APP_DEPENDENCY_STORE.to_string(),
+                read_only: false,
+                purpose: MountPurpose::Shared,
+            };
+            let project_guest_path = build_mount.guest_path.clone();
+            let dependency_staging_guest_path =
+                format!("{project_guest_path}/.lingxi-build-state/dependency-staging");
+            let build_state_root = format!("{project_guest_path}/.lingxi-build-state");
+            let memory_mb =
+                crate::local_apps_build::build_memory_budget_mb(self.physical_memory_bytes());
+            let requires_network = receipt
+                .summary
+                .iter()
+                .any(|change| !matches!(change.kind, DependencyChangeKind::Remove));
+            // Add/update flows may use approved network access to resolve the
+            // user-confirmed manifest and preheat the shared store. Remove-only
+            // flows stay offline throughout so they cannot silently upgrade an
+            // unrelated dependency. The second pass is always the commit gate:
+            // after clearing the first tree, it must materialize that same
+            // lock with network disabled before any snapshot or workspace file
+            // is published.
+            let resolution_request = Self::dependency_install_request(
+                &build_mount,
+                &store_mount,
+                dependency_staging_guest_path.clone(),
+                &build_state_root,
+                memory_mb,
+                if requires_network {
+                    NetworkPolicy::Allowed
+                } else {
+                    NetworkPolicy::Disabled
+                },
+                false,
+                false,
+                true,
+            );
+            if let Err(error) =
+                Self::run_dependency_install_command(runtime.as_ref(), resolution_request).await
+            {
+                let _ = Self::remove_owned_path(&dependency_staging);
+                return Err(error);
+            }
+            if let Err(error) = Self::reset_dependency_staging_node_modules(&dependency_staging) {
+                let _ = Self::remove_owned_path(&dependency_staging);
+                return Err(error);
+            }
+            let frozen_request = Self::dependency_install_request(
+                &build_mount,
+                &store_mount,
+                dependency_staging_guest_path,
+                &build_state_root,
+                memory_mb,
+                NetworkPolicy::Disabled,
+                true,
+                false,
+                true,
+            );
+            if let Err(error) =
+                Self::run_dependency_install_command(runtime.as_ref(), frozen_request).await
+            {
+                let _ = Self::remove_owned_path(&dependency_staging);
+                return Err(error);
+            }
+            if let Err(error) =
+                validate_dependency_lifecycle_scripts(&dependency_staging.join("node_modules"))
+            {
+                let _ = Self::remove_owned_path(&dependency_staging);
+                return Err(error);
+            }
+            let lock_bytes = std::fs::read(dependency_staging.join("pnpm-lock.yaml"))
+                .map_err(|error| format!("read updated pnpm-lock.yaml: {error}"))?;
+            let lock_digest = format!("{:x}", Sha256::digest(&lock_bytes));
+            let snapshot_root = self.dependency_snapshot_root(&lock_digest);
+            let snapshot_lock = self.dependency_snapshot_lock(&lock_digest).await;
+            let _snapshot_guard = snapshot_lock.lock().await;
+            if !Self::dependency_snapshot_is_ready(&snapshot_root, &lock_digest)? {
+                Self::publish_dependency_snapshot(
+                    &dependency_staging.join("node_modules"),
+                    &snapshot_root,
+                    &lock_digest,
+                )?;
+            }
+            let commit_result: Result<(), String> = (|| {
+                crate::local_apps_build::write_file(
+                    &workspace,
+                    crate::local_app_runtime_profiles::REQUESTED_FILE_REL,
+                    &receipt.requested_json,
+                    true,
+                )
+                .map_err(|error| error.to_string())?;
+                crate::local_apps_build::write_file(
+                    &workspace,
+                    crate::local_app_runtime_profiles::EFFECTIVE_PACKAGE_FILE_REL,
+                    &receipt.effective_package_json,
+                    true,
+                )
+                .map_err(|error| error.to_string())?;
+                crate::local_apps_build::write_file(
+                    &workspace,
+                    crate::local_app_runtime_profiles::LOCKFILE_FILE_REL,
+                    &lock_bytes,
+                    true,
+                )
+                .map_err(|error| error.to_string())?;
+                crate::local_apps_build::write_file(
+                    &workspace,
+                    "package.json",
+                    &receipt.effective_package_json,
+                    true,
+                )
+                .map_err(|error| error.to_string())?;
+                crate::local_apps_build::write_file(
+                    &workspace,
+                    "pnpm-lock.yaml",
+                    &lock_bytes,
+                    true,
+                )
+                .map_err(|error| error.to_string())?;
+                Ok(())
+            })();
+            if let Err(error) = commit_result {
+                let _ = Self::remove_owned_path(&dependency_staging);
+                return Err(error);
+            }
+            if let Err(error) = self
+                .finalize_dependency_install(&layout, &dependency_staging, &lock_digest)
+                .await
+            {
+                return Err(error);
+            }
+            service
+                .complete_dependency_install_with_metadata(
+                    &app_id,
+                    Some(lock_digest),
+                    Some(PNPM_TOOLCHAIN_KEY.to_string()),
+                )
+                .await
+                .map_err(|error| error.to_string())?;
+            let dependencies = service
+                .dependency_record(&app_id)
+                .await
+                .map_err(|error| error.to_string())?;
+            let builder = crate::local_apps_build::LocalAppBuilder {
+                mobile_linux: self.mobile_linux(),
+                host: self,
+            };
+            builder
+                .build_workspace_locked(&layout, &dependencies)
+                .await
+                .map_err(|error| format!("dependency update production build failed: {error}"))?;
+            crate::local_apps_build::validate_build_for_launch(&layout)
+                .map_err(|error| format!("dependency update profile smoke failed: {error}"))?;
+            let mut committed_journal = recovery_journal.clone();
+            committed_journal.status = DependencyUpdateRecoveryStatus::Committed;
+            Self::write_dependency_update_recovery_journal(&layout, &committed_journal)?;
+            Ok(json!({
+                "ok": true,
+                "app_id": app_id,
+                "changes": receipt.summary,
+                "dependencies": dependencies,
+            }))
+        }
+        .await;
+        match result {
+            Ok(value) => {
+                Self::discard_dependency_update_rollback(rollback);
+                if let Err(error) = Self::remove_dependency_update_recovery_journal(&layout) {
+                    tracing::warn!(
+                        app_id = %app_id,
+                        %error,
+                        "dependency update committed but recovery journal cleanup was deferred"
+                    );
+                }
+                self.consume_dependency_change_receipt(&app_id, &receipt_id)
+                    .await;
+                Ok(value)
+            }
+            Err(error) => {
+                let rollback_error = match self
+                    .restore_dependency_update_rollback(&service, &app_id, &layout, &rollback)
+                    .await
+                {
+                    Ok(()) => {
+                        let mut committed_journal = recovery_journal.clone();
+                        committed_journal.status = DependencyUpdateRecoveryStatus::Committed;
+                        Self::write_dependency_update_recovery_journal(&layout, &committed_journal)
+                            .and_then(|_| {
+                                Self::cleanup_dependency_update_recovery(
+                                    &layout,
+                                    &committed_journal,
+                                )
+                            })
+                            .err()
+                    }
+                    Err(error) => Some(error),
+                };
+                self.release_dependency_change_receipt_claim(&app_id, &receipt_id)
+                    .await;
+                match rollback_error {
+                    Some(rollback_error) => {
+                        Err(format!("{error}; rollback failed: {rollback_error}"))
+                    }
+                    None => Err(error),
+                }
+            }
+        }
+    }
+
+    async fn migrate_runtime_profile(&self, _input: Value) -> Result<Value, String> {
+        Err("runtime profile migration is not available in this host build".into())
+    }
+
+    async fn prepare_shell_app(&self, record: local_apps::AppRecord) -> Result<(), String> {
+        self.write_guided_contract_value(&record).await
     }
 
     async fn update_manifest(&self, input: Value) -> Result<Value, String> {
@@ -4675,8 +7361,10 @@ impl LocalAppsMcpHost for LocalAppsHostBroker {
         &self,
         record: local_apps::AppRecord,
         surface: local_apps::AppSurface,
+        runtime_profile: Option<local_apps::AppRuntimeProfile>,
     ) -> Result<(), String> {
-        self.scaffold_app_value(&record, surface).await
+        self.scaffold_app_value(&record, surface, runtime_profile)
+            .await
     }
 
     async fn scaffold_shell_app(&self, input: Value) -> Result<Value, String> {
@@ -4736,6 +7424,36 @@ fn raise_decision(decision: AppAuthorizationDecisionDto) -> PermissionDecision {
         AppAuthorizationDecisionDto::AllowSession => PermissionDecision::AllowSession,
         AppAuthorizationDecisionDto::AllowAlways => PermissionDecision::AlwaysAllow,
         _ => PermissionDecision::Deny,
+    }
+}
+
+fn lower_runtime_profile_family(profile: AppRuntimeProfile) -> AppRuntimeProfileDto {
+    match profile {
+        AppRuntimeProfile::ReactDom => AppRuntimeProfileDto::ReactDom,
+        AppRuntimeProfile::Canvas2d => AppRuntimeProfileDto::Canvas2d,
+        AppRuntimeProfile::Three3d => AppRuntimeProfileDto::Three3d,
+        AppRuntimeProfile::Phaser2d => AppRuntimeProfileDto::Phaser2d,
+        AppRuntimeProfile::Babylon3d => AppRuntimeProfileDto::Babylon3d,
+    }
+}
+
+fn raise_runtime_profile_family(
+    profile: AppRuntimeProfileDto,
+) -> Result<AppRuntimeProfile, String> {
+    match profile {
+        AppRuntimeProfileDto::ReactDom => Ok(AppRuntimeProfile::ReactDom),
+        AppRuntimeProfileDto::Canvas2d => Ok(AppRuntimeProfile::Canvas2d),
+        AppRuntimeProfileDto::Three3d => Ok(AppRuntimeProfile::Three3d),
+        AppRuntimeProfileDto::Phaser2d => Ok(AppRuntimeProfile::Phaser2d),
+        AppRuntimeProfileDto::Babylon3d => Ok(AppRuntimeProfile::Babylon3d),
+        _ => Err("unknown runtime profile selection returned by the client".into()),
+    }
+}
+
+fn lower_surface(surface: local_apps::AppSurface) -> AppSurfaceDto {
+    match surface {
+        local_apps::AppSurface::Dom => AppSurfaceDto::Dom,
+        local_apps::AppSurface::Canvas => AppSurfaceDto::Canvas,
     }
 }
 
@@ -5530,7 +8248,272 @@ fn validate_dependency_tree(root: &Path) -> Result<(), String> {
     }
     let canonical_root = std::fs::canonicalize(root)
         .map_err(|error| format!("resolve dependency tree {}: {error}", root.display()))?;
-    validate_dependency_entry(root, &canonical_root)
+    validate_dependency_entry(root, &canonical_root)?;
+    validate_dependency_lifecycle_scripts(root)
+}
+
+const FORBIDDEN_DEPENDENCY_LIFECYCLE_SCRIPTS: [&str; 4] =
+    ["preinstall", "install", "postinstall", "prepare"];
+
+const TRUSTED_TOOLCHAIN_NATIVE_BINDINGS: &[(&str, &str, &str)] = &[
+    (
+        "@rolldown/binding-linux-arm64-musl",
+        "1.2.6",
+        "rolldown-binding.linux-arm64-musl.node",
+    ),
+    (
+        "@rolldown/binding-linux-x64-musl",
+        "1.2.6",
+        "rolldown-binding.linux-x64-musl.node",
+    ),
+    (
+        "@rollup/rollup-linux-arm64-musl",
+        "4.44.0",
+        "rollup.linux-arm64-musl.node",
+    ),
+    (
+        "@rollup/rollup-linux-x64-musl",
+        "4.44.0",
+        "rollup.linux-x64-musl.node",
+    ),
+    (
+        "lightningcss-linux-arm64-musl",
+        "1.33.0",
+        "lightningcss.linux-arm64-musl.node",
+    ),
+    (
+        "lightningcss-linux-x64-musl",
+        "1.33.0",
+        "lightningcss.linux-x64-musl.node",
+    ),
+];
+
+const TRUSTED_TOOLCHAIN_LIFECYCLE_SCRIPTS: &[(&str, &str, &[&str])] = &[
+    ("balanced-match", "4.0.4", &["prepare"]),
+    ("brace-expansion", "5.0.9", &["prepare"]),
+    ("dom-serializer", "2.0.0", &["prepare"]),
+    ("domelementtype", "2.3.0", &["prepare"]),
+    ("domhandler", "5.0.3", &["prepare"]),
+    ("domutils", "3.2.2", &["prepare"]),
+    ("entities", "4.5.0", &["prepare"]),
+    ("html-dom-parser", "5.1.8", &["prepare"]),
+    ("html-react-parser", "5.2.17", &["prepare"]),
+    ("htmlparser2", "10.1.0", &["prepare"]),
+    ("inline-style-parser", "0.2.7", &["prepare"]),
+    ("lightningcss", "1.33.0", &["prepare"]),
+    ("minimatch", "10.2.6", &["prepare"]),
+    ("style-to-js", "1.1.21", &["prepare"]),
+    ("style-to-object", "1.0.14", &["prepare"]),
+];
+
+fn trusted_toolchain_lifecycle_scripts(
+    package: &str,
+    version: &str,
+) -> Option<&'static [&'static str]> {
+    TRUSTED_TOOLCHAIN_LIFECYCLE_SCRIPTS.iter().find_map(
+        |(trusted_package, trusted_version, scripts)| {
+            (*trusted_package == package && *trusted_version == version).then_some(*scripts)
+        },
+    )
+}
+
+fn dependency_package_path(package: &str) -> PathBuf {
+    let mut path = PathBuf::new();
+    for part in package.split('/') {
+        path.push(part);
+    }
+    path
+}
+
+fn validate_trusted_dependency_manifest(
+    dependency_root: &Path,
+    package: &str,
+    version: &str,
+) -> Result<(), String> {
+    let manifest_path = dependency_root
+        .join(dependency_package_path(package))
+        .join("package.json");
+    let metadata = std::fs::symlink_metadata(&manifest_path).map_err(|error| {
+        format!(
+            "inspect dependency package manifest {}: {error}",
+            manifest_path.display()
+        )
+    })?;
+    if !metadata.is_file() || metadata.file_type().is_symlink() {
+        return Err(format!(
+            "dependency package manifest must be a regular file: {}",
+            manifest_path.display()
+        ));
+    }
+    let bytes = std::fs::read(&manifest_path).map_err(|error| {
+        format!(
+            "read dependency package manifest {}: {error}",
+            manifest_path.display()
+        )
+    })?;
+    let manifest: Value = serde_json::from_slice(&bytes).map_err(|error| {
+        format!(
+            "parse dependency package manifest {}: {error}",
+            manifest_path.display()
+        )
+    })?;
+    if manifest.get("name").and_then(Value::as_str) != Some(package)
+        || manifest.get("version").and_then(Value::as_str) != Some(version)
+    {
+        return Err(format!(
+            "dependency package manifest {} does not match trusted package {}@{}",
+            manifest_path.display(),
+            package,
+            version
+        ));
+    }
+    Ok(())
+}
+
+fn trusted_dependency_lifecycle_script_path(
+    dependency_root: &Path,
+    manifest_path: &Path,
+    package: &str,
+    version: &str,
+    script: &str,
+) -> Result<bool, String> {
+    let canonical_manifest = std::fs::canonicalize(manifest_path).map_err(|error| {
+        format!(
+            "canonicalize dependency package manifest {}: {error}",
+            manifest_path.display()
+        )
+    })?;
+    let relative = canonical_manifest
+        .strip_prefix(dependency_root)
+        .map_err(|_| {
+            format!(
+                "dependency package manifest {} is outside {}",
+                canonical_manifest.display(),
+                dependency_root.display()
+            )
+        })?;
+    let expected = dependency_package_path(package).join("package.json");
+    if relative != expected {
+        return Ok(false);
+    }
+    validate_trusted_dependency_manifest(dependency_root, package, version)?;
+    Ok(trusted_toolchain_lifecycle_scripts(package, version)
+        .is_some_and(|allowed| allowed.contains(&script)))
+}
+
+fn trusted_dependency_native_binding_path(
+    path: &Path,
+    dependency_root: &Path,
+) -> Result<bool, String> {
+    let canonical_path = std::fs::canonicalize(path).map_err(|error| {
+        format!(
+            "canonicalize dependency tree entry {}: {error}",
+            path.display()
+        )
+    })?;
+    let relative = canonical_path.strip_prefix(dependency_root).map_err(|_| {
+        format!(
+            "dependency tree entry {} is outside {}",
+            canonical_path.display(),
+            dependency_root.display()
+        )
+    })?;
+    for (package, version, file_name) in TRUSTED_TOOLCHAIN_NATIVE_BINDINGS {
+        let expected = dependency_package_path(package).join(file_name);
+        if relative == expected {
+            validate_trusted_dependency_manifest(dependency_root, package, version)?;
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// Reject package lifecycle hooks from a resolved dependency tree. The
+/// resolver runs with scripts disabled, but retaining a hook in the snapshot
+/// would let a later package-manager invocation execute it. Only explicitly
+/// reviewed fixed-toolchain metadata is exempted.
+fn validate_dependency_lifecycle_scripts(root: &Path) -> Result<(), String> {
+    let dependency_root = root
+        .canonicalize()
+        .map_err(|error| format!("canonicalize dependency tree {}: {error}", root.display()))?;
+    validate_dependency_lifecycle_scripts_from_root(&dependency_root, &dependency_root)
+}
+
+fn validate_dependency_lifecycle_scripts_from_root(
+    dependency_root: &Path,
+    current: &Path,
+) -> Result<(), String> {
+    let metadata = std::fs::symlink_metadata(current)
+        .map_err(|error| format!("inspect dependency tree {}: {error}", current.display()))?;
+    if metadata.file_type().is_symlink() || metadata.is_file() {
+        return Ok(());
+    }
+    if !metadata.is_dir() {
+        return Err(format!(
+            "dependency tree entry is not regular: {}",
+            current.display()
+        ));
+    }
+    for entry in std::fs::read_dir(current)
+        .map_err(|error| format!("read dependency tree {}: {error}", current.display()))?
+    {
+        let entry = entry.map_err(|error| format!("read dependency tree entry: {error}"))?;
+        let path = entry.path();
+        let metadata = std::fs::symlink_metadata(&path)
+            .map_err(|error| format!("inspect dependency tree {}: {error}", path.display()))?;
+        if metadata.file_type().is_symlink() {
+            continue;
+        }
+        if metadata.is_dir() {
+            validate_dependency_lifecycle_scripts_from_root(dependency_root, &path)?;
+            continue;
+        }
+        if !metadata.is_file() || !installed_package_manifest(&path) {
+            continue;
+        }
+        let bytes = std::fs::read(&path).map_err(|error| {
+            format!(
+                "read dependency package manifest {}: {error}",
+                path.display()
+            )
+        })?;
+        let manifest: Value = serde_json::from_slice(&bytes).map_err(|error| {
+            format!(
+                "parse dependency package manifest {}: {error}",
+                path.display()
+            )
+        })?;
+        let package = manifest
+            .get("name")
+            .and_then(Value::as_str)
+            .filter(|name| !name.trim().is_empty())
+            .unwrap_or("<unnamed>");
+        let Some(scripts) = manifest.get("scripts").and_then(Value::as_object) else {
+            continue;
+        };
+        let version = manifest
+            .get("version")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        for script in FORBIDDEN_DEPENDENCY_LIFECYCLE_SCRIPTS {
+            if scripts.contains_key(script) {
+                if trusted_dependency_lifecycle_script_path(
+                    dependency_root,
+                    &path,
+                    package,
+                    version,
+                    script,
+                )? {
+                    continue;
+                }
+                return Err(format!(
+                    "dependency package {package} declares forbidden lifecycle script {script} in {}",
+                    path.display()
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn validate_dependency_entry(path: &Path, canonical_root: &Path) -> Result<(), String> {
@@ -5540,10 +8523,29 @@ fn validate_dependency_entry(path: &Path, canonical_root: &Path) -> Result<(), S
         // A contained shim is legal; anything reaching outside the tree is not.
         // Traversal never descends THROUGH the link, so a link to a directory
         // inside the tree cannot make this recursion unbounded.
-        dependency_symlink_target(path, canonical_root)?;
+        let target = dependency_symlink_target(path, canonical_root)?;
+        let path_is_native =
+            path.extension().and_then(|extension| extension.to_str()) == Some("node");
+        let target_is_native =
+            target.extension().and_then(|extension| extension.to_str()) == Some("node");
+        if path_is_native || target_is_native {
+            return Err(format!(
+                "dependency tree contains a native Node addon symlink: {}",
+                path.display()
+            ));
+        }
         return Ok(());
     }
     if metadata.is_file() {
+        if path.extension().and_then(|extension| extension.to_str()) == Some("node") {
+            if trusted_dependency_native_binding_path(path, canonical_root)? {
+                return Ok(());
+            }
+            return Err(format!(
+                "dependency tree contains a native Node addon: {}",
+                path.display()
+            ));
+        }
         return Ok(());
     }
     if !metadata.is_dir() {
@@ -5908,8 +8910,14 @@ mod tests {
         next_task_id: AtomicU64,
         tasks: Mutex<HashMap<String, Arc<MockTask>>>,
         last_request: Mutex<Option<LinuxCommandRequest>>,
+        isolated_requests: Mutex<Vec<LinuxCommandRequest>>,
+        pnpm_node_modules_entries: Mutex<Vec<Vec<String>>>,
         enforcement_receipt: AtomicBool,
         fail_kill: AtomicBool,
+        fail_build: AtomicBool,
+        fail_frozen_install: AtomicBool,
+        inject_lifecycle_script: AtomicBool,
+        omit_staged_vite_marker: AtomicBool,
     }
 
     impl MockMobileLinuxRuntime {
@@ -5920,8 +8928,14 @@ mod tests {
                 next_task_id: AtomicU64::new(1),
                 tasks: Mutex::new(HashMap::new()),
                 last_request: Mutex::new(None),
+                isolated_requests: Mutex::new(Vec::new()),
+                pnpm_node_modules_entries: Mutex::new(Vec::new()),
                 enforcement_receipt: AtomicBool::new(true),
                 fail_kill: AtomicBool::new(false),
+                fail_build: AtomicBool::new(false),
+                fail_frozen_install: AtomicBool::new(false),
+                inject_lifecycle_script: AtomicBool::new(false),
+                omit_staged_vite_marker: AtomicBool::new(false),
             })
         }
 
@@ -5931,6 +8945,30 @@ mod tests {
 
         fn set_enforcement_receipt(&self, enforced: bool) {
             self.enforcement_receipt.store(enforced, Ordering::SeqCst);
+        }
+
+        fn set_omit_staged_vite_marker(&self, omit: bool) {
+            self.omit_staged_vite_marker.store(omit, Ordering::SeqCst);
+        }
+
+        fn set_fail_build(&self, fail: bool) {
+            self.fail_build.store(fail, Ordering::SeqCst);
+        }
+
+        fn set_fail_frozen_install(&self, fail: bool) {
+            self.fail_frozen_install.store(fail, Ordering::SeqCst);
+        }
+
+        fn set_inject_lifecycle_script(&self, inject: bool) {
+            self.inject_lifecycle_script.store(inject, Ordering::SeqCst);
+        }
+
+        async fn isolated_requests(&self) -> Vec<LinuxCommandRequest> {
+            self.isolated_requests.lock().await.clone()
+        }
+
+        async fn pnpm_node_modules_entries(&self) -> Vec<Vec<String>> {
+            self.pnpm_node_modules_entries.lock().await.clone()
         }
 
         async fn recorded_request(&self) -> LinuxCommandRequest {
@@ -6033,6 +9071,165 @@ mod tests {
         ) -> Result<traits::LinuxCommandResult, MobileLinuxError> {
             Self::enforce_network_policy(&request)?;
             Err(MobileLinuxError::Unsupported)
+        }
+
+        async fn run_isolated(
+            &self,
+            request: LinuxCommandRequest,
+        ) -> Result<traits::LinuxCommandResult, MobileLinuxError> {
+            *self.last_request.lock().await = Some(request.clone());
+            self.isolated_requests.lock().await.push(request.clone());
+            let build_mount = request.mounts.first().ok_or_else(|| {
+                MobileLinuxError::InvalidRequest("missing LocalAppBuild mount".into())
+            })?;
+            let guest_cwd = request.cwd.clone().ok_or_else(|| {
+                MobileLinuxError::InvalidRequest("missing dependency staging cwd".into())
+            })?;
+            let relative = guest_cwd
+                .strip_prefix(&build_mount.guest_path)
+                .map(|suffix| suffix.trim_start_matches('/'))
+                .ok_or_else(|| {
+                    MobileLinuxError::InvalidRequest(
+                        "dependency staging cwd is outside the mounted workspace".into(),
+                    )
+                })?;
+            let host_cwd = if relative.is_empty() {
+                build_mount.host_path.clone()
+            } else {
+                build_mount.host_path.join(relative)
+            };
+            if request.command == "/usr/bin/pnpm" {
+                let mut entries = fs::read_dir(host_cwd.join("node_modules"))
+                    .into_iter()
+                    .flatten()
+                    .filter_map(Result::ok)
+                    .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                    .collect::<Vec<_>>();
+                entries.sort();
+                self.pnpm_node_modules_entries.lock().await.push(entries);
+            }
+            if request.command == "/usr/bin/pnpm"
+                && request.args.iter().any(|arg| arg == "--frozen-lockfile")
+                && self.fail_frozen_install.load(Ordering::SeqCst)
+            {
+                return Ok(traits::LinuxCommandResult {
+                    stdout: String::new(),
+                    stderr: "synthetic frozen install failure".into(),
+                    exit_code: 1,
+                    timed_out: false,
+                    cancelled: false,
+                    enforcement: traits::LinuxEnforcementReceipt {
+                        network_policy_enforced: self.enforcement_receipt.load(Ordering::SeqCst),
+                        memory_limit_enforced: self.enforcement_receipt.load(Ordering::SeqCst),
+                    },
+                });
+            }
+            if request.command == "/usr/bin/pnpm"
+                && request.args.iter().any(|arg| arg == "--lockfile-only")
+            {
+                return Ok(traits::LinuxCommandResult {
+                    stdout: "lockfile resolved".into(),
+                    stderr: String::new(),
+                    exit_code: 0,
+                    timed_out: false,
+                    cancelled: false,
+                    enforcement: traits::LinuxEnforcementReceipt {
+                        network_policy_enforced: self.enforcement_receipt.load(Ordering::SeqCst),
+                        memory_limit_enforced: self.enforcement_receipt.load(Ordering::SeqCst),
+                    },
+                });
+            }
+            if request.command == "/usr/bin/node" {
+                if self.fail_build.load(Ordering::SeqCst) {
+                    return Ok(traits::LinuxCommandResult {
+                        stdout: String::new(),
+                        stderr: "synthetic build failure".into(),
+                        exit_code: 1,
+                        timed_out: false,
+                        cancelled: false,
+                        enforcement: traits::LinuxEnforcementReceipt {
+                            network_policy_enforced: self
+                                .enforcement_receipt
+                                .load(Ordering::SeqCst),
+                            memory_limit_enforced: self.enforcement_receipt.load(Ordering::SeqCst),
+                        },
+                    });
+                }
+                let output_rel = request
+                    .args
+                    .windows(2)
+                    .find_map(|pair| (pair[0] == "--outDir").then_some(pair[1].as_str()))
+                    .ok_or_else(|| {
+                        MobileLinuxError::InvalidRequest("missing Vite --outDir".into())
+                    })?;
+                let output = host_cwd.join(output_rel);
+                fs::create_dir_all(&output).map_err(|error| {
+                    MobileLinuxError::Io(format!("create fake build output: {error}"))
+                })?;
+                fs::write(
+                    output.join("index.html"),
+                    b"<!doctype html><title>built</title>",
+                )
+                .map_err(|error| {
+                    MobileLinuxError::Io(format!("write fake build output: {error}"))
+                })?;
+                return Ok(traits::LinuxCommandResult {
+                    stdout: "built".into(),
+                    stderr: String::new(),
+                    exit_code: 0,
+                    timed_out: false,
+                    cancelled: false,
+                    enforcement: traits::LinuxEnforcementReceipt {
+                        network_policy_enforced: self.enforcement_receipt.load(Ordering::SeqCst),
+                        memory_limit_enforced: self.enforcement_receipt.load(Ordering::SeqCst),
+                    },
+                });
+            }
+            fs::create_dir_all(host_cwd.join("node_modules")).map_err(|error| {
+                MobileLinuxError::Io(format!("create fake node_modules root: {error}"))
+            })?;
+            if !self.omit_staged_vite_marker.load(Ordering::SeqCst) {
+                let vite = host_cwd.join("node_modules/vite/bin/vite.js");
+                fs::create_dir_all(vite.parent().expect("vite parent")).map_err(|error| {
+                    MobileLinuxError::Io(format!("create fake install tree: {error}"))
+                })?;
+                fs::write(&vite, b"#!/usr/bin/env node\n").map_err(|error| {
+                    MobileLinuxError::Io(format!("write fake vite binary: {error}"))
+                })?;
+                fs::write(
+                    host_cwd.join("node_modules/vite/package.json"),
+                    r#"{"name":"vite","version":"8.2.1","license":"MIT"}"#,
+                )
+                .map_err(|error| {
+                    MobileLinuxError::Io(format!("write fake vite manifest: {error}"))
+                })?;
+            }
+            fs::write(host_cwd.join("node_modules/react.js"), b"react")
+                .map_err(|error| MobileLinuxError::Io(format!("write fake dependency: {error}")))?;
+            fs::create_dir_all(host_cwd.join("node_modules/react")).map_err(|error| {
+                MobileLinuxError::Io(format!("create fake react package dir: {error}"))
+            })?;
+            let react_manifest = if self.inject_lifecycle_script.load(Ordering::SeqCst) {
+                r#"{"name":"react","version":"19.2.8","license":"MIT","scripts":{"install":"echo unsafe"}}"#
+            } else {
+                r#"{"name":"react","version":"19.2.8","license":"MIT"}"#
+            };
+            fs::write(
+                host_cwd.join("node_modules/react/package.json"),
+                react_manifest,
+            )
+            .map_err(|error| MobileLinuxError::Io(format!("write fake react manifest: {error}")))?;
+            Ok(traits::LinuxCommandResult {
+                stdout: "ok".into(),
+                stderr: String::new(),
+                exit_code: 0,
+                timed_out: false,
+                cancelled: false,
+                enforcement: traits::LinuxEnforcementReceipt {
+                    network_policy_enforced: self.enforcement_receipt.load(Ordering::SeqCst),
+                    memory_limit_enforced: self.enforcement_receipt.load(Ordering::SeqCst),
+                },
+            })
         }
 
         async fn spawn_background(
@@ -6338,7 +9535,7 @@ mod tests {
             Arc::new(NoopClientEventSink),
             None,
             false,
-            Some(runtime_root),
+            Some(runtime_root.clone()),
         );
 
         let started = tokio::time::Instant::now();
@@ -6375,7 +9572,7 @@ mod tests {
             Arc::new(NoopClientEventSink),
             None,
             false,
-            Some(runtime_root),
+            Some(runtime_root.clone()),
         );
 
         let error = broker
@@ -6422,19 +9619,135 @@ mod tests {
             .create_app(Some(name), "a test app", None)
             .await
             .expect("create app");
-        let layout = AppLayout::new(root.path().to_path_buf(), record.id.clone()).expect("layout");
+        seed_launchable_runtime_fixture(root.path(), &record, name);
+        service
+            .commit_scaffold(&record.id, name, "a test app", None)
+            .await
+            .expect("commit fixture scaffold");
+        record.id
+    }
+
+    fn collect_fixture_files(current: &Path, files: &mut Vec<PathBuf>) {
+        let metadata = fs::symlink_metadata(current).expect("inspect fixture output");
+        assert!(
+            !metadata.file_type().is_symlink(),
+            "fixture output must not contain symlinks: {}",
+            current.display()
+        );
+        if metadata.is_dir() {
+            for entry in fs::read_dir(current).expect("read fixture output") {
+                let entry = entry.expect("fixture output entry");
+                collect_fixture_files(&entry.path(), files);
+            }
+        } else if metadata.is_file() {
+            files.push(current.to_path_buf());
+        } else {
+            panic!(
+                "fixture output must be a regular file or directory: {}",
+                current.display()
+            );
+        }
+    }
+
+    fn fixture_output_digest(root: &Path) -> String {
+        let mut files = Vec::new();
+        collect_fixture_files(root, &mut files);
+        files.sort();
+        let mut hasher = Sha256::new();
+        for path in files {
+            let relative = path
+                .strip_prefix(root)
+                .expect("fixture output stays under the root");
+            hasher.update(relative.to_string_lossy().replace('\\', "/").as_bytes());
+            hasher.update([0]);
+            hasher.update(fs::read(&path).expect("read fixture output file"));
+            hasher.update([0]);
+        }
+        format!("{:x}", hasher.finalize())
+    }
+
+    fn write_fixture_package_manifest(node_modules: &Path, package: &str, version: &str) {
+        let package_dir = node_modules.join(package);
+        fs::create_dir_all(&package_dir).expect("create fixture package directory");
+        fs::write(
+            package_dir.join("package.json"),
+            format!("{{\"name\":\"{package}\",\"version\":\"{version}\"}}\n"),
+        )
+        .expect("write fixture package manifest");
+    }
+
+    fn seed_launchable_runtime_fixture(root: &Path, record: &local_apps::AppRecord, name: &str) {
+        let layout = AppLayout::new(root.to_path_buf(), record.id.clone()).expect("layout");
+        let workspace = root.join(layout.workspace_rel());
+        let binding = crate::local_app_runtime_profiles::current_binding_for_family(
+            local_apps::AppRuntimeProfile::ReactDom,
+        )
+        .expect("published react-dom runtime profile");
+        let artifacts =
+            scaffold_runtime_profile(Some(binding.clone()), local_apps::AppSurface::Dom)
+                .expect("react-dom scaffold artifacts");
+        stamp_scaffold_identity(&layout, name, &artifacts).expect("stamp fixture scaffold");
+        persist_runtime_profile_files(&workspace, &artifacts)
+            .expect("persist fixture runtime profile files");
+
+        let contract = crate::local_app_runtime_profiles::contract_for_binding(&binding)
+            .expect("react-dom runtime contract");
+        let node_modules = workspace.join("node_modules");
+        for &(package, version) in contract.core_packages {
+            write_fixture_package_manifest(&node_modules, package, version);
+        }
+        let vite_bin = node_modules.join("vite/bin/vite.js");
+        fs::create_dir_all(vite_bin.parent().expect("vite bin parent"))
+            .expect("create fixture vite bin dir");
+        fs::write(&vite_bin, b"#!/usr/bin/env node\n").expect("write fixture vite marker");
+        fs::write(workspace.join("vite.config.mjs"), "export default {};\n")
+            .expect("mark fixture as a Vite app");
+
+        let tree_sha256 =
+            dependency_tree_digest(&workspace.join("node_modules")).expect("dependency tree");
+        refresh_runtime_profile_snapshot(&layout, &tree_sha256)
+            .expect("refresh fixture dependency snapshot");
+        let manifest = load_manifest(&layout).expect("fixture manifest");
+        storage::save_dependency_record(
+            root,
+            &local_apps::AppDependencyRecord {
+                schema_version: local_apps::APPS_SCHEMA_VERSION,
+                app_id: record.id.clone(),
+                state: local_apps::AppDependencyState::Ready,
+                lockfile_sha256: manifest
+                    .dependency_snapshot
+                    .as_ref()
+                    .map(|snapshot| snapshot.lockfile_sha256.clone()),
+                toolchain_key: manifest
+                    .dependency_snapshot
+                    .as_ref()
+                    .map(|snapshot| snapshot.toolchain_key.clone()),
+                install_attempts: 1,
+                last_error: None,
+                updated_at_ms: record.updated_at_ms,
+            },
+        )
+        .expect("save fixture dependency record");
+
         let static_dist = root
-            .path()
             .join(layout.build_rel(false))
             .join(crate::local_apps_build::VITE_OUTPUT_DIR);
         fs::create_dir_all(&static_dist).expect("create static dist");
         fs::write(static_dist.join("index.html"), "<html>ok</html>").expect("write index.html");
-        let full_build = root.path().join(layout.build_rel(true));
+        let full_build = root.join(layout.build_rel(true));
         fs::create_dir_all(&full_build).expect("create full build");
-        let workspace = root.path().join(layout.workspace_rel());
-        fs::write(workspace.join("vite.config.mjs"), "export default {};")
-            .expect("mark fixture as a Vite app");
-        record.id
+        let build_receipt = json!({
+            "version": 3,
+            "buildKey": "fixture-static-build",
+            "runtimeContractSha256": manifest.runtime_contract_hash().expect("runtime contract hash"),
+            "dependencySnapshotSha256": manifest.dependency_snapshot_hash().expect("dependency snapshot hash"),
+            "outputSha256": fixture_output_digest(&static_dist),
+        });
+        fs::write(
+            root.join(layout.build_rel(false)).join("build.json"),
+            serde_json::to_vec_pretty(&build_receipt).expect("serialize fixture build receipt"),
+        )
+        .expect("write fixture build receipt");
     }
 
     async fn scaffolded_lingxi(
@@ -6447,7 +9760,11 @@ mod tests {
             .await
             .expect("create app");
         broker
-            .scaffold_app_value(&record, local_apps::AppSurface::Dom)
+            .scaffold_app_value(
+                &record,
+                local_apps::AppSurface::Dom,
+                Some(local_apps::AppRuntimeProfile::ReactDom),
+            )
             .await
             .expect("scaffold app");
         let layout = AppLayout::new(root.path().to_path_buf(), record.id.clone()).expect("layout");
@@ -6461,7 +9778,8 @@ mod tests {
     /// agent never declares a manifest for still knows what it was built on.
     #[tokio::test]
     async fn scaffold_records_the_host_device_context() {
-        let (root, service, broker) = create_broker(false, None).await;
+        let runtime = MockMobileLinuxRuntime::new(Duration::ZERO);
+        let (root, service, broker) = create_broker(false, Some(runtime.clone())).await;
         assert!(broker
             .attach_host_environment(host_environment(
                 traits::MobileHostOs::Ios,
@@ -6473,7 +9791,11 @@ mod tests {
             .await
             .expect("create app");
         broker
-            .scaffold_app_value(&record, local_apps::AppSurface::Dom)
+            .scaffold_app_value(
+                &record,
+                local_apps::AppSurface::Dom,
+                Some(local_apps::AppRuntimeProfile::ReactDom),
+            )
             .await
             .expect("scaffold app");
 
@@ -6562,7 +9884,8 @@ mod tests {
 
     #[tokio::test]
     async fn scaffold_writes_capability_neutral_lingxi_when_shell_is_missing() {
-        let (_app_id, lingxi) = scaffolded_lingxi(true, None).await;
+        let runtime = MockMobileLinuxRuntime::new(Duration::ZERO);
+        let (_app_id, lingxi) = scaffolded_lingxi(true, Some(runtime)).await;
         assert!(
             lingxi.contains("repository-verified Vite + Ionic foundation"),
             "{lingxi}"
@@ -6581,7 +9904,11 @@ mod tests {
             .await
             .expect("create app");
         broker
-            .scaffold_app_value(&record, local_apps::AppSurface::Dom)
+            .scaffold_app_value(
+                &record,
+                local_apps::AppSurface::Dom,
+                Some(local_apps::AppRuntimeProfile::ReactDom),
+            )
             .await
             .expect("scaffold app");
         let layout = AppLayout::new(root.path().to_path_buf(), record.id).expect("layout");
@@ -6592,8 +9919,61 @@ mod tests {
         assert!(lingxi.contains("do not run a package manager in this local-app workspace"));
         assert!(broker
             .create_next_step()
-            .contains("Do not recreate the app scaffold"));
-        assert!(broker.create_next_step().contains("pnpm install"));
+            .contains("Do not recreate the app"));
+        assert!(broker
+            .create_next_step()
+            .contains("do not install dependencies yet"));
+    }
+
+    #[tokio::test]
+    async fn create_initializer_persists_dependency_snapshot_before_the_app_becomes_visible() {
+        let runtime = MockMobileLinuxRuntime::new(Duration::ZERO);
+        let (root, service, broker) = create_broker(false, Some(runtime.clone())).await;
+        let host = Arc::clone(&broker);
+
+        let record = service
+            .create_app_with_git_and_workflow_model_and_initializer(
+                Some("Tracker"),
+                "a test app",
+                None,
+                false,
+                None,
+                local_apps::CreateMode::Scaffolded,
+                None,
+                move |record| {
+                    let host = Arc::clone(&host);
+                    async move {
+                        host.scaffold_app(
+                            record,
+                            local_apps::AppSurface::Dom,
+                            Some(local_apps::AppRuntimeProfile::ReactDom),
+                        )
+                        .await
+                        .map_err(local_apps::AppError::Io)
+                    }
+                },
+            )
+            .await
+            .expect("create app");
+
+        let layout = AppLayout::new(root.path().to_path_buf(), record.id.clone()).expect("layout");
+        let manifest = load_manifest(&layout).expect("manifest");
+        assert!(
+            record.scaffolded,
+            "the returned app is visible only after commit"
+        );
+        assert_eq!(
+            service
+                .dependency_record(&record.id)
+                .await
+                .expect("dependency record")
+                .state,
+            local_apps::AppDependencyState::Ready
+        );
+        assert!(
+            manifest.dependency_snapshot.is_some(),
+            "the visible app must already carry a verified dependency snapshot"
+        );
     }
 
     // ---- §C.1 `LocalAppScaffold` — the create transaction --------------
@@ -6631,9 +10011,44 @@ mod tests {
         })
     }
 
+    async fn confirmed_scaffold_input(
+        broker: &Arc<LocalAppsHostBroker>,
+        app_id: &str,
+        name: &str,
+        brief: &str,
+        surface: &str,
+    ) -> Value {
+        let profile = match surface {
+            "dom" => local_apps::AppRuntimeProfile::ReactDom,
+            "canvas" => local_apps::AppRuntimeProfile::Canvas2d,
+            other => panic!("unsupported test scaffold surface {other}"),
+        };
+        let binding = crate::local_app_runtime_profiles::current_binding_for_family(profile)
+            .expect("published runtime profile");
+        let receipt = broker
+            .issue_runtime_profile_receipt(app_id, binding)
+            .await
+            .expect("issue test runtime-profile receipt");
+        json!({
+            "app_id": app_id,
+            "name": name,
+            "brief": brief,
+            "runtime_profile_receipt": receipt.receipt_id,
+        })
+    }
+
     fn workspace_of(root: &TempDir, app_id: &str) -> PathBuf {
         let layout = AppLayout::new(root.path().to_path_buf(), app_id.to_string()).expect("layout");
         root.path().join(layout.workspace_rel())
+    }
+
+    fn dependency_baseline_for(
+        layout: &AppLayout,
+        dependency_record: &local_apps::AppDependencyRecord,
+    ) -> DependencyBaselineIdentity {
+        LocalAppsHostBroker::load_trusted_dependency_baseline(layout, dependency_record)
+            .expect("trusted dependency baseline")
+            .3
     }
 
     /// Break the LAST step of the landing (§C.1 step 3e, the formal
@@ -6653,6 +10068,20 @@ mod tests {
     fn repair_the_final_landing_step(root: &TempDir, app_id: &str) {
         let contract = workspace_of(root, app_id).join("LINGXI.md");
         fs::remove_dir_all(&contract).expect("free the contract path");
+    }
+
+    fn break_index_commit(root: &TempDir) -> Vec<u8> {
+        let index = root.path().join(local_apps::storage::index_rel());
+        let original = fs::read(&index).expect("read index before injected failure");
+        fs::remove_file(&index).expect("remove index before injected failure");
+        fs::create_dir_all(&index).expect("occupy index path");
+        original
+    }
+
+    fn repair_index_commit(root: &TempDir, original: &[u8]) {
+        let index = root.path().join(local_apps::storage::index_rel());
+        fs::remove_dir_all(&index).expect("free index path");
+        fs::write(index, original).expect("restore index after injected failure");
     }
 
     /// The opening turn of the interview must ask for a DESCRIPTION in ordinary
@@ -6701,6 +10130,1648 @@ mod tests {
             guided.contains("用 `AskUserQuestion` 把提议的**名称**与**形态**交给用户确认或修改"),
             "the name/surface confirmation still belongs in a picker: {guided}"
         );
+        assert!(
+            guided.contains("1-3 个聚焦问题"),
+            "a clarification round must contain one to three questions: {guided}"
+        );
+        assert!(
+            guided.contains("没有未决事项就省略这一轮"),
+            "no unresolved decisions must omit the clarification round: {guided}"
+        );
+    }
+
+    #[tokio::test]
+    async fn scaffold_requires_a_runtime_profile_receipt() {
+        let (root, service, broker) = create_broker(false, None).await;
+        let shell = shell_app_fixture(&broker, &service).await;
+
+        let error = broker
+            .scaffold_shell_app_value(scaffold_input(&shell.id, "A", "b", "dom"))
+            .await
+            .expect_err("scaffold must fail closed without a native-confirmed receipt");
+        assert!(error.contains("runtime_profile_receipt"), "{error}");
+        assert!(!service.record(&shell.id).await.expect("record").scaffolded);
+        assert!(
+            fs::read_to_string(workspace_of(&root, &shell.id).join("LINGXI.md"))
+                .expect("guided contract")
+                .contains("尚未定形态")
+        );
+    }
+
+    #[tokio::test]
+    async fn invalid_workflow_model_releases_the_runtime_profile_receipt_claim() {
+        let (_root, service, broker) = create_broker(false, None).await;
+        let shell = shell_app_fixture(&broker, &service).await;
+        let binding = crate::local_app_runtime_profiles::current_binding_for_family(
+            local_apps::AppRuntimeProfile::ReactDom,
+        )
+        .expect("published dom profile");
+        let receipt = broker
+            .issue_runtime_profile_receipt(&shell.id, binding)
+            .await
+            .expect("issue receipt");
+
+        let error = broker
+            .scaffold_shell_app_value(json!({
+                "app_id": shell.id,
+                "name": "bad workflow model",
+                "brief": "b",
+                "runtime_profile_receipt": receipt.receipt_id,
+                "workflow_model": 123,
+            }))
+            .await
+            .expect_err("invalid workflow_model must fail before scaffold");
+        assert!(error.contains("workflow_model must be a string"), "{error}");
+
+        let replacement = broker
+            .issue_runtime_profile_receipt(
+                &shell.id,
+                crate::local_app_runtime_profiles::current_binding_for_family(
+                    local_apps::AppRuntimeProfile::ReactDom,
+                )
+                .expect("published dom profile"),
+            )
+            .await
+            .expect("claim must have been released");
+        assert_ne!(replacement.receipt_id, receipt.receipt_id);
+    }
+
+    #[tokio::test]
+    async fn runtime_profile_receipts_enforce_claim_supersede_cross_app_and_ttl() {
+        let (_root, service, broker) = create_broker(false, None).await;
+        let first = shell_app_fixture(&broker, &service).await;
+        let second = shell_app_fixture(&broker, &service).await;
+        let binding = crate::local_app_runtime_profiles::current_binding_for_family(
+            local_apps::AppRuntimeProfile::ReactDom,
+        )
+        .expect("published dom profile");
+
+        let original = broker
+            .issue_runtime_profile_receipt(&first.id, binding.clone())
+            .await
+            .expect("issue receipt");
+        assert_eq!(
+            broker
+                .claim_runtime_profile_receipt(&first.id, &original.receipt_id)
+                .await
+                .expect("claim")
+                .family,
+            binding.family
+        );
+        let in_use = broker
+            .issue_runtime_profile_receipt(&first.id, binding.clone())
+            .await
+            .expect_err("claimed receipt must block supersede");
+        assert!(in_use.contains("already in use"), "{in_use}");
+        let cross_app = broker
+            .claim_runtime_profile_receipt(&second.id, &original.receipt_id)
+            .await
+            .expect_err("receipt must be app-scoped");
+        assert!(cross_app.contains(&second.id), "{cross_app}");
+
+        broker
+            .release_runtime_profile_receipt_claim(&first.id, &original.receipt_id)
+            .await;
+        let replacement = broker
+            .issue_runtime_profile_receipt(&first.id, binding)
+            .await
+            .expect("issue replacement");
+        let stale = broker
+            .claim_runtime_profile_receipt(&first.id, &original.receipt_id)
+            .await
+            .expect_err("superseded receipt must not claim");
+        assert!(stale.contains("stale or superseded"), "{stale}");
+        broker
+            .consume_runtime_profile_receipt(&first.id, &replacement.receipt_id)
+            .await;
+        let consumed = broker
+            .claim_runtime_profile_receipt(&first.id, &replacement.receipt_id)
+            .await
+            .expect_err("consumed receipt must not replay");
+        assert!(
+            consumed.contains("missing or was already consumed"),
+            "{consumed}"
+        );
+
+        let expired = broker
+            .issue_runtime_profile_receipt(
+                &first.id,
+                crate::local_app_runtime_profiles::current_binding_for_family(
+                    local_apps::AppRuntimeProfile::ReactDom,
+                )
+                .expect("published dom profile"),
+            )
+            .await
+            .expect("issue expiring receipt");
+        broker
+            .pending_runtime_profile_receipts
+            .lock()
+            .await
+            .get_mut(&first.id)
+            .expect("stored receipt")
+            .expires_at_ms = now_ms().saturating_sub(1);
+        let expired_error = broker
+            .claim_runtime_profile_receipt(&first.id, &expired.receipt_id)
+            .await
+            .expect_err("expired receipt must fail");
+        assert!(expired_error.contains("expired"), "{expired_error}");
+    }
+
+    #[tokio::test]
+    async fn runtime_profiles_report_availability_cache_download_and_migrations() {
+        let (_root, _service, broker) = create_broker(false, None).await;
+        let profiles = broker
+            .runtime_profiles_value(json!({}))
+            .await
+            .expect("runtime profiles")["profiles"]
+            .as_array()
+            .expect("profiles array")
+            .clone();
+        let react = profiles
+            .iter()
+            .find(|entry| entry["family"] == "react_dom")
+            .expect("react_dom profile");
+        assert_eq!(react["cache_status"], "download_required");
+        assert_eq!(react["download_status"], "download_required");
+        assert_eq!(react["available_migrations"], json!([]));
+
+        for family in ["three_3d", "phaser_2d"] {
+            let entry = profiles
+                .iter()
+                .find(|entry| entry["family"] == family)
+                .unwrap_or_else(|| panic!("{family} profile"));
+            assert_eq!(entry["cache_status"], "download_required");
+            assert_eq!(
+                entry["download_status"], "download_required",
+                "source bundle availability must not claim an installed dependency tree"
+            );
+        }
+
+        let babylon = profiles
+            .iter()
+            .find(|entry| entry["family"] == "babylon_3d")
+            .expect("babylon profile");
+        assert_eq!(babylon["available"], false);
+        assert_eq!(babylon["cache_status"], "unavailable");
+        assert_eq!(babylon["download_status"], "gated");
+        assert_eq!(babylon["available_migrations"], json!([]));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn runtime_profile_dependency_status_distinguishes_seed_and_shared_cache() {
+        let root = TempDir::new().expect("tempdir");
+        let binding = crate::local_app_runtime_profiles::current_binding_for_family(
+            AppRuntimeProfile::ReactDom,
+        )
+        .expect("react profile binding");
+        let contract = crate::local_app_runtime_profiles::contract_for_binding(&binding)
+            .expect("react profile contract");
+        let lock_digest = crate::local_app_runtime_profiles::lockfile_sha256(contract);
+
+        // A configured seed with the exact lock is bundled, even though its
+        // dependency tree has not been copied into the shared cache.
+        let runtime_root = create_bundled_seed(root.path(), &lock_digest);
+        let broker = LocalAppsHostBroker::new(
+            root.path().to_path_buf(),
+            Arc::new(NoopClientEventSink),
+            None,
+            false,
+            Some(runtime_root.clone()),
+        );
+        assert_eq!(
+            broker.runtime_profile_dependency_availability(
+                AppRuntimeProfile::ReactDom,
+                binding.revision,
+            ),
+            RuntimeProfileDependencyAvailability::Bundled,
+        );
+
+        // Once the exact lock is represented by a verified shared snapshot,
+        // the provenance changes to cached. The selector must not keep
+        // claiming that it will use the device bundle.
+        let snapshot = broker.dependency_snapshot_root(&lock_digest);
+        assert!(LocalAppsHostBroker::adopt_bundled_dependency_seed(
+            &runtime_root,
+            &lock_digest,
+            &snapshot,
+        )
+        .expect("adopt matching seed"));
+        assert_eq!(
+            broker.runtime_profile_dependency_availability(
+                AppRuntimeProfile::ReactDom,
+                binding.revision,
+            ),
+            RuntimeProfileDependencyAvailability::Cached,
+        );
+    }
+
+    #[tokio::test]
+    async fn native_runtime_profile_selection_is_authoritative_over_the_recommendation() {
+        let root = TempDir::new().expect("tempdir");
+        let service = test_service(&root).await;
+        let sink = MockSink::arc();
+        let broker =
+            LocalAppsHostBroker::new(root.path().to_path_buf(), sink.clone(), None, false, None);
+        assert!(broker.attach_service(service.clone()).is_ok());
+        let shell = shell_app_fixture(&broker, &service).await;
+
+        let resolver = {
+            let sink = sink.clone();
+            let broker = broker.clone();
+            tokio::spawn(async move {
+                loop {
+                    for event in sink.events().await {
+                        if let ClientEvent::AppEvent {
+                            event: AppEventDto::AppRuntimeProfileSelectionRequested { request },
+                        } = event
+                        {
+                            assert_eq!(
+                                request.recommended_family,
+                                Some(AppRuntimeProfileDto::Babylon3d)
+                            );
+                            assert_eq!(request.options.len(), 5);
+                            let babylon = request
+                                .options
+                                .iter()
+                                .find(|option| option.family == AppRuntimeProfileDto::Babylon3d)
+                                .expect("Babylon catalog option");
+                            assert!(!babylon.available);
+                            assert_eq!(babylon.download_status, "gated");
+                            assert!(
+                                broker
+                                    .resolve_runtime_profile_selection(
+                                        &request.request_id,
+                                        Some(AppRuntimeProfileDto::Canvas2d),
+                                    )
+                                    .await
+                            );
+                            return;
+                        }
+                    }
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            })
+        };
+
+        let selected = broker
+            .confirm_runtime_profile_value(json!({
+                "app_id": shell.id,
+                "recommended_profile": "babylon_3d",
+            }))
+            .await
+            .expect("native selection returns a receipt");
+        resolver.await.expect("selection resolver");
+        assert_eq!(selected["runtime_profile"]["family"], "canvas_2d");
+        assert_ne!(selected["runtime_profile"]["family"], "babylon_3d");
+    }
+
+    #[tokio::test]
+    async fn a_failed_scaffold_releases_the_receipt_claim_for_retry() {
+        let runtime = MockMobileLinuxRuntime::new(Duration::ZERO);
+        let (root, service, broker) = create_broker(false, Some(runtime.clone())).await;
+        let shell = shell_app_fixture(&broker, &service).await;
+        let original_manifest = load_manifest(
+            &AppLayout::new(root.path().to_path_buf(), shell.id.clone()).expect("layout"),
+        )
+        .expect("shell manifest");
+        let original_dependency = service
+            .dependency_record(&shell.id)
+            .await
+            .expect("shell dependency record");
+        let binding = crate::local_app_runtime_profiles::current_binding_for_family(
+            local_apps::AppRuntimeProfile::Canvas2d,
+        )
+        .expect("published canvas profile");
+        let receipt = broker
+            .issue_runtime_profile_receipt(&shell.id, binding)
+            .await
+            .expect("issue receipt");
+        break_the_final_landing_step(&root, &shell.id);
+
+        let first = broker
+            .scaffold_shell_app_value(json!({
+                "app_id": shell.id,
+                "name": "打飞机",
+                "brief": "b",
+                "runtime_profile_receipt": receipt.receipt_id,
+            }))
+            .await
+            .expect_err("broken landing must fail");
+        assert!(first.contains("LINGXI.md"), "{first}");
+        let layout = AppLayout::new(root.path().to_path_buf(), shell.id.clone()).expect("layout");
+        assert_eq!(
+            load_manifest(&layout).expect("restored manifest"),
+            original_manifest,
+            "landing failure must restore the shell manifest"
+        );
+        assert_eq!(
+            service
+                .dependency_record(&shell.id)
+                .await
+                .expect("restored dependency record"),
+            original_dependency,
+            "landing failure must restore the service dependency cache"
+        );
+        assert!(
+            !root
+                .path()
+                .join(local_apps::storage::scaffold_recovery_journal_rel(
+                    &shell.id
+                ))
+                .exists(),
+            "a synchronous rollback must remove its recovery journal"
+        );
+        assert!(
+            workspace_of(&root, &shell.id).join("LINGXI.md").is_dir(),
+            "the exact shell workspace must be restored, including the injected failure fixture"
+        );
+        repair_the_final_landing_step(&root, &shell.id);
+
+        broker
+            .scaffold_shell_app_value(json!({
+                "app_id": shell.id,
+                "name": "打飞机",
+                "brief": "b",
+                "runtime_profile_receipt": receipt.receipt_id,
+            }))
+            .await
+            .expect("same receipt can retry after the claim is released");
+        assert!(service.record(&shell.id).await.expect("record").scaffolded);
+    }
+
+    #[tokio::test]
+    async fn scaffold_failure_after_dependency_snapshot_restores_shell_before_record_commit() {
+        let runtime = MockMobileLinuxRuntime::new(Duration::ZERO);
+        let (root, service, broker) = create_broker(false, Some(runtime.clone())).await;
+        let shell = shell_app_fixture(&broker, &service).await;
+        let layout = AppLayout::new(root.path().to_path_buf(), shell.id.clone()).expect("layout");
+        let original_manifest = load_manifest(&layout).expect("shell manifest");
+        let original_dependency = service
+            .dependency_record(&shell.id)
+            .await
+            .expect("shell dependency record");
+        let original_guided = fs::read(workspace_of(&root, &shell.id).join("LINGXI.md"))
+            .expect("guided workspace contract");
+        let original_index = break_index_commit(&root);
+        let receipt = broker
+            .issue_runtime_profile_receipt(
+                &shell.id,
+                crate::local_app_runtime_profiles::current_binding_for_family(
+                    local_apps::AppRuntimeProfile::ReactDom,
+                )
+                .expect("published DOM profile"),
+            )
+            .await
+            .expect("issue receipt");
+
+        let error = broker
+            .scaffold_shell_app_value(json!({
+                "app_id": shell.id,
+                "name": "回滚测试",
+                "brief": "dependency snapshot then commit failure",
+                "runtime_profile_receipt": receipt.receipt_id,
+            }))
+            .await
+            .expect_err("the occupied index must fail after dependency snapshot");
+        assert!(error.contains("index.json"), "{error}");
+        repair_index_commit(&root, &original_index);
+
+        let after = service.record(&shell.id).await.expect("shell record");
+        assert!(
+            !after.scaffolded,
+            "record.scaffolded is the final commit point"
+        );
+        assert_eq!(
+            load_manifest(&layout).expect("restored manifest"),
+            original_manifest
+        );
+        assert_eq!(
+            service
+                .dependency_record(&shell.id)
+                .await
+                .expect("restored dependency record"),
+            original_dependency
+        );
+        assert_eq!(
+            fs::read(workspace_of(&root, &shell.id).join("LINGXI.md"))
+                .expect("restored guided contract"),
+            original_guided
+        );
+        assert!(
+            !root
+                .path()
+                .join(local_apps::storage::scaffold_recovery_journal_rel(
+                    &shell.id
+                ))
+                .exists(),
+            "rollback must remove the durable journal after restoring the shell"
+        );
+
+        // The receipt claim is released and the repaired shell can retry from
+        // the exact pre-landing state.
+        broker
+            .scaffold_shell_app_value(json!({
+                "app_id": shell.id,
+                "name": "回滚测试",
+                "brief": "dependency snapshot then commit failure",
+                "runtime_profile_receipt": receipt.receipt_id,
+            }))
+            .await
+            .expect("same receipt retries after rollback");
+        assert!(service.record(&shell.id).await.expect("record").scaffolded);
+    }
+
+    #[tokio::test]
+    async fn cold_start_recovers_a_partial_scaffold_before_loading_the_app() {
+        let root = TempDir::new().expect("tempdir");
+        let service = test_service(&root).await;
+        let broker = LocalAppsHostBroker::new(
+            root.path().to_path_buf(),
+            Arc::new(NoopClientEventSink),
+            None,
+            false,
+            None,
+        );
+        assert!(broker.attach_service(service.clone()).is_ok());
+        let shell = shell_app_fixture(&broker, &service).await;
+        let layout = AppLayout::new(root.path().to_path_buf(), shell.id.clone()).expect("layout");
+        let original_manifest = load_manifest(&layout).expect("shell manifest");
+        let original_guided =
+            fs::read(workspace_of(&root, &shell.id).join("LINGXI.md")).expect("guided contract");
+        let binding = crate::local_app_runtime_profiles::current_binding_for_family(
+            local_apps::AppRuntimeProfile::Canvas2d,
+        )
+        .expect("published canvas profile");
+        let artifacts = scaffold_runtime_profile(Some(binding), local_apps::AppSurface::Canvas)
+            .expect("scaffold artifacts");
+        let target =
+            crate::local_apps_build::LocalAppBuildTarget::from_runtime_binding(&artifacts.binding)
+                .expect("build target");
+        let build_lock =
+            local_apps::storage::lock_app_build(root.path(), &shell.id).expect("build lock");
+        let recovery = local_apps::storage::begin_scaffold_recovery(
+            root.path(),
+            &shell.id,
+            "冷启动回滚",
+            "crash recovery",
+        )
+        .expect("durable recovery journal");
+        stamp_scaffold_identity(&layout, "冷启动回滚", &artifacts).expect("stamp partial identity");
+        crate::local_apps_build::scaffold_workspace_initialized(&layout, target, true)
+            .expect("land partial workspace");
+        persist_runtime_profile_files(&workspace_of(&root, &shell.id), &artifacts)
+            .expect("persist partial runtime files");
+        // Simulate process death: neither commit nor rollback runs.
+        std::mem::forget(recovery);
+        drop(build_lock);
+        drop(broker);
+        drop(service);
+
+        let loaded = local_apps::storage::load_all(root.path()).expect("cold-start recovery");
+        assert_eq!(loaded.len(), 1);
+        assert!(!loaded[0].record.scaffolded);
+        assert_eq!(
+            load_manifest(&layout).expect("restored manifest"),
+            original_manifest
+        );
+        assert_eq!(
+            fs::read(workspace_of(&root, &shell.id).join("LINGXI.md"))
+                .expect("restored guided contract"),
+            original_guided
+        );
+        assert!(
+            !root
+                .path()
+                .join(local_apps::storage::scaffold_recovery_journal_rel(
+                    &shell.id
+                ))
+                .exists(),
+            "cold-start recovery must consume the journal"
+        );
+    }
+
+    #[tokio::test]
+    async fn runtime_profile_apps_fail_closed_on_dependency_input_drift() {
+        let runtime = MockMobileLinuxRuntime::new(Duration::ZERO);
+        let (root, service, broker) = create_broker(false, Some(runtime)).await;
+        let shell = shell_app_fixture(&broker, &service).await;
+        broker
+            .scaffold_shell_app_value(
+                confirmed_scaffold_input(&broker, &shell.id, "漂移测试", "b", "dom").await,
+            )
+            .await
+            .expect("scaffold");
+        fs::write(
+            workspace_of(&root, &shell.id).join("package.json"),
+            "{\n  \"name\": \"tampered\"\n}\n",
+        )
+        .expect("tamper package.json");
+
+        let error = broker
+            .ensure_dependency_install(&shell.id, false)
+            .await
+            .expect_err("runtime-profile apps must not auto-repair dependency drift");
+        assert!(error.contains("dependencies_dirty"), "{error}");
+        assert!(error.contains("LocalAppConfirmDependencyChange"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn remove_only_dependency_change_skips_native_confirmation() {
+        let runtime = MockMobileLinuxRuntime::new(Duration::ZERO);
+        let (root, service, broker) = create_broker(false, Some(runtime.clone())).await;
+        let shell = shell_app_fixture(&broker, &service).await;
+        broker
+            .scaffold_shell_app_value(
+                confirmed_scaffold_input(&broker, &shell.id, "移除依赖", "b", "dom").await,
+            )
+            .await
+            .expect("scaffold");
+        let layout = AppLayout::new(root.path().to_path_buf(), shell.id.clone()).expect("layout");
+        let workspace = root.path().join(layout.workspace_rel());
+        let binding = load_manifest(&layout)
+            .expect("manifest")
+            .runtime_profile
+            .expect("runtime profile");
+        let contract = crate::local_app_runtime_profiles::contract_for_binding(&binding)
+            .expect("runtime contract");
+        let mut requested = LocalAppsHostBroker::load_requested_dependency_map(&workspace)
+            .expect("requested dependencies");
+        requested.insert("dayjs".into(), "1.11.13".into());
+        let dependency_record = service
+            .dependency_record(&shell.id)
+            .await
+            .expect("dependency record");
+        let receipt = broker
+            .issue_dependency_change_receipt(
+                &shell.id,
+                dependency_baseline_for(&layout, &dependency_record),
+                LocalAppsHostBroker::serialize_requested_dependency_map(&requested)
+                    .expect("requested json"),
+                LocalAppsHostBroker::build_effective_package_json(contract, &requested)
+                    .expect("effective package"),
+                vec![DependencyChange {
+                    kind: DependencyChangeKind::Add,
+                    package: "dayjs".into(),
+                    version: Some("1.11.13".into()),
+                }],
+            )
+            .await
+            .expect("issue dependency receipt");
+        broker
+            .update_dependencies(json!({
+                "app_id": shell.id,
+                "receipt_id": receipt.receipt_id,
+            }))
+            .await
+            .expect("seed committed dependency baseline");
+        let request_start = runtime.isolated_requests().await.len();
+
+        let result = broker
+            .confirm_dependency_change(json!({
+                "app_id": shell.id,
+                "changes": [{"kind": "remove", "package": "dayjs"}],
+            }))
+            .await
+            .expect("remove-only confirmation should not require native approval");
+        assert_eq!(result["ok"], true);
+        assert!(result["receipt"]["id"].as_str().is_some(), "{result}");
+        broker
+            .update_dependencies(json!({
+                "app_id": shell.id,
+                "receipt_id": result["receipt"]["id"].as_str().expect("receipt id"),
+            }))
+            .await
+            .expect("remove-only dependency update");
+        let requests = runtime.isolated_requests().await;
+        let dependency_requests: Vec<_> = requests[request_start..]
+            .iter()
+            .filter(|request| request.command == "/usr/bin/pnpm")
+            .collect();
+        assert_eq!(dependency_requests.len(), 2, "{dependency_requests:?}");
+        assert!(
+            dependency_requests
+                .iter()
+                .all(|request| request.network == NetworkPolicy::Disabled),
+            "remove-only updates must not perform a networked dependency resolution: {dependency_requests:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn dependency_change_confirmation_fails_closed_on_tampered_requested_baseline() {
+        let runtime = MockMobileLinuxRuntime::new(Duration::ZERO);
+        let (root, service, broker) = create_broker(false, Some(runtime)).await;
+        let shell = shell_app_fixture(&broker, &service).await;
+        broker
+            .scaffold_shell_app_value(
+                confirmed_scaffold_input(&broker, &shell.id, "依赖篡改", "b", "dom").await,
+            )
+            .await
+            .expect("scaffold");
+        let workspace = workspace_of(&root, &shell.id);
+        fs::write(
+            workspace.join(crate::local_app_runtime_profiles::REQUESTED_FILE_REL),
+            "{\n  \"dependencies\": {\n    \"dayjs\": \"1.11.13\"\n  }\n}\n",
+        )
+        .expect("tamper requested dependency baseline");
+
+        let error = broker
+            .confirm_dependency_change(json!({
+                "app_id": shell.id,
+                "changes": [{"kind": "add", "package": "nanoid", "version": "5.1.6"}],
+            }))
+            .await
+            .expect_err("tampered requested baseline must fail closed");
+        assert!(error.contains("dependencies_dirty"), "{error}");
+        assert!(
+            error.contains("outside the host-managed dependency flow"),
+            "{error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn dependency_add_uses_dedicated_native_confirmation_before_receipt() {
+        let runtime = MockMobileLinuxRuntime::new(Duration::ZERO);
+        let root = TempDir::new().expect("tempdir");
+        let service = test_service(&root).await;
+        let sink = MockSink::arc();
+        let broker = LocalAppsHostBroker::new(
+            root.path().to_path_buf(),
+            sink.clone(),
+            Some(runtime.clone()),
+            false,
+            None,
+        );
+        assert!(broker.attach_service(service.clone()).is_ok());
+        let shell = shell_app_fixture(&broker, &service).await;
+        broker
+            .scaffold_shell_app_value(
+                confirmed_scaffold_input(&broker, &shell.id, "确认依赖", "b", "dom").await,
+            )
+            .await
+            .expect("scaffold");
+        let requests_before_confirmation = runtime.isolated_requests().await.len();
+
+        let request = tokio::spawn({
+            let broker = broker.clone();
+            let app_id = shell.id.clone();
+            async move {
+                broker
+                    .confirm_dependency_change(json!({
+                        "app_id": app_id,
+                        "changes": [{
+                            "kind": "add",
+                            "package": "dayjs",
+                            "version": "1.11.13"
+                        }]
+                    }))
+                    .await
+            }
+        });
+
+        let confirmation = timeout(Duration::from_secs(2), async {
+            loop {
+                if let Some(request) = sink.events().await.into_iter().find_map(|event| {
+                    if let ClientEvent::AppEvent {
+                        event: AppEventDto::AppDependencyChangeConfirmationRequested { request },
+                    } = event
+                    {
+                        Some(request)
+                    } else {
+                        None
+                    }
+                }) {
+                    break request;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("dedicated confirmation event");
+        assert_eq!(confirmation.app_id, shell.id);
+        assert_eq!(confirmation.changes.len(), 1);
+        assert_eq!(confirmation.changes[0].package, "dayjs");
+        assert_eq!(
+            confirmation.changes[0].cache_status,
+            "unknown_until_resolution"
+        );
+        assert_eq!(confirmation.changes[0].download_status, "may_be_required");
+        assert_eq!(confirmation.license_risk, "unknown_until_resolution");
+        assert_eq!(confirmation.sbom_risk, "unknown_until_resolution");
+        assert!(confirmation.lifecycle_scripts_blocked);
+        assert!(confirmation.native_addons_blocked);
+        assert_eq!(
+            confirmation.rollback_policy,
+            "rollback_on_validation_failure"
+        );
+        assert_eq!(
+            runtime.isolated_requests().await.len(),
+            requests_before_confirmation,
+            "confirmation must not install or resolve dependencies before approval"
+        );
+        assert!(
+            broker
+                .pending_dependency_change_receipts
+                .lock()
+                .await
+                .get(&shell.id)
+                .is_none(),
+            "a receipt must not exist before approval"
+        );
+
+        assert!(
+            broker
+                .resolve_dependency_change_confirmation(&confirmation.request_id, true)
+                .await
+        );
+        let result = request
+            .await
+            .expect("confirmation task")
+            .expect("approved dependency change");
+        assert!(result["receipt"]["id"].as_str().is_some(), "{result}");
+    }
+
+    #[tokio::test]
+    async fn dependency_add_denial_does_not_issue_receipt() {
+        let runtime = MockMobileLinuxRuntime::new(Duration::ZERO);
+        let root = TempDir::new().expect("tempdir");
+        let service = test_service(&root).await;
+        let sink = MockSink::arc();
+        let broker = LocalAppsHostBroker::new(
+            root.path().to_path_buf(),
+            sink.clone(),
+            Some(runtime),
+            false,
+            None,
+        );
+        assert!(broker.attach_service(service.clone()).is_ok());
+        let shell = shell_app_fixture(&broker, &service).await;
+        broker
+            .scaffold_shell_app_value(
+                confirmed_scaffold_input(&broker, &shell.id, "拒绝依赖", "b", "dom").await,
+            )
+            .await
+            .expect("scaffold");
+
+        let request = tokio::spawn({
+            let broker = broker.clone();
+            let app_id = shell.id.clone();
+            async move {
+                broker
+                    .confirm_dependency_change(json!({
+                        "app_id": app_id,
+                        "changes": [{
+                            "kind": "update",
+                            "package": "dayjs",
+                            "version": "1.11.14"
+                        }]
+                    }))
+                    .await
+            }
+        });
+        let request_id = timeout(Duration::from_secs(2), async {
+            loop {
+                if let Some(request_id) = sink.events().await.into_iter().find_map(|event| {
+                    if let ClientEvent::AppEvent {
+                        event: AppEventDto::AppDependencyChangeConfirmationRequested { request },
+                    } = event
+                    {
+                        Some(request.request_id)
+                    } else {
+                        None
+                    }
+                }) {
+                    break request_id;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("dedicated confirmation event");
+        assert!(
+            broker
+                .resolve_dependency_change_confirmation(&request_id, false)
+                .await
+        );
+        let error = request
+            .await
+            .expect("confirmation task")
+            .expect_err("denial must fail closed");
+        assert!(error.contains("denied"), "{error}");
+        assert!(
+            broker
+                .pending_dependency_change_receipts
+                .lock()
+                .await
+                .get(&shell.id)
+                .is_none(),
+            "a denied change must not issue a receipt"
+        );
+    }
+
+    #[tokio::test]
+    async fn dependency_update_resolves_then_verifies_with_frozen_network_denied_install() {
+        let runtime = MockMobileLinuxRuntime::new(Duration::ZERO);
+        let (root, service, broker) = create_broker(false, Some(runtime.clone())).await;
+        let shell = shell_app_fixture(&broker, &service).await;
+        broker
+            .scaffold_shell_app_value(
+                confirmed_scaffold_input(&broker, &shell.id, "依赖两阶段", "b", "dom").await,
+            )
+            .await
+            .expect("scaffold");
+        let request_start = runtime.isolated_requests().await.len();
+
+        let layout = AppLayout::new(root.path().to_path_buf(), shell.id.clone()).expect("layout");
+        let workspace = root.path().join(layout.workspace_rel());
+        let binding = load_manifest(&layout)
+            .expect("manifest")
+            .runtime_profile
+            .expect("runtime profile");
+        let contract = crate::local_app_runtime_profiles::contract_for_binding(&binding)
+            .expect("runtime contract");
+        let mut requested = LocalAppsHostBroker::load_requested_dependency_map(&workspace)
+            .expect("requested dependency map");
+        requested.insert("dayjs".into(), "1.11.13".into());
+        let dependency_record = service
+            .dependency_record(&shell.id)
+            .await
+            .expect("dependency record");
+        let receipt = broker
+            .issue_dependency_change_receipt(
+                &shell.id,
+                dependency_baseline_for(&layout, &dependency_record),
+                LocalAppsHostBroker::serialize_requested_dependency_map(&requested)
+                    .expect("requested json"),
+                LocalAppsHostBroker::build_effective_package_json(contract, &requested)
+                    .expect("effective package"),
+                vec![DependencyChange {
+                    kind: DependencyChangeKind::Add,
+                    package: "dayjs".into(),
+                    version: Some("1.11.13".into()),
+                }],
+            )
+            .await
+            .expect("issue dependency receipt");
+
+        broker
+            .update_dependencies(json!({
+                "app_id": shell.id,
+                "receipt_id": receipt.receipt_id,
+            }))
+            .await
+            .expect("dependency update");
+        assert!(
+            !LocalAppsHostBroker::dependency_update_recovery_path(&layout).exists(),
+            "successful dependency update must remove its committed recovery journal"
+        );
+
+        let requests = runtime.isolated_requests().await;
+        let dependency_requests: Vec<_> = requests[request_start..]
+            .iter()
+            .filter(|request| request.command == "/usr/bin/pnpm")
+            .collect();
+        assert_eq!(dependency_requests.len(), 2, "{dependency_requests:?}");
+        let resolution = dependency_requests[0];
+        assert_eq!(resolution.network, NetworkPolicy::Allowed);
+        assert!(
+            resolution
+                .args
+                .iter()
+                .any(|arg| arg == "--no-frozen-lockfile"),
+            "resolution must be allowed to produce a new lockfile: {resolution:?}"
+        );
+        assert!(
+            !resolution.args.iter().any(|arg| arg == "--lockfile-only"),
+            "networked resolution must preheat the store with a full install: {resolution:?}"
+        );
+        assert!(!resolution.args.iter().any(|arg| arg == "--frozen-lockfile"));
+        assert!(resolution.args.iter().any(|arg| arg == "--ignore-scripts"));
+        assert!(resolution.args.iter().any(|arg| arg == "--no-runtime"));
+
+        let frozen = dependency_requests[1];
+        assert_eq!(frozen.network, NetworkPolicy::Disabled);
+        for flag in ["--frozen-lockfile", "--ignore-scripts", "--no-runtime"] {
+            assert!(
+                frozen.args.iter().any(|arg| arg == flag),
+                "frozen verification must include {flag}: {frozen:?}"
+            );
+        }
+        assert!(!frozen.args.iter().any(|arg| arg == "--no-frozen-lockfile"));
+        assert!(!frozen.args.iter().any(|arg| arg == "--lockfile-only"));
+
+        assert!(
+            !workspace
+                .join(".lingxi-build-state/dependency-staging/node_modules")
+                .exists(),
+            "successful dependency update must clean its staging tree after publication"
+        );
+    }
+
+    #[tokio::test]
+    async fn stale_dependency_receipt_cannot_overwrite_a_newer_committed_baseline() {
+        let runtime = MockMobileLinuxRuntime::new(Duration::ZERO);
+        let (root, service, broker) = create_broker(false, Some(runtime)).await;
+        let shell = shell_app_fixture(&broker, &service).await;
+        broker
+            .scaffold_shell_app_value(
+                confirmed_scaffold_input(&broker, &shell.id, "依赖过期回归", "b", "dom").await,
+            )
+            .await
+            .expect("scaffold");
+
+        let layout = AppLayout::new(root.path().to_path_buf(), shell.id.clone()).expect("layout");
+        let workspace = root.path().join(layout.workspace_rel());
+        let binding = load_manifest(&layout)
+            .expect("manifest")
+            .runtime_profile
+            .expect("runtime profile");
+        let contract = crate::local_app_runtime_profiles::contract_for_binding(&binding)
+            .expect("runtime contract");
+        let baseline_a_record = service
+            .dependency_record(&shell.id)
+            .await
+            .expect("baseline A dependency record");
+        let baseline_a = dependency_baseline_for(&layout, &baseline_a_record);
+        let mut requested = LocalAppsHostBroker::load_requested_dependency_map(&workspace)
+            .expect("requested dependency map");
+        requested.insert("dayjs".into(), "1.11.13".into());
+        let requested_json = LocalAppsHostBroker::serialize_requested_dependency_map(&requested)
+            .expect("requested json");
+        let effective_package_json =
+            LocalAppsHostBroker::build_effective_package_json(contract, &requested)
+                .expect("effective package");
+        let fresh_receipt = broker
+            .issue_dependency_change_receipt(
+                &shell.id,
+                baseline_a.clone(),
+                requested_json.clone(),
+                effective_package_json.clone(),
+                vec![DependencyChange {
+                    kind: DependencyChangeKind::Add,
+                    package: "dayjs".into(),
+                    version: Some("1.11.13".into()),
+                }],
+            )
+            .await
+            .expect("fresh receipt");
+        broker
+            .update_dependencies(json!({
+                "app_id": shell.id,
+                "receipt_id": fresh_receipt.receipt_id,
+            }))
+            .await
+            .expect("commit newer dependency baseline");
+
+        let stale_receipt_id = "dependency-change-stale".to_string();
+        broker
+            .pending_dependency_change_receipts
+            .lock()
+            .await
+            .insert(
+                shell.id.clone(),
+                PendingDependencyChangeReceipt {
+                    receipt_id: stale_receipt_id.clone(),
+                    app_id: shell.id.clone(),
+                    baseline: baseline_a,
+                    requested_json,
+                    effective_package_json,
+                    issued_at_ms: now_ms(),
+                    expires_at_ms: now_ms() + RUNTIME_PROFILE_RECEIPT_TTL.as_millis() as u64,
+                    summary: vec![DependencyChange {
+                        kind: DependencyChangeKind::Add,
+                        package: "dayjs".into(),
+                        version: Some("1.11.13".into()),
+                    }],
+                    claimed: false,
+                },
+            );
+
+        let error = broker
+            .update_dependencies(json!({
+                "app_id": shell.id,
+                "receipt_id": stale_receipt_id,
+            }))
+            .await
+            .expect_err("stale receipt must fail closed");
+        assert!(error.contains("reconfirm before applying"), "{error}");
+        assert!(
+            broker
+                .pending_dependency_change_receipts
+                .lock()
+                .await
+                .get(&shell.id)
+                .is_none(),
+            "stale receipt must be consumed after rejection"
+        );
+        assert_eq!(
+            LocalAppsHostBroker::load_requested_dependency_map(&workspace)
+                .expect("current requested dependency map")
+                .get("dayjs")
+                .map(String::as_str),
+            Some("1.11.13"),
+            "the newer committed baseline must remain authoritative"
+        );
+    }
+
+    #[tokio::test]
+    async fn frozen_dependency_install_failure_rolls_back_and_releases_receipt_claim() {
+        let runtime = MockMobileLinuxRuntime::new(Duration::ZERO);
+        let (root, service, broker) = create_broker(false, Some(runtime.clone())).await;
+        let shell = shell_app_fixture(&broker, &service).await;
+        broker
+            .scaffold_shell_app_value(
+                confirmed_scaffold_input(&broker, &shell.id, "依赖冻结失败", "b", "dom").await,
+            )
+            .await
+            .expect("scaffold");
+        let layout = AppLayout::new(root.path().to_path_buf(), shell.id.clone()).expect("layout");
+        let workspace = root.path().join(layout.workspace_rel());
+        let previous_package = fs::read(workspace.join("package.json")).expect("package.json");
+        let previous_dependency = service
+            .dependency_record(&shell.id)
+            .await
+            .expect("dependency record");
+        let binding = load_manifest(&layout)
+            .expect("manifest")
+            .runtime_profile
+            .expect("runtime profile");
+        let contract = crate::local_app_runtime_profiles::contract_for_binding(&binding)
+            .expect("runtime contract");
+        let mut requested = LocalAppsHostBroker::load_requested_dependency_map(&workspace)
+            .expect("requested dependency map");
+        requested.insert("dayjs".into(), "1.11.13".into());
+        let receipt = broker
+            .issue_dependency_change_receipt(
+                &shell.id,
+                dependency_baseline_for(&layout, &previous_dependency),
+                LocalAppsHostBroker::serialize_requested_dependency_map(&requested)
+                    .expect("requested json"),
+                LocalAppsHostBroker::build_effective_package_json(contract, &requested)
+                    .expect("effective package"),
+                vec![DependencyChange {
+                    kind: DependencyChangeKind::Add,
+                    package: "dayjs".into(),
+                    version: Some("1.11.13".into()),
+                }],
+            )
+            .await
+            .expect("issue dependency receipt");
+        let receipt_id = receipt.receipt_id;
+
+        runtime.set_fail_frozen_install(true);
+        let error = broker
+            .update_dependencies(json!({
+                "app_id": shell.id,
+                "receipt_id": receipt_id,
+            }))
+            .await
+            .expect_err("frozen install failure must abort the update");
+        assert!(
+            error.contains("synthetic frozen install failure"),
+            "{error}"
+        );
+        assert_eq!(
+            fs::read(workspace.join("package.json")).expect("restored package"),
+            previous_package
+        );
+        assert!(
+            workspace.join("node_modules/vite/bin/vite.js").is_file(),
+            "failed verification must leave the previous dependency tree"
+        );
+        let current_dependency = service
+            .dependency_record(&shell.id)
+            .await
+            .expect("current dependency record");
+        assert_eq!(current_dependency.state, AppDependencyState::Ready);
+        assert_eq!(
+            current_dependency.lockfile_sha256,
+            previous_dependency.lockfile_sha256
+        );
+
+        runtime.set_fail_frozen_install(false);
+        let retried = broker
+            .update_dependencies(json!({
+                "app_id": shell.id,
+                "receipt_id": receipt_id,
+            }))
+            .await
+            .expect("failed frozen install releases the receipt claim");
+        assert_eq!(retried["ok"], true);
+    }
+
+    #[tokio::test]
+    async fn dependency_update_rejects_lifecycle_scripts_before_snapshot_and_releases_receipt() {
+        let runtime = MockMobileLinuxRuntime::new(Duration::ZERO);
+        let (root, service, broker) = create_broker(false, Some(runtime.clone())).await;
+        let shell = shell_app_fixture(&broker, &service).await;
+        broker
+            .scaffold_shell_app_value(
+                confirmed_scaffold_input(&broker, &shell.id, "依赖脚本", "b", "dom").await,
+            )
+            .await
+            .expect("scaffold");
+        let layout = AppLayout::new(root.path().to_path_buf(), shell.id.clone()).expect("layout");
+        let workspace = root.path().join(layout.workspace_rel());
+        let previous_package = fs::read(workspace.join("package.json")).expect("package.json");
+        let previous_dependency = service
+            .dependency_record(&shell.id)
+            .await
+            .expect("dependency record");
+        let binding = load_manifest(&layout)
+            .expect("manifest")
+            .runtime_profile
+            .expect("runtime profile");
+        let contract = crate::local_app_runtime_profiles::contract_for_binding(&binding)
+            .expect("runtime contract");
+        let mut requested = LocalAppsHostBroker::load_requested_dependency_map(&workspace)
+            .expect("requested dependency map");
+        requested.insert("dayjs".into(), "1.11.13".into());
+        let receipt = broker
+            .issue_dependency_change_receipt(
+                &shell.id,
+                dependency_baseline_for(&layout, &previous_dependency),
+                LocalAppsHostBroker::serialize_requested_dependency_map(&requested)
+                    .expect("requested json"),
+                LocalAppsHostBroker::build_effective_package_json(contract, &requested)
+                    .expect("effective package"),
+                vec![DependencyChange {
+                    kind: DependencyChangeKind::Add,
+                    package: "dayjs".into(),
+                    version: Some("1.11.13".into()),
+                }],
+            )
+            .await
+            .expect("issue dependency receipt");
+        let receipt_id = receipt.receipt_id;
+
+        runtime.set_inject_lifecycle_script(true);
+        let error = broker
+            .update_dependencies(json!({
+                "app_id": shell.id,
+                "receipt_id": receipt_id,
+            }))
+            .await
+            .expect_err("lifecycle script must abort the update before snapshot publication");
+        assert!(error.contains("react"), "{error}");
+        assert!(error.contains("install"), "{error}");
+        assert_eq!(
+            fs::read(workspace.join("package.json")).expect("restored package"),
+            previous_package
+        );
+        assert!(workspace.join("node_modules/vite/bin/vite.js").is_file());
+        let current_dependency = service
+            .dependency_record(&shell.id)
+            .await
+            .expect("current dependency record");
+        assert_eq!(current_dependency.state, AppDependencyState::Ready);
+        assert_eq!(
+            current_dependency.lockfile_sha256,
+            previous_dependency.lockfile_sha256
+        );
+
+        runtime.set_inject_lifecycle_script(false);
+        let retried = broker
+            .update_dependencies(json!({
+                "app_id": shell.id,
+                "receipt_id": receipt_id,
+            }))
+            .await
+            .expect("lifecycle-script rejection releases the receipt claim");
+        assert_eq!(retried["ok"], true);
+    }
+
+    #[tokio::test]
+    async fn dependency_update_rolls_back_authoritative_files_when_finalize_fails() {
+        let runtime = MockMobileLinuxRuntime::new(Duration::ZERO);
+        let (root, service, broker) = create_broker(false, Some(runtime.clone())).await;
+        let shell = shell_app_fixture(&broker, &service).await;
+        broker
+            .scaffold_shell_app_value(
+                confirmed_scaffold_input(&broker, &shell.id, "依赖回滚", "b", "dom").await,
+            )
+            .await
+            .expect("scaffold");
+        runtime.set_omit_staged_vite_marker(true);
+
+        let layout = AppLayout::new(root.path().to_path_buf(), shell.id.clone()).expect("layout");
+        let workspace = root.path().join(layout.workspace_rel());
+        let previous_package = fs::read(workspace.join("package.json")).expect("package.json");
+        let previous_requested =
+            fs::read(workspace.join(crate::local_app_runtime_profiles::REQUESTED_FILE_REL))
+                .expect("requested.json");
+        let previous_dependency = service
+            .dependency_record(&shell.id)
+            .await
+            .expect("dependency record");
+
+        let binding = load_manifest(&layout)
+            .expect("manifest")
+            .runtime_profile
+            .expect("runtime profile");
+        let contract = crate::local_app_runtime_profiles::contract_for_binding(&binding)
+            .expect("runtime contract");
+        let mut requested = LocalAppsHostBroker::load_requested_dependency_map(&workspace)
+            .expect("requested dependency map");
+        requested.insert("dayjs".into(), "1.11.13".into());
+        let requested_json = LocalAppsHostBroker::serialize_requested_dependency_map(&requested)
+            .expect("requested json");
+        let effective_package_json =
+            LocalAppsHostBroker::build_effective_package_json(contract, &requested)
+                .expect("effective package");
+        let receipt = broker
+            .issue_dependency_change_receipt(
+                &shell.id,
+                dependency_baseline_for(&layout, &previous_dependency),
+                requested_json,
+                effective_package_json,
+                vec![DependencyChange {
+                    kind: DependencyChangeKind::Add,
+                    package: "dayjs".into(),
+                    version: Some("1.11.13".into()),
+                }],
+            )
+            .await
+            .expect("issue dependency receipt");
+
+        let error = broker
+            .update_dependencies(json!({
+                "app_id": shell.id,
+                "receipt_id": receipt.receipt_id,
+            }))
+            .await
+            .expect_err("missing staged vite marker must fail finalize");
+        assert!(error.contains("staged Vite executable"), "{error}");
+        assert_eq!(
+            fs::read(workspace.join("package.json")).expect("restored package"),
+            previous_package
+        );
+        assert_eq!(
+            fs::read(workspace.join(crate::local_app_runtime_profiles::REQUESTED_FILE_REL))
+                .expect("restored requested"),
+            previous_requested
+        );
+        assert!(
+            workspace.join("node_modules/vite/bin/vite.js").is_file(),
+            "previous dependency tree must be restored"
+        );
+        let current_dependency = service
+            .dependency_record(&shell.id)
+            .await
+            .expect("current dependency record");
+        assert_eq!(current_dependency.state, AppDependencyState::Ready);
+        assert_eq!(
+            current_dependency.lockfile_sha256,
+            previous_dependency.lockfile_sha256
+        );
+        assert_eq!(
+            current_dependency.toolchain_key,
+            previous_dependency.toolchain_key
+        );
+    }
+
+    #[tokio::test]
+    async fn dependency_update_builds_before_consuming_and_restores_the_old_build_on_failure() {
+        let runtime = MockMobileLinuxRuntime::new(Duration::ZERO);
+        let (root, service, broker) = create_broker(false, Some(runtime.clone())).await;
+        let shell = shell_app_fixture(&broker, &service).await;
+        broker
+            .scaffold_shell_app_value(
+                confirmed_scaffold_input(&broker, &shell.id, "依赖构建", "b", "dom").await,
+            )
+            .await
+            .expect("scaffold");
+        let layout = AppLayout::new(root.path().to_path_buf(), shell.id.clone()).expect("layout");
+        let builder = crate::local_apps_build::LocalAppBuilder {
+            mobile_linux: broker.mobile_linux(),
+            host: &broker,
+        };
+        builder
+            .build_workspace(&layout)
+            .await
+            .expect("initial production build");
+        let built_index = layout
+            .root()
+            .join(layout.build_rel(false))
+            .join(crate::local_apps_build::VITE_OUTPUT_DIR)
+            .join("index.html");
+        let old_index = fs::read(&built_index).expect("old build output");
+
+        let workspace = root.path().join(layout.workspace_rel());
+        let binding = load_manifest(&layout)
+            .expect("manifest")
+            .runtime_profile
+            .expect("runtime profile");
+        let contract = crate::local_app_runtime_profiles::contract_for_binding(&binding)
+            .expect("runtime contract");
+        let mut requested = LocalAppsHostBroker::load_requested_dependency_map(&workspace)
+            .expect("requested dependency map");
+        requested.insert("dayjs".into(), "1.11.13".into());
+        let previous_dependency = service
+            .dependency_record(&shell.id)
+            .await
+            .expect("dependency record");
+        let receipt = broker
+            .issue_dependency_change_receipt(
+                &shell.id,
+                dependency_baseline_for(&layout, &previous_dependency),
+                LocalAppsHostBroker::serialize_requested_dependency_map(&requested)
+                    .expect("requested json"),
+                LocalAppsHostBroker::build_effective_package_json(contract, &requested)
+                    .expect("effective package"),
+                vec![DependencyChange {
+                    kind: DependencyChangeKind::Add,
+                    package: "dayjs".into(),
+                    version: Some("1.11.13".into()),
+                }],
+            )
+            .await
+            .expect("issue dependency receipt");
+
+        runtime.set_fail_build(true);
+        let error = broker
+            .update_dependencies(json!({
+                "app_id": shell.id,
+                "receipt_id": receipt.receipt_id,
+            }))
+            .await
+            .expect_err("production build failure must roll back the dependency update");
+        assert!(error.contains("production build failed"), "{error}");
+        assert_eq!(
+            fs::read(&built_index).expect("restored old build"),
+            old_index
+        );
+        crate::local_apps_build::validate_build_for_launch(&layout)
+            .expect("restored build receipt remains launchable");
+
+        runtime.set_fail_build(false);
+        let retried = broker
+            .update_dependencies(json!({
+                "app_id": shell.id,
+                "receipt_id": receipt.receipt_id,
+            }))
+            .await
+            .expect("failed build releases the receipt claim for retry");
+        assert_eq!(retried["ok"], true);
+        crate::local_apps_build::validate_build_for_launch(&layout)
+            .expect("successful dependency update writes a launchable build receipt");
+        let replay = broker
+            .update_dependencies(json!({
+                "app_id": shell.id,
+                "receipt_id": receipt.receipt_id,
+            }))
+            .await
+            .expect_err("successful build consumes the receipt");
+        assert!(
+            replay.contains("missing or was already consumed"),
+            "{replay}"
+        );
+    }
+
+    #[tokio::test]
+    async fn dependency_update_cold_start_recovers_an_in_progress_journal() {
+        let runtime = MockMobileLinuxRuntime::new(Duration::ZERO);
+        let (root, service, broker) = create_broker(false, Some(runtime.clone())).await;
+        let shell = shell_app_fixture(&broker, &service).await;
+        broker
+            .scaffold_shell_app_value(
+                confirmed_scaffold_input(&broker, &shell.id, "依赖冷启动", "b", "dom").await,
+            )
+            .await
+            .expect("scaffold");
+        let layout = AppLayout::new(root.path().to_path_buf(), shell.id.clone()).expect("layout");
+        let builder = crate::local_apps_build::LocalAppBuilder {
+            mobile_linux: broker.mobile_linux(),
+            host: &broker,
+        };
+        builder
+            .build_workspace(&layout)
+            .await
+            .expect("initial production build");
+        let workspace = root.path().join(layout.workspace_rel());
+        let old_manifest = load_manifest(&layout).expect("old manifest");
+        let old_package = fs::read(workspace.join("package.json")).expect("old package");
+        let old_tree_digest =
+            dependency_tree_digest(&workspace.join("node_modules")).expect("old dependency tree");
+        let build_index = root
+            .path()
+            .join(layout.build_rel(false))
+            .join(crate::local_apps_build::VITE_OUTPUT_DIR)
+            .join("index.html");
+        let old_build_index = fs::read(&build_index).expect("old build output");
+        let old_dependency = service
+            .dependency_record(&shell.id)
+            .await
+            .expect("old dependency record");
+        let rollback = broker
+            .capture_dependency_update_rollback(&layout, old_dependency.clone())
+            .expect("capture durable rollback");
+        let journal = LocalAppsHostBroker::dependency_update_recovery_journal(
+            &layout,
+            &rollback,
+            DependencyUpdateRecoveryStatus::InProgress,
+        )
+        .expect("build recovery journal");
+        LocalAppsHostBroker::write_dependency_update_recovery_journal(&layout, &journal)
+            .expect("write recovery journal");
+
+        // Simulate process death after new workspace files, dependency tree,
+        // manifest, build and dependency state were partially published.
+        fs::write(workspace.join("package.json"), b"{\"name\":\"new\"}\n")
+            .expect("write partial package");
+        let mut new_manifest = old_manifest.clone();
+        new_manifest.name = "partial-new".into();
+        new_manifest.revision += 1;
+        local_apps::save_manifest(&layout, &new_manifest).expect("write partial manifest");
+        LocalAppsHostBroker::remove_owned_path(&workspace.join("node_modules"))
+            .expect("remove old tree");
+        fs::create_dir_all(workspace.join("node_modules/vite/bin")).expect("new tree");
+        fs::write(
+            workspace.join("node_modules/vite/bin/vite.js"),
+            b"partial-new",
+        )
+        .expect("new tree marker");
+        fs::write(&build_index, b"partial-new-build").expect("partial build");
+        fs::create_dir_all(
+            workspace
+                .join(".lingxi-build-state")
+                .join("dependency-staging"),
+        )
+        .expect("partial staging");
+        service
+            .start_dependency_install(&shell.id)
+            .await
+            .expect("mark dependency update in progress");
+        drop(rollback);
+        drop(broker);
+        drop(service);
+
+        // The broker constructor runs recovery before AppService::load, so the
+        // service observes the same exact old dependency record as disk.
+        let restarted = LocalAppsHostBroker::new(
+            root.path().to_path_buf(),
+            Arc::new(NoopClientEventSink),
+            Some(runtime),
+            false,
+            None,
+        );
+        let restarted_service = test_service(&root).await;
+        assert!(restarted.attach_service(restarted_service.clone()).is_ok());
+        assert_eq!(
+            load_manifest(&layout).expect("restored manifest"),
+            old_manifest
+        );
+        assert_eq!(
+            fs::read(workspace.join("package.json")).expect("restored package"),
+            old_package
+        );
+        assert_eq!(
+            dependency_tree_digest(&workspace.join("node_modules")).expect("restored tree"),
+            old_tree_digest
+        );
+        assert_eq!(
+            fs::read(build_index).expect("restored build"),
+            old_build_index
+        );
+        assert_eq!(
+            restarted_service
+                .dependency_record(&shell.id)
+                .await
+                .expect("restored dependency record"),
+            old_dependency
+        );
+        assert!(
+            !LocalAppsHostBroker::dependency_update_recovery_path(&layout).exists(),
+            "boot recovery must consume the dependency journal"
+        );
+        assert!(
+            !workspace
+                .join(".lingxi-build-state/dependency-staging")
+                .exists(),
+            "boot recovery must remove interrupted staging"
+        );
+    }
+
+    #[tokio::test]
+    async fn dependency_update_cold_start_cleans_a_committed_journal_without_rollback() {
+        let runtime = MockMobileLinuxRuntime::new(Duration::ZERO);
+        let (root, service, broker) = create_broker(false, Some(runtime.clone())).await;
+        let shell = shell_app_fixture(&broker, &service).await;
+        broker
+            .scaffold_shell_app_value(
+                confirmed_scaffold_input(&broker, &shell.id, "依赖提交恢复", "b", "dom").await,
+            )
+            .await
+            .expect("scaffold");
+        let layout = AppLayout::new(root.path().to_path_buf(), shell.id.clone()).expect("layout");
+        let builder = crate::local_apps_build::LocalAppBuilder {
+            mobile_linux: broker.mobile_linux(),
+            host: &broker,
+        };
+        builder
+            .build_workspace(&layout)
+            .await
+            .expect("initial production build");
+        let workspace = root.path().join(layout.workspace_rel());
+        let mut new_manifest = load_manifest(&layout).expect("manifest");
+        new_manifest.name = "committed-new".into();
+        new_manifest.revision += 1;
+        let old_dependency = service
+            .dependency_record(&shell.id)
+            .await
+            .expect("old dependency record");
+        let rollback = broker
+            .capture_dependency_update_rollback(&layout, old_dependency)
+            .expect("capture durable rollback");
+        let node_modules_backup = rollback
+            .node_modules_backup
+            .clone()
+            .expect("fixture has dependency tree");
+        let build_backup = rollback
+            .build_backup
+            .clone()
+            .expect("fixture has production build");
+        let journal = LocalAppsHostBroker::dependency_update_recovery_journal(
+            &layout,
+            &rollback,
+            DependencyUpdateRecoveryStatus::Committed,
+        )
+        .expect("build committed recovery journal");
+        LocalAppsHostBroker::write_dependency_update_recovery_journal(&layout, &journal)
+            .expect("write committed recovery journal");
+        local_apps::save_manifest(&layout, &new_manifest).expect("write committed manifest");
+        fs::write(
+            workspace.join("package.json"),
+            b"{\"name\":\"committed-new\"}\n",
+        )
+        .expect("write committed package");
+        LocalAppsHostBroker::remove_owned_path(&workspace.join("node_modules"))
+            .expect("remove old tree");
+        fs::create_dir_all(workspace.join("node_modules/vite/bin")).expect("new tree");
+        fs::write(
+            workspace.join("node_modules/vite/bin/vite.js"),
+            b"committed-new",
+        )
+        .expect("new tree marker");
+        let build_index = root
+            .path()
+            .join(layout.build_rel(false))
+            .join(crate::local_apps_build::VITE_OUTPUT_DIR)
+            .join("index.html");
+        fs::write(&build_index, b"committed-new-build").expect("committed build");
+        fs::create_dir_all(
+            workspace
+                .join(".lingxi-build-state")
+                .join("dependency-staging"),
+        )
+        .expect("committed staging");
+        service
+            .start_dependency_install(&shell.id)
+            .await
+            .expect("mark committed dependency state");
+        drop(rollback);
+        drop(broker);
+        drop(service);
+
+        let restarted = LocalAppsHostBroker::new(
+            root.path().to_path_buf(),
+            Arc::new(NoopClientEventSink),
+            Some(runtime),
+            false,
+            None,
+        );
+        let restarted_service = test_service(&root).await;
+        assert!(restarted.attach_service(restarted_service.clone()).is_ok());
+        assert_eq!(
+            load_manifest(&layout).expect("committed manifest"),
+            new_manifest
+        );
+        assert_eq!(
+            fs::read(workspace.join("package.json")).expect("committed package"),
+            b"{\"name\":\"committed-new\"}\n"
+        );
+        assert_eq!(
+            fs::read(workspace.join("node_modules/vite/bin/vite.js")).expect("committed tree"),
+            b"committed-new"
+        );
+        assert_eq!(
+            fs::read(build_index).expect("committed build"),
+            b"committed-new-build"
+        );
+        assert_eq!(
+            restarted_service
+                .dependency_record(&shell.id)
+                .await
+                .expect("committed dependency record")
+                .state,
+            AppDependencyState::Installing
+        );
+        assert!(!node_modules_backup.exists());
+        assert!(!build_backup.exists());
+        assert!(!LocalAppsHostBroker::dependency_update_recovery_path(&layout).exists());
+        assert!(!workspace
+            .join(".lingxi-build-state/dependency-staging")
+            .exists());
     }
 
     /// The whole point of the flow: what the user confirmed in the interview
@@ -6714,7 +11785,8 @@ mod tests {
     /// above still passes.
     #[tokio::test]
     async fn scaffold_commits_all_four_fields_and_writes_the_formal_contract() {
-        let (root, service, broker) = create_broker(false, None).await;
+        let runtime = MockMobileLinuxRuntime::new(Duration::ZERO);
+        let (root, service, broker) = create_broker(false, Some(runtime)).await;
         let shell = shell_app_fixture(&broker, &service).await;
         let guided = fs::read_to_string(workspace_of(&root, &shell.id).join("LINGXI.md"))
             .expect("read the guided contract");
@@ -6723,7 +11795,9 @@ mod tests {
             "the fixture must start on the guided contract: {guided}"
         );
 
-        let mut input = scaffold_input(&shell.id, "打飞机", "一个竖版射击小游戏", "canvas");
+        let mut input =
+            confirmed_scaffold_input(&broker, &shell.id, "打飞机", "一个竖版射击小游戏", "canvas")
+                .await;
         input["workflow_model"] = json!("anthropic/claude-opus-4");
         let value = broker
             .scaffold_shell_app_value(input)
@@ -6771,15 +11845,41 @@ mod tests {
             contract.contains("local-canvas-build"),
             "the contract must be the one for the CONFIRMED surface: {contract}"
         );
+        assert!(
+            contract.contains("runtime profile `canvas_2d` revision `1`"),
+            "the formal contract must mirror the persisted profile identity: {contract}"
+        );
+        assert!(
+            contract.contains("informational mirror")
+                && contract
+                    .contains("persisted manifest binding and host catalog are authoritative"),
+            "LINGXI.md must not become the runtime profile authority: {contract}"
+        );
+        assert!(
+            contract.contains("lib/frame-loop.js") && !contract.contains("src/game/frame-loop.js"),
+            "the managed Canvas frame helper must not be presented as editable: {contract}"
+        );
 
         // The surface is on the manifest, and the seed is the canvas one.
         let layout = AppLayout::new(root.path().to_path_buf(), shell.id.clone()).expect("layout");
         let manifest = load_manifest(&layout).expect("manifest");
         assert_eq!(manifest.surface, Some(local_apps::AppSurface::Canvas));
         assert_eq!(manifest.name, "打飞机");
+        assert!(
+            manifest.dependency_snapshot.is_some(),
+            "the commit point must not expose a scaffolded app without a verified dependency snapshot"
+        );
         assert!(workspace_of(&root, &shell.id)
             .join("app/screens/game-screen.jsx")
             .is_file());
+        assert_eq!(
+            service
+                .dependency_record(&shell.id)
+                .await
+                .expect("dependency record")
+                .state,
+            local_apps::AppDependencyState::Ready
+        );
     }
 
     /// The branch's central guarantee, pinned at its PRODUCTION call site:
@@ -6807,7 +11907,8 @@ mod tests {
             "src/stores/premature-store.js",
             "notes.md",
         ];
-        let (root, service, broker) = create_broker(false, None).await;
+        let runtime = MockMobileLinuxRuntime::new(Duration::ZERO);
+        let (root, service, broker) = create_broker(false, Some(runtime)).await;
         let shell = shell_app_fixture(&broker, &service).await;
         let workspace = workspace_of(&root, &shell.id);
 
@@ -6823,12 +11924,10 @@ mod tests {
         fs::write(&installed, b"installed").expect("write");
 
         broker
-            .scaffold_shell_app_value(scaffold_input(
-                &shell.id,
-                "打飞机",
-                "一个竖版射击小游戏",
-                "dom",
-            ))
+            .scaffold_shell_app_value(
+                confirmed_scaffold_input(&broker, &shell.id, "打飞机", "一个竖版射击小游戏", "dom")
+                    .await,
+            )
             .await
             .expect("scaffold");
 
@@ -6844,8 +11943,9 @@ mod tests {
             "the seed must be what is on disk after the wipe"
         );
         assert!(
-            installed.is_file(),
-            "node_modules is host-owned and costs minutes on device; the wipe must keep it"
+            workspace.join("node_modules/vite/bin/vite.js").is_file(),
+            "the wipe may rebuild node_modules, but the committed app must finish with \
+             host-managed dependencies installed"
         );
         let layout = AppLayout::new(root.path().to_path_buf(), shell.id.clone()).expect("layout");
         assert_eq!(
@@ -6863,7 +11963,8 @@ mod tests {
     /// drop the user's choice.
     #[tokio::test]
     async fn omitting_the_workflow_model_preserves_the_one_the_create_chose() {
-        let (_root, service, broker) = create_broker(false, None).await;
+        let runtime = MockMobileLinuxRuntime::new(Duration::ZERO);
+        let (_root, service, broker) = create_broker(false, Some(runtime)).await;
         let record = service
             .create_app_with_git_and_workflow_model_and_initializer(
                 None,
@@ -6880,7 +11981,9 @@ mod tests {
         assert_eq!(record.workflow_model.as_deref(), Some("openai/gpt-5"));
 
         broker
-            .scaffold_shell_app_value(scaffold_input(&record.id, "A", "b", "dom"))
+            .scaffold_shell_app_value(
+                confirmed_scaffold_input(&broker, &record.id, "A", "b", "dom").await,
+            )
             .await
             .expect("scaffold");
 
@@ -6898,11 +12001,14 @@ mod tests {
     /// finished-looking app in the library that still opens the interview.
     #[tokio::test]
     async fn a_failed_landing_persists_none_of_the_four_fields() {
-        let (root, service, broker) = create_broker(false, None).await;
+        let runtime = MockMobileLinuxRuntime::new(Duration::ZERO);
+        let (root, service, broker) = create_broker(false, Some(runtime)).await;
         let shell = shell_app_fixture(&broker, &service).await;
         break_the_final_landing_step(&root, &shell.id);
 
-        let mut input = scaffold_input(&shell.id, "打飞机", "一个竖版射击小游戏", "canvas");
+        let mut input =
+            confirmed_scaffold_input(&broker, &shell.id, "打飞机", "一个竖版射击小游戏", "canvas")
+                .await;
         input["workflow_model"] = json!("anthropic/claude-opus-4");
         let error = broker
             .scaffold_shell_app_value(input)
@@ -6932,17 +12038,19 @@ mod tests {
     /// retry would be refused forever and the draft would be bricked.
     #[tokio::test]
     async fn the_reservation_is_released_on_the_failure_path_so_a_retry_can_land() {
-        let (root, service, broker) = create_broker(false, None).await;
+        let runtime = MockMobileLinuxRuntime::new(Duration::ZERO);
+        let (root, service, broker) = create_broker(false, Some(runtime)).await;
         let shell = shell_app_fixture(&broker, &service).await;
         break_the_final_landing_step(&root, &shell.id);
+        let input = confirmed_scaffold_input(&broker, &shell.id, "打飞机", "b", "canvas").await;
         broker
-            .scaffold_shell_app_value(scaffold_input(&shell.id, "打飞机", "b", "canvas"))
+            .scaffold_shell_app_value(input.clone())
             .await
             .expect_err("the first attempt must fail");
         repair_the_final_landing_step(&root, &shell.id);
 
         broker
-            .scaffold_shell_app_value(scaffold_input(&shell.id, "打飞机", "b", "canvas"))
+            .scaffold_shell_app_value(input)
             .await
             .expect("the retry must land");
 
@@ -6957,11 +12065,13 @@ mod tests {
     /// call failed for some unrelated reason.
     #[tokio::test]
     async fn two_concurrent_scaffolds_reject_the_second_at_the_in_process_reservation() {
-        let (_root, service, broker) = create_broker(false, None).await;
+        let runtime = MockMobileLinuxRuntime::new(Duration::ZERO);
+        let (_root, service, broker) = create_broker(false, Some(runtime)).await;
         let shell = shell_app_fixture(&broker, &service).await;
+        let input = confirmed_scaffold_input(&broker, &shell.id, "A", "b", "dom").await;
         let (first, second) = tokio::join!(
-            broker.scaffold_shell_app_value(scaffold_input(&shell.id, "A", "b", "dom")),
-            broker.scaffold_shell_app_value(scaffold_input(&shell.id, "B", "b", "dom")),
+            broker.scaffold_shell_app_value(input.clone()),
+            broker.scaffold_shell_app_value(input),
         );
         assert!(
             first.is_ok() ^ second.is_ok(),
@@ -6988,13 +12098,15 @@ mod tests {
     /// [`the_landing_takes_the_build_lock_first_and_hands_it_back_held`].
     #[tokio::test]
     async fn a_concurrent_delete_cannot_orphan_a_scaffold_in_flight() {
-        let (root, service, broker) = create_broker(false, None).await;
+        let runtime = MockMobileLinuxRuntime::new(Duration::ZERO);
+        let (root, service, broker) = create_broker(false, Some(runtime)).await;
         let shell = shell_app_fixture(&broker, &service).await;
         let app_dir = root.path().join("apps").join(&shell.id);
         assert!(app_dir.is_dir(), "the fixture must exist to be raced");
+        let input = confirmed_scaffold_input(&broker, &shell.id, "A", "b", "dom").await;
 
         let (scaffolded, deleted) = tokio::join!(
-            broker.scaffold_shell_app_value(scaffold_input(&shell.id, "A", "b", "dom")),
+            broker.scaffold_shell_app_value(input),
             service.delete_app(&shell.id),
         );
         deleted.expect("the delete must complete");
@@ -7022,6 +12134,10 @@ mod tests {
         let mut proposed = shell.clone();
         proposed.name = "A".into();
         proposed.brief = "b".into();
+        let binding = crate::local_app_runtime_profiles::current_binding_for_family(
+            local_apps::AppRuntimeProfile::ReactDom,
+        )
+        .expect("published react-dom runtime profile");
 
         let contend = |root: PathBuf, app_id: String| {
             tokio::task::spawn_blocking(move || local_apps::storage::lock_app_build(&root, &app_id))
@@ -7033,9 +12149,10 @@ mod tests {
 
         let landing = tokio::spawn({
             let broker = Arc::clone(&broker);
+            let binding = binding.clone();
             async move {
                 broker
-                    .land_scaffold(&proposed, local_apps::AppSurface::Dom)
+                    .land_scaffold(&proposed, local_apps::AppSurface::Dom, Some(binding))
                     .await
             }
         });
@@ -7059,6 +12176,8 @@ mod tests {
             .expect("the landing must succeed");
         assert!(workspace_of(&root, &shell.id).join("app/app.jsx").is_file());
 
+        let (held_build, held_recovery, recovery) = held;
+
         assert!(
             timeout(
                 Duration::from_millis(400),
@@ -7069,7 +12188,11 @@ mod tests {
             "the landing must STILL hold the lock when it returns, so the \
              commit point runs under it"
         );
-        drop(held);
+        recovery
+            .rollback()
+            .expect("discard the uncommitted landing");
+        drop(held_build);
+        drop(held_recovery);
         timeout(
             Duration::from_secs(30),
             contend(root.path().to_path_buf(), shell.id.clone()),
@@ -7085,10 +12208,13 @@ mod tests {
     /// refusal is what stands between a stray tool call and the user's work.
     #[tokio::test]
     async fn scaffolding_a_formed_app_is_rejected() {
-        let (root, service, broker) = create_broker(false, None).await;
+        let runtime = MockMobileLinuxRuntime::new(Duration::ZERO);
+        let (root, service, broker) = create_broker(false, Some(runtime)).await;
         let shell = shell_app_fixture(&broker, &service).await;
         broker
-            .scaffold_shell_app_value(scaffold_input(&shell.id, "A", "b", "dom"))
+            .scaffold_shell_app_value(
+                confirmed_scaffold_input(&broker, &shell.id, "A", "b", "dom").await,
+            )
             .await
             .expect("the first scaffold must land");
         let workspace = workspace_of(&root, &shell.id);
@@ -7099,7 +12225,9 @@ mod tests {
         .expect("write user source");
 
         let error = broker
-            .scaffold_shell_app_value(scaffold_input(&shell.id, "B", "b", "dom"))
+            .scaffold_shell_app_value(
+                confirmed_scaffold_input(&broker, &shell.id, "B", "b", "dom").await,
+            )
             .await
             .expect_err("the second scaffold must be rejected");
         assert!(error.contains("already"), "got {error}");
@@ -7124,13 +12252,14 @@ mod tests {
         let (root, service, broker) = create_broker(false, None).await;
         let shell = shell_app_fixture(&broker, &service).await;
 
-        for (name, brief, surface, expected) in [
-            ("A", "   ", "dom", "brief must be a non-empty string"),
-            ("   ", "b", "dom", "name must be a non-empty string"),
-            ("A", "b", "webgl", "unknown app surface"),
+        for (name, brief, expected) in [
+            ("A", "   ", "brief must be a non-empty string"),
+            ("   ", "b", "name must be a non-empty string"),
         ] {
             let error = broker
-                .scaffold_shell_app_value(scaffold_input(&shell.id, name, brief, surface))
+                .scaffold_shell_app_value(
+                    confirmed_scaffold_input(&broker, &shell.id, name, brief, "dom").await,
+                )
                 .await
                 .expect_err("must be rejected");
             assert!(
@@ -7138,9 +12267,22 @@ mod tests {
                 "expected {expected:?} in {error:?}"
             );
         }
+        let mut surface_override =
+            confirmed_scaffold_input(&broker, &shell.id, "A", "b", "dom").await;
+        surface_override["surface"] = json!("webgl");
+        let error = broker
+            .scaffold_shell_app_value(surface_override)
+            .await
+            .expect_err("surface overrides must be rejected");
+        assert!(
+            error.contains("runtime_profile_receipt is authoritative"),
+            "got {error}"
+        );
         let over_long = "x".repeat(local_apps::service::MAX_NAME_BYTES + 1);
         let error = broker
-            .scaffold_shell_app_value(scaffold_input(&shell.id, &over_long, "b", "dom"))
+            .scaffold_shell_app_value(
+                confirmed_scaffold_input(&broker, &shell.id, &over_long, "b", "dom").await,
+            )
             .await
             .expect_err("an over-long name must be rejected");
         assert!(error.contains("limit"), "got {error}");
@@ -7163,7 +12305,8 @@ mod tests {
     /// and why renaming an app is not offered at all.
     #[tokio::test]
     async fn the_manifest_name_may_only_be_written_before_any_database_exists() {
-        let (root, service, broker) = create_broker(false, None).await;
+        let runtime = MockMobileLinuxRuntime::new(Duration::ZERO);
+        let (root, service, broker) = create_broker(false, Some(runtime)).await;
         let shell = shell_app_fixture(&broker, &service).await;
         let layout = AppLayout::new(root.path().to_path_buf(), shell.id.clone()).expect("layout");
         assert!(
@@ -7172,7 +12315,9 @@ mod tests {
         );
 
         broker
-            .scaffold_shell_app_value(scaffold_input(&shell.id, "A", "b", "dom"))
+            .scaffold_shell_app_value(
+                confirmed_scaffold_input(&broker, &shell.id, "A", "b", "dom").await,
+            )
             .await
             .expect("the first landing must be allowed to write the name");
         assert_eq!(load_manifest(&layout).expect("manifest").name, "A");
@@ -7184,7 +12329,17 @@ mod tests {
             .expect("open the app data store");
         assert!(layout.database_path().exists(), "the store must be on disk");
 
-        let error = stamp_scaffold_identity(&layout, "B", local_apps::AppSurface::Dom)
+        let artifacts = scaffold_runtime_profile(
+            Some(
+                crate::local_app_runtime_profiles::current_binding_for_family(
+                    local_apps::AppRuntimeProfile::ReactDom,
+                )
+                .expect("published react-dom runtime profile"),
+            ),
+            local_apps::AppSurface::Dom,
+        )
+        .expect("react-dom profile");
+        let error = stamp_scaffold_identity(&layout, "B", &artifacts)
             .expect_err("a name rewrite after the store exists must be refused");
         assert!(error.contains("database"), "got {error}");
         assert_eq!(
@@ -7242,12 +12397,7 @@ mod tests {
             .expect("persist the seeded workspace permissions");
         storage::save_index(root.path(), std::slice::from_ref(&app.record))
             .expect("persist the seeded index");
-        let static_dist = root
-            .path()
-            .join(layout.build_rel(false))
-            .join(crate::local_apps_build::VITE_OUTPUT_DIR);
-        fs::create_dir_all(&static_dist).expect("create static dist");
-        fs::write(static_dist.join("index.html"), "<html>ok</html>").expect("write index.html");
+        seed_launchable_runtime_fixture(root.path(), &app.record, name);
     }
 
     /// A registry of its own for a probe that drives `bind_stable_loopback`
@@ -7406,6 +12556,169 @@ mod tests {
         assert!(error.contains("symlink"), "{error}");
     }
 
+    #[test]
+    fn dependency_snapshot_rejects_native_node_addons() {
+        let root = TempDir::new().expect("tempdir");
+        let source = root.path().join("node_modules/pkg");
+        fs::create_dir_all(&source).expect("source tree");
+        fs::write(source.join("binding.node"), b"native").expect("native addon");
+        let error = validate_dependency_tree(root.path().join("node_modules").as_path())
+            .expect_err("native addons must be rejected");
+        assert!(error.contains("native Node addon"), "{error}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dependency_snapshot_rejects_native_node_addon_symlink_paths() {
+        let root = TempDir::new().expect("tempdir");
+        let source = root.path().join("node_modules/pkg");
+        fs::create_dir_all(&source).expect("source tree");
+        fs::write(source.join("payload.bin"), b"payload").expect("payload");
+        std::os::unix::fs::symlink("payload.bin", source.join("binding.node"))
+            .expect("native addon symlink");
+
+        let error = validate_dependency_tree(root.path().join("node_modules").as_path())
+            .expect_err("native addon symlink path must be rejected");
+        assert!(error.contains("native Node addon symlink"), "{error}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dependency_snapshot_rejects_symlinks_that_resolve_to_native_addons() {
+        let root = TempDir::new().expect("tempdir");
+        let pkg = root.path().join("node_modules/pkg");
+        let bin = root.path().join("node_modules/.bin");
+        fs::create_dir_all(&pkg).expect("package tree");
+        fs::create_dir_all(&bin).expect("bin tree");
+        fs::write(pkg.join("binding.node"), b"native").expect("native addon");
+        std::os::unix::fs::symlink("../pkg/binding.node", bin.join("native-shim"))
+            .expect("native shim");
+
+        let error = validate_dependency_tree(root.path().join("node_modules").as_path())
+            .expect_err("symlink target native addon must be rejected");
+        assert!(error.contains("native Node addon"), "{error}");
+    }
+
+    #[test]
+    fn dependency_snapshot_accepts_trusted_toolchain_native_bindings_and_prepare_metadata() {
+        let root = TempDir::new().expect("tempdir");
+        let node_modules = root.path().join("node_modules");
+        for (package, version, _) in TRUSTED_TOOLCHAIN_LIFECYCLE_SCRIPTS {
+            let package_dir = node_modules.join(package);
+            fs::create_dir_all(&package_dir).expect("lifecycle package dir");
+            fs::write(
+                package_dir.join("package.json"),
+                format!(
+                    "{{\"name\":\"{package}\",\"version\":\"{version}\",\"scripts\":{{\"prepare\":\"node prepare.js\"}}}}\n"
+                ),
+            )
+            .expect("lifecycle package manifest");
+        }
+        for (package, version, binary) in TRUSTED_TOOLCHAIN_NATIVE_BINDINGS {
+            let package_dir = node_modules.join(package);
+            fs::create_dir_all(&package_dir).expect("binding dir");
+            fs::write(
+                package_dir.join("package.json"),
+                format!("{{\"name\":\"{package}\",\"version\":\"{version}\"}}\n"),
+            )
+            .expect("binding manifest");
+            fs::write(package_dir.join(binary), b"\x7fELFfixture").expect("binding binary");
+        }
+
+        validate_dependency_tree(&node_modules)
+            .expect("trusted fixed-toolchain binding and prepare metadata are allowed");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dependency_snapshot_accepts_trusted_toolchain_entries_through_a_canonicalized_parent() {
+        let root = TempDir::new().expect("tempdir");
+        let real_root = root.path().join("real");
+        let node_modules = real_root.join("node_modules");
+        for (package, version, _) in TRUSTED_TOOLCHAIN_LIFECYCLE_SCRIPTS {
+            let package_dir = node_modules.join(package);
+            fs::create_dir_all(&package_dir).expect("lifecycle package dir");
+            fs::write(
+                package_dir.join("package.json"),
+                format!(
+                    "{{\"name\":\"{package}\",\"version\":\"{version}\",\"scripts\":{{\"prepare\":\"node prepare.js\"}}}}\n"
+                ),
+            )
+            .expect("lifecycle package manifest");
+        }
+        for (package, version, binary) in TRUSTED_TOOLCHAIN_NATIVE_BINDINGS {
+            let package_dir = node_modules.join(package);
+            fs::create_dir_all(&package_dir).expect("binding dir");
+            fs::write(
+                package_dir.join("package.json"),
+                format!("{{\"name\":\"{package}\",\"version\":\"{version}\"}}\n"),
+            )
+            .expect("binding manifest");
+            fs::write(package_dir.join(binary), b"\x7fELFfixture").expect("binding binary");
+        }
+        let alias_root = root.path().join("alias");
+        std::os::unix::fs::symlink(&real_root, &alias_root).expect("alias root");
+
+        validate_dependency_tree(&alias_root.join("node_modules"))
+            .expect("trusted entries must survive canonical root/path spelling differences");
+    }
+
+    #[test]
+    fn dependency_snapshot_accepts_trusted_hoisted_lifecycle_manifests_recursively() {
+        let root = TempDir::new().expect("tempdir");
+        let node_modules = root.path().join("node_modules");
+        let package_dir = node_modules.join("balanced-match");
+        fs::create_dir_all(package_dir.join("dist")).expect("package dir");
+        fs::write(
+            package_dir.join("package.json"),
+            r#"{"name":"balanced-match","version":"4.0.4","scripts":{"prepare":"node prepare.js"}}"#,
+        )
+        .expect("package manifest");
+        fs::write(package_dir.join("dist/index.js"), "export {};\n").expect("nested file");
+
+        validate_dependency_tree(&node_modules)
+            .expect("recursive validation must keep the hoisted dependency root stable");
+    }
+
+    #[test]
+    fn dependency_snapshot_rejects_untrusted_lifecycle_scripts() {
+        let root = TempDir::new().expect("tempdir");
+        let package_dir = root.path().join("node_modules/dayjs");
+        fs::create_dir_all(&package_dir).expect("package dir");
+        fs::write(
+            package_dir.join("package.json"),
+            r#"{"name":"dayjs","version":"1.11.13","scripts":{"prepare":"node build.js"}}"#,
+        )
+        .expect("package manifest");
+        let error = validate_dependency_tree(root.path().join("node_modules").as_path())
+            .expect_err("arbitrary dependency lifecycle metadata must fail closed");
+        assert!(
+            error.contains("forbidden lifecycle script prepare"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn dependency_versions_reject_non_registry_and_alias_protocols() {
+        for version in [
+            "file:../pkg",
+            "workspace:*",
+            "patch:left-pad@1.3.0#./left-pad.patch",
+            "portal:../pkg",
+            "catalog:default",
+            "npm:react@19.2.8",
+            "git+https://example.invalid/repo.git",
+        ] {
+            let error = LocalAppsHostBroker::validate_dependency_version(version)
+                .expect_err("only ordinary npm registry versions are accepted");
+            assert!(error.contains("npm registry only"), "{version}: {error}");
+        }
+        for version in ["1.2.3", "^1.2.3", "~1.2.3", ">=1 <2", "latest"] {
+            LocalAppsHostBroker::validate_dependency_version(version)
+                .unwrap_or_else(|error| panic!("ordinary registry version {version}: {error}"));
+        }
+    }
+
     /// The shape `pnpm install` ACTUALLY produces for this template: every
     /// package with a `bin` field gets a relative shim under `node_modules/.bin`
     /// that points back inside the tree. Measured against the pinned template
@@ -7526,6 +12839,48 @@ mod tests {
             dependency_tree_digest(&linked).expect("linked digest"),
             dependency_tree_digest(&plain).expect("plain digest"),
         );
+    }
+
+    #[test]
+    fn dependency_sbom_spdx_ids_are_collision_free_for_punctuation_variants() {
+        let root = TempDir::new().expect("tempdir");
+        let node_modules = root.path().join("node_modules");
+        fs::create_dir_all(&node_modules).expect("node_modules");
+        write_fixture_package_manifest(&node_modules, "a.b", "1_0");
+        write_fixture_package_manifest(&node_modules, "a-b", "1.0");
+        let binding = crate::local_app_runtime_profiles::current_binding_for_family(
+            local_apps::AppRuntimeProfile::ReactDom,
+        )
+        .expect("binding");
+        let sbom =
+            installed_dependency_sbom(&node_modules, &binding, &"d".repeat(64)).expect("sbom");
+        let document: Value = serde_json::from_slice(&sbom).expect("sbom json");
+        let packages = document
+            .get("packages")
+            .and_then(Value::as_array)
+            .expect("packages");
+        let ids = packages
+            .iter()
+            .filter_map(|package| package.get("SPDXID").and_then(Value::as_str))
+            .filter(|id| id.starts_with("SPDXRef-Package-"))
+            .collect::<Vec<_>>();
+        assert_eq!(ids.len(), 2);
+        assert_ne!(ids[0], ids[1], "distinct packages must not collide");
+        let relationships = document
+            .get("relationships")
+            .and_then(Value::as_array)
+            .expect("relationships");
+        for id in ids {
+            assert!(
+                relationships.iter().any(|relationship| {
+                    relationship
+                        .get("relatedSpdxElement")
+                        .and_then(Value::as_str)
+                        == Some(id)
+                }),
+                "relationship must target {id}"
+            );
+        }
     }
 
     /// Build a staged seed shaped the way `stage-local-app-runtime.py` emits
@@ -9280,14 +14635,15 @@ mod tests {
         }
 
         async fn scaffold(&self, name: &str) -> Result<Value, String> {
-            self.broker
-                .scaffold_shell_app_value(json!({
-                    "app_id": self.app_id,
-                    "name": name,
-                    "brief": "a confirmed brief",
-                    "surface": "canvas",
-                }))
-                .await
+            let input = confirmed_scaffold_input(
+                &self.broker,
+                &self.app_id,
+                name,
+                "a confirmed brief",
+                "canvas",
+            )
+            .await;
+            self.broker.scaffold_shell_app_value(input).await
         }
 
         async fn run_boot_backfill_sweep(&self) {
@@ -9315,7 +14671,7 @@ mod tests {
         let broker = LocalAppsHostBroker::new(
             root.path().to_path_buf(),
             Arc::new(NoopClientEventSink),
-            None,
+            Some(MockMobileLinuxRuntime::new(Duration::ZERO)),
             false,
             None,
         );

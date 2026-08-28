@@ -1,4 +1,4 @@
-//! Persisted-schema compatibility goldens (spec §D).
+//! Persisted-schema compatibility coverage (spec §D).
 //!
 //! `tests/fixtures/v1/` holds a complete checked-in on-disk store —
 //! `apps/index.json` plus every per-app document (`runtime.json`,
@@ -6,44 +6,25 @@
 //! `workspace/.lingxi/app.manifest.json`) — captured at `schemaVersion` 1.
 //! The tree is produced by DRIVING A REAL [`AppService`] through a legal
 //! trace (deterministic [`FixedClock`]), so every persisted shape is one a
-//! legal writer actually produces. Coverage: a `ready` app with a fully
-//! populated runtime record and a conversation id, and a minimal
-//! `git_enabled: false` draft app pinning every omitted-optional form. Two
-//! directions are pinned:
+//! legal writer actually produced.
 //!
-//! - **read**: [`local_apps::storage::load_all`] over the fixture tree must
-//!   keep producing exactly the expected in-memory states (spelled out as
-//!   literals below). A renamed field, a retyped value, or a changed enum
-//!   tag would break loading real user data — it fails here first.
-//! - **write**: re-persisting the loaded states through the real writers
-//!   ([`local_apps::storage::save_app_files`] /
-//!   [`local_apps::storage::save_index`]) must reproduce every fixture
-//!   document byte-for-byte. Key casing, enum tags, indentation, trailing
-//!   newline and optional-field omission are all part of the persisted
-//!   contract.
+//! This crate now intentionally has NO v1→v2 migration for pre-release local
+//! app stores. The checked-in v1 fixture therefore serves as a pinned negative
+//! case: loads must fail closed with explicit "clear apps/ and recreate"
+//! guidance, instead of silently laundering an old store into the new schema.
 //!
-//! A third test pins the LEGACY migration: a pipeline-era store (mid-pipeline
-//! `workflowState`, stale `interactions.json`/`design-spec.json`) loads with
-//! the state collapsed to `draft` and the stale documents left untouched.
-//!
-//! Regenerating the fixtures is only legitimate together with an INTENTIONAL
-//! schema change (which also means bumping
-//! [`local_apps::APPS_SCHEMA_VERSION`] and providing a migration). Then:
-//!
-//! ```text
-//! BLESS=1 cargo test -p local-apps --test serde_compat
-//! ```
-//!
-//! (the same `BLESS=1` convention as the client-protocol wire snapshots),
-//! and review the diff before committing. Re-blessing re-drives the trace,
-//! which is fully deterministic.
+//! Positive coverage comes from a fresh v2 store driven through the real
+//! service path at test time. That store must load to the expected in-memory
+//! states and re-persist byte-for-byte through the real writers.
 
 use local_apps::storage::{self, save_app_files, save_index};
 use local_apps::test_support::FixedClock;
 use local_apps::{
-    save_manifest, save_permissions, AppEventObserver, AppLayout, AppManifest, AppPermissions,
-    AppRecord, AppRuntimeMode, AppRuntimeRecord, AppRuntimeState, AppService, AppState,
-    AppWorkflowState, NoopAppEventObserver, APPS_SCHEMA_VERSION,
+    save_manifest, save_permissions, AppDependencyRecord, AppDependencySnapshot,
+    AppDependencyState, AppErrorCode, AppEventObserver, AppLayout, AppManifest, AppPermissions,
+    AppRecord, AppRuntimeMode, AppRuntimeProfile, AppRuntimeProfileBinding, AppRuntimeRecord,
+    AppRuntimeState, AppService, AppState, AppSurface, AppWorkflowState, NoopAppEventObserver,
+    APPS_SCHEMA_VERSION,
 };
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -53,9 +34,8 @@ fn fixtures_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/v1")
 }
 
-/// `true` when invoked in regeneration mode (`BLESS=1`).
-fn bless() -> bool {
-    matches!(std::env::var("BLESS").as_deref(), Ok("1" | "true"))
+fn profiled_manifest_fixture() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/v2_profiled_manifest.json")
 }
 
 /// The fixture tests operate on the ONE checked-in fixture store, and each
@@ -73,6 +53,49 @@ fn scrub_fixture_lock() {
 
 /// Base timestamp of the fixture trace (epoch ms).
 const T0: u64 = 1_753_000_000_000;
+
+/// Persist the post-scaffold v2 contract that a legal profile confirmation and
+/// dependency transaction commit together. The catalog itself lives in the
+/// host crate, so this core compatibility test pins a deterministic valid
+/// binding while exercising the real manifest and dependency-record writers.
+fn save_profiled_contract(root: &Path, app: &AppState) {
+    let contract_sha256 = "a".repeat(64);
+    let snapshot = AppDependencySnapshot {
+        requested_sha256: "b".repeat(64),
+        package_sha256: "c".repeat(64),
+        lockfile_sha256: "d".repeat(64),
+        dependency_tree_sha256: "e".repeat(64),
+        sbom_sha256: "f".repeat(64),
+        toolchain_key: "pnpm@11.22.0/node@24.18.1".to_string(),
+        verified_profile_contract_sha256: contract_sha256.clone(),
+    };
+    let mut manifest = AppManifest::for_new_app(&app.record.id, &app.record.name);
+    manifest.surface = Some(AppSurface::Dom);
+    manifest.runtime_profile = Some(AppRuntimeProfileBinding {
+        family: AppRuntimeProfile::ReactDom,
+        revision: 1,
+        contract_sha256,
+    });
+    manifest.dependency_snapshot = Some(snapshot.clone());
+    let layout = AppLayout::new(root, &app.record.id).expect("profiled layout");
+    save_manifest(&layout, &manifest).expect("save profiled manifest");
+    storage::save_dependency_record(
+        root,
+        &AppDependencyRecord {
+            schema_version: APPS_SCHEMA_VERSION,
+            app_id: app.record.id.clone(),
+            state: AppDependencyState::Ready,
+            lockfile_sha256: Some(snapshot.lockfile_sha256),
+            toolchain_key: Some(snapshot.toolchain_key),
+            install_attempts: 1,
+            last_error: None,
+            // The dependency transaction commits before later workflow/runtime
+            // state changes, so its timestamp is independent of record.updatedAtMs.
+            updated_at_ms: T0,
+        },
+    )
+    .expect("save ready dependency record");
+}
 
 /// Seed one brand-new app with a PINNED id — byte-for-byte the persistence
 /// `AppService::create_app_with_git` performs (per-app files first, index
@@ -101,7 +124,7 @@ fn seed_app(
     // writer creates the layout skeleton itself, so no separate
     // `initialize` is needed.
     let layout = AppLayout::new(root, id).expect("seed layout");
-    save_manifest(&layout, &AppManifest::for_new_app(id, name)).expect("seed manifest");
+    save_profiled_contract(root, &app);
     save_permissions(&layout, &AppPermissions::default()).expect("seed permissions");
     existing.push(app);
     let records: Vec<AppRecord> = existing.iter().map(|app| app.record.clone()).collect();
@@ -247,18 +270,12 @@ fn expected_states() -> Vec<AppState> {
 /// first, index last — the same order the service commits in). The manifest
 /// and permission documents are not part of [`AppState`], so each is minted
 /// from the same PRODUCER `create_app_with_git` uses ([`seed_app`] does the
-/// same) — copying them out of the fixture instead would compare the fixture
-/// against a round-trip of itself for exactly the two documents this pins.
-fn write_store(root: &Path, states: &[AppState]) {
+/// same).
+fn write_current_store(root: &Path, states: &[AppState]) {
     for app in states {
         save_app_files(root, app).expect("save app files");
         let layout = AppLayout::new(root, app.record.id.clone()).expect("target layout");
-        let mut manifest = AppManifest::for_new_app(&app.record.id, &app.record.name);
-        // Reproduce the checked-in legacy fixture: a v1 manifest predates the
-        // runtimeApiVersion field and must remain byte-stable for migration
-        // compatibility tests.
-        manifest.runtime_api_version = 1;
-        save_manifest(&layout, &manifest).expect("save manifest");
+        save_profiled_contract(root, app);
         save_permissions(&layout, &AppPermissions::default()).expect("save permissions");
     }
     let records: Vec<AppRecord> = states.iter().map(|app| app.record.clone()).collect();
@@ -293,72 +310,108 @@ fn walk_files(root: &Path) -> Vec<PathBuf> {
     out
 }
 
-/// READ direction: the checked-in v1 tree must keep loading to exactly the
-/// expected states through the loader [`local_apps::AppService`] uses —
-/// which also proves the fixture needs neither torn-commit repair nor
-/// runtime reconciliation.
 #[test]
-fn fixture_store_loads_to_the_canonical_states() {
-    if bless() {
-        return; // the sibling test is rewriting the tree
-    }
-    let _store = FIXTURE_STORE.blocking_lock();
-    let loaded = storage::load_all(&fixtures_root())
-        .expect("the checked-in v1 fixture store must load without a migration");
-    scrub_fixture_lock();
+fn checked_in_v2_profiled_manifest_round_trips_with_runtime_profile_and_snapshot() {
+    let bytes =
+        std::fs::read(profiled_manifest_fixture()).expect("read v2 profiled manifest fixture");
+    let manifest: AppManifest =
+        serde_json::from_slice(&bytes).expect("fixture must deserialize as schema v2");
+    assert_eq!(manifest.app_id, "profiled-v2");
+    assert_eq!(manifest.surface, Some(local_apps::AppSurface::Canvas));
+    let runtime_profile = manifest.runtime_profile.as_ref().expect("runtime profile");
     assert_eq!(
-        loaded,
-        expected_states(),
-        "parsing the v1 fixtures drifted — old on-disk stores would load wrong"
+        runtime_profile.family,
+        local_apps::AppRuntimeProfile::Three3d
     );
+    assert_eq!(
+        runtime_profile.contract_sha256,
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    );
+    let snapshot = manifest
+        .dependency_snapshot
+        .as_ref()
+        .expect("dependency snapshot");
+    assert_eq!(
+        snapshot.verified_profile_contract_sha256,
+        runtime_profile.contract_sha256
+    );
+    assert_eq!(snapshot.toolchain_key, "pnpm@11.22.0/node@24.18.1");
+    assert_eq!(
+        {
+            let mut serialized = serde_json::to_vec_pretty(&manifest).expect("serialize manifest");
+            serialized.push(b'\n');
+            serialized
+        },
+        bytes,
+        "the checked-in v2 fixture must stay byte-for-byte stable"
+    );
+    assert_eq!(manifest.runtime_contract_hash().unwrap().len(), 64);
+    assert_eq!(manifest.dependency_snapshot_hash().unwrap().len(), 64);
 }
 
-/// WRITE direction: re-persisting the loaded fixture states through the real
-/// writers must reproduce every fixture document byte-for-byte (and produce
-/// no extra / missing files). Under `BLESS=1` the tree is regenerated by
-/// driving the real service trace instead.
-#[tokio::test]
-async fn writers_reproduce_the_fixture_bytes_exactly() {
-    let fixtures = fixtures_root();
-    let _store = FIXTURE_STORE.lock().await;
+/// Negative direction: the checked-in v1 tree must fail closed with reset
+/// guidance rather than being auto-migrated.
+#[test]
+fn fixture_v1_store_is_rejected_with_reset_guidance() {
+    let _store = FIXTURE_STORE.blocking_lock();
+    let error = storage::load_all(&fixtures_root())
+        .expect_err("the checked-in v1 fixture store must stay unsupported without a migration");
+    scrub_fixture_lock();
+    assert_eq!(error.code(), AppErrorCode::StorageCorrupt);
+    let message = error.to_string();
+    assert!(message.contains("unsupported schemaVersion 1"), "{message}");
+    assert!(message.contains("delete apps/"), "{message}");
+    assert!(message.contains("清除应用开发数据"), "{message}");
+}
 
-    if bless() {
-        let apps_dir = fixtures.join(storage::APPS_DIR);
-        if apps_dir.exists() {
-            std::fs::remove_dir_all(&apps_dir).expect("clear stale fixtures");
-        }
-        std::fs::create_dir_all(&fixtures).expect("create fixtures root");
-        drive_canonical_store(&fixtures).await;
-        scrub_fixture_lock();
-        return;
+/// Positive direction: a fresh v2 store must round-trip through the real load
+/// and write paths without byte drift.
+#[tokio::test]
+async fn fresh_v2_store_round_trips_through_real_writers() {
+    let fixtures = tempfile::tempdir().expect("tempdir");
+    drive_canonical_store(fixtures.path()).await;
+
+    let states = storage::load_all(fixtures.path()).expect("fresh v2 store loads");
+    assert_eq!(states, expected_states());
+    for app in &states {
+        let layout = AppLayout::new(fixtures.path(), &app.record.id).expect("profiled layout");
+        let manifest = local_apps::load_manifest(&layout).expect("load profiled manifest");
+        assert_eq!(manifest.surface, Some(AppSurface::Dom));
+        assert_eq!(
+            manifest
+                .runtime_profile
+                .as_ref()
+                .map(|binding| binding.family),
+            Some(AppRuntimeProfile::ReactDom)
+        );
+        assert!(manifest.dependency_snapshot.is_some());
+        assert_eq!(
+            storage::load_dependency_record(fixtures.path(), &app.record)
+                .expect("load dependency record")
+                .state,
+            AppDependencyState::Ready
+        );
     }
 
-    let states = storage::load_all(&fixtures).expect("fixtures load");
-    scrub_fixture_lock();
-    // Belt and braces: the states we re-serialize are the pinned ones.
-    assert_eq!(states, expected_states());
+    let rewritten = tempfile::tempdir().expect("tempdir");
+    write_current_store(rewritten.path(), &states);
 
-    let tmp = tempfile::tempdir().expect("tempdir");
-    write_store(tmp.path(), &states);
-
-    let written_files = walk_files(tmp.path());
-    let fixture_files = walk_files(&fixtures);
+    let written_files = walk_files(rewritten.path());
+    let fixture_files = walk_files(fixtures.path());
     assert_eq!(
         written_files, fixture_files,
-        "the writers and the checked-in fixture tree must contain the same files; \
-         if a document was intentionally added/removed, re-bless with \
-         `BLESS=1 cargo test -p local-apps --test serde_compat`"
+        "the writers and the freshly produced v2 store must contain the same files"
     );
 
     let mut failures = Vec::new();
     for rel in &fixture_files {
-        let want = std::fs::read_to_string(fixtures.join(rel))
+        let want = std::fs::read_to_string(fixtures.path().join(rel))
             .unwrap_or_else(|error| panic!("read fixture {}: {error}", rel.display()));
-        let got = std::fs::read_to_string(tmp.path().join(rel))
+        let got = std::fs::read_to_string(rewritten.path().join(rel))
             .unwrap_or_else(|error| panic!("read written {}: {error}", rel.display()));
         if got != want {
             failures.push(format!(
-                "`{}` drifted from the persisted v1 contract.\n--- fixture ---\n{want}\
+                "`{}` drifted from the persisted v2 contract.\n--- fixture ---\n{want}\
                  --- writer ---\n{got}",
                 rel.display()
             ));
@@ -372,13 +425,10 @@ async fn writers_reproduce_the_fixture_bytes_exactly() {
     );
 }
 
-/// LEGACY migration: a pipeline-era store — a mid-pipeline `workflowState`
-/// plus the pipeline's own documents (`interactions.json`,
-/// `design-spec.json`) — must load with the state collapsed to `draft` (the
-/// serde aliases) and the stale documents left on disk untouched (the loader
-/// never reads them; nothing deletes them).
+/// A pipeline-era v1 store is also unsupported without an explicit migration;
+/// the failure should point developers at resetting their local app data.
 #[test]
-fn a_legacy_pipeline_store_loads_as_draft_and_ignores_stale_docs() {
+fn a_legacy_pipeline_store_is_rejected_with_reset_guidance() {
     let dir = tempfile::tempdir().expect("tempdir");
     let root = dir.path();
     let app_dir = root.join("apps/legacy01");
@@ -498,43 +548,22 @@ fn a_legacy_pipeline_store_loads_as_draft_and_ignores_stale_docs() {
     std::fs::write(&interactions_path, stale_interactions).expect("write interactions");
     std::fs::write(&design_spec_path, stale_design_spec).expect("write design spec");
 
-    let index_before = std::fs::read_to_string(root.join("apps/index.json")).unwrap();
-    let mirror_before =
-        std::fs::read_to_string(app_dir.join("workspace/.lingxi/app.json")).unwrap();
+    let error =
+        storage::load_all(root).expect_err("a legacy v1 pipeline store must stay unsupported");
+    assert_eq!(error.code(), AppErrorCode::StorageCorrupt);
+    let message = error.to_string();
+    assert!(message.contains("unsupported schemaVersion 1"), "{message}");
+    assert!(message.contains("delete apps/"), "{message}");
+    assert!(message.contains("清除应用开发数据"), "{message}");
 
-    let loaded = storage::load_all(root).expect("a legacy pipeline store must load");
-    assert_eq!(loaded.len(), 1);
-    let app = &loaded[0];
-    assert_eq!(app.record.id, "legacy01");
-    assert_eq!(
-        app.record.workflow_state,
-        AppWorkflowState::Draft,
-        "every mid-pipeline legacy state collapses to draft"
-    );
-    assert_eq!(app.record.conversation_id.as_deref(), Some("conv-legacy-1"));
-    assert!(app.record.git_enabled);
-    assert_eq!(app.runtime.state, AppRuntimeState::Stopped);
-
-    // The stale pipeline documents were neither read-repaired nor deleted.
+    // The stale pipeline documents are not touched by the failed load.
     assert_eq!(
         std::fs::read_to_string(&interactions_path).unwrap(),
-        stale_interactions,
-        "interactions.json must be left byte-for-byte untouched"
+        stale_interactions
     );
     assert_eq!(
         std::fs::read_to_string(&design_spec_path).unwrap(),
-        stale_design_spec,
-        "design-spec.json must be left byte-for-byte untouched"
-    );
-    // And the load needed no repair rewrite either (index and mirror agree
-    // once both parse to `draft`), so even those stay untouched.
-    assert_eq!(
-        std::fs::read_to_string(root.join("apps/index.json")).unwrap(),
-        index_before
-    );
-    assert_eq!(
-        std::fs::read_to_string(app_dir.join("workspace/.lingxi/app.json")).unwrap(),
-        mirror_before
+        stale_design_spec
     );
 }
 

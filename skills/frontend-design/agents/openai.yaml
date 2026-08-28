@@ -1,4 +1,4 @@
 interface:
   display_name: "Frontend Design"
-  short_description: "Specify distinctive native UI before coding"
-  default_prompt: "Use $frontend-design to produce a confirmed platform-native design spec before implementing this local app."
+  short_description: "Define target-specific local app presentation"
+  default_prompt: "Use $frontend-design to produce a target-specific design_spec for this LingXi local app before implementation."

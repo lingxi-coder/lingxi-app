@@ -2320,6 +2320,73 @@ fn apply_mobile_profile_allowlist(
 // still reach them via fully-qualified paths). `LlmTransportBridge` is still
 // imported at the top of the module.
 
+fn mobile_skill_listing_provider(
+    registry: Arc<RwLock<command_api::CommandRegistry>>,
+) -> Arc<dyn orchestrator::prompt::skill_listing::SkillListingProvider> {
+    Arc::new(
+        orchestrator::prompt::skill_listing::LazySkillListingProvider::new(move || {
+            let registry = registry.clone();
+            async move {
+                use command_api::{CommandSource, SlashCommandKind};
+                let reg = registry.read().await;
+                reg.model_invocable_commands() // !disable_model_invocation (registry.rs)
+                    .into_iter()
+                    // TS `cmd.type === 'prompt'` — markdown/plugin/bundled
+                    // commands, not builtin/mcp.
+                    .filter(|c| {
+                        matches!(
+                            c.kind,
+                            SlashCommandKind::Markdown { .. }
+                                | SlashCommandKind::Plugin { .. }
+                                | SlashCommandKind::Bundled { .. }
+                        )
+                    })
+                    // TS `cmd.source !== 'builtin'`.
+                    .filter(|c| c.source != CommandSource::Builtin)
+                    // TS loadedFrom ∈ {bundled,skills,commands_DEPRECATED} ||
+                    //    hasUserSpecifiedDescription || whenToUse.
+                    .filter(|c| {
+                        matches!(
+                            c.loaded_from.as_deref(),
+                            Some("bundled" | "skills" | "commands_DEPRECATED")
+                        ) || c.has_user_specified_description
+                            || c.when_to_use.is_some()
+                    })
+                    .map(|c| orchestrator::prompt::skill_listing::SkillListingEntry {
+                        name: c.name.clone(),
+                        description: c.description.clone(),
+                        when_to_use: c.when_to_use.clone(),
+                        // TS `cmd.source === 'bundled'` (prompt.ts) — bundled
+                        // skills are never truncated; mirror via loadedFrom.
+                        is_bundled: c.loaded_from.as_deref() == Some("bundled"),
+                    })
+                    .collect()
+            }
+        }),
+    )
+}
+
+fn mobile_reload_skills_handler(
+    registry: Arc<RwLock<command_api::CommandRegistry>>,
+    cwd: std::path::PathBuf,
+    lingxi_home: std::path::PathBuf,
+    home: std::path::PathBuf,
+) -> command_core::reload_skills::ReloadSkillsHandler {
+    command_core::reload_skills::ReloadSkillsHandler::with_all_roots(
+        registry,
+        cwd,
+        lingxi_home,
+        None,
+        home,
+        Vec::new(),
+        false,
+    )
+    .with_locked_post_reload_finalizer(
+        true,
+        Arc::new(|reg| crate::register_mobile_bundled_prompt_commands(reg)),
+    )
+}
+
 /// Build a fully-wired mobile [`MobileRuntime`] from a deterministic
 /// [`MobileConfig`] + an `Arc<dyn Platform>` (plan F3-03 — the mobile sibling of
 /// `engine_desktop::build`).
@@ -3745,23 +3812,17 @@ async fn build_mobile_inner_with_ask(
         "mobile sets sandbox_available=false because it has no live SandboxRuntimeRunner; \
          enabling sandboxing requires injecting one (see the sandbox_runner coupling note)"
     );
-    // Audit fix (#14): build a disk-backed Skill loader so the mobile Skill tool
-    // resolves on-disk `.lingxi/commands` / `.lingxi/skills` under the device's
-    // app-private root (`lingxi_home` = `<app_files_root>/.claude`). `home` = cwd
-    // so `home/.claude` resolves to the same app-private `.claude` as lingxi_home
-    // (the loaders dedup by name across project/user/managed layers). No
-    // session id at build time on mobile (the session is per-connection), so
-    // `${LINGXI_SESSION_ID}` is left un-substituted — matching the loader's None
-    // path. The loader owns its own registry, so this needs no reordering of the
-    // composition below.
+    // Pre-create the shared command-registry slot before the tool registry and
+    // the orchestrator so the Skill tool, slash dispatcher, and per-turn skill
+    // listing all observe one live command set.
+    let shared_command_registry: Arc<RwLock<command_api::CommandRegistry>> =
+        Arc::new(RwLock::new(command_api::CommandRegistry::new()));
+    // Audit fix (#14): wire the mobile Skill tool to the SAME live registry the
+    // slash dispatcher and listing provider use. The registry is filled below
+    // once the orchestrator handle is available, and later `/reload-skills`
+    // mutations stay visible to all three surfaces.
     let skill_loader: Arc<dyn tool_skill::skill::SkillLoader> = Arc::new(
-        crate::skill_loader::MobileDiskSkillLoader::load_from_disk(
-            &cwd,
-            &cfg.lingxi_home,
-            &cwd,
-            None,
-        )
-        .await,
+        crate::skill_loader::MobileDiskSkillLoader::new(shared_command_registry.clone()),
     );
     // (#3 shell-expansion) Build the shared prompt shell-expansion provider from
     // `tool_ctx` (carrying the base `permission_policy` + process/sandbox seams)
@@ -3801,6 +3862,7 @@ async fn build_mobile_inner_with_ask(
     let workflow_launcher = Arc::new(crate::workflow_support::MobileWorkflowLauncher {
         registry: task_registry.clone(),
         project_cwd: cwd.clone(),
+        app_data_root: mobile_apps_data_root(&cfg),
         current_cwd: workflow_cwd.clone(),
         lingxi_home: cfg.lingxi_home.clone(),
         session_uuid: active_session_uuid.clone(),
@@ -4070,6 +4132,12 @@ async fn build_mobile_inner_with_ask(
     .with_task_notifications(Arc::new(orchestrator::RegistryTaskNotifications::new(
         task_registry.clone() as Arc<dyn traits::task_registry::TaskRegistryHandle>,
     )))
+    // SKILLLIST.1: enumerate model-invocable skills each turn so the model
+    // can discover bundled and user skills. Reads the shared registry lazily;
+    // the registry is populated after the orchestrator handle is available.
+    .with_skill_listing(mobile_skill_listing_provider(
+        shared_command_registry.clone(),
+    ))
     // P1-06: share the ONE `readFileState` map with the file tools (created
     // above) so post-compact file restore + staleness consumers see a tool's
     // `readFileState.set` — mirror of desktop.
@@ -4215,12 +4283,17 @@ async fn build_mobile_inner_with_ask(
         }
     }
     orch.spawn_startup_responses_websocket_prewarm();
-    // Pre-create the shared registry slot so batch-8's `/reload-skills` handler
-    // and the dispatcher observe ONE command set; fill it once the builtins are
-    // assembled, then hand the SAME `Arc` to the dispatcher.
-    let shared_command_registry: Arc<RwLock<command_api::CommandRegistry>> =
-        Arc::new(RwLock::new(command_api::CommandRegistry::new()));
+    // Fill the shared registry slot so batch-8, the slash dispatcher, the
+    // per-turn skill listing, and the Skill tool all observe ONE command set.
     let mut reg = mobile_command_registry(handle.clone(), auth.clone());
+    crate::skill_loader::load_mobile_disk_commands_into_registry(
+        &mut reg,
+        &cwd,
+        &cfg.lingxi_home,
+        &cwd,
+    )
+    .await;
+    crate::register_mobile_bundled_prompt_commands(&mut reg);
     // `/workflows`: mobile cannot open the TUI picker, so bind the shared
     // command handler to the same live registry that powers workflow tools and
     // return the picker's snapshot as a structured command-output result.
@@ -4244,6 +4317,12 @@ async fn build_mobile_inner_with_ask(
         false,
         disable_agent_view,
     );
+    reg.register_builtin_handler(Arc::new(mobile_reload_skills_handler(
+        shared_command_registry.clone(),
+        cwd.clone(),
+        cfg.lingxi_home.clone(),
+        cwd.clone(),
+    )));
     *shared_command_registry.write().await = reg;
     let background_command_handle = handle.clone();
     let dispatcher = RegistrySlashDispatcher::new(shared_command_registry.clone())
@@ -4286,14 +4365,11 @@ async fn build_mobile_inner_with_ask(
     //     runtime and the FFI host drops it with no hook-capable teardown seam.
     let session_start = orch.fire_session_start("startup").await;
     if session_start.reload_skills {
-        let handler = command_core::reload_skills::ReloadSkillsHandler::with_all_roots(
+        let handler = mobile_reload_skills_handler(
             shared_command_registry.clone(),
             cwd.clone(),
             cfg.lingxi_home.clone(),
-            None,
             cwd.clone(),
-            Vec::new(),
-            false,
         );
         if let Some(parsed) = parse_slash_command("/reload-skills") {
             let _ = handler.handle(&parsed).await;
@@ -5888,31 +5964,10 @@ impl MobileEngineHandle {
                     )
                     .await
             }
-            // Create + scaffold in one step: today's path, unchanged except
-            // that the correlation key is now real instead of the `None` stub
-            // the protocol bump left behind.
-            AppCreateModeDto::Scaffolded => {
-                let surface = raised_surface.unwrap_or(local_apps::AppSurface::Dom);
-                service
-                    .create_app_with_git_and_workflow_model_and_initializer(
-                        name,
-                        brief,
-                        conversation_id,
-                        git_enabled,
-                        workflow_model.as_deref(),
-                        local_apps::CreateMode::Scaffolded,
-                        request_id.clone(),
-                        move |record| {
-                            let host = Arc::clone(&scaffold_host);
-                            async move {
-                                host.scaffold_app_value(&record, surface)
-                                    .await
-                                    .map_err(local_apps::AppError::Io)
-                            }
-                        },
-                    )
-                    .await
-            }
+            AppCreateModeDto::Scaffolded => Err(local_apps::AppError::InvalidRequest(
+                "create_app mode=scaffolded was removed in protocol v9; create a shell, confirm a runtime profile in the native UI, then scaffold with the one-shot receipt"
+                    .into(),
+            )),
         };
         match created {
             Ok(record) => {
@@ -7021,6 +7076,38 @@ impl MobileEngineHandle {
                     tracing::debug!(
                         request_id,
                         "unknown or completed local-app capability request"
+                    );
+                }
+                Ok(())
+            }
+            ClientCommand::ResolveAppRuntimeProfileSelection {
+                request_id,
+                selected_family,
+            } => {
+                if !self
+                    .local_apps_host
+                    .resolve_runtime_profile_selection(&request_id, selected_family)
+                    .await
+                {
+                    tracing::debug!(
+                        request_id,
+                        "unknown or completed local-app runtime profile selection"
+                    );
+                }
+                Ok(())
+            }
+            ClientCommand::ResolveAppDependencyChangeConfirmation {
+                request_id,
+                approved,
+            } => {
+                if !self
+                    .local_apps_host
+                    .resolve_dependency_change_confirmation(&request_id, approved)
+                    .await
+                {
+                    tracing::debug!(
+                        request_id,
+                        "unknown or completed local-app dependency change confirmation"
                     );
                 }
                 Ok(())
@@ -9819,21 +9906,23 @@ pub fn build_mobile_engine_inner(
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
+    use std::path::Path;
     use std::sync::{Arc, Mutex as StdMutex};
 
     use async_trait::async_trait;
     use client_adapter::{ClientEventListener, ListenerSink, PermissionRequestSink};
     use client_protocol::events::ClientEvent;
+    use tool_skill::skill::{SkillCommandType, SkillLoader as _};
     use traits::subagent_spawn::{SubagentObservation, SubagentSpawnObserver};
-    use traits::OrchestratorHandle as _;
+    use traits::{OrchestratorHandle as _, SlashCommandDispatcher as _, SlashDispatchResult};
 
     use super::{
         build_mobile, builtin_provider_catalog, classify_provider_connection_response,
         collect_session_agent_transcript_paths, find_session_agent_transcript_path,
-        lower_session_agent_snapshot, mobile_cron_schedule_error, provider_models_endpoint,
-        session_agent_conversation_is_visible, session_agent_transcript_event,
-        session_agent_transcript_revision, MobileConfig, MobileCronStoreHandle,
-        MobileSessionAgentObserver,
+        lower_session_agent_snapshot, mobile_cron_schedule_error, mobile_skill_listing_provider,
+        provider_models_endpoint, session_agent_conversation_is_visible,
+        session_agent_transcript_event, session_agent_transcript_revision, MobileConfig,
+        MobileCronStoreHandle, MobileSessionAgentObserver,
     };
 
     #[test]
@@ -10571,6 +10660,249 @@ mod tests {
         // the command registry binds to. Constructing it at all proves the full
         // mobile assembly (tool registry + command registry + adapter sinks).
         let _handle: Arc<dyn traits::OrchestratorHandle> = rt.orchestrator.clone();
+
+        // SKILLLIST.1: the production composition must attach the listing
+        // provider before the orchestrator is wrapped, and the provider's live
+        // registry must contain every compiled-in mobile skill.
+        assert!(
+            rt.orchestrator.has_skill_listing(),
+            "mobile orchestrator must expose a skill-listing provider"
+        );
+        let listed = mobile_skill_listing_provider(rt.slash_registry.clone())
+            .skill_entries()
+            .await;
+        let listed_names: std::collections::BTreeSet<_> =
+            listed.iter().map(|entry| entry.name.as_str()).collect();
+        let expected_names = [
+            "accessibility",
+            "babylon-3d-local-app",
+            "canvas-2d-local-app",
+            "create-local-app",
+            "frontend-design",
+            "frontend-qa",
+            "ionic-react-local-app",
+            "phaser-2d-local-app",
+            "react-best-practices",
+            "threejs-local-app",
+        ];
+        for name in expected_names {
+            assert!(
+                listed_names.contains(name),
+                "mobile skill-listing provider must expose bundled skill {name:?}: {listed_names:?}"
+            );
+        }
+        let registry = rt.slash_registry.read().await;
+        for name in expected_names {
+            assert!(
+                registry.resolve(name).is_some(),
+                "compiled-in mobile skill {name:?} must be present in the live slash registry"
+            );
+        }
+    }
+
+    fn write_skill(root: &Path, name: &str, description: &str, body: &str) {
+        let dir = root.join(".lingxi").join("skills").join(name);
+        std::fs::create_dir_all(&dir).expect("create skill dir");
+        std::fs::write(
+            dir.join("SKILL.md"),
+            format!("---\ndescription: {description}\n---\n{body}\n"),
+        )
+        .expect("write skill");
+    }
+
+    #[tokio::test]
+    async fn mobile_listing_dispatcher_and_skill_tool_share_one_live_registry() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        write_skill(tmp.path(), "foo", "Foo skill", "FOO BODY v1");
+        write_skill(
+            tmp.path(),
+            "frontend-design",
+            "Decoy frontend-design",
+            "DECOY FRONTEND DESIGN",
+        );
+        let commands_dir = tmp.path().join(".lingxi").join("commands");
+        std::fs::create_dir_all(&commands_dir).expect("create commands dir");
+        std::fs::write(
+            commands_dir.join("loop.md"),
+            "---\ndescription: Decoy loop\n---\nDECOY LOOP BODY\n",
+        )
+        .expect("write loop decoy");
+
+        let platform: Arc<dyn traits::Platform> =
+            Arc::new(HostFakePlatform::new(tmp.path().to_path_buf()));
+        let listener: Arc<dyn ClientEventListener> = Arc::new(FakeListener::default());
+        let perm_sink: Arc<dyn PermissionRequestSink> =
+            Arc::new(RecordingPermissionSink::default());
+        let rt = build_mobile(test_config(tmp.path()), platform, listener, perm_sink)
+            .await
+            .expect("build_mobile failed");
+
+        let provider = mobile_skill_listing_provider(rt.slash_registry.clone());
+        let loader = crate::skill_loader::MobileDiskSkillLoader::new(rt.slash_registry.clone());
+
+        let listed = provider.skill_entries().await;
+        let listed_names: std::collections::BTreeSet<_> =
+            listed.iter().map(|entry| entry.name.as_str()).collect();
+        let expected = [
+            "loop",
+            "accessibility",
+            "babylon-3d-local-app",
+            "canvas-2d-local-app",
+            "create-local-app",
+            "foo",
+            "frontend-design",
+            "frontend-qa",
+            "ionic-react-local-app",
+            "phaser-2d-local-app",
+            "react-best-practices",
+            "threejs-local-app",
+        ];
+        for name in expected {
+            assert!(
+                listed_names.contains(name),
+                "live mobile listing must contain {name:?}: {listed_names:?}"
+            );
+            let desc = loader
+                .load(name)
+                .await
+                .expect("load ok")
+                .unwrap_or_else(|| panic!("listed skill {name:?} must resolve through Skill"));
+            assert_eq!(
+                desc.command_type,
+                SkillCommandType::Prompt,
+                "listed entry {name:?} must remain prompt-invocable"
+            );
+        }
+        let foo_v1 = loader
+            .load("foo")
+            .await
+            .expect("load ok")
+            .expect("foo present");
+        assert!(foo_v1.body.contains("FOO BODY v1"));
+        let frontend_design = loader
+            .load("frontend-design")
+            .await
+            .expect("load ok")
+            .expect("frontend-design present");
+        let bundled_frontend_prompt = frontend_design
+            .dynamic_body
+            .as_ref()
+            .expect("bundled frontend-design stays programmatic")
+            .build("");
+        assert!(
+            !bundled_frontend_prompt.contains("DECOY FRONTEND DESIGN"),
+            "same-name disk decoy must not override bundled frontend-design"
+        );
+        let loop_desc = loader
+            .load("loop")
+            .await
+            .expect("load ok")
+            .expect("loop present");
+        let loop_prompt = loop_desc
+            .dynamic_body
+            .as_ref()
+            .expect("bundled loop stays programmatic")
+            .build("");
+        assert!(
+            !loop_prompt.contains("DECOY LOOP BODY"),
+            "same-name disk decoy must not override bundled loop"
+        );
+        let registry = rt.slash_registry.read().await;
+        let resolved_loop = registry.resolve("loop").expect("loop resolves");
+        assert_eq!(
+            resolved_loop.loaded_from.as_deref(),
+            Some("bundled"),
+            "loop must resolve from bundled after boot restore"
+        );
+        drop(registry);
+        let listed_loop = listed
+            .iter()
+            .find(|entry| entry.name == "loop")
+            .expect("loop listed");
+        assert!(listed_loop.is_bundled, "loop must list as bundled");
+
+        write_skill(tmp.path(), "foo", "Foo skill", "FOO BODY v2");
+        match rt.dispatcher.dispatch("/reload-skills").await {
+            SlashDispatchResult::Handled { .. } => {}
+            other => panic!("reload-skills must be handled locally, got {other:?}"),
+        }
+        let foo_v2 = loader
+            .load("foo")
+            .await
+            .expect("load ok")
+            .expect("foo present after reload");
+        assert!(foo_v2.body.contains("FOO BODY v2"));
+        let loop_after_reload = loader
+            .load("loop")
+            .await
+            .expect("load ok")
+            .expect("loop still present after reload");
+        let loop_prompt_after_reload = loop_after_reload
+            .dynamic_body
+            .as_ref()
+            .expect("bundled loop stays programmatic")
+            .build("");
+        assert!(
+            !loop_prompt_after_reload.contains("DECOY LOOP BODY"),
+            "bundled loop must survive reload precedence"
+        );
+
+        std::fs::remove_dir_all(tmp.path().join(".lingxi").join("skills").join("foo"))
+            .expect("remove foo skill");
+        match rt.dispatcher.dispatch("/reload-skills").await {
+            SlashDispatchResult::Handled { .. } => {}
+            other => panic!("reload-skills must be handled locally, got {other:?}"),
+        }
+        let listed_after_delete = provider.skill_entries().await;
+        let listed_after_delete_names: std::collections::BTreeSet<_> = listed_after_delete
+            .iter()
+            .map(|entry| entry.name.as_str())
+            .collect();
+        assert!(
+            !listed_after_delete_names.contains("foo"),
+            "deleted disk skill must disappear from live listing: {listed_after_delete_names:?}"
+        );
+        assert!(
+            loader.load("foo").await.expect("load ok").is_none(),
+            "deleted disk skill must disappear from the shared Skill loader"
+        );
+        let frontend_design_after_delete = loader
+            .load("frontend-design")
+            .await
+            .expect("load ok")
+            .expect("frontend-design still present");
+        let bundled_frontend_prompt_after_delete = frontend_design_after_delete
+            .dynamic_body
+            .as_ref()
+            .expect("bundled frontend-design stays programmatic")
+            .build("");
+        assert!(
+            !bundled_frontend_prompt_after_delete.contains("DECOY FRONTEND DESIGN"),
+            "bundled precedence must survive repeated reloads"
+        );
+        let loop_after_delete = loader
+            .load("loop")
+            .await
+            .expect("load ok")
+            .expect("loop still present after delete reload");
+        let loop_prompt_after_delete = loop_after_delete
+            .dynamic_body
+            .as_ref()
+            .expect("bundled loop stays programmatic")
+            .build("");
+        assert!(
+            !loop_prompt_after_delete.contains("DECOY LOOP BODY"),
+            "bundled loop precedence must survive repeated reloads"
+        );
+        let registry_after_delete = rt.slash_registry.read().await;
+        let resolved_loop_after_delete = registry_after_delete
+            .resolve("loop")
+            .expect("loop resolves after reload");
+        assert_eq!(
+            resolved_loop_after_delete.loaded_from.as_deref(),
+            Some("bundled"),
+            "loop must still resolve from bundled after repeated reloads"
+        );
     }
 
     /// Audit (secure-storage): the runtime's `oauth_supported` reflects the
@@ -10763,6 +11095,7 @@ mod tests {
         let launcher = crate::workflow_support::MobileWorkflowLauncher {
             registry: rt.task_registry.clone(),
             project_cwd: tmp.path().to_path_buf(),
+            app_data_root: tmp.path().to_path_buf(),
             current_cwd: Arc::new(std::sync::Mutex::new(tmp.path().to_path_buf())),
             lingxi_home: tmp.path().join(".claude"),
             // The launcher and status sink must share the engine's live
@@ -10889,6 +11222,7 @@ mod tests {
         let launcher = crate::workflow_support::MobileWorkflowLauncher {
             registry: rt.task_registry.clone(),
             project_cwd: tmp.path().to_path_buf(),
+            app_data_root: tmp.path().to_path_buf(),
             current_cwd,
             lingxi_home: tmp.path().join(".claude"),
             session_uuid: rt.active_session_uuid.clone(),
@@ -12883,16 +13217,14 @@ mod tests {
                     workflow_model: None,
                     conversation_id: None,
                     surface: None,
-                    mode: AppCreateModeDto::Scaffolded,
+                    mode: AppCreateModeDto::Shell,
                     request_id: None,
                 })
                 .await
                 .expect("submit(CreateApp)");
             let events = drain_events(&handle, &listener).await;
-            let app_id = apps_changed_rows(&events).expect("CreateApp must announce AppsChanged")
-                [0]
-            .id
-            .clone();
+            let (record, _) = created_row(&events).expect("CreateApp must announce AppCreated");
+            let app_id = record.id;
 
             handle
                 .submit(ClientCommand::GetAppDetails {
@@ -12929,14 +13261,14 @@ mod tests {
                     workflow_model: None,
                     conversation_id: None,
                     surface: None,
-                    mode: AppCreateModeDto::Scaffolded,
+                    mode: AppCreateModeDto::Shell,
                     request_id: None,
                 })
                 .await
                 .expect("submit(CreateApp)");
             let events = drain_events(&handle, &listener).await;
-            let rows = apps_changed_rows(&events).expect("CreateApp announces AppsChanged");
-            let app_id = rows[0].id.clone();
+            let (record, _) = created_row(&events).expect("CreateApp announces AppCreated");
+            let app_id = record.id.clone();
             // The create snapshot carries the new row; init-session pinning
             // arrives as one incremental record update.
             let pinned = events
@@ -13186,16 +13518,14 @@ mod tests {
                     workflow_model: Some("deepseek/deepseek-v4-flash".into()),
                     conversation_id: None,
                     surface: None,
-                    mode: AppCreateModeDto::Scaffolded,
+                    mode: AppCreateModeDto::Shell,
                     request_id: None,
                 })
                 .await
                 .expect("submit(CreateApp)");
             let events = drain_events(&handle, &listener).await;
-            let app_id = apps_changed_rows(&events).expect("CreateApp must announce AppsChanged")
-                [0]
-            .id
-            .clone();
+            let (record, _) = created_row(&events).expect("CreateApp must announce AppCreated");
+            let app_id = record.id;
 
             let service = handle.local_apps().expect("local-apps service");
             let record = service.record(&app_id).await.expect("record");
@@ -13242,19 +13572,19 @@ mod tests {
                     workflow_model: None,
                     conversation_id: Some("conv-7".into()),
                     surface: None,
-                    mode: AppCreateModeDto::Scaffolded,
+                    mode: AppCreateModeDto::Shell,
                     request_id: None,
                 })
                 .await
                 .expect("submit(CreateApp)");
             let events = drain_events(&handle, &listener).await;
-            let apps = apps_changed_rows(&events).expect("CreateApp must announce AppsChanged");
+            let (record, _) = created_row(&events).expect("CreateApp must announce AppCreated");
             assert_eq!(
-                apps[0].conversation_id.as_deref(),
+                record.conversation_id.as_deref(),
                 Some("conv-7"),
                 "a chat-origin create keeps the conversation binding"
             );
-            let app_id = apps[0].id.clone();
+            let app_id = record.id;
 
             // Persisted capability grants are revocable from the native
             // permissions page without exposing permissions.json to clients.
@@ -13359,14 +13689,14 @@ mod tests {
                     workflow_model: None,
                     conversation_id: None,
                     surface: None,
-                    mode: AppCreateModeDto::Scaffolded,
+                    mode: AppCreateModeDto::Shell,
                     request_id: None,
                 })
                 .await
                 .expect("submit(CreateApp)");
             let events = drain_events(&handle, &listener).await;
-            let apps = apps_changed_rows(&events).expect("CreateApp must announce AppsChanged");
-            let app_id = apps[0].id.clone();
+            let (record, _) = created_row(&events).expect("CreateApp must announce AppCreated");
+            let app_id = record.id;
             let service = handle.local_apps().expect("local-apps service");
             // v3 seeding: the only surviving workflow mutation is the ready
             // stamp (the build tool's success path).
@@ -13437,16 +13767,14 @@ mod tests {
                     workflow_model: None,
                     conversation_id: None,
                     surface: None,
-                    mode: AppCreateModeDto::Scaffolded,
+                    mode: AppCreateModeDto::Shell,
                     request_id: None,
                 })
                 .await
                 .expect("submit(CreateApp)");
             let events = drain_events(&handle, &listener).await;
-            let app_id = apps_changed_rows(&events).expect("CreateApp must announce AppsChanged")
-                [0]
-            .id
-            .clone();
+            let (record, _) = created_row(&events).expect("CreateApp must announce AppCreated");
+            let app_id = record.id;
             let service = handle.local_apps().expect("local-apps service");
 
             // Runtime record: stopped -> starting (pins the port)…
@@ -13538,7 +13866,7 @@ mod tests {
                     workflow_model: None,
                     conversation_id: None,
                     surface: None,
-                    mode: AppCreateModeDto::Scaffolded,
+                    mode: AppCreateModeDto::Shell,
                     request_id: None,
                 })
                 .await
@@ -13864,27 +14192,11 @@ mod tests {
         });
     }
 
-    /// 🚨 The SCAFFOLDED branch echoes the key too.
-    ///
-    /// Two different tests already cover the shell half (`AppCreated` on a
-    /// `Shell` create) and the failure half, and neither one touches this arm:
-    /// the handler calls the service TWICE, once per branch, and each call site
-    /// passes `request_id` independently. A later edit that `None`s out this
-    /// one would compile, would leave every other test in this file green, and
-    /// would silently break correlation for whatever sends `Scaffolded`.
-    ///
-    /// That is the "wired today, `None` after some refactor, nothing notices"
-    /// shape this plan has been bitten by repeatedly. One test closes it.
-    ///
-    /// ⚠️ Reachability, recorded honestly rather than implied by this test's
-    /// existence: after Tasks 13/14 land, NO shipping client sends
-    /// `mode: Scaffolded` — both create entry points become `Shell`, and the
-    /// agent's `LocalAppCreate` tool calls `AppService` directly
-    /// (`local_apps_mcp.rs`), never this handler. The variant remains part of
-    /// the blessed 8.0.0 wire and this arm remains the only thing that would
-    /// serve it, which is exactly why it is pinned rather than deleted.
+    /// 🚨 `Scaffolded` is no longer a reachable success path on the client
+    /// wire: v9 create is shell-only, and any stale caller must get a typed
+    /// failure carrying its own correlation key.
     #[test]
-    fn a_scaffolded_create_echoes_the_request_id_on_app_created() {
+    fn a_scaffolded_create_reports_the_request_id_on_app_operation_failed() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let (handle, listener) = build_submit_handle(tmp.path());
 
@@ -13899,31 +14211,33 @@ mod tests {
                 Some("req-3"),
             )
             .await;
-            let (record, request_id) =
-                created_row(&events).expect("a Scaffolded create must announce AppCreated");
+            let (code, message, request_id) = first_failure(&events).unwrap_or_else(|| {
+                panic!(
+                    "a Scaffolded create must fail typed on the v9 shell-only wire, got {events:?}"
+                )
+            });
+            assert_eq!(code, AppErrorCodeDto::InvalidRequest, "{message}");
             assert!(
-                record.scaffolded,
-                "sanity: this must be the Scaffolded arm, not the Shell one: {record:?}"
+                message.contains("shell"),
+                "the failure must explain that CreateApp is shell-only now, got {message}"
             );
             assert_eq!(
                 request_id.as_deref(),
                 Some("req-3"),
-                "the Scaffolded branch must echo the caller's key verbatim — it is the \
-                 same field the Shell branch echoes, and nothing else in this file \
-                 would notice it going constant-None here"
+                "the stale caller must still receive its own correlation key"
+            );
+            assert!(
+                created_row(&events).is_none(),
+                "a rejected Scaffolded create must not land a record: {events:?}"
             );
         });
     }
 
-    /// 🚨 BOTH branches, in one test, on purpose.
-    ///
-    /// `mode` was received and ignored (`mode: _mode`) until this handler
-    /// forked on it. Testing `Shell` alone cannot tell "the handler reads the
-    /// mode" apart from "the handler always takes the Shell path" — those are
-    /// different programs. Pinning the two outcomes against each other is what
-    /// makes the read observable.
+    /// 🚨 The wire still carries both enum variants, but only `Shell` is a
+    /// valid client create. Pinning success vs typed rejection keeps the
+    /// compatibility story explicit.
     #[test]
-    fn create_app_forks_on_the_mode_in_both_directions() {
+    fn create_app_accepts_shell_and_rejects_scaffolded_mode() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let (handle, listener) = build_submit_handle(tmp.path());
 
@@ -13945,8 +14259,6 @@ mod tests {
                 .join(&shell_record.id)
                 .join("workspace");
 
-            // A `Scaffolded` create needs a non-empty brief — that invariant
-            // survives untouched on this branch (§A.3).
             let scaffolded = submit_create(
                 &handle,
                 &listener,
@@ -13957,29 +14269,24 @@ mod tests {
                 None,
             )
             .await;
-            let (scaffolded_record, _) =
-                created_row(&scaffolded).expect("Scaffolded create announces AppCreated");
-            let scaffolded_workspace = tmp
-                .path()
-                .join("apps")
-                .join(&scaffolded_record.id)
-                .join("workspace");
+            let (code, message, _) = first_failure(&scaffolded).unwrap_or_else(|| {
+                panic!(
+                    "Scaffolded create must fail typed on the shell-only wire, got {scaffolded:?}"
+                )
+            });
 
             assert!(
                 !shell_record.scaffolded,
                 "Shell lands unformed: {shell_record:?}"
             );
             assert!(
-                scaffolded_record.scaffolded,
-                "Scaffolded lands formed: {scaffolded_record:?}"
-            );
-            assert!(
                 !shell_workspace.join("package.json").exists(),
                 "the Shell branch must lay down no scaffold"
             );
+            assert_eq!(code, AppErrorCodeDto::InvalidRequest, "{message}");
             assert!(
-                scaffolded_workspace.join("package.json").is_file(),
-                "the Scaffolded branch must lay the scaffold down"
+                message.contains("shell"),
+                "the rejection must explain the shell-only contract, got {message}"
             );
         });
     }

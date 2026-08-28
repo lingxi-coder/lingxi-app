@@ -13,13 +13,20 @@ import com.lingxi.code.bindings.AppCreateModeDto
 import com.lingxi.code.bindings.AppCreateOriginDto
 import com.lingxi.code.bindings.AppDataFieldDto
 import com.lingxi.code.bindings.AppDataFieldTypeDto
+import com.lingxi.code.bindings.AppDependencyChangeConfirmationRequestDto
+import com.lingxi.code.bindings.AppDependencyChangeKindDto
+import com.lingxi.code.bindings.AppDetailsDto
 import com.lingxi.code.bindings.AppEventDto
 import com.lingxi.code.bindings.AppRecordDto
 import com.lingxi.code.bindings.AppRuntimeDetailsDto
 import com.lingxi.code.bindings.AppRuntimeModeDto
+import com.lingxi.code.bindings.AppRuntimeProfileDto
+import com.lingxi.code.bindings.AppRuntimeProfileSelectionRequestDto
+import com.lingxi.code.bindings.AppRuntimeProfileStatusDto
 import com.lingxi.code.bindings.AppRuntimeStateDto
 import com.lingxi.code.bindings.AppSessionKindDto
 import com.lingxi.code.bindings.AppSessionRowDto
+import com.lingxi.code.bindings.AppSurfaceDto
 import com.lingxi.code.bindings.AppUiActionKindDto
 import com.lingxi.code.bindings.AppUiRequestDto
 import com.lingxi.code.bindings.AppWorkflowStateDto
@@ -178,6 +185,8 @@ class LocalAppsViewModel(
 
     private val pendingCapabilityKinds = mutableMapOf<String, AppCapabilityKindDto>()
     private val queuedAuthorizations = ArrayDeque<LocalAppAuthorizationRequest>()
+    private val queuedRuntimeProfileSelections = ArrayDeque<LocalAppRuntimeProfileSelectionRequest>()
+    private val queuedDependencyChangeConfirmations = ArrayDeque<LocalAppDependencyChangeConfirmationRequest>()
     private val uiControlGrants = mutableMapOf<String, LocalAppAuthorizationDecision>()
     private val runtimeLastUsedAt = mutableMapOf<String, Long>()
     private val runtimeStartsInFlight = mutableSetOf<String>()
@@ -343,6 +352,8 @@ class LocalAppsViewModel(
                 )
             }
             is LocalAppsAction.ResolveAuthorization -> resolveAuthorization(action.decision)
+            is LocalAppsAction.ResolveRuntimeProfileSelection -> resolveRuntimeProfileSelection(action.family)
+            is LocalAppsAction.ResolveDependencyChangeConfirmation -> resolveDependencyChangeConfirmation(action.approved)
             is LocalAppsAction.ResolveProfileProposal -> resolveProfileProposal(action.approved)
             is LocalAppsAction.UiActionHandled -> resolveCompletedUiAction(action)
             is LocalAppsAction.SelectDetailsTab -> _uiState.update { state ->
@@ -787,28 +798,33 @@ class LocalAppsViewModel(
 
     private fun resolveAuthorization(decision: LocalAppAuthorizationDecision) {
         val request = _uiState.value.pendingAuthorization ?: return
-        val bindingDecision = decision.toBindingDecision()
+        val effectiveDecision = when {
+            request.allowsPersistentGrant -> decision
+            decision == LocalAppAuthorizationDecision.Deny -> decision
+            else -> LocalAppAuthorizationDecision.AllowOnce
+        }
+        val bindingDecision = effectiveDecision.toBindingDecision()
         if (request.isUiControl) {
-            if (decision == LocalAppAuthorizationDecision.Deny || request.uiAction == null) {
+            if (effectiveDecision == LocalAppAuthorizationDecision.Deny || request.uiAction == null) {
                 submit(
                     ClientCommand.ResolveAppUiRequest(
                         request.requestId,
                         bindingDecision,
                         null,
-                        if (request.uiAction == null && decision != LocalAppAuthorizationDecision.Deny) {
+                        if (request.uiAction == null && effectiveDecision != LocalAppAuthorizationDecision.Deny) {
                             strings.resolve(R.string.local_apps_ui_action_missing_target, "UI 请求缺少有效目标或参数")
                         } else null,
                     ),
                 )
-            } else if (decision == LocalAppAuthorizationDecision.AllowSession ||
-                decision == LocalAppAuthorizationDecision.AllowAlways
+            } else if (effectiveDecision == LocalAppAuthorizationDecision.AllowSession ||
+                effectiveDecision == LocalAppAuthorizationDecision.AllowAlways
             ) {
-                uiControlGrants[request.appId] = decision
+                uiControlGrants[request.appId] = effectiveDecision
             }
         } else {
             val capability = pendingCapabilityKinds.remove(request.requestId)
-            if (capability == AppCapabilityKindDto.UI_CONTROL && decision != LocalAppAuthorizationDecision.Deny) {
-                uiControlGrants[request.appId] = decision
+            if (capability == AppCapabilityKindDto.UI_CONTROL && effectiveDecision != LocalAppAuthorizationDecision.Deny) {
+                uiControlGrants[request.appId] = effectiveDecision
             }
             submit(ClientCommand.ResolveAppCapabilityRequest(request.requestId, bindingDecision))
         }
@@ -819,19 +835,59 @@ class LocalAppsViewModel(
             it.copy(
                 pendingAuthorization = nextAuthorization,
                 pendingUiAction = if (
-                    request.isUiControl && decision != LocalAppAuthorizationDecision.Deny && request.uiAction != null
+                    request.isUiControl && effectiveDecision != LocalAppAuthorizationDecision.Deny && request.uiAction != null
                 ) {
-                    LocalAppPendingUiAction(request.requestId, request.appId, request.uiAction, decision)
+                    LocalAppPendingUiAction(request.requestId, request.appId, request.uiAction, effectiveDecision)
                 } else it.pendingUiAction,
                 selectedAppId = if (request.isUiControl) request.appId else it.selectedAppId,
-                destination = if (request.isUiControl && decision != LocalAppAuthorizationDecision.Deny) {
+                destination = if (request.isUiControl && effectiveDecision != LocalAppAuthorizationDecision.Deny) {
                     LocalAppsDestination.Details(request.appId, LocalAppDetailsTab.Preview)
                 } else it.destination,
-                selectedDetailsTab = if (request.isUiControl && decision != LocalAppAuthorizationDecision.Deny) {
+                selectedDetailsTab = if (request.isUiControl && effectiveDecision != LocalAppAuthorizationDecision.Deny) {
                     LocalAppDetailsTab.Preview
                 } else it.selectedDetailsTab,
             )
         }
+    }
+
+    private fun enqueueRuntimeProfileSelection(request: LocalAppRuntimeProfileSelectionRequest) {
+        if (_uiState.value.pendingRuntimeProfileSelection == null) {
+            _uiState.update { it.copy(pendingRuntimeProfileSelection = request) }
+            return
+        }
+        queuedRuntimeProfileSelections.addLast(request)
+    }
+
+    private fun resolveRuntimeProfileSelection(family: LocalAppRuntimeProfileFamily?) {
+        val request = _uiState.value.pendingRuntimeProfileSelection ?: return
+        submit(
+            ClientCommand.ResolveAppRuntimeProfileSelection(
+                request.requestId,
+                family?.toBindingRuntimeProfileFamily(),
+            ),
+        )
+        val nextSelection = queuedRuntimeProfileSelections.removeFirstOrNull()
+        _uiState.update { it.copy(pendingRuntimeProfileSelection = nextSelection) }
+    }
+
+    private fun enqueueDependencyChangeConfirmation(request: LocalAppDependencyChangeConfirmationRequest) {
+        if (_uiState.value.pendingDependencyChangeConfirmation == null) {
+            _uiState.update { it.copy(pendingDependencyChangeConfirmation = request) }
+            return
+        }
+        queuedDependencyChangeConfirmations.addLast(request)
+    }
+
+    private fun resolveDependencyChangeConfirmation(approved: Boolean) {
+        val request = _uiState.value.pendingDependencyChangeConfirmation ?: return
+        submit(
+            ClientCommand.ResolveAppDependencyChangeConfirmation(
+                requestId = request.requestId,
+                approved = approved,
+            ),
+        )
+        val next = queuedDependencyChangeConfirmations.removeFirstOrNull()
+        _uiState.update { it.copy(pendingDependencyChangeConfirmation = next) }
     }
 
     private fun resolveCompletedUiAction(action: LocalAppsAction.UiActionHandled) {
@@ -956,7 +1012,10 @@ class LocalAppsViewModel(
             is AppEventDto.AppDetailsChanged -> reduceDetails(event.details)
             is AppEventDto.AppRecordChanged -> {
                 val prior = _uiState.value.apps.firstOrNull { it.id == event.record.id }
-                val app = event.record.toUiApp(fallbackRuntime = prior?.runtime)
+                val app = event.record.toUiApp(
+                    fallbackRuntime = prior?.runtime,
+                    runtimeProfileStatus = prior?.runtimeProfileStatus,
+                )
                 // RecordChanged may race the initial full catalog snapshot.
                 // Upsert it and restore the canonical newest-first ordering so
                 // an incremental init-session pin cannot be dropped or leave
@@ -1056,6 +1115,7 @@ class LocalAppsViewModel(
                                 request.action.name.lowercase(),
                             ),
                             isUiControl = true,
+                            allowsPersistentGrant = true,
                             uiAction = action,
                         ),
                     )
@@ -1077,8 +1137,15 @@ class LocalAppsViewModel(
                             domainSuffix?.let(::append)
                         },
                         isUiControl = false,
+                        allowsPersistentGrant = request.capability.allowsPersistentGrant(),
                     ),
                 )
+            }
+            is AppEventDto.AppRuntimeProfileSelectionRequested -> {
+                enqueueRuntimeProfileSelection(event.request.toUiRuntimeProfileSelection())
+            }
+            is AppEventDto.AppDependencyChangeConfirmationRequested -> {
+                enqueueDependencyChangeConfirmation(event.request.toUiDependencyChangeConfirmation())
             }
             is AppEventDto.AppCheckpointsChanged -> _uiState.update { state ->
                 val details = state.details[event.appId] ?: return@update state
@@ -1165,9 +1232,11 @@ class LocalAppsViewModel(
 
     private fun reduceDetails(details: com.lingxi.code.bindings.AppDetailsDto) {
         val prior = _uiState.value.apps.firstOrNull { it.id == details.app.id }
+        val runtimeProfileStatus = details.runtimeProfileStatus?.toUiRuntimeProfileStatus()
         val app = details.app.toUiApp(
             runtime = details.runtime.toUiRuntime(),
             fallbackRuntime = prior?.runtime,
+            runtimeProfileStatus = runtimeProfileStatus,
         )
         _uiState.update { current ->
             val apps = if (current.apps.any { it.id == app.id }) {
@@ -1199,6 +1268,7 @@ class LocalAppsViewModel(
                             )
                         },
                         runtime = details.runtime.toUiRuntime(),
+                        runtimeProfileStatus = runtimeProfileStatus,
                     )
                 ),
             )
@@ -1260,7 +1330,10 @@ class LocalAppsViewModel(
         val oldIds = _uiState.value.apps.mapTo(hashSetOf()) { it.id }
         val apps = event.apps.map { record ->
             val prior = _uiState.value.apps.firstOrNull { it.id == record.id }
-            record.toUiApp(fallbackRuntime = prior?.runtime)
+            record.toUiApp(
+                fallbackRuntime = prior?.runtime,
+                runtimeProfileStatus = prior?.runtimeProfileStatus,
+            )
         }.sortedByDescending { it.updatedAtMs }
         val liveIds = apps.mapTo(hashSetOf()) { it.id }
         runtimeStartsInFlight.retainAll(liveIds)
@@ -1515,9 +1588,20 @@ private fun AppRuntimeDetailsDto.toUiRuntime(): LocalAppRuntime = LocalAppRuntim
     recovery = recoveryState?.name?.lowercase(),
 )
 
+private fun AppRuntimeProfileStatusDto.toUiRuntimeProfileStatus(): LocalAppRuntimeProfileStatus = when (this) {
+    AppRuntimeProfileStatusDto.VERIFIED -> LocalAppRuntimeProfileStatus.Verified
+    AppRuntimeProfileStatusDto.DEPENDENCIES_DIRTY -> LocalAppRuntimeProfileStatus.DependenciesDirty
+    AppRuntimeProfileStatusDto.CORE_DEPENDENCY_DRIFT -> LocalAppRuntimeProfileStatus.CoreDependencyDrift
+    AppRuntimeProfileStatusDto.REBUILD_REQUIRED -> LocalAppRuntimeProfileStatus.RebuildRequired
+    AppRuntimeProfileStatusDto.MIGRATION_AVAILABLE -> LocalAppRuntimeProfileStatus.MigrationAvailable
+    AppRuntimeProfileStatusDto.RUNTIME_BUNDLE_MISSING -> LocalAppRuntimeProfileStatus.RuntimeBundleMissing
+    AppRuntimeProfileStatusDto.RUNTIME_CONTRACT_CORRUPT -> LocalAppRuntimeProfileStatus.RuntimeContractCorrupt
+}
+
 private fun AppRecordDto.toUiApp(
     runtime: LocalAppRuntime? = null,
     fallbackRuntime: LocalAppRuntime? = null,
+    runtimeProfileStatus: LocalAppRuntimeProfileStatus? = null,
 ): LocalAppItem = LocalAppItem(
     id = id,
     name = name,
@@ -1532,6 +1616,7 @@ private fun AppRecordDto.toUiApp(
     // draft branch in this module reads it from here and nowhere else — no
     // surface re-derives "is this a draft" by sniffing the name or the brief.
     scaffolded = scaffolded,
+    runtimeProfileStatus = runtimeProfileStatus,
 )
 
 private fun AppCapabilityKindDto.authorizationTitle(
@@ -1546,6 +1631,10 @@ private fun AppCapabilityKindDto.authorizationTitle(
         strings.resolve(R.string.local_apps_permission_network_short, "允许应用联网？")
     AppCapabilityKindDto.RESTORE_CHECKPOINT ->
         strings.resolve(R.string.local_apps_permission_restore, "允许恢复代码检查点？")
+    AppCapabilityKindDto.RUNTIME_PROFILE_SELECTION ->
+        strings.resolve(R.string.local_apps_permission_runtime_profile_selection, "允许应用选择或确认运行时 Profile？")
+    AppCapabilityKindDto.DEPENDENCY_CHANGE ->
+        strings.resolve(R.string.local_apps_permission_dependency_change, "允许应用更新依赖吗？")
     AppCapabilityKindDto.CAMERA ->
         strings.resolve(R.string.local_apps_permission_camera, "允许应用使用相机拍照？")
     AppCapabilityKindDto.PHOTO_LIBRARY ->
@@ -1591,12 +1680,88 @@ private fun AppCapabilityKindDto.authorizationTitle(
         "允许应用读取自己刚获取的媒体？"
 }
 
+private fun AppCapabilityKindDto.allowsPersistentGrant(): Boolean = when (this) {
+    AppCapabilityKindDto.RUNTIME_PROFILE_SELECTION,
+    AppCapabilityKindDto.DEPENDENCY_CHANGE -> false
+    else -> true
+}
+
 private fun LocalAppAuthorizationDecision.toBindingDecision(): AppAuthorizationDecisionDto = when (this) {
     LocalAppAuthorizationDecision.Deny -> AppAuthorizationDecisionDto.DENY
     LocalAppAuthorizationDecision.AllowOnce -> AppAuthorizationDecisionDto.ALLOW_ONCE
     LocalAppAuthorizationDecision.AllowSession -> AppAuthorizationDecisionDto.ALLOW_SESSION
     LocalAppAuthorizationDecision.AllowAlways -> AppAuthorizationDecisionDto.ALLOW_ALWAYS
 }
+
+private fun AppRuntimeProfileDto.toUiRuntimeProfileFamily(): LocalAppRuntimeProfileFamily = when (this) {
+    AppRuntimeProfileDto.REACT_DOM -> LocalAppRuntimeProfileFamily.ReactDom
+    AppRuntimeProfileDto.CANVAS2D -> LocalAppRuntimeProfileFamily.Canvas2d
+    AppRuntimeProfileDto.THREE3D -> LocalAppRuntimeProfileFamily.Three3d
+    AppRuntimeProfileDto.PHASER2D -> LocalAppRuntimeProfileFamily.Phaser2d
+    AppRuntimeProfileDto.BABYLON3D -> LocalAppRuntimeProfileFamily.Babylon3d
+}
+
+private fun LocalAppRuntimeProfileFamily.toBindingRuntimeProfileFamily(): AppRuntimeProfileDto = when (this) {
+    LocalAppRuntimeProfileFamily.ReactDom -> AppRuntimeProfileDto.REACT_DOM
+    LocalAppRuntimeProfileFamily.Canvas2d -> AppRuntimeProfileDto.CANVAS2D
+    LocalAppRuntimeProfileFamily.Three3d -> AppRuntimeProfileDto.THREE3D
+    LocalAppRuntimeProfileFamily.Phaser2d -> AppRuntimeProfileDto.PHASER2D
+    LocalAppRuntimeProfileFamily.Babylon3d -> AppRuntimeProfileDto.BABYLON3D
+}
+
+private fun AppRuntimeProfileSelectionRequestDto.toUiRuntimeProfileSelection(): LocalAppRuntimeProfileSelectionRequest =
+    LocalAppRuntimeProfileSelectionRequest(
+        requestId = requestId,
+        appId = appId,
+        reason = reason,
+        recommendedFamily = recommendedFamily?.toUiRuntimeProfileFamily(),
+        options = options.map { option ->
+            LocalAppRuntimeProfileOption(
+                family = option.family.toUiRuntimeProfileFamily(),
+                revision = option.revision.toUInt(),
+                contractSha256 = option.contractSha256,
+                surface = if (option.surface == AppSurfaceDto.DOM) {
+                    LocalAppRuntimeProfileSurface.Dom
+                } else {
+                    LocalAppRuntimeProfileSurface.Canvas
+                },
+                corePackages = option.corePackages.map { pkg ->
+                    LocalAppRuntimeProfilePackage(pkg.name, pkg.version)
+                },
+                cacheStatus = option.cacheStatus,
+                downloadStatus = option.downloadStatus,
+                available = option.available,
+                reason = option.reason,
+            )
+        },
+    )
+
+private fun AppDependencyChangeKindDto.toUiDependencyChangeKind(): LocalAppDependencyChangeKind = when (this) {
+    AppDependencyChangeKindDto.ADD -> LocalAppDependencyChangeKind.Add
+    AppDependencyChangeKindDto.UPDATE -> LocalAppDependencyChangeKind.Update
+    AppDependencyChangeKindDto.REMOVE -> LocalAppDependencyChangeKind.Remove
+}
+
+private fun AppDependencyChangeConfirmationRequestDto.toUiDependencyChangeConfirmation(): LocalAppDependencyChangeConfirmationRequest =
+    LocalAppDependencyChangeConfirmationRequest(
+        requestId = requestId,
+        appId = appId,
+        reason = reason,
+        changes = changes.map { change ->
+            LocalAppDependencyChange(
+                kind = change.kind.toUiDependencyChangeKind(),
+                packageName = change.`package`,
+                version = change.version,
+                cacheStatus = change.cacheStatus,
+                downloadStatus = change.downloadStatus,
+            )
+        },
+        licenseRisk = licenseRisk,
+        sbomRisk = sbomRisk,
+        lifecycleScriptsBlocked = lifecycleScriptsBlocked,
+        nativeAddonsBlocked = nativeAddonsBlocked,
+        rollbackPolicy = rollbackPolicy,
+    )
 
 private fun AppUiRequestDto.toUiAutomationAction(): LocalAppUiAutomationAction? {
     val uiTarget = target?.toUiTarget()

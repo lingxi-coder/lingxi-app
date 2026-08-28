@@ -755,8 +755,8 @@ final class LocalAppsStoreTests: XCTestCase {
             store.handle(event: .appEvent(event: .appDetailsChanged(details: AppDetailsDto(
                 app: appRecord(id: "tracker", name: "Tracker"),
                 manifest: AppManifestDto(
-                    schemaVersion: 1,
-                    runtimeApiVersion: nil,
+                    schemaVersion: 2,
+                    runtimeApiVersion: 2,
                     appId: "tracker",
                     name: "Tracker",
                     designRevision: 3,
@@ -768,8 +768,12 @@ final class LocalAppsStoreTests: XCTestCase {
                     )],
                     allowedDomains: [],
                     capabilities: [],
-                    deviceContext: nil
+                    deviceContext: nil,
+                    surface: nil,
+                    runtimeProfile: nil,
+                    dependencySnapshot: nil
                 ),
+                runtimeProfileStatus: .verified,
                 runtime: AppRuntimeDetailsDto(
                     state: .stopped,
                     mode: .nextProduction,
@@ -784,6 +788,45 @@ final class LocalAppsStoreTests: XCTestCase {
             XCTAssertEqual(store.collections["tracker"]?.count, 1)
             XCTAssertEqual(store.collections["tracker"]?.first?.fields.first?.id, "title")
             XCTAssertEqual(store.apps.map(\.id), ["tracker"])
+            XCTAssertEqual(store.app(id: "tracker")?.runtimeProfileStatus, .verified)
+        }
+
+        func testRuntimeProfileStatusMapsAllWireValuesAndSurvivesListRefresh() {
+            let mappings: [(AppRuntimeProfileStatusDto, LocalAppRuntimeProfileStatus)] = [
+                (.verified, .verified),
+                (.dependenciesDirty, .dependenciesDirty),
+                (.coreDependencyDrift, .coreDependencyDrift),
+                (.rebuildRequired, .rebuildRequired),
+                (.migrationAvailable, .migrationAvailable),
+                (.runtimeBundleMissing, .runtimeBundleMissing),
+                (.runtimeContractCorrupt, .runtimeContractCorrupt),
+            ]
+            for (wire, local) in mappings {
+                XCTAssertEqual(LocalAppsProtocolAdapter.runtimeProfileStatus(wire), local)
+            }
+
+            let store = LocalAppsStore()
+            store.handle(event: .appEvent(event: .appDetailsChanged(details: AppDetailsDto(
+                app: appRecord(id: "tracker", name: "Tracker"),
+                manifest: nil,
+                runtimeProfileStatus: .runtimeContractCorrupt,
+                runtime: AppRuntimeDetailsDto(
+                    state: .stopped,
+                    mode: .nextProduction,
+                    loopbackUrl: nil,
+                    suspensionReason: nil,
+                    recoveryState: .recovered,
+                    lastError: nil
+                ),
+                checkpoints: []
+            ))))
+            XCTAssertEqual(store.app(id: "tracker")?.runtimeProfileStatus, .runtimeContractCorrupt)
+
+            // The list endpoint does not carry details; refreshing it must
+            // retain the last known host snapshot so a card does not flicker
+            // back to an unknown state.
+            store.handle(event: .appsChanged(apps: [appRecord(id: "tracker", name: "Tracker")]))
+            XCTAssertEqual(store.app(id: "tracker")?.runtimeProfileStatus, .runtimeContractCorrupt)
         }
 
         func testRuntimeDetailsUseTheLoopbackURL() {
@@ -898,6 +941,164 @@ final class LocalAppsStoreTests: XCTestCase {
             XCTAssertEqual(requestId, "permission-1")
             XCTAssertEqual(decision, .allowSession)
             XCTAssertNil(store.pendingPermission)
+        }
+
+        func testRuntimeProfilePromptOnlyAllowsOneShotAuthorization() async {
+            let store = LocalAppsStore()
+            var submitted: [ClientCommand] = []
+            store.configure { command in submitted.append(command) }
+            store.handle(event: .appEvent(event: .appCapabilityRequested(request: AppCapabilityRequestDto(
+                requestId: "permission-runtime-1",
+                appId: "tracker",
+                capability: .runtimeProfileSelection,
+                domain: nil,
+                reason: "Choose the runtime profile"
+            ))))
+
+            XCTAssertEqual(store.pendingPermission?.allowsPersistentGrant, false)
+            await store.resolvePendingPermission(.always)
+
+            guard case let .resolveAppCapabilityRequest(requestId, decision) = submitted.last else {
+                return XCTFail("Expected capability resolution command")
+            }
+            XCTAssertEqual(requestId, "permission-runtime-1")
+            XCTAssertEqual(decision, .allowOnce)
+            XCTAssertNil(store.pendingPermission)
+        }
+
+        func testRuntimeProfileSelectionRequestPresentsOptionsAndReturnsChosenFamily() async {
+            let store = LocalAppsStore()
+            var submitted: [ClientCommand] = []
+            store.configure { command in submitted.append(command) }
+            store.handle(event: .appEvent(event: .appRuntimeProfileSelectionRequested(request: AppRuntimeProfileSelectionRequestDto(
+                requestId: "runtime-select-1",
+                appId: "tracker",
+                reason: "Pick the runtime profile before scaffold",
+                recommendedFamily: .three3d,
+                options: [
+                    AppRuntimeProfileOptionDto(
+                        family: .three3d,
+                        revision: 1,
+                        contractSha256: "three-contract",
+                        surface: .canvas,
+                        corePackages: [
+                            AppRuntimeProfilePackageDto(name: "three", version: "0.185.1"),
+                        ],
+                        cacheStatus: "bundled",
+                        downloadStatus: "bundled",
+                        available: true,
+                        reason: nil
+                    ),
+                    AppRuntimeProfileOptionDto(
+                        family: .babylon3d,
+                        revision: 1,
+                        contractSha256: "babylon-contract",
+                        surface: .canvas,
+                        corePackages: [
+                            AppRuntimeProfilePackageDto(name: "@babylonjs/core", version: "9.22.1"),
+                        ],
+                        cacheStatus: "unavailable",
+                        downloadStatus: "gated",
+                        available: false,
+                        reason: "Pending device validation"
+                    ),
+                ]
+            ))))
+
+            XCTAssertEqual(store.pendingRuntimeProfileSelection?.id, "runtime-select-1")
+            XCTAssertEqual(store.pendingRuntimeProfileSelection?.recommendedFamily, .three3d)
+            XCTAssertEqual(store.pendingRuntimeProfileSelection?.options.count, 2)
+            XCTAssertEqual(store.pendingRuntimeProfileSelection?.options.last?.available, false)
+
+            await store.resolvePendingRuntimeProfileSelection(.three3d)
+
+            guard case let .resolveAppRuntimeProfileSelection(requestId, selectedFamily) = submitted.last else {
+                return XCTFail("Expected runtime profile selection resolution command")
+            }
+            XCTAssertEqual(requestId, "runtime-select-1")
+            XCTAssertEqual(selectedFamily, .three3d)
+            XCTAssertNil(store.pendingRuntimeProfileSelection)
+        }
+
+        func testDependencyChangeConfirmationShowsPolicyAndReturnsApproval() async {
+            let store = LocalAppsStore()
+            var submitted: [ClientCommand] = []
+            store.configure { command in submitted.append(command) }
+            store.handle(event: .appEvent(event: .appDependencyChangeConfirmationRequested(
+                request: AppDependencyChangeConfirmationRequestDto(
+                    requestId: "dependency-confirm-1",
+                    appId: "tracker",
+                    reason: "pre_resolution_no_network",
+                    changes: [
+                        AppDependencyChangeDto(
+                            kind: .add,
+                            package: "dayjs",
+                            version: "1.11.13",
+                            cacheStatus: "unknown_until_resolution",
+                            downloadStatus: "may_be_required"
+                        ),
+                    ],
+                    licenseRisk: "unknown_until_resolution",
+                    sbomRisk: "unknown_until_resolution",
+                    lifecycleScriptsBlocked: true,
+                    nativeAddonsBlocked: true,
+                    rollbackPolicy: "rollback_on_validation_failure"
+                )
+            )))
+
+            XCTAssertEqual(store.pendingDependencyChangeConfirmation?.id, "dependency-confirm-1")
+            XCTAssertEqual(store.pendingDependencyChangeConfirmation?.changes.first?.package, "dayjs")
+            XCTAssertEqual(store.pendingDependencyChangeConfirmation?.licenseRisk, "unknown_until_resolution")
+            XCTAssertEqual(store.pendingDependencyChangeConfirmation?.lifecycleScriptsBlocked, true)
+            XCTAssertEqual(store.pendingDependencyChangeConfirmation?.nativeAddonsBlocked, true)
+
+            await store.resolvePendingDependencyChangeConfirmation(true)
+
+            guard case let .resolveAppDependencyChangeConfirmation(requestId, approved) = submitted.last else {
+                return XCTFail("Expected dependency confirmation resolution command")
+            }
+            XCTAssertEqual(requestId, "dependency-confirm-1")
+            XCTAssertTrue(approved)
+            XCTAssertNil(store.pendingDependencyChangeConfirmation)
+        }
+
+        func testDependencyChangeConfirmationQueuesAndCancelIsOneShot() async {
+            let store = LocalAppsStore()
+            var submitted: [ClientCommand] = []
+            store.configure { command in submitted.append(command) }
+            let request = { (id: String) in
+                AppDependencyChangeConfirmationRequestDto(
+                    requestId: id,
+                    appId: "tracker",
+                    reason: "pre_resolution_no_network",
+                    changes: [
+                        AppDependencyChangeDto(
+                            kind: .update,
+                            package: "zod",
+                            version: "4.4.3",
+                            cacheStatus: "unknown_until_resolution",
+                            downloadStatus: "may_be_required"
+                        ),
+                    ],
+                    licenseRisk: "unknown_until_resolution",
+                    sbomRisk: "unknown_until_resolution",
+                    lifecycleScriptsBlocked: true,
+                    nativeAddonsBlocked: true,
+                    rollbackPolicy: "rollback_on_validation_failure"
+                )
+            }
+            store.handle(event: .appEvent(event: .appDependencyChangeConfirmationRequested(request: request("dependency-confirm-a"))))
+            store.handle(event: .appEvent(event: .appDependencyChangeConfirmationRequested(request: request("dependency-confirm-b"))))
+            XCTAssertEqual(store.pendingDependencyChangeConfirmation?.id, "dependency-confirm-a")
+
+            await store.resolvePendingDependencyChangeConfirmation(false)
+
+            guard case let .resolveAppDependencyChangeConfirmation(requestId, approved) = submitted.first else {
+                return XCTFail("Expected dependency confirmation cancellation command")
+            }
+            XCTAssertEqual(requestId, "dependency-confirm-a")
+            XCTAssertFalse(approved)
+            XCTAssertEqual(store.pendingDependencyChangeConfirmation?.id, "dependency-confirm-b")
         }
 
         /// Every operation the injected page bridge advertises must reach a

@@ -99,6 +99,23 @@ pub enum AppSurfaceDto {
     Canvas,
 }
 
+/// One fixed runtime family from the global local-app catalog.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
+#[non_exhaustive]
+pub enum AppRuntimeProfileDto {
+    #[serde(rename = "react_dom")]
+    ReactDom,
+    #[serde(rename = "canvas_2d")]
+    Canvas2d,
+    #[serde(rename = "three_3d")]
+    Three3d,
+    #[serde(rename = "phaser_2d")]
+    Phaser2d,
+    #[serde(rename = "babylon_3d")]
+    Babylon3d,
+}
+
 /// Stable machine-readable failure code carried on
 /// [`AppOperationFailed`](crate::events::ClientEvent::AppOperationFailed) —
 /// mirrors the core `AppErrorCode`. A bare wire STRING (`"not_found"`, …).
@@ -324,8 +341,9 @@ pub enum AppRuntimeRecoveryStateDto {
 #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 pub struct AppManifestDto {
     pub schema_version: u32,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub runtime_api_version: Option<u16>,
+    /// Schema v2 manifests carry the runtime API major explicitly. Missing
+    /// values are not treated as an implicit legacy compatibility mode.
+    pub runtime_api_version: u16,
     pub app_id: String,
     pub name: String,
     pub design_revision: u64,
@@ -337,6 +355,54 @@ pub struct AppManifestDto {
     pub capabilities: Vec<AppCapabilityKindDto>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub device_context: Option<DeviceContextDto>,
+    /// Persisted scaffold surface. None only for an unscaffolded shell.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub surface: Option<AppSurfaceDto>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_profile: Option<AppRuntimeProfileBindingDto>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dependency_snapshot: Option<AppDependencySnapshotDto>,
+}
+
+/// Immutable runtime catalog binding for one scaffolded app.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+#[serde(rename_all = "camelCase")]
+pub struct AppRuntimeProfileBindingDto {
+    pub family: AppRuntimeProfileDto,
+    pub revision: u32,
+    pub contract_sha256: String,
+}
+
+/// Host-derived health of an app's pinned runtime profile and dependency
+/// evidence. A bare wire string; the set is deliberately finite so clients
+/// can render actionable states without parsing host error prose.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum AppRuntimeProfileStatusDto {
+    Verified,
+    DependenciesDirty,
+    CoreDependencyDrift,
+    RebuildRequired,
+    MigrationAvailable,
+    RuntimeBundleMissing,
+    RuntimeContractCorrupt,
+}
+
+/// Host-verified dependency snapshot for one scaffolded app.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+#[serde(rename_all = "camelCase")]
+pub struct AppDependencySnapshotDto {
+    pub requested_sha256: String,
+    pub package_sha256: String,
+    pub lockfile_sha256: String,
+    pub dependency_tree_sha256: String,
+    pub sbom_sha256: String,
+    pub toolchain_key: String,
+    pub verified_profile_contract_sha256: String,
 }
 
 /// Native host target the app was generated for.
@@ -376,6 +442,10 @@ pub struct AppDetailsDto {
     pub app: AppRecordDto,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub manifest: Option<AppManifestDto>,
+    /// None for an unscaffolded shell; scaffolded apps always receive a
+    /// host-derived runtime-profile health classification.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_profile_status: Option<AppRuntimeProfileStatusDto>,
     pub runtime: AppRuntimeDetailsDto,
     pub checkpoints: Vec<AppCheckpointDto>,
 }
@@ -794,6 +864,12 @@ pub enum AppCapabilityKindDto {
     UiControl,
     NetworkDomain,
     RestoreCheckpoint,
+    /// One-shot host approval for selecting or confirming a runtime profile.
+    /// This is an operational prompt, not a manifest-declared app capability.
+    RuntimeProfileSelection,
+    /// One-shot host approval for dependency add/update operations. This is an
+    /// operational prompt, not a manifest-declared app capability.
+    DependencyChange,
     Camera,
     PhotoLibrary,
     Microphone,
@@ -828,6 +904,97 @@ pub struct AppCapabilityRequestDto {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub domain: Option<String>,
     pub reason: String,
+}
+
+/// One core package pinned by a runtime profile contract.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+#[serde(rename_all = "camelCase")]
+pub struct AppRuntimeProfilePackageDto {
+    pub name: String,
+    pub version: String,
+}
+
+/// One runtime profile option surfaced by the native host selector.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+#[serde(rename_all = "camelCase")]
+pub struct AppRuntimeProfileOptionDto {
+    pub family: AppRuntimeProfileDto,
+    pub revision: u32,
+    pub contract_sha256: String,
+    pub surface: AppSurfaceDto,
+    pub core_packages: Vec<AppRuntimeProfilePackageDto>,
+    pub cache_status: String,
+    pub download_status: String,
+    pub available: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+/// Native one-shot runtime profile selection request for one unscaffolded app.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+#[serde(rename_all = "camelCase")]
+pub struct AppRuntimeProfileSelectionRequestDto {
+    pub request_id: String,
+    pub app_id: String,
+    pub reason: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recommended_family: Option<AppRuntimeProfileDto>,
+    pub options: Vec<AppRuntimeProfileOptionDto>,
+}
+
+/// The kind of one requested dependency change.  Removal is represented on
+/// the wire even though the host does not require an approval prompt for a
+/// removal-only batch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum AppDependencyChangeKindDto {
+    Add,
+    Update,
+    Remove,
+}
+
+/// One dependency operation shown in the native confirmation surface.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+#[serde(rename_all = "camelCase")]
+pub struct AppDependencyChangeDto {
+    pub kind: AppDependencyChangeKindDto,
+    pub package: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    /// Host-known cache state before resolution.  This is deliberately a
+    /// status string: cache implementation details are not a client contract.
+    pub cache_status: String,
+    /// Whether this change may require a registry download.  The host must
+    /// not inspect or modify the network/cache while constructing this DTO.
+    pub download_status: String,
+}
+
+/// Native one-shot dependency-change confirmation request.
+///
+/// This is intentionally separate from [`AppCapabilityRequestDto`].  A
+/// dependency change needs a reviewable per-package diff and supply-chain
+/// policy evidence, not a generic allow/deny capability sentence.  The host
+/// emits it before any registry access and only issues a dependency receipt
+/// after approval.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+#[serde(rename_all = "camelCase")]
+pub struct AppDependencyChangeConfirmationRequestDto {
+    pub request_id: String,
+    pub app_id: String,
+    pub reason: String,
+    pub changes: Vec<AppDependencyChangeDto>,
+    pub license_risk: String,
+    pub sbom_risk: String,
+    pub lifecycle_scripts_blocked: bool,
+    pub native_addons_blocked: bool,
+    pub rollback_policy: String,
 }
 
 /// User decision for data/UI/capability requests.
@@ -935,6 +1102,20 @@ pub enum AppEventDto {
         /// variant itself.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         request_id: Option<String>,
+    },
+    /// A native one-shot runtime profile selector must resolve this request
+    /// with one chosen family or an explicit cancel.
+    ///
+    /// Appended at the END to preserve UniFFI enum ordinals for older clients.
+    AppRuntimeProfileSelectionRequested {
+        request: AppRuntimeProfileSelectionRequestDto,
+    },
+    /// A native one-shot dependency review must resolve with approval or
+    /// cancellation before the host may resolve/install any package.
+    ///
+    /// Appended at the END to preserve UniFFI enum ordinals for older clients.
+    AppDependencyChangeConfirmationRequested {
+        request: AppDependencyChangeConfirmationRequestDto,
     },
 }
 

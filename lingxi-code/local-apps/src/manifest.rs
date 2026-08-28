@@ -8,10 +8,11 @@ use crate::error::AppError;
 use crate::ids;
 use crate::permissions::AppCapability;
 use crate::runtime_v2::RUNTIME_API_MAJOR;
-use crate::types::APPS_SCHEMA_VERSION;
+use crate::types::{AppRuntimeProfile, APPS_SCHEMA_VERSION};
 use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path, PathBuf};
 use traits::rooted_fs::{self, AtomicWriteOptions};
 use traits::FsError;
@@ -59,14 +60,35 @@ pub const MAX_ENUM_OPTION_BYTES: usize = 500;
 pub const HOST_OWNED_RECORD_FIELD_IDS: [&str; 4] =
     ["recordId", "revision", "createdAtMs", "updatedAtMs"];
 
-fn default_runtime_api_version() -> u16 {
-    // Missing on a legacy manifest means v1. It remains readable for
-    // migration/repair, but the v2 runtime will refuse to mount it.
-    1
+fn is_sha256_hex(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
-fn is_legacy_runtime_api_version(value: &u16) -> bool {
-    *value == 1
+fn canonicalize_json(value: Value) -> Value {
+    match value {
+        Value::Object(object) => {
+            let ordered = object
+                .into_iter()
+                .map(|(key, value)| (key, canonicalize_json(value)))
+                .collect::<BTreeMap<_, _>>();
+            let mut rebuilt = Map::with_capacity(ordered.len());
+            for (key, value) in ordered {
+                rebuilt.insert(key, value);
+            }
+            Value::Object(rebuilt)
+        }
+        Value::Array(values) => Value::Array(values.into_iter().map(canonicalize_json).collect()),
+        other => other,
+    }
+}
+
+fn canonical_hash(value: Value, context: &str) -> Result<String, AppError> {
+    let bytes = serde_json::to_vec(&canonicalize_json(value))
+        .map_err(|error| AppError::Io(format!("serialize {context}: {error}")))?;
+    Ok(format!("{:x}", Sha256::digest(bytes)))
 }
 
 /// Supported native collection field types.
@@ -239,19 +261,102 @@ impl AppSurface {
     }
 }
 
+impl AppRuntimeProfile {
+    /// The fixed scaffold surface this runtime family requires.
+    #[must_use]
+    pub fn surface(self) -> AppSurface {
+        match self {
+            Self::ReactDom => AppSurface::Dom,
+            Self::Canvas2d | Self::Three3d | Self::Phaser2d | Self::Babylon3d => AppSurface::Canvas,
+        }
+    }
+}
+
+/// Immutable runtime binding stamped when a shell becomes a scaffolded app.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppRuntimeProfileBinding {
+    /// Selected runtime family from the global catalog.
+    pub family: AppRuntimeProfile,
+    /// Catalog revision within the family.
+    pub revision: u32,
+    /// SHA-256 of the catalog contract this app is pinned to.
+    pub contract_sha256: String,
+}
+
+impl AppRuntimeProfileBinding {
+    pub(crate) fn validate(&self) -> Result<(), AppError> {
+        if self.revision == 0 {
+            return Err(AppError::InvalidRequest(
+                "runtimeProfile revision must be at least 1".into(),
+            ));
+        }
+        if !is_sha256_hex(&self.contract_sha256) {
+            return Err(AppError::InvalidRequest(
+                "runtimeProfile contractSha256 must be 64 lowercase hex bytes".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Host-verified dependency snapshot for one scaffolded app.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppDependencySnapshot {
+    /// SHA-256 of the requested dependency declaration the host approved.
+    pub requested_sha256: String,
+    /// SHA-256 of the effective merged package manifest written to the app.
+    pub package_sha256: String,
+    /// SHA-256 of the exact lockfile used to materialize the dependency tree.
+    pub lockfile_sha256: String,
+    /// SHA-256 of the verified installed dependency tree.
+    pub dependency_tree_sha256: String,
+    /// SHA-256 of the generated SBOM document.
+    pub sbom_sha256: String,
+    /// Toolchain identity, for example `pnpm@11.22.0/node@24.18.1`.
+    pub toolchain_key: String,
+    /// Runtime-profile contract digest this snapshot was verified against.
+    pub verified_profile_contract_sha256: String,
+}
+
+impl AppDependencySnapshot {
+    fn validate(&self) -> Result<(), AppError> {
+        for (label, value) in [
+            ("requestedSha256", &self.requested_sha256),
+            ("packageSha256", &self.package_sha256),
+            ("lockfileSha256", &self.lockfile_sha256),
+            ("dependencyTreeSha256", &self.dependency_tree_sha256),
+            ("sbomSha256", &self.sbom_sha256),
+            (
+                "verifiedProfileContractSha256",
+                &self.verified_profile_contract_sha256,
+            ),
+        ] {
+            if !is_sha256_hex(value) {
+                return Err(AppError::InvalidRequest(format!(
+                    "{label} must be 64 lowercase hex bytes"
+                )));
+            }
+        }
+        if self.toolchain_key.trim().is_empty() {
+            return Err(AppError::InvalidRequest(
+                "dependencySnapshot toolchainKey must not be empty".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
 /// Versioned local application manifest.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AppManifest {
     /// Persisted local-app schema version.
     pub schema_version: u32,
-    /// Runtime API major used by the generated page. New apps are v2;
-    /// missing values deserialize as v1 so old data is preserved but cannot
-    /// be silently mounted by the v2 host.
-    #[serde(
-        default = "default_runtime_api_version",
-        skip_serializing_if = "is_legacy_runtime_api_version"
-    )]
+    /// Runtime API major used by the generated page. Schema v2 manifests must
+    /// carry the published runtime API explicitly; missing or legacy values
+    /// are storage corruption rather than an implicit compatibility mode.
     pub runtime_api_version: u16,
     /// Stable app id bound by the native host.
     pub app_id: String,
@@ -275,16 +380,15 @@ pub struct AppManifest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub device_context: Option<DeviceContext>,
     /// Which scaffold this app was created from. Stamped at creation, never
-    /// changed. `None` means the app predates the scaffold split and cannot be
-    /// rebuilt — [`crate::AppSurface`] and the builder both treat it that way.
-    ///
-    /// `skip_serializing_if` is load-bearing, not tidiness: [`Self::hash`]
-    /// serializes the WHOLE struct and that digest is what binds a manifest to
-    /// its SQLite schema. A field that always serializes would change every
-    /// existing app's hash, and `AppDataStore::ensure_manifest` would then
-    /// reject every read and write with a manifest mismatch.
+    /// changed. `None` means the app is still an unscaffolded shell.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub surface: Option<AppSurface>,
+    /// Immutable runtime catalog binding for a scaffolded app.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_profile: Option<AppRuntimeProfileBinding>,
+    /// Host-verified dependency snapshot for a scaffolded app.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dependency_snapshot: Option<AppDependencySnapshot>,
 }
 
 impl AppManifest {
@@ -304,6 +408,8 @@ impl AppManifest {
             capabilities: Vec::new(),
             device_context: None,
             surface: None,
+            runtime_profile: None,
+            dependency_snapshot: None,
         }
     }
 
@@ -316,7 +422,7 @@ impl AppManifest {
                 self.schema_version
             )));
         }
-        if !matches!(self.runtime_api_version, 1 | RUNTIME_API_MAJOR) {
+        if self.runtime_api_version != RUNTIME_API_MAJOR {
             return Err(AppError::InvalidRequest(format!(
                 "manifest runtimeApiVersion {} is unsupported",
                 self.runtime_api_version
@@ -438,11 +544,52 @@ impl AppManifest {
         if let Some(device_context) = &self.device_context {
             device_context.validate()?;
         }
+        match (
+            &self.surface,
+            &self.runtime_profile,
+            &self.dependency_snapshot,
+        ) {
+            (None, None, None) => {}
+            (Some(surface), Some(binding), snapshot) => {
+                binding.validate()?;
+                if binding.family.surface() != *surface {
+                    return Err(AppError::InvalidRequest(format!(
+                        "runtimeProfile family {} does not match manifest surface {}",
+                        binding.family,
+                        surface.as_str()
+                    )));
+                }
+                if let Some(snapshot) = snapshot {
+                    snapshot.validate()?;
+                    if binding.contract_sha256 != snapshot.verified_profile_contract_sha256 {
+                        return Err(AppError::InvalidRequest(
+                            "dependencySnapshot verifiedProfileContractSha256 must match runtimeProfile contractSha256".into(),
+                        ));
+                    }
+                }
+            }
+            (Some(_), None, None) => {
+                return Err(AppError::InvalidRequest(
+                    "scaffolded apps must commit a runtimeProfile with the surface".into(),
+                ));
+            }
+            (None, None, Some(_)) | (None, Some(_), _) => {
+                return Err(AppError::InvalidRequest(
+                    "surface, runtimeProfile, and dependencySnapshot must agree on scaffold identity".into(),
+                ));
+            }
+            _ => {
+                return Err(AppError::InvalidRequest(
+                    "dependencySnapshot requires a matching surface and runtimeProfile".into(),
+                ));
+            }
+        }
         Ok(())
     }
 
     /// True only when this manifest can be mounted by the direct-cutover v2
-    /// runtime. Legacy manifests remain loadable for rebuild/migration UI.
+    /// runtime. Pre-release legacy manifests are rejected while loading, so
+    /// this is an explicit runtime guard rather than a compatibility fallback.
     #[must_use]
     pub fn runtime_api_compatible(&self) -> bool {
         self.runtime_api_version == RUNTIME_API_MAJOR
@@ -456,12 +603,44 @@ impl AppManifest {
             .find(|collection| collection.id == id)
     }
 
-    /// Stable SHA-256 of the serialized manifest contract.
-    pub fn hash(&self) -> Result<String, AppError> {
+    /// Stable SHA-256 of the native data contract only.
+    pub fn data_contract_hash(&self) -> Result<String, AppError> {
         self.validate()?;
-        let bytes = serde_json::to_vec(self)
-            .map_err(|error| AppError::Io(format!("serialize app manifest: {error}")))?;
-        Ok(format!("{:x}", Sha256::digest(bytes)))
+        canonical_hash(
+            serde_json::json!({
+                "collections": self.collections,
+            }),
+            "app data contract",
+        )
+    }
+
+    /// Stable SHA-256 of the pinned runtime contract.
+    pub fn runtime_contract_hash(&self) -> Result<String, AppError> {
+        self.validate()?;
+        canonical_hash(
+            serde_json::json!({
+                "runtimeApiVersion": self.runtime_api_version,
+                "surface": self.surface,
+                "runtimeProfile": self.runtime_profile,
+            }),
+            "app runtime contract",
+        )
+    }
+
+    /// Stable SHA-256 of the host-verified dependency snapshot.
+    pub fn dependency_snapshot_hash(&self) -> Result<String, AppError> {
+        self.validate()?;
+        canonical_hash(
+            serde_json::json!({
+                "dependencySnapshot": self.dependency_snapshot,
+            }),
+            "app dependency snapshot",
+        )
+    }
+
+    /// Backward-compatible alias for the SQLite-bound data contract hash.
+    pub fn hash(&self) -> Result<String, AppError> {
+        self.data_contract_hash()
     }
 }
 
@@ -830,6 +1009,8 @@ mod tests {
             capabilities: Vec::new(),
             device_context: None,
             surface: None,
+            runtime_profile: None,
+            dependency_snapshot: None,
         }
     }
 
@@ -851,6 +1032,84 @@ mod tests {
         save_manifest(&layout, &expected).unwrap();
         assert_eq!(load_manifest(&layout).unwrap(), expected);
         assert_eq!(expected.hash().unwrap().len(), 64);
+    }
+
+    #[test]
+    fn runtime_and_dependency_metadata_do_not_change_the_data_contract_hash() {
+        let base = manifest();
+        let mut profiled = base.clone();
+        profiled.surface = Some(AppSurface::Canvas);
+        profiled.runtime_profile = Some(AppRuntimeProfileBinding {
+            family: AppRuntimeProfile::Three3d,
+            revision: 1,
+            contract_sha256: "a".repeat(64),
+        });
+        profiled.dependency_snapshot = Some(AppDependencySnapshot {
+            requested_sha256: "b".repeat(64),
+            package_sha256: "c".repeat(64),
+            lockfile_sha256: "d".repeat(64),
+            dependency_tree_sha256: "e".repeat(64),
+            sbom_sha256: "f".repeat(64),
+            toolchain_key: "pnpm@11/node@24".into(),
+            verified_profile_contract_sha256: "a".repeat(64),
+        });
+        assert_eq!(
+            base.data_contract_hash().unwrap(),
+            profiled.data_contract_hash().unwrap()
+        );
+        assert_ne!(
+            base.runtime_contract_hash().unwrap(),
+            profiled.runtime_contract_hash().unwrap()
+        );
+        assert_ne!(
+            base.dependency_snapshot_hash().unwrap(),
+            profiled.dependency_snapshot_hash().unwrap()
+        );
+    }
+
+    #[test]
+    fn canonical_hash_is_independent_of_json_object_field_order() {
+        let left: Value = serde_json::from_str(
+            r#"{"family":"three_3d","nested":{"revision":1,"surface":"canvas"}}"#,
+        )
+        .unwrap();
+        let right: Value = serde_json::from_str(
+            r#"{"nested":{"surface":"canvas","revision":1},"family":"three_3d"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            canonical_hash(left, "left").unwrap(),
+            canonical_hash(right, "right").unwrap()
+        );
+    }
+
+    #[test]
+    fn scaffolded_apps_require_a_runtime_profile() {
+        let mut invalid = manifest();
+        invalid.surface = Some(AppSurface::Dom);
+        assert!(invalid.validate().is_err());
+    }
+
+    #[test]
+    fn dependency_snapshot_requires_a_matching_runtime_profile_contract() {
+        let mut invalid = manifest();
+        invalid.surface = Some(AppSurface::Dom);
+
+        invalid.runtime_profile = Some(AppRuntimeProfileBinding {
+            family: AppRuntimeProfile::ReactDom,
+            revision: 1,
+            contract_sha256: "a".repeat(64),
+        });
+        invalid.dependency_snapshot = Some(AppDependencySnapshot {
+            requested_sha256: "b".repeat(64),
+            package_sha256: "c".repeat(64),
+            lockfile_sha256: "d".repeat(64),
+            dependency_tree_sha256: "e".repeat(64),
+            sbom_sha256: "f".repeat(64),
+            toolchain_key: "pnpm@11/node@24".into(),
+            verified_profile_contract_sha256: "0".repeat(64),
+        });
+        assert!(invalid.validate().is_err());
     }
 
     #[test]
@@ -1033,21 +1292,60 @@ mod tests {
     }
 
     #[test]
-    fn an_old_manifest_json_without_capabilities_loads_as_empty() {
-        // The exact on-disk shape every pre-capability app already has. It
-        // must keep loading (as "no device capabilities declared") without
-        // any migration step.
-        let json = r#"{
-  "schemaVersion": 1,
+    fn a_v2_manifest_without_capabilities_loads_as_empty() {
+        let json = format!(
+            r#"{{
+  "schemaVersion": {schema_version},
+  "runtimeApiVersion": {runtime_api_version},
   "appId": "abcd1234",
   "revision": 3,
   "name": "Tasks",
   "collections": [],
   "allowedDomains": ["api.example.com"]
-}"#;
-        let loaded: AppManifest = serde_json::from_str(json).unwrap();
+}}"#,
+            schema_version = APPS_SCHEMA_VERSION,
+            runtime_api_version = RUNTIME_API_MAJOR,
+        );
+        let loaded: AppManifest = serde_json::from_str(&json).unwrap();
         loaded.validate().unwrap();
         assert!(loaded.capabilities.is_empty());
+    }
+
+    #[test]
+    fn schema_v2_manifest_without_runtime_api_is_rejected() {
+        let json = format!(
+            r#"{{
+  "schemaVersion": {schema_version},
+  "appId": "abcd1234",
+  "revision": 3,
+  "name": "Tasks",
+  "collections": [],
+  "allowedDomains": []
+}}"#,
+            schema_version = APPS_SCHEMA_VERSION,
+        );
+        assert!(
+            serde_json::from_str::<AppManifest>(&json).is_err(),
+            "schema v2 must not silently default a missing runtimeApiVersion"
+        );
+    }
+
+    #[test]
+    fn schema_v2_manifest_with_legacy_runtime_api_is_rejected() {
+        let json = format!(
+            r#"{{
+  "schemaVersion": {schema_version},
+  "runtimeApiVersion": 1,
+  "appId": "abcd1234",
+  "revision": 3,
+  "name": "Tasks",
+  "collections": [],
+  "allowedDomains": []
+}}"#,
+            schema_version = APPS_SCHEMA_VERSION,
+        );
+        let loaded = serde_json::from_str::<AppManifest>(&json).expect("parse manifest");
+        assert!(loaded.validate().is_err());
     }
 
     #[test]

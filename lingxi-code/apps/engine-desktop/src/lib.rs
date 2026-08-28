@@ -5117,46 +5117,51 @@ impl orchestrator::prompt::async_hook_response::AsyncHookResponseProvider
     }
 }
 
-struct RegistrySkillListing(Arc<RwLock<CommandRegistry>>);
-
-#[async_trait::async_trait]
-impl orchestrator::prompt::skill_listing::SkillListingProvider for RegistrySkillListing {
-    async fn skill_entries(&self) -> Vec<orchestrator::prompt::skill_listing::SkillListingEntry> {
-        use command_api::{CommandSource, SlashCommandKind};
-        let reg = self.0.read().await;
-        reg.model_invocable_commands() // !disable_model_invocation (registry.rs)
-            .into_iter()
-            // TS `cmd.type === 'prompt'` — markdown/plugin commands, not builtin/mcp.
-            .filter(|c| {
-                matches!(
-                    c.kind,
-                    SlashCommandKind::Markdown { .. }
-                        | SlashCommandKind::Plugin { .. }
-                        // Bundled programmatic skills (`/loop`) are model-invocable.
-                        | SlashCommandKind::Bundled { .. }
-                )
-            })
-            // TS `cmd.source !== 'builtin'`.
-            .filter(|c| c.source != CommandSource::Builtin)
-            // TS loadedFrom ∈ {bundled,skills,commands_DEPRECATED} ||
-            //    hasUserSpecifiedDescription || whenToUse.
-            .filter(|c| {
-                matches!(
-                    c.loaded_from.as_deref(),
-                    Some("bundled" | "skills" | "commands_DEPRECATED")
-                ) || c.has_user_specified_description
-                    || c.when_to_use.is_some()
-            })
-            .map(|c| orchestrator::prompt::skill_listing::SkillListingEntry {
-                name: c.name.clone(),
-                description: c.description.clone(),
-                when_to_use: c.when_to_use.clone(),
-                // TS `cmd.source === 'bundled'` (prompt.ts) — bundled skills are
-                // never truncated; mirror via loadedFrom == "bundled".
-                is_bundled: c.loaded_from.as_deref() == Some("bundled"),
-            })
-            .collect()
-    }
+fn registry_skill_listing_provider(
+    registry: Arc<RwLock<CommandRegistry>>,
+) -> Arc<dyn orchestrator::prompt::skill_listing::SkillListingProvider> {
+    Arc::new(
+        orchestrator::prompt::skill_listing::LazySkillListingProvider::new(move || {
+            let registry = registry.clone();
+            async move {
+                use command_api::{CommandSource, SlashCommandKind};
+                let reg = registry.read().await;
+                reg.model_invocable_commands() // !disable_model_invocation (registry.rs)
+                    .into_iter()
+                    // TS `cmd.type === 'prompt'` — markdown/plugin commands,
+                    // bundled commands, not builtin/mcp.
+                    .filter(|c| {
+                        matches!(
+                            c.kind,
+                            SlashCommandKind::Markdown { .. }
+                                | SlashCommandKind::Plugin { .. }
+                                // Bundled programmatic skills (`/loop`) are model-invocable.
+                                | SlashCommandKind::Bundled { .. }
+                        )
+                    })
+                    // TS `cmd.source !== 'builtin'`.
+                    .filter(|c| c.source != CommandSource::Builtin)
+                    // TS loadedFrom ∈ {bundled,skills,commands_DEPRECATED} ||
+                    //    hasUserSpecifiedDescription || whenToUse.
+                    .filter(|c| {
+                        matches!(
+                            c.loaded_from.as_deref(),
+                            Some("bundled" | "skills" | "commands_DEPRECATED")
+                        ) || c.has_user_specified_description
+                            || c.when_to_use.is_some()
+                    })
+                    .map(|c| orchestrator::prompt::skill_listing::SkillListingEntry {
+                        name: c.name.clone(),
+                        description: c.description.clone(),
+                        when_to_use: c.when_to_use.clone(),
+                        // TS `cmd.source === 'bundled'` (prompt.ts) — bundled
+                        // skills are never truncated; mirror via loadedFrom.
+                        is_bundled: c.loaded_from.as_deref() == Some("bundled"),
+                    })
+                    .collect()
+            }
+        }),
+    )
 }
 
 /// Production [`mcp::oauth::OnAuthorizationUrl`] callback for OAuth-configured
@@ -9542,9 +9547,9 @@ pub async fn build(
         // SKILLLIST.1: enumerate model-invocable skills each turn so the model
         // can discover them. Reads `shared_command_registry` lazily at turn time
         // (populated below at (6), before any turn fires).
-        .with_skill_listing(Arc::new(RegistrySkillListing(
+        .with_skill_listing(registry_skill_listing_provider(
             shared_command_registry.clone(),
-        )))
+        ))
         // B5: fold completed background (`async`) hook responses back into the
         // next turn. Backed by the completion-channel drain buffer above.
         .with_async_hook_responses(Arc::new(async_hook_response_buffer.clone()))

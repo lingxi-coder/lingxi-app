@@ -183,6 +183,27 @@ impl ProfileApps {
             devices,
         ));
         let client_events = Arc::new(ClientEventFanout::new());
+        // Dependency updates publish a durable journal before touching the
+        // manifest, dependency record or promoted build. Recovery must finish
+        // before AppService loads those files into memory; continuing after a
+        // failed restore would make a torn transaction look authoritative.
+        let root_is_real_directory = match std::fs::symlink_metadata(&root) {
+            Ok(metadata) => metadata.is_dir() && !metadata.file_type().is_symlink(),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+            Err(error) => {
+                return Err(AppError::Io(format!(
+                    "inspect Local App profile root {}: {error}",
+                    root.display()
+                )))
+            }
+        };
+        if root_is_real_directory {
+            LocalAppsHostBroker::recover_dependency_updates_on_boot(&root).map_err(|error| {
+                AppError::StorageCorrupt(format!(
+                    "recover interrupted Local App dependency update: {error}"
+                ))
+            })?;
+        }
         let host = LocalAppsHostBroker::new_with_physical_memory(
             root.clone(),
             client_events.clone(),

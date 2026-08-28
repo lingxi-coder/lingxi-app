@@ -52,6 +52,15 @@
 //! leftovers in `apps/.trash` are swept best-effort at the next load.
 //! [`load_all`] itself is index-driven and never enumerates `apps/`, so
 //! `.trash` is invisible to it beyond the sweep.
+//!
+//! A first scaffold has one additional crash boundary.  The host writes a
+//! durable journal and a complete copy of the shell before it stamps the
+//! manifest or wipes the interview workspace.  [`load_all`] resolves that
+//! journal while the index lock is held and *before* it reads any per-app
+//! document.  A journal whose commit point did not land restores the shell;
+//! one whose record commit did land is only cleaned up.  This keeps a crash
+//! between the manifest/workspace writes and `scaffolded = true` from ever
+//! becoming an authoritative, routable half-app.
 
 use crate::error::AppError;
 use crate::ids;
@@ -62,6 +71,7 @@ use crate::types::{
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use traits::rooted_fs::{self, AtomicWriteOptions};
@@ -105,6 +115,52 @@ pub const WORKSPACE_DIR: &str = "workspace";
 pub const APP_STATE_DIR: &str = branding::DOT_DIR;
 /// App-scoped metadata mirror inside `workspace/.lingxi/`.
 pub const APP_METADATA_FILE: &str = "app.json";
+/// Sibling directory holding temporary, durable first-scaffold snapshots.
+/// Entries are removed after commit/rollback; an entry left by a crash is
+/// consumed by [`load_all`] before the app is made available to the service.
+pub const SCAFFOLD_RECOVERY_DIR: &str = ".scaffold-recovery";
+/// Journal inside `apps/<id>` describing an in-flight first scaffold.
+pub const SCAFFOLD_RECOVERY_JOURNAL_FILE: &str = "scaffold-recovery.json";
+/// File name for the advisory lock serializing first-scaffold recovery with
+/// the store loader. The lock lives in a private OS temporary directory, not
+/// under the app store: it is runtime coordination state and must not appear
+/// in a persisted-store snapshot or schema round-trip.
+pub const SCAFFOLD_RECOVERY_LOCK_FILE: &str = "scaffold-recovery.lock";
+
+/// Durable first-scaffold recovery metadata.
+///
+/// The backup is a complete copy of the app directory (apart from advisory
+/// lock files and this journal).  The target fields let load-time recovery
+/// distinguish a committed mirror from a stale shell without trusting a
+/// partially written manifest.  This is intentionally a storage primitive,
+/// not a profile-selection primitive: the host remains the authority for the
+/// runtime binding and the service's `scaffolded` bit remains the commit point.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScaffoldRecoveryJournal {
+    /// Store schema this journal belongs to.
+    pub schema_version: u32,
+    /// App whose directory was snapshotted.
+    pub app_id: String,
+    /// File-name component under [`SCAFFOLD_RECOVERY_DIR`].
+    pub backup_name: String,
+    /// Proposed record identity used to recognize a durable commit.
+    pub target_name: String,
+    /// Proposed record description used to recognize a durable commit.
+    pub target_brief: String,
+}
+
+/// Handle for one in-flight first-scaffold transaction.
+///
+/// The handle is returned only after both the complete backup and journal have
+/// been durably written.  Callers must consume it with [`Self::commit`] after
+/// the service record commit, or [`Self::rollback`] on every earlier failure.
+#[derive(Debug)]
+pub struct ScaffoldRecoveryHandle {
+    root: PathBuf,
+    app_id: String,
+    backup_name: String,
+}
 
 /// The whole `apps/index.json` document.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -367,6 +423,575 @@ pub fn metadata_rel(app_id: &str) -> PathBuf {
         .join(APP_METADATA_FILE)
 }
 
+/// Root-relative directory containing first-scaffold backups.
+#[must_use]
+pub fn scaffold_recovery_dir_rel() -> PathBuf {
+    PathBuf::from(APPS_DIR).join(SCAFFOLD_RECOVERY_DIR)
+}
+
+/// Root-relative journal for an in-flight first scaffold.
+#[must_use]
+pub fn scaffold_recovery_journal_rel(app_id: &str) -> PathBuf {
+    app_dir_rel(app_id).join(SCAFFOLD_RECOVERY_JOURNAL_FILE)
+}
+
+/// Logical lock file name used by [`lock_scaffold_recovery`]. This is retained
+/// as a small naming helper for callers that need to describe the runtime
+/// artifact; it is not a path inside the app store.
+#[must_use]
+pub fn scaffold_recovery_lock_rel() -> PathBuf {
+    PathBuf::from(SCAFFOLD_RECOVERY_LOCK_FILE)
+}
+
+/// Return the private, per-store directory used for the recovery lock.
+///
+/// The lock must coordinate independent engine processes without creating a
+/// new persisted file below the Local App store. Hashing the canonical store
+/// root gives every process the same lock name while keeping user paths and
+/// app identifiers out of the temporary directory. A pre-existing root is
+/// expected by every normal caller; the fallback keeps direct test callers
+/// and first-run setup deterministic when canonicalization cannot resolve it.
+fn scaffold_recovery_lock_root(root: &Path) -> PathBuf {
+    let identity = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+    let digest = Sha256::digest(identity.to_string_lossy().as_bytes());
+    std::env::temp_dir().join(format!("lingxi-local-app-scaffold-{:x}", digest))
+}
+
+/// Take the global first-scaffold recovery lock. The lock is deliberately
+/// outside `root` so read-only store loads do not leave a new document-like
+/// artifact behind. Callers must take this before `index.lock` or any app
+/// build lock when they may inspect or mutate scaffold recovery state.
+pub fn lock_scaffold_recovery(root: &Path) -> Result<rooted_fs::RootedFileLock, AppError> {
+    let lock_root = scaffold_recovery_lock_root(root);
+    private_dir(&lock_root)?;
+    rooted_fs::lock_exclusive(
+        &lock_root,
+        &scaffold_recovery_lock_rel(),
+        rooted_fs::PRIVATE_DIR_MODE,
+        rooted_fs::PRIVATE_FILE_MODE,
+    )
+    .map_err(|error| AppError::from_fs("lock scaffold recovery", &error))
+}
+
+fn scaffold_recovery_backup_rel(backup_name: &str) -> PathBuf {
+    scaffold_recovery_dir_rel().join(backup_name)
+}
+
+fn private_dir(path: &Path) -> Result<(), AppError> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => Ok(()),
+        Ok(_) => Err(AppError::StorageCorrupt(format!(
+            "{} is not a real directory",
+            path.display()
+        ))),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            std::fs::create_dir(path)
+                .map_err(|error| AppError::Io(format!("create {}: {error}", path.display())))?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).map_err(
+                    |error| AppError::Io(format!("restrict {}: {error}", path.display())),
+                )?;
+            }
+            Ok(())
+        }
+        Err(error) => Err(AppError::Io(format!("inspect {}: {error}", path.display()))),
+    }
+}
+
+fn remove_owned_path(path: &Path) -> Result<(), AppError> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {
+            std::fs::remove_dir_all(path)
+                .map_err(|error| AppError::Io(format!("remove {}: {error}", path.display())))
+        }
+        Ok(_) => std::fs::remove_file(path)
+            .map_err(|error| AppError::Io(format!("remove {}: {error}", path.display()))),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(AppError::Io(format!("inspect {}: {error}", path.display()))),
+    }
+}
+
+fn copy_tree_entry(source: &Path, destination: &Path) -> Result<(), AppError> {
+    let metadata = std::fs::symlink_metadata(source)
+        .map_err(|error| AppError::Io(format!("inspect {}: {error}", source.display())))?;
+    if metadata.file_type().is_symlink() {
+        return Err(AppError::StorageCorrupt(format!(
+            "scaffold recovery snapshot contains symlink {}",
+            source.display()
+        )));
+    }
+    if metadata.is_dir() {
+        private_dir(destination)?;
+        for entry in std::fs::read_dir(source)
+            .map_err(|error| AppError::Io(format!("read {}: {error}", source.display())))?
+        {
+            let entry = entry.map_err(|error| {
+                AppError::Io(format!("read {} entry: {error}", source.display()))
+            })?;
+            copy_tree_entry(&entry.path(), &destination.join(entry.file_name()))?;
+        }
+        return Ok(());
+    }
+    if !metadata.is_file() {
+        return Err(AppError::StorageCorrupt(format!(
+            "scaffold recovery snapshot contains a special file {}",
+            source.display()
+        )));
+    }
+    if let Some(parent) = destination.parent() {
+        if !parent.exists() {
+            std::fs::create_dir_all(parent)
+                .map_err(|error| AppError::Io(format!("create {}: {error}", parent.display())))?;
+        }
+    }
+    std::fs::copy(source, destination).map_err(|error| {
+        AppError::Io(format!(
+            "copy scaffold recovery file {} -> {}: {error}",
+            source.display(),
+            destination.display()
+        ))
+    })?;
+    Ok(())
+}
+
+fn copy_app_snapshot(source: &Path, destination: &Path) -> Result<(), AppError> {
+    let metadata = std::fs::symlink_metadata(source)
+        .map_err(|error| AppError::Io(format!("inspect {}: {error}", source.display())))?;
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        return Err(AppError::StorageCorrupt(format!(
+            "app directory {} is not a real directory",
+            source.display()
+        )));
+    }
+    private_dir(destination)?;
+    for entry in std::fs::read_dir(source)
+        .map_err(|error| AppError::Io(format!("read {}: {error}", source.display())))?
+    {
+        let entry = entry
+            .map_err(|error| AppError::Io(format!("read {} entry: {error}", source.display())))?;
+        let name = entry.file_name();
+        // These are live advisory locks held by the transaction itself (or by
+        // another host operation). Copying them would snapshot stale lock
+        // state and can make a restored app look busy forever.
+        if name == std::ffi::OsStr::new(BUILD_LOCK_FILE)
+            || name == std::ffi::OsStr::new(BACKGROUND_LOCK_FILE)
+            || name == std::ffi::OsStr::new(SCAFFOLD_RECOVERY_JOURNAL_FILE)
+        {
+            continue;
+        }
+        copy_tree_entry(&entry.path(), &destination.join(name))?;
+    }
+    Ok(())
+}
+
+fn clear_app_directory_for_restore(app_dir: &Path) -> Result<(), AppError> {
+    let metadata = std::fs::symlink_metadata(app_dir)
+        .map_err(|error| AppError::Io(format!("inspect {}: {error}", app_dir.display())))?;
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        return Err(AppError::StorageCorrupt(format!(
+            "app directory {} is not a real directory",
+            app_dir.display()
+        )));
+    }
+    for entry in std::fs::read_dir(app_dir)
+        .map_err(|error| AppError::Io(format!("read {}: {error}", app_dir.display())))?
+    {
+        let entry = entry
+            .map_err(|error| AppError::Io(format!("read {} entry: {error}", app_dir.display())))?;
+        let name = entry.file_name();
+        if name == std::ffi::OsStr::new(BUILD_LOCK_FILE)
+            || name == std::ffi::OsStr::new(BACKGROUND_LOCK_FILE)
+            || name == std::ffi::OsStr::new(SCAFFOLD_RECOVERY_JOURNAL_FILE)
+        {
+            continue;
+        }
+        remove_owned_path(&entry.path())?;
+    }
+    Ok(())
+}
+
+fn restore_app_snapshot(root: &Path, journal: &ScaffoldRecoveryJournal) -> Result<(), AppError> {
+    let app_dir = rooted_fs::checked_join(root, &app_dir_rel(&journal.app_id))
+        .map_err(|error| AppError::from_fs("restore scaffold app", &error))?;
+    let backup = rooted_fs::checked_join(root, &scaffold_recovery_backup_rel(&journal.backup_name))
+        .map_err(|error| AppError::from_fs("restore scaffold backup", &error))?;
+    let backup_name = backup
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| {
+            AppError::StorageCorrupt("scaffold recovery backup name is invalid".into())
+        })?;
+    if backup_name != journal.backup_name
+        || !journal
+            .backup_name
+            .starts_with(&format!("{}-", journal.app_id))
+    {
+        return Err(AppError::StorageCorrupt(
+            "scaffold recovery backup is not bound to its app".into(),
+        ));
+    }
+    let backup_metadata = std::fs::symlink_metadata(&backup).map_err(|error| {
+        AppError::StorageCorrupt(format!(
+            "scaffold recovery backup {} is unavailable: {error}",
+            backup.display()
+        ))
+    })?;
+    if !backup_metadata.is_dir() || backup_metadata.file_type().is_symlink() {
+        return Err(AppError::StorageCorrupt(format!(
+            "scaffold recovery backup {} is not a real directory",
+            backup.display()
+        )));
+    }
+    // Validate the complete source before removing the live app. If the
+    // backup is damaged, fail closed and leave the journal for an operator;
+    // never turn a corrupted snapshot into a silently empty app.
+    validate_snapshot_tree(&backup)?;
+    clear_app_directory_for_restore(&app_dir)?;
+    for entry in std::fs::read_dir(&backup)
+        .map_err(|error| AppError::Io(format!("read {}: {error}", backup.display())))?
+    {
+        let entry = entry
+            .map_err(|error| AppError::Io(format!("read {} entry: {error}", backup.display())))?;
+        copy_tree_entry(&entry.path(), &app_dir.join(entry.file_name()))?;
+    }
+    Ok(())
+}
+
+fn validate_snapshot_tree(path: &Path) -> Result<(), AppError> {
+    let metadata = std::fs::symlink_metadata(path).map_err(|error| {
+        AppError::StorageCorrupt(format!("inspect {}: {error}", path.display()))
+    })?;
+    if metadata.file_type().is_symlink() {
+        return Err(AppError::StorageCorrupt(format!(
+            "scaffold recovery snapshot contains symlink {}",
+            path.display()
+        )));
+    }
+    if metadata.is_dir() {
+        for entry in std::fs::read_dir(path).map_err(|error| {
+            AppError::StorageCorrupt(format!("read {}: {error}", path.display()))
+        })? {
+            let entry = entry.map_err(|error| {
+                AppError::StorageCorrupt(format!("read {} entry: {error}", path.display()))
+            })?;
+            validate_snapshot_tree(&entry.path())?;
+        }
+    } else if !metadata.is_file() {
+        return Err(AppError::StorageCorrupt(format!(
+            "scaffold recovery snapshot contains a special file {}",
+            path.display()
+        )));
+    }
+    Ok(())
+}
+
+fn read_scaffold_recovery_journal(
+    root: &Path,
+    app_id: &str,
+) -> Result<Option<ScaffoldRecoveryJournal>, AppError> {
+    let rel = scaffold_recovery_journal_rel(app_id);
+    let body = match rooted_fs::read_to_string_limited(root, &rel, MAX_DOC_BYTES) {
+        Ok(body) => body,
+        Err(FsError::NotFound(_)) => return Ok(None),
+        Err(error) => return Err(load_read_error(&rel, &error)),
+    };
+    let journal: ScaffoldRecoveryJournal = serde_json::from_str(&body)
+        .map_err(|error| AppError::StorageCorrupt(format!("{}: {error}", rel.display())))?;
+    if journal.schema_version != APPS_SCHEMA_VERSION {
+        return Err(AppError::StorageCorrupt(format!(
+            "{}: unsupported schemaVersion {} (expected {APPS_SCHEMA_VERSION})",
+            rel.display(),
+            journal.schema_version
+        )));
+    }
+    if journal.app_id != app_id || !ids::is_valid_app_id(&journal.app_id) {
+        return Err(AppError::StorageCorrupt(format!(
+            "{}: journal app id {:?} does not match {:?}",
+            rel.display(),
+            journal.app_id,
+            app_id
+        )));
+    }
+    if journal.target_name.trim().is_empty() || journal.target_brief.trim().is_empty() {
+        return Err(AppError::StorageCorrupt(format!(
+            "{}: scaffold target identity must not be empty",
+            rel.display()
+        )));
+    }
+    let Some(suffix) = journal
+        .backup_name
+        .strip_prefix(&format!("{}-", journal.app_id))
+    else {
+        return Err(AppError::StorageCorrupt(format!(
+            "{}: backup is not bound to app {}",
+            rel.display(),
+            app_id
+        )));
+    };
+    if suffix.is_empty()
+        || !suffix.bytes().all(|byte| byte.is_ascii_hexdigit())
+        || journal.backup_name.contains('/')
+        || journal.backup_name.contains('\\')
+    {
+        return Err(AppError::StorageCorrupt(format!(
+            "{}: invalid scaffold recovery backup name {:?}",
+            rel.display(),
+            journal.backup_name
+        )));
+    }
+    Ok(Some(journal))
+}
+
+fn write_scaffold_recovery_journal(
+    root: &Path,
+    journal: &ScaffoldRecoveryJournal,
+) -> Result<(), AppError> {
+    let mut body = serde_json::to_vec_pretty(journal)
+        .map_err(|error| AppError::Io(format!("serialize scaffold recovery journal: {error}")))?;
+    body.push(b'\n');
+    if body.len() as u64 > MAX_DOC_BYTES {
+        return Err(AppError::InvalidRequest(
+            "scaffold recovery journal exceeds the durable size limit".into(),
+        ));
+    }
+    rooted_fs::atomic_write(
+        root,
+        &scaffold_recovery_journal_rel(&journal.app_id),
+        &body,
+        AtomicWriteOptions::default(),
+    )
+    .map_err(|error| AppError::from_fs("write scaffold recovery journal", &error))
+}
+
+fn remove_scaffold_recovery_journal(root: &Path, app_id: &str) -> Result<(), AppError> {
+    match rooted_fs::remove_file(root, &scaffold_recovery_journal_rel(app_id)) {
+        Ok(()) => Ok(()),
+        Err(FsError::NotFound(_)) => Ok(()),
+        Err(error) => Err(AppError::from_fs(
+            "remove scaffold recovery journal",
+            &error,
+        )),
+    }
+}
+
+fn scaffold_commit_is_durable(
+    root: &Path,
+    journal: &ScaffoldRecoveryJournal,
+    index_record: Option<&AppRecord>,
+) -> Result<bool, AppError> {
+    let target_matches = |record: &AppRecord| {
+        record.scaffolded
+            && record.name == journal.target_name
+            && record.brief == journal.target_brief
+    };
+    if index_record.is_some_and(target_matches) {
+        return Ok(true);
+    }
+    let rel = metadata_rel(&journal.app_id);
+    let body = match rooted_fs::read_to_string_limited(root, &rel, MAX_DOC_BYTES) {
+        Ok(body) => body,
+        Err(FsError::NotFound(_)) => return Ok(false),
+        Err(error) => return Err(load_read_error(&rel, &error)),
+    };
+    let mirror: AppMetadataFile = serde_json::from_str(&body)
+        .map_err(|error| AppError::StorageCorrupt(format!("{}: {error}", rel.display())))?;
+    ensure_schema_version(&rel, mirror.schema_version)?;
+    if mirror.app.id != journal.app_id {
+        return Err(AppError::StorageCorrupt(format!(
+            "{} mirrors app id {:?} but journal belongs to {:?}",
+            rel.display(),
+            mirror.app.id,
+            journal.app_id
+        )));
+    }
+    ensure_workspace_rel(&rel.display().to_string(), &mirror.app)?;
+    if mirror.app.scaffolded
+        && (mirror.app.name != journal.target_name || mirror.app.brief != journal.target_brief)
+    {
+        return Err(AppError::StorageCorrupt(format!(
+            "{} has a scaffolded record that does not match the recovery target",
+            rel.display()
+        )));
+    }
+    Ok(target_matches(&mirror.app))
+}
+
+fn recover_scaffold_transaction_locked(
+    root: &Path,
+    app_id: &str,
+    index_record: Option<&AppRecord>,
+) -> Result<(), AppError> {
+    let Some(journal) = read_scaffold_recovery_journal(root, app_id)? else {
+        return Ok(());
+    };
+    let backup = rooted_fs::checked_join(root, &scaffold_recovery_backup_rel(&journal.backup_name))
+        .map_err(|error| AppError::from_fs("resolve scaffold recovery backup", &error))?;
+    if scaffold_commit_is_durable(root, &journal, index_record)? {
+        // Remove the backup first while the journal remains. If cleanup is
+        // interrupted, the next load sees the committed mirror and retries
+        // both the missing backup and journal without rolling back.
+        if let Err(error) = remove_owned_path(&backup) {
+            tracing::warn!(app_id, path = %backup.display(), error = %error, "committed scaffold backup cleanup deferred");
+            return Ok(());
+        }
+        if let Err(error) = remove_scaffold_recovery_journal(root, app_id) {
+            tracing::warn!(app_id, error = %error, "committed scaffold journal cleanup deferred");
+        }
+        return Ok(());
+    }
+    restore_app_snapshot(root, &journal)?;
+    // Keep the journal until the restored shell is complete. If this remove
+    // fails, the shell is still authoritative and a later load safely repeats
+    // the idempotent restore from the immutable backup.
+    remove_scaffold_recovery_journal(root, app_id)?;
+    remove_owned_path(&backup)?;
+    Ok(())
+}
+
+/// Start a first-scaffold transaction while the caller holds the app build
+/// lock. Existing journals are recovered first, which makes an in-process
+/// retry after a failed landing as safe as a cold-start retry.
+pub fn begin_scaffold_recovery(
+    root: &Path,
+    app_id: &str,
+    target_name: &str,
+    target_brief: &str,
+) -> Result<ScaffoldRecoveryHandle, AppError> {
+    ids::validate_app_id(app_id)?;
+    if target_name.trim().is_empty() || target_brief.trim().is_empty() {
+        return Err(AppError::InvalidRequest(
+            "scaffold recovery target identity must not be empty".into(),
+        ));
+    }
+    // A previous failed attempt may have been interrupted after the caller
+    // released its receipt but before its synchronous rollback completed.
+    // Recover it under the already-held build lock before taking a fresh
+    // snapshot. No index hint is needed: the mirror is the service commit
+    // point and carries the target identity recorded in the journal.
+    if read_scaffold_recovery_journal(root, app_id)?.is_some() {
+        recover_scaffold_transaction_locked(root, app_id, None)?;
+    }
+    let app_dir = rooted_fs::checked_join(root, &app_dir_rel(app_id))
+        .map_err(|error| AppError::from_fs("begin scaffold recovery", &error))?;
+    let app_metadata = std::fs::symlink_metadata(&app_dir).map_err(|error| {
+        AppError::Io(format!(
+            "inspect scaffold app {}: {error}",
+            app_dir.display()
+        ))
+    })?;
+    if !app_metadata.is_dir() || app_metadata.file_type().is_symlink() {
+        return Err(AppError::StorageCorrupt(format!(
+            "scaffold app {} is not a real directory",
+            app_dir.display()
+        )));
+    }
+    let recovery_root = rooted_fs::checked_join(root, &scaffold_recovery_dir_rel())
+        .map_err(|error| AppError::from_fs("begin scaffold recovery", &error))?;
+    private_dir(&recovery_root)?;
+    let mut backup_name = None;
+    let mut backup = None;
+    for _ in 0..16 {
+        let candidate = format!("{}-{}", app_id, ids::generate_app_id());
+        let candidate_path = recovery_root.join(&candidate);
+        match std::fs::symlink_metadata(&candidate_path) {
+            Ok(_) => continue,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                backup_name = Some(candidate);
+                backup = Some(candidate_path);
+                break;
+            }
+            Err(error) => {
+                return Err(AppError::Io(format!(
+                    "inspect scaffold backup {}: {error}",
+                    candidate_path.display()
+                )))
+            }
+        }
+    }
+    let backup_name = backup_name.ok_or_else(|| {
+        AppError::Io("could not allocate a unique scaffold recovery backup".into())
+    })?;
+    let backup = backup.expect("backup path allocated with backup name");
+    if let Err(error) = copy_app_snapshot(&app_dir, &backup) {
+        let _ = remove_owned_path(&backup);
+        return Err(error);
+    }
+    let journal = ScaffoldRecoveryJournal {
+        schema_version: APPS_SCHEMA_VERSION,
+        app_id: app_id.to_string(),
+        backup_name: backup_name.clone(),
+        target_name: target_name.trim().to_string(),
+        target_brief: target_brief.trim().to_string(),
+    };
+    if let Err(error) = write_scaffold_recovery_journal(root, &journal) {
+        let _ = remove_owned_path(&backup);
+        return Err(error);
+    }
+    Ok(ScaffoldRecoveryHandle {
+        root: root.to_path_buf(),
+        app_id: app_id.to_string(),
+        backup_name,
+    })
+}
+
+impl ScaffoldRecoveryHandle {
+    /// Mark the scaffold committed and remove its rollback material. The
+    /// backup is removed before the journal so an interrupted cleanup can be
+    /// retried by load-time recovery without rolling back a committed app.
+    pub fn commit(self) -> Result<(), AppError> {
+        let backup =
+            rooted_fs::checked_join(&self.root, &scaffold_recovery_backup_rel(&self.backup_name))
+                .map_err(|error| AppError::from_fs("resolve scaffold recovery backup", &error))?;
+        remove_owned_path(&backup)?;
+        remove_scaffold_recovery_journal(&self.root, &self.app_id)?;
+        Ok(())
+    }
+
+    /// Restore the exact shell snapshot and remove its journal. If cleanup
+    /// fails the journal remains, so a retry or cold start can repeat recovery.
+    pub fn rollback(self) -> Result<(), AppError> {
+        let journal_path = scaffold_recovery_journal_rel(&self.app_id);
+        let journal =
+            read_scaffold_recovery_journal(&self.root, &self.app_id)?.ok_or_else(|| {
+                AppError::StorageCorrupt("scaffold recovery journal disappeared".into())
+            })?;
+        restore_app_snapshot(&self.root, &journal)?;
+        remove_scaffold_recovery_journal(&self.root, &self.app_id).map_err(|error| {
+            AppError::Io(format!(
+                "remove scaffold recovery journal {}: {error}",
+                journal_path.display()
+            ))
+        })?;
+        let backup =
+            rooted_fs::checked_join(&self.root, &scaffold_recovery_backup_rel(&self.backup_name))
+                .map_err(|error| AppError::from_fs("resolve scaffold recovery backup", &error))?;
+        if let Err(error) = remove_owned_path(&backup) {
+            tracing::warn!(
+                app_id = %self.app_id,
+                path = %backup.display(),
+                error = %error,
+                "scaffold backup cleanup deferred after rollback"
+            );
+        }
+        Ok(())
+    }
+}
+
+/// Recover a pending first-scaffold transaction before a listed app is read.
+/// The caller is normally [`load_all`], which already holds the index lock;
+/// this function takes the app build lock itself for cross-process safety.
+pub fn recover_scaffold_transaction(root: &Path, index_record: &AppRecord) -> Result<(), AppError> {
+    ids::validate_app_id(&index_record.id)?;
+    let _recovery_lock = lock_scaffold_recovery(root)?;
+    if read_scaffold_recovery_journal(root, &index_record.id)?.is_none() {
+        return Ok(());
+    }
+    let _lock = lock_app_build(root, &index_record.id)?;
+    recover_scaffold_transaction_locked(root, &index_record.id, Some(index_record))
+}
+
 /// Serialize a document the way the repo persists native-feature JSON:
 /// pretty 2-space indent plus a single trailing newline.
 fn serialize_doc<T: Serialize>(rel: &Path, value: &T) -> Result<String, AppError> {
@@ -451,6 +1076,14 @@ fn read_doc<T: DeserializeOwned>(root: &Path, rel: &Path) -> Result<T, AppError>
 fn ensure_schema_version(rel: &Path, found: u32) -> Result<(), AppError> {
     if found == APPS_SCHEMA_VERSION {
         Ok(())
+    } else if found < APPS_SCHEMA_VERSION {
+        Err(AppError::StorageCorrupt(format!(
+            "{}: unsupported schemaVersion {found} (expected {APPS_SCHEMA_VERSION}); \
+             this pre-release store is no longer supported, so clear the app dev data \
+             (delete apps/) and create again / 此预发布 schema 的 store 已不再支持，\
+             请清除应用开发数据（删除 apps/）后重新创建",
+            rel.display()
+        )))
     } else {
         Err(AppError::StorageCorrupt(format!(
             "{}: unsupported schemaVersion {found} (expected {APPS_SCHEMA_VERSION})",
@@ -482,6 +1115,11 @@ pub fn load_all(root: &Path) -> Result<Vec<AppState>, AppError> {
     // empty store).
     std::fs::create_dir_all(root.join(APPS_DIR))
         .map_err(|error| AppError::Io(format!("create {}: {error}", root.display())))?;
+    // Recovery is acquired BEFORE `index.lock`: an active scaffold host owns
+    // this lock before its app `build.lock`, and its commit then takes the
+    // index lock. Keeping the same order here prevents the loader from
+    // deadlocking with a scaffold that is waiting to publish its record.
+    let _recovery_lock = lock_scaffold_recovery(root)?;
     let _lock = lock_index(root)?;
     sweep_trash(root);
     let index_rel = index_rel();
@@ -552,6 +1190,15 @@ pub fn load_all(root: &Path) -> Result<Vec<AppState>, AppError> {
         // per-app document is read, so a tampered value is rejected instead
         // of being laundered back into the index by a later repair rewrite.
         ensure_workspace_rel("apps/index.json", &record)?;
+
+        // A first-scaffold landing is a host transaction whose record commit
+        // happens after the manifest/workspace writes. Resolve any durable
+        // journal before reading runtime, metadata, or dependency state so a
+        // crash cannot route a half-landed app through the service. The helper
+        // takes the per-app build lock in addition to the index lock, which
+        // also serializes a second engine instance still finishing the same
+        // landing.
+        recover_scaffold_transaction_locked(root, &record.id, Some(&record))?;
 
         let runtime_rel = runtime_rel(&record.id);
         let runtime: AppRuntimeRecord = read_doc(root, &runtime_rel)?;
@@ -1067,6 +1714,62 @@ mod tests {
     }
 
     #[test]
+    fn load_recovers_a_partial_first_scaffold_before_reading_app_documents() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = AppState::create(
+            "scaffold1".into(),
+            "untitled".into(),
+            "original brief".into(),
+            None,
+            1_700_000_000_000,
+        );
+        app.record.scaffolded = false;
+        save_full(dir.path(), std::slice::from_ref(&app));
+        let layout = crate::manifest::AppLayout::new(dir.path(), app.record.id.clone()).unwrap();
+        layout.initialize().unwrap();
+        let manifest = crate::manifest::AppManifest::for_new_app("scaffold1", "untitled");
+        crate::manifest::save_manifest(&layout, &manifest).unwrap();
+        let workspace = dir.path().join(layout.workspace_rel());
+        std::fs::write(workspace.join("LINGXI.md"), "guided shell\n").unwrap();
+
+        let lock = lock_app_build(dir.path(), "scaffold1").unwrap();
+        let recovery =
+            begin_scaffold_recovery(dir.path(), "scaffold1", "formed name", "formed brief")
+                .unwrap();
+        let mut partial = manifest.clone();
+        partial.name = "formed name".into();
+        partial.surface = Some(crate::manifest::AppSurface::Canvas);
+        partial.runtime_profile = Some(crate::manifest::AppRuntimeProfileBinding {
+            family: crate::types::AppRuntimeProfile::Canvas2d,
+            revision: 1,
+            contract_sha256: "0".repeat(64),
+        });
+        crate::manifest::save_manifest(&layout, &partial).unwrap();
+        std::fs::write(workspace.join("premature.js"), "discard me\n").unwrap();
+        // A process crash drops the handle without running rollback.
+        std::mem::forget(recovery);
+        drop(lock);
+
+        let loaded = load_all(dir.path()).unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert!(!loaded[0].record.scaffolded);
+        assert_eq!(
+            crate::manifest::load_manifest(&layout).unwrap(),
+            manifest,
+            "load-time recovery must restore the pre-scaffold manifest"
+        );
+        assert_eq!(
+            std::fs::read(workspace.join("LINGXI.md")).unwrap(),
+            b"guided shell\n"
+        );
+        assert!(!workspace.join("premature.js").exists());
+        assert!(!dir
+            .path()
+            .join(scaffold_recovery_journal_rel("scaffold1"))
+            .exists());
+    }
+
+    #[test]
     fn round_trips_full_store() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = new_app("aaaa1111");
@@ -1102,7 +1805,7 @@ mod tests {
         let body = std::fs::read_to_string(dir.path().join("apps/index.json")).unwrap();
         assert!(body.starts_with("{\n"));
         assert!(body.ends_with("}\n"));
-        assert!(body.contains("\"schemaVersion\": 1"));
+        assert!(body.contains(&format!("\"schemaVersion\": {APPS_SCHEMA_VERSION}")));
         assert!(body.contains("\"workflowState\": \"draft\""));
     }
 
@@ -1280,7 +1983,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join("apps")).unwrap();
         let body = serde_json::json!({
-            "schemaVersion": 1,
+            "schemaVersion": APPS_SCHEMA_VERSION,
             "apps": [{
                 "id": "../../escape",
                 "name": "evil",
@@ -1323,7 +2026,7 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             std::fs::create_dir_all(dir.path().join("apps")).unwrap();
             let body = serde_json::json!({
-                "schemaVersion": 1,
+                "schemaVersion": APPS_SCHEMA_VERSION,
                 "apps": [{
                     "id": "aaaa1111",
                     "name": "sneaky",
@@ -1543,12 +2246,16 @@ mod tests {
             let path = dir.path().join(doc);
             let body = std::fs::read_to_string(&path).unwrap();
             assert!(
-                body.contains("\"schemaVersion\": 1"),
+                body.contains(&format!("\"schemaVersion\": {APPS_SCHEMA_VERSION}")),
                 "{doc} must carry the schema version"
             );
             std::fs::write(
                 &path,
-                body.replacen("\"schemaVersion\": 1", "\"schemaVersion\": 99", 1),
+                body.replacen(
+                    &format!("\"schemaVersion\": {APPS_SCHEMA_VERSION}"),
+                    "\"schemaVersion\": 99",
+                    1,
+                ),
             )
             .unwrap();
             let err = load_all(dir.path()).unwrap_err();

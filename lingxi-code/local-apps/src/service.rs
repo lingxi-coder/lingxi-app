@@ -28,7 +28,7 @@ use crate::data;
 use crate::error::AppError;
 use crate::events::{AppEvent, AppEventObserver};
 use crate::ids;
-use crate::manifest::{AppLayout, AppManifest};
+use crate::manifest::{load_manifest, AppLayout, AppManifest};
 use crate::permissions::{
     save_permissions_initialized, save_workspace_permission_settings_initialized, AppPermissions,
 };
@@ -36,11 +36,11 @@ use crate::state::AppState;
 use crate::storage;
 use crate::types::{
     AppCheckpoint, AppCheckpointKind, AppDependencyRecord, AppDependencyState, AppRecord,
-    AppRuntimeMode, AppRuntimeRecord, AppRuntimeState, AppWorkflowState,
+    AppRuntimeMode, AppRuntimeRecord, AppRuntimeState, AppWorkflowState, APPS_SCHEMA_VERSION,
 };
 use std::collections::{BTreeSet, HashMap};
 use std::future::Future;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::UNIX_EPOCH;
 use tokio::sync::{Mutex, OwnedMutexGuard};
@@ -581,6 +581,38 @@ impl AppService {
         })
     }
 
+    /// Restore a dependency record captured by a host-owned scaffold
+    /// transaction.  First-scaffold landing updates `dependencies.json`
+    /// before the app's `scaffolded` record commit; if landing fails, the host
+    /// restores the complete app-directory snapshot and must restore this
+    /// in-memory cache to the same value before allowing a retry.  This is a
+    /// deliberately exact replacement (including install-attempt counters
+    /// and timestamps), not a state-machine transition that would manufacture
+    /// a new attempt while compensating a failed transaction.
+    pub async fn restore_dependency_record(
+        &self,
+        dependency: AppDependencyRecord,
+    ) -> Result<AppDependencyRecord, AppError> {
+        let app_id = dependency.app_id.clone();
+        let apps = self.state.lock().await;
+        let _ = Self::position(&apps, &app_id)?;
+        if dependency.schema_version != APPS_SCHEMA_VERSION {
+            return Err(AppError::InvalidRequest(format!(
+                "dependency record schemaVersion {} is unsupported (expected {APPS_SCHEMA_VERSION})",
+                dependency.schema_version
+            )));
+        }
+        ids::validate_app_id(&dependency.app_id)?;
+        let root = self.root.clone();
+        let persisted = dependency.clone();
+        Self::run_blocking(move || storage::save_dependency_record(&root, &persisted)).await?;
+        self.dependencies
+            .lock()
+            .await
+            .insert(app_id, dependency.clone());
+        Ok(dependency)
+    }
+
     async fn update_dependency_record(
         &self,
         app_id: &str,
@@ -787,6 +819,7 @@ impl AppService {
             .transpose()?;
         let name = name.to_string();
         let brief = brief.to_string();
+        let root = self.root.clone();
         self.with_app(app_id, move |app, now| {
             if app.record.scaffolded {
                 return (
@@ -796,6 +829,9 @@ impl AppService {
                     ))),
                     Vec::new(),
                 );
+            }
+            if let Err(error) = Self::validate_scaffold_commit_ready(&root, &app.record) {
+                return (Err(error), Vec::new());
             }
             app.record.name = name;
             app.record.brief = brief;
@@ -986,7 +1022,7 @@ impl AppService {
             conversation_id,
             crate::types::DEFAULT_GIT_VERSION_CONTROL,
             None,
-            CreateMode::Scaffolded,
+            CreateMode::Shell,
             None,
             initializer,
         )
@@ -1007,7 +1043,7 @@ impl AppService {
             conversation_id,
             git_enabled,
             None,
-            CreateMode::Scaffolded,
+            CreateMode::Shell,
             None,
             |_| async { Ok(()) },
         )
@@ -1029,7 +1065,7 @@ impl AppService {
             conversation_id,
             git_enabled,
             workflow_model,
-            CreateMode::Scaffolded,
+            CreateMode::Shell,
             None,
             |_| async { Ok(()) },
         )
@@ -1172,6 +1208,24 @@ impl AppService {
                 .await;
                 return Err(error);
             }
+            if mode == CreateMode::Scaffolded {
+                let validation_root = root.clone();
+                let validation_record = record.clone();
+                if let Err(error) = Self::run_blocking(move || {
+                    Self::validate_scaffold_commit_ready(&validation_root, &validation_record)
+                })
+                .await
+                {
+                    Self::cleanup_uncommitted_create(
+                        root.clone(),
+                        record.id.clone(),
+                        "scaffolded create validation",
+                        &error,
+                    )
+                    .await;
+                    return Err(error);
+                }
+            }
             let mut records = existing_records;
             records.push(record.clone());
             if let Err(error) = Self::run_blocking({
@@ -1192,10 +1246,12 @@ impl AppService {
                 return Err(error);
             }
             apps.push(app);
-            dependencies.lock().await.insert(
-                record.id.clone(),
-                storage::default_dependency_record(&record.id, now),
-            );
+            let dependency = storage::load_dependency_record(&root, &record)
+                .unwrap_or_else(|_| storage::default_dependency_record(&record.id, now));
+            dependencies
+                .lock()
+                .await
+                .insert(record.id.clone(), dependency);
             drop(apps);
             // Ordered, not incidental: the list has to be current before the
             // event that points into it, or a client that navigates on
@@ -1222,6 +1278,43 @@ impl AppService {
         completion
             .await
             .map_err(|error| AppError::Io(format!("create completion task failed: {error}")))?
+    }
+
+    fn validate_scaffold_commit_ready(root: &Path, record: &AppRecord) -> Result<(), AppError> {
+        let layout = AppLayout::new(root, record.id.clone())?;
+        let manifest = load_manifest(&layout)?;
+        let runtime_profile = manifest.runtime_profile.clone().ok_or_else(|| {
+            AppError::InvalidRequest(
+                "scaffold commit requires a runtime profile before publish".into(),
+            )
+        })?;
+        if manifest.surface != Some(runtime_profile.family.surface()) {
+            return Err(AppError::InvalidRequest(
+                "scaffold commit requires a manifest surface matching the runtime profile before publish".into(),
+            ));
+        }
+        let dependency_snapshot = manifest.dependency_snapshot.ok_or_else(|| {
+            AppError::InvalidRequest(
+                "scaffold commit requires a verified dependency snapshot before publish".into(),
+            )
+        })?;
+        if dependency_snapshot.verified_profile_contract_sha256 != runtime_profile.contract_sha256 {
+            return Err(AppError::InvalidRequest(
+                "scaffold commit requires a dependency snapshot that matches the runtime profile before publish".into(),
+            ));
+        }
+        let dependency = storage::load_dependency_record(root, record)?;
+        if dependency.state != AppDependencyState::Ready
+            || dependency.lockfile_sha256.as_deref()
+                != Some(dependency_snapshot.lockfile_sha256.as_str())
+            || dependency.toolchain_key.as_deref()
+                != Some(dependency_snapshot.toolchain_key.as_str())
+        {
+            return Err(AppError::InvalidRequest(
+                "scaffold commit requires a ready dependency record that matches the verified snapshot before publish".into(),
+            ));
+        }
+        Ok(())
     }
 
     fn best_effort_cleanup_uncommitted_create(
@@ -1431,9 +1524,11 @@ mod tests {
     use super::*;
     use crate::error::AppErrorCode;
     use crate::events::{NoopAppEventObserver, RecordingAppEventObserver};
+    use crate::manifest::{save_manifest, AppLayout, AppManifest, AppRuntimeProfileBinding};
     use crate::test_support::FixedClock;
-    use crate::types::AppDependencyState;
     use crate::types::AppWorkflowState;
+    use crate::types::{AppDependencyRecord, AppDependencyState};
+    use crate::AppDependencySnapshot;
     use std::path::Path;
     use std::time::Duration;
     use tokio::time::timeout;
@@ -1473,6 +1568,64 @@ mod tests {
     async fn test_service() -> AppService {
         let root = tempfile::tempdir().unwrap().into_path();
         harness(&root).await.service
+    }
+
+    fn scaffolded_runtime_binding() -> AppRuntimeProfileBinding {
+        AppRuntimeProfileBinding {
+            family: crate::AppRuntimeProfile::ReactDom,
+            revision: 1,
+            contract_sha256: "a".repeat(64),
+        }
+    }
+
+    fn scaffolded_dependency_snapshot(
+        binding: &AppRuntimeProfileBinding,
+        lockfile_sha256: &str,
+        toolchain_key: &str,
+    ) -> AppDependencySnapshot {
+        AppDependencySnapshot {
+            requested_sha256: "b".repeat(64),
+            package_sha256: "c".repeat(64),
+            lockfile_sha256: lockfile_sha256.to_string(),
+            dependency_tree_sha256: "d".repeat(64),
+            sbom_sha256: "e".repeat(64),
+            toolchain_key: toolchain_key.to_string(),
+            verified_profile_contract_sha256: binding.contract_sha256.clone(),
+        }
+    }
+
+    fn scaffolded_dependency_record(
+        app_id: &str,
+        state: AppDependencyState,
+        lockfile_sha256: &str,
+        toolchain_key: &str,
+    ) -> AppDependencyRecord {
+        AppDependencyRecord {
+            schema_version: crate::types::APPS_SCHEMA_VERSION,
+            app_id: app_id.to_string(),
+            state,
+            lockfile_sha256: Some(lockfile_sha256.to_string()),
+            toolchain_key: Some(toolchain_key.to_string()),
+            install_attempts: 1,
+            last_error: None,
+            updated_at_ms: 1_700_000_000_000,
+        }
+    }
+
+    fn seed_scaffold_commit_ready_state(
+        root: &Path,
+        record: &AppRecord,
+        binding: &AppRuntimeProfileBinding,
+        snapshot: &AppDependencySnapshot,
+        dependency: &AppDependencyRecord,
+    ) {
+        let layout = AppLayout::new(root, record.id.clone()).expect("layout");
+        let mut manifest = load_manifest(&layout).expect("manifest");
+        manifest.runtime_profile = Some(binding.clone());
+        manifest.surface = Some(binding.family.surface());
+        manifest.dependency_snapshot = Some(snapshot.clone());
+        save_manifest(&layout, &manifest).expect("save manifest");
+        storage::save_dependency_record(root, dependency).expect("save dependency record");
     }
 
     /// Rebuild a fresh [`AppService`] over the SAME on-disk root as
@@ -2121,6 +2274,21 @@ mod tests {
         assert!(!shell.scaffolded);
         assert_eq!(shell.name, PLACEHOLDER_APP_NAME);
         let _ = h.take_events().await;
+        let binding = scaffolded_runtime_binding();
+        let snapshot =
+            scaffolded_dependency_snapshot(&binding, &"f".repeat(64), "pnpm@11.22.0/node@24.18.1");
+        seed_scaffold_commit_ready_state(
+            dir.path(),
+            &shell,
+            &binding,
+            &snapshot,
+            &scaffolded_dependency_record(
+                &shell.id,
+                AppDependencyState::Ready,
+                &snapshot.lockfile_sha256,
+                &snapshot.toolchain_key,
+            ),
+        );
 
         let committed = h
             .service
@@ -2164,6 +2332,21 @@ mod tests {
             .create_app_with_mode(None, "", None, CreateMode::Shell, None)
             .await
             .unwrap();
+        let binding = scaffolded_runtime_binding();
+        let snapshot =
+            scaffolded_dependency_snapshot(&binding, &"f".repeat(64), "pnpm@11.22.0/node@24.18.1");
+        seed_scaffold_commit_ready_state(
+            &service.root,
+            &shell,
+            &binding,
+            &snapshot,
+            &scaffolded_dependency_record(
+                &shell.id,
+                AppDependencyState::Ready,
+                &snapshot.lockfile_sha256,
+                &snapshot.toolchain_key,
+            ),
+        );
         service
             .commit_scaffold(&shell.id, "A", "b", None)
             .await
@@ -2198,6 +2381,21 @@ mod tests {
             )
             .await
             .unwrap();
+        let binding = scaffolded_runtime_binding();
+        let snapshot =
+            scaffolded_dependency_snapshot(&binding, &"f".repeat(64), "pnpm@11.22.0/node@24.18.1");
+        seed_scaffold_commit_ready_state(
+            &service.root,
+            &shell,
+            &binding,
+            &snapshot,
+            &scaffolded_dependency_record(
+                &shell.id,
+                AppDependencyState::Ready,
+                &snapshot.lockfile_sha256,
+                &snapshot.toolchain_key,
+            ),
+        );
         let committed = service
             .commit_scaffold(&shell.id, "A", "b", None)
             .await
@@ -2214,6 +2412,21 @@ mod tests {
             .create_app_with_mode(None, "", None, CreateMode::Shell, None)
             .await
             .unwrap();
+        let binding = scaffolded_runtime_binding();
+        let snapshot =
+            scaffolded_dependency_snapshot(&binding, &"f".repeat(64), "pnpm@11.22.0/node@24.18.1");
+        seed_scaffold_commit_ready_state(
+            &service.root,
+            &shell,
+            &binding,
+            &snapshot,
+            &scaffolded_dependency_record(
+                &shell.id,
+                AppDependencyState::Ready,
+                &snapshot.lockfile_sha256,
+                &snapshot.toolchain_key,
+            ),
+        );
         let over_long_model = "m".repeat(MAX_WORKFLOW_MODEL_BYTES + 1);
         for (name, brief, model) in [
             ("   ", "b", None),
@@ -2233,6 +2446,31 @@ mod tests {
             !after.scaffolded,
             "a rejected commit must leave the shell a shell"
         );
+        assert_eq!(after.name, PLACEHOLDER_APP_NAME);
+        assert_eq!(after.brief, "");
+    }
+
+    #[tokio::test]
+    async fn commit_scaffold_rejects_a_shell_without_verified_runtime_metadata() {
+        let service = test_service().await;
+        let shell = service
+            .create_app_with_mode(None, "", None, CreateMode::Shell, None)
+            .await
+            .unwrap();
+
+        let error = service
+            .commit_scaffold(&shell.id, "A", "b", None)
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), AppErrorCode::InvalidRequest);
+        assert!(
+            error
+                .to_string()
+                .contains("scaffold commit requires a runtime profile before publish"),
+            "got {error}"
+        );
+        let after = service.record(&shell.id).await.unwrap();
+        assert!(!after.scaffolded);
         assert_eq!(after.name, PLACEHOLDER_APP_NAME);
         assert_eq!(after.brief, "");
     }
@@ -2376,20 +2614,20 @@ mod tests {
         );
     }
 
-    /// Direct coverage for `brief`'s validation (empty-after-trim rejected,
-    /// `MAX_BRIEF_BYTES` enforced, exactly-at-cap accepted, and the trimmed
-    /// value is what's persisted).
+    /// Direct coverage for shell `brief` validation: empty-after-trim is
+    /// allowed, `MAX_BRIEF_BYTES` is enforced, exactly-at-cap is accepted,
+    /// and the trimmed value is what is persisted.
     #[tokio::test]
     async fn create_app_enforces_brief_caps() {
         let dir = tempfile::tempdir().unwrap();
         let h = harness(dir.path()).await;
-        // Empty after trim is rejected, independent of `name`.
-        let err = h
+        let empty = h
             .service
             .create_app(Some("A"), "   ", None)
             .await
-            .unwrap_err();
-        assert_eq!(err.code(), AppErrorCode::InvalidRequest);
+            .expect("a shell may start without a confirmed brief");
+        assert_eq!(empty.brief, "");
+        assert!(!empty.scaffolded);
         // Over the cap is rejected.
         let err = h
             .service
@@ -2397,10 +2635,7 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(err.code(), AppErrorCode::InvalidRequest);
-        assert!(
-            h.service.list_apps().await.is_empty(),
-            "nothing was created"
-        );
+        assert_eq!(h.service.list_apps().await, vec![empty]);
         // Exactly at the cap is fine, and leading/trailing whitespace is
         // trimmed the same way `name` is before persisting.
         let record = h
@@ -2459,15 +2694,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn create_app_rejects_an_empty_brief() {
-        let service = test_service().await;
-        service
-            .create_app(Some("Notes"), "   ", None)
-            .await
-            .expect_err("an empty brief is rejected");
-    }
-
-    #[tokio::test]
     async fn shell_mode_accepts_an_empty_brief_and_records_an_unscaffolded_shell() {
         let dir = tempfile::tempdir().unwrap();
         let h = harness(dir.path()).await;
@@ -2501,35 +2727,170 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn scaffolded_mode_records_a_scaffolded_app() {
+    async fn default_wrappers_create_unscaffolded_records() {
         let dir = tempfile::tempdir().unwrap();
         let h = harness(dir.path()).await;
         let record = h
             .service
-            .create_app_with_mode(None, "a todo list", None, CreateMode::Scaffolded, None)
+            .create_app_with_git_and_workflow_model(
+                Some("todo"),
+                "a todo list",
+                None,
+                false,
+                Some("openai/gpt-5"),
+            )
             .await
             .expect("create");
-        assert!(
-            record.scaffolded,
-            "the create+scaffold path commits scaffolded=true"
-        );
-        // `AppState::create_with_git` hardcodes `scaffolded: true` in its own
-        // literal (state.rs) — `assert!` above alone would still pass even if
-        // the `app.record.scaffolded = mode == CreateMode::Scaffolded;`
-        // assignment in `create_app_with_git_and_workflow_model_and_initializer`
-        // were deleted entirely, because the hardcoded default is also
-        // `true`. Cross-check against a Shell-mode sibling created in the
-        // SAME test: only the CreateMode-derived assignment can make the two
-        // differ, so this proves the flag tracks `mode`, not a constant.
-        let shell = h
+        assert!(!record.scaffolded, "default wrappers now create a shell");
+        assert_eq!(record.name, "todo");
+        assert_eq!(record.brief, "a todo list");
+        assert_eq!(record.workflow_model.as_deref(), Some("openai/gpt-5"));
+    }
+
+    #[tokio::test]
+    async fn scaffolded_mode_without_runtime_profile_fails_closed() {
+        let dir = tempfile::tempdir().unwrap();
+        let h = harness(dir.path()).await;
+        let error = h
             .service
-            .create_app_with_mode(None, "", None, CreateMode::Shell, None)
+            .create_app_with_mode(None, "a todo list", None, CreateMode::Scaffolded, None)
             .await
-            .expect("shell creation must accept an empty brief");
-        assert_ne!(
-            record.scaffolded, shell.scaffolded,
-            "scaffolded must be mode-derived: Scaffolded and Shell must disagree"
+            .expect_err("legacy scaffolded create must not commit without a runtime profile");
+        assert!(
+            matches!(&error, AppError::InvalidRequest(message) if message.contains("runtime profile")),
+            "{error:?}"
         );
+        assert!(h.service.list_apps().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn scaffolded_mode_accepts_only_a_ready_matching_dependency_record() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        let h = harness(dir.path()).await;
+        let binding = scaffolded_runtime_binding();
+        let snapshot =
+            scaffolded_dependency_snapshot(&binding, &"f".repeat(64), "pnpm@11.22.0/node@24.18.1");
+        let record = h
+            .service
+            .create_app_with_git_and_workflow_model_and_initializer(
+                None,
+                "ready scaffold",
+                None,
+                crate::types::DEFAULT_GIT_VERSION_CONTROL,
+                None,
+                CreateMode::Scaffolded,
+                None,
+                move |record| {
+                    let root = root.clone();
+                    let binding = binding.clone();
+                    let snapshot = snapshot.clone();
+                    async move {
+                        let layout = AppLayout::new(root.clone(), record.id.clone())?;
+                        let mut manifest =
+                            AppManifest::for_new_app(record.id.clone(), record.name.clone());
+                        manifest.surface = Some(binding.family.surface());
+                        manifest.runtime_profile = Some(binding.clone());
+                        manifest.dependency_snapshot = Some(snapshot.clone());
+                        save_manifest(&layout, &manifest)?;
+                        storage::save_dependency_record(
+                            &root,
+                            &scaffolded_dependency_record(
+                                &record.id,
+                                AppDependencyState::Ready,
+                                &snapshot.lockfile_sha256,
+                                &snapshot.toolchain_key,
+                            ),
+                        )?;
+                        Ok(())
+                    }
+                },
+            )
+            .await
+            .expect("scaffolded create commits only once runtime metadata is valid");
+        assert!(record.scaffolded);
+        assert_eq!(h.service.list_apps().await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn scaffolded_mode_rejects_failed_or_mismatched_dependency_records() {
+        for (label, state, lockfile_sha256, toolchain_key) in [
+            (
+                "failed",
+                AppDependencyState::Failed,
+                "f".repeat(64),
+                "pnpm@11.22.0/node@24.18.1".to_string(),
+            ),
+            (
+                "lock mismatch",
+                AppDependencyState::Ready,
+                "0".repeat(64),
+                "pnpm@11.22.0/node@24.18.1".to_string(),
+            ),
+            (
+                "toolchain mismatch",
+                AppDependencyState::Ready,
+                "f".repeat(64),
+                "pnpm@0/node@0".to_string(),
+            ),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let root = dir.path().to_path_buf();
+            let h = harness(dir.path()).await;
+            let binding = scaffolded_runtime_binding();
+            let snapshot = scaffolded_dependency_snapshot(
+                &binding,
+                &"f".repeat(64),
+                "pnpm@11.22.0/node@24.18.1",
+            );
+            let error = h
+                .service
+                .create_app_with_git_and_workflow_model_and_initializer(
+                    None,
+                    "invalid scaffold",
+                    None,
+                    crate::types::DEFAULT_GIT_VERSION_CONTROL,
+                    None,
+                    CreateMode::Scaffolded,
+                    None,
+                    move |record| {
+                        let root = root.clone();
+                        let binding = binding.clone();
+                        let snapshot = snapshot.clone();
+                        let lockfile_sha256 = lockfile_sha256.clone();
+                        let toolchain_key = toolchain_key.clone();
+                        async move {
+                            let layout = AppLayout::new(root.clone(), record.id.clone())?;
+                            let mut manifest =
+                                AppManifest::for_new_app(record.id.clone(), record.name.clone());
+                            manifest.surface = Some(binding.family.surface());
+                            manifest.runtime_profile = Some(binding.clone());
+                            manifest.dependency_snapshot = Some(snapshot.clone());
+                            save_manifest(&layout, &manifest)?;
+                            storage::save_dependency_record(
+                                &root,
+                                &scaffolded_dependency_record(
+                                    &record.id,
+                                    state,
+                                    &lockfile_sha256,
+                                    &toolchain_key,
+                                ),
+                            )?;
+                            Ok(())
+                        }
+                    },
+                )
+                .await
+                .expect_err("invalid dependency provenance must fail closed");
+            assert!(
+                matches!(&error, AppError::InvalidRequest(message) if message.contains("dependency record")),
+                "{label}: {error:?}"
+            );
+            assert!(
+                h.service.list_apps().await.is_empty(),
+                "{label}: invalid scaffolded create must not publish"
+            );
+        }
     }
 
     #[tokio::test]

@@ -65,6 +65,22 @@ struct LocalAppsRootView: View {
         }
         .sheet(
             item: Binding(
+                get: { store.pendingRuntimeProfileSelection },
+                set: { _ in }
+            )
+        ) { prompt in
+            LocalAppRuntimeProfileSelectionSheet(store: store, prompt: prompt)
+        }
+        .sheet(
+            item: Binding(
+                get: { store.pendingDependencyChangeConfirmation },
+                set: { _ in }
+            )
+        ) { prompt in
+            LocalAppDependencyChangeConfirmationSheet(store: store, prompt: prompt)
+        }
+        .sheet(
+            item: Binding(
                 get: { store.pendingProfileProposal },
                 set: { _ in }
             )
@@ -143,8 +159,10 @@ struct LocalAppPermissionSheet: View {
                 Spacer()
                 VStack(spacing: 10) {
                     permissionButton(.once, prominent: true)
-                    permissionButton(.session)
-                    permissionButton(.always)
+                    if prompt.allowsPersistentGrant {
+                        permissionButton(.session)
+                        permissionButton(.always)
+                    }
                     permissionButton(.deny)
                 }
             }
@@ -179,6 +197,345 @@ struct LocalAppPermissionSheet: View {
         }
         .tint(decision == .deny ? .red : nil)
         .accessibilityIdentifier("local-apps.permission.\(decision.rawValue)")
+    }
+}
+
+struct LocalAppRuntimeProfileSelectionSheet: View {
+    @Bindable var store: LocalAppsStore
+    let prompt: LocalAppRuntimeProfileSelectionPrompt
+
+    var body: some View {
+        NavigationStack {
+            content
+            .navigationTitle("local_apps_runtime_profile_title")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("common_cancel") {
+                        cancelSelection()
+                    }
+                }
+            }
+        }
+        .interactiveDismissDisabled()
+        .presentationDetents([.large])
+        .accessibilityIdentifier("local-apps.runtime-profile.\(prompt.id)")
+    }
+
+    private var content: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 18) {
+                promptHeader
+                optionList
+            }
+            .padding(24)
+        }
+    }
+
+    private var promptHeader: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Label(String(localized: "local_apps_runtime_profile_prompt_title"), systemImage: "shippingbox.fill")
+                .font(.title3.bold())
+            Text(prompt.reason)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private var optionList: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            ForEach(prompt.options) { option in
+                RuntimeProfileOptionCard(
+                    option: option,
+                    isRecommended: prompt.recommendedFamily == option.family,
+                    onSelect: { select(option.family) }
+                )
+            }
+        }
+    }
+
+    private func select(_ family: LocalAppRuntimeProfileFamily) {
+        Task { await store.resolvePendingRuntimeProfileSelection(family) }
+    }
+
+    private func cancelSelection() {
+        Task { await store.resolvePendingRuntimeProfileSelection(nil) }
+    }
+}
+
+private struct RuntimeProfileOptionCard: View {
+    let option: LocalAppRuntimeProfileOption
+    let isRecommended: Bool
+    let onSelect: () -> Void
+
+    private var availabilityText: String {
+        option.available
+            ? String(localized: "local_apps_runtime_profile_available")
+            : String(localized: "local_apps_runtime_profile_unavailable")
+    }
+
+    private var availabilityColor: Color {
+        option.available ? .secondary : .red
+    }
+
+    private var revisionSurfaceText: String {
+        String(
+            format: String(localized: "local_apps_runtime_profile_revision_surface"),
+            Int(option.revision),
+            option.surface.title
+        )
+    }
+
+    private var packageListText: String {
+        option.corePackages
+            .map { "\($0.name)@\($0.version)" }
+            .joined(separator: "\n")
+    }
+
+    private var contractText: String {
+        String(format: String(localized: "local_apps_runtime_profile_contract"), option.contractSHA256)
+    }
+
+    private var cacheDownloadText: String {
+        String(
+            format: String(localized: "local_apps_runtime_profile_cache_download"),
+            localizedRuntimeProfileStatus(option.cacheStatus),
+            localizedRuntimeProfileStatus(option.downloadStatus)
+        )
+    }
+
+    private var actionText: String {
+        option.available
+            ? String(localized: "local_apps_runtime_profile_select")
+            : String(localized: "local_apps_runtime_profile_unavailable_action")
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .firstTextBaseline) {
+                Text(option.family.title)
+                    .font(.headline)
+                Spacer()
+                if isRecommended {
+                    Text(String(localized: "local_apps_runtime_profile_recommended"))
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                }
+                Text(availabilityText)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(availabilityColor)
+            }
+            Text(revisionSurfaceText)
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+            Text(packageListText)
+                .font(.system(.footnote, design: .monospaced))
+                .textSelection(.enabled)
+            Text(contractText)
+                .font(.system(.footnote, design: .monospaced))
+                .textSelection(.enabled)
+            Text(cacheDownloadText)
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+            if let reason = option.reason {
+                Text(reason)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+            if option.available {
+                Button(action: onSelect) {
+                    Text(actionText)
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.borderedProminent)
+            } else {
+                Button(action: onSelect) {
+                    Text(actionText)
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.bordered)
+                .disabled(true)
+            }
+        }
+        .padding(16)
+        .background(.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 16))
+    }
+}
+
+struct LocalAppDependencyChangeConfirmationSheet: View {
+    @Bindable var store: LocalAppsStore
+    let prompt: LocalAppDependencyChangeConfirmationPrompt
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 18) {
+                    Label(
+                        String(localized: "local_apps_dependency_change_title"),
+                        systemImage: "shippingbox.and.arrow.backward.fill"
+                    )
+                    .font(.title3.bold())
+                    Text(localizedDependencyConfirmationReason(prompt.reason))
+                        .foregroundStyle(.secondary)
+
+                    VStack(alignment: .leading, spacing: 12) {
+                        ForEach(Array(prompt.changes.enumerated()), id: \.offset) { _, change in
+                            DependencyChangeRow(change: change)
+                        }
+                    }
+
+                    VStack(alignment: .leading, spacing: 8) {
+                        policyRow(
+                            title: String(localized: "local_apps_dependency_change_license_risk"),
+                            value: localizedDependencyRisk(prompt.licenseRisk)
+                        )
+                        policyRow(
+                            title: String(localized: "local_apps_dependency_change_sbom_risk"),
+                            value: localizedDependencyRisk(prompt.sbomRisk)
+                        )
+                        policyRow(
+                            title: String(localized: "local_apps_dependency_change_scripts"),
+                            value: prompt.lifecycleScriptsBlocked
+                                ? String(localized: "local_apps_dependency_change_blocked")
+                                : String(localized: "local_apps_dependency_change_allowed")
+                        )
+                        policyRow(
+                            title: String(localized: "local_apps_dependency_change_native_addons"),
+                            value: prompt.nativeAddonsBlocked
+                                ? String(localized: "local_apps_dependency_change_blocked")
+                                : String(localized: "local_apps_dependency_change_allowed")
+                        )
+                    }
+                    .padding(14)
+                    .background(.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 14))
+
+                    Text(localizedDependencyRollbackPolicy(prompt.rollbackPolicy))
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .padding(24)
+            }
+            .navigationTitle("local_apps_dependency_change_navigation_title")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("common_cancel") {
+                        resolve(false)
+                    }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("local_apps_dependency_change_approve") {
+                        resolve(true)
+                    }
+                }
+            }
+        }
+        .interactiveDismissDisabled()
+        .presentationDetents([.large])
+        .accessibilityIdentifier("local-apps.dependency-change.\(prompt.id)")
+    }
+
+    private func resolve(_ approved: Bool) {
+        Task { await store.resolvePendingDependencyChangeConfirmation(approved) }
+    }
+
+    @ViewBuilder
+    private func policyRow(title: String, value: String) -> some View {
+        LabeledContent(title) {
+            Text(value)
+                .multilineTextAlignment(.trailing)
+        }
+    }
+}
+
+private struct DependencyChangeRow: View {
+    let change: LocalAppDependencyChange
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            HStack(alignment: .firstTextBaseline) {
+                Text(change.kind.title)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                Text(change.package)
+                    .font(.headline)
+                    .textSelection(.enabled)
+                if let version = change.version {
+                    Text("@\(version)")
+                        .font(.system(.subheadline, design: .monospaced))
+                        .textSelection(.enabled)
+                }
+            }
+            Text(
+                String(
+                    format: String(localized: "local_apps_dependency_change_cache_download"),
+                    localizedDependencyStatus(change.cacheStatus),
+                    localizedDependencyStatus(change.downloadStatus)
+                )
+            )
+            .font(.footnote)
+            .foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(14)
+        .background(.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 12))
+    }
+}
+
+private func localizedDependencyRisk(_ raw: String) -> String {
+    switch raw {
+    case "unknown_until_resolution":
+        return String(localized: "local_apps_dependency_change_unknown_until_resolution")
+    default:
+        return raw
+    }
+}
+
+private func localizedDependencyConfirmationReason(_ raw: String) -> String {
+    switch raw {
+    case "pre_resolution_no_network":
+        return String(localized: "local_apps_dependency_change_pre_resolution_no_network")
+    default:
+        return raw
+    }
+}
+
+private func localizedDependencyRollbackPolicy(_ raw: String) -> String {
+    switch raw {
+    case "rollback_on_validation_failure":
+        return String(localized: "local_apps_dependency_change_rollback_on_failure")
+    default:
+        return raw
+    }
+}
+
+private func localizedDependencyStatus(_ raw: String) -> String {
+    switch raw {
+    case "may_be_required":
+        return String(localized: "local_apps_dependency_change_download_may_be_required")
+    case "not_required":
+        return String(localized: "local_apps_dependency_change_download_not_required")
+    case "not_needed":
+        return String(localized: "local_apps_dependency_change_cache_not_needed")
+    default:
+        return raw
+    }
+}
+
+private func localizedRuntimeProfileStatus(_ raw: String) -> String {
+    switch raw {
+    case "bundled":
+        String(localized: "local_apps_runtime_profile_status_bundled")
+    case "cached":
+        String(localized: "local_apps_runtime_profile_status_cached")
+    case "download_required":
+        String(localized: "local_apps_runtime_profile_status_download_required")
+    case "unavailable":
+        String(localized: "local_apps_runtime_profile_status_unavailable")
+    case "gated":
+        String(localized: "local_apps_runtime_profile_status_gated")
+    default:
+        raw
     }
 }
 
@@ -421,6 +778,12 @@ private struct LocalAppLibraryRow: View {
                             .foregroundStyle(theme.text3)
                             .lineLimit(1)
                     }
+                    if let profileStatus = app.runtimeProfileStatus {
+                        Label(profileStatus.title, systemImage: profileStatus.systemImageName)
+                            .font(.caption2.weight(.medium))
+                            .foregroundStyle(runtimeProfileStatusColor(profileStatus))
+                            .lineLimit(1)
+                    }
                 }
                 Spacer()
                 Menu {
@@ -454,5 +817,13 @@ private struct LocalAppLibraryRow: View {
         case .failed: theme.danger
         case .stopped, .suspended: theme.text4
         }
+    }
+}
+
+private func runtimeProfileStatusColor(_ status: LocalAppRuntimeProfileStatus) -> Color {
+    switch status {
+    case .verified: .green
+    case .dependenciesDirty, .migrationAvailable, .rebuildRequired: .orange
+    case .coreDependencyDrift, .runtimeBundleMissing, .runtimeContractCorrupt: .red
     }
 }

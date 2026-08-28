@@ -24,10 +24,11 @@ expected_native_packages_for = _VERIFY.expected_native_packages_for
 fail = _VERIFY.fail
 load_json = _VERIFY.load_json
 validate_apk_pins = _VERIFY.validate_apk_pins
-validate_lock = _VERIFY.validate_lock
+validate_base_seed_profile_relationships = _VERIFY.validate_base_seed_profile_relationships
 validate_runtime_policy = _VERIFY.validate_runtime_policy
 validate_sbom = _VERIFY.validate_sbom
-validate_source_policy = _VERIFY.validate_source_policy
+validate_runtime_profile_lock = _VERIFY.validate_runtime_profile_lock
+validate_runtime_profile_source_policy = _VERIFY.validate_runtime_profile_source_policy
 
 
 FORBIDDEN_TOP_LEVEL_PACKAGES = {"corepack", "nodejs-npm", "npm", "pnpm", "yarn"}
@@ -69,6 +70,12 @@ def validate_node_modules(
         fail("runtime node_modules must not retain the Next.js package")
     if (root / "@next").exists():
         fail("runtime node_modules must not retain @next SWC packages")
+    if (root / "three").exists():
+        fail("runtime node_modules must not retain the Three.js package in the engine-free seed")
+    if (root / "phaser").exists():
+        fail("runtime node_modules must not retain the Phaser package in the engine-free seed")
+    if (root / "@babylonjs").exists():
+        fail("runtime node_modules must not retain Babylon packages in the engine-free seed")
     # Tailwind left the pinned set with the Ionic move. Its Oxide bindings were
     # the ONLY thing validating that scope, so without this a stale seed still
     # carrying `@tailwindcss/oxide-*/*.node` stages clean and `copytree` ships
@@ -85,6 +92,9 @@ def validate_node_modules(
     lightningcss = load_json(root / "lightningcss" / "package.json")
     if lightningcss.get("version") != EXPECTED_LIGHTNINGCSS_VERSION:
         fail(f"runtime node_modules did not resolve lightningcss@{EXPECTED_LIGHTNINGCSS_VERSION}")
+    rollup = load_json(root / "rollup" / "package.json")
+    if rollup.get("version") != "4.44.0":
+        fail("runtime node_modules did not resolve rollup@4.44.0")
     allowed_rolldown_bindings = expected_native_packages_for(platform, "rolldown")
     allowed_rolldown_dirs = {name.removeprefix("@rolldown/") for name in allowed_rolldown_bindings}
     rolldown_roots = (
@@ -96,6 +106,30 @@ def validate_node_modules(
         if path.name.startswith("binding-") and path.name not in allowed_rolldown_dirs:
             fail(f"runtime node_modules resolved an unexpected Rolldown binding: @rolldown/{path.name}")
     for name, version in allowed_rolldown_bindings.items():
+        package_root = root / pathlib.PurePosixPath(name)
+        package = load_json(package_root / "package.json")
+        if package.get("version") != version:
+            fail(f"runtime node_modules did not resolve {name}@{version}")
+        binary = package_root / expected_native_binary_for(name)
+        native_bindings = list(package_root.glob("*.node"))
+        if (
+            len(native_bindings) != 1
+            or native_bindings[0].is_symlink()
+            or native_bindings[0].name != binary.name
+            or not binary.is_file()
+        ):
+            fail(f"runtime node_modules must contain one real native binding for {name}")
+    allowed_rollup_bindings = expected_native_packages_for(platform, "rollup")
+    allowed_rollup_dirs = {name.removeprefix("@rollup/") for name in allowed_rollup_bindings}
+    rollup_roots = (
+        [path for path in (root / "@rollup").iterdir()]
+        if (root / "@rollup").is_dir()
+        else []
+    )
+    for path in rollup_roots:
+        if path.name.startswith("rollup-linux-") and path.name not in allowed_rollup_dirs:
+            fail(f"runtime node_modules resolved an unexpected Rollup binding: @rollup/{path.name}")
+    for name, version in allowed_rollup_bindings.items():
         package_root = root / pathlib.PurePosixPath(name)
         package = load_json(package_root / "package.json")
         if package.get("version") != version:
@@ -131,6 +165,19 @@ def validate_node_modules(
             or not binary.is_file()
         ):
             fail(f"runtime node_modules must contain one real native binding for {name}")
+    allowed_native_bindings = {
+        (root / pathlib.PurePosixPath(name) / expected_native_binary_for(name)).resolve()
+        for name in (
+            *allowed_rolldown_bindings.keys(),
+            *allowed_rollup_bindings.keys(),
+            *allowed_lightningcss_bindings.keys(),
+        )
+    }
+    for path in root.rglob("*.node"):
+        if path.is_symlink():
+            fail(f"runtime node_modules native binding must be a real file: {path}")
+        if path.resolve() not in allowed_native_bindings:
+            fail(f"runtime node_modules contains an unexpected native binding: {path}")
     bin_dir = root / ".bin"
     for name in ("corepack", "npm", "npx", "pnpm", "yarn"):
         path = bin_dir / name
@@ -220,11 +267,13 @@ def main() -> None:
     pins = load_json(repo / "docs" / "mobile-linux" / "local-app-runtime-pins.json")
     template = repo / pins["local_app_runtime"]["template"]
     validate_apk_pins(pins, release=False, apk_dir=None)
-    validate_lock(template, pins)
-    validate_source_policy(template, pins)
+    validate_runtime_profile_lock("react-dom", template, pins)
+    validate_runtime_profile_source_policy("react-dom", template)
+    validate_base_seed_profile_relationships(repo, pins)
     validate_sbom(repo, template)
     validate_runtime_policy(repo)
     allowed_rolldown_bindings = expected_native_packages_for(args.platform, "rolldown")
+    allowed_rollup_bindings = expected_native_packages_for(args.platform, "rollup")
     allowed_lightningcss_bindings = expected_native_packages_for(args.platform, "lightningcss")
     validate_node_modules(node_modules, args.platform)
 
@@ -265,6 +314,7 @@ def main() -> None:
             "read_only": True,
             "pnpm_lock_sha256": sha256(template / "pnpm-lock.yaml"),
             "resolved_rolldown_bindings": sorted(allowed_rolldown_bindings),
+            "resolved_rollup_bindings": sorted(allowed_rollup_bindings),
             "resolved_lightningcss_bindings": sorted(allowed_lightningcss_bindings),
             "files": inventory(temporary),
         }

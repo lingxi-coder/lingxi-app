@@ -35,7 +35,8 @@ use crate::computer_access::ComputerAccessResponseDto;
 use crate::controls::ReasoningSelectionDto;
 use crate::listings::TaskStatusDto;
 use crate::local_apps::{
-    AppAuthorizationDecisionDto, AppBridgeRequestDto, AppCreateOriginDto, AppSurfaceDto,
+    AppAuthorizationDecisionDto, AppBridgeRequestDto, AppCreateOriginDto, AppRuntimeProfileDto,
+    AppSurfaceDto,
 };
 use crate::permission::PermissionResponseDto;
 use serde::{Deserialize, Serialize};
@@ -49,11 +50,10 @@ fn is_default_git_version_control(value: &bool) -> bool {
     *value
 }
 
-/// How a [`CreateApp`](ClientCommand::CreateApp) creates the app — the same
-/// concept, with the same names, as the service layer's
-/// `local_apps::CreateMode`. It is deliberately NOT a translated vocabulary:
-/// the host maps `Shell` to `CreateMode::Shell` and `Scaffolded` to
-/// `CreateMode::Scaffolded`, one to one.
+/// How a [`CreateApp`](ClientCommand::CreateApp) creates the app. Protocol v9
+/// accepts `Shell`; the retained `Scaffolded` wire value is rejected by the
+/// host so runtime identity can only come from native confirmation plus a
+/// one-shot scaffold receipt.
 ///
 /// A bare wire STRING (`"shell"` / `"scaffolded"`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -65,7 +65,8 @@ pub enum AppCreateModeDto {
     /// `surface` MUST be `None` — the shape is decided when the scaffold
     /// lands, not before.
     Shell,
-    /// Create and scaffold in one step (today's behaviour).
+    /// Retained for an explicit error response; direct create-and-scaffold is
+    /// not allowed in protocol v9.
     Scaffolded,
 }
 
@@ -406,19 +407,16 @@ pub enum ClientCommand {
         /// from the wire when `None`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         conversation_id: Option<String>,
-        /// Which scaffold to lay down. `None` means the caller expressed no
-        /// preference and the host picks the routed default — the surface is
-        /// immutable once scaffolded, so a client that shows the user a choice
-        /// must send what the user actually saw rather than relying on that
-        /// default. Appended LAST: the generated mobile bindings encode struct
-        /// variants positionally, so inserting a field above `conversation_id`
-        /// would silently reinterpret it on a client built against the previous
-        /// bindings.
+        /// Retained only for protocol-v9 error compatibility. New clients send
+        /// `None` with `Shell`; the later native runtime-profile selection owns
+        /// the immutable surface. Appended LAST: generated mobile bindings
+        /// encode struct variants positionally, so inserting a field above
+        /// `conversation_id` would silently reinterpret it on an older client.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         surface: Option<AppSurfaceDto>,
-        /// `Shell` = create the empty shell only; `Scaffolded` = create and
-        /// scaffold. Appended LAST (with `request_id`) for the same positional
-        /// reason as `surface` above.
+        /// `Shell` creates the empty shell. `Scaffolded` is retained only so
+        /// the host can return a clear protocol-v9 error directing the caller
+        /// through native profile confirmation and receipt-bound scaffold.
         mode: AppCreateModeDto,
         /// Client-generated correlation key, echoed verbatim on both the
         /// success event (`AppEventDto::AppCreated`) and the failure event
@@ -477,6 +475,16 @@ pub enum ClientCommand {
         request_id: String,
         /// User's scoped authorization decision.
         decision: AppAuthorizationDecisionDto,
+    },
+
+    /// Resolve one native runtime profile selection request with the chosen
+    /// family or an explicit cancel.
+    ResolveAppRuntimeProfileSelection {
+        /// Pending selection request correlator.
+        request_id: String,
+        /// Selected runtime family, or `None` when the user cancelled.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        selected_family: Option<AppRuntimeProfileDto>,
     },
 
     /// Approve or reject a host-issued App Agent Profile proposal. The token
@@ -556,6 +564,16 @@ pub enum ClientCommand {
     SetFastMode {
         /// Whether the user wants the fast tier enabled.
         enabled: bool,
+    },
+
+    /// Resolve a native dependency-change confirmation request.  `approved`
+    /// is a one-shot decision; the host issues a dependency receipt only for
+    /// `true` and performs no registry access before that decision.
+    ResolveAppDependencyChangeConfirmation {
+        /// Pending dependency-review request correlator.
+        request_id: String,
+        /// Whether the user approved the exact package diff shown by native UI.
+        approved: bool,
     },
 }
 

@@ -1199,10 +1199,12 @@ mod tests {
     };
     use local_apps::test_support::FixedClock;
     use local_apps::{
-        load_manifest, load_permissions, save_manifest, save_permissions, AppCapability, AppLayout,
-        AppService, NoopAppEventObserver,
+        load_manifest, load_permissions, save_manifest, save_permissions, AppCapability,
+        AppDependencyRecord, AppDependencyState, AppLayout, AppRuntimeProfile, AppService,
+        AppSurface, NoopAppEventObserver, APPS_SCHEMA_VERSION,
     };
     use serde_json::{json, Value};
+    use sha2::{Digest, Sha256};
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex as StdMutex};
     use std::time::Duration;
@@ -1481,6 +1483,7 @@ mod tests {
             .join(crate::local_apps_build::VITE_OUTPUT_DIR);
         std::fs::create_dir_all(&static_dist).expect("static dist");
         std::fs::write(static_dist.join("index.html"), "<html>ok</html>").expect("index");
+        let record = prepare_launchable_runtime_fixture(&service, record, &layout).await;
         Harness {
             _root: root,
             broker,
@@ -1488,6 +1491,149 @@ mod tests {
             service,
             app_id: record.id,
             layout,
+        }
+    }
+
+    async fn prepare_launchable_runtime_fixture(
+        service: &Arc<AppService>,
+        record: local_apps::AppRecord,
+        layout: &AppLayout,
+    ) -> local_apps::AppRecord {
+        let binding = crate::local_app_runtime_profiles::current_binding_for_family(
+            AppRuntimeProfile::ReactDom,
+        )
+        .expect("react dom binding");
+        let workspace = layout.root().join(layout.workspace_rel());
+        crate::local_apps_build::scaffold_workspace_initialized(
+            layout,
+            crate::local_apps_build::LocalAppBuildTarget::ReactDomR1,
+            true,
+        )
+        .expect("scaffold workspace");
+        let scaffold = crate::local_app_runtime_profiles::scaffold_artifacts_for_binding(&binding)
+            .expect("runtime profile scaffold");
+        for (relative, bytes) in &scaffold.files {
+            let path = workspace.join(relative);
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).expect("create scaffold parent");
+            }
+            std::fs::write(path, bytes).expect("write scaffold file");
+        }
+
+        let requested_bytes =
+            std::fs::read(workspace.join(crate::local_app_runtime_profiles::REQUESTED_FILE_REL))
+                .expect("read requested dependencies");
+        let package_bytes = std::fs::read(
+            workspace.join(crate::local_app_runtime_profiles::EFFECTIVE_PACKAGE_FILE_REL),
+        )
+        .expect("read effective package");
+        let lockfile_bytes =
+            std::fs::read(workspace.join(crate::local_app_runtime_profiles::LOCKFILE_FILE_REL))
+                .expect("read lockfile");
+        let sbom_bytes = br#"{
+  "spdxVersion": "SPDX-2.3",
+  "SPDXID": "SPDXRef-DOCUMENT",
+  "name": "device-op-fixture",
+  "dataLicense": "CC0-1.0",
+  "documentNamespace": "https://example.invalid/spdx/device-op-fixture"
+}
+"#;
+        let snapshot = crate::local_app_runtime_profiles::snapshot_artifacts_for_binding(
+            &binding,
+            crate::local_app_runtime_profiles::hash_bytes(&requested_bytes),
+            crate::local_app_runtime_profiles::hash_bytes(&package_bytes),
+            crate::local_app_runtime_profiles::hash_bytes(&lockfile_bytes),
+            crate::local_app_runtime_profiles::hash_bytes(b"device-op-fixture-tree"),
+            sbom_bytes,
+        )
+        .expect("dependency snapshot");
+        for (relative, bytes) in &snapshot.files {
+            let path = workspace.join(relative);
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).expect("create snapshot parent");
+            }
+            std::fs::write(path, bytes).expect("write snapshot file");
+        }
+
+        let mut manifest = load_manifest(layout).expect("manifest");
+        manifest.surface = Some(AppSurface::Dom);
+        manifest.runtime_profile = Some(binding);
+        manifest.dependency_snapshot = Some(snapshot.snapshot);
+        save_manifest(layout, &manifest).expect("save runtime manifest");
+        local_apps::storage::save_dependency_record(
+            layout.root(),
+            &AppDependencyRecord {
+                schema_version: APPS_SCHEMA_VERSION,
+                app_id: record.id.clone(),
+                state: AppDependencyState::Ready,
+                lockfile_sha256: manifest
+                    .dependency_snapshot
+                    .as_ref()
+                    .map(|snapshot| snapshot.lockfile_sha256.clone()),
+                toolchain_key: manifest
+                    .dependency_snapshot
+                    .as_ref()
+                    .map(|snapshot| snapshot.toolchain_key.clone()),
+                install_attempts: 1,
+                last_error: None,
+                updated_at_ms: record.updated_at_ms,
+            },
+        )
+        .expect("save dependency record");
+
+        let build_root = layout.root().join(layout.build_rel(false));
+        let output_root = build_root.join(crate::local_apps_build::VITE_OUTPUT_DIR);
+        let output_sha256 = digest_tree(&output_root);
+        let build_receipt = json!({
+            "version": 3,
+            "buildKey": "device-op-fixture",
+            "runtimeContractSha256": manifest.runtime_contract_hash().expect("runtime hash"),
+            "dependencySnapshotSha256": manifest
+                .dependency_snapshot_hash()
+                .expect("dependency hash"),
+            "outputSha256": output_sha256,
+        });
+        std::fs::write(
+            build_root.join("build.json"),
+            serde_json::to_vec_pretty(&build_receipt).expect("serialize build receipt"),
+        )
+        .expect("write build receipt");
+        service
+            .commit_scaffold(&record.id, &record.name, &record.brief, None)
+            .await
+            .expect("commit formed fixture")
+    }
+
+    fn digest_tree(root: &std::path::Path) -> String {
+        let mut files = Vec::new();
+        collect_tree_files(root, &mut files);
+        files.sort();
+        let mut hasher = Sha256::new();
+        for path in files {
+            let relative = path.strip_prefix(root).expect("relative output path");
+            hasher.update(relative.to_string_lossy().replace('\\', "/").as_bytes());
+            hasher.update([0]);
+            hasher.update(std::fs::read(&path).expect("read output file"));
+            hasher.update([0]);
+        }
+        format!("{:x}", hasher.finalize())
+    }
+
+    fn collect_tree_files(current: &std::path::Path, files: &mut Vec<std::path::PathBuf>) {
+        let metadata = std::fs::symlink_metadata(current).expect("inspect output path");
+        assert!(
+            !metadata.file_type().is_symlink(),
+            "build output must not contain symlinks"
+        );
+        if metadata.is_dir() {
+            for entry in std::fs::read_dir(current).expect("read output directory") {
+                let entry = entry.expect("read output entry");
+                collect_tree_files(&entry.path(), files);
+            }
+        } else if metadata.is_file() {
+            files.push(current.to_path_buf());
+        } else {
+            panic!("build output must be regular files");
         }
     }
 

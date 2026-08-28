@@ -4,7 +4,9 @@ import hashlib
 import json
 import pathlib
 import re
+import subprocess
 import sys
+import tempfile
 
 
 EXPECTED_DEPENDENCIES = {
@@ -29,12 +31,6 @@ EXPECTED_DEPENDENCIES = {
     "react-dom": "19.2.8",
     "react-router": "6.30.6",
     "react-router-dom": "6.30.6",
-    # Pure-JS WebGL renderer. It is in the pinned set because a generated game
-    # cannot install it: the workspace contract forbids the agent from touching
-    # package.json or running a package manager, so anything not pinned here is
-    # unreachable to every app this host will ever build. No native binding, so
-    # it does not enter EXPECTED_NATIVE_PACKAGE_BINARIES.
-    "three": "0.185.1",
     "vite": "8.2.1",
     "zod": "4.4.3",
     "zustand": "5.0.15",
@@ -46,24 +42,26 @@ EXPECTED_SCRIPTS = {
     "preview": "vite preview",
 }
 EXPECTED_ROLLDOWN_BINDINGS = {
-    "@rolldown/binding-linux-arm64-musl": "1.2.4",
-    "@rolldown/binding-linux-x64-musl": "1.2.4",
+    "@rolldown/binding-linux-arm64-musl": "1.2.6",
+    "@rolldown/binding-linux-x64-musl": "1.2.6",
 }
 EXPECTED_LIGHTNINGCSS_BINDINGS = {
     "lightningcss-linux-arm64-musl": "1.33.0",
     "lightningcss-linux-x64-musl": "1.33.0",
 }
+EXPECTED_ROLLUP_BINDINGS = {
+    "@rollup/rollup-linux-arm64-musl": "4.44.0",
+    "@rollup/rollup-linux-x64-musl": "4.44.0",
+}
 EXPECTED_NATIVE_PACKAGE_BINARIES = {
     "@rolldown/binding-linux-arm64-musl": "rolldown-binding.linux-arm64-musl.node",
     "@rolldown/binding-linux-x64-musl": "rolldown-binding.linux-x64-musl.node",
-    "@rolldown/binding-linux-arm64-gnu": "rolldown-binding.linux-arm64-gnu.node",
-    "@rolldown/binding-linux-x64-gnu": "rolldown-binding.linux-x64-gnu.node",
+    "@rollup/rollup-linux-arm64-musl": "rollup.linux-arm64-musl.node",
+    "@rollup/rollup-linux-x64-musl": "rollup.linux-x64-musl.node",
     "lightningcss-linux-arm64-musl": "lightningcss.linux-arm64-musl.node",
     "lightningcss-linux-x64-musl": "lightningcss.linux-x64-musl.node",
-    "lightningcss-linux-arm64-gnu": "lightningcss.linux-arm64-gnu.node",
-    "lightningcss-linux-x64-gnu": "lightningcss.linux-x64-gnu.node",
 }
-EXPECTED_ROLLDOWN_VERSION = "1.2.4"
+EXPECTED_ROLLDOWN_VERSION = "1.2.6"
 EXPECTED_LIGHTNINGCSS_VERSION = "1.33.0"
 EXPECTED_WRITABLE_ROOTS = ["app", "components", "lib", "styles", "public"]
 VITE_EXPECTED_WRITABLE_ROOTS = EXPECTED_WRITABLE_ROOTS + ["src"]
@@ -109,11 +107,89 @@ FORBIDDEN_SOURCE_PATTERNS = {
     "server action": re.compile(r"^[\t ]*[\"']use server[\"'];?", re.MULTILINE),
 }
 
+RUNTIME_PROFILE_COMMON_DEPENDENCIES = {
+    "@ionic/react": "9.0.0",
+    "@ionic/react-router": "9.0.0",
+    "@vitejs/plugin-react": "6.0.4",
+    "react": "19.2.8",
+    "react-dom": "19.2.8",
+    "react-router": "6.30.6",
+    "react-router-dom": "6.30.6",
+    "vite": "8.2.1",
+    "zod": "4.4.3",
+    "zustand": "5.0.15",
+}
+RUNTIME_PROFILE_LOCK_PACKAGES = {
+    "rolldown": "1.2.6",
+    "@rolldown/binding-linux-arm64-musl": "1.2.6",
+    "@rolldown/binding-linux-x64-musl": "1.2.6",
+    "@rollup/rollup-linux-arm64-musl": "4.44.0",
+    "@rollup/rollup-linux-x64-musl": "4.44.0",
+    "lightningcss": "1.33.0",
+    "lightningcss-linux-arm64-musl": "1.33.0",
+    "lightningcss-linux-x64-musl": "1.33.0",
+}
+RUNTIME_PROFILE_LOCK_SHA256 = {
+    "react-dom": "ff805143f51e7a9cc31a935495b64f3515a54a6ebb8d4b7374f1d5e33869aabb",
+    "canvas-2d": "ff805143f51e7a9cc31a935495b64f3515a54a6ebb8d4b7374f1d5e33869aabb",
+    "three-3d": "dee30efc799fdf0b859a21b9ba482e931ce117d83253f750f47974aeb623aed6",
+    "phaser-2d": "4673a2fa573ed431b7e48d58fb143bfda8a9ef3e379d63ebd05395d5c4935b95",
+    "babylon-3d": "a2b282f45cb5cfde7cae1fce39c06b0dd943a25ba037b911704727d959de632c",
+}
+RUNTIME_PROFILES = {
+    "react-dom": {
+        "extra_dependencies": {},
+        "host_managed_helpers": [],
+    },
+    "canvas-2d": {
+        "extra_dependencies": {},
+        "host_managed_helpers": ["lib/frame-loop.js"],
+    },
+    "three-3d": {
+        "extra_dependencies": {"three": "0.185.1"},
+        "host_managed_helpers": ["lib/frame-loop.js"],
+    },
+    "phaser-2d": {
+        "extra_dependencies": {"phaser": "4.2.1"},
+        "host_managed_helpers": ["lib/frame-loop.js", "lib/phaser-runtime.js"],
+    },
+    "babylon-3d": {
+        "extra_dependencies": {
+            "@babylonjs/core": "9.22.1",
+            "@babylonjs/havok": "1.3.14",
+            "@babylonjs/loaders": "9.22.1",
+        },
+        "host_managed_helpers": ["lib/frame-loop.js", "lib/babylon-runtime.js"],
+    },
+}
+RUNTIME_PROFILE_HOST_MANAGED_BASE = [
+    ".lingxi",
+    ".gitignore",
+    "LINGXI.md",
+    "index.html",
+    "jsconfig.json",
+    "vite.config.mjs",
+    "package.json",
+    "pnpm-lock.yaml",
+    "pnpm-workspace.yaml",
+    "lib/device-context.js",
+    "lib/lingxi-bridge.js",
+    "lib/platform-adapter.js",
+    "lib/lingxi-provider.jsx",
+]
+RUNTIME_PROFILE_HOST_MANAGED_SUFFIX = [
+    "styles/foundation.css",
+    "node_modules",
+]
+
 
 def expected_native_packages_for(platform: str, family: str) -> dict[str, str]:
     if family == "rolldown":
         bindings = EXPECTED_ROLLDOWN_BINDINGS
         arm64 = "@rolldown/binding-linux-arm64-musl"
+    elif family == "rollup":
+        bindings = EXPECTED_ROLLUP_BINDINGS
+        arm64 = "@rollup/rollup-linux-arm64-musl"
     elif family == "lightningcss":
         bindings = EXPECTED_LIGHTNINGCSS_BINDINGS
         arm64 = "lightningcss-linux-arm64-musl"
@@ -373,275 +449,6 @@ def expected_node(pins: dict) -> str:
     return version
 
 
-def validate_lock(template: pathlib.Path, pins: dict) -> None:
-    package_json = load_json(template / "package.json")
-    lock_path = template / "pnpm-lock.yaml"
-    lock_text = lock_path.read_text(encoding="utf-8")
-    EXPECTED_NODE = expected_node(pins)
-    if package_json.get("engines") != {"node": EXPECTED_NODE}:
-        fail("template package.json must pin Node exactly")
-    # pnpm 11 stopped reading settings from package.json -- it warns
-    # "The \"pnpm\" field in package.json is no longer read by pnpm" and
-    # silently ignores an npm-style top-level "overrides" too. Checking the
-    # package.json field is therefore a check on dead config: the template
-    # carried `overrides: {lightningcss: 1.33.0}` there, the lockfile recorded
-    # no overrides block at all, and the tree resolved TWO lightningcss copies
-    # with 1.32.0 winning the hoisted root -- unsatisfying vite's own ^1.33.0.
-    # Assert it where pnpm actually applies it, and require the lockfile to
-    # show the override was applied rather than merely declared.
-    workspace_settings = load_yaml_mapping(template / "pnpm-workspace.yaml")
-    if workspace_settings.get("overrides") != EXPECTED_OVERRIDES:
-        fail("pnpm-workspace.yaml must pin the deduplicated native CSS override")
-    if "overrides" in package_json:
-        fail("template package.json must not carry overrides: pnpm 11 ignores them")
-    if package_json.get("dependencies") != EXPECTED_DEPENDENCIES:
-        fail("template package.json dependencies must match the fixed runtime")
-    if package_json.get("scripts") != EXPECTED_SCRIPTS:
-        fail("template package.json must expose the standard Vite scripts only")
-
-    if not re.search(r"^lockfileVersion:\s*['\"]?9\.0['\"]?\s*$", lock_text, re.MULTILINE):
-        fail("pnpm-lock.yaml must use lockfileVersion 9")
-    if "importers:" not in lock_text or "packages:" not in lock_text or "snapshots:" not in lock_text:
-        fail("pnpm-lock.yaml is missing importers/packages/snapshots")
-    if "package-lock.json" in lock_text or "next@" in lock_text:
-        fail("pnpm-lock.yaml contains retired npm/Next package metadata")
-    for name, version in EXPECTED_OVERRIDES.items():
-        if not re.search(rf"^overrides:\n(?:  .*\n)*  {re.escape(name)}:\s*{re.escape(version)}\s*$",
-                         lock_text, re.MULTILINE):
-            fail(f"pnpm-lock.yaml does not record the applied override {name}@{version}")
-    for name, version in EXPECTED_DEPENDENCIES.items():
-        pattern = rf"(?ms)^\s+['\"]?{re.escape(name)}['\"]?:\s*\n\s+specifier:\s*{re.escape(version)}\b"
-        if not re.search(pattern, lock_text):
-            fail(f"pnpm-lock importer did not pin {name}@{version}")
-    for name, version in {
-        "rolldown": EXPECTED_ROLLDOWN_VERSION,
-        "lightningcss": EXPECTED_LIGHTNINGCSS_VERSION,
-        **EXPECTED_ROLLDOWN_BINDINGS,
-        **EXPECTED_LIGHTNINGCSS_BINDINGS,
-    }.items():
-        if not re.search(rf"^\s*['\"]?{re.escape(name)}@{re.escape(version)}['\"]?:\s*$", lock_text, re.MULTILINE):
-            fail(f"pnpm-lock packages did not pin {name}@{version}")
-
-    runtime = pins.get("local_app_runtime")
-    expected_runtime = {
-        "template": "lingxi-code/local-apps/templates/vite-react-static-v1",
-        "node": EXPECTED_NODE,
-        "react": EXPECTED_DEPENDENCIES["react"],
-        "react_dom": EXPECTED_DEPENDENCIES["react-dom"],
-        "vite": EXPECTED_DEPENDENCIES["vite"],
-        "rolldown": EXPECTED_ROLLDOWN_VERSION,
-        "rolldown_bindings": EXPECTED_ROLLDOWN_BINDINGS,
-        "lightningcss": EXPECTED_LIGHTNINGCSS_VERSION,
-        "lightningcss_bindings": EXPECTED_LIGHTNINGCSS_BINDINGS,
-        "lockfile": "lingxi-code/local-apps/templates/vite-react-static-v1/pnpm-lock.yaml",
-        # Checked against the file on disk rather than a literal, so a lockfile
-        # edit that forgets to refresh the pin is caught as drift instead of
-        # being frozen into a constant that has to be hand-updated in lockstep.
-        "lockfile_sha256": hashlib.sha256(lock_path.read_bytes()).hexdigest(),
-    }
-    if runtime != expected_runtime:
-        fail("local-app runtime pin manifest diverged from the template lock")
-    lock_digest = hashlib.sha256(lock_path.read_bytes()).hexdigest()
-    if lock_digest != runtime["lockfile_sha256"]:
-        fail("pnpm-lock.yaml bytes diverged from the pinned SHA-256")
-
-
-def validate_workspace_sources(
-    template: pathlib.Path,
-    writable_roots: list[str],
-    top_level_files: set[str],
-    description: str,
-) -> None:
-    """The one source-policy walk both app templates go through.
-
-    Parametrized rather than copied: the Vite fallback used to carry a
-    near-duplicate of this function that had silently dropped the API-route ban
-    and the top-level-config escape hatch, so `index.html` and `vite.config.mjs`
-    were never pattern-scanned at all. A single walk means the next rule added
-    here lands on both templates by construction.
-
-    `top_level_files` are the host-managed files that live outside every
-    writable root and must still be scanned — the Next config, and the Vite
-    entry HTML plus its config.
-    """
-    policy = load_json(template / ".lingxi" / "source-policy.json")
-    if policy.get("agent_writable_roots") != writable_roots:
-        fail(f"{description} agent writable roots must match the fixed source policy")
-    scan_workspace_sources(template, writable_roots, top_level_files, description)
-
-
-def scan_workspace_sources(
-    template: pathlib.Path,
-    writable_roots: list[str],
-    top_level_files: set[str],
-    description: str,
-) -> None:
-    """The symlink / stray-path / forbidden-pattern walk, without reading a policy.
-
-    Split out so a SCAFFOLD SEED can be scanned too. A seed directory holds only
-    editable source; its `.lingxi/source-policy.json` is host-managed and shipped
-    once from the DOM template, and giving each seed its own copy is exactly the
-    duplicate-derivation this split exists to avoid.
-    """
-    allowed_top_level = (
-        set(writable_roots)
-        | top_level_files
-        | {
-            ".gitignore",
-            ".lingxi",
-            "package.json",
-            "pnpm-lock.yaml",
-            "pnpm-workspace.yaml",
-        }
-    )
-    for path in template.rglob("*"):
-        if path.is_symlink():
-            fail(f"symbolic links are forbidden in the {description}: {path}")
-        relative = path.relative_to(template)
-        if relative.parts[0] not in allowed_top_level:
-            fail(f"path is outside the fixed app workspace roots: {relative}")
-        if not path.is_file() or path.suffix not in SOURCE_SUFFIXES:
-            continue
-        if (
-            relative.parts[0] not in writable_roots
-            and relative.as_posix() not in top_level_files
-        ):
-            continue
-        if relative.name in FORBIDDEN_ROUTE_FILES:
-            fail(f"API routes are forbidden: {relative}")
-        text = path.read_text(encoding="utf-8")
-        for label, pattern in FORBIDDEN_SOURCE_PATTERNS.items():
-            if pattern.search(text):
-                fail(f"forbidden {label} in {relative}")
-
-
-def validate_scaffold_metadata(template: pathlib.Path, pins: dict) -> None:
-    manifest = load_json(template / ".lingxi" / "app.manifest.json")
-    if manifest != {
-        "schema_version": 1,
-        "template_id": template.name,
-        "template_version": 3,
-        "runtime_compatibility": ["store-static"],
-        "dependencies": {
-            "node": expected_node(pins),
-            "react": EXPECTED_DEPENDENCIES["react"],
-            "react-dom": EXPECTED_DEPENDENCIES["react-dom"],
-            "vite": EXPECTED_DEPENDENCIES["vite"],
-            "@ionic/react": EXPECTED_DEPENDENCIES["@ionic/react"],
-        },
-        "capabilities": {"collections": [], "network_domains": []},
-    }:
-        fail(f"canonical {template.name} app manifest diverged")
-    design_spec = load_json(template / ".lingxi" / "design-spec.json")
-    if design_spec != {
-        "schema_version": 1,
-        "template_id": template.name,
-        "template_version": 3,
-        "answers": {},
-        "legacy_fields": {},
-    }:
-        fail(f"canonical {template.name} design spec stub diverged")
-
-
-def validate_scaffold_seed(template: pathlib.Path, pins: dict) -> None:
-    """Validate an additional scaffold seed (e.g. the canvas surface).
-
-    A seed ships only editable source plus its own `.lingxi` stubs: the locked
-    manifests, the Vite config, the entry HTML, the bridge and the source policy
-    all come from the DOM template and are re-pinned into every workspace
-    regardless of which seed was used. Without this call a seed would be the one
-    place in the repository whose source is never pattern-scanned.
-    """
-    scan_workspace_sources(
-        template,
-        writable_roots=["app", "src"],
-        top_level_files=set(),
-        description=f"{template.name} scaffold seed",
-    )
-    validate_scaffold_metadata(template, pins)
-
-
-def validate_source_policy(template: pathlib.Path, pins: dict) -> None:
-    validate_workspace_sources(
-        template,
-        writable_roots=VITE_EXPECTED_WRITABLE_ROOTS,
-        top_level_files={
-            "index.html",
-            "jsconfig.json",
-            "vite.config.mjs",
-        },
-        description="app template",
-    )
-    source_policy = load_json(template / ".lingxi" / "source-policy.json")
-    if source_policy.get("host_managed_paths") != [
-        ".lingxi",
-        ".gitignore",
-        "LINGXI.md",
-        "index.html",
-        "jsconfig.json",
-        "vite.config.mjs",
-        "package.json",
-        "pnpm-lock.yaml",
-        "pnpm-workspace.yaml",
-        "lib/device-context.js",
-        "lib/lingxi-bridge.js",
-        "lib/platform-adapter.js",
-        "lib/lingxi-provider.jsx",
-        "styles/foundation.css",
-        "node_modules",
-    ]:
-        fail("app template host-managed paths diverged from build enforcement")
-    gitignore = (template / ".gitignore").read_text(encoding="utf-8").splitlines()
-    if "node_modules/" not in gitignore or "dist/" not in gitignore:
-        fail("app template must ignore per-app dependencies and build output")
-    if (template / "package-lock.json").exists():
-        fail("retired package-lock.json must not be shipped in the app template")
-    workspace_permissions = load_json(template / ".lingxi" / "settings.local.json")
-    if workspace_permissions != {
-        "permissions": {
-            # The three LocalApp* grants mirror the app-scoped workspace lease
-            # (`permission::workspace_lease`): inside an app workspace the agent
-            # builds, reads logs and restarts the preview constantly, and a
-            # prompt on each one made the create flow unusable.
-            "allow": [
-                "Read(./**)",
-                "Edit(./**)",
-                "LocalAppLogs",
-                "LocalAppBuild",
-                "LocalAppRuntime",
-            ],
-            "deny": [
-                "Edit(./.lingxi/**)",
-                "Edit(./.gitignore)",
-                "Edit(./LINGXI.md)",
-                "Edit(./lib/lingxi-bridge.js)",
-            ],
-        }
-    }:
-        fail("app template workspace read/edit permissions diverged")
-    if "package_install" not in source_policy.get("forbidden_features", []):
-        fail("app template must forbid package installation during generation")
-    config = (template / "vite.config.mjs").read_text(encoding="utf-8")
-    out_dir_values = re.findall(
-        r'^[\t ]*outDir\s*:\s*["\']([^"\']+)["\']\s*,?[\t ]*(?://.*)?$',
-        config,
-        flags=re.MULTILINE,
-    )
-    if out_dir_values != ["dist"]:
-        fail("fixed Vite build must use the official dist output directory")
-    compressed_size_values = re.findall(
-        r"^[\t ]*reportCompressedSize\s*:\s*(true|false)\s*,?[\t ]*(?://.*)?$",
-        config,
-        flags=re.MULTILINE,
-    )
-    if compressed_size_values != ["false"]:
-        fail("fixed Vite build must disable compressed-size reporting")
-    package_json = load_json(template / "package.json")
-    if package_json.get("scripts") != EXPECTED_SCRIPTS:
-        fail("canonical Vite template must expose the standard dev/build/preview scripts")
-    validate_scaffold_metadata(template, pins)
-
-
 def validate_sbom(repo: pathlib.Path, template: pathlib.Path) -> None:
     sbom = load_json(repo / "docs" / "mobile-linux" / "sbom" / "local-app-runtime.spdx.json")
     if sbom.get("spdxVersion") != "SPDX-2.3":
@@ -686,10 +493,10 @@ def validate_runtime_policy(repo: pathlib.Path) -> None:
         fail("local-app runtime policy must not pin create-vite scaffolding policy")
     dependency_snapshot = policy.get("dependency_snapshot")
     if dependency_snapshot != {
-        "source": "embedded:vite-react-static-v1/pnpm-lock.yaml",
+        "source": "embedded:runtime-profiles/react-dom/r1/pnpm-lock.yaml",
         "materialize_into": f"{build_root}/node_modules",
         "guest_mount": "forbidden",
-        "selection_policy": "locked_template_only",
+        "selection_policy": "exact_lock_only",
         "install_command": "pnpm install --frozen-lockfile --ignore-scripts --no-runtime --prefer-offline",
     }:
         fail("local-app dependency snapshot policy diverged")
@@ -917,6 +724,9 @@ def validate_create_skill(repo: pathlib.Path) -> None:
         fail("create-local-app skill frontmatter is invalid")
     required_tokens = {
         "LocalAppCreate",
+        "LocalAppRuntimeProfiles",
+        "LocalAppConfirmRuntimeProfile",
+        "runtime_profile_receipt",
         "LocalAppManifest",
         "LocalAppBuild",
         "LocalAppRuntime",
@@ -936,13 +746,23 @@ def validate_create_skill(repo: pathlib.Path) -> None:
         "build/store/dist/",
         "recommended strategy",
         "task-local workflow",
-        "rescore the revised",
-        # The scaffold choice. A skill that never names `surface` leaves the
-        # canvas scaffold unreachable: the engine can materialize it, the tool
-        # accepts it, and nothing would ever ask for it.
-        '"surface":"dom"',
+        "rescore",
+        "revised confirmed specification",
+        "For a `dom` surface",
+        "`fast`, `balanced`, or `thorough`",
+        "for a `canvas` surface, offer",
+        "Never advertise or pass",
+        "`fast` for a canvas surface",
+        "expected_writable_collections",
+        "host reads the materialized manifest and overwrites it",
+        "Do not supply `args.runtime_profile` as an authority",
+        # Runtime profile, not a model-authored surface/renderer, is the
+        # immutable scaffold choice.
+        '"runtime_profile_receipt":"<receipt id>"',
+        "Profile family CANNOT be changed afterwards",
         "`canvas` when the whole interface is one drawn surface",
-        "CANNOT be changed afterwards",
+        "LocalAppConfirmDependencyChange",
+        "LocalAppUpdateDependencies",
         # The display name is the model's to write. Without this the engine
         # falls back to the brief's first 24 characters, which is what the
         # deferred create flow exists to stop.
@@ -1000,6 +820,9 @@ def validate_create_skill(repo: pathlib.Path) -> None:
         "Complexity score",
         "agent_calls",
         "verification_mode",
+        "args.expected_writable_collections",
+        "Host-materialized expected_writable_collections",
+        "Return not_applicable only when the host-materialized expected_writable_collections is empty",
         "streamLlmChat",
         "getClipboardText",
         "setClipboardText",
@@ -1023,19 +846,68 @@ def validate_create_skill(repo: pathlib.Path) -> None:
     # replaces `data_roundtrip` for an app that declares no collection.
     canvas_tokens = {
         "app/screens/game-screen.jsx",
-        "createFrameLoop in src/game/frame-loop.js",
+        "createFrameLoop in lib/frame-loop.js",
         "Keep per-frame simulation state in a ref",
         "There is no not_applicable: this app draws its whole interface",
         "only a difference proves the loop is running",
         "cannot be driven by the host automation path",
         "NEVER from @ionic/core/components",
-        "three@0.185.1 is in the locked set",
+        "locked `three@0.185.1` runtime",
     }
     missing_canvas = sorted(
         token for token in workflow_tokens | canvas_tokens if token not in canvas_workflow
     )
     if missing_canvas:
         fail(f"local-canvas-build workflow is missing contract tokens: {missing_canvas}")
+    if "allowedStrategies: ['balanced', 'thorough']" not in canvas_workflow:
+        fail("local-canvas-build must allow exactly balanced and thorough strategies")
+
+    handoff_path = repo / "docs" / "local-apps" / "HANDOFF.md"
+    try:
+        handoff = handoff_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        fail(f"missing local-app handoff: {exc}")
+    # Keep the handoff tied to the scaffold that the host actually seeds. The
+    # old Template v2 paragraph described an unavailable Tailwind/shadcn stack
+    # and omitted the provider/bridge helpers that generated source must use.
+    handoff_tokens = {
+        "DOM workflow shape",
+        "Canvas workflow shape",
+        "Shared workflow core",
+        "vite-react-static-v1",
+        "vite-react-canvas-v1",
+        "@ionic/react",
+        "LingXiBridgeProvider",
+        "IonReactHashRouter",
+        "lib/lingxi-provider.jsx",
+        "queryCollection",
+        "requestLlmChat",
+        "expected_writable_collections",
+    }
+    missing_handoff = sorted(token for token in handoff_tokens if token not in handoff)
+    if missing_handoff:
+        fail(f"local-app handoff is missing scaffold/workflow contract tokens: {missing_handoff}")
+    if "Template v2 bundles the JSX Vite/Tailwind foundation" in handoff:
+        fail("local-app handoff still describes the retired Template v2 scaffold")
+    # The host-chrome contract, carried VERBATIM by both shapes: the run surface
+    # has no title bar and no back button, and the host paints one control over
+    # the bottom-leading corner. Without these two sentences a generated app can
+    # ship with zero bars and no way out, and nothing downstream notices — the
+    # build succeeds and the DOM snapshot of a bar-less page is perfectly valid.
+    # Only the two invariant clauses are pinned here; the keep-clear dimensions
+    # are derived from the clients' tap targets and are pinned once, in
+    # `builtins.rs`, so a legitimate re-derivation touches one gate and not two.
+    host_chrome_tokens = {
+        "The host draws NO chrome around a running app",
+        "The host floats ONE control over the running page in the BOTTOM-LEADING corner",
+    }
+    for label, script in (
+        ("local-app-build", workflow),
+        ("local-canvas-build", canvas_workflow),
+    ):
+        missing_chrome = sorted(token for token in host_chrome_tokens if token not in script)
+        if missing_chrome:
+            fail(f"{label} workflow is missing host-chrome contract tokens: {missing_chrome}")
 
 
 def validate_product_model_name_absence(repo: pathlib.Path) -> None:
@@ -1063,49 +935,296 @@ def validate_product_model_name_absence(repo: pathlib.Path) -> None:
                 continue
 
 
+def runtime_profile_template_root(repo: pathlib.Path) -> pathlib.Path:
+    return repo / "lingxi-code" / "local-apps" / "templates" / "runtime-profiles"
+
+
+def expected_runtime_profile_dependencies(profile_name: str) -> dict[str, str]:
+    profile = RUNTIME_PROFILES.get(profile_name)
+    if profile is None:
+        fail(f"unknown runtime profile: {profile_name}")
+    return dict(RUNTIME_PROFILE_COMMON_DEPENDENCIES | profile["extra_dependencies"])
+
+
+def expected_runtime_profile_host_managed_paths(profile_name: str) -> list[str]:
+    profile = RUNTIME_PROFILES.get(profile_name)
+    if profile is None:
+        fail(f"unknown runtime profile: {profile_name}")
+    return [
+        *RUNTIME_PROFILE_HOST_MANAGED_BASE,
+        *profile["host_managed_helpers"],
+        *RUNTIME_PROFILE_HOST_MANAGED_SUFFIX,
+    ]
+
+
+def lock_contains_package(lock_text: str, name: str, version: str) -> bool:
+    return re.search(
+        rf"^\s*['\"]?{re.escape(name)}@{re.escape(version)}['\"]?:\s*$",
+        lock_text,
+        re.MULTILINE,
+    ) is not None
+
+
+def validate_runtime_profile_lock(
+    profile_name: str,
+    template: pathlib.Path,
+    pins: dict,
+) -> None:
+    package_json = load_json(template / "package.json")
+    lock_path = template / "pnpm-lock.yaml"
+    lock_text = lock_path.read_text(encoding="utf-8")
+    expected_dependencies = expected_runtime_profile_dependencies(profile_name)
+    if package_json.get("engines") != {"node": expected_node(pins)}:
+        fail(f"{profile_name} package.json must pin Node exactly")
+    if package_json.get("dependencies") != expected_dependencies:
+        fail(f"{profile_name} package.json dependencies diverged from the runtime-profile contract")
+    if package_json.get("scripts") != EXPECTED_SCRIPTS:
+        fail(f"{profile_name} package.json must expose the standard Vite scripts only")
+    if "overrides" in package_json:
+        fail(f"{profile_name} package.json must not carry pnpm overrides")
+    if hashlib.sha256(lock_path.read_bytes()).hexdigest() != RUNTIME_PROFILE_LOCK_SHA256[profile_name]:
+        fail(f"{profile_name} pnpm-lock.yaml bytes diverged from the reviewed runtime-profile lock")
+
+    workspace_settings = load_yaml_mapping(template / "pnpm-workspace.yaml")
+    expected_workspace_settings = {
+        "lockfile": "pnpm-lock.yaml",
+        "nodeLinker": "hoisted",
+        "packageImportMethod": "clone-or-copy",
+        "verifyStoreIntegrity": "true",
+        "strictStorePkgContentCheck": "true",
+        "ignoreScripts": "true",
+        "preferFrozenLockfile": "true",
+        "overrides": {"lightningcss": "1.33.0"},
+    }
+    if workspace_settings != expected_workspace_settings:
+        fail(f"{profile_name} pnpm-workspace.yaml diverged from the fixed runtime-profile settings")
+    if not re.search(r"^lockfileVersion:\s*['\"]?9\.0['\"]?\s*$", lock_text, re.MULTILINE):
+        fail(f"{profile_name} pnpm-lock.yaml must use lockfileVersion 9")
+    if "importers:" not in lock_text or "packages:" not in lock_text or "snapshots:" not in lock_text:
+        fail(f"{profile_name} pnpm-lock.yaml is missing importers/packages/snapshots")
+    for name, version in expected_dependencies.items():
+        pattern = rf"(?ms)^\s+['\"]?{re.escape(name)}['\"]?:\s*\n\s+specifier:\s*{re.escape(version)}\b"
+        if not re.search(pattern, lock_text):
+            fail(f"{profile_name} pnpm-lock importer did not pin {name}@{version}")
+    for name, version in RUNTIME_PROFILE_LOCK_PACKAGES.items():
+        if not lock_contains_package(lock_text, name, version):
+            fail(f"{profile_name} pnpm-lock did not pin {name}@{version}")
+
+
+def validate_base_seed_profile_relationships(repo: pathlib.Path, pins: dict) -> None:
+    base_template = repo / pins["local_app_runtime"]["template"]
+    if base_template != runtime_profile_template_root(repo) / "react-dom" / "r1":
+        fail("bundled local-app dependency seed must point to runtime-profiles/react-dom/r1")
+    base_lock_sha = hashlib.sha256((base_template / "pnpm-lock.yaml").read_bytes()).hexdigest()
+    if pins["local_app_runtime"]["lockfile_sha256"] != base_lock_sha:
+        fail("bundled local-app dependency seed lock SHA diverged from the base runtime profile")
+
+    canvas_lock_sha = hashlib.sha256(
+        (runtime_profile_template_root(repo) / "canvas-2d" / "r1" / "pnpm-lock.yaml").read_bytes()
+    ).hexdigest()
+    if canvas_lock_sha != base_lock_sha:
+        fail("react_dom and canvas_2d must share the engine-free bundled seed lock")
+    for profile_name in ("three-3d", "phaser-2d", "babylon-3d"):
+        profile_lock_sha = hashlib.sha256(
+            (runtime_profile_template_root(repo) / profile_name / "r1" / "pnpm-lock.yaml").read_bytes()
+        ).hexdigest()
+        if profile_lock_sha == base_lock_sha:
+            fail(f"{profile_name} must not share the engine-free bundled seed lock")
+
+    package_json = load_json(base_template / "package.json")
+    dependencies = package_json.get("dependencies", {})
+    forbidden_engine_packages = {"three", "phaser", "@babylonjs/core", "@babylonjs/loaders", "@babylonjs/havok"}
+    present = sorted(package for package in forbidden_engine_packages if package in dependencies)
+    if present:
+        fail(f"bundled local-app dependency seed must remain engine-free, found {present}")
+    lock_text = (base_template / "pnpm-lock.yaml").read_text(encoding="utf-8")
+    forbidden_lock_entries = []
+    for package in forbidden_engine_packages:
+        if re.search(rf"^\s*['\"]?{re.escape(package)}@", lock_text, re.MULTILINE):
+            forbidden_lock_entries.append(package)
+    if forbidden_lock_entries:
+        fail(
+            "bundled local-app dependency seed lock must remain engine-free, found "
+            f"{sorted(forbidden_lock_entries)}"
+        )
+    expected_runtime = {
+        "template": "lingxi-code/local-apps/templates/runtime-profiles/react-dom/r1",
+        "node": expected_node(pins),
+        "react": EXPECTED_DEPENDENCIES["react"],
+        "react_dom": EXPECTED_DEPENDENCIES["react-dom"],
+        "vite": EXPECTED_DEPENDENCIES["vite"],
+        "rolldown": EXPECTED_ROLLDOWN_VERSION,
+        "rolldown_bindings": EXPECTED_ROLLDOWN_BINDINGS,
+        "rollup": "4.44.0",
+        "rollup_bindings": EXPECTED_ROLLUP_BINDINGS,
+        "lightningcss": EXPECTED_LIGHTNINGCSS_VERSION,
+        "lightningcss_bindings": EXPECTED_LIGHTNINGCSS_BINDINGS,
+        "lockfile": "lingxi-code/local-apps/templates/runtime-profiles/react-dom/r1/pnpm-lock.yaml",
+        "lockfile_sha256": base_lock_sha,
+    }
+    if pins.get("local_app_runtime") != expected_runtime:
+        fail("bundled local-app dependency seed pins diverged from the engine-free base profile")
+
+
+def scan_runtime_profile_sources(template: pathlib.Path) -> None:
+    writable_roots = set(VITE_EXPECTED_WRITABLE_ROOTS)
+    allowed_top_level = {
+        *writable_roots,
+        ".gitignore",
+        ".lingxi",
+        "index.html",
+        "jsconfig.json",
+        "vite.config.mjs",
+        "package.json",
+        "pnpm-lock.yaml",
+        "pnpm-workspace.yaml",
+        "node_modules",
+        "dist",
+    }
+    for path in template.rglob("*"):
+        relative = path.relative_to(template)
+        if relative.parts[0] in {"node_modules", "dist"}:
+            continue
+        if path.is_symlink():
+            fail(f"symbolic links are forbidden in runtime profile sources: {relative}")
+        if relative.parts[0] not in allowed_top_level:
+            fail(f"runtime profile path is outside the fixed workspace roots: {relative}")
+        if not path.is_file() or path.suffix not in SOURCE_SUFFIXES:
+            continue
+        if relative.name in FORBIDDEN_ROUTE_FILES:
+            fail(f"API routes are forbidden: {relative}")
+        text = path.read_text(encoding="utf-8")
+        for label, pattern in FORBIDDEN_SOURCE_PATTERNS.items():
+            if pattern.search(text):
+                fail(f"forbidden {label} in {relative}")
+
+
+def validate_runtime_profile_source_policy(profile_name: str, template: pathlib.Path) -> None:
+    source_policy = load_json(template / ".lingxi" / "source-policy.json")
+    if source_policy.get("schema_version") != 1:
+        fail(f"{profile_name} source policy schema_version must remain 1")
+    if source_policy.get("agent_writable_roots") != VITE_EXPECTED_WRITABLE_ROOTS:
+        fail(f"{profile_name} source policy writable roots diverged")
+    expected_host_managed = expected_runtime_profile_host_managed_paths(profile_name)
+    if source_policy.get("host_managed_paths") != expected_host_managed:
+        fail(f"{profile_name} source policy host-managed paths diverged")
+    if set(source_policy.get("forbidden_features", [])) != {
+        "arbitrary_javascript_bridge_actions",
+        "direct_network_calls",
+        "eval",
+        "external_scripts",
+        "package_install",
+        "server_actions",
+        "symbolic_links",
+    }:
+        fail(f"{profile_name} source policy forbidden features diverged")
+    for helper in expected_host_managed:
+        if "/" in helper and helper not in {"node_modules"} and not (template / helper).is_file():
+            fail(f"{profile_name} source policy references a missing managed helper: {helper}")
+    lingxi_dir = template / ".lingxi"
+    lingering = sorted(
+        path.relative_to(lingxi_dir).as_posix()
+        for path in lingxi_dir.rglob("*")
+        if path.is_file() or path.is_symlink()
+    )
+    if lingering != ["source-policy.json"]:
+        fail(f"{profile_name} runtime profile must keep only .lingxi/source-policy.json, found {lingering}")
+    config = (template / "vite.config.mjs").read_text(encoding="utf-8")
+    compressed_size_values = re.findall(
+        r"^[\t ]*reportCompressedSize\s*:\s*(true|false)\s*,?[\t ]*(?://.*)?$",
+        config,
+        flags=re.MULTILINE,
+    )
+    if compressed_size_values != ["false"]:
+        fail(f"{profile_name} fixed Vite build must disable compressed-size reporting")
+    out_dir_values = re.findall(
+        r'^[\t ]*outDir\s*:\s*["\']([^"\']+)["\']\s*,?[\t ]*(?://.*)?$',
+        config,
+        flags=re.MULTILINE,
+    )
+    if out_dir_values != ["dist"]:
+        fail(f"{profile_name} fixed Vite build must use the official dist output directory")
+    scan_runtime_profile_sources(template)
+
+
+def validate_runtime_profile_sbom(
+    repo: pathlib.Path,
+    profile_name: str,
+    template: pathlib.Path,
+) -> None:
+    generator = repo / "lingxi-code" / "scripts" / "mobile-linux" / "generate-local-app-sbom.py"
+    with tempfile.TemporaryDirectory(prefix=f"local-app-sbom-{profile_name}-") as temp_root:
+        output = pathlib.Path(temp_root) / "runtime.spdx.json"
+        subprocess.run(
+            [sys.executable, str(generator), "--lock", str(template / "pnpm-lock.yaml"), "--output", str(output)],
+            check=True,
+        )
+        sbom = load_json(output)
+        if sbom.get("spdxVersion") != "SPDX-2.3":
+            fail(f"{profile_name} generated SBOM must remain SPDX-2.3")
+        packages = sbom.get("packages")
+        if not isinstance(packages, list) or len(packages) != 1:
+            fail(f"{profile_name} generated SBOM must describe exactly one lockfile package")
+        lock_digest = hashlib.sha256((template / "pnpm-lock.yaml").read_bytes()).hexdigest()
+        package = packages[0]
+        if package.get("checksums") != [{"algorithm": "SHA256", "checksumValue": lock_digest}]:
+            fail(f"{profile_name} generated SBOM checksum must match pnpm-lock.yaml")
+        if not str(sbom.get("documentNamespace", "")).endswith(lock_digest):
+            fail(f"{profile_name} generated SBOM namespace must end with the lock digest")
+
+
+def validate_runtime_profiles(
+    repo: pathlib.Path,
+    pins: dict,
+    selected_profile: str | None,
+) -> None:
+    root = runtime_profile_template_root(repo)
+    profile_names = [selected_profile] if selected_profile else sorted(RUNTIME_PROFILES)
+    for profile_name in profile_names:
+        if profile_name not in RUNTIME_PROFILES:
+            fail(f"unknown runtime profile: {profile_name}")
+        template = root / profile_name / "r1"
+        if not template.is_dir():
+            fail(f"runtime profile template is missing: {template}")
+        validate_runtime_profile_lock(profile_name, template, pins)
+        validate_runtime_profile_source_policy(profile_name, template)
+        validate_runtime_profile_sbom(repo, profile_name, template)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--repo-root", required=True)
     parser.add_argument("--release", action="store_true")
     parser.add_argument("--apk-dir")
-    parser.add_argument("--template")
-    parser.add_argument("--vite-template")
+    parser.add_argument("--profile", choices=sorted(RUNTIME_PROFILES), help="validate one runtime profile only")
+    parser.add_argument("--template", help="override a single runtime profile r1 directory")
     args = parser.parse_args()
 
     repo = pathlib.Path(args.repo_root).resolve()
     pins = load_json(repo / "docs" / "mobile-linux" / "local-app-runtime-pins.json")
-    template = (
-        pathlib.Path(args.template).resolve()
-        if args.template
-        else repo / pins.get("local_app_runtime", {}).get("template", "")
-    )
-    vite_template = (
-        pathlib.Path(args.vite_template).resolve()
-        if args.vite_template
-        else template
-    )
     validate_apk_pins(
         pins,
         release=args.release,
         apk_dir=pathlib.Path(args.apk_dir).resolve() if args.apk_dir else None,
     )
-    validate_lock(template, pins)
-    validate_source_policy(template, pins)
-    if vite_template != template:
-        validate_source_policy(vite_template, pins)
-    # Unconditional, like every other check here: gating on `is_dir()` made the
-    # one directory this verifier calls "never pattern-scanned elsewhere" fail
-    # OPEN the moment it is renamed, moved, or missing from a filtered checkout
-    # — while `local_apps_build.rs` still embeds those exact paths.
-    canvas_seed = template.parent / "vite-react-canvas-v1"
-    if not canvas_seed.is_dir():
-        fail(f"canvas scaffold seed is missing: {canvas_seed}")
-    validate_scaffold_seed(canvas_seed, pins)
-    validate_sbom(repo, template)
+    if args.template:
+        if not args.profile:
+            fail("--template requires --profile so the expected runtime profile contract is known")
+        template = pathlib.Path(args.template).resolve()
+        validate_runtime_profile_lock(args.profile, template, pins)
+        validate_runtime_profile_source_policy(args.profile, template)
+        validate_runtime_profile_sbom(repo, args.profile, template)
+    else:
+        template = repo / pins.get("local_app_runtime", {}).get("template", "")
+        validate_runtime_profile_lock("react-dom", template, pins)
+        validate_runtime_profile_source_policy("react-dom", template)
+        validate_base_seed_profile_relationships(repo, pins)
+        validate_sbom(repo, template)
+        validate_runtime_profiles(repo, pins, args.profile)
     validate_runtime_policy(repo)
     validate_create_skill(repo)
     validate_product_model_name_absence(repo)
-    print("local-app supply-chain pins verified")
+    print("local-app runtime profile supply-chain pins verified")
 
 
 if __name__ == "__main__":

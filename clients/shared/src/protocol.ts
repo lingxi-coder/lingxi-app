@@ -34,7 +34,7 @@
 export const BRIDGE_PROTOCOL_VERSION = '0.2.0';
 
 /** `client-protocol` DTO contract version this SDK speaks. */
-export const CLIENT_PROTOCOL_VERSION = '8.0.0';
+export const CLIENT_PROTOCOL_VERSION = '9.0.0';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // commands.rs
@@ -167,18 +167,17 @@ export type ClientCommand =
       workflow_model?: string;
       conversation_id?: string;
       /**
-       * Which scaffold to lay down. Omitted means the caller expressed no
-       * preference and the host applies the routed default; a client that
-       * shows the user a choice must send what the user actually saw, because
-       * the surface is immutable once scaffolded.
+       * Retained only for protocol-v9 error compatibility. New clients create
+       * a `shell` with this omitted; the native runtime-profile selector later
+       * determines the immutable surface and mints the scaffold receipt.
        */
       surface?: AppSurfaceDto;
       /**
        * `shell` creates the empty shell only (the record lands with
-       * `scaffolded: false` and no scaffold); `scaffolded` creates and
-       * scaffolds in one step. Required — there is no default. In `shell` mode
-       * `surface` must be omitted: the shape is decided when the scaffold
-       * lands, not before.
+       * `scaffolded: false` and no scaffold). `scaffolded` is retained only so
+       * the v9 host can return an explicit error directing old clients through
+       * native profile selection and receipt-bound scaffold. Required — there
+       * is no default. In `shell` mode `surface` must be omitted.
        */
       mode: AppCreateModeDto;
       /**
@@ -203,6 +202,16 @@ export type ClientCommand =
       type: 'resolve_app_capability_request';
       request_id: string;
       decision: AppAuthorizationDecisionDto;
+    }
+  | {
+      type: 'resolve_app_runtime_profile_selection';
+      request_id: string;
+      selected_family?: AppRuntimeProfileDto;
+    }
+  | {
+      type: 'resolve_app_dependency_change_confirmation';
+      request_id: string;
+      approved: boolean;
     }
   | {
       type: 'resolve_app_profile_proposal';
@@ -800,11 +809,18 @@ export type AppCreateOriginDto = 'chat' | 'library';
  */
 export type AppSurfaceDto = 'dom' | 'canvas';
 
+export type AppRuntimeProfileDto =
+  | 'react_dom'
+  | 'canvas_2d'
+  | 'three_3d'
+  | 'phaser_2d'
+  | 'babylon_3d';
+
 /**
  * How a `create_app` creates the app (commands.rs `AppCreateModeDto`) — the
- * same concept, with the same names, as the engine's `local_apps::CreateMode`.
- * `shell` is the empty shell the "+" button creates before the user confirms a
- * shape; `scaffolded` creates and scaffolds in one step.
+ * `shell` is the only accepted protocol-v9 mode. `scaffolded` is retained as a
+ * decodable wire value so the host can reject it with guidance to use native
+ * runtime-profile confirmation and a one-shot scaffold receipt.
  */
 export type AppCreateModeDto = 'shell' | 'scaffolded';
 
@@ -928,8 +944,8 @@ export type AppRuntimeRecoveryStateDto =
 /** Generated application manifest (local_apps.rs `AppManifestDto`). */
 export interface AppManifestDto {
   schema_version: number;
-  /** Runtime API major; legacy manifests are readable but not mountable in v2. */
-  runtime_api_version?: number;
+  /** Runtime API major; schema v2 requires this field explicitly. */
+  runtime_api_version: number;
   app_id: string;
   name: string;
   design_revision: number;
@@ -939,6 +955,36 @@ export interface AppManifestDto {
   capabilities: AppCapabilityKindDto[];
   /** Native target the app was generated for; host-derived, absent when unknown. */
   device_context?: DeviceContextDto;
+  /** Persisted scaffold surface; absent only for an unscaffolded shell. */
+  surface?: AppSurfaceDto;
+  runtime_profile?: AppRuntimeProfileBindingDto;
+  dependency_snapshot?: AppDependencySnapshotDto;
+}
+
+export interface AppRuntimeProfileBindingDto {
+  family: AppRuntimeProfileDto;
+  revision: number;
+  contractSha256: string;
+}
+
+/** Host-derived health of a pinned runtime profile and its evidence. */
+export type AppRuntimeProfileStatusDto =
+  | 'verified'
+  | 'dependencies_dirty'
+  | 'core_dependency_drift'
+  | 'rebuild_required'
+  | 'migration_available'
+  | 'runtime_bundle_missing'
+  | 'runtime_contract_corrupt';
+
+export interface AppDependencySnapshotDto {
+  requestedSha256: string;
+  packageSha256: string;
+  lockfileSha256: string;
+  dependencyTreeSha256: string;
+  sbomSha256: string;
+  toolchainKey: string;
+  verifiedProfileContractSha256: string;
 }
 
 /**
@@ -965,6 +1011,7 @@ export interface AppRuntimeDetailsDto {
 export interface AppDetailsDto {
   app: AppRecordDto;
   manifest?: AppManifestDto;
+  runtime_profile_status?: AppRuntimeProfileStatusDto;
   runtime: AppRuntimeDetailsDto;
   checkpoints: AppCheckpointDto[];
 }
@@ -1201,6 +1248,8 @@ export type AppCapabilityKindDto =
   | 'ui_control'
   | 'network_domain'
   | 'restore_checkpoint'
+  | 'runtime_profile_selection'
+  | 'dependency_change'
   | 'camera'
   | 'photo_library'
   | 'microphone'
@@ -1231,6 +1280,53 @@ export interface AppCapabilityRequestDto {
   reason: string;
 }
 
+export interface AppRuntimeProfilePackageDto {
+  name: string;
+  version: string;
+}
+
+export interface AppRuntimeProfileOptionDto {
+  family: AppRuntimeProfileDto;
+  revision: number;
+  contractSha256: string;
+  surface: AppSurfaceDto;
+  corePackages: AppRuntimeProfilePackageDto[];
+  cacheStatus: string;
+  downloadStatus: string;
+  available: boolean;
+  reason?: string;
+}
+
+export interface AppRuntimeProfileSelectionRequestDto {
+  requestId: string;
+  appId: string;
+  reason: string;
+  recommendedFamily?: AppRuntimeProfileDto;
+  options: AppRuntimeProfileOptionDto[];
+}
+
+export type AppDependencyChangeKindDto = 'add' | 'update' | 'remove';
+
+export interface AppDependencyChangeDto {
+  kind: AppDependencyChangeKindDto;
+  package: string;
+  version?: string;
+  cacheStatus: string;
+  downloadStatus: string;
+}
+
+export interface AppDependencyChangeConfirmationRequestDto {
+  requestId: string;
+  appId: string;
+  reason: string;
+  changes: AppDependencyChangeDto[];
+  licenseRisk: string;
+  sbomRisk: string;
+  lifecycleScriptsBlocked: boolean;
+  nativeAddonsBlocked: boolean;
+  rollbackPolicy: string;
+}
+
 /** User decision for data/UI/capability requests (local_apps.rs `AppAuthorizationDecisionDto`). */
 export type AppAuthorizationDecisionDto =
   | 'deny'
@@ -1251,6 +1347,8 @@ export type AppEventDto =
   | { type: 'app_bridge_response'; response: AppBridgeResponseDto }
   | { type: 'app_ui_request'; request: AppUiRequestDto }
   | { type: 'app_capability_requested'; request: AppCapabilityRequestDto }
+  | { type: 'app_runtime_profile_selection_requested'; request: AppRuntimeProfileSelectionRequestDto }
+  | { type: 'app_dependency_change_confirmation_requested'; request: AppDependencyChangeConfirmationRequestDto }
   | { type: 'app_checkpoints_changed'; app_id: string; checkpoints: AppCheckpointDto[] }
   /** An app-initiated `llm.chat` started/finished; drives the "calling AI" indicator. */
   | { type: 'app_llm_activity_changed'; app_id: string; active: boolean }

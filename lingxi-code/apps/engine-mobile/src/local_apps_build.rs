@@ -2,11 +2,23 @@
 //! Vite build, extracted from the generation pipeline so that
 //! scaffold/build no longer belongs to the LLM-generation executor.
 
+use crate::local_app_runtime_profiles::{
+    contract_for_binding as runtime_profile_contract_for_binding, BABYLON_3D_EDITABLE_FILES,
+    BABYLON_3D_MANAGED_FILES, CANVAS_2D_EDITABLE_FILES, CANVAS_2D_MANAGED_FILES,
+    EFFECTIVE_PACKAGE_FILE_REL, LOCKFILE_FILE_REL, PHASER_2D_EDITABLE_FILES,
+    PHASER_2D_MANAGED_FILES, REACT_DOM_EDITABLE_FILES, REACT_DOM_MANAGED_FILES, REQUESTED_FILE_REL,
+    SBOM_FILE_REL, SNAPSHOT_FILE_REL, THREE_3D_EDITABLE_FILES, THREE_3D_MANAGED_FILES,
+    TREE_PROOF_FILE_REL,
+};
 use crate::local_apps_host::LocalAppsHostBroker;
-use local_apps::{AppDataStore, AppError, AppLayout, AppManifest};
+use local_apps::{
+    AppDataStore, AppError, AppLayout, AppManifest, AppRecord, AppRuntimeProfile,
+    AppRuntimeProfileBinding,
+};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use sha2::{Digest, Sha256};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -19,25 +31,49 @@ const BUILD_TIMEOUT_MS: u64 = 30 * 60 * 1_000;
 const LOW_MEMORY_BUILD_BUDGET_MB: u32 = 2_048;
 const MID_MEMORY_BUILD_BUDGET_MB: u32 = 3_072;
 const HIGH_MEMORY_BUILD_BUDGET_MB: u32 = 4_096;
-const DEPENDENCY_READY_WAIT_TIMEOUT_MS: u64 = 120_000;
 const MAX_BUILD_LOG_BYTES: u64 = 1 * 1024 * 1024;
 const BUILD_PROVENANCE_FILE: &str = "build.json";
-const BUILD_INPUT_MANIFEST_FILE: &str = "input-manifest.json";
-const BUILD_PROVENANCE_VERSION: u8 = 2;
+const BUILD_PROVENANCE_VERSION: u8 = 3;
 /// Vite's default deployment directory, relative to the isolated project root.
 pub(crate) const VITE_OUTPUT_DIR: &str = "dist";
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-struct BuildInputEntry {
-    path: String,
-    size: u64,
-    modified_ns: u128,
-    content_sha256: String,
+/// Host-derived health of a scaffolded Local App runtime profile.
+///
+/// This is deliberately a state classification rather than an error string.
+/// Details screens and MCP callers need to distinguish a user-requested
+/// dependency change from a damaged runtime contract without parsing build
+/// errors. The classifier below is read-only: it never repairs managed files,
+/// installs packages, scans app-owned source, or changes the manifest.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AppRuntimeProfileStatus {
+    Verified,
+    DependenciesDirty,
+    CoreDependencyDrift,
+    RebuildRequired,
+    MigrationAvailable,
+    RuntimeBundleMissing,
+    RuntimeContractCorrupt,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct BuildInputManifest {
-    files: Vec<BuildInputEntry>,
+impl AppRuntimeProfileStatus {
+    /// Stable wire spelling used by the client protocol and MCP responses.
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Verified => "verified",
+            Self::DependenciesDirty => "dependencies_dirty",
+            Self::CoreDependencyDrift => "core_dependency_drift",
+            Self::RebuildRequired => "rebuild_required",
+            Self::MigrationAvailable => "migration_available",
+            Self::RuntimeBundleMissing => "runtime_bundle_missing",
+            Self::RuntimeContractCorrupt => "runtime_contract_corrupt",
+        }
+    }
+}
+
+impl std::fmt::Display for AppRuntimeProfileStatus {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -45,22 +81,41 @@ struct BuildProvenance {
     version: u8,
     #[serde(rename = "buildKey")]
     build_key: String,
+    #[serde(rename = "runtimeContractSha256")]
+    runtime_contract_sha256: String,
+    #[serde(rename = "dependencySnapshotSha256")]
+    dependency_snapshot_sha256: String,
     #[serde(rename = "outputSha256")]
     output_sha256: String,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum LocalAppBuildTarget {
-    /// Routed, multi-screen Ionic interface.
-    ViteReactStaticV1,
-    /// One drawn surface owning its own frame loop.
-    ViteReactCanvasV1,
+    /// Profile-aware routed scaffold.
+    ReactDomR1,
+    /// Profile-aware Canvas 2D scaffold.
+    Canvas2dR1,
+    /// Profile-aware Three.js scaffold.
+    Three3dR1,
+    /// Profile-aware Phaser scaffold.
+    Phaser2dR1,
+    /// Profile-aware Babylon scaffold.
+    Babylon3dR1,
 }
 
 impl LocalAppBuildTarget {
-    pub(crate) fn from_surface(surface: local_apps::AppSurface) -> Self {
-        match surface {
-            local_apps::AppSurface::Dom => Self::ViteReactStaticV1,
-            local_apps::AppSurface::Canvas => Self::ViteReactCanvasV1,
+    pub(crate) fn from_runtime_binding(
+        binding: &AppRuntimeProfileBinding,
+    ) -> Result<Self, AppError> {
+        let contract = runtime_profile_contract_for_binding(binding)?;
+        match (contract.family, contract.revision) {
+            (AppRuntimeProfile::ReactDom, 1) => Ok(Self::ReactDomR1),
+            (AppRuntimeProfile::Canvas2d, 1) => Ok(Self::Canvas2dR1),
+            (AppRuntimeProfile::Three3d, 1) => Ok(Self::Three3dR1),
+            (AppRuntimeProfile::Phaser2d, 1) => Ok(Self::Phaser2dR1),
+            (AppRuntimeProfile::Babylon3d, 1) => Ok(Self::Babylon3dR1),
+            (family, revision) => Err(AppError::NotYetAvailable(format!(
+                "runtime profile {family} r{revision} has no build bundle in this host build"
+            ))),
         }
     }
 
@@ -77,8 +132,10 @@ impl LocalAppBuildTarget {
     #[cfg(test)]
     fn surface(self) -> local_apps::AppSurface {
         match self {
-            Self::ViteReactStaticV1 => local_apps::AppSurface::Dom,
-            Self::ViteReactCanvasV1 => local_apps::AppSurface::Canvas,
+            Self::ReactDomR1 => local_apps::AppSurface::Dom,
+            Self::Canvas2dR1 | Self::Three3dR1 | Self::Phaser2dR1 | Self::Babylon3dR1 => {
+                local_apps::AppSurface::Canvas
+            }
         }
     }
 
@@ -88,112 +145,47 @@ impl LocalAppBuildTarget {
     /// looking for screens and a router that workspace does not contain.
     pub(crate) fn template_id(self) -> &'static str {
         match self {
-            Self::ViteReactStaticV1 => "vite-react-static-v1",
-            Self::ViteReactCanvasV1 => "vite-react-canvas-v1",
+            Self::ReactDomR1 => "runtime-profile/react-dom/r1",
+            Self::Canvas2dR1 => "runtime-profile/canvas-2d/r1",
+            Self::Three3dR1 => "runtime-profile/three-3d/r1",
+            Self::Phaser2dR1 => "runtime-profile/phaser-2d/r1",
+            Self::Babylon3dR1 => "runtime-profile/babylon-3d/r1",
         }
     }
 
-    /// Discriminates the build cache. Two scaffolds can produce the same file
-    /// set for a trivial app, and without this the second one would be served
-    /// the first one's cached output.
-    fn cache_tag(self) -> &'static [u8] {
+    #[cfg(test)]
+    fn runtime_profile(self) -> AppRuntimeProfile {
         match self {
-            Self::ViteReactStaticV1 => b"template=vite-react-static-v1\0",
-            Self::ViteReactCanvasV1 => b"template=vite-react-canvas-v1\0",
+            Self::ReactDomR1 => AppRuntimeProfile::ReactDom,
+            Self::Canvas2dR1 => AppRuntimeProfile::Canvas2d,
+            Self::Three3dR1 => AppRuntimeProfile::Three3d,
+            Self::Phaser2dR1 => AppRuntimeProfile::Phaser2d,
+            Self::Babylon3dR1 => AppRuntimeProfile::Babylon3d,
         }
     }
 }
-
-macro_rules! template_file {
-    ($dir:literal, $path:literal) => {
-        (
-            $path,
-            include_bytes!(concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/../../local-apps/templates/",
-                $dir,
-                "/",
-                $path
-            )) as &[u8],
-        )
-    };
-}
-
-macro_rules! embedded_template_file {
-    ($path:literal) => {
-        template_file!("vite-react-static-v1", $path)
-    };
-}
-
-macro_rules! canvas_template_file {
-    ($path:literal) => {
-        template_file!("vite-react-canvas-v1", $path)
-    };
-}
-
-/// A seed file the canvas scaffold takes VERBATIM from the DOM scaffold.
-///
-/// Spelled differently from [`canvas_template_file`] on purpose. These bytes
-/// have exactly one derivation on disk, so the two scaffolds cannot drift apart
-/// on the entry point, the stylesheet import or the error boundary — the failure
-/// mode a second full copy of the tree would guarantee within a few months.
-macro_rules! shared_source_file {
-    ($path:literal) => {
-        template_file!("vite-react-static-v1", $path)
-    };
-}
-
-pub(crate) const VITE_LOCKED_FILES: &[(&str, &[u8])] = &[
-    embedded_template_file!(".gitignore"),
-    embedded_template_file!("package.json"),
-    embedded_template_file!("pnpm-lock.yaml"),
-    embedded_template_file!("pnpm-workspace.yaml"),
-    embedded_template_file!("jsconfig.json"),
-    embedded_template_file!("index.html"),
-    embedded_template_file!("vite.config.mjs"),
-    embedded_template_file!(".lingxi/source-policy.json"),
-    embedded_template_file!("lib/lingxi-bridge.js"),
-    embedded_template_file!("lib/device-context.js"),
-    embedded_template_file!("lib/platform-adapter.js"),
-    embedded_template_file!("lib/lingxi-provider.jsx"),
-    embedded_template_file!("styles/foundation.css"),
-];
-
-/// The editable seed for a routed, multi-screen app.
-const DOM_SOURCE_FILES: &[(&str, &[u8])] = &[
-    embedded_template_file!("app/main.jsx"),
-    embedded_template_file!("app/app.jsx"),
-    embedded_template_file!("app/providers.jsx"),
-    embedded_template_file!("app/error-boundary.jsx"),
-    embedded_template_file!("app/globals.css"),
-    embedded_template_file!("app/screens/home-screen.jsx"),
-    embedded_template_file!("app/screens/detail-screen.jsx"),
-    embedded_template_file!("src/stores/app-store.js"),
-    embedded_template_file!("public/.gitkeep"),
-];
-
-/// The editable seed for a drawn surface.
-///
-/// It is not a subset of the DOM seed and it is not a copy of it: the provider
-/// mounts no router, the screen owns a frame loop, and the store holds a phase
-/// machine instead of form state. Only the four files that carry no scaffold
-/// opinion are shared.
-const CANVAS_SOURCE_FILES: &[(&str, &[u8])] = &[
-    shared_source_file!("app/main.jsx"),
-    shared_source_file!("app/error-boundary.jsx"),
-    shared_source_file!("app/globals.css"),
-    shared_source_file!("public/.gitkeep"),
-    canvas_template_file!("app/app.jsx"),
-    canvas_template_file!("app/providers.jsx"),
-    canvas_template_file!("app/screens/game-screen.jsx"),
-    canvas_template_file!("src/game/frame-loop.js"),
-    canvas_template_file!("src/stores/game-store.js"),
-];
 
 fn source_files(target: LocalAppBuildTarget) -> &'static [(&'static str, &'static [u8])] {
     match target {
-        LocalAppBuildTarget::ViteReactStaticV1 => DOM_SOURCE_FILES,
-        LocalAppBuildTarget::ViteReactCanvasV1 => CANVAS_SOURCE_FILES,
+        LocalAppBuildTarget::ReactDomR1 => REACT_DOM_EDITABLE_FILES,
+        LocalAppBuildTarget::Canvas2dR1 => CANVAS_2D_EDITABLE_FILES,
+        LocalAppBuildTarget::Three3dR1 => THREE_3D_EDITABLE_FILES,
+        LocalAppBuildTarget::Phaser2dR1 => PHASER_2D_EDITABLE_FILES,
+        LocalAppBuildTarget::Babylon3dR1 => BABYLON_3D_EDITABLE_FILES,
+    }
+}
+
+fn hash_bytes(bytes: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(bytes))
+}
+
+fn locked_files(target: LocalAppBuildTarget) -> Vec<(&'static str, &'static [u8])> {
+    match target {
+        LocalAppBuildTarget::ReactDomR1 => REACT_DOM_MANAGED_FILES.to_vec(),
+        LocalAppBuildTarget::Canvas2dR1 => CANVAS_2D_MANAGED_FILES.to_vec(),
+        LocalAppBuildTarget::Three3dR1 => THREE_3D_MANAGED_FILES.to_vec(),
+        LocalAppBuildTarget::Phaser2dR1 => PHASER_2D_MANAGED_FILES.to_vec(),
+        LocalAppBuildTarget::Babylon3dR1 => BABYLON_3D_MANAGED_FILES.to_vec(),
     }
 }
 
@@ -273,18 +265,19 @@ fn save_record_mirror(layout: &AppLayout, record: &local_apps::AppRecord) -> Res
 /// from the compiled-in template before every build, so a mis-detection would
 /// repin the wrong scaffold and then read its own output back as confirmation.
 ///
-/// The judgement is on the COMBINATION of two independently-persisted fields —
-/// `AppRecord.scaffolded` (the record mirror) and `AppManifest.surface` — and
-/// the pair is checked as a pair, never field by field:
+/// The judgement is on the COMBINATION of two independently-persisted facts —
+/// `AppRecord.scaffolded` (the record mirror) and `AppManifest.runtime_profile`
+/// — and the pair is checked as a pair, never field by field:
 ///
-/// | `scaffolded` | `surface` | verdict |
+/// | `scaffolded` | `runtime_profile` | verdict |
 /// |---|---|---|
 /// | `false` | `None` | an unformed shell: refuse and name `LocalAppScaffold` |
-/// | `true` | `Some(s)` | build `s` |
+/// | `true` | `Some(profile)` | build that profile's fixed surface/runtime family |
 /// | `false` | `Some(_)` | no writer produces this — storage corruption |
 /// | `true` | `None` | no writer produces this — storage corruption |
 ///
-/// ⚠️ Returning `from_surface(s)` the moment `surface` is `Some(_)` would be the
+/// ⚠️ Mapping only `runtime_profile.family` the moment the binding is `Some(_)`
+/// would be the
 /// same code for the happy path and would pass every happy-path test, but a
 /// torn record — scaffold committed the manifest, crashed before the index and
 /// the mirror — would then build straight past the shell gate and hand the user
@@ -305,42 +298,75 @@ pub(crate) fn detect_build_target(layout: &AppLayout) -> Result<LocalAppBuildTar
     }
 
     let scaffolded = load_record_mirror(layout)?.scaffolded;
-    let surface = local_apps::load_manifest(layout)?.surface;
+    let manifest = local_apps::load_manifest(layout)?;
 
-    match (scaffolded, surface) {
-        (true, Some(surface)) => Ok(LocalAppBuildTarget::from_surface(surface)),
-        // The `+` button lands one of these: a record, a workspace and a
-        // conversation, but no shape. There is nothing to build yet, and the
-        // agent reading this error is the one holding the fix.
-        (false, None) => Err(AppError::InvalidRequest(
-            "this app has no shape yet — it was created as an empty shell and nothing has been \
-             scaffolded into its workspace. Agree a name and a surface (\"dom\" for a routed, \
-             multi-screen interface, \"canvas\" for a single drawn surface) with the user, then \
-             call LocalAppScaffold to lay the scaffold down. Building only becomes possible after \
-             that."
-                .into(),
-        )),
-        (false, Some(surface)) => Err(AppError::StorageCorrupt(format!(
-            "app {}: the record says this workspace was never scaffolded, but the manifest \
-             already records the {:?} surface. No path in this version of the engine writes that \
-             combination, so the app store is torn — most likely a scaffold that committed the \
-             manifest and then crashed. Refusing to build rather than guessing which half is \
-             right.",
+    match (
+        scaffolded,
+        manifest.surface,
+        manifest.runtime_profile.as_ref(),
+    ) {
+        (true, Some(surface), Some(binding)) => {
+            let contract = runtime_profile_contract_for_binding(binding)?;
+            if contract.surface != surface {
+                return Err(AppError::StorageCorrupt(format!(
+                    "app {} manifest records runtime profile {} on surface {}; the mapping is invalid",
+                    layout.app_id(),
+                    binding.family,
+                    surface.as_str()
+                )));
+            }
+            LocalAppBuildTarget::from_runtime_binding(binding)
+        }
+        (true, Some(surface), None) => Err(AppError::StorageCorrupt(format!(
+            "app {}: the manifest records surface {} but no runtime profile, so there is no exact runtime contract to rebuild",
             layout.app_id(),
             surface.as_str()
         ))),
-        (true, None) => Err(AppError::StorageCorrupt(format!(
+        // The `+` button lands one of these: a record, a workspace and a
+        // conversation, but no shape. There is nothing to build yet, and the
+        // agent reading this error is the one holding the fix.
+        (false, None, None) => Err(AppError::InvalidRequest(
+            "this app has no runtime profile yet — it was created as an empty shell and nothing \
+             has been scaffolded into its workspace. Confirm the app name and runtime profile \
+             with the user, then call LocalAppScaffold to bind the profile and lay the scaffold \
+             down. Building only becomes possible after that."
+                .into(),
+        )),
+        (false, _, Some(binding)) => Err(AppError::StorageCorrupt(format!(
+            "app {}: the record says this workspace was never scaffolded, but the manifest \
+             already records the {} runtime profile. No path in this version of the engine writes \
+             that combination, so the app store is torn — most likely a scaffold that committed \
+             the manifest and then crashed. Refusing to build rather than guessing which half is \
+             right.",
+            layout.app_id(),
+            binding.family
+        ))),
+        (true, None, Some(binding)) => Err(AppError::StorageCorrupt(format!(
+            "app {}: the manifest records runtime profile {} but no surface, so the scaffold \
+             identity is incomplete and cannot be rebuilt safely",
+            layout.app_id(),
+            binding.family
+        ))),
+        (true, None, None) => Err(AppError::StorageCorrupt(format!(
             "app {}: the record says this workspace is scaffolded, but the manifest records no \
-             surface, so there is no way to tell which scaffold its source was seeded from. No \
-             path in this version of the engine writes that combination; the app store is torn or \
-             the manifest was overwritten. Refusing to build rather than guessing a scaffold.",
+             surface or runtime profile, so there is no way to tell which scaffold/runtime \
+             contract its source was seeded from. No path in this version of the engine writes \
+             that combination; the app store is torn or the manifest was overwritten. Refusing \
+             to build rather than guessing a scaffold.",
             layout.app_id()
+        ))),
+        (false, Some(surface), None) => Err(AppError::StorageCorrupt(format!(
+            "app {}: the record says this workspace was never scaffolded, but the manifest \
+             already records surface {}. No path in this version of the engine writes that \
+             combination, so the app store is torn.",
+            layout.app_id(),
+            surface.as_str()
         ))),
     }
 }
 
-/// The subset of [`VITE_LOCKED_FILES`] the host re-pins from its compiled-in
-/// bytes before every build.
+/// The common relative paths the host re-pins from the app's exact compiled-in
+/// runtime-profile contract before every build.
 ///
 /// The repository-verified Vite scaffold is the single source of truth for the
 /// build infrastructure. Editable application code lives in `app/`, `src/`,
@@ -368,6 +394,9 @@ const HOST_MANAGED_FILES: &[&str] = &[
     "lib/device-context.js",
     "lib/platform-adapter.js",
     "lib/lingxi-provider.jsx",
+    "lib/frame-loop.js",
+    "lib/phaser-runtime.js",
+    "lib/babylon-runtime.js",
     "styles/foundation.css",
 ];
 
@@ -378,17 +407,24 @@ const HOST_MANAGED_FILES: &[&str] = &[
 /// silently inherited this list with nothing failing.
 fn repinned_host_managed_files(target: LocalAppBuildTarget) -> &'static [&'static str] {
     match target {
-        LocalAppBuildTarget::ViteReactStaticV1 | LocalAppBuildTarget::ViteReactCanvasV1 => {
-            HOST_MANAGED_FILES
-        }
+        LocalAppBuildTarget::ReactDomR1
+        | LocalAppBuildTarget::Canvas2dR1
+        | LocalAppBuildTarget::Three3dR1
+        | LocalAppBuildTarget::Phaser2dR1
+        | LocalAppBuildTarget::Babylon3dR1 => HOST_MANAGED_FILES,
     }
 }
 
 /// [`HOST_MANAGED_FILES`] minus `.lingxi/source-policy.json`: the build root is
 /// a copy of the workspace and does not carry host metadata.
+#[cfg(test)]
 fn build_locked_files(target: LocalAppBuildTarget) -> &'static [&'static str] {
     match target {
-        LocalAppBuildTarget::ViteReactStaticV1 | LocalAppBuildTarget::ViteReactCanvasV1 => &[
+        LocalAppBuildTarget::ReactDomR1
+        | LocalAppBuildTarget::Canvas2dR1
+        | LocalAppBuildTarget::Three3dR1
+        | LocalAppBuildTarget::Phaser2dR1
+        | LocalAppBuildTarget::Babylon3dR1 => &[
             ".gitignore",
             "package.json",
             "pnpm-lock.yaml",
@@ -400,9 +436,63 @@ fn build_locked_files(target: LocalAppBuildTarget) -> &'static [&'static str] {
             "lib/device-context.js",
             "lib/platform-adapter.js",
             "lib/lingxi-provider.jsx",
+            "lib/frame-loop.js",
+            "lib/phaser-runtime.js",
+            "lib/babylon-runtime.js",
             "styles/foundation.css",
         ],
     }
+}
+
+fn load_workspace_manifest(workspace: &Path) -> Result<Option<AppManifest>, AppError> {
+    let path = workspace.join(".lingxi/app.manifest.json");
+    let body = match std::fs::read_to_string(&path) {
+        Ok(body) => body,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(AppError::Io(format!(
+                "read workspace manifest {}: {error}",
+                path.display()
+            )))
+        }
+    };
+    let manifest: AppManifest = serde_json::from_str(&body).map_err(|error| {
+        AppError::StorageCorrupt(format!("workspace manifest {}: {error}", path.display()))
+    })?;
+    manifest.validate()?;
+    Ok(Some(manifest))
+}
+
+fn dependency_override_rel(relative: &str) -> Option<&'static str> {
+    match relative {
+        "package.json" => Some(EFFECTIVE_PACKAGE_FILE_REL),
+        "pnpm-lock.yaml" => Some(LOCKFILE_FILE_REL),
+        _ => None,
+    }
+}
+
+fn authoritative_locked_file_bytes(
+    workspace: &Path,
+    manifest: Option<&AppManifest>,
+    relative: &str,
+    template_bytes: &'static [u8],
+) -> Result<Vec<u8>, AppError> {
+    let Some(override_rel) = dependency_override_rel(relative) else {
+        return Ok(template_bytes.to_vec());
+    };
+    let Some(manifest) = manifest else {
+        return Ok(template_bytes.to_vec());
+    };
+    if manifest.runtime_profile.is_none() || manifest.dependency_snapshot.is_none() {
+        return Ok(template_bytes.to_vec());
+    }
+    let override_path = workspace.join(override_rel);
+    std::fs::read(&override_path).map_err(|error| {
+        AppError::StorageCorrupt(format!(
+            "runtime-profile dependency snapshot is missing {}: {}",
+            override_rel, error
+        ))
+    })
 }
 
 /// Rewrite every host-managed file from its compiled-in template unless it
@@ -417,16 +507,19 @@ pub(crate) fn restore_host_managed_files(
     target: LocalAppBuildTarget,
 ) -> Result<(), AppError> {
     let managed = repinned_host_managed_files(target);
-    for (relative, bytes) in VITE_LOCKED_FILES
+    let manifest = load_workspace_manifest(workspace)?;
+    for (relative, bytes) in locked_files(target)
         .iter()
         .filter(|(relative, _)| managed.contains(relative))
     {
+        let expected =
+            authoritative_locked_file_bytes(workspace, manifest.as_ref(), relative, bytes)?;
         let path = ensure_safe_file_parent(workspace, relative)?;
         let is_matching_regular_file = std::fs::symlink_metadata(&path)
             .ok()
             .filter(|metadata| metadata.is_file() && !metadata.file_type().is_symlink())
             .and_then(|_| std::fs::read(&path).ok())
-            .is_some_and(|current| current.as_slice() == *bytes);
+            .is_some_and(|current| current == expected);
         if is_matching_regular_file {
             continue;
         }
@@ -434,7 +527,7 @@ pub(crate) fn restore_host_managed_files(
             file = %relative,
             "host-managed workspace file diverged from its pinned template; restoring before the build"
         );
-        write_file(workspace, relative, bytes, true)?;
+        write_file(workspace, relative, &expected, true)?;
     }
     Ok(())
 }
@@ -531,6 +624,9 @@ pub(crate) fn scaffold_workspace(
     // same thing on both sides.
     let mut manifest = local_apps::AppManifest::for_new_app(layout.app_id(), layout.app_id());
     manifest.surface = Some(target.surface());
+    manifest.runtime_profile =
+        crate::local_app_runtime_profiles::current_binding_for_family(target.runtime_profile())
+            .ok();
     local_apps::save_manifest(layout, &manifest)?;
     // And stamp the record mirror the same way, for the same reason:
     // `detect_build_target` judges the PAIR (`scaffolded`, `surface`), so a
@@ -551,7 +647,54 @@ pub(crate) fn scaffold_workspace(
     });
     record.scaffolded = true;
     save_record_mirror(layout, &record)?;
-    scaffold_workspace_initialized(layout, target, true)
+    scaffold_workspace_initialized(layout, target, true)?;
+
+    if let Some(binding) = manifest.runtime_profile.clone() {
+        let workspace = layout.root().join(layout.workspace_rel());
+        let requested = br#"{"dependencies":{}}"#.to_vec();
+        let effective = std::fs::read(workspace.join("package.json"))
+            .map_err(|error| AppError::Io(format!("read scaffolded package.json: {error}")))?;
+        let lockfile = std::fs::read(workspace.join("pnpm-lock.yaml"))
+            .map_err(|error| AppError::Io(format!("read scaffolded pnpm-lock.yaml: {error}")))?;
+        let tree_sha256 = hash_bytes(b"test-dependency-tree");
+        let sbom = br#"{"SPDXID":"SPDXRef-DOCUMENT"}"#.to_vec();
+        let snapshot = local_apps::AppDependencySnapshot {
+            requested_sha256: hash_bytes(&requested),
+            package_sha256: hash_bytes(&effective),
+            lockfile_sha256: hash_bytes(&lockfile),
+            dependency_tree_sha256: tree_sha256.clone(),
+            sbom_sha256: hash_bytes(&sbom),
+            toolchain_key: crate::local_app_runtime_profiles::RUNTIME_PROFILE_TOOLCHAIN_KEY
+                .to_string(),
+            verified_profile_contract_sha256: binding.contract_sha256.clone(),
+        };
+        write_file(&workspace, REQUESTED_FILE_REL, &requested, true)?;
+        write_file(&workspace, EFFECTIVE_PACKAGE_FILE_REL, &effective, true)?;
+        write_file(&workspace, LOCKFILE_FILE_REL, &lockfile, true)?;
+        write_file(
+            &workspace,
+            TREE_PROOF_FILE_REL,
+            serde_json::to_string_pretty(&serde_json::json!({
+                "treeSha256": tree_sha256,
+                "toolchainKey": snapshot.toolchain_key.clone(),
+            }))
+            .expect("test tree proof json")
+            .as_bytes(),
+            true,
+        )?;
+        write_file(&workspace, SBOM_FILE_REL, &sbom, true)?;
+        write_file(
+            &workspace,
+            SNAPSHOT_FILE_REL,
+            serde_json::to_string_pretty(&snapshot)
+                .expect("test dependency snapshot json")
+                .as_bytes(),
+            true,
+        )?;
+        manifest.dependency_snapshot = Some(snapshot);
+        local_apps::save_manifest(layout, &manifest)?;
+    }
+    Ok(())
 }
 
 /// Materialize the pinned template after the enclosing create transaction has
@@ -582,7 +725,7 @@ pub(crate) fn scaffold_workspace_initialized(
     if first_scaffold {
         wipe_editable_surface(&workspace)?;
     }
-    for (relative, bytes) in VITE_LOCKED_FILES {
+    for (relative, bytes) in locked_files(target) {
         write_file(&workspace, relative, bytes, true)?;
     }
     for (relative, bytes) in source_files(target) {
@@ -614,8 +757,8 @@ pub(crate) fn scaffold_workspace_initialized(
 /// also returns `true` for `package.json`, `index.html`, `.gitignore`,
 /// `jsconfig.json`, `pnpm-lock.yaml`, every `vite.config.*` spelling,
 /// `lib/lingxi-provider.jsx` and `styles/foundation.css` — none of which are
-/// preserved, and none of which need to be: `VITE_LOCKED_FILES` re-seeds them
-/// byte-for-byte on the very next lines of
+/// preserved, and none of which need to be: the selected runtime-profile
+/// bundle re-seeds them byte-for-byte on the very next lines of
 /// [`scaffold_workspace_initialized`]. Deleting and re-seeding them is the
 /// point; the three names below are the ones that CANNOT be re-seeded.
 ///
@@ -913,21 +1056,6 @@ impl LocalAppBuilder<'_> {
                     }),
                 ));
             }
-            // Unit-level builders can intentionally omit the service and
-            // provide a prepared Vite marker. Production profiles always
-            // attach the service, so this compatibility path does not bypass
-            // dependency state in a running app.
-            Err(error) if error.contains("service is still starting") => {
-                await_workspace_dependencies(
-                    &layout.root().join(layout.workspace_rel()),
-                    std::time::Duration::from_millis(DEPENDENCY_READY_WAIT_TIMEOUT_MS),
-                )
-                .await?;
-                // Unit-level builders can reach this compatibility path
-                // without an attached AppService. Preserve the legacy build
-                // key inputs until the service is available again.
-                local_apps::storage::default_dependency_record(layout.app_id(), now_ms())
-            }
             Err(error) => return Err(AppError::NotYetAvailable(error)),
         };
         let build_lock = self.host.build_lock();
@@ -939,15 +1067,48 @@ impl LocalAppBuilder<'_> {
         // directory renames.
         let _process_build_guard =
             local_apps::storage::lock_app_build(layout.root(), layout.app_id())?;
+        self.build_workspace_locked(layout, &dependency).await
+    }
+
+    /// Build while the caller already owns both the broker-wide build mutex
+    /// and this app's cross-process build lock.
+    ///
+    /// Dependency updates use this entry point so resolving, snapshotting,
+    /// building and rollback remain one transaction. Calling
+    /// [`Self::build_workspace`] there would try to reacquire the same locks
+    /// and deadlock.
+    pub(crate) async fn build_workspace_locked(
+        &self,
+        layout: &AppLayout,
+        dependency: &local_apps::AppDependencyRecord,
+    ) -> Result<(), AppError> {
+        self.assert_build_runtime_available()?;
+        if dependency.state != local_apps::AppDependencyState::Ready {
+            return Err(AppError::NotYetAvailable(
+                dependency
+                    .last_error
+                    .clone()
+                    .unwrap_or_else(|| format!("workspace dependencies are {}", dependency.state)),
+            ));
+        }
         let workspace = layout.root().join(layout.workspace_rel());
         let target = detect_build_target(layout)?;
+        validate_dependency_snapshot_files(layout, &workspace)?;
         // Re-pin the host-managed files from the compiled-in templates on
         // EVERY build before Vite touches the workspace.
         restore_host_managed_files(&workspace, target)?;
         let build_root = layout.root().join(layout.build_rel(false));
         recover_build_promotion(&build_root)?;
-        let build_key = workspace_build_key(&workspace, &dependency, target)?;
-        if build_cache_hit(&build_root, &build_key)? {
+        let manifest = local_apps::load_manifest(layout)?;
+        let runtime_contract_sha256 = manifest.runtime_contract_hash()?;
+        let dependency_snapshot_sha256 = manifest.dependency_snapshot_hash()?;
+        let build_key = workspace_build_key(layout, &workspace)?;
+        if build_cache_hit(
+            &build_root,
+            &build_key,
+            &runtime_contract_sha256,
+            &dependency_snapshot_sha256,
+        )? {
             return Ok(());
         }
         let artifact_root = workspace_build_artifact_root(&workspace);
@@ -964,11 +1125,19 @@ impl LocalAppBuilder<'_> {
             let validate_artifact_root = artifact_root.clone();
             let validate_build_root = build_root.clone();
             let build_key_for_publish = build_key.clone();
+            let runtime_contract_for_publish = runtime_contract_sha256.clone();
+            let dependency_snapshot_for_publish = dependency_snapshot_sha256.clone();
             tokio::task::spawn_blocking(move || {
                 let output_sha256 = validate_build_output(&validate_artifact_root)?;
                 prune_staging_root_for_publish(&validate_artifact_root)?;
                 promote_build_root(&validate_artifact_root, &validate_build_root)?;
-                write_build_provenance(&validate_build_root, &build_key_for_publish, &output_sha256)
+                write_build_provenance(
+                    &validate_build_root,
+                    &build_key_for_publish,
+                    &runtime_contract_for_publish,
+                    &dependency_snapshot_for_publish,
+                    &output_sha256,
+                )
             })
             .await
             .map_err(|error| AppError::Io(format!("build promotion worker failed: {error}")))?
@@ -989,75 +1158,171 @@ fn workspace_build_output_rel() -> String {
     format!(".lingxi-build-state/build-output/{VITE_OUTPUT_DIR}")
 }
 
-/// Compute the source build key while reusing content digests for files whose
-/// size and modification timestamp are unchanged. A missing or malformed
-/// manifest falls back to hashing every input, so cache metadata never blocks a
-/// rebuild.
-fn workspace_build_key(
-    workspace: &Path,
-    dependency: &local_apps::AppDependencyRecord,
-    target: LocalAppBuildTarget,
-) -> Result<String, AppError> {
-    let previous = load_build_input_manifest(workspace);
-    let mut inputs = Vec::new();
-    collect_workspace_inputs(workspace, workspace, &mut inputs)?;
-    inputs.sort_by(|left, right| left.path.cmp(&right.path));
+fn read_regular_file(path: &Path, label: &str) -> Result<Vec<u8>, AppError> {
+    let metadata = std::fs::symlink_metadata(path).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            AppError::StorageCorrupt(format!("{label} is missing: {}", path.display()))
+        } else {
+            AppError::Io(format!("inspect {label} {}: {error}", path.display()))
+        }
+    })?;
+    if !metadata.is_file() || metadata.file_type().is_symlink() {
+        return Err(AppError::StorageCorrupt(format!(
+            "{label} must be a regular file: {}",
+            path.display()
+        )));
+    }
+    std::fs::read(path).map_err(|error| AppError::Io(format!("read {label}: {error}")))
+}
 
-    let mut files = Vec::with_capacity(inputs.len());
-    for input in inputs {
-        let content_sha256 = match previous
-            .get(&input.path)
-            .filter(|entry| entry.size == input.size && entry.modified_ns == input.modified_ns)
-            .filter(|entry| !entry.content_sha256.is_empty())
-            .map(|entry| entry.content_sha256.clone())
-        {
-            Some(content_sha256) => content_sha256,
-            None => hash_file(&workspace.join(&input.path))?,
-        };
-        files.push(BuildInputEntry {
-            content_sha256,
-            ..input
-        });
+/// Verify the host-owned dependency declaration and proof before any build can
+/// restore files or invoke pnpm/Vite. Workspace package/lock edits are drift,
+/// not an implicit dependency update, and must go through the receipt flow.
+fn validate_dependency_snapshot_files(
+    layout: &AppLayout,
+    workspace: &Path,
+) -> Result<(), AppError> {
+    let manifest = local_apps::load_manifest(layout)?;
+    let Some(binding) = manifest.runtime_profile.as_ref() else {
+        return Ok(());
+    };
+    let contract = runtime_profile_contract_for_binding(binding)?;
+    let snapshot = manifest.dependency_snapshot.as_ref().ok_or_else(|| {
+        AppError::StorageCorrupt(format!(
+            "app {} is scaffolded but dependencySnapshot is missing",
+            layout.app_id()
+        ))
+    })?;
+    if snapshot.toolchain_key != contract.toolchain_key {
+        return Err(AppError::StorageCorrupt(format!(
+            "runtime_contract_corrupt: dependency snapshot toolchain {} does not match profile {}",
+            snapshot.toolchain_key, contract.toolchain_key
+        )));
     }
 
-    let manifest_changed = previous.len() != files.len()
-        || files
-            .iter()
-            .any(|entry| previous.get(&entry.path) != Some(entry));
-    if manifest_changed {
-        if let Err(error) = write_build_input_manifest(workspace, &files) {
-            tracing::warn!(error = %error, "could not persist local-app build input manifest");
+    let requested = read_regular_file(&workspace.join(REQUESTED_FILE_REL), "requested.json")?;
+    let effective = read_regular_file(
+        &workspace.join(EFFECTIVE_PACKAGE_FILE_REL),
+        "effective-package.json",
+    )?;
+    let lock = read_regular_file(&workspace.join(LOCKFILE_FILE_REL), "dependency lockfile")?;
+    let sbom = read_regular_file(&workspace.join(SBOM_FILE_REL), "dependency SBOM")?;
+    let snapshot_file = read_regular_file(
+        &workspace.join(SNAPSHOT_FILE_REL),
+        "dependency snapshot receipt",
+    )?;
+    let persisted_snapshot: local_apps::AppDependencySnapshot =
+        serde_json::from_slice(&snapshot_file).map_err(|error| {
+            AppError::StorageCorrupt(format!("parse dependency snapshot receipt: {error}"))
+        })?;
+    if &persisted_snapshot != snapshot {
+        return Err(AppError::StorageCorrupt(
+            "dependency snapshot receipt does not match the app manifest".into(),
+        ));
+    }
+    for (label, bytes, expected) in [
+        (
+            "requested.json",
+            requested.as_slice(),
+            snapshot.requested_sha256.as_str(),
+        ),
+        (
+            "effective-package.json",
+            effective.as_slice(),
+            snapshot.package_sha256.as_str(),
+        ),
+        (
+            "pnpm-lock.yaml",
+            lock.as_slice(),
+            snapshot.lockfile_sha256.as_str(),
+        ),
+        (
+            "sbom.spdx.json",
+            sbom.as_slice(),
+            snapshot.sbom_sha256.as_str(),
+        ),
+    ] {
+        let actual = hash_bytes(bytes);
+        if actual != *expected {
+            return Err(AppError::StorageCorrupt(format!(
+                "core_dependency_drift: {label} digest {actual} does not match dependency snapshot {expected}"
+            )));
         }
     }
+    let proof = read_regular_file(
+        &workspace.join(TREE_PROOF_FILE_REL),
+        "dependency tree proof",
+    )?;
+    let proof: serde_json::Value = serde_json::from_slice(&proof).map_err(|error| {
+        AppError::StorageCorrupt(format!("parse dependency tree proof: {error}"))
+    })?;
+    if proof.get("treeSha256").and_then(serde_json::Value::as_str)
+        != Some(snapshot.dependency_tree_sha256.as_str())
+        || proof
+            .get("toolchainKey")
+            .and_then(serde_json::Value::as_str)
+            != Some(snapshot.toolchain_key.as_str())
+    {
+        return Err(AppError::StorageCorrupt(
+            "dependency tree proof does not match dependencySnapshot".into(),
+        ));
+    }
+
+    let root_package =
+        read_regular_file(&workspace.join("package.json"), "workspace package.json")?;
+    let root_lock = read_regular_file(
+        &workspace.join("pnpm-lock.yaml"),
+        "workspace pnpm-lock.yaml",
+    )?;
+    if root_package != effective || root_lock != lock {
+        return Err(AppError::InvalidRequest(
+            "dependencies_dirty: workspace package.json or pnpm-lock.yaml differs from the host-owned dependency snapshot; use LocalAppConfirmDependencyChange and LocalAppUpdateDependencies"
+                .into(),
+        ));
+    }
+    Ok(())
+}
+
+/// Compute the source build key from the current app-owned bytes.
+///
+/// Explicit builds are trust-bearing, so this path must not reuse cached
+/// content digests from mutable metadata such as size/mtime.
+fn workspace_build_key(layout: &AppLayout, workspace: &Path) -> Result<String, AppError> {
+    let manifest = local_apps::load_manifest(layout)?;
+    let binding = manifest.runtime_profile.as_ref().ok_or_else(|| {
+        AppError::StorageCorrupt(format!(
+            "app {} has no runtime profile for its build key",
+            layout.app_id()
+        ))
+    })?;
+    let contract = runtime_profile_contract_for_binding(binding)?;
+    let managed_paths = contract
+        .managed_files
+        .iter()
+        .map(|(path, _)| *path)
+        .collect::<BTreeSet<_>>();
+    let mut inputs = Vec::new();
+    collect_workspace_inputs(workspace, workspace, &mut inputs)?;
+    inputs.retain(|path| path != "LINGXI.md" && !managed_paths.contains(path.as_str()));
+    inputs.sort();
 
     let mut hasher = Sha256::new();
-    for file in files {
-        hasher.update(file.path.as_bytes());
+    for path in inputs {
+        hasher.update(path.as_bytes());
         hasher.update([0]);
-        hasher.update(file.content_sha256.as_bytes());
+        hasher.update(hash_file(&workspace.join(&path))?.as_bytes());
         hasher.update([0]);
     }
-    hasher.update(target.cache_tag());
-    hasher.update(
-        dependency
-            .lockfile_sha256
-            .as_deref()
-            .unwrap_or("legacy-lockfile"),
-    );
+    hasher.update(manifest.runtime_contract_hash()?);
     hasher.update([0]);
-    hasher.update(
-        dependency
-            .toolchain_key
-            .as_deref()
-            .unwrap_or("legacy-toolchain"),
-    );
+    hasher.update(manifest.dependency_snapshot_hash()?);
     Ok(format!("{:x}", hasher.finalize()))
 }
 
 fn collect_workspace_inputs(
     current: &Path,
     workspace: &Path,
-    files: &mut Vec<BuildInputEntry>,
+    files: &mut Vec<String>,
 ) -> Result<(), AppError> {
     for entry in std::fs::read_dir(current).map_err(|error| {
         AppError::Io(format!(
@@ -1105,28 +1370,7 @@ fn collect_workspace_inputs(
             let relative = path
                 .strip_prefix(workspace)
                 .map_err(|error| AppError::Io(format!("derive build key path: {error}")))?;
-            let modified_ns = metadata
-                .modified()
-                .map_err(|error| {
-                    AppError::Io(format!(
-                        "inspect build key mtime {}: {error}",
-                        path.display()
-                    ))
-                })?
-                .duration_since(UNIX_EPOCH)
-                .map_err(|error| {
-                    AppError::Io(format!(
-                        "inspect build key mtime {}: {error}",
-                        path.display()
-                    ))
-                })?
-                .as_nanos();
-            files.push(BuildInputEntry {
-                path: relative.to_string_lossy().replace('\\', "/"),
-                size: metadata.len(),
-                modified_ns,
-                content_sha256: String::new(),
-            });
+            files.push(relative.to_string_lossy().replace('\\', "/"));
         }
     }
     Ok(())
@@ -1139,48 +1383,18 @@ fn hash_file(path: &Path) -> Result<String, AppError> {
     Ok(format!("{:x}", Sha256::digest(bytes)))
 }
 
-fn load_build_input_manifest(workspace: &Path) -> BTreeMap<String, BuildInputEntry> {
-    let path = workspace
-        .join(".lingxi-build-state")
-        .join(BUILD_INPUT_MANIFEST_FILE);
-    let Ok(body) = std::fs::read_to_string(path) else {
-        return BTreeMap::new();
-    };
-    let Ok(manifest) = serde_json::from_str::<BuildInputManifest>(&body) else {
-        return BTreeMap::new();
-    };
-    manifest
-        .files
-        .into_iter()
-        .map(|entry| (entry.path.clone(), entry))
-        .collect()
-}
-
-fn write_build_input_manifest(workspace: &Path, files: &[BuildInputEntry]) -> Result<(), AppError> {
-    let parent = workspace.join(".lingxi-build-state");
-    std::fs::create_dir_all(&parent)
-        .map_err(|error| AppError::Io(format!("create build input directory: {error}")))?;
-    let path = parent.join(BUILD_INPUT_MANIFEST_FILE);
-    let temp = parent.join(format!(".{BUILD_INPUT_MANIFEST_FILE}.tmp-{}", now_stamp()));
-    let body = serde_json::to_vec_pretty(&BuildInputManifest {
-        files: files.to_vec(),
-    })
-    .map_err(|error| AppError::Io(format!("serialize build input manifest: {error}")))?;
-    std::fs::write(&temp, body)
-        .map_err(|error| AppError::Io(format!("write build input manifest: {error}")))?;
-    std::fs::rename(&temp, &path).map_err(|error| {
-        let _ = std::fs::remove_file(&temp);
-        AppError::Io(format!("publish build input manifest: {error}"))
-    })
-}
-
 /// Provenance lives beside the promoted build, outside the editable workspace
 /// and outside `dist/`, so the preview server never exposes it as an asset.
 fn build_provenance_path(build_root: &Path) -> PathBuf {
     build_root.join(BUILD_PROVENANCE_FILE)
 }
 
-fn build_cache_hit(build_root: &Path, build_key: &str) -> Result<bool, AppError> {
+fn build_cache_hit(
+    build_root: &Path,
+    build_key: &str,
+    runtime_contract_sha256: &str,
+    dependency_snapshot_sha256: &str,
+) -> Result<bool, AppError> {
     let index = build_root.join(VITE_OUTPUT_DIR).join("index.html");
     let index_metadata = match std::fs::symlink_metadata(&index) {
         Ok(metadata) => metadata,
@@ -1202,7 +1416,11 @@ fn build_cache_hit(build_root: &Path, build_key: &str) -> Result<bool, AppError>
             return Ok(false);
         }
     };
-    if provenance.version != BUILD_PROVENANCE_VERSION || provenance.build_key != build_key {
+    if provenance.version != BUILD_PROVENANCE_VERSION
+        || provenance.build_key != build_key
+        || provenance.runtime_contract_sha256 != runtime_contract_sha256
+        || provenance.dependency_snapshot_sha256 != dependency_snapshot_sha256
+    {
         return Ok(false);
     }
     let output_sha256 = match digest_tree(&build_root.join(VITE_OUTPUT_DIR)) {
@@ -1215,6 +1433,8 @@ fn build_cache_hit(build_root: &Path, build_key: &str) -> Result<bool, AppError>
 fn write_build_provenance(
     build_root: &Path,
     build_key: &str,
+    runtime_contract_sha256: &str,
+    dependency_snapshot_sha256: &str,
     output_sha256: &str,
 ) -> Result<(), AppError> {
     let path = build_provenance_path(build_root);
@@ -1227,6 +1447,8 @@ fn write_build_provenance(
     let body = serde_json::to_vec_pretty(&BuildProvenance {
         version: BUILD_PROVENANCE_VERSION,
         build_key: build_key.to_string(),
+        runtime_contract_sha256: runtime_contract_sha256.to_string(),
+        dependency_snapshot_sha256: dependency_snapshot_sha256.to_string(),
         output_sha256: output_sha256.to_string(),
     })
     .map_err(|error| AppError::Io(format!("serialize build provenance: {error}")))?;
@@ -1238,6 +1460,304 @@ fn write_build_provenance(
     })
 }
 
+/// Validate only the immutable launch identity and promoted output. This gate
+/// deliberately does not inspect app source, resolve packages, access the
+/// network, or migrate a profile; any mismatch requires an explicit rebuild.
+pub(crate) fn validate_build_for_launch(layout: &AppLayout) -> Result<(), AppError> {
+    let _target = detect_build_target(layout)?;
+    let manifest = local_apps::load_manifest(layout)?;
+    if manifest.runtime_profile.is_none() || manifest.dependency_snapshot.is_none() {
+        return Err(AppError::StorageCorrupt(format!(
+            "app {} is scaffolded but has no complete runtime profile and dependency snapshot",
+            layout.app_id()
+        )));
+    }
+    let expected_runtime = manifest.runtime_contract_hash()?;
+    let expected_dependencies = manifest.dependency_snapshot_hash()?;
+    let build_root = layout.root().join(layout.build_rel(false));
+    let provenance_path = build_provenance_path(&build_root);
+    let body = std::fs::read_to_string(&provenance_path).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            AppError::NotYetAvailable(
+                "rebuild_required: the promoted build has no build receipt".into(),
+            )
+        } else {
+            AppError::Io(format!("read build receipt: {error}"))
+        }
+    })?;
+    let provenance: BuildProvenance = serde_json::from_str(&body).map_err(|error| {
+        AppError::StorageCorrupt(format!(
+            "runtime_contract_corrupt: invalid build receipt: {error}"
+        ))
+    })?;
+    if provenance.version != BUILD_PROVENANCE_VERSION {
+        return Err(AppError::NotYetAvailable(format!(
+            "rebuild_required: build receipt version {} is not supported",
+            provenance.version
+        )));
+    }
+    if provenance.runtime_contract_sha256 != expected_runtime {
+        return Err(AppError::NotYetAvailable(
+            "rebuild_required: build receipt runtime contract does not match the app manifest"
+                .into(),
+        ));
+    }
+    if provenance.dependency_snapshot_sha256 != expected_dependencies {
+        return Err(AppError::NotYetAvailable(
+            "rebuild_required: build receipt dependency snapshot does not match the app manifest"
+                .into(),
+        ));
+    }
+    let output_root = build_root.join(VITE_OUTPUT_DIR);
+    let actual_output = digest_tree(&output_root).map_err(|error| {
+        AppError::NotYetAvailable(format!(
+            "rebuild_required: promoted build output is missing or invalid: {error}"
+        ))
+    })?;
+    if provenance.output_sha256 != actual_output {
+        return Err(AppError::NotYetAvailable(
+            "rebuild_required: promoted build output does not match its build receipt".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// Derive the persisted runtime-profile health for one app.
+///
+/// The record's `scaffolded` bit is the first authority: an empty shell has no
+/// runtime profile status. For a formed app this function validates the
+/// profile binding, dependency receipts, profile-managed files, and promoted
+/// build output in that order. It intentionally does not call any repair,
+/// dependency-install, or migration path and never walks app-owned source.
+/// Every observable failure is represented by a stable status so details/MCP
+/// callers do not need to parse build error prose.
+pub(crate) fn derive_runtime_profile_status(
+    root: &Path,
+    record: &AppRecord,
+) -> Option<AppRuntimeProfileStatus> {
+    derive_runtime_profile_status_with_edges(
+        root,
+        record,
+        local_apps::RUNTIME_PROFILE_MIGRATION_EDGES,
+    )
+}
+
+fn derive_runtime_profile_status_with_edges(
+    root: &Path,
+    record: &AppRecord,
+    migration_edges: &[local_apps::RuntimeProfileMigrationEdge],
+) -> Option<AppRuntimeProfileStatus> {
+    let corrupt = || Some(AppRuntimeProfileStatus::RuntimeContractCorrupt);
+    let layout = match AppLayout::new(root, record.id.clone()) {
+        Ok(layout) => layout,
+        Err(_) => return corrupt(),
+    };
+    let mirror = match load_record_mirror(&layout) {
+        Ok(mirror) => mirror,
+        Err(_) => return corrupt(),
+    };
+    if mirror.id != record.id
+        || mirror.scaffolded != record.scaffolded
+        || mirror.workspace_rel != record.workspace_rel
+    {
+        return corrupt();
+    }
+
+    // A clean shell has no profile metadata yet and therefore no status. A
+    // partial shell, however, is a torn state and must remain visible as
+    // corruption instead of silently looking like an ordinary draft.
+    if !record.scaffolded {
+        return match local_apps::load_manifest(&layout) {
+            Ok(manifest)
+                if manifest.surface.is_none()
+                    && manifest.runtime_profile.is_none()
+                    && manifest.dependency_snapshot.is_none() =>
+            {
+                None
+            }
+            Ok(_) => corrupt(),
+            Err(AppError::NotFound(_)) => None,
+            Err(_) => corrupt(),
+        };
+    }
+
+    let manifest = match local_apps::load_manifest(&layout) {
+        Ok(manifest) => manifest,
+        Err(_) => return corrupt(),
+    };
+    if manifest.app_id != record.id || manifest.runtime_api_version != local_apps::RUNTIME_API_MAJOR
+    {
+        return corrupt();
+    }
+
+    let Some(surface) = manifest.surface else {
+        return corrupt();
+    };
+    let Some(binding) = manifest.runtime_profile.as_ref() else {
+        return corrupt();
+    };
+    let Some(snapshot) = manifest.dependency_snapshot.as_ref() else {
+        return corrupt();
+    };
+    if binding.family.surface() != surface
+        || snapshot.verified_profile_contract_sha256 != binding.contract_sha256
+    {
+        return corrupt();
+    }
+
+    // A known-but-not-shipped family (for example the gated Babylon profile),
+    // an unknown family/revision, or a removed historical bundle all mean the
+    // exact runtime cannot be materialized on this host. A published bundle
+    // with a different digest is corruption, not an upgrade opportunity.
+    let Some(catalog_entry) = crate::local_app_runtime_profiles::list_runtime_profiles()
+        .into_iter()
+        .find(|entry| entry.family == binding.family && entry.revision == binding.revision)
+    else {
+        return Some(AppRuntimeProfileStatus::RuntimeBundleMissing);
+    };
+    if !catalog_entry.available {
+        return Some(AppRuntimeProfileStatus::RuntimeBundleMissing);
+    }
+    if catalog_entry.contract_sha256 != binding.contract_sha256 {
+        return corrupt();
+    }
+    let contract = match runtime_profile_contract_for_binding(binding) {
+        Ok(contract) => contract,
+        Err(_) => return Some(AppRuntimeProfileStatus::RuntimeBundleMissing),
+    };
+    if snapshot.toolchain_key != contract.toolchain_key {
+        return corrupt();
+    }
+
+    let workspace = root.join(layout.workspace_rel());
+    let Some(requested) = status_regular_file(&workspace.join(REQUESTED_FILE_REL)) else {
+        return Some(AppRuntimeProfileStatus::CoreDependencyDrift);
+    };
+    let Some(effective) = status_regular_file(&workspace.join(EFFECTIVE_PACKAGE_FILE_REL)) else {
+        return Some(AppRuntimeProfileStatus::CoreDependencyDrift);
+    };
+    let Some(lock) = status_regular_file(&workspace.join(LOCKFILE_FILE_REL)) else {
+        return Some(AppRuntimeProfileStatus::CoreDependencyDrift);
+    };
+    let Some(tree_proof) = status_regular_file(&workspace.join(TREE_PROOF_FILE_REL)) else {
+        return Some(AppRuntimeProfileStatus::CoreDependencyDrift);
+    };
+    let Some(sbom) = status_regular_file(&workspace.join(SBOM_FILE_REL)) else {
+        return Some(AppRuntimeProfileStatus::CoreDependencyDrift);
+    };
+    let Some(snapshot_file) = status_regular_file(&workspace.join(SNAPSHOT_FILE_REL)) else {
+        return Some(AppRuntimeProfileStatus::CoreDependencyDrift);
+    };
+    let persisted_snapshot: local_apps::AppDependencySnapshot =
+        match serde_json::from_slice(&snapshot_file) {
+            Ok(snapshot) => snapshot,
+            Err(_) => return Some(AppRuntimeProfileStatus::CoreDependencyDrift),
+        };
+    if persisted_snapshot != snapshot.clone() {
+        return Some(AppRuntimeProfileStatus::CoreDependencyDrift);
+    }
+    if hash_bytes(&effective) != snapshot.package_sha256
+        || hash_bytes(&lock) != snapshot.lockfile_sha256
+        || hash_bytes(&sbom) != snapshot.sbom_sha256
+    {
+        return Some(AppRuntimeProfileStatus::CoreDependencyDrift);
+    }
+    let proof: Value = match serde_json::from_slice(&tree_proof) {
+        Ok(proof) => proof,
+        Err(_) => return Some(AppRuntimeProfileStatus::CoreDependencyDrift),
+    };
+    if proof.get("treeSha256").and_then(Value::as_str)
+        != Some(snapshot.dependency_tree_sha256.as_str())
+        || proof.get("toolchainKey").and_then(Value::as_str)
+            != Some(snapshot.toolchain_key.as_str())
+    {
+        return Some(AppRuntimeProfileStatus::CoreDependencyDrift);
+    }
+
+    // `requested.json` is the only dependency input the agent is allowed to
+    // propose directly. Its digest changing means the app is dirty and needs
+    // the explicit dependency confirmation flow; the resolved package, lock,
+    // tree proof and SBOM above remain host-owned evidence.
+    if hash_bytes(&requested) != snapshot.requested_sha256 {
+        return Some(AppRuntimeProfileStatus::DependenciesDirty);
+    }
+    let Some(root_package) = status_regular_file(&workspace.join("package.json")) else {
+        return Some(AppRuntimeProfileStatus::CoreDependencyDrift);
+    };
+    let Some(root_lock) = status_regular_file(&workspace.join("pnpm-lock.yaml")) else {
+        return Some(AppRuntimeProfileStatus::CoreDependencyDrift);
+    };
+    if root_package != effective || root_lock != lock {
+        return Some(AppRuntimeProfileStatus::DependenciesDirty);
+    }
+
+    // Package/lock are dependency-managed overrides. Every other catalog
+    // managed file must still be byte-identical to the pinned profile bundle;
+    // the status path only observes this drift and never restores it.
+    for (relative, expected) in contract.managed_files {
+        if matches!(*relative, "package.json" | "pnpm-lock.yaml") {
+            continue;
+        }
+        let Some(actual) = status_regular_file(&workspace.join(relative)) else {
+            return Some(AppRuntimeProfileStatus::CoreDependencyDrift);
+        };
+        if actual.as_slice() != *expected {
+            return Some(AppRuntimeProfileStatus::CoreDependencyDrift);
+        }
+    }
+
+    let build_root = root.join(layout.build_rel(false));
+    let Some(provenance_bytes) = status_regular_file(&build_provenance_path(&build_root)) else {
+        return Some(AppRuntimeProfileStatus::RebuildRequired);
+    };
+    let provenance: BuildProvenance = match serde_json::from_slice(&provenance_bytes) {
+        Ok(provenance) => provenance,
+        Err(_) => return Some(AppRuntimeProfileStatus::RebuildRequired),
+    };
+    let expected_runtime = match manifest.runtime_contract_hash() {
+        Ok(hash) => hash,
+        Err(_) => return corrupt(),
+    };
+    let expected_dependencies = match manifest.dependency_snapshot_hash() {
+        Ok(hash) => hash,
+        Err(_) => return corrupt(),
+    };
+    if provenance.version != BUILD_PROVENANCE_VERSION
+        || provenance.runtime_contract_sha256 != expected_runtime
+        || provenance.dependency_snapshot_sha256 != expected_dependencies
+    {
+        return Some(AppRuntimeProfileStatus::RebuildRequired);
+    }
+    let output_root = build_root.join(VITE_OUTPUT_DIR);
+    let output_sha256 = match digest_tree(&output_root) {
+        Ok(hash) => hash,
+        Err(_) => return Some(AppRuntimeProfileStatus::RebuildRequired),
+    };
+    if output_sha256 != provenance.output_sha256 {
+        return Some(AppRuntimeProfileStatus::RebuildRequired);
+    }
+
+    if migration_edges
+        .iter()
+        .any(|edge| edge.family == binding.family && edge.from_revision == binding.revision)
+    {
+        Some(AppRuntimeProfileStatus::MigrationAvailable)
+    } else {
+        Some(AppRuntimeProfileStatus::Verified)
+    }
+}
+
+/// Read one status input without following symlinks. A missing, non-regular,
+/// unreadable or symlinked file is represented as `None` and classified by the
+/// caller according to the owning contract.
+fn status_regular_file(path: &Path) -> Option<Vec<u8>> {
+    let metadata = std::fs::symlink_metadata(path).ok()?;
+    if !metadata.is_file() || metadata.file_type().is_symlink() {
+        return None;
+    }
+    std::fs::read(path).ok()
+}
+
 fn now_stamp() -> u128 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -1245,6 +1765,7 @@ fn now_stamp() -> u128 {
         .unwrap_or_default()
 }
 
+#[cfg(test)]
 async fn await_workspace_dependencies(
     workspace: &Path,
     timeout_duration: tokio::time::Duration,
@@ -1684,20 +2205,26 @@ fn ensure_safe_file_parent(root: &Path, relative: &str) -> Result<PathBuf, AppEr
     Ok(root.join(relative_path))
 }
 
+#[cfg(test)]
 fn write_host_managed_build_files(
+    workspace: &Path,
     build_root: &Path,
     target: LocalAppBuildTarget,
 ) -> Result<(), AppError> {
     let managed = build_locked_files(target);
-    for (relative, bytes) in VITE_LOCKED_FILES
+    let manifest = load_workspace_manifest(workspace)?;
+    for (relative, bytes) in locked_files(target)
         .iter()
         .filter(|(relative, _)| managed.contains(relative))
     {
-        write_file(build_root, relative, bytes, true)?;
+        let expected =
+            authoritative_locked_file_bytes(workspace, manifest.as_ref(), relative, bytes)?;
+        write_file(build_root, relative, &expected, true)?;
     }
     Ok(())
 }
 
+#[cfg(test)]
 fn replace_build_source(
     workspace: &Path,
     build_root: &Path,
@@ -1709,10 +2236,11 @@ fn replace_build_source(
     }
     std::fs::create_dir_all(build_root)
         .map_err(|error| AppError::Io(format!("create build directory: {error}")))?;
-    write_host_managed_build_files(build_root, target)?;
+    write_host_managed_build_files(workspace, build_root, target)?;
     copy_workspace_tree(workspace, workspace, build_root, target)
 }
 
+#[cfg(test)]
 fn copy_workspace_tree(
     workspace: &Path,
     current: &Path,
@@ -1733,6 +2261,7 @@ fn copy_workspace_tree(
     Ok(())
 }
 
+#[cfg(test)]
 fn copy_workspace_contents(
     workspace: &Path,
     current: &Path,
@@ -1753,6 +2282,7 @@ fn copy_workspace_contents(
     Ok(())
 }
 
+#[cfg(test)]
 fn copy_workspace_entry(
     workspace: &Path,
     source: &Path,
@@ -1785,6 +2315,7 @@ fn copy_workspace_entry(
     Ok(())
 }
 
+#[cfg(test)]
 fn should_skip_workspace_path(relative: &Path, target: LocalAppBuildTarget) -> bool {
     if repinned_host_managed_files(target).contains(&relative.to_string_lossy().as_ref()) {
         return true;
@@ -1886,6 +2417,14 @@ fn bounded_message(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn pinned_locked_bytes(target: LocalAppBuildTarget, relative: &str) -> &'static [u8] {
+        locked_files(target)
+            .into_iter()
+            .find(|(path, _)| *path == relative)
+            .map(|(_, bytes)| bytes)
+            .expect("pinned file bytes")
+    }
 
     /// A build tool's DIAGNOSIS is the last thing it prints. Keeping the head
     /// threw it away.
@@ -2193,8 +2732,228 @@ mod tests {
 
         let mut manifest = local_apps::AppManifest::for_new_app("aaaa1111", "Fixture");
         manifest.surface = surface;
-        local_apps::save_manifest(&layout, &manifest).expect("manifest");
+        if scaffolded {
+            manifest.runtime_profile = surface.and_then(|surface| {
+                let family = match surface {
+                    local_apps::AppSurface::Dom => AppRuntimeProfile::ReactDom,
+                    local_apps::AppSurface::Canvas => AppRuntimeProfile::Canvas2d,
+                };
+                crate::local_app_runtime_profiles::current_binding_for_family(family).ok()
+            });
+            if let Some(binding) = manifest.runtime_profile.as_ref() {
+                manifest.dependency_snapshot = Some(local_apps::AppDependencySnapshot {
+                    requested_sha256: "0".repeat(64),
+                    package_sha256: "1".repeat(64),
+                    lockfile_sha256: "2".repeat(64),
+                    dependency_tree_sha256: "3".repeat(64),
+                    sbom_sha256: "4".repeat(64),
+                    toolchain_key: crate::local_app_runtime_profiles::RUNTIME_PROFILE_TOOLCHAIN_KEY
+                        .to_string(),
+                    verified_profile_contract_sha256: binding.contract_sha256.clone(),
+                });
+            }
+        }
+        let manifest_path = layout.root().join(layout.manifest_rel());
+        if !scaffolded && surface.is_some() {
+            let mut body = serde_json::to_vec_pretty(&manifest).expect("serialize torn manifest");
+            body.push(b'\n');
+            fs::write(&manifest_path, body).expect("write torn manifest");
+        } else {
+            local_apps::save_manifest(&layout, &manifest).expect("manifest");
+        }
         layout
+    }
+
+    /// Build the smallest fully verified app state used by the status
+    /// classifier tests. `scaffold_workspace` writes the exact profile and
+    /// dependency evidence; this helper only adds a promoted output and its
+    /// receipt, which are the final inputs needed for `verified`.
+    fn verified_status_fixture(root: &Path) -> (AppLayout, local_apps::AppRecord) {
+        let layout = AppLayout::new(root, "aaaa1111").expect("layout");
+        scaffold_workspace(&layout, LocalAppBuildTarget::ReactDomR1).expect("scaffold");
+        let record = load_record_mirror(&layout).expect("record mirror");
+        let manifest = local_apps::load_manifest(&layout).expect("manifest");
+        let build_root = layout.root().join(layout.build_rel(false));
+        let output = build_root.join(VITE_OUTPUT_DIR);
+        fs::create_dir_all(&output).expect("output");
+        fs::write(output.join("index.html"), "<html>verified</html>").expect("index");
+        let output_sha256 = digest_tree(&output).expect("output digest");
+        write_build_provenance(
+            &build_root,
+            "status-test-build-key",
+            &manifest.runtime_contract_hash().expect("runtime hash"),
+            &manifest
+                .dependency_snapshot_hash()
+                .expect("dependency hash"),
+            &output_sha256,
+        )
+        .expect("build receipt");
+        (layout, record)
+    }
+
+    #[test]
+    fn runtime_profile_status_is_absent_for_a_clean_shell() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let layout = layout_with(root.path(), false, None);
+        let record = load_record_mirror(&layout).expect("record mirror");
+        assert_eq!(derive_runtime_profile_status(root.path(), &record), None);
+    }
+
+    #[test]
+    fn runtime_profile_status_marks_a_partial_shell_corrupt() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let layout = layout_with(root.path(), false, Some(local_apps::AppSurface::Dom));
+        let record = load_record_mirror(&layout).expect("record mirror");
+        assert_eq!(
+            derive_runtime_profile_status(root.path(), &record),
+            Some(AppRuntimeProfileStatus::RuntimeContractCorrupt)
+        );
+    }
+
+    #[test]
+    fn runtime_profile_status_precedence_reports_verified_and_each_drift_class() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let (layout, record) = verified_status_fixture(root.path());
+        assert_eq!(
+            derive_runtime_profile_status(root.path(), &record),
+            Some(AppRuntimeProfileStatus::Verified)
+        );
+
+        // Requested declarations are the only dependency input an agent may
+        // change directly, so they report a confirmation-required dirty state.
+        let workspace = root.path().join(layout.workspace_rel());
+        fs::write(
+            workspace.join(REQUESTED_FILE_REL),
+            br#"{"dependencies":{"date-fns":"4.0.0"}}"#,
+        )
+        .expect("requested dependency change");
+        assert_eq!(
+            derive_runtime_profile_status(root.path(), &record),
+            Some(AppRuntimeProfileStatus::DependenciesDirty)
+        );
+
+        // Resolved dependency evidence is host-owned; changing it is drift,
+        // not a user proposal.
+        let (layout, record) = verified_status_fixture(root.path());
+        let workspace = root.path().join(layout.workspace_rel());
+        fs::write(
+            workspace.join(EFFECTIVE_PACKAGE_FILE_REL),
+            br#"{"name":"tampered"}"#,
+        )
+        .expect("tamper effective package");
+        assert_eq!(
+            derive_runtime_profile_status(root.path(), &record),
+            Some(AppRuntimeProfileStatus::CoreDependencyDrift)
+        );
+
+        // Profile-managed bytes are also host-owned evidence. The classifier
+        // observes the drift and never repairs it on the details path.
+        let (layout, record) = verified_status_fixture(root.path());
+        let workspace = root.path().join(layout.workspace_rel());
+        fs::write(
+            workspace.join("vite.config.mjs"),
+            b"export default {};" as &[u8],
+        )
+        .expect("tamper profile file");
+        assert_eq!(
+            derive_runtime_profile_status(root.path(), &record),
+            Some(AppRuntimeProfileStatus::CoreDependencyDrift)
+        );
+    }
+
+    #[test]
+    fn runtime_profile_status_distinguishes_bundle_and_metadata_corruption() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let (layout, record) = verified_status_fixture(root.path());
+        let mut manifest = local_apps::load_manifest(&layout).expect("manifest");
+        manifest.surface = None;
+        manifest.runtime_profile = None;
+        manifest.dependency_snapshot = None;
+        local_apps::save_manifest(&layout, &manifest).expect("remove profile metadata");
+        assert_eq!(
+            derive_runtime_profile_status(root.path(), &record),
+            Some(AppRuntimeProfileStatus::RuntimeContractCorrupt)
+        );
+
+        let root = tempfile::tempdir().expect("tempdir");
+        let (layout, record) = verified_status_fixture(root.path());
+        let mut manifest = local_apps::load_manifest(&layout).expect("manifest");
+        let binding = manifest.runtime_profile.as_mut().expect("binding");
+        binding.contract_sha256 = "0".repeat(64);
+        manifest
+            .dependency_snapshot
+            .as_mut()
+            .expect("snapshot")
+            .verified_profile_contract_sha256 = "0".repeat(64);
+        local_apps::save_manifest(&layout, &manifest).expect("tamper profile hash");
+        assert_eq!(
+            derive_runtime_profile_status(root.path(), &record),
+            Some(AppRuntimeProfileStatus::RuntimeContractCorrupt)
+        );
+
+        let root = tempfile::tempdir().expect("tempdir");
+        let (layout, record) = verified_status_fixture(root.path());
+        let mut manifest = local_apps::load_manifest(&layout).expect("manifest");
+        let binding = manifest.runtime_profile.as_mut().expect("binding");
+        binding.family = AppRuntimeProfile::Babylon3d;
+        binding.contract_sha256 = "a".repeat(64);
+        manifest
+            .dependency_snapshot
+            .as_mut()
+            .expect("snapshot")
+            .verified_profile_contract_sha256 = "a".repeat(64);
+        manifest.surface = Some(local_apps::AppSurface::Canvas);
+        local_apps::save_manifest(&layout, &manifest).expect("gate unavailable profile");
+        assert_eq!(
+            derive_runtime_profile_status(root.path(), &record),
+            Some(AppRuntimeProfileStatus::RuntimeBundleMissing)
+        );
+    }
+
+    #[test]
+    fn runtime_profile_status_reports_rebuild_when_output_receipt_is_missing_or_stale() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let layout = AppLayout::new(root.path(), "aaaa1111").expect("layout");
+        scaffold_workspace(&layout, LocalAppBuildTarget::ReactDomR1).expect("scaffold");
+        let record = load_record_mirror(&layout).expect("record mirror");
+        assert_eq!(
+            derive_runtime_profile_status(root.path(), &record),
+            Some(AppRuntimeProfileStatus::RebuildRequired)
+        );
+
+        let (layout, record) = verified_status_fixture(root.path());
+        fs::write(
+            layout
+                .root()
+                .join(layout.build_rel(false))
+                .join(BUILD_PROVENANCE_FILE),
+            b"{}",
+        )
+        .expect("stale receipt");
+        assert_eq!(
+            derive_runtime_profile_status(root.path(), &record),
+            Some(AppRuntimeProfileStatus::RebuildRequired)
+        );
+    }
+
+    #[test]
+    fn runtime_profile_status_reports_a_valid_migration_edge_only_after_all_gates() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let (layout, record) = verified_status_fixture(root.path());
+        let binding = local_apps::load_manifest(&layout)
+            .expect("manifest")
+            .runtime_profile
+            .expect("binding");
+        let edge = local_apps::RuntimeProfileMigrationEdge {
+            family: binding.family,
+            from_revision: binding.revision,
+            to_revision: binding.revision + 1,
+            rebuild_compatible: true,
+        };
+        assert_eq!(
+            derive_runtime_profile_status_with_edges(root.path(), &record, &[edge]),
+            Some(AppRuntimeProfileStatus::MigrationAvailable)
+        );
     }
 
     /// The `+` button lands exactly this: a record and a workspace, no shape.
@@ -2234,7 +2993,8 @@ mod tests {
             "no path in this version writes scaffolded=false with a surface: {error:?}"
         );
         assert!(
-            error.to_string().contains("torn"),
+            error.to_string().contains("invalid app manifest")
+                && error.to_string().contains("runtimeProfile"),
             "the refusal must say the store disagrees with itself: {error:?}"
         );
     }
@@ -2270,7 +3030,7 @@ mod tests {
                 Some(local_apps::AppSurface::Dom)
             ))
             .expect("dom surface"),
-            LocalAppBuildTarget::ViteReactStaticV1
+            LocalAppBuildTarget::ReactDomR1
         );
 
         let canvas_root = tempfile::tempdir().expect("tempdir");
@@ -2281,7 +3041,7 @@ mod tests {
                 Some(local_apps::AppSurface::Canvas)
             ))
             .expect("canvas surface"),
-            LocalAppBuildTarget::ViteReactCanvasV1
+            LocalAppBuildTarget::Canvas2dR1
         );
     }
 
@@ -2301,7 +3061,7 @@ mod tests {
         fs::write(workspace.join("vite.config.mjs"), "export default {};").expect("Vite marker");
         assert_eq!(
             detect_build_target(&layout).expect("canvas surface survives a Vite marker"),
-            LocalAppBuildTarget::ViteReactCanvasV1
+            LocalAppBuildTarget::Canvas2dR1
         );
     }
 
@@ -2357,7 +3117,7 @@ mod tests {
     fn scaffold_workspace_stamps_both_halves_of_the_pair() {
         let root = tempfile::tempdir().expect("tempdir");
         let layout = AppLayout::new(root.path(), "aaaa1111").expect("layout");
-        scaffold_workspace(&layout, LocalAppBuildTarget::ViteReactCanvasV1).expect("scaffold");
+        scaffold_workspace(&layout, LocalAppBuildTarget::Canvas2dR1).expect("scaffold");
 
         assert!(
             load_record_mirror(&layout)
@@ -2367,7 +3127,7 @@ mod tests {
         );
         assert_eq!(
             detect_build_target(&layout).expect("a scaffolded workspace is buildable"),
-            LocalAppBuildTarget::ViteReactCanvasV1
+            LocalAppBuildTarget::Canvas2dR1
         );
     }
 
@@ -2383,7 +3143,7 @@ mod tests {
         before.brief = "shows the local tide".to_string();
         save_record_mirror(&layout, &before).expect("named record");
 
-        scaffold_workspace(&layout, LocalAppBuildTarget::ViteReactStaticV1).expect("scaffold");
+        scaffold_workspace(&layout, LocalAppBuildTarget::ReactDomR1).expect("scaffold");
 
         let after = load_record_mirror(&layout).expect("record mirror");
         assert_eq!(
@@ -2417,7 +3177,7 @@ mod tests {
         fs::write(workspace.join("package.json"), "{\"tampered\":true}").expect("package");
         fs::write(workspace.join("app/main.jsx"), "export default 'custom';").expect("source");
 
-        replace_build_source(&workspace, &output, LocalAppBuildTarget::ViteReactStaticV1)
+        replace_build_source(&workspace, &output, LocalAppBuildTarget::ReactDomR1)
             .expect("copy source");
         assert_eq!(
             fs::read_to_string(output.join("app/main.jsx")).unwrap(),
@@ -2425,19 +3185,11 @@ mod tests {
         );
         assert_eq!(
             fs::read(output.join("package.json")).unwrap(),
-            VITE_LOCKED_FILES
-                .iter()
-                .find(|(relative, _)| *relative == "package.json")
-                .map(|(_, bytes)| *bytes)
-                .unwrap()
+            pinned_locked_bytes(LocalAppBuildTarget::ReactDomR1, "package.json")
         );
         assert_eq!(
             fs::read(output.join("lib/lingxi-bridge.js")).unwrap(),
-            VITE_LOCKED_FILES
-                .iter()
-                .find(|(relative, _)| *relative == "lib/lingxi-bridge.js")
-                .map(|(_, bytes)| *bytes)
-                .unwrap()
+            pinned_locked_bytes(LocalAppBuildTarget::ReactDomR1, "lib/lingxi-bridge.js")
         );
         assert!(!output.join("node_modules").exists());
         assert!(!output.join(".lingxi").exists());
@@ -2455,7 +3207,7 @@ mod tests {
         fs::create_dir_all(workspace.join("src")).expect("source");
         fs::write(workspace.join("src/main.jsx"), "export default null;").expect("source file");
 
-        replace_build_source(&workspace, &output, LocalAppBuildTarget::ViteReactStaticV1)
+        replace_build_source(&workspace, &output, LocalAppBuildTarget::ReactDomR1)
             .expect("copy source");
 
         assert!(output.join("src/main.jsx").is_file());
@@ -2505,43 +3257,75 @@ mod tests {
     }
 
     #[test]
-    fn build_key_persists_an_incremental_manifest_and_invalidates_changed_source() {
+    fn build_key_ignores_managed_files_and_invalidates_changed_source() {
         let root = tempfile::tempdir().expect("tempdir");
-        let workspace = root.path().join("workspace");
+        let layout = layout_with(root.path(), true, Some(local_apps::AppSurface::Dom));
+        let workspace = layout.root().join(layout.workspace_rel());
         fs::create_dir_all(workspace.join("app")).expect("workspace");
         fs::write(workspace.join("app/main.jsx"), "export default 'one';").expect("source");
-        let dependency = local_apps::storage::default_dependency_record("aaaa1111", 1);
-
-        let first = workspace_build_key(
-            &workspace,
-            &dependency,
-            LocalAppBuildTarget::ViteReactStaticV1,
-        )
-        .expect("first key");
-        let manifest_path = workspace
-            .join(".lingxi-build-state")
-            .join(BUILD_INPUT_MANIFEST_FILE);
-        assert!(
-            manifest_path.is_file(),
-            "build key should persist its manifest"
-        );
-        let second = workspace_build_key(
-            &workspace,
-            &dependency,
-            LocalAppBuildTarget::ViteReactStaticV1,
-        )
-        .expect("reused key");
+        let first = workspace_build_key(&layout, &workspace).expect("first key");
+        let second = workspace_build_key(&layout, &workspace).expect("reused key");
         assert_eq!(first, second, "unchanged inputs should keep the same key");
+
+        fs::write(workspace.join("vite.config.mjs"), "managed drift").expect("managed file");
+        fs::write(workspace.join("LINGXI.md"), "informational mirror").expect("contract mirror");
+        let managed_only = workspace_build_key(&layout, &workspace).expect("managed-only key");
+        assert_eq!(
+            first, managed_only,
+            "runtime-managed files and LINGXI.md are represented outside the app-source digest"
+        );
 
         fs::write(workspace.join("app/main.jsx"), "export default 'changed';")
             .expect("changed source");
-        let third = workspace_build_key(
-            &workspace,
-            &dependency,
-            LocalAppBuildTarget::ViteReactStaticV1,
-        )
-        .expect("changed key");
+        let third = workspace_build_key(&layout, &workspace).expect("changed key");
         assert_ne!(first, third, "changed source must invalidate the key");
+    }
+
+    #[test]
+    fn build_key_ignores_a_forged_stale_input_manifest_and_hashes_current_bytes() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let layout = layout_with(root.path(), true, Some(local_apps::AppSurface::Dom));
+        let workspace = layout.root().join(layout.workspace_rel());
+        let source_path = workspace.join("app/main.jsx");
+        let first_source = "export default 'one';";
+        let second_source = "export default 'two';";
+        assert_eq!(
+            first_source.len(),
+            second_source.len(),
+            "same-size regression required"
+        );
+        fs::create_dir_all(source_path.parent().expect("parent")).expect("workspace");
+        fs::write(&source_path, first_source).expect("source");
+        let first = workspace_build_key(&layout, &workspace).expect("first key");
+
+        let legacy_cache = workspace.join(".lingxi-build-state/input-manifest.json");
+        fs::create_dir_all(legacy_cache.parent().expect("build-state parent"))
+            .expect("build state");
+        fs::write(
+            &legacy_cache,
+            format!(
+                r#"{{
+  "files": [
+    {{
+      "path": "app/main.jsx",
+      "size": {},
+      "modified_ns": 123,
+      "content_sha256": "{:x}"
+    }}
+  ]
+}}"#,
+                first_source.len(),
+                Sha256::digest(first_source.as_bytes())
+            ),
+        )
+        .expect("legacy manifest");
+
+        fs::write(&source_path, second_source).expect("same-size changed source");
+        let second = workspace_build_key(&layout, &workspace).expect("second key");
+        assert_ne!(
+            first, second,
+            "explicit builds must hash current bytes even if a stale input-manifest.json claims the old digest"
+        );
     }
 
     #[test]
@@ -2554,14 +3338,58 @@ mod tests {
         fs::write(output.join("assets.js"), "console.log('good');").expect("asset");
 
         let digest = digest_tree(&output).expect("output digest");
-        write_build_provenance(&build_root, "source-key", &digest).expect("provenance");
-        assert!(build_cache_hit(&build_root, "source-key").expect("cache check"));
+        write_build_provenance(
+            &build_root,
+            "source-key",
+            "runtime",
+            "dependencies",
+            &digest,
+        )
+        .expect("provenance");
+        assert!(
+            build_cache_hit(&build_root, "source-key", "runtime", "dependencies")
+                .expect("cache check")
+        );
 
         fs::write(output.join("assets.js"), "console.log('tampered');").expect("tamper");
-        assert!(!build_cache_hit(&build_root, "source-key").expect("tampered cache check"));
+        assert!(
+            !build_cache_hit(&build_root, "source-key", "runtime", "dependencies")
+                .expect("tampered cache check")
+        );
 
         fs::write(build_root.join(BUILD_PROVENANCE_FILE), "{}").expect("stale provenance");
-        assert!(!build_cache_hit(&build_root, "source-key").expect("stale cache check"));
+        assert!(
+            !build_cache_hit(&build_root, "source-key", "runtime", "dependencies")
+                .expect("stale cache check")
+        );
+    }
+
+    #[test]
+    fn launch_gate_binds_manifest_contracts_and_promoted_output() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let layout = layout_with(root.path(), true, Some(local_apps::AppSurface::Dom));
+        let build_root = layout.root().join(layout.build_rel(false));
+        let output = build_root.join(VITE_OUTPUT_DIR);
+        fs::create_dir_all(&output).expect("output");
+        fs::write(output.join("index.html"), "<html>good</html>").expect("index");
+        let manifest = local_apps::load_manifest(&layout).expect("manifest");
+        let output_sha256 = digest_tree(&output).expect("output digest");
+        write_build_provenance(
+            &build_root,
+            "source-key",
+            &manifest.runtime_contract_hash().expect("runtime hash"),
+            &manifest
+                .dependency_snapshot_hash()
+                .expect("dependency hash"),
+            &output_sha256,
+        )
+        .expect("provenance");
+
+        validate_build_for_launch(&layout).expect("matching receipt must launch");
+
+        fs::write(output.join("index.html"), "<html>tampered</html>").expect("tamper");
+        let error = validate_build_for_launch(&layout).expect_err("tampered output must block");
+        assert!(error.to_string().contains("rebuild_required"), "{error}");
     }
 
     #[test]
@@ -2656,8 +3484,7 @@ mod tests {
         let root = tempfile::tempdir().expect("tempdir");
         let layout = AppLayout::new(root.path(), "aaaa1111").expect("layout");
 
-        scaffold_workspace(&layout, LocalAppBuildTarget::ViteReactStaticV1)
-            .expect("scaffold workspace");
+        scaffold_workspace(&layout, LocalAppBuildTarget::ReactDomR1).expect("scaffold workspace");
 
         let workspace = layout.root().join(layout.workspace_rel());
         assert!(workspace.join(".gitignore").is_file());
@@ -2698,8 +3525,7 @@ mod tests {
     /// everything under `app/` and `src/` is the user's app from here on.
     fn formed_layout(root: &Path) -> AppLayout {
         let layout = shell_layout(root);
-        scaffold_workspace(&layout, LocalAppBuildTarget::ViteReactStaticV1)
-            .expect("first scaffold");
+        scaffold_workspace(&layout, LocalAppBuildTarget::ReactDomR1).expect("first scaffold");
         layout
     }
 
@@ -2737,7 +3563,7 @@ mod tests {
         write_workspace_file(&workspace, "app/screens/rogue.jsx", b"// not in the seed");
         write_workspace_file(&workspace, "node_modules/.keep", b"");
 
-        scaffold_workspace_initialized(&layout, LocalAppBuildTarget::ViteReactStaticV1, true)
+        scaffold_workspace_initialized(&layout, LocalAppBuildTarget::ReactDomR1, true)
             .expect("scaffold");
 
         assert!(
@@ -2784,7 +3610,7 @@ mod tests {
             b"// squatted by the agent",
         );
 
-        scaffold_workspace_initialized(&layout, LocalAppBuildTarget::ViteReactStaticV1, true)
+        scaffold_workspace_initialized(&layout, LocalAppBuildTarget::ReactDomR1, true)
             .expect("scaffold");
 
         let landed = fs::read(workspace.join("app/screens/home-screen.jsx")).expect("read");
@@ -2815,7 +3641,7 @@ mod tests {
         )
         .expect("edit a seed path");
 
-        scaffold_workspace_initialized(&layout, LocalAppBuildTarget::ViteReactStaticV1, false)
+        scaffold_workspace_initialized(&layout, LocalAppBuildTarget::ReactDomR1, false)
             .expect("repin");
 
         assert!(
@@ -2849,7 +3675,7 @@ mod tests {
             b"stale",
         );
 
-        scaffold_workspace_initialized(&layout, LocalAppBuildTarget::ViteReactStaticV1, true)
+        scaffold_workspace_initialized(&layout, LocalAppBuildTarget::ReactDomR1, true)
             .expect("scaffold");
 
         assert!(
@@ -2872,9 +3698,8 @@ mod tests {
         fs::create_dir_all(&workspace).expect("bare workspace");
         write_workspace_file(&workspace, "keep-me.txt", b"not ours to delete");
 
-        let error =
-            scaffold_workspace_initialized(&layout, LocalAppBuildTarget::ViteReactStaticV1, true)
-                .expect_err("an uninitialized workspace must not be wiped");
+        let error = scaffold_workspace_initialized(&layout, LocalAppBuildTarget::ReactDomR1, true)
+            .expect_err("an uninitialized workspace must not be wiped");
 
         assert!(
             format!("{error}").contains("initialized app workspace"),
@@ -2901,9 +3726,8 @@ mod tests {
         fs::create_dir_all(workspace.parent().expect("app dir")).expect("app dir");
         std::os::unix::fs::symlink(&outside, &workspace).expect("symlink workspace");
 
-        let error =
-            scaffold_workspace_initialized(&layout, LocalAppBuildTarget::ViteReactStaticV1, true)
-                .expect_err("a symlinked workspace root must be refused");
+        let error = scaffold_workspace_initialized(&layout, LocalAppBuildTarget::ReactDomR1, true)
+            .expect_err("a symlinked workspace root must be refused");
 
         assert!(
             outside.join("precious.txt").exists(),
@@ -2926,7 +3750,7 @@ mod tests {
         fs::write(outside.join("precious.txt"), "someone else's tree").expect("outside file");
         std::os::unix::fs::symlink(&outside, workspace.join("vendor")).expect("symlink vendor");
 
-        scaffold_workspace_initialized(&layout, LocalAppBuildTarget::ViteReactStaticV1, true)
+        scaffold_workspace_initialized(&layout, LocalAppBuildTarget::ReactDomR1, true)
             .expect("scaffold");
 
         assert!(
@@ -2950,8 +3774,7 @@ mod tests {
         fs::write(&outside, "{\"outside\":true}").expect("outside file");
         std::os::unix::fs::symlink(&outside, workspace.join("package.json"))
             .expect("symlink package.json");
-        scaffold_workspace(&layout, LocalAppBuildTarget::ViteReactStaticV1)
-            .expect("scaffold workspace");
+        scaffold_workspace(&layout, LocalAppBuildTarget::ReactDomR1).expect("scaffold workspace");
 
         let metadata = fs::symlink_metadata(workspace.join("package.json")).expect("metadata");
         assert!(metadata.is_file());
@@ -2968,17 +3791,13 @@ mod tests {
         let root = tempfile::tempdir().expect("tempdir");
         let workspace = root.path().join("workspace");
         fs::create_dir_all(&workspace).expect("workspace");
-        let pinned_package = VITE_LOCKED_FILES
-            .iter()
-            .find(|(relative, _)| *relative == "package.json")
-            .map(|(_, bytes)| *bytes)
-            .expect("pinned package bytes");
+        let pinned_package = pinned_locked_bytes(LocalAppBuildTarget::ReactDomR1, "package.json");
         let outside = root.path().join("outside-package.json");
         fs::write(&outside, pinned_package).expect("outside file");
         std::os::unix::fs::symlink(&outside, workspace.join("package.json"))
             .expect("symlink package.json");
 
-        restore_host_managed_files(&workspace, LocalAppBuildTarget::ViteReactStaticV1)
+        restore_host_managed_files(&workspace, LocalAppBuildTarget::ReactDomR1)
             .expect("restore host-managed files");
 
         let metadata = fs::symlink_metadata(workspace.join("package.json")).expect("metadata");
@@ -2991,6 +3810,59 @@ mod tests {
         assert_eq!(fs::read(&outside).unwrap(), pinned_package);
     }
 
+    #[test]
+    fn restore_prefers_app_dependency_snapshot_for_package_and_lock() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let layout = AppLayout::new(root.path(), "aaaa1111").expect("layout");
+        layout.initialize().expect("initialize");
+        let workspace = layout.root().join(layout.workspace_rel());
+        let binding = crate::local_app_runtime_profiles::current_binding_for_family(
+            AppRuntimeProfile::ReactDom,
+        )
+        .expect("binding");
+        let mut manifest = local_apps::AppManifest::for_new_app("aaaa1111", "Fixture");
+        manifest.surface = Some(local_apps::AppSurface::Dom);
+        manifest.runtime_profile = Some(binding.clone());
+        manifest.dependency_snapshot = Some(local_apps::AppDependencySnapshot {
+            requested_sha256: "1".repeat(64),
+            package_sha256: "2".repeat(64),
+            lockfile_sha256: "3".repeat(64),
+            dependency_tree_sha256: "4".repeat(64),
+            sbom_sha256: "5".repeat(64),
+            toolchain_key: "pnpm@11.22.0/node@24.18.1".into(),
+            verified_profile_contract_sha256: binding.contract_sha256.clone(),
+        });
+        local_apps::save_manifest(&layout, &manifest).expect("manifest");
+        write_file(
+            &workspace,
+            EFFECTIVE_PACKAGE_FILE_REL,
+            br#"{ "name": "fixture", "dependencies": { "dayjs": "1.11.13" } }"#,
+            true,
+        )
+        .expect("effective package");
+        write_file(
+            &workspace,
+            LOCKFILE_FILE_REL,
+            b"lockfileVersion: '9.0'\nsettings:\n  autoInstallPeers: true\n",
+            true,
+        )
+        .expect("lockfile");
+        fs::write(workspace.join("package.json"), br#"{"tampered":true}"#).expect("package");
+        fs::write(workspace.join("pnpm-lock.yaml"), b"tampered\n").expect("lock");
+
+        restore_host_managed_files(&workspace, LocalAppBuildTarget::ReactDomR1)
+            .expect("restore host-managed files");
+
+        assert_eq!(
+            fs::read(workspace.join("package.json")).expect("package.json"),
+            fs::read(workspace.join(EFFECTIVE_PACKAGE_FILE_REL)).expect("effective package"),
+        );
+        assert_eq!(
+            fs::read(workspace.join("pnpm-lock.yaml")).expect("pnpm-lock.yaml"),
+            fs::read(workspace.join(LOCKFILE_FILE_REL)).expect("snapshot lockfile"),
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn restore_replaces_symlinked_host_managed_parent_without_writing_outside() {
@@ -2999,16 +3871,13 @@ mod tests {
         let outside_lib = root.path().join("outside-lib");
         fs::create_dir_all(&workspace).expect("workspace");
         fs::create_dir_all(&outside_lib).expect("outside lib");
-        let pinned_bridge = VITE_LOCKED_FILES
-            .iter()
-            .find(|(relative, _)| *relative == "lib/lingxi-bridge.js")
-            .map(|(_, bytes)| *bytes)
-            .expect("pinned bridge bytes");
+        let pinned_bridge =
+            pinned_locked_bytes(LocalAppBuildTarget::ReactDomR1, "lib/lingxi-bridge.js");
         fs::write(outside_lib.join("lingxi-bridge.js"), pinned_bridge).expect("outside bridge");
         std::os::unix::fs::symlink(&outside_lib, workspace.join("lib"))
             .expect("symlink lib parent");
 
-        restore_host_managed_files(&workspace, LocalAppBuildTarget::ViteReactStaticV1)
+        restore_host_managed_files(&workspace, LocalAppBuildTarget::ReactDomR1)
             .expect("restore host-managed files");
 
         let lib_metadata = fs::symlink_metadata(workspace.join("lib")).expect("lib metadata");
@@ -3073,29 +3942,13 @@ mod tests {
     async fn the_build_re_pins_host_managed_infrastructure_without_touching_app_owned_files() {
         let root = tempfile::tempdir().expect("tempdir");
         let layout = AppLayout::new(root.path(), "aaaa1111").expect("layout");
-        scaffold_workspace(&layout, LocalAppBuildTarget::ViteReactStaticV1)
-            .expect("scaffold workspace");
+        scaffold_workspace(&layout, LocalAppBuildTarget::ReactDomR1).expect("scaffold workspace");
         let workspace = layout.root().join(layout.workspace_rel());
-        let pinned_bridge = VITE_LOCKED_FILES
-            .iter()
-            .find(|(relative, _)| *relative == "lib/lingxi-bridge.js")
-            .map(|(_, bytes)| *bytes)
-            .expect("pinned bridge bytes");
-        let pinned_gitignore = VITE_LOCKED_FILES
-            .iter()
-            .find(|(relative, _)| *relative == ".gitignore")
-            .map(|(_, bytes)| *bytes)
-            .expect("pinned gitignore bytes");
-        let pinned_package = VITE_LOCKED_FILES
-            .iter()
-            .find(|(relative, _)| *relative == "package.json")
-            .map(|(_, bytes)| *bytes)
-            .expect("pinned package bytes");
-        let pinned_index = VITE_LOCKED_FILES
-            .iter()
-            .find(|(relative, _)| *relative == "index.html")
-            .map(|(_, bytes)| *bytes)
-            .expect("pinned index bytes");
+        let pinned_bridge =
+            pinned_locked_bytes(LocalAppBuildTarget::ReactDomR1, "lib/lingxi-bridge.js");
+        let pinned_gitignore = pinned_locked_bytes(LocalAppBuildTarget::ReactDomR1, ".gitignore");
+        let pinned_package = pinned_locked_bytes(LocalAppBuildTarget::ReactDomR1, "package.json");
+        let pinned_index = pinned_locked_bytes(LocalAppBuildTarget::ReactDomR1, "index.html");
 
         fs::write(
             workspace.join("lib/lingxi-bridge.js"),
@@ -3103,7 +3956,6 @@ mod tests {
         )
         .expect("tampered bridge");
         fs::write(workspace.join(".gitignore"), b"").expect("tampered gitignore");
-        fs::write(workspace.join("package.json"), br#"{"tampered":true}"#).expect("package.json");
         fs::write(
             workspace.join("index.html"),
             b"<!doctype html><div>tampered</div>",
@@ -3145,10 +3997,12 @@ mod tests {
             mobile_linux: Some(runtime),
             host: broker.as_ref(),
         };
+        let mut dependency = local_apps::storage::default_dependency_record("aaaa1111", 1);
+        dependency.state = local_apps::AppDependencyState::Ready;
 
         // The preflight passes, so preparation runs; only `node` itself fails.
         builder
-            .build_workspace(&layout)
+            .build_workspace_locked(&layout, &dependency)
             .await
             .expect_err("the stub runtime cannot run the build tool");
 
@@ -3187,8 +4041,7 @@ mod tests {
     async fn a_failed_build_cleans_up_its_staging_directory() {
         let root = tempfile::tempdir().expect("tempdir");
         let layout = AppLayout::new(root.path(), "aaaa1111").expect("layout");
-        scaffold_workspace(&layout, LocalAppBuildTarget::ViteReactStaticV1)
-            .expect("scaffold workspace");
+        scaffold_workspace(&layout, LocalAppBuildTarget::ReactDomR1).expect("scaffold workspace");
         let workspace = layout.root().join(layout.workspace_rel());
         fs::create_dir_all(workspace.join("node_modules/vite/bin")).expect("node_modules");
         fs::write(
@@ -3232,8 +4085,7 @@ mod tests {
     async fn build_runs_from_the_workspace_mount_and_promotes_private_output() {
         let root = tempfile::tempdir().expect("tempdir");
         let layout = AppLayout::new(root.path(), "aaaa1111").expect("layout");
-        scaffold_workspace(&layout, LocalAppBuildTarget::ViteReactStaticV1)
-            .expect("scaffold workspace");
+        scaffold_workspace(&layout, LocalAppBuildTarget::ReactDomR1).expect("scaffold workspace");
         let workspace = layout.root().join(layout.workspace_rel());
         fs::create_dir_all(workspace.join("node_modules/vite/bin")).expect("node_modules");
         fs::write(
@@ -3262,9 +4114,11 @@ mod tests {
             mobile_linux: Some(runtime.clone() as Arc<dyn MobileLinuxRuntime>),
             host: broker.as_ref(),
         };
+        let mut dependency = local_apps::storage::default_dependency_record("aaaa1111", 1);
+        dependency.state = local_apps::AppDependencyState::Ready;
 
         builder
-            .build_workspace(&layout)
+            .build_workspace_locked(&layout, &dependency)
             .await
             .expect("workspace build");
 
@@ -3298,7 +4152,7 @@ mod tests {
     fn the_locked_bridge_exposes_the_native_wire_contract() {
         let bridge = include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../local-apps/templates/vite-react-static-v1/lib/lingxi-bridge.js"
+            "/../../local-apps/templates/runtime-profiles/react-dom/r1/lib/lingxi-bridge.js"
         ));
         for anchor in [
             "records[].document",
@@ -3351,15 +4205,15 @@ mod tests {
     fn platform_adapter_declares_distinct_phone_and_tablet_presentations() {
         let adapter = include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../local-apps/templates/vite-react-static-v1/lib/platform-adapter.js"
+            "/../../local-apps/templates/runtime-profiles/react-dom/r1/lib/platform-adapter.js"
         ));
         let foundation = include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../local-apps/templates/vite-react-static-v1/styles/foundation.css"
+            "/../../local-apps/templates/runtime-profiles/react-dom/r1/styles/foundation.css"
         ));
         let vite_config = include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../local-apps/templates/vite-react-static-v1/vite.config.mjs"
+            "/../../local-apps/templates/runtime-profiles/react-dom/r1/vite.config.mjs"
         ));
         for marker in [
             "ios:iphone",
@@ -3429,23 +4283,16 @@ mod tests {
     #[test]
     fn build_key_ignores_service_state_written_under_dot_lingxi() {
         let root = tempfile::tempdir().expect("tempdir");
-        let workspace = root.path().join("workspace");
+        let layout = layout_with(root.path(), true, Some(local_apps::AppSurface::Dom));
+        let workspace = layout.root().join(layout.workspace_rel());
         fs::create_dir_all(workspace.join("app")).expect("workspace");
-        fs::create_dir_all(workspace.join(".lingxi")).expect("state dir");
         fs::write(workspace.join("app/main.jsx"), "export default 'one';").expect("source");
         fs::write(
             workspace.join(".lingxi/app.json"),
             r#"{"last_build_id":"build-1"}"#,
         )
         .expect("record");
-        let dependency = local_apps::storage::default_dependency_record("aaaa1111", 1);
-
-        let first = workspace_build_key(
-            &workspace,
-            &dependency,
-            LocalAppBuildTarget::ViteReactStaticV1,
-        )
-        .expect("first key");
+        let first = workspace_build_key(&layout, &workspace).expect("first key");
 
         // Exactly what a build does to its own record on the way out.
         fs::write(
@@ -3453,12 +4300,7 @@ mod tests {
             r#"{"last_build_id":"build-2"}"#,
         )
         .expect("rewritten record");
-        let second = workspace_build_key(
-            &workspace,
-            &dependency,
-            LocalAppBuildTarget::ViteReactStaticV1,
-        )
-        .expect("second key");
+        let second = workspace_build_key(&layout, &workspace).expect("second key");
         assert_eq!(
             first, second,
             "a rewritten .lingxi/app.json must not invalidate the build key -- \
@@ -3468,12 +4310,7 @@ mod tests {
         // The skip must be scoped to service state, not a blanket dotfile
         // amnesty: real source still has to invalidate.
         fs::write(workspace.join("app/main.jsx"), "export default 'two';").expect("changed");
-        let third = workspace_build_key(
-            &workspace,
-            &dependency,
-            LocalAppBuildTarget::ViteReactStaticV1,
-        )
-        .expect("third key");
+        let third = workspace_build_key(&layout, &workspace).expect("third key");
         assert_ne!(first, third, "changed source must still invalidate the key");
     }
 

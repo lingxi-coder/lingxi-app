@@ -66,6 +66,8 @@ pub mod local_apps_tools;
 mod local_apps_bridge;
 
 #[cfg(feature = "uniffi")]
+mod local_app_runtime_profiles;
+#[cfg(feature = "uniffi")]
 mod local_apps_build;
 #[cfg(feature = "uniffi")]
 mod local_apps_host;
@@ -393,13 +395,7 @@ pub fn mobile_command_registry(
 ) -> CommandRegistry {
     let mut reg = CommandRegistry::new();
     register_all_builtin_commands(&mut reg);
-    // Bundled programmatic skills (`/loop`), mirroring desktop. Gated on the cron
-    // kill-switch (loop.ts:83); mobile starts no cron scheduler so a scheduled
-    // job is inert, but the skill's listing/usage path is harmless and faithful.
-    let cron_enabled =
-        !traits::env::is_env_truthy(std::env::var("LINGXI_DISABLE_CRON").ok().as_deref());
-    command_core::register_bundled_skills(&mut reg, cron_enabled);
-    register_mobile_skill_commands(&mut reg);
+    register_mobile_bundled_prompt_commands(&mut reg);
     register_core_batch_1(&mut reg, handle.clone());
     register_core_batch_2(&mut reg, handle.clone(), auth);
     register_core_batch_4(&mut reg, handle.clone());
@@ -418,13 +414,27 @@ pub fn mobile_command_registry(
     reg
 }
 
+/// Register the mobile authoritative bundled prompt catalog: the command-core
+/// programmatic bundled prompts (for example `/loop`) plus the mobile-only
+/// bundled skill set. Call this after any disk-sourced load on mobile so the
+/// shipped bundled prompts keep precedence over same-name on-device decoys.
+pub(crate) fn register_mobile_bundled_prompt_commands(reg: &mut CommandRegistry) {
+    // Bundled programmatic skills (`/loop`), mirroring desktop. Gated on the cron
+    // kill-switch (loop.ts:83); mobile starts no cron scheduler so a scheduled
+    // job is inert, but the skill's listing/usage path is harmless and faithful.
+    let cron_enabled =
+        !traits::env::is_env_truthy(std::env::var("LINGXI_DISABLE_CRON").ok().as_deref());
+    command_core::register_bundled_skills(reg, cron_enabled);
+    register_mobile_skill_commands(reg);
+}
+
 /// Mirror the compiled-in mobile Skill registry into the slash-command
 /// catalog. The Skill tool remains the canonical invocation path, but a
-/// settings screen and `/` palette must see the same five shipped skills — a
+/// settings screen and `/` palette must see the same shipped mobile skills — a
 /// second hard-coded client list would drift again. The prompt body is the
-/// exact bundled markdown, so a slash invocation and a Skill-tool invocation
-/// receive identical guidance.
-fn register_mobile_skill_commands(reg: &mut CommandRegistry) {
+/// exact bundled content, and both invocation paths use the standard argument
+/// expansion semantics so they receive identical guidance.
+pub(crate) fn register_mobile_skill_commands(reg: &mut CommandRegistry) {
     let skills = mobile_skill_registry();
     for name in [
         "create-local-app",
@@ -432,6 +442,11 @@ fn register_mobile_skill_commands(reg: &mut CommandRegistry) {
         "frontend-qa",
         "accessibility",
         "react-best-practices",
+        "ionic-react-local-app",
+        "canvas-2d-local-app",
+        "threejs-local-app",
+        "phaser-2d-local-app",
+        "babylon-3d-local-app",
     ] {
         let Some(skill) = skills.get(name) else {
             continue;
@@ -460,10 +475,96 @@ struct MobileSkillPrompt {
 
 impl BundledPromptFn for MobileSkillPrompt {
     fn build(&self, args: &str) -> String {
-        if args.trim().is_empty() {
-            self.body.clone()
-        } else {
-            format!("{}\n\nUser-supplied focus:\n{}", self.body, args.trim())
+        command_api::substitute_arguments_faithful(&self.body, Some(args), true, &[])
+            .expect("bundled mobile skills have no named arguments")
+    }
+}
+
+#[cfg(test)]
+mod mobile_skill_command_tests {
+    use super::*;
+
+    #[test]
+    fn slash_skills_are_all_registered_and_keep_complete_bundled_content() {
+        let mut commands = CommandRegistry::new();
+        register_mobile_skill_commands(&mut commands);
+
+        let mut names: Vec<_> = commands
+            .list_all()
+            .into_iter()
+            .map(|command| command.name.as_str())
+            .collect();
+        names.sort_unstable();
+        assert_eq!(
+            names,
+            vec![
+                "accessibility",
+                "babylon-3d-local-app",
+                "canvas-2d-local-app",
+                "create-local-app",
+                "frontend-design",
+                "frontend-qa",
+                "ionic-react-local-app",
+                "phaser-2d-local-app",
+                "react-best-practices",
+                "threejs-local-app",
+            ]
+        );
+
+        let skills = mobile_skill_registry();
+        let test_cases = [
+            ("ionic-react-local-app", ""),
+            ("canvas-2d-local-app", "focus"),
+            ("threejs-local-app", "  focus  "),
+            ("phaser-2d-local-app", "focus"),
+            ("babylon-3d-local-app", "focus"),
+            ("ionic-react-local-app", " \t "),
+        ];
+        for (name, args) in test_cases {
+            let command = commands.resolve(name).expect("bundled slash skill");
+            let SlashCommandKind::Bundled {
+                prompt_fn: Some(prompt),
+                ..
+            } = &command.kind
+            else {
+                panic!("{name} must be a bundled prompt command");
+            };
+            let expected = command_api::substitute_arguments_faithful(
+                &skills.get(name).expect("bundled skill").content,
+                Some(args),
+                true,
+                &[],
+            )
+            .expect("bundled mobile skills have no named arguments");
+            let built = prompt.build(args);
+            if args.is_empty() {
+                assert_eq!(
+                    expected,
+                    skills.get(name).expect("bundled skill").content,
+                    "empty args must leave the bundled body unchanged"
+                );
+                assert!(
+                    !built.contains("\n\nARGUMENTS:"),
+                    "empty args must not append an ARGUMENTS footer"
+                );
+            }
+            assert_eq!(
+                built, expected,
+                "slash invocation must match Skill's standard argument expansion"
+            );
+            if !args.is_empty() {
+                assert!(
+                    built.ends_with(&format!("\n\nARGUMENTS: {args}")),
+                    "nonempty args must reach the built prompt with the exact raw ARGUMENTS footer"
+                );
+            }
+            if args == " \t " {
+                assert_ne!(
+                    built,
+                    skills.get(name).expect("bundled skill").content,
+                    "whitespace-only args currently count as nonempty and must keep the raw ARGUMENTS footer"
+                );
+            }
         }
     }
 }

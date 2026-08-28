@@ -16,7 +16,8 @@
         "scaffolded": true
       },
       "manifest": {
-        "schema_version": 1,
+        "schema_version": 2,
+        "runtime_api_version": 2,
         "app_id": "habits-1a2b",
         "name": "Habits",
         "design_revision": 4,
@@ -41,8 +42,28 @@
         ],
         "capabilities": [
           "camera"
-        ]
+        ],
+        "device_context": {
+          "os": "ios",
+          "formFactor": "iphone"
+        },
+        "surface": "dom",
+        "runtime_profile": {
+          "family": "react_dom",
+          "revision": 1,
+          "contractSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "dependency_snapshot": {
+          "requestedSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "packageSha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          "lockfileSha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          "dependencyTreeSha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+          "sbomSha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+          "toolchainKey": "pnpm@11.22.0/node@24.18.1",
+          "verifiedProfileContractSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }
       },
+      "runtime_profile_status": "verified",
       "runtime": {
         "state": "stopped",
         "mode": "static_export",

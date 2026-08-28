@@ -9,6 +9,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -146,6 +147,12 @@ fun LocalAppsScreen(
         }
         state.pendingAuthorization?.let { request ->
             AuthorizationDialog(request = request, onAction = onAction)
+        }
+        state.pendingRuntimeProfileSelection?.let { request ->
+            RuntimeProfileSelectionDialog(request = request, onAction = onAction)
+        }
+        state.pendingDependencyChangeConfirmation?.let { request ->
+            DependencyChangeConfirmationDialog(request = request, onAction = onAction)
         }
         state.pendingProfileProposal?.let { proposal ->
             ProfileProposalDialog(proposal = proposal, onAction = onAction)
@@ -371,6 +378,9 @@ private fun LocalAppCard(app: LocalAppItem, onAction: (LocalAppsAction) -> Unit)
             }
             app.runtime.detail?.let {
                 Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+            }
+            app.runtimeProfileStatus?.let { status ->
+                LocalAppRuntimeProfileStatusBadge(status)
             }
             Row(
                 verticalAlignment = Alignment.CenterVertically,
@@ -851,6 +861,17 @@ private fun LocalAppDataDetails(details: LocalAppDetails?) {
         verticalArrangement = Arrangement.spacedBy(12.dp),
         modifier = Modifier.fillMaxSize().padding(16.dp),
     ) {
+        details?.runtimeProfileStatus?.let { status ->
+            item {
+                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Text(
+                        stringResource(R.string.local_apps_runtime_profile_health_title),
+                        style = MaterialTheme.typography.titleMedium,
+                    )
+                    LocalAppRuntimeProfileStatusBadge(status)
+                }
+            }
+        }
         item {
             Card {
                 Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -1184,14 +1205,16 @@ private fun AuthorizationDialog(
                     onClick = { onAction(LocalAppsAction.ResolveAuthorization(LocalAppAuthorizationDecision.AllowOnce)) },
                     modifier = Modifier.fillMaxWidth(),
                 ) { Text(stringResource(R.string.local_apps_allow_once)) }
-                OutlinedButton(
-                    onClick = { onAction(LocalAppsAction.ResolveAuthorization(LocalAppAuthorizationDecision.AllowSession)) },
-                    modifier = Modifier.fillMaxWidth(),
-                ) { Text(stringResource(R.string.local_apps_allow_session)) }
-                TextButton(
-                    onClick = { onAction(LocalAppsAction.ResolveAuthorization(LocalAppAuthorizationDecision.AllowAlways)) },
-                    modifier = Modifier.fillMaxWidth(),
-                ) { Text(stringResource(R.string.local_apps_allow_always)) }
+                if (request.allowsPersistentGrant) {
+                    OutlinedButton(
+                        onClick = { onAction(LocalAppsAction.ResolveAuthorization(LocalAppAuthorizationDecision.AllowSession)) },
+                        modifier = Modifier.fillMaxWidth(),
+                    ) { Text(stringResource(R.string.local_apps_allow_session)) }
+                    TextButton(
+                        onClick = { onAction(LocalAppsAction.ResolveAuthorization(LocalAppAuthorizationDecision.AllowAlways)) },
+                        modifier = Modifier.fillMaxWidth(),
+                    ) { Text(stringResource(R.string.local_apps_allow_always)) }
+                }
             }
         },
         confirmButton = {},
@@ -1201,6 +1224,269 @@ private fun AuthorizationDialog(
             }
         },
     )
+}
+
+@Composable
+private fun RuntimeProfileSelectionDialog(
+    request: LocalAppRuntimeProfileSelectionRequest,
+    onAction: (LocalAppsAction) -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = { onAction(LocalAppsAction.ResolveRuntimeProfileSelection(null)) },
+        title = { Text(stringResource(R.string.local_apps_runtime_profile_prompt_title)) },
+        text = {
+            LazyColumn(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(max = 420.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                item {
+                    Text(request.reason)
+                }
+                items(request.options) { option ->
+                    Card(
+                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer),
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(12.dp),
+                            verticalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                Text(
+                                    option.family.label(),
+                                    style = MaterialTheme.typography.titleMedium,
+                                    modifier = Modifier.weight(1f),
+                                )
+                                if (request.recommendedFamily == option.family) {
+                                    AssistChip(
+                                        onClick = {},
+                                        enabled = false,
+                                        label = { Text(stringResource(R.string.local_apps_runtime_profile_recommended)) },
+                                    )
+                                }
+                                AssistChip(
+                                    onClick = {},
+                                    enabled = false,
+                                    label = {
+                                        Text(
+                                            if (option.available) {
+                                                stringResource(R.string.local_apps_runtime_profile_available)
+                                            } else {
+                                                stringResource(R.string.local_apps_runtime_profile_unavailable)
+                                            },
+                                        )
+                                    },
+                                )
+                            }
+                            Text(
+                                stringResource(
+                                    R.string.local_apps_runtime_profile_revision_surface,
+                                    option.revision.toInt(),
+                                    option.surface.label(),
+                                ),
+                                style = MaterialTheme.typography.bodySmall,
+                            )
+                            Text(
+                                option.corePackages.joinToString("\n") { "${it.name}@${it.version}" },
+                                style = MaterialTheme.typography.bodySmall,
+                            )
+                            Text(
+                                stringResource(R.string.local_apps_runtime_profile_contract, option.contractSha256),
+                                style = MaterialTheme.typography.bodySmall,
+                            )
+                            Text(
+                                stringResource(
+                                    R.string.local_apps_runtime_profile_cache_download,
+                                    option.cacheStatus.localizedRuntimeProfileStatus(),
+                                    option.downloadStatus.localizedRuntimeProfileStatus(),
+                                ),
+                                style = MaterialTheme.typography.bodySmall,
+                            )
+                            option.reason?.let {
+                                Text(it, style = MaterialTheme.typography.bodySmall)
+                            }
+                            Button(
+                                onClick = { onAction(LocalAppsAction.ResolveRuntimeProfileSelection(option.family)) },
+                                modifier = Modifier.fillMaxWidth(),
+                                enabled = option.available,
+                            ) {
+                                Text(
+                                    if (option.available) {
+                                        stringResource(R.string.local_apps_runtime_profile_select)
+                                    } else {
+                                        stringResource(R.string.local_apps_runtime_profile_unavailable_action)
+                                    },
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {},
+        dismissButton = {
+            TextButton(onClick = { onAction(LocalAppsAction.ResolveRuntimeProfileSelection(null)) }) {
+                Text(stringResource(R.string.common_cancel))
+            }
+        },
+    )
+}
+
+@Composable
+private fun DependencyChangeConfirmationDialog(
+    request: LocalAppDependencyChangeConfirmationRequest,
+    onAction: (LocalAppsAction) -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = { onAction(LocalAppsAction.ResolveDependencyChangeConfirmation(false)) },
+        title = { Text(stringResource(R.string.local_apps_dependency_change_title)) },
+        text = {
+            LazyColumn(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(max = 520.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                item {
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text(request.reason.localizedDependencyConfirmationReason())
+                        Text(
+                            stringResource(R.string.local_apps_authorization_app_id, request.appId),
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                    }
+                }
+                items(request.changes) { change ->
+                    Card(
+                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer),
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(12.dp),
+                            verticalArrangement = Arrangement.spacedBy(6.dp),
+                        ) {
+                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                Text(
+                                    change.kind.label(),
+                                    style = MaterialTheme.typography.labelMedium,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                                Text(
+                                    change.packageName + (change.version?.let { "@$it" } ?: ""),
+                                    style = MaterialTheme.typography.titleSmall,
+                                )
+                            }
+                            Text(
+                                stringResource(
+                                    R.string.local_apps_dependency_change_cache_download,
+                                    change.cacheStatus.localizedDependencyStatus(),
+                                    change.downloadStatus.localizedDependencyStatus(),
+                                ),
+                                style = MaterialTheme.typography.bodySmall,
+                            )
+                        }
+                    }
+                }
+                item {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(top = 4.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
+                        DependencyPolicyRow(
+                            label = stringResource(R.string.local_apps_dependency_change_license_risk),
+                            value = request.licenseRisk.localizedDependencyRisk(),
+                        )
+                        DependencyPolicyRow(
+                            label = stringResource(R.string.local_apps_dependency_change_sbom_risk),
+                            value = request.sbomRisk.localizedDependencyRisk(),
+                        )
+                        DependencyPolicyRow(
+                            label = stringResource(R.string.local_apps_dependency_change_scripts),
+                            value = if (request.lifecycleScriptsBlocked) {
+                                stringResource(R.string.local_apps_dependency_change_blocked)
+                            } else {
+                                stringResource(R.string.local_apps_dependency_change_allowed)
+                            },
+                        )
+                        DependencyPolicyRow(
+                            label = stringResource(R.string.local_apps_dependency_change_native_addons),
+                            value = if (request.nativeAddonsBlocked) {
+                                stringResource(R.string.local_apps_dependency_change_blocked)
+                            } else {
+                                stringResource(R.string.local_apps_dependency_change_allowed)
+                            },
+                        )
+                        Text(
+                            request.rollbackPolicy.localizedDependencyRollbackPolicy(),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(top = 4.dp),
+                        )
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            Button(onClick = { onAction(LocalAppsAction.ResolveDependencyChangeConfirmation(true)) }) {
+                Text(stringResource(R.string.local_apps_dependency_change_approve))
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = { onAction(LocalAppsAction.ResolveDependencyChangeConfirmation(false)) }) {
+                Text(stringResource(R.string.common_cancel))
+            }
+        },
+    )
+}
+
+@Composable
+private fun DependencyPolicyRow(label: String, value: String) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween,
+    ) {
+        Text(label, style = MaterialTheme.typography.bodySmall)
+        Text(
+            value,
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
+}
+
+@Composable
+private fun LocalAppDependencyChangeKind.label(): String = when (this) {
+    LocalAppDependencyChangeKind.Add -> stringResource(R.string.local_apps_dependency_change_add)
+    LocalAppDependencyChangeKind.Update -> stringResource(R.string.local_apps_dependency_change_update)
+    LocalAppDependencyChangeKind.Remove -> stringResource(R.string.local_apps_dependency_change_remove)
+}
+
+@Composable
+private fun String.localizedDependencyRisk(): String = when (this) {
+    "unknown_until_resolution" -> stringResource(R.string.local_apps_dependency_change_unknown_until_resolution)
+    else -> this
+}
+
+@Composable
+private fun String.localizedDependencyConfirmationReason(): String = when (this) {
+    "pre_resolution_no_network" -> stringResource(R.string.local_apps_dependency_change_pre_resolution_no_network)
+    else -> this
+}
+
+@Composable
+private fun String.localizedDependencyRollbackPolicy(): String = when (this) {
+    "rollback_on_validation_failure" -> stringResource(R.string.local_apps_dependency_change_rollback_on_failure)
+    else -> this
+}
+
+@Composable
+private fun String.localizedDependencyStatus(): String = when (this) {
+    "may_be_required" -> stringResource(R.string.local_apps_dependency_change_download_may_be_required)
+    "not_required" -> stringResource(R.string.local_apps_dependency_change_download_not_required)
+    "not_needed" -> stringResource(R.string.local_apps_dependency_change_cache_not_needed)
+    else -> this
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -1246,6 +1532,66 @@ private fun LocalAppDataFieldType.label(): String = when (this) {
     LocalAppDataFieldType.DateTime -> stringResource(R.string.local_apps_data_field_type_datetime)
     LocalAppDataFieldType.Enum -> stringResource(R.string.local_apps_data_field_type_enum)
     LocalAppDataFieldType.ImageRef -> stringResource(R.string.local_apps_data_field_type_image_ref)
+}
+
+@Composable
+private fun LocalAppRuntimeProfileFamily.label(): String = when (this) {
+    LocalAppRuntimeProfileFamily.ReactDom -> stringResource(R.string.local_apps_runtime_profile_family_react_dom)
+    LocalAppRuntimeProfileFamily.Canvas2d -> stringResource(R.string.local_apps_runtime_profile_family_canvas_2d)
+    LocalAppRuntimeProfileFamily.Three3d -> stringResource(R.string.local_apps_runtime_profile_family_three_3d)
+    LocalAppRuntimeProfileFamily.Phaser2d -> stringResource(R.string.local_apps_runtime_profile_family_phaser_2d)
+    LocalAppRuntimeProfileFamily.Babylon3d -> stringResource(R.string.local_apps_runtime_profile_family_babylon_3d)
+}
+
+@Composable
+private fun LocalAppRuntimeProfileSurface.label(): String = when (this) {
+    LocalAppRuntimeProfileSurface.Dom -> stringResource(R.string.local_apps_runtime_profile_surface_dom)
+    LocalAppRuntimeProfileSurface.Canvas -> stringResource(R.string.local_apps_runtime_profile_surface_canvas)
+}
+
+@Composable
+private fun String.localizedRuntimeProfileStatus(): String = when (this) {
+    "bundled" -> stringResource(R.string.local_apps_runtime_profile_status_bundled)
+    "cached" -> stringResource(R.string.local_apps_runtime_profile_status_cached)
+    "download_required" -> stringResource(R.string.local_apps_runtime_profile_status_download_required)
+    "unavailable" -> stringResource(R.string.local_apps_runtime_profile_status_unavailable)
+    "gated" -> stringResource(R.string.local_apps_runtime_profile_status_gated)
+    else -> this
+}
+
+@Composable
+private fun LocalAppRuntimeProfileStatusBadge(status: LocalAppRuntimeProfileStatus) {
+    val color = when (status) {
+        LocalAppRuntimeProfileStatus.Verified -> MaterialTheme.colorScheme.primary
+        LocalAppRuntimeProfileStatus.DependenciesDirty,
+        LocalAppRuntimeProfileStatus.MigrationAvailable,
+        LocalAppRuntimeProfileStatus.RebuildRequired -> MaterialTheme.colorScheme.tertiary
+        LocalAppRuntimeProfileStatus.CoreDependencyDrift,
+        LocalAppRuntimeProfileStatus.RuntimeBundleMissing,
+        LocalAppRuntimeProfileStatus.RuntimeContractCorrupt -> MaterialTheme.colorScheme.error
+    }
+    Text(
+        text = status.localizedLabel(),
+        style = MaterialTheme.typography.labelMedium,
+        color = color,
+    )
+}
+
+@Composable
+private fun LocalAppRuntimeProfileStatus.localizedLabel(): String = when (this) {
+    LocalAppRuntimeProfileStatus.Verified -> stringResource(R.string.local_apps_runtime_profile_health_verified)
+    LocalAppRuntimeProfileStatus.DependenciesDirty ->
+        stringResource(R.string.local_apps_runtime_profile_health_dependencies_dirty)
+    LocalAppRuntimeProfileStatus.CoreDependencyDrift ->
+        stringResource(R.string.local_apps_runtime_profile_health_core_dependency_drift)
+    LocalAppRuntimeProfileStatus.RebuildRequired ->
+        stringResource(R.string.local_apps_runtime_profile_health_rebuild_required)
+    LocalAppRuntimeProfileStatus.MigrationAvailable ->
+        stringResource(R.string.local_apps_runtime_profile_health_migration_available)
+    LocalAppRuntimeProfileStatus.RuntimeBundleMissing ->
+        stringResource(R.string.local_apps_runtime_profile_health_runtime_bundle_missing)
+    LocalAppRuntimeProfileStatus.RuntimeContractCorrupt ->
+        stringResource(R.string.local_apps_runtime_profile_health_runtime_contract_corrupt)
 }
 
 @Composable

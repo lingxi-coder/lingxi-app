@@ -265,3 +265,171 @@ pub runtime_profile: Option<AppRuntimeProfileBinding>,
 6. **冒烟门落 host core**（新增步骤 6.5）——可与 4/5 并行，因为它不碰插件文件。
 7. 迁移判定（第 3 条）+ 客户端 DTO + 协议 bless（方案步骤 7-8，合并 `SmokeReport`）。
 8. 清理与文档（方案步骤 9-10）。
+
+---
+
+## 9. verification 的 skills / agents 具体内容（本节补上文缺的部分）
+
+第 7 节给的是**架构与顺序**，没有给插件里那几个文件**写什么**。本节补齐。
+
+### 9.1 先更正方案的 skill 清单
+
+方案说「把根级十个 local-app skills 迁入插件」，并列出 11 个目录。实际（2026-08-28）：
+
+| 插件目录 | 来源 | 状态 |
+|---|---|---|
+| `create/` | `skills/create-local-app` | ✅ 存在 |
+| `verify/` | `skills/frontend-qa` | ✅ 存在 |
+| `design/` | `skills/frontend-design` | ✅ 存在 |
+| `accessibility/` | `skills/accessibility` | ✅ 存在 |
+| `react/` | `skills/react-best-practices` | ✅ 存在 |
+| `dom/` | `skills/ionic-react-local-app` | ✅ 存在 |
+| `canvas-2d/` | `skills/canvas-2d-local-app` | ✅ 存在 |
+| `threejs/` | `skills/threejs-local-app` | ✅ 存在 |
+| `phaser/` | `skills/phaser-2d-local-app` | ✅ 存在 |
+| `babylon/` | `skills/babylon-3d-local-app` | ✅ 存在 |
+| **`update/`** | — | 🚨 **不存在，必须新写** |
+
+⇒ 是「迁移 10 + 新写 1」，不是「迁移 10」。`update/` 是方案新引入的入口
+（`operation:"update"`），它承载 revision 语义，也是 Phase 4 里**标注（annotation）
+转成修改指令**的落点。方案的工作量估计需要据此调整。
+
+📝 十个 skill 全部存在这件事本身也是新的——`phaser-2d-local-app` 与
+`babylon-3d-local-app` 是评审期间出现的。再次印证第 5 条。
+
+### 9.2 `skills/verify/` 必须携带的内容（今天的 `frontend-qa` 没有）
+
+**🚨 最重要的一条：捕获仪器。** `frontend-qa` 现在要求
+「A claim without a screenshot, log … 」并让 verifier「capture two frames」，
+但**全篇没有一个字提到用哪个 API 取帧**。而 spike 实测：
+
+- `takeSnapshot`（= 生产 `capture_ui` 现在走的路径，`LocalAppWebView.swift:572`）
+  对**离屏** WKWebView **恒返回 rgb(0,0,0)**；
+- `drawHierarchy` 正常，且能捕获 2D canvas 与 WebGL。
+
+⇒ 若冒烟门用离屏视图，而 skill 让 verifier「截两帧比对」，verifier 会拿到
+**两张全黑的图**，然后按 `frontend-qa` 现有的「motion」判据报告「无变化」——
+一个**假的失败**，且看起来像 app 坏了。skill 必须写明：
+**在离屏语境下不得使用 `takeSnapshot`**，帧证据由宿主侧 `drawHierarchy` 提供。
+
+**其余必须进 `verify/` 的内容**（均来自 verification 设计，今天散落在设计文档里）：
+
+| 内容 | 为什么必须在 skill 里 |
+|---|---|
+| 六条判据表（1/2/6 阻塞，4/5 建议） | verifier 需要知道**哪些会否决交付**，否则它会把建议项当阻塞项报 |
+| **判据 4/5 是建议不是阻塞**，及其四条误阻塞路径（菜单态 canvas、JPEG 质量档位被读成运动、Android reload 的 `about:blank` 白帧、WebContent 进程死亡） | 这四条各由不同评审镜头发现；不写进 skill，verifier 会重新踩 |
+| 判据 6 必须覆盖 `console.error` | React 19 的 `onCaughtError` 路由到 `console.error`，**永不到 `window.onerror`**；模板的 `error-boundary.jsx` 只有 `getDerivedStateFromError` ⇒ 渲染崩溃的 app 会出兜底页：**有 DOM、有配色文字、无未捕获异常 —— 三条判据全绿出厂** |
+| 载荷降级语义 | `inspect_ui` 结果被降级（`truncated` 含 `runtimeErrors`）⇒ 判 `infrastructure_unavailable`，**不判通过**。观测不到 ≠ 没异常 |
+| 失败分类 | 任何来自门发出的 UI 请求的 `Err` ⇒ `infrastructure_unavailable`；source defect **只从成功的载荷**里判 |
+| **Android 无冒烟能力 ⇒ `verification_unavailable`** | 绝不能把 iOS-only 的成功推广到 Android，也绝不静默判通过 |
+| ⚠️ 载荷预算降级**两端都只钉了拼写、从未执行过** | Phase 1a 真机验收发现：`testSnapshotDegradesInAFixedOrderAndSaysSo` 断言的是注入 JS 的**文本**。超 256 KiB 是**硬失败不是截断** ⇒ 对一个真实的忙页面，`inspect_ui` 可能返回错误而非降级载荷。skill 必须让 verifier 把这种情况报成基础设施问题，而不是 app 缺陷 |
+
+### 9.3 `agents/verifier.md` 的权限形状
+
+方案已经说对了一半（「不得编辑源码」「输出固定 `qa_report`」）。要补两条：
+
+1. **verifier 不得自报门禁结论。** 今天的 `webview_checked` 就是 verifier 自填的布尔值
+   （`local_app_workflow_core.js:518`），背后零证据。插件化之后，
+   **`qa_report` 里不得包含任何等价于「我验过了」的字段**——
+   机器事实由 host core 的 `SmokeReport` 提供，verifier 只在其**之上**做主观判断。
+   这是判据 3 在 agent 定义层面的落地。
+2. **工具白名单必须显式排除写工具**，且要有一条测试断言它排除了
+   （方案的验收标准写了「verifier 无源码写工具」，但没说怎么证明）。
+   建议：断言 verifier 的解析后工具集与 builder 的**交集为空**（写工具侧）。
+
+### 9.4 明确**不**进插件的部分
+
+| verification 能力 | 归属 | 理由 |
+|---|---|---|
+| `inspect_ui` / `capture_ui` / `act_on_ui`（Phase 1a） | **host core** | 是 WebView 能力，不是创作能力；插件关闭时仍存在，只是 agent 侧被 gate |
+| `image-read`（Phase 1a） | **host core** | 同上 |
+| 冒烟门 + `SmokeReport`（Phase 2） | **host core** | 见第 2 条 |
+| `StoreAppAnnotation` / `DeleteAppAnnotation` / build generations（Phase 3） | **host core，动协议** | 协议与存储是 host 的 |
+| iOS overlay / 标注状态机 / 副驾驶条（Phase 4/5） | **host core 客户端** | 是原生 UI，插件装不下 |
+| 主观 QA 评审（设计、可用性、视觉、交互探索） | **插件 `verifier`** | 可关闭 |
+| renderer 专属的验证要点（canvas 帧率、three.js 场景图等） | **插件 renderer skills** | 随 profile 走 |
+
+一句话：**插件承载「怎么判断好不好」，host core 承载「能不能加载、有没有报错」。**
+
+### 9.5 `skills/update/` 与标注的衔接（Phase 4 的落点）
+
+`update/` 是新写的，它同时是 verification Phase 4 的接口：用户在 app 上框选问题、
+写一句描述 ⇒ 组装成 `revision_prompt` ⇒ 走 `operation:"update"`。所以它必须写明：
+
+- `revision_prompt` 可能携带**标注上下文**（区域截图 + 用户描述 + 该区域的 DOM 摘要）；
+- 标注的生命周期由 host core 管（`annotations/` 原子目录、build generation 清理），
+  skill 只消费不管理；
+- **最小修改原则**：`update` 不得借机重写无关文件——这条今天由
+  `local_app_workflow_core.js` 的 repair 语义隐含表达，迁移时必须显式写进 skill。
+
+---
+
+## 10. 🚨 「使用已有 app」这一整类完全没被覆盖（方案与本评审第 9 节都漏了）
+
+方案的 11 个 skill 全是**创作**技能（create/update/verify/design/accessibility +
+5 个 renderer）。**没有任何一个 skill 讲「怎么使用一个已经存在的 app」。**
+
+这不是可有可无的补充——它正好落在方案自己划的那条禁用边界上。
+
+### 10.1 禁用后的状态是「有工具、没说明书」
+
+方案说插件关闭时「List/Get/Runtime/Logs/QueryData、已有 app 列表和原生
+preview/runtime 控件继续可用」。同时方案第 9 步要「删除根 `skills/` 下旧 local-app skills」。
+
+而**全仓库唯一描述 `LocalAppQueryData` / `LocalAppMutateData` 语义的文本，
+就在 `skills/create-local-app/SKILL.md` 里**（`:280`、`:304`、`:481`、`:520`）——
+一个即将被迁进插件、并默认关闭的文件。
+
+⇒ **插件关闭后：工具还在，唯一的说明书没了。**
+用户在 app 会话里说「把我记账 app 里那笔 100 改成 200」，模型手里有
+`LocalAppMutateData`，但仓库里已经没有任何东西告诉它这个工具的操作形状约束
+（`:304` 那条「每个 operation 必须精确是……」）。这比「工具和说明一起消失」更糟，
+因为它是**静默降级**：模型会尝试，然后以它自己猜的形状调用。
+
+### 10.2 工具分类不完整
+
+`defaults_per_tool.rs` 里共 **24 个** `LocalApp*` 工具。方案的禁用清单
+（Create、Scaffold、Manifest、Build、dependency update、Inspect/Capture/Act、
+checkpoint mutation、background mutation）与保留清单
+（List/Get/Runtime/Logs/QueryData）**加起来不等于 24**，中间有一批没有归属，例如：
+
+| 工具 | 默认 | 属于创作还是使用？方案未答 |
+|---|---|---|
+| `LocalAppMutateData` | Deny | **使用**——改自己 app 里的数据不是创作 |
+| `LocalAppEvents` | Deny | 使用（app 作用域事件流） |
+| `LocalAppCheckpointList` | **Allow** | 使用（只读历史）——但 checkpoint *restore* 是创作？ |
+| `LocalAppBackgroundList` / `Status` | — | 使用（看后台任务） |
+| `LocalAppTool` / `LocalApp` | — | 未分类 |
+
+**要求**：方案必须给出 **24 个工具的完整二分表**，而不是两个示例性列表。
+判据建议用一句话表述并逐个套用：**「它会改变 app 的源码或 manifest 吗？」——
+会 ⇒ 创作（随插件关闭）；不会 ⇒ 使用（始终可用）。**
+按这条，`MutateData`（改数据不改源码）属于使用，`CheckpointRestore`（回滚源码）属于创作。
+
+### 10.3 建议：`skills/use/` 留在 host core，不进插件
+
+新增一个**不属于插件**的 `use` skill（或并入 host core 的常驻上下文），内容是：
+
+- 24 个工具里「使用」那一半的操作形状与约束（从 `create-local-app` 里**抽出**而非复制）；
+- 数据读写的边界：`QueryData` 只读、`MutateData` 的 operation 形状、collection 必须已在
+  manifest 声明（否则报 `collection "x" is not declared by the app manifest`——
+  这是 2026-08-07 真机 QA 里最严重的那条 F1）；
+- runtime 的启停语义：`start` 对运行中的 runtime 是成功的 no-op；
+  **restart 不重新加载页面**（端口刻意稳定 ⇒ URL 逐字节相同 ⇒
+  `LocalAppWebView.swift:1104` 的 `guard loadedURL != url` 直接返回）——
+  这条是 spike 顺带证实的，今天写在 `docs/local-apps/HANDOFF.md` 里当作提示词纪律，
+  但它其实是**使用者需要知道的运行时事实**；
+- 插件关闭时**它仍然在**——这正是它必须留在 host core 的理由。
+
+这样禁用插件的语义才是干净的：**失去「造和改」，保留「用」，而且「用」是有说明书的。**
+
+### 10.4 对 verification 的直接影响
+
+`verify` / `verifier` 需要调用的**恰恰是使用类工具**（跑起来、查数据、看日志、
+读 runtime 状态）。所以：
+
+- verifier 的工具白名单 = 「使用」那一半 + `Inspect/Capture/Act`（观测类），
+  **不含任何写源码的工具**——这与第 9.3 节的要求一致，现在有了明确的划分依据；
+- 若 `use` skill 进了插件并随之关闭，则**插件关闭时 host core 的冒烟门仍要工作，
+  但描述其所用工具的文本没了**。这是第 2 条（冒烟门必须留 host core）之外
+  又一个「门的依赖不能住在可关闭的容器里」的实例。

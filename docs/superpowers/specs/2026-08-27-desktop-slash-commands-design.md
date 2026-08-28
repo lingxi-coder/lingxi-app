@@ -12,7 +12,7 @@ What already works: the catalog is pulled (`refresh_listings → slash_commands`
 What is broken, verified in the tree:
 
 1. **The result is dropped on the floor.** The engine dispatches the command for real (`bridge-server/src/boot.rs:901` wires a live `SlashCommandDispatcher`; `router.rs:943` emits `ClientEvent::SlashCommandResult { turn_id, display, is_error }`). No client in this repository handles that event — a grep for `slash_command_result` across `clients/electron`, `clients/ios/Sources`, and `clients/android/app/src` returns zero hits. Typing `/status` shows the user's own echo and nothing else, forever.
-2. **No `turn_id` correlation.** `useBridge.runSlashCommand` sends `{ type: 'run_slash_command', raw }` with no turn id, and `validation.ts:210` enforces `exactKeys(input, ['type', 'raw'])`, so a prompt-expanding command cannot be tied to the turn stream it starts.
+2. **A prompt-expanding command does not claim the turn.** `sendPrompt` marks the session's turn active the instant the command crosses the bridge (`useBridge.ts:761`), deliberately: `turn_started` may arrive a tick later, and `bridge.ts:904` carries the same pre-claim with a comment naming the gap it closes. `runSlashCommand` omits it. So between dispatching `/security-review` and the engine's `turn_started`, the composer stays unlocked and `cancel()` is a no-op, because `useBridge.ts:798` gates on `turnActive`.
 3. **~19 commands answer with a dead end.** `commands/core/src/register.rs:423` registers `InteractiveOnlyHandler` for `add-dir, background, branch, cd, color, copy, diff, focus, plan, plugin, privacy-settings, rename, rewind, tasks, terminal-setup, theme, tui, usage, usage-credits`, each replying `"/x is available in interactive TUI mode only."` The desktop *is* an interactive client and already owns UI for several of them, but nothing routes a slash command into that UI.
 4. **The completion popup ignores half of its own DTO.** `SlashCommandDto` carries `aliases`, `argument_hint`, `menu_description`, and `hidden` (`client-protocol/src/listings.rs:358`). `filterSlashCommands` matches only `name`/`description`/`source`, and the row renders only name/description/source (`BetaDesktop.tsx:1415-1420`). In particular `hidden` is not filtered, contradicting the DTO's stated contract that hidden commands stay resolvable by exact input but must not appear in a bare `/` menu.
 
@@ -26,7 +26,7 @@ What is broken, verified in the tree:
 
 | # | Content | Depends on |
 |---|---|---|
-| 1 | Skeleton: result rendering, `turn_id`, dispatch layer, popup DTO alignment, reconciliation gate, **group B** | — |
+| 1 | Skeleton: result rendering, turn ownership, dispatch layer, popup DTO alignment, reconciliation gate, **group B** | — |
 | 2 | Group A, session control: `/clear /resume /compact /exit` (existing bridge methods) + `/fork /rename /rewind` (new bridge commands; engine `fork.rs` exists) | 1 |
 | 3 | Group C, panels: `/status /context /usage /tasks /memory /mcp /hooks /diff`. Also has to widen `validation.ts:236`, whose `refresh_listings` allowlist admits only `status \| doctor \| slash_commands` and caps `which` at 3 entries | 1 |
 | 4 | Group D, host capabilities: `/cd /add-dir /worktree /copy /export /plugin /branch` — new Electron main-process powers (working-directory swap, clipboard, file export) | 1 |
@@ -59,11 +59,19 @@ Reducer: `conversation.ts` gains `case 'slash_command_result'` that pushes a `Co
 
 The command name for the header comes from the raw line the client sent. `SlashCommandResult` carries no name, so `runSlashCommand` records the pending raw line and the reducer pairs it; when a result arrives with no pending line (a command the engine originated), the header falls back to the empty string and only the output renders.
 
-### 2. `turn_id` for prompt-expanding commands
+### 2. Turn ownership for prompt-expanding commands
 
-- `useBridge.runSlashCommand` allocates a turn id from the same counter `sendPrompt` uses and passes it as `turn_id`.
-- `main/validation.ts` `case 'run_slash_command'` becomes `exactKeys(input, ['type', 'raw', 'turn_id'])` with `turn_id` optional and range-checked through the existing `integer` helper.
-- The client marks the turn active on dispatch so the composer locks, exactly as a prompt does, and releases on `turn_ended`.
+This client does not allocate turn ids and must not start: `sendPrompt` sends none, and the id arrives from the engine on `turn_started`. Inventing a client-side counter would collide with the engine's id space. `RunSlashCommand.turn_id` therefore stays unset, and the fix is about turn *ownership*, not correlation.
+
+`runSlashCommand` pre-claims the turn exactly as `sendPrompt` does. The complication is that most slash commands are display-only and never start a turn — an unconditional pre-claim would lock the composer forever on `/status`, trading one defect for a worse one.
+
+The release signal is `slash_command_result` itself. The engine emits it only on the display-only path; a command that expands into a turn is intercepted earlier in the connection (`bridge-server/src/server.rs:1053`) and runs as an ordinary turn. So:
+
+- `runSlashCommand` sets `turnActiveRefs` true and records the session in a new `slashPendingRefs: Map<string, boolean>`.
+- `turn_started` clears that session's `slashPendingRefs` entry — the command did expand into a turn, and the normal `turn_ended` path owns the release from here.
+- `slash_command_result` releases `turnActiveRefs` **only if** `slashPendingRefs` still holds the session. The guard matters because `router.rs:939` has a fallback arm that emits `SlashCommandResult` for a prompt command that reached the display-only path; without the guard that fallback would unlock the composer mid-turn.
+
+No main-process change: with `turn_id` unset, `validation.ts:210`'s `exactKeys(input, ['type', 'raw'])` stays exactly as it is.
 
 ### 3. The desktop dispatch layer
 
@@ -125,7 +133,7 @@ A second direction catches typos in the desktop table: every name in the table m
 - `parseSlashLine` / `resolveDesktopCommand`: alias resolution, `required`-bare falling through to the engine, argument splitting.
 - Reducer: `slash_command_result` produces a `CommandRunItem`; `is_error: true` marks it; a result with no pending raw line still renders.
 - Popup: hidden filtered from the bare menu, hidden resolvable by exact name, alias match, `menu_description` preferred, `argument_hint` rendered.
-- Validation: `run_slash_command` accepts `turn_id`, rejects a non-integer, still rejects unknown keys.
+- Turn ownership: a display-only result releases the pre-claimed turn; a result arriving after `turn_started` does NOT release it.
 - Group B: each command calls the bridge method it claims to (fake bridge context), and bare invocation opens the picker.
 - The reconciliation gate, including its own red-proof assertions.
 

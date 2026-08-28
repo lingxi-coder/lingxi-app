@@ -236,7 +236,14 @@ export function beginLocalSlashCommand(state: ConversationState, raw: string): C
  */
 export function appendPendingUserPrompt(state: ConversationState, text: string, images: readonly ImageRefDto[] = []): ConversationState {
   const next = appendUserPrompt(state, text, images);
-  return next === state ? state : { ...next, running: true };
+  // An ordinary prompt is definitionally not a pending slash command. Clearing
+  // `pendingSlashName` here closes off a stale claim left by a bare picker
+  // command (`/model`, `/permissions`, `/effort`, `/theme`, `/config` with no
+  // argument) that never emitted anything to consume it: without this, an
+  // unrelated `error` arriving before `turn_started` would find a non-null
+  // name and take the slash release path, unlocking the composer while this
+  // prompt's turn is still starting.
+  return next === state ? state : { ...next, running: true, pendingSlashName: null };
 }
 
 /**

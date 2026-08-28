@@ -11,7 +11,7 @@ const table: DesktopCommand[] = [
   { name: 'rename', args: 'required', run: noop },
 ];
 
-test('a slash line splits into a name and an untrimmed-tail argument string', () => {
+test('a slash line splits into a name and a trimmed-tail argument string', () => {
   assert.deepEqual(parseSlashLine('/model'), { name: 'model', args: '' });
   assert.deepEqual(parseSlashLine('/model opus 4'), { name: 'model', args: 'opus 4' });
   assert.deepEqual(parseSlashLine('  /model  opus  '), { name: 'model', args: 'opus' });

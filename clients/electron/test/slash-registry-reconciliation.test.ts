@@ -20,11 +20,20 @@ function interactiveOnlyNames(): string[] {
   assert.notEqual(open, -1, 'the interactive-only name array moved — update this extraction');
   const close = source.indexOf('] {', open);
   assert.notEqual(close, -1, 'the interactive-only name array is unterminated');
-  return source
+  const names = source
     .slice(open, close)
     .split('\n')
     .filter((line) => !line.trim().startsWith('//'))
     .flatMap((line) => [...line.matchAll(/"([a-z0-9-]+)"/g)].map((match) => match[1]!));
+  // A regex that silently matches nothing would make every caller's
+  // assertions vacuously true. These red-proof checks travel with the
+  // extractor itself (not a sibling test) so that running any single test
+  // alone still cannot pass on an empty/broken extraction.
+  assert.ok(names.length >= 15, `extracted only ${names.length} interactive-only names — the extraction is broken, not the registry`);
+  for (const anchor of ['theme', 'rewind', 'tasks']) {
+    assert.ok(names.includes(anchor), `anchor "${anchor}" missing — the extraction is reading the wrong block`);
+  }
+  return names;
 }
 
 function builtinCommandNames(): string[] {
@@ -68,13 +77,10 @@ const DEFERRED: Record<string, string> = {
 };
 
 test('the extraction actually reads the engine registry', () => {
-  // A regex that silently matches nothing would make every assertion below
-  // vacuously true. Prove the reader works before trusting what it returns.
-  const names = interactiveOnlyNames();
-  assert.ok(names.length >= 15, `extracted only ${names.length} interactive-only names — the extraction is broken, not the registry`);
-  for (const anchor of ['theme', 'rewind', 'tasks']) {
-    assert.ok(names.includes(anchor), `anchor "${anchor}" missing — the extraction is reading the wrong block`);
-  }
+  // interactiveOnlyNames() carries its own red-proof assertions now (length
+  // + anchors), so calling it here still catches a broken extraction; this
+  // test additionally proves the builtin-table reader works.
+  interactiveOnlyNames();
   const builtins = builtinCommandNames();
   assert.equal(builtins.length, 108, `expected the 108-name builtin table, got ${builtins.length}`);
 });

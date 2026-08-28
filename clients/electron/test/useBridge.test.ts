@@ -303,3 +303,150 @@ test('beginLocalCommand calls the non-claiming echo, never the engine-claiming o
       + 'permanently locking the composer after a bare /model.',
   );
 });
+
+function useBridgeSource(): string {
+  return readFileSync(join(process.cwd(), 'src/renderer/bridge/useBridge.ts'), 'utf8');
+}
+
+test('a slash release resets the cancellation runtime, not just the turn claims (event fan-out)', () => {
+  // Regression under test (FINDING 1): cancel() gates on turnActiveRefs, which
+  // this branch sets true even for a display-only command like /status. While
+  // that command is in flight the composer is read-only, so Stop is the only
+  // affordance -- pressing it sets cancelling.current/isCancelling. Those are
+  // normally cleared only by turn_ended/session_ended, neither of which a
+  // display-only command ever produces. Left set: isCancelling stays true (the
+  // Stop button renders disabled on the user's NEXT real turn), and
+  // cancelling.current stays true (cancel() early-returns forever after --
+  // Stop goes silently inert for the rest of the session).
+  const source = useBridgeSource();
+
+  const slashResultReleaseBody = sliceBetweenMarkers(
+    source,
+    "if (event.type === 'slash_command_result' && shouldReleaseSlashTurn",
+    "if (event.type === 'error' && shouldReleaseSlashTurn",
+    'the slash_command_result release branch',
+  );
+  assert.match(
+    slashResultReleaseBody,
+    /\bclearCancellationRuntime\(/,
+    'the slash_command_result release no longer calls clearCancellationRuntime -- a display-only command '
+      + "leaves cancelling.current stuck true, and cancel() (`turnActiveRefs.current.get(sessionId)` gate) "
+      + 'silently stops working for the rest of the session after the first Stop press during a slash command.',
+  );
+  assert.match(
+    slashResultReleaseBody,
+    /isCancelling:\s*false/,
+    'the slash_command_result release no longer resets runtime isCancelling -- the Stop button renders '
+      + 'disabled on the user\'s next real turn.',
+  );
+
+  const errorReleaseBody = sliceBetweenMarkers(
+    source,
+    "if (event.type === 'error' && shouldReleaseSlashTurn",
+    'updateRuntime(sessionId, (state) => {\n        let next = { ...state, conversation: reduceEvent',
+    'the error release branch',
+  );
+  assert.match(
+    errorReleaseBody,
+    /\bclearCancellationRuntime\(/,
+    'the error release (dispatch reaches no engine handler / transport failure) no longer calls '
+      + 'clearCancellationRuntime -- same stranding as the slash_command_result branch, via the error path.',
+  );
+  assert.match(
+    errorReleaseBody,
+    /isCancelling:\s*false/,
+    'the error release no longer resets runtime isCancelling.',
+  );
+});
+
+test('the runSlashCommand dispatch-failure catch resets cancellation runtime; the best-effort refresh-listings catch does not', () => {
+  // Same FINDING 1 regression, but on the synchronous dispatch-failure path in
+  // runSlashCommand (host.command throws before anything crosses the bridge).
+  // The SECOND catch (the best-effort slash-listing refresh, which runs only
+  // after dispatch already succeeded and may have started a live turn) must
+  // NOT reset cancellation runtime -- doing so would strand a live turn's own
+  // in-flight cancellation.
+  const source = useBridgeSource();
+  const runSlashCommandBody = sliceBetweenMarkers(
+    source,
+    'const runSlashCommand = useCallback',
+    'const beginLocalCommand = useCallback',
+    'runSlashCommand',
+  );
+
+  const firstCatchStart = runSlashCommandBody.indexOf('catch (cause) {');
+  assert.ok(firstCatchStart >= 0, 'could not locate the dispatch-failure catch inside runSlashCommand');
+  const firstCatchEnd = runSlashCommandBody.indexOf('return;', firstCatchStart);
+  assert.ok(firstCatchEnd > firstCatchStart, 'the dispatch-failure catch no longer ends with a return -- update this test\'s markers');
+  const dispatchFailureCatch = runSlashCommandBody.slice(firstCatchStart, firstCatchEnd);
+
+  assert.match(
+    dispatchFailureCatch,
+    /\bclearCancellationRuntime\(/,
+    'runSlashCommand\'s dispatch-failure catch no longer calls clearCancellationRuntime -- a genuine dispatch '
+      + 'failure (the command never reached the engine) still leaves cancelling.current stuck if the user had '
+      + 'pressed Stop, same stranding as FINDING 1.',
+  );
+  assert.match(dispatchFailureCatch, /isCancelling:\s*false/, 'the dispatch-failure catch no longer resets isCancelling.');
+
+  const secondCatchStart = runSlashCommandBody.indexOf('catch (cause) {', firstCatchEnd);
+  assert.ok(secondCatchStart > firstCatchEnd, 'could not locate the second (refresh-listings) catch inside runSlashCommand');
+  const secondCatchEnd = runSlashCommandBody.indexOf('}', secondCatchStart);
+  const refreshListingsCatch = runSlashCommandBody.slice(secondCatchStart, secondCatchEnd);
+  assert.doesNotMatch(
+    refreshListingsCatch,
+    /clearCancellationRuntime/,
+    'the best-effort refresh-listings catch now calls clearCancellationRuntime -- this runs AFTER dispatch '
+      + 'already succeeded (possibly starting a real turn), so resetting cancellation here would strand a '
+      + "live turn's own in-flight cancel().",
+  );
+});
+
+test('a slash-turn claim is cleared on session reset events, not just turn_started (FINDING 2)', () => {
+  // Regression under test: the reducer clears pendingSlashName on
+  // session_started/session_ended/session_resumed (conversation.ts), but
+  // before this fix only turn_started cleared the refs half
+  // (slashPendingRefs). A stale claim surviving a session reset can later arm
+  // the `error` release branch against an unrelated turn, setting
+  // turnActive=false while `running` stays true: Stop renders but cancel()
+  // early-returns, so a live turn becomes unstoppable.
+  const source = useBridgeSource();
+  const sessionResetBody = sliceBetweenMarkers(
+    source,
+    "if (event.type === 'turn_started') clearSlashTurnClaim(slashPendingRefs.current, sessionId);",
+    "if (event.type === 'slash_command_result' && shouldReleaseSlashTurn",
+    'the session-reset slash-claim handling in the event fan-out',
+  );
+  for (const eventType of ['session_started', 'session_ended', 'session_resumed']) {
+    assert.match(
+      sessionResetBody,
+      new RegExp(`event\\.type === '${eventType}'`),
+      `the event fan-out no longer checks for '${eventType}' near where turn_started clears slashPendingRefs -- `
+        + 'a session reset can leave a stale slash claim that later mislabels an unrelated error as a slash release.',
+    );
+  }
+  assert.match(
+    sessionResetBody,
+    /clearSlashTurnClaim\(slashPendingRefs\.current, sessionId\)/,
+    'no clearSlashTurnClaim call found alongside the session-reset event check.',
+  );
+});
+
+test('a connection reset that clears turnActiveRefs also clears the outstanding slash claim (FINDING 2)', () => {
+  // Same regression as above, via the OTHER path that clears turnActiveRefs
+  // for a non-slash reason: a connection reset (respawn/disconnect/error/idle,
+  // shouldClearPendingPermissions) in onConnectionStateChanged.
+  const source = useBridgeSource();
+  const connectionResetBody = sliceBetweenMarkers(
+    source,
+    'if (shouldClearPendingPermissions(state)) {\n        turnActiveRefs.current.set(sessionId, false);',
+    "if (activeSessionIdRef.current === sessionId && state.status === 'error')",
+    'the connection-reset turnActiveRefs clear in onConnectionStateChanged',
+  );
+  assert.match(
+    connectionResetBody,
+    /clearSlashTurnClaim\(slashPendingRefs\.current, sessionId\)/,
+    'a connection reset clears turnActiveRefs but not slashPendingRefs -- a stale slash claim from before the '
+      + 'reset can survive into the next session/turn and mislabel an unrelated error as a slash release.',
+  );
+});

@@ -117,10 +117,22 @@ test('a locally-handled command never claims running, unlike an engine-forwarded
   const local = beginLocalSlashCommand(emptyConversation(), '/model');
   assert.equal(local.running, false);
 
-  // A local command never receives a slash_command_result, error, or
-  // turn_started/turn_ended -- so `running` simply stays false; nothing ever
-  // arrives to change it, and there is no claim left to release.
-  assert.equal(local.running, false);
+  // A local EMITTING command (e.g. `/model nope`, `/theme sepia`, `/config
+  // extra`) does push a SYNTHETIC slash_command_result through this same
+  // reducer -- `emitCommandOutput` (useBridge.ts) builds exactly this event.
+  // That is where pendingSlashName's double duty (label + release guard)
+  // actually fires for a local command, and it must not disturb `running`:
+  // it was never claimed, so there is no claim to release, but the row still
+  // has to land labelled with the command name and the pending name still
+  // has to be consumed so a later result can't inherit it.
+  const afterSyntheticResult = reduceEvent(local, { type: 'slash_command_result', display: 'Unknown model: nope', is_error: true });
+  assert.equal(afterSyntheticResult.running, false);
+  assert.equal(afterSyntheticResult.pendingSlashName, null);
+  const row = afterSyntheticResult.items.at(-1);
+  assert.equal(row?.type, 'command');
+  assert.equal(row.name, '/model');
+  assert.equal(row.output, 'Unknown model: nope');
+  assert.equal(row.isError, true);
 });
 
 test('command output folds only once it is genuinely long', () => {

@@ -17,6 +17,7 @@ import type {
   ToolResultDisplayDto,
 } from '@lingxi/bridge-client';
 import {
+  beginLocalSlashCommand,
   conversationFromMessages,
   emptyConversation,
   reduceEvent,
@@ -348,6 +349,30 @@ test('submitted prompt reserves the turn slot before turn_started arrives', () =
   assert.equal(s.running, true);
   s = reduceEvent(s, { type: 'turn_ended', outcome: { type: 'cancelled' }, cost: COST });
   assert.equal(s.running, false);
+});
+
+test('an ordinary prompt after a bare picker command clears the stale pending-slash name', () => {
+  // A bare picker command (e.g. `/model` with no argument) sets
+  // pendingSlashName with no claim (beginLocalSlashCommand) and never emits
+  // anything that would consume it -- the picker is dismissed locally.
+  const afterPicker = beginLocalSlashCommand(emptyConversation(), '/model');
+  assert.equal(afterPicker.pendingSlashName, '/model');
+
+  // The user then sends an ordinary prompt. Without clearing the stale name,
+  // an unrelated error landing before turn_started would find a non-null
+  // pendingSlashName and take the slash-release path, unlocking the composer
+  // (running: false) while this prompt's turn is still starting.
+  const submitted = appendPendingUserPrompt(afterPicker, 'fix the bug');
+  assert.equal(submitted.pendingSlashName, null);
+  assert.equal(submitted.running, true);
+
+  const afterUnrelatedError = reduceEvent(submitted, { type: 'error', message: 'a listing refresh failed' });
+  assert.equal(
+    afterUnrelatedError.running,
+    true,
+    'an unrelated error released the composer mid-prompt: pendingSlashName from the earlier bare picker '
+      + 'command survived into the ordinary prompt and armed the slash-release path.',
+  );
 });
 
 test('reduceEvents folds a full turn end-to-end', () => {

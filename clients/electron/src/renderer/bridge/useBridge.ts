@@ -527,9 +527,29 @@ export function useBridge(): UseBridge {
       if (event.type === 'turn_started') turnActiveRefs.current.set(sessionId, true);
       if (event.type === 'turn_ended' || event.type === 'session_ended') turnActiveRefs.current.set(sessionId, false);
       if (event.type === 'turn_started') clearSlashTurnClaim(slashPendingRefs.current, sessionId);
+      // The reducer resets `pendingSlashName` to null on every one of these
+      // three events (a fresh `emptyConversation()`/`conversationFromMessages`
+      // state). The refs half of the claim must reset in lockstep, or a stale
+      // `slashPendingRefs` entry can survive a session reset and later arm the
+      // `error` release branch below against an unrelated turn.
+      if (event.type === 'session_started' || event.type === 'session_ended' || event.type === 'session_resumed') {
+        clearSlashTurnClaim(slashPendingRefs.current, sessionId);
+      }
       if (event.type === 'slash_command_result' && shouldReleaseSlashTurn(slashPendingRefs.current, sessionId)) {
         clearSlashTurnClaim(slashPendingRefs.current, sessionId);
         turnActiveRefs.current.set(sessionId, false);
+        // This release is terminal for the session's cancellation bookkeeping
+        // too: a display-only command (e.g. `/status`) makes Stop the user's
+        // only affordance while the composer is locked, and pressing it sets
+        // `cancelling.current`/`isCancelling` with only `turn_ended` wired to
+        // clear them (`:587-597`) -- which a display-only command never
+        // produces. Left set, `cancelling.current` never resets, so `cancel()`
+        // (`:800`) early-returns forever after, and `isCancelling` renders the
+        // Stop button `disabled` on the user's next real turn.
+        const cancelling = cancellingRefs.current.get(sessionId);
+        const task = cancellationTasks.current.get(sessionId);
+        if (cancelling && task) clearCancellationRuntime(cancelling, task);
+        updateRuntime(sessionId, (state) => ({ ...state, isCancelling: false }));
       }
       // A dispatch that never reaches the engine, or an engine with no
       // dispatcher wired (`bridge-server/src/router.rs:953` emits `error`
@@ -540,6 +560,13 @@ export function useBridge(): UseBridge {
       if (event.type === 'error' && shouldReleaseSlashTurn(slashPendingRefs.current, sessionId)) {
         clearSlashTurnClaim(slashPendingRefs.current, sessionId);
         turnActiveRefs.current.set(sessionId, false);
+        // Same terminal-release reasoning as the slash_command_result branch
+        // above: this error is the claim's only terminal event, so it must
+        // also reset the cancellation bookkeeping it may have armed.
+        const cancelling = cancellingRefs.current.get(sessionId);
+        const task = cancellationTasks.current.get(sessionId);
+        if (cancelling && task) clearCancellationRuntime(cancelling, task);
+        updateRuntime(sessionId, (state) => ({ ...state, isCancelling: false }));
       }
       updateRuntime(sessionId, (state) => {
         let next = { ...state, conversation: reduceEvent(state.conversation, event), desktop: reduceDesktopEvent(state.desktop, event) };
@@ -649,7 +676,14 @@ export function useBridge(): UseBridge {
         }
         return next;
       });
-      if (shouldClearPendingPermissions(state)) turnActiveRefs.current.set(sessionId, false);
+      if (shouldClearPendingPermissions(state)) {
+        turnActiveRefs.current.set(sessionId, false);
+        // Same lockstep requirement as the session-event reset above: a
+        // connection reset (respawn/disconnect/error/idle) clears the turn
+        // claim, so the outstanding slash claim it may have been carrying
+        // must be cleared with it.
+        clearSlashTurnClaim(slashPendingRefs.current, sessionId);
+      }
       if (activeSessionIdRef.current === sessionId && state.status === 'error') setError(state.message);
       if (activeSessionIdRef.current === sessionId && state.status === 'disconnected' && state.reason) setError(state.reason);
       if (state.status === 'connected') {
@@ -753,12 +787,21 @@ export function useBridge(): UseBridge {
       await host.command(sessionId, { type: 'run_slash_command', raw: command });
     } catch (cause) {
       // A genuine dispatch failure: the command never ran, so release both
-      // claims and surface the error exactly as before.
+      // claims and surface the error exactly as before. This is also
+      // terminal for the session's cancellation bookkeeping -- see the
+      // matching reset on the slash_command_result/error release branches
+      // in the event fan-out above.
       turnActiveRefs.current.set(sessionId, false);
       clearSlashTurnClaim(slashPendingRefs.current, sessionId);
+      {
+        const cancelling = cancellingRefs.current.get(sessionId);
+        const task = cancellationTasks.current.get(sessionId);
+        if (cancelling && task) clearCancellationRuntime(cancelling, task);
+      }
       updateRuntime(sessionId, (state) => ({
         ...state,
         conversation: reduceEvent(state.conversation, { type: 'error', kind: { type: 'transport' }, message: 'Failed to run the slash command.' }),
+        isCancelling: false,
       }));
       capture(cause);
       return;

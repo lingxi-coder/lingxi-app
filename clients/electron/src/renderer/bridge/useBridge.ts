@@ -399,6 +399,15 @@ export function useBridge(): UseBridge {
   sessionLoadingRef.current = sessionLoading;
   bootstrapRef.current = bootstrap;
 
+  // Settings are captured per-CONNECTION on the engine side (`SettingsContext`
+  // is built once per `assemble_with_provider_keys` call), so a snapshot from
+  // a previous session/project is not a valid answer for a new one — without
+  // this, switching sessions would leave the old session's `project`/`local`
+  // values on screen until a fresh snapshot happened to arrive.
+  useEffect(() => {
+    setSettingsSnapshotEvent(null);
+  }, [activeSessionId]);
+
   const capture = useCallback((cause: unknown) => {
     const message = messageFrom(cause);
     setError(message);
@@ -646,7 +655,7 @@ export function useBridge(): UseBridge {
         return next;
       });
       if (event.type === 'session_started' || event.type === 'turn_ended') scheduleProjectCatalogRefresh(sessionId);
-      if (event.type === 'settings_snapshot') setSettingsSnapshotEvent(event);
+      if (event.type === 'settings_snapshot' && activeSessionIdRef.current === sessionId) setSettingsSnapshotEvent(event);
       if (event.type === 'error') {
         updateRuntime(sessionId, (state) => ({ ...state, error: event.message }));
         if (activeSessionIdRef.current === sessionId) setError(event.message);

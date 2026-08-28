@@ -44,7 +44,7 @@ use crate::driver::{CredentialRequiredTurnDriver, OrchestratorTurnDriver};
 use crate::mcp_bridge::McpPaths;
 use crate::router::{EngineCommandRouter, SessionStoreContext};
 use crate::server::{BridgeConnection, TurnDriver};
-use crate::settings_bridge::{build_snapshot, SettingsContext, SettingsPaths};
+use crate::settings_bridge::{active_settings_baseline, SettingsContext, SettingsPaths};
 
 /// Env override for the API base URL (mirrors `apps/cli`'s `resolve_api_base`).
 pub const API_BASE_ENV: &str = "LINGXI_API_BASE_URL";
@@ -782,25 +782,36 @@ pub async fn assemble_with_provider_keys(
     // loads its own settings from, again before `cfg` moves into the desktop
     // composition root.
     //
-    // `active` is snapshotted ONCE, here, and is deliberately the FILE LAYERS
-    // ONLY as read at this moment — no cli/managed/env overlay. It answers
-    // "what did this session load from the files at boot", which is the
-    // baseline a later on-disk edit is shown as diverging from; re-reading it
-    // per listing would make it track the files and say nothing. That is why
-    // the managed overlay below is NOT folded into it, even though the same
-    // overlay does win in the snapshot's `effective`.
+    // `active` is snapshotted ONCE, here, and answers "what did this session
+    // load at boot" — the baseline a later on-disk edit, or a later listing's
+    // freshly re-read `effective`, is shown as diverging from. It DOES fold in
+    // the managed overlay, even though it is otherwise file-layers-only and
+    // never re-read: the engine loads managed (policy) settings at boot too,
+    // same as the three files, so a managed key is just as much "already
+    // loaded" as a `user`/`project`/`local` one. Leaving it out here made a
+    // managed key differ from `effective` (which always re-applies the same
+    // overlay) permanently and unfixably — a "restart to apply" banner for a
+    // change no restart can ever apply, since the user never wrote it and no
+    // restart changes it. Folding it in here, once, from the same overlay
+    // `effective` re-applies every time, makes the two agree on managed keys
+    // forever, which is the correct answer: nothing IS pending on a key the
+    // user cannot change.
     let settings_context = {
         let paths = SettingsPaths {
             lingxi_home: cfg.lingxi_home.clone(),
             project_dir: cfg.cwd.clone(),
         };
-        let active = build_snapshot(&paths, BTreeMap::new(), BTreeMap::new()).effective;
+        // Managed (policy) discovery is the desktop composition root's job;
+        // bridge-server does not locate those tiers itself. Resolved once,
+        // here, and reused for both `active`'s one-time bake-in below and the
+        // `managed` field every later listing re-applies to `effective` — the
+        // same map both places, so the two can never drift apart.
+        let managed = engine_desktop::managed_settings_overlay().await;
+        let active = active_settings_baseline(&paths, &managed);
         SettingsContext {
             paths,
             active,
-            // Managed (policy) discovery is the desktop composition root's job;
-            // bridge-server does not locate those tiers itself.
-            managed: engine_desktop::managed_settings_overlay().await,
+            managed,
         }
     };
 

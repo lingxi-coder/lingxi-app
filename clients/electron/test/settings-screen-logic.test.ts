@@ -8,6 +8,7 @@ import {
   resolveInitialPage,
   restartDisabledReason,
 } from '../src/renderer/components/settings/SettingsScreen';
+import { pendingKeys } from '../src/renderer/components/settings/useEngineSettings';
 import type { SettingsSnapshotEvent } from '../src/renderer/bridge/useBridge';
 
 test('resolveInitialPage opens the provider-credentials deep link when a provider id is given', () => {
@@ -71,16 +72,26 @@ test('parseSettingsSnapshot is null-safe: no event means no snapshot and no erro
   assert.deepEqual(parseSettingsSnapshot(undefined), { snapshot: null, error: null });
 });
 
-test('parseSettingsSnapshot decodes the required fields and defaults the optional ones', () => {
+test('parseSettingsSnapshot defaults a missing active_json to effective, not to {}', () => {
   const { snapshot, error } = parseSettingsSnapshot(rawSnapshot());
   assert.equal(error, null);
   assert.deepEqual(snapshot, {
     effective: { model: 'opus' },
     provenance: { model: 'user' },
     files: [],
-    active: {},
+    active: { model: 'opus' },
     locked: [],
   });
+});
+
+test('an absent active_json must not manufacture a pending banner out of "we do not know"', () => {
+  // If `active` defaulted to `{}` instead of `effective`, every effective key
+  // would look newly pending — a maximally loud FALSE banner built from an
+  // absent optional field, not from an actual difference on disk.
+  const { snapshot } = parseSettingsSnapshot(rawSnapshot({
+    effective_json: JSON.stringify({ model: 'opus', theme: 'dark' }),
+  }));
+  assert.deepEqual(pendingKeys(snapshot!), [], 'no active_json means no known difference, so no pending keys');
 });
 
 test('parseSettingsSnapshot decodes the optional fields when present', () => {

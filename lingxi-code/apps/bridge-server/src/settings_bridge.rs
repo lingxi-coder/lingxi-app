@@ -160,6 +160,28 @@ pub fn build_snapshot(
     }
 }
 
+/// The `SettingsContext.active` a connection captures ONCE at boot: the three
+/// settings files merged, with the SAME managed overlay `effective` will keep
+/// re-applying on every later listing folded in here too.
+///
+/// This is not "the file layers as read" — it is "what this session actually
+/// had loaded at boot", and the engine loads managed (policy) settings at
+/// boot exactly as much as it loads the three files. Baking `managed` in here
+/// is what keeps a managed key from permanently differing between `active`
+/// and every later `effective`: without it, a policy-pinned key would show up
+/// forever in a diff of the two — a "restart to apply" banner for a change no
+/// restart can ever resolve, since the user never wrote it and no restart
+/// changes it. Taking `managed` by reference (rather than consuming it, the
+/// way [`build_snapshot`]'s own parameter does) lets the caller reuse the
+/// exact same map for the `SettingsContext.managed` field every later listing
+/// re-applies — the same map in both places, so the two can never drift apart.
+pub fn active_settings_baseline(
+    paths: &SettingsPaths,
+    managed: &BTreeMap<String, Value>,
+) -> BTreeMap<String, Value> {
+    build_snapshot(paths, BTreeMap::new(), managed.clone()).effective
+}
+
 /// Resolve the file path for a **writable** destination layer. Only
 /// `User` / `Project` / `Local` are writable; everything else is rejected
 /// with an error naming both the rejected value and the writable set.
@@ -616,6 +638,68 @@ mod tests {
             Some("from-user")
         );
         assert_eq!(snap.provenance.get("model"), Some(&SettingsLayer::User));
+    }
+
+    /// A managed-overlay key must not appear in the difference between
+    /// `effective` and `active` — never permanently, and this is the whole
+    /// point of `active_settings_baseline`. `effective` re-applies the same
+    /// managed overlay on every later listing; if `active` (captured once at
+    /// boot) leaves it out, a policy-pinned key differs from `effective`
+    /// forever, and `pendingKeys` (the desktop shell's TypeScript diff, see
+    /// `clients/electron/.../useEngineSettings.ts`) reports a "restart to
+    /// apply" banner for a change no restart can ever resolve, since the user
+    /// never wrote it and no restart changes it.
+    ///
+    /// This mirrors exactly what `boot.rs::assemble_with_provider_keys` does
+    /// (`active_settings_baseline` for `SettingsContext.active`, then
+    /// `build_snapshot` again at listing time with that same `active` and
+    /// `managed`) and exactly what a REGRESSION back to the old
+    /// `build_snapshot(&paths, BTreeMap::new(), BTreeMap::new()).effective`
+    /// (empty managed) would break: with that old call, `active` would carry
+    /// no `outputStyle` key at all, so the `assert_eq!` below on `active`
+    /// would fail immediately, and the `snap.effective`/`snap.active`
+    /// equality would fail too (`Some("from-managed") != None`).
+    #[test]
+    fn a_managed_overlay_key_never_differs_between_effective_and_active() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        let project = dir.path().join("repo");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(project.join(branding::DOT_DIR)).unwrap();
+        // A file layer also sets this key, so the test cannot pass by
+        // accident (a managed key with no file competitor would trivially
+        // agree even with the old, buggy empty-managed baseline: `None ==
+        // None` when re-merged with an empty overlay in `active`'s own
+        // build_snapshot call below — this needs a REAL value on both sides).
+        std::fs::write(
+            home.join("settings.json"),
+            r#"{"outputStyle":"from-user"}"#,
+        )
+        .unwrap();
+
+        let paths = SettingsPaths {
+            lingxi_home: home,
+            project_dir: project,
+        };
+        let mut managed = BTreeMap::new();
+        managed.insert("outputStyle".to_string(), Value::from("from-managed"));
+
+        // Exactly what `boot.rs` does once, at connection setup.
+        let active = active_settings_baseline(&paths, &managed);
+        assert_eq!(
+            active.get("outputStyle").and_then(|v| v.as_str()),
+            Some("from-managed"),
+            "active must already carry the managed value, or it can never agree with effective",
+        );
+
+        // Exactly what `emit_settings_snapshot` does on every later listing.
+        let snap = build_snapshot(&paths, active, managed);
+        assert_eq!(
+            snap.effective.get("outputStyle"),
+            snap.active.get("outputStyle"),
+            "a managed key must be identical between effective and active — nothing is pending \
+             on a key the user cannot change",
+        );
     }
 
     /// Only the layers a user session could actually write are writable

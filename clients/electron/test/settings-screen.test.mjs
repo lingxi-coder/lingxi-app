@@ -81,21 +81,34 @@ async function runScenario(scenario) {
 }
 
 test('the layer switcher appears only on layered pages', async () => {
-  const { permissions, diagnostics } = await runScenario('layer-switcher');
+  const { permissions, diagnostics, mcp, customProviders, rawJson } = await runScenario('layer-switcher');
   assert.equal(permissions.hasLayerSwitcher, true, 'permissions is layered and must offer user/project/local');
   assert.equal(diagnostics.hasLayerSwitcher, false, 'diagnostics is client-owned and must not show a layer switcher');
+  // `permissions` (编码, layered) vs `diagnostics` (高级, not layered) alone
+  // cannot fail a regression that keys the switcher off `group === '编码'`
+  // instead of `page.layered` — both pages agree on both properties. These
+  // three are the ones that actually separate the two rules.
+  assert.equal(mcp.hasLayerSwitcher, false, 'mcp is inside 编码 but NOT layered — its own three-scope storage, no layer switcher');
+  assert.equal(customProviders.hasLayerSwitcher, true, 'custom-providers is outside 编码 but IS layered');
+  assert.equal(rawJson.hasLayerSwitcher, true, 'raw-json is outside 编码 but IS layered');
 });
 
-test('project and local tabs are disabled with no project open', async () => {
+test('project and local tabs are disabled with no project open, with the reason shown as visible text', async () => {
   const { withoutProject, withProject } = await runScenario('project-tabs');
   assert.equal(withoutProject.userDisabled, false, 'the user layer needs no project and must stay editable');
   assert.equal(withoutProject.projectDisabled, true);
   assert.equal(withoutProject.localDisabled, true);
+  // The reason must be visible TEXT, not just a `title=` tooltip: Chromium
+  // does not dispatch the pointer events a native tooltip needs on a
+  // DISABLED control, and a tooltip is invisible to keyboard/screen-reader
+  // users regardless.
+  assert.match(withoutProject.layerSwitcherReasonText ?? '', /项目/, 'the disabled reason must be visible text, not a title= tooltip');
   // And the disabling is really keyed on the project, not permanent: once one
   // opens, both re-enable — proving the assertion above isn't just "always disabled".
   assert.equal(withProject.projectDisabled, false);
   assert.equal(withProject.localDisabled, false);
   assert.equal(withProject.userDisabled, false);
+  assert.equal(withProject.layerSwitcherReasonText, null, 'once a project is open there is nothing to explain');
 });
 
 test('the pending-settings banner comes from pendingKeys alone, and its restart action respects a turn in flight', async () => {
@@ -105,8 +118,35 @@ test('the pending-settings banner comes from pendingKeys alone, and its restart 
   assert.match(pending.bannerText ?? '', /1 项/, 'exactly one key (`model`) differs, not `theme`');
   assert.equal(pending.restartButtonDisabled, false);
   assert.equal(midTurn.restartButtonDisabled, true, 'a turn in flight must disable restart, not fail silently on click');
+  assert.match(midTurn.restartDisabledReasonText ?? '', /对话|回合/, 'the reason must be visible text, not a title= tooltip');
   assert.equal(afterRestart.restartCalls, 1, 'restart goes through bridge.restartBridge, the existing path');
   assert.equal(resolved.hasBanner, false, 'once active catches up to effective, the banner must go away');
+});
+
+test('a rejected restart surfaces its error visibly instead of being swallowed, and a later success clears it', async () => {
+  const { afterFailure, afterSuccess } = await runScenario('restart-error');
+  assert.equal(afterFailure.hasRestartError, true, 'the shell covers <ErrorBanner>, so a caught restart failure must render its own visible error');
+  assert.match(afterFailure.restartErrorText ?? '', /cancel the active turn/, 'the ACTUAL host-provided reason must reach the user, not a generic message');
+  assert.equal(afterSuccess.hasRestartError, false, 'a later successful restart must clear the earlier failure banner');
+});
+
+test('opening settings while the session is loading sends nothing, and the snapshot fetch retries once the session is ready — with no extra action', async () => {
+  const { initial, whileLoading, afterReady } = await runScenario('session-loading-guard');
+  // Counts are relative to each other, not a hardcoded number: React
+  // StrictMode's dev-mode mount→cleanup→mount probe re-runs an effect with
+  // no cleanup function twice, so exactly how many times the initial,
+  // already-ready mount fires the fetch is an artifact of the test harness,
+  // not something this scenario is testing.
+  assert.equal(whileLoading.refreshCalls, initial.refreshCalls, 'a session still loading must not receive a fetch attempt at all');
+  assert.ok(afterReady.refreshCalls > whileLoading.refreshCalls, 'once loading finishes the effect must retry on its own, with no separate action');
+});
+
+test('the settings-focus trap moves focus in on mount, wraps Tab both directions, and restores focus to the opener on close', async () => {
+  const { onMount, afterForwardTab, afterBackwardTab, afterClose } = await runScenario('focus-trap');
+  assert.equal(onMount.activeElementAriaLabel, 'Close settings', 'mounting an aria-modal dialog must move focus INTO it, not leave it in the background');
+  assert.equal(afterForwardTab.activeElementAriaLabel, '搜索设置', 'forward Tab from the last focusable (close) must wrap to the first (search), not escape the dialog');
+  assert.equal(afterBackwardTab.activeElementAriaLabel, 'Close settings', 'shift+Tab from the first focusable (search) must wrap to the last (close)');
+  assert.equal(afterClose.activeElementId, 'opener', 'closing must restore focus to whatever had it before the dialog mounted');
 });
 
 test('an unimplemented page renders an explicit placeholder, not a blank panel — implemented pages without content yet get a different, honest message', async () => {

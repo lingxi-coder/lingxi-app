@@ -1,6 +1,6 @@
-import { useEffect, useMemo, useState, type ComponentType, type ReactNode } from 'react';
+import { useEffect, useMemo, useRef, useState, type ComponentType, type ReactNode } from 'react';
 
-import type { UseBridge, SettingsSnapshotEvent } from '../../bridge/useBridge';
+import { dialogFocusTarget, type UseBridge, type SettingsSnapshotEvent } from '../../bridge/useBridge';
 import { useT } from '../../theme/ThemeContext';
 import type { ThemeMode } from '../../theme/tokens';
 import { Icon } from '../Icon';
@@ -20,6 +20,9 @@ const EDITABLE_LAYERS: EditableLayer[] = ['user', 'project', 'local'];
 
 const GROUP_ORDER: NavPage['group'][] = ['个人', '模型与服务', '编码', '高级'];
 
+const LAYER_DISABLED_REASON_ID = 'settings-layer-switcher-disabled-reason';
+const RESTART_DISABLED_REASON_ID = 'settings-restart-disabled-reason';
+
 /**
  * Props are deliberately isomorphic to the existing `BetaSettingsProps`
  * (`clients/electron/src/renderer/components/BetaDesktop.tsx`) so a later
@@ -28,7 +31,9 @@ const GROUP_ORDER: NavPage['group'][] = ['个人', '模型与服务', '编码', 
  * optionality, same deep-link contract (`initialProviderId` +
  * `pendingModelReference` are what the model picker uses to open Settings on
  * the provider blocking a model; `onClose` is expected to restore focus to
- * whatever opened it, which is the caller's job, not this component's).
+ * whatever opened it, which is the caller's job, not this component's — see
+ * the mount effect below for the DIFFERENT focus concern this component DOES
+ * own: trapping focus inside the dialog while it's open).
  */
 export interface SettingsScreenProps {
   bridge: UseBridge;
@@ -52,10 +57,16 @@ export function layerDisabled(layer: EditableLayer, hasProject: boolean): boolea
 
 /**
  * Why the "restart engine" action in the pending-settings banner should be
- * disabled, or `null` if it should not be. The main process already refuses
- * a restart mid-turn (see `restartBridgePreconditionError` in `useBridge.ts`)
- * — this mirrors that refusal in the UI so the button never invites a click
- * it can only answer with an error the user can't act on.
+ * disabled, or `null` if it should not be. This mirrors only the ONE
+ * precondition this component can actually see (`bridge.running`, a turn in
+ * flight) plus the absence of a session — it deliberately does NOT try to
+ * reproduce every precondition the host enforces (`assertRestartAllowed`,
+ * `src/main/host.ts:538-546`: a non-active session, `pendingInteractions >
+ * 0`, `hasActiveWork(projectPath)`), since this component has no visibility
+ * into most of those. A restart the host rejects for a reason not covered
+ * here still surfaces — see `handleRestart`'s catch, rendered as
+ * `settings-restart-error` — so an enabled button can never fail silently
+ * even though this function's disabling is necessarily incomplete.
  */
 export function restartDisabledReason(running: boolean, hasSession: boolean): string | null {
   if (running) return '对话正在进行时无法重启引擎，请等待当前回合结束。';
@@ -85,6 +96,14 @@ export function groupedNav(query: string): Array<{ group: NavPage['group']; page
  * machine stays JSON-free and pure. A malformed payload becomes an error
  * result, never a thrown exception — a broken settings file must not take
  * the whole settings screen down with it.
+ *
+ * A missing `active_json` (an older producer may omit it — it's optional on
+ * the wire) defaults `active` to `effective`, NOT to `{}`. An empty object
+ * would make `pendingKeys` treat every effective key as newly pending — a
+ * maximally loud false "restart to apply" banner manufactured from "we don't
+ * know" rather than from an actual difference. Defaulting to `effective`
+ * instead means "we don't know of anything pending", which is the honest
+ * reading of an absent field.
  */
 export function parseSettingsSnapshot(
   raw: SettingsSnapshotEvent | null | undefined,
@@ -94,7 +113,7 @@ export function parseSettingsSnapshot(
     const effective = JSON.parse(raw.effective_json) as Record<string, unknown>;
     const provenance = JSON.parse(raw.provenance_json) as Record<string, string>;
     const files = raw.files_json ? (JSON.parse(raw.files_json) as SettingsSnapshot['files']) : [];
-    const active = raw.active_json ? (JSON.parse(raw.active_json) as Record<string, unknown>) : {};
+    const active = raw.active_json ? (JSON.parse(raw.active_json) as Record<string, unknown>) : effective;
     const locked = raw.locked ?? [];
     return { snapshot: { effective, provenance, files, active, locked }, error: null };
   } catch (cause) {
@@ -103,6 +122,10 @@ export function parseSettingsSnapshot(
       error: cause instanceof Error ? cause.message : 'The settings snapshot could not be parsed.',
     };
   }
+}
+
+function messageFrom(cause: unknown): string {
+  return cause instanceof Error && cause.message ? cause.message : 'The engine could not be restarted.';
 }
 
 /**
@@ -169,33 +192,43 @@ function LayerSwitcher({ value, onChange, hasProject }: {
 }) {
   const t = useT();
   return (
-    <div
-      data-testid="layer-switcher"
-      style={{ display: 'inline-flex', padding: 3, gap: 2, borderRadius: 9, background: t.sidebarBg, border: `0.5px solid ${t.border}` }}
-    >
-      {EDITABLE_LAYERS.map((layer) => {
-        const active = value === layer;
-        const disabled = layerDisabled(layer, hasProject);
-        return (
-          <button
-            key={layer}
-            type="button"
-            data-layer={layer}
-            disabled={disabled}
-            title={disabled ? '打开一个项目后可编辑' : undefined}
-            onClick={() => onChange(layer)}
-            style={{
-              padding: '5px 14px', borderRadius: 7, border: 'none', fontFamily: 'inherit',
-              cursor: disabled ? 'not-allowed' : 'pointer',
-              background: active ? t.surface : 'transparent',
-              color: active ? t.text : disabled ? t.text4 : t.text3,
-              fontSize: 12.5, fontWeight: active ? 600 : 500,
-            }}
-          >
-            {provenanceLabel(layer)}
-          </button>
-        );
-      })}
+    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 4 }}>
+      <div
+        data-testid="layer-switcher"
+        style={{ display: 'inline-flex', padding: 3, gap: 2, borderRadius: 9, background: t.sidebarBg, border: `0.5px solid ${t.border}` }}
+      >
+        {EDITABLE_LAYERS.map((layer) => {
+          const active = value === layer;
+          const disabled = layerDisabled(layer, hasProject);
+          return (
+            <button
+              key={layer}
+              type="button"
+              data-layer={layer}
+              disabled={disabled}
+              aria-describedby={disabled ? LAYER_DISABLED_REASON_ID : undefined}
+              onClick={() => onChange(layer)}
+              style={{
+                padding: '5px 14px', borderRadius: 7, border: 'none', fontFamily: 'inherit',
+                cursor: disabled ? 'not-allowed' : 'pointer',
+                background: active ? t.surface : 'transparent',
+                color: active ? t.text : disabled ? t.text4 : t.text3,
+                fontSize: 12.5, fontWeight: active ? 600 : 500,
+              }}
+            >
+              {provenanceLabel(layer)}
+            </button>
+          );
+        })}
+      </div>
+      {/* Visible, not just a `title=` tooltip: Chromium does not dispatch the
+          pointer events a native tooltip needs on a DISABLED control, and a
+          tooltip is invisible to keyboard/screen-reader users regardless. */}
+      {!hasProject && (
+        <div id={LAYER_DISABLED_REASON_ID} data-testid="layer-switcher-disabled-reason" style={{ fontSize: 11, color: t.text4 }}>
+          打开一个项目后可编辑
+        </div>
+      )}
     </div>
   );
 }
@@ -218,20 +251,30 @@ function PendingSettingsBanner({ pending, disabledReason, onRestart }: {
       }}
     >
       <span>重启引擎以应用（{pending.length} 项）</span>
-      <button
-        type="button"
-        disabled={disabledReason !== null}
-        title={disabledReason ?? undefined}
-        onClick={onRestart}
-        style={{
-          padding: '5px 12px', borderRadius: 7, border: `0.5px solid ${t.accentBorder}`,
-          background: disabledReason !== null ? t.surfaceActive : t.accent,
-          color: disabledReason !== null ? t.text4 : '#fff',
-          fontSize: 12, fontWeight: 600, cursor: disabledReason !== null ? 'not-allowed' : 'pointer',
-        }}
-      >
-        重启引擎
-      </button>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+        {/* Same reasoning as the layer switcher's reason text above: visible
+            text a screen reader can reach via `aria-describedby`, not a
+            tooltip a disabled button will never dispatch. */}
+        {disabledReason && (
+          <span id={RESTART_DISABLED_REASON_ID} data-testid="restart-disabled-reason" style={{ fontSize: 11, color: t.text3 }}>
+            {disabledReason}
+          </span>
+        )}
+        <button
+          type="button"
+          disabled={disabledReason !== null}
+          aria-describedby={disabledReason ? RESTART_DISABLED_REASON_ID : undefined}
+          onClick={onRestart}
+          style={{
+            padding: '5px 12px', borderRadius: 7, border: `0.5px solid ${t.accentBorder}`,
+            background: disabledReason !== null ? t.surfaceActive : t.accent,
+            color: disabledReason !== null ? t.text4 : '#fff',
+            fontSize: 12, fontWeight: 600, cursor: disabledReason !== null ? 'not-allowed' : 'pointer',
+          }}
+        >
+          重启引擎
+        </button>
+      </div>
     </div>
   );
 }
@@ -248,6 +291,15 @@ export function SettingsScreen({
   const [page, setPage] = useState<string>(() => resolveInitialPage(initialProviderId));
   const [query, setQuery] = useState('');
   const [editingLayer, setEditingLayer] = useState<EditableLayer>('user');
+  const [restartError, setRestartError] = useState<string | null>(null);
+
+  const panelRef = useRef<HTMLDivElement>(null);
+  const closeRef = useRef<HTMLButtonElement>(null);
+  // A ref, not a dependency, so the mount effect below (which must run its
+  // capture-focus/attach-listener logic exactly once) always calls the
+  // LATEST `onClose` without needing to re-run when the prop identity changes.
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
 
   const activeSessionId = bridge.activeSession?.sessionId;
   const hasProject = Boolean(bridge.bootstrap?.workspace?.path);
@@ -265,18 +317,64 @@ export function SettingsScreen({
   // The shell owns the settings-snapshot lifecycle so every page and the
   // pending banner read the one parse of it, rather than each page task
   // re-fetching and re-parsing the same wire event independently.
+  //
+  // Gated on `bridge.connected` and NOT `bridge.sessionLoading`: `command()`
+  // (the thing `refreshSettingsSnapshot` wraps) silently no-ops while a
+  // session is loading, and `activeSession` is already populated with the
+  // PENDING session during that window — so a naive `[activeSessionId]`
+  // dependency fires once, sends nothing, and never fires again once loading
+  // finishes (neither dependency changes), leaving the snapshot — and so the
+  // pending banner — permanently null. Depending on `bridge.connected` too
+  // makes this effect re-run exactly when loading finishes and the session
+  // is actually ready to answer, which is also what makes a post-restart
+  // refresh happen automatically: a real restart cycles `connected` through
+  // `false` before `true` again, re-firing this effect with no separate
+  // "refresh after restart" call needed (see `handleRestart` below).
   useEffect(() => {
-    if (!activeSessionId) return;
+    if (!activeSessionId || !bridge.connected || bridge.sessionLoading) return;
     void bridge.refreshSettingsSnapshot().catch(() => undefined);
-  }, [activeSessionId, bridge.refreshSettingsSnapshot]);
+  }, [activeSessionId, bridge.connected, bridge.sessionLoading, bridge.refreshSettingsSnapshot]);
 
+  // Focus management for a dialog that claims `aria-modal="true"`: claiming
+  // it while leaving focus (and Tab) free to wander the background would be
+  // its own overclaim — assistive tech is told the background is inert while
+  // Tab still walks it. This captures whatever had focus before mount,
+  // moves focus onto the close button, traps Tab inside `panelRef`'s
+  // focusable descendants (wrapping via the same `dialogFocusTarget` helper
+  // `BetaSettings` uses), and restores focus to whatever had it on unmount.
+  // This is a DIFFERENT concern from `SettingsScreenProps.onClose` /
+  // `SettingsRoute.restoreFocus` in `App.tsx`: that restores focus to the
+  // opener once the WHOLE settings surface closes; this is about focus while
+  // it's open. Both are needed.
   useEffect(() => {
+    const previouslyFocused = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    closeRef.current?.focus();
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') onClose();
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        onCloseRef.current();
+        return;
+      }
+      if (event.key !== 'Tab') return;
+      const focusable = [...(panelRef.current?.querySelectorAll<HTMLElement>(
+        'button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled])',
+      ) ?? [])];
+      const active = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+      const target = dialogFocusTarget(focusable, active, event.shiftKey);
+      if (target) {
+        event.preventDefault();
+        target.focus();
+      } else if (focusable.length === 0) {
+        event.preventDefault();
+        panelRef.current?.focus();
+      }
     };
-    window.addEventListener('keydown', onKeyDown);
-    return () => window.removeEventListener('keydown', onKeyDown);
-  }, [onClose]);
+    document.addEventListener('keydown', onKeyDown);
+    return () => {
+      document.removeEventListener('keydown', onKeyDown);
+      previouslyFocused?.focus();
+    };
+  }, []);
 
   const { snapshot, error: snapshotError } = useMemo(
     () => parseSettingsSnapshot(bridge.settingsSnapshotEvent),
@@ -286,17 +384,31 @@ export function SettingsScreen({
   const restartReason = restartDisabledReason(bridge.running, Boolean(activeSessionId));
 
   const handleRestart = () => {
-    void bridge.restartBridge()
-      .then(() => bridge.refreshSettingsSnapshot())
-      .catch(() => undefined);
+    setRestartError(null);
+    // No explicit "refresh the snapshot after this" chain: a successful
+    // restart cycles `bridge.connected` through `false`→`true`, which the
+    // effect above already treats as a reason to re-fetch. Chaining it here
+    // too would just re-race the same no-op-while-loading guard that effect
+    // exists to fix.
+    void bridge.restartBridge().catch((cause) => setRestartError(messageFrom(cause)));
   };
 
   let body: ReactNode;
-  if (activePage.needsEngine && !engineReady) {
-    body = <EngineRequiredEmptyState page={activePage} />;
-  } else if (!activePage.implemented) {
+  // Whether the body actually has something a layer switcher could target.
+  // `false` for a page that will never exist here (not implemented) or one
+  // whose data this shell cannot even read right now (no engine) — showing
+  // the switcher there would offer a write target for a page with nothing to
+  // write. `true` even for the "not wired yet" placeholder: the SETTINGS
+  // exist and are readable/writable (the engine is ready), only this
+  // shell's own editing UI for them hasn't been built yet — a temporary
+  // packaging gap, not an absence of anything to write.
+  let canWriteHere = false;
+  if (!activePage.implemented) {
     body = <PagePlaceholder page={activePage} kind="not-implemented" />;
+  } else if (activePage.needsEngine && !engineReady) {
+    body = <EngineRequiredEmptyState page={activePage} />;
   } else {
+    canWriteHere = true;
     const Component = PAGE_CONTENT[activePage.id];
     body = Component
       ? (
@@ -312,18 +424,28 @@ export function SettingsScreen({
       )
       : <PagePlaceholder page={activePage} kind="not-wired" />;
   }
+  const showLayerSwitcher = activePage.layered && canWriteHere;
 
   return (
     <div
+      ref={panelRef}
       role="dialog"
       aria-modal="true"
       aria-label="设置"
+      tabIndex={-1}
       style={{
         position: 'absolute', inset: 0, zIndex: 60, display: 'flex', flexDirection: 'column',
         background: t.windowBg, color: t.text,
       }}
     >
       <PendingSettingsBanner pending={pending} disabledReason={restartReason} onRestart={handleRestart} />
+      {restartError && (
+        <div data-testid="settings-restart-error" role="alert" style={{
+          padding: '10px 18px', background: t.danger, color: '#fff', fontSize: 12.5, flexShrink: 0,
+        }}>
+          重启失败：{restartError}
+        </div>
+      )}
       {snapshotError && (
         <div data-testid="settings-snapshot-error" role="alert" style={{
           padding: '10px 18px', background: t.danger, color: '#fff', fontSize: 12.5, flexShrink: 0,
@@ -397,7 +519,7 @@ export function SettingsScreen({
         <div style={{ flex: 1, minWidth: 0, overflowY: 'auto', padding: '20px 32px 40px' }}>
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 16, marginBottom: 18 }}>
             <div style={{ fontSize: 18, fontWeight: 600 }}>{activePage.label}</div>
-            {activePage.layered && (
+            {showLayerSwitcher && (
               <LayerSwitcher value={editingLayer} onChange={setEditingLayer} hasProject={hasProject} />
             )}
           </div>
@@ -405,6 +527,7 @@ export function SettingsScreen({
         </div>
 
         <button
+          ref={closeRef}
           type="button"
           aria-label="Close settings"
           onClick={onClose}

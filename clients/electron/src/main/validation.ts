@@ -6,6 +6,7 @@ import type {
   ReasoningSelectionDto,
 } from '@lingxi/bridge-client';
 import { detectImageMediaType, isSupportedImageMediaType, MAX_IMAGE_ATTACHMENTS, MAX_IMAGE_BYTES } from '../shared/imageInput.js';
+import { ALLOWED_CLIENT_COMMAND_TYPES, ALLOWED_REFRESH_LISTING_KINDS } from '../shared/clientCommands.js';
 
 const MAX_PROMPT_LENGTH = 256 * 1024;
 const MAX_ID_LENGTH = 512;
@@ -18,33 +19,16 @@ const PERMISSION_BEHAVIORS = ['allow', 'deny', 'ask'] as const;
 const MCP_SCOPES = ['user', 'local', 'project'] as const;
 
 /**
- * The runtime mirror of `../shared/clientCommands.ts`'s `AllowedClientCommand`
- * type. That file exports a compile-time-only type (erased at runtime), so it
- * cannot itself supply this Set or the `switch` below — this list and every
- * `case` in `validateClientCommand` must be kept byte-for-byte in sync with
- * it by hand. Changing one without the other means the desktop typechecks a
- * command it cannot actually send (or worse, cannot send one it can type).
+ * The runtime membership check for the Desktop command surface, built from
+ * `../shared/clientCommands.ts`'s `ALLOWED_CLIENT_COMMAND_TYPES` — the same
+ * array `AllowedClientCommand` (the compile-time gate) derives its union
+ * from — plus `refresh_listings` itself, which is a separate envelope shape
+ * rather than a member of that array. Restating the list here, instead of
+ * importing it, is exactly how it drifted before: this file's allowlist
+ * never accepted `new_session` / `resume_session` while the type claimed
+ * both were part of the surface.
  */
-const ALLOWED_COMMANDS = new Set([
-  'set_model',
-  'set_permission_mode',
-  'get_conversation_controls',
-  'set_reasoning_selection',
-  'set_fast_mode',
-  'list_models',
-  'run_slash_command',
-  'list_sessions',
-  'task_list',
-  'task_output',
-  'task_stop',
-  'refresh_listings',
-  'update_settings',
-  'update_permission_rules',
-  'set_default_permission_mode',
-  'update_workspace_directories',
-  'upsert_mcp_server',
-  'remove_mcp_server',
-]);
+const ALLOWED_COMMANDS: ReadonlySet<string> = new Set<string>([...ALLOWED_CLIENT_COMMAND_TYPES, 'refresh_listings']);
 
 function object(value: unknown): Record<string, unknown> {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) throw new Error('invalid payload');
@@ -298,15 +282,9 @@ export function validateClientCommand(value: unknown, workspace?: string): Clien
       const which = input['which'].map((value) => {
         const listing = object(value);
         exactKeys(listing, ['type']);
-        if (
-          listing['type'] !== 'status'
-          && listing['type'] !== 'doctor'
-          && listing['type'] !== 'slash_commands'
-          && listing['type'] !== 'settings'
-          && listing['type'] !== 'mcp'
-          && listing['type'] !== 'skills'
-        ) throw new Error('listing is not allowed');
-        return { type: listing['type'] } as const;
+        const kind = listing['type'] as (typeof ALLOWED_REFRESH_LISTING_KINDS)[number];
+        if (!ALLOWED_REFRESH_LISTING_KINDS.includes(kind)) throw new Error('listing is not allowed');
+        return { type: kind };
       });
       return { type, which };
     }

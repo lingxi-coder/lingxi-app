@@ -71,7 +71,7 @@
 | **1'** | verification Phase 1a（两端 inspect/capture contract + `image-read`） | **无** | 两端 contract 通过；不动协议。**与步骤 1 零文件重叠**（`LocalAppWebView`/`image-read` 在 create-flow 全文 0 命中），可与步骤 1 并行 |
 | 2 | verification Phase 1b（共享基础补丁） | 1、1' | `.lingxi` build-key、canvas workflow lease/delete guard 通过；不动协议 |
 | 3a | create-flow Phase 1.0 IIFE spike | 2 | Babylon + glTF + Havok 在固定 pnpm/IIFE 下完成双端 production build + WebView smoke；失败则 runtime profile 停止 |
-| 3b | verification smoke spike | 1' | 六条真机判据、WebView role/registry、fresh document load、权限与结构化报告载体有实测结论；失败不阻塞 3a/4 |
+| 3b ✅ | verification smoke spike | 1' | **2026-08-27 完成**（探针 `6b0377784`，iPhone 11 / iOS 18.6.2，83 tests 0 failures）。结论：离屏 WKWebView 可行，但**捕获必须走 `drawHierarchy`**，`takeSnapshot` 对离屏视图恒为黑；离屏 rAF 照常运行，2D canvas 与 WebGL 均可捕获；冒烟报告载体**必须动协议** ⇒ 判据 6 落 Phase 3 |
 | 4 | create-flow Phase 1 Web runtime profiles | 3a 通过 | 五 profile、engine-free seed、receipt confirmation、snapshot/SBOM、workflow/build/真机性能门通过 |
 | 5 | verification Phase 3 数据/协议基础 | 2、4 | 在协议 8.0.0 + profile-aware 代码上 rebase；annotation 原子存储、build generations、下一次 contract bless 与两端 bindings 通过 |
 | 6 | verification Phase 2 smoke gate/workflow 改造 | 3b、4 | smoke gate 对所有 Web profile 有明确结果；无能力平台返回 `verification_unavailable`，不静默通过 |
@@ -102,7 +102,8 @@ verification Phase 3 在其自身逻辑上只依赖 Phase 1；本文把它排在
 
 ## 阻塞与继续规则
 
-- verification smoke spike 未决只阻塞步骤 6/7，不阻塞 runtime profile 步骤 4。
+- ~~verification smoke spike 未决只阻塞步骤 6/7~~ —— **spike 已于 2026-08-27 完成**，
+  步骤 6 的这条前置解除。步骤 6 现在只等步骤 4（runtime profiles）。
 - IIFE spike 失败阻塞步骤 4，并按本文默认顺序连带暂停步骤 5；create-flow §0-§H、verification Phase 1a/1b 与 smoke spike 可以继续。若决定在没有 runtime profiles 的情况下先交付 verification Phase 3，必须先更新本文和两份 design 的 rebase 顺序，不能口头跳过步骤 4。
 - Android 没有 smoke host 能力时必须返回 `verification_unavailable`，不能把 iOS-only 成功推广到 Android。
 - Godot 不得借用 WebView `AppSurface::Canvas` 或 `window.lingxi.v2` 绕过独立设计门。

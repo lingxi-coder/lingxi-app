@@ -181,7 +181,7 @@ Android-use 又是一套。把它塞进本设计只会得到一个只在本地�
 ─────────────────────                    ──────────────────────
 Design → Generate & Build                 用户玩 app
               │                            │ 点悬浮按钮进标注态
-      [挂载点未定 · spike] ──► 冒烟门        │ 拖框 → 描述
+      [离屏 WKWebView ✅spike] ──► 冒烟门     │ 拖框 → 描述
               │                            ▼
               ▼                        标注入清单（客户端，落盘）
         workflow 结束                       │ 提交
@@ -215,9 +215,10 @@ canvas 应用没有可命中元素，退化为「矩形 + 图 + 描述」，这�
 
 替换 workflow 里由 agent 自述的 gate。
 
-### ⛔ 挂载点未定：阻塞在一个 spike 上
+### ✅ 挂载点已定（原「阻塞在一个 spike 上」）
 
-**四轮纸面设计，四个挂载点，四次被杀，四次死因互不相同。本节不再给出方案。**
+**四轮纸面设计，四个挂载点，四次被杀，四次死因互不相同。第五个方案由真机 spike 定案，
+不是由第五轮推演。** 下表保留四次死因（仍然有效，仍然是判据的来源）；结论见本节末。
 
 | 提案 | 死因（均在代码上验证） |
 |---|---|
@@ -256,7 +257,83 @@ canvas 应用没有可命中元素，退化为「矩形 + 图 + 描述」，这�
    spike 必须明确这个载体是既有 DTO 字段、新 app event，还是进程级服务状态；
    在载体未定之前，不得承诺「冒烟报告不动协议」。
 
-### 下一步是 spike，不是第六轮纸面推演
+### ✅ spike 已完成 —— 2026-08-27，iPhone 11 / iOS 18.6.2 实测
+
+**结论：候选挂载点成立，但捕获 API 必须换。** 探针提交于 `6b0377784`
+（`clients/ios/Tests/LocalAppsStoreTests.swift`，四个 `testSpike*`），
+`Executed 83 tests, with 0 failures`。
+
+**离屏安放矩阵**（每种策略都强制 `layoutIfNeeded()` + 250ms 合成器周转，
+所以「没跑布局」被排除；零尺寸对照组正确地拒绝绘制，因此矩阵测的是布局而不是噪声）：
+
+| 安放策略 | `takeSnapshot` | `drawHierarchy` |
+|---|---|---|
+| outside-bounds x=-10000 | blank rgb(0,0,0) | **PAINTED** rgb(255,0,0) |
+| below-the-fold y=height | blank rgb(0,0,0) | **PAINTED** rgb(255,0,0) |
+| behind content, sent to back | blank rgb(0,0,0) | **PAINTED** rgb(255,0,0) |
+| alpha 0.01 at origin | blank rgb(0,0,0) | blank rgb(3,0,0) |
+| own window below normal level | blank rgb(0,0,0) | **PAINTED** rgb(255,0,0) |
+
+🚨 **`takeSnapshot` 对离屏视图从不合成 —— 而它正是生产 `capture_ui` 在用的路径**
+（`LocalAppWebView.swift:572`）。`LocalAppWebView.swift:21` 那条既有注释描述的就是这个。
+冒烟门**必须走 `drawHierarchy`**，不能复用现有截图路径。
+
+`alpha 0.01` 被排除的理由和本文原先写的不一样：它**确实绘制了**，
+rgb(3,0,0) ≈ 255 × 0.01 —— alpha 被应用到渲染结果上，证据几乎全黑。
+
+**canvas / WebGL 探针**（针对 create-flow 新增的 `canvas-2d` / `threejs` profile）：
+
+| surface | loaded | context | rAF frames | `takeSnapshot` | `drawHierarchy` |
+|---|---|---|---|---|---|
+| 2d | true | true | 25 | blank | **PAINTED** rgb(255,0,0) |
+| webgl | true | true | 25 | blank | **PAINTED** rgb(255,0,0) |
+
+1. `drawHierarchy` 能捕到离屏的 2D canvas 与 **WebGL**，GPU 内容丢失的担心没有兑现。
+2. **`requestAnimationFrame` 在离屏状态下照常运行**（~400ms 内 25 帧）⇒
+   动画类 app 不会静默产出空白证据，门也不必自己驱动帧。这是最阴的那个失败形态。
+3. `takeSnapshot` 对 canvas/WebGL 同样为黑 ⇒ 问题在 API，不在内容。
+
+**判据 2「新鲜文档」实测通过**：同 URL 的显式重载确实换文档（第一份文档上打的标记
+在第二次加载后消失）。所以热重载缺口是**我们自己的** `guard loadedURL != url`
+（`LocalAppWebView.swift:1104`），不是 WebKit 的限制。
+
+⚠️ **本节早期结论「离屏不能绘制」是错的,已作废。** 那个否定只基于 `takeSnapshot`
+一个仪器,加一个仪器就反转了。记在这里是因为——**前四个纸面方案就是这么死的:
+一个仪器、一台设备、一个自信的否定。** 任何后续的否定结论必须至少跑两个独立仪器。
+
+### 其余判据的代码侧裁决（行号按 2026-08-27 的树重核，本文旧行号已漂）
+
+- **判据 1「宿主保证触发」——找到不可绕过的接缝。** 四个死掉的方案都在**入口**设门，
+  而入口可绕（`restore_checkpoint_value` `local_apps_host.rs:3279` 直接调
+  `build_workspace` `:3340`、`:3348`，完全不经 `build_app` `:4178`）。
+  但 **`promote_build_root` 只有一个生产调用点**（`local_apps_build.rs:970`；
+  `:2498` 是测试）——那是新字节变成被服务字节的定义性时刻，三条产出路径全收敛于此。
+  六轮推演没找到它，因为六轮都在看入口。
+- **判据 3「判定不经模型」——确认，且现状比本文写的更糟。** workflow runtime 只记
+  `last_tool_name: Option<String>`（`local_workflow.rs:87`，写入在 `:1655`），从不看结果；
+  `start_runtime`（`local_apps_host.rs:2854`）的前置只有 `service.record()`，
+  `workflow_state` 在该文件零命中。而**今天已经存在的那道门**
+  （`local_app_workflow_core.js:438`）判的是 `verification.webview_checked`——
+  一个**verifier 子代理自己填的布尔值**，背后零证据。这是判据 3 要消灭的形状本身。
+- **判据 5「不越权」——确认。** `defaults_per_tool.rs:116` `LocalAppBuild` = AllowByDefault；
+  `:144/:148/:151` Inspect/Capture/ActOn = DenyByDefault。
+- **判据 6「结果可观测」——载体选项砍掉一半。** `AppRecordDto.workflow_state` 的类型
+  `AppWorkflowStateDto` 是**无字段枚举** `Draft | Ready`（`local_apps.rs:41-46`），
+  而本仓库 uniffi 规则禁止给无字段枚举加带数据变体 ⇒ 冒烟报告**不能搭它**。
+  只剩「`AppRecordDto` 新增字段」或「新 app 事件」，**两者都动协议** ⇒ 判据 6 落 Phase 3，
+  「冒烟报告不动协议」不得承诺。
+- **🚨 本文未写的一条硬约束：门会把用户从聊天里拽走。**
+  `LocalAppsStore.swift:1033` 对**每一个** UI 请求都设 `requestedPresentationAppID`，
+  且发生在 `:1044` 的 inspect/capture 自动放行分支**之前**。那个字段就是挂载可见预览的东西。
+  所以专用宿主通道必须同时绕开 `approvedUIAutomation`（`:148`，纯进程内存，冷启必弹窗）
+  **和** `requestedPresentationAppID`。本文原先把这当成候选方案顺带的好处，它其实是硬约束。
+- **registry 子问题——比本文估计的小。** 每个 `LocalAppBridgeBroker` 已各自持有私有
+  `inFlight: Set<String>`（`LocalAppWebView.swift:156`），流帧带 request id
+  （`local_apps.rs:565`）⇒ `resolveBridge` 与 `deliverStreamFrame` **都能按 requestID 路由**
+  （跨 controller 的 id 集合不相交），真正需要 `role` 的只有 `execute(request:)`（`:108-116`）。
+  仍未决：`close(appID:)`（`:75-78`）与数据存储删除（`dataStore(appID:)` `:1526`）时谁负责关掉冒烟视图。
+
+### 原「下一步是 spike」一节（已由上文取代，保留论证）
 
 四次死因分别是**时序、页面加载语义、权限表、结果不可观测**——没有一条是靠更仔细地读代码
 能提前发现的，四次都是评审在事后从另一个角度撞出来的。按本仓库自己的判据
@@ -308,7 +385,12 @@ WKWebView 会**静默破坏应用删除的清理**，而且它启动时的写入
 spike 的验收标准是上面那六条**加上这个子问题**，每条都要在**真机**上被证伪或证实——
 尤其第 3 条，它是本设计存在的全部理由。
 
-**在 spike 有结论之前，阶段 2 不可计划。** 阶段 1a/1b 与阶段 3 不依赖它，可以先做。
+~~**在 spike 有结论之前，阶段 2 不可计划。**~~ **spike 已于 2026-08-27 完成（见上），
+封印解除。** 阶段 2 现在的唯一前置是 create-flow 的 Web runtime profile（master step 4），
+它**尚未落地**——`RuntimeProfile`/`runtime_profile` 全 Rust 零命中，实际形态是
+`skills/{ionic-react,canvas-2d,threejs}-local-app/` 加 `local_app_workflow_core.js` 的
+`args.renderer`，且**该参数哪儿都不持久化**（`AppSurface` 只存 `Dom | Canvas`）。
+⇒ 阶段 2 必须把 renderer 当**每次调用的参数**，不能当 app 属性。
 
 🚨 **阶段 2 的门只覆盖 iOS，这必须写进契约而不是默认。** workflow 与引擎的改动两端共用，
 但 spike 的候选是 iOS 的离屏 `WKWebView`，而 Android 的 WebView registry 是**另一套独立
@@ -392,7 +474,7 @@ React 19（`package.json:17` `"react": "19.2.8"`）的默认 `onCaughtError` 路
 来挂载 WebView。若离屏候选在真机上不成立，spike 应判该方案失败，而不是
 回退到把 app 强制推上屏。
 
-## 协议改动：已确定两组，冒烟载体待 spike
+## 协议改动：已确定两组，冒烟载体已收窄（spike 后）
 
 `ResolveAppUiRequest.result_json` 和 `AppUiRequestDto.value` 都是不透明
 `Option<String>`（`commands.rs:438`、`local_apps.rs:774`），所以绝大部分能力不触及协议。
@@ -401,7 +483,7 @@ React 19（`package.json:17` `"react": "19.2.8"`）的默认 `onCaughtError` 路
 |---|---|---|
 | `inspect_ui` 元素几何 / canvas rect / runtimeErrors | `result_json` 内 JSON | 否 |
 | `capture_ui` 区域裁剪 | host schema 序列化到 `value` JSON | 否 |
-| 冒烟门报告 / `needs_user_review` | **待 spike 决定** | **待定，不得预判为否** |
+| 冒烟门报告 / `needs_user_review` | **必须动协议**：`AppWorkflowStateDto` 是无字段枚举（`local_apps.rs:41-46`），uniffi 规则禁止给它加带数据变体 ⇒ 只能新增 `AppRecordDto` 字段或新 app 事件 | **是** ⇒ 落 Phase 3 |
 | 标注 → 消息 | 复用 `SendPrompt` | 否 |
 | 清单清理触发 | 复用 `AppRecordChanged`，但 `AppRecordDto` 新增 build 字段 | **是** |
 | **存标注 / 删标注** | 两条新命令 + `AppEventDto` 回执 | **是** |
@@ -1281,8 +1363,8 @@ agent-facing contract 判绿。
 |---|---|---|
 | **1a** | 两端 `inspect_ui` 几何/canvas rect/runtimeErrors（含 `console.error` 与载荷预算）+ `capture_ui` 区域（修正后的裁剪数学）+ `image-read` | **无依赖，今天即可开工**。这些只动 `LocalAppWebView.swift`/`.kt` 与 `engine-mobile/Cargo.toml`——按 create-flow 全文 grep，`LocalAppWebView` 与 `image-read` 命中数**均为 0**，零文件重叠。**完全不碰协议** |
 | **1b** | `.lingxi` 进构建键跳过表 + 两处 `local-app-build` 字面量改集合判定（lease 与删除守卫） | master step 2 的写入窗口——这三处落在 `local_apps_build.rs` / `local_workflow.rs` / `registry.rs`，与 create-flow 有文件级重叠，按 master order 串行 |
-| **spike** | 宿主能否拿到新鲜且不可伪造的观测（六条验收，真机） | 1a |
-| 2 | 冒烟门 + 判据 1/2/6 阻塞、4/5 建议 + workflow 脚本删减（含那五处同 commit 必改）+ `needs_user_review` 可见信号 + source-vs-source 的决定。**iOS only**：引擎必须显式表达「本平台无冒烟能力」并返回 `verification_unavailable`，Android 对等能力是独立 spike | **spike + create-flow Web runtime profile Phase 1**；所有 workflow 判定必须覆盖最终 profile 集合 |
+| ~~**spike**~~ ✅ | 宿主能否拿到新鲜且不可伪造的观测（六条验收，真机）——**2026-08-27 完成**，探针 `6b0377784` | 1a |
+| 2 | 冒烟门 + 判据 1/2/6 阻塞、4/5 建议 + workflow 脚本删减（含那五处同 commit 必改）+ `needs_user_review` 可见信号 + source-vs-source 的决定。**iOS only**：引擎必须显式表达「本平台无冒烟能力」并返回 `verification_unavailable`，Android 对等能力是独立 spike。**捕获必须走 `drawHierarchy`，不得用 `takeSnapshot`**（spike 实测：后者对离屏视图恒为黑） | ~~spike~~ ✅ + **create-flow Web runtime profile Phase 1（仍未落地）**；所有 workflow 判定必须覆盖最终 profile 集合 |
 | 3 | `StoreAppAnnotation` 原子目录 + **`DeleteAppAnnotation`** + **`annotation_id` 落盘前校验/归一** + **`annotations/` 的 read/delete 双豁免** + `AppRecord`/`AppRecordDto` 两个 build generation 字段 + `BuildOutcome`/`build_and_record` + 协议 bless/绑定生成。**硬门：并发 restore 测试** | 1 + create-flow 协议 8.0.0 + runtime-profile Phase 1；按 master order rebase 后再 bless |
 | 4 | iOS overlay + controller 串行 + 标注状态机与持久化 + RootView one-shot 提交路由 + **最小可用副驾驶条**（输入/药丸清单/提交/重试/丢弃/quota 错误） | **2 与 3** |
 | 5 | 副驾驶条的视觉/交互打磨 + 引导（**先单独评审**，不承载功能性恢复入口） | 4 |
@@ -1298,7 +1380,8 @@ agent-facing contract 判绿。
 
 阶段 1b 与 3 在 verification 自身的数据依赖上可以并行，**但集成上不得并行写入**：master order 将阶段 3 排在 runtime-profile Phase 1 之后，以避免 `AppRecord`、DTO、host、bindings 和客户端 adapter 两轮冲突修改。阶段 **1a** 是 spike 与 2 的硬前置（判据依赖 1a 新增的 rect 与 runtimeErrors）；
 **1b 不是** spike 的前置，它只在阶段 3 之前必须落地（构建键那条）。
-**阶段 2 在 spike 出结论前不可计划；阶段 4 不得在 2 之前交付**，因为提交路由的
+~~阶段 2 在 spike 出结论前不可计划~~（spike 已完成，2026-08-27）；
+**阶段 4 仍不得在 2 之前交付**，因为提交路由的
 source-vs-source 互斥策略与 `buildObserved → cleared` 的门结果都由阶段 2 确定。
 
 ## 先于本设计存在的在线缺陷

@@ -7,6 +7,7 @@ import {
   moveSlashSelectionIndex,
   reconcileSlashSelectionIndex,
   slashCommandText,
+  slashMenuLabel,
   slashNavigationDirection,
 } from '../src/renderer/bridge/slashCommands';
 
@@ -46,6 +47,29 @@ test('the unfiltered palette keeps the complete engine catalog', () => {
     source: 'builtin',
   }));
   assert.equal(filterSlashCommands(catalog, '').length, catalog.length);
+});
+
+const dtoCommands = [
+  { name: 'model', description: 'Switch the active model', source: 'builtin' },
+  { name: 'usage', description: 'Show usage', source: 'builtin', aliases: ['cost', 'stats'] },
+  { name: 'secret', description: 'Hidden helper', source: 'builtin', hidden: true },
+  { name: 'compact', description: 'Compact the conversation', source: 'builtin', menu_description: 'Compact', argument_hint: '[instructions]' },
+];
+
+test('hidden commands stay out of the bare menu but resolve on an exact name', () => {
+  assert.equal(filterSlashCommands(dtoCommands, '').some((c) => c.name === 'secret'), false);
+  assert.equal(filterSlashCommands(dtoCommands, 'secret').some((c) => c.name === 'secret'), true);
+  // A prefix is not an exact name — still hidden.
+  assert.equal(filterSlashCommands(dtoCommands, 'sec').some((c) => c.name === 'secret'), false);
+});
+
+test('an alias matches its command', () => {
+  assert.deepEqual(filterSlashCommands(dtoCommands, 'cost').map((c) => c.name), ['usage']);
+});
+
+test('the menu label prefers menu_description', () => {
+  assert.equal(slashMenuLabel(dtoCommands[3]!), 'Compact');
+  assert.equal(slashMenuLabel(dtoCommands[0]!), 'Switch the active model');
 });
 
 test('arrow navigation survives keyup reconciliation and clamps at both ends', () => {

@@ -22,6 +22,7 @@ import {
   moveSlashSelectionIndex,
   reconcileSlashSelectionIndex,
   slashCommandText,
+  slashMenuLabel,
   slashNavigationDirection,
 } from '../bridge/slashCommands';
 import { groupModelReferences, modelReference } from '../bridge/modelCatalog';
@@ -1410,8 +1411,11 @@ export function BetaComposer({ bridge, ready }: { bridge: UseBridge; ready: bool
                   <span
                     className="mono"
                     style={{ color: t.accent, fontWeight: 650, borderRadius: 6, padding: '2px 0', fontSize: 11.5 }}
-                  >/{entry.name}</span>
-                  <span style={{ color: t.text2, fontSize: 12.5 }}>{entry.description}</span>
+                  >
+                    /{entry.name}
+                    {entry.argument_hint ? <span style={{ color: t.text4, fontWeight: 400 }}> {entry.argument_hint}</span> : null}
+                  </span>
+                  <span style={{ color: t.text2, fontSize: 12.5 }}>{slashMenuLabel(entry)}</span>
                   <span style={{ color: t.text4, fontSize: 10, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{entry.source}</span>
                 </button>
               );

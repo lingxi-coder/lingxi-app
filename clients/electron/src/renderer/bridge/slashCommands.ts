@@ -21,13 +21,25 @@ export function activeSlashCommand(text: string, cursor: number): ActiveSlashCom
 function commandScore(command: SlashCommandDto, query: string): number | undefined {
   const name = command.name.toLocaleLowerCase();
   const normalized = query.toLocaleLowerCase();
+  const aliases = (command.aliases ?? []).map((alias) => alias.toLocaleLowerCase());
+  // A hidden command is resolvable by its EXACT name and nothing else — the
+  // DTO's stated contract (client-protocol/src/listings.rs:377).
+  if (command.hidden) {
+    return normalized && (name === normalized || aliases.includes(normalized)) ? 0 : undefined;
+  }
   if (!normalized) return 0;
-  if (name === normalized) return 0;
+  if (name === normalized || aliases.includes(normalized)) return 0;
   if (name.startsWith(normalized)) return 10;
+  if (aliases.some((alias) => alias.startsWith(normalized))) return 15;
   if (name.includes(normalized)) return 20;
   if (command.description.toLocaleLowerCase().includes(normalized)) return 30;
   if (command.source.toLocaleLowerCase().includes(normalized)) return 40;
   return undefined;
+}
+
+/** The compact menu label: `menu_description` when the engine supplied one. */
+export function slashMenuLabel(command: SlashCommandDto): string {
+  return command.menu_description ?? command.description;
 }
 
 /** Rank the live engine catalog without inventing commands in the renderer. */

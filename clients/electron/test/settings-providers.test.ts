@@ -2,9 +2,10 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
+  isEditableLayer,
   parseModelsInput,
-  providersFromSnapshot,
-  routingFromSnapshot,
+  providersFromLayer,
+  routingFromLayer,
   validateCustomProvider,
 } from '../src/renderer/components/settings/pages/CustomProviders';
 import {
@@ -58,23 +59,69 @@ test('models input parses comma- and newline-separated ids, dropping blanks', ()
   assert.deepEqual(parseModelsInput('   '), []);
 });
 
-test('providersFromSnapshot reads the effective view and is never a throw', () => {
-  assert.deepEqual(providersFromSnapshot(null), {});
-  assert.deepEqual(providersFromSnapshot({ effective: {}, active: {}, provenance: {}, files: [], locked: [] }), {});
-  const withProviders = {
-    effective: { providers: { mine: { type: 'openai', models: [{ id: 'm' }] } } },
-    active: {}, provenance: {}, files: [], locked: [],
+test('providersFromLayer reads the SELECTED LAYER\'s own map, and is never a throw', () => {
+  assert.deepEqual(providersFromLayer(null, 'user'), {});
+  assert.deepEqual(
+    providersFromLayer({ effective: {}, active: {}, provenance: {}, files: [], locked: [], layers: {} }, 'user'),
+    {},
+  );
+  const snapshot = {
+    effective: {}, active: {}, provenance: {}, files: [], locked: [],
+    layers: {
+      user: { providers: { userOnly: { type: 'openai', models: [{ id: 'm-user' }] } } },
+      local: { providers: { localOnly: { type: 'openai', models: [{ id: 'm-local' }] } } },
+    },
   };
-  assert.deepEqual(providersFromSnapshot(withProviders), { mine: { type: 'openai', models: [{ id: 'm' }] } });
+  assert.deepEqual(providersFromLayer(snapshot, 'user'), { userOnly: { type: 'openai', models: [{ id: 'm-user' }] } });
+  assert.deepEqual(providersFromLayer(snapshot, 'local'), { localOnly: { type: 'openai', models: [{ id: 'm-local' }] } });
 });
 
-test('routingFromSnapshot reads the effective view and is never a throw', () => {
-  assert.deepEqual(routingFromSnapshot(null), {});
-  const withRouting = {
-    effective: { routing: { retry: { maxAttempts: 3, backoffMs: 500 } } },
-    active: {}, provenance: {}, files: [], locked: [],
+// Fix round 1: this is the regression test for the Important finding. Before
+// the fix, this page read `snapshot.effective['providers']` — the
+// cross-layer MERGED view — so a write based on it would silently copy
+// whichever layer won the merge into whichever layer the user meant to save.
+// `providersFromLayer` must give `project` NONE of `local`'s entries even
+// though `local` would win an `effective` merge.
+test('providersFromLayer never leaks another layer\'s entries into the selected layer (fix round 1 regression)', () => {
+  const snapshot = {
+    effective: { providers: { localOnly: { type: 'openai', models: [{ id: 'm-local' }] } } },
+    active: {}, provenance: { providers: 'local' }, files: [], locked: [],
+    layers: {
+      user: { providers: { userOnly: { type: 'openai', models: [{ id: 'm-user' }] } } },
+      project: {},
+      local: { providers: { localOnly: { type: 'openai', models: [{ id: 'm-local' }] } } },
+    },
   };
-  assert.deepEqual(routingFromSnapshot(withRouting), { retry: { maxAttempts: 3, backoffMs: 500 } });
+  assert.deepEqual(
+    providersFromLayer(snapshot, 'project'),
+    {},
+    'project never set `providers`, so it must read empty, not local\'s merged-in value',
+  );
+  assert.deepEqual(
+    providersFromLayer(snapshot, 'user'),
+    { userOnly: { type: 'openai', models: [{ id: 'm-user' }] } },
+    'user must see only its own entry, not local\'s',
+  );
+});
+
+test('routingFromLayer reads the SELECTED LAYER\'s own map, and is never a throw', () => {
+  assert.deepEqual(routingFromLayer(null, 'project'), {});
+  const snapshot = {
+    effective: {}, active: {}, provenance: {}, files: [], locked: [],
+    layers: {
+      project: { routing: { retry: { maxAttempts: 3, backoffMs: 500 } } },
+    },
+  };
+  assert.deepEqual(routingFromLayer(snapshot, 'project'), { retry: { maxAttempts: 3, backoffMs: 500 } });
+  assert.deepEqual(routingFromLayer(snapshot, 'user'), {}, 'user never set `routing`, so it must read empty');
+});
+
+test('isEditableLayer accepts exactly the three layer-switcher tabs', () => {
+  assert.equal(isEditableLayer('user'), true);
+  assert.equal(isEditableLayer('project'), true);
+  assert.equal(isEditableLayer('local'), true);
+  assert.equal(isEditableLayer('managed'), false);
+  assert.equal(isEditableLayer('device'), false);
 });
 
 // ---------------------------------------------------------------------------

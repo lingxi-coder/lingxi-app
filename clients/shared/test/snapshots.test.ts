@@ -1340,6 +1340,7 @@ function validateEvent(name: string, v: unknown): void {
       if ('files_json' in o) assert.ok(isString(o['files_json']));
       if ('active_json' in o) assert.ok(isString(o['active_json']));
       if ('locked' in o) validateStringArray(o['locked']);
+      if ('layers_json' in o) assert.ok(isString(o['layers_json']));
       break;
     case 'auth_state': {
       const st = rec(o['state']);
@@ -1560,11 +1561,11 @@ test('every event snapshot parses as ClientEvent', () => {
   }
 });
 
-// `settings_snapshot`'s three widened fields (files_json/active_json/locked)
-// have no golden that exercises them — the on-disk snapshot predates the
-// widening. Without this test the three `if (...)` checks in the
+// `settings_snapshot`'s four widened fields (files_json/active_json/locked/
+// layers_json) have no golden that exercises them — the on-disk snapshot
+// predates the widening. Without this test the four `if (...)` checks in the
 // `settings_snapshot` case are dead code that always "passes".
-test('a widened settings_snapshot validates its three new optional fields, and rejects a malformed one', () => {
+test('a widened settings_snapshot validates its four new optional fields, and rejects a malformed one', () => {
   validateEvent('settings_snapshot(widened)', {
     type: 'settings_snapshot',
     effective_json: '{"model":"claude-opus-4-7"}',
@@ -1572,6 +1573,7 @@ test('a widened settings_snapshot validates its three new optional fields, and r
     files_json: '[{"layer":"user","path":"/home/user/.lingxi/settings.json","exists":true,"parsed":true}]',
     active_json: '{"model":"claude-opus-4-7"}',
     locked: ['model'],
+    layers_json: '{"user":{"model":"claude-opus-4-7"}}',
   });
   assert.throws(
     () => validateEvent('settings_snapshot(bad-locked)', {
@@ -1590,6 +1592,15 @@ test('a widened settings_snapshot validates its three new optional fields, and r
       files_json: 123,
     }),
     'a non-string `files_json` must be rejected',
+  );
+  assert.throws(
+    () => validateEvent('settings_snapshot(bad-layers_json)', {
+      type: 'settings_snapshot',
+      effective_json: '{}',
+      provenance_json: '{}',
+      layers_json: 123,
+    }),
+    'a non-string `layers_json` must be rejected',
   );
 });
 

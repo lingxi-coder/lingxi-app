@@ -1,7 +1,7 @@
-import { useState } from 'react';
-import { Card, OverriddenNotice, Row } from '../rows';
+import { useEffect, useState } from 'react';
+import { Card, OverriddenNotice, Row, type Provenance } from '../rows';
 import { useT } from '../../../theme/ThemeContext';
-import type { PageContentProps } from '../SettingsScreen';
+import type { EditableLayer, PageContentProps } from '../SettingsScreen';
 import { rowState, type SettingsSnapshot } from '../useEngineSettings';
 import { ghostButtonStyle } from './ghostButton';
 
@@ -52,9 +52,21 @@ export function validateCustomProvider(draft: CustomProviderDraft): string | nul
   return null;
 }
 
-/** `settings.providers` as parsed from the snapshot's effective view — the best available read for a layered map-valued key (see this page's module doc for why edits start from `effective`, not a per-layer raw value the shell doesn't have). */
-export function providersFromSnapshot(snapshot: SettingsSnapshot | null): Record<string, CustomProviderDraft> {
-  const value = snapshot?.effective?.['providers'];
+/**
+ * `settings.providers` as `editingLayer`'s OWN raw value — NOT
+ * `snapshot.effective`. This is Task 17 fix round 1: `effective` is the
+ * cross-layer MERGED view, and `update_settings` replaces a key WHOLESALE in
+ * one layer's file rather than deep-merging
+ * (`migrations/src/settings_update.rs`). Basing a write on `effective` would
+ * silently fork whichever layer `providers` happened to resolve to into
+ * whichever layer gets saved — exactly the bug this fix closes. `layers`
+ * (from `ClientEvent::SettingsSnapshot.layers_json`, added for this fix)
+ * gives each layer's own unmerged map; a layer that never set the key reads
+ * as `{}`, honestly reflecting "this layer owns none of these", not a
+ * borrowed view of what some other layer owns.
+ */
+export function providersFromLayer(snapshot: SettingsSnapshot | null, layer: string): Record<string, CustomProviderDraft> {
+  const value = snapshot?.layers?.[layer]?.['providers'];
   return value && typeof value === 'object' && !Array.isArray(value)
     ? (value as Record<string, CustomProviderDraft>)
     : {};
@@ -71,9 +83,15 @@ export interface RoutingDraft {
   retry?: RoutingRetryDraft;
 }
 
-export function routingFromSnapshot(snapshot: SettingsSnapshot | null): RoutingDraft {
-  const value = snapshot?.effective?.['routing'];
+/** Same fix as `providersFromLayer` above, for `settings.routing`. */
+export function routingFromLayer(snapshot: SettingsSnapshot | null, layer: string): RoutingDraft {
+  const value = snapshot?.layers?.[layer]?.['routing'];
   return value && typeof value === 'object' && !Array.isArray(value) ? (value as RoutingDraft) : {};
+}
+
+/** Whether `layer` is one of the three tabs the layer switcher can actually jump to — `OverriddenNotice.onJump` must not offer to jump to `cli`/`managed`/`env`/`defaults`, which this shell has no tab for. */
+export function isEditableLayer(layer: Provenance): layer is EditableLayer {
+  return layer === 'user' || layer === 'project' || layer === 'local';
 }
 
 /** `"gpt-x, gpt-y"` / one-per-line → `[{id:'gpt-x'},{id:'gpt-y'}]`, blank entries dropped. Pure so the parsing itself is testable independent of any form state. */
@@ -102,12 +120,20 @@ const inputStyle = (t: ReturnType<typeof useT>) => ({
  * This is a genuinely `layered` page outside the 编码 group — see `nav.ts`'s
  * own comment on why that's not a contradiction. `rowState`/`OverriddenNotice`
  * (Task 13/Task 12) surface whether a write to the CURRENTLY selected layer
- * would actually take effect, the same way any other layered page would.
+ * would actually take effect, the same way any other layered page would;
+ * `OverriddenNotice`'s "前往该层" jumps the shell's layer switcher there via
+ * `onJumpToLayer` (Task 17 fix round 1 — it used to be wired to a no-op).
+ *
+ * Task 17 fix round 1 also moved what this page reads/writes from
+ * `snapshot.effective` to `snapshot.layers[editingLayer]` — see
+ * `providersFromLayer`/`routingFromLayer` above for why `effective` (a
+ * cross-layer merge) was the wrong source for a page that writes one layer
+ * WHOLESALE.
  */
-export function CustomProviders({ bridge, snapshot, editingLayer }: PageContentProps) {
+export function CustomProviders({ bridge, snapshot, editingLayer, onJumpToLayer }: PageContentProps) {
   const t = useT();
-  const providers = providersFromSnapshot(snapshot);
-  const routing = routingFromSnapshot(snapshot);
+  const providers = providersFromLayer(snapshot, editingLayer);
+  const routing = routingFromLayer(snapshot, editingLayer);
 
   const [profileName, setProfileName] = useState('');
   const [type, setType] = useState<string>(SUPPORTED_PROVIDER_TYPES[0]);
@@ -136,6 +162,22 @@ export function CustomProviders({ bridge, snapshot, editingLayer }: PageContentP
     setModelsText('');
     setFormError(null);
   };
+
+  // Switching the edited layer changes what `providers`/`routing` above
+  // resolve to entirely (a different layer's own map). A form still holding
+  // a draft loaded from the PREVIOUS layer (via `loadForEdit`, or typed
+  // retry values) must not silently land in the newly selected layer when
+  // saved — that would be the exact cross-layer-fork bug this fix exists to
+  // prevent, just triggered by the layer switcher instead of a stale read.
+  useEffect(() => {
+    resetForm();
+    setAliasName('');
+    setAliasTarget('');
+    setRoutingError(null);
+    setMaxAttempts(routing.retry?.maxAttempts?.toString() ?? '');
+    setBackoffMs(routing.retry?.backoffMs?.toString() ?? '');
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [editingLayer]);
 
   const loadForEdit = (name: string, draft: CustomProviderDraft) => {
     setProfileName(name);
@@ -229,7 +271,11 @@ export function CustomProviders({ bridge, snapshot, editingLayer }: PageContentP
       <Card title="自定义 Provider">
         {providersRowState?.kind === 'overridden' && (
           <Row title="生效层" align="center">
-            <OverriddenNotice editingLayer={editingLayer} effectiveLayer={providersRowState.by} onJump={() => undefined} />
+            <OverriddenNotice
+              editingLayer={editingLayer}
+              effectiveLayer={providersRowState.by}
+              onJump={() => { if (isEditableLayer(providersRowState.by)) onJumpToLayer(providersRowState.by); }}
+            />
           </Row>
         )}
         {providerNames.length === 0 && (
@@ -274,7 +320,11 @@ export function CustomProviders({ bridge, snapshot, editingLayer }: PageContentP
       <Card title="路由 (routing)">
         {routingRowState?.kind === 'overridden' && (
           <Row title="生效层" align="center">
-            <OverriddenNotice editingLayer={editingLayer} effectiveLayer={routingRowState.by} onJump={() => undefined} />
+            <OverriddenNotice
+              editingLayer={editingLayer}
+              effectiveLayer={routingRowState.by}
+              onJump={() => { if (isEditableLayer(routingRowState.by)) onJumpToLayer(routingRowState.by); }}
+            />
           </Row>
         )}
         <Row title="别名 (aliases)" desc="alias → profile/model" align="start">

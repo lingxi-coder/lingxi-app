@@ -451,6 +451,10 @@ fn current_contract_index() -> ContractIndex {
         "ClientEvent::SettingsSnapshot.locked",
         "Option<Vec<String>>",
     );
+    put(
+        "ClientEvent::SettingsSnapshot.layers_json",
+        "Option<String>",
+    );
 
     put("ClientEvent::AuthState", "auth_state");
     put("ClientEvent::AuthState.state", "AuthStateDto");

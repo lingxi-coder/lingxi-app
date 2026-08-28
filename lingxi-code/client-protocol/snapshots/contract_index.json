@@ -552,6 +552,7 @@
   "ClientEvent::SettingsSnapshot.active_json": "Option<String>",
   "ClientEvent::SettingsSnapshot.effective_json": "String",
   "ClientEvent::SettingsSnapshot.files_json": "Option<String>",
+  "ClientEvent::SettingsSnapshot.layers_json": "Option<String>",
   "ClientEvent::SettingsSnapshot.locked": "Option<Vec<String>>",
   "ClientEvent::SettingsSnapshot.provenance_json": "String",
   "ClientEvent::Skills": "skills",

@@ -32,6 +32,17 @@ export interface SettingsSnapshot {
   active: Record<string, unknown>;
   provenance: Record<string, string>;
   locked: string[];
+  /**
+   * `{layer: {key: value}}` —— 每一个文件层「自己」的原始设置 map，未经合并。
+   * 对应 wire 上的 `layers_json`（`client-protocol/src/events.rs`）。`effective`
+   * 是跨层合并后的值，`active` 是不含 managed 覆盖的文件层合并值 —— 两者都不能
+   * 回答「L 层的文件本身写了什么」，而分层编辑器在写回某一层之前恰恰需要这个
+   * 答案：`update_settings` 是整键替换、不做深度合并，所以拿 `effective` 去
+   * 预合并一次写入，会把「碰巧在 effective 里赢了」的其它层数据悄悄叉进正在
+   * 保存的这一层（Task 17 fix round 1 的真实 bug）。旧生产者省略这个字段时
+   * 默认为 `{}`，而不是让每一层都读到 undefined。
+   */
+  layers: Record<string, Record<string, unknown>>;
 }
 
 /**

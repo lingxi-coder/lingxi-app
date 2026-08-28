@@ -96,13 +96,13 @@ export function groupedNav(query: string): Array<{ group: NavPage['group']; page
  * Turns the wire event's JSON-string fields into the structured shape
  * `useEngineSettings.ts` works with. `ClientEvent::SettingsSnapshot` carries
  * `effective_json` / `provenance_json` as required strings and
- * `files_json` / `active_json` / `locked` as optional ones — the contract
- * crate excludes `serde_json::Value` (not UniFFI-representable), so this
- * parse has to happen somewhere on the TypeScript side, and it happens here
- * rather than inside `useEngineSettings.ts` so that module's six-state
- * machine stays JSON-free and pure. A malformed payload becomes an error
- * result, never a thrown exception — a broken settings file must not take
- * the whole settings screen down with it.
+ * `files_json` / `active_json` / `locked` / `layers_json` as optional ones —
+ * the contract crate excludes `serde_json::Value` (not UniFFI-representable),
+ * so this parse has to happen somewhere on the TypeScript side, and it
+ * happens here rather than inside `useEngineSettings.ts` so that module's
+ * six-state machine stays JSON-free and pure. A malformed payload becomes an
+ * error result, never a thrown exception — a broken settings file must not
+ * take the whole settings screen down with it.
  *
  * A missing `active_json` (an older producer may omit it — it's optional on
  * the wire) defaults `active` to `effective`, NOT to `{}`. An empty object
@@ -122,7 +122,11 @@ export function parseSettingsSnapshot(
     const files = raw.files_json ? (JSON.parse(raw.files_json) as SettingsSnapshot['files']) : [];
     const active = raw.active_json ? (JSON.parse(raw.active_json) as Record<string, unknown>) : effective;
     const locked = raw.locked ?? [];
-    return { snapshot: { effective, provenance, files, active, locked }, error: null };
+    // A producer that predates `layers_json` (additive, §0.10) leaves every
+    // layer looking empty rather than throwing — the same "we don't know"
+    // default `active`'s own fallback comment argues for, not a crash.
+    const layers = raw.layers_json ? (JSON.parse(raw.layers_json) as Record<string, Record<string, unknown>>) : {};
+    return { snapshot: { effective, provenance, files, active, locked, layers }, error: null };
   } catch (cause) {
     return {
       snapshot: null,
@@ -179,6 +183,15 @@ export interface PageContentProps {
    * on purpose.
    */
   onClose(): void;
+  /**
+   * Switches the shell's layer switcher to `layer` — the shell owns
+   * `editingLayer`'s state (this is literally its `setEditingLayer`), so a
+   * layered page cannot jump layers on its own. Exists so an
+   * `OverriddenNotice`'s "前往该层" affordance actually does something
+   * instead of being a dead button — Task 17 fix round 1: a banner offering
+   * to jump somewhere and going nowhere is worse than no offer at all.
+   */
+  onJumpToLayer(layer: EditableLayer): void;
 }
 
 function PagePlaceholder({ page, kind }: { page: NavPage; kind: 'not-implemented' | 'not-wired' }) {
@@ -456,6 +469,7 @@ export function SettingsScreen({
           initialProviderId={initialProviderId}
           pendingModelReference={pendingModelReference}
           onClose={onClose}
+          onJumpToLayer={setEditingLayer}
         />
       )
       : <PagePlaceholder page={activePage} kind="not-wired" />;

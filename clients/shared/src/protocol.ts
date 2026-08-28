@@ -1571,6 +1571,18 @@ export type ClientEvent =
       active_json?: string;
       /** Top-level keys the managed layer locks; editable elsewhere is refused. */
       locked?: string[];
+      /**
+       * `{layer: {key: value}}` — each FILE layer's OWN raw settings map,
+       * unmerged. `effective_json` is a cross-layer merge and `active_json`
+       * is the file-layer merge without the managed overlay; neither can
+       * stand in for "what does layer L's file itself say", which a layered
+       * editor needs before writing back to one layer: `update_settings`
+       * replaces a key WHOLESALE in one layer's file, so pre-merging a write
+       * against `effective_json` (which can carry another layer's entries
+       * for an object-valued key like `providers`) would silently fork that
+       * other layer's data into whichever layer gets saved.
+       */
+      layers_json?: string;
     }
   | { type: 'auth_state'; state: AuthStateDto }
   | { type: 'doctor_report'; report: DoctorReportDto }

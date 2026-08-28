@@ -86,6 +86,16 @@ pub struct SettingsSnapshot {
     /// so every one of them also appears in `effective` with the managed
     /// value and a `Managed` provenance.
     pub locked: Vec<String>,
+    /// Each FILE layer's OWN raw map, unmerged: `{"user": {...}, "project":
+    /// {...}, "local": {...}}`, keyed by [`SettingsLayer::wire_name`]. This
+    /// is what a layered editor must pre-merge an object-valued key's write
+    /// against — `effective` is a cross-layer merge and can carry another
+    /// layer's entries for a key like `providers`, so basing a write on it
+    /// would silently fork that other layer's data into whichever layer gets
+    /// saved (see `ClientEvent::SettingsSnapshot::layers_json`'s doc). A
+    /// layer whose file does not exist or failed to parse contributes an
+    /// empty map here, the same way it contributes nothing to `effective`.
+    pub layers: BTreeMap<&'static str, serde_json::Map<String, Value>>,
 }
 
 /// The two roots needed to resolve every settings layer's file path.
@@ -130,6 +140,7 @@ pub fn build_snapshot(
     let mut effective: BTreeMap<String, Value> = BTreeMap::new();
     let mut provenance: BTreeMap<String, SettingsLayer> = BTreeMap::new();
     let mut files: Vec<SettingsFile> = Vec::new();
+    let mut layers: BTreeMap<&'static str, serde_json::Map<String, Value>> = BTreeMap::new();
 
     for (source, layer) in FILE_LAYERS {
         let path = settings_path(source, &paths.lingxi_home, &paths.project_dir);
@@ -149,6 +160,9 @@ pub fn build_snapshot(
             writable: parse_error.is_none(),
             parse_error,
         });
+        // Moved, not cloned: `map` is only read by reference above, so this
+        // is the map's one and only owner from here on.
+        layers.insert(layer.wire_name(), map);
     }
 
     // The managed overlay goes on LAST so it wins, and its keys are the locked
@@ -166,6 +180,7 @@ pub fn build_snapshot(
         active,
         provenance,
         locked,
+        layers,
     }
 }
 
@@ -463,6 +478,10 @@ pub struct LoweredSettings {
     pub active_json: String,
     /// Administrator-locked keys, passed through unchanged.
     pub locked: Vec<String>,
+    /// `{layer: {key: value}}` — each file layer's own raw map, unmerged.
+    /// See [`SettingsSnapshot::layers`] for why a layered editor needs this
+    /// instead of `effective_json` before writing back to one layer.
+    pub layers_json: String,
 }
 
 /// Lower a snapshot to the wire payloads. A pure function called by the
@@ -515,6 +534,7 @@ pub fn lower_snapshot(snapshot: &SettingsSnapshot) -> LoweredSettings {
         }),
         active_json: to_json_or_empty_object("active", &snapshot.active),
         locked: snapshot.locked.clone(),
+        layers_json: to_json_or_empty_object("layers", &snapshot.layers),
     }
 }
 
@@ -591,6 +611,136 @@ mod tests {
             snap.locked,
             vec!["telemetryEnabled".to_string()],
             "locked must be derived from the caller's managed overlay, not hardcoded"
+        );
+    }
+
+    /// `layers` must give each layer its OWN raw value for an object-valued
+    /// key like `providers` — never the cross-layer merged (`effective`)
+    /// view. This is the exact bug a layered editor hit: pre-merging a write
+    /// against `effective` for `providers` silently forked whichever OTHER
+    /// layer's entries `effective` happened to be showing into the layer
+    /// actually being saved, because `update_settings` replaces a key
+    /// WHOLESALE in one layer's file rather than deep-merging
+    /// (`migrations/src/settings_update.rs`).
+    ///
+    /// This test is written so that if `layers` were populated from
+    /// `effective` (cloned once per layer) instead of from each layer's own
+    /// raw map, it fails: `effective["providers"]` resolves to whichever
+    /// layer wins the (flat, last-layer-wins) merge for that key — here,
+    /// `local`, since `FILE_LAYERS` applies user → project → local in
+    /// increasing priority — so a merged-view bug would make
+    /// `layers["user"]` and `layers["project"]` both wrongly report the
+    /// LOCAL layer's `providers` value instead of their own (or none, for
+    /// `routing`, which only `project` defines).
+    #[test]
+    fn layers_gives_each_layer_its_own_raw_value_not_the_merged_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        let project = dir.path().join("repo");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(project.join(branding::DOT_DIR)).unwrap();
+
+        std::fs::write(
+            home.join("settings.json"),
+            r#"{"providers":{"userProvider":{"type":"openai","models":[{"id":"m-user"}]}}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            project.join(branding::DOT_DIR).join("settings.json"),
+            r#"{"providers":{"projectProvider":{"type":"openai","models":[{"id":"m-project"}]}},"routing":{"retry":{"maxAttempts":3}}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            project.join(branding::DOT_DIR).join("settings.local.json"),
+            r#"{"providers":{"localProvider":{"type":"openai","models":[{"id":"m-local"}]}}}"#,
+        )
+        .unwrap();
+
+        let paths = SettingsPaths {
+            lingxi_home: home,
+            project_dir: project,
+        };
+        let snap = build_snapshot(&paths, BTreeMap::new(), BTreeMap::new());
+
+        // Sanity check on the premise: `effective` really is the flat,
+        // last-layer-wins merge, so it shows ONLY local's providers — proving
+        // the assertions below cannot pass by accident if `layers` secretly
+        // reused `effective`.
+        let effective_providers = snap.effective.get("providers").unwrap();
+        assert!(
+            effective_providers.get("localProvider").is_some()
+                && effective_providers.get("userProvider").is_none(),
+            "premise check: effective must be local's own value, not a union — got {effective_providers}"
+        );
+
+        let user_providers = snap.layers.get("user").unwrap().get("providers").unwrap();
+        assert!(
+            user_providers.get("userProvider").is_some(),
+            "the user layer's own map must have userProvider, got {user_providers}"
+        );
+        assert!(
+            user_providers.get("localProvider").is_none()
+                && user_providers.get("projectProvider").is_none(),
+            "the user layer's own map must NOT carry another layer's entries, got {user_providers}"
+        );
+
+        let project_providers = snap
+            .layers
+            .get("project")
+            .unwrap()
+            .get("providers")
+            .unwrap();
+        assert!(
+            project_providers.get("projectProvider").is_some()
+                && project_providers.get("userProvider").is_none()
+                && project_providers.get("localProvider").is_none(),
+            "the project layer's own map must be exactly its own value, got {project_providers}"
+        );
+
+        let local_providers = snap.layers.get("local").unwrap().get("providers").unwrap();
+        assert!(
+            local_providers.get("localProvider").is_some()
+                && local_providers.get("userProvider").is_none()
+                && local_providers.get("projectProvider").is_none(),
+            "the local layer's own map must be exactly its own value, got {local_providers}"
+        );
+
+        // `routing` is defined ONLY at `project` — a merged-view bug would
+        // make every layer report it (or none would, depending on how the
+        // bug shaped up), so a layer that never wrote the key must have no
+        // entry for it at all, not an empty object standing in for "unset".
+        assert!(
+            snap.layers.get("user").unwrap().get("routing").is_none(),
+            "a layer that never set `routing` must have no entry for it"
+        );
+        assert!(
+            snap.layers.get("local").unwrap().get("routing").is_none(),
+            "a layer that never set `routing` must have no entry for it"
+        );
+        assert!(
+            snap.layers
+                .get("project")
+                .unwrap()
+                .get("routing")
+                .is_some(),
+            "the layer that DID set `routing` must report it"
+        );
+
+        // The wire lowering must carry the same per-layer isolation through
+        // `layers_json`'s JSON serialization.
+        let lowered = lower_snapshot(&snap);
+        let layers_wire: Value = serde_json::from_str(&lowered.layers_json).unwrap();
+        assert!(
+            layers_wire["user"]["providers"]["userProvider"].is_object(),
+            "wire layers_json must keep the user layer's own providers, got {layers_wire}"
+        );
+        assert!(
+            layers_wire["user"]["providers"]["localProvider"].is_null(),
+            "wire layers_json must not leak another layer's entries into this one, got {layers_wire}"
+        );
+        assert!(
+            layers_wire["project"]["routing"]["retry"]["maxAttempts"] == 3,
+            "wire layers_json must carry the project layer's own routing value, got {layers_wire}"
         );
     }
 

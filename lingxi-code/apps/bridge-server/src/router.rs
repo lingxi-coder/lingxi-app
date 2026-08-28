@@ -369,6 +369,7 @@ impl EngineCommandRouter {
             files_json: Some(lowered.files_json),
             active_json: Some(lowered.active_json),
             locked: Some(lowered.locked),
+            layers_json: Some(lowered.layers_json),
         })
         .await;
     }

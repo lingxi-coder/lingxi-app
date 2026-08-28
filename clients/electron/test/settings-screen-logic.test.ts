@@ -81,6 +81,32 @@ test('parseSettingsSnapshot defaults a missing active_json to effective, not to 
     files: [],
     active: { model: 'opus' },
     locked: [],
+    layers: {},
+  });
+});
+
+// Fix round 1: `layers_json` is additive (§0.10), same as the other three —
+// a producer that predates it must decode to an empty `layers` map, not
+// `undefined` (which would make every `providersFromLayer`/`routingFromLayer`
+// call in `CustomProviders` throw instead of honestly reporting "this layer
+// has nothing").
+test('parseSettingsSnapshot defaults a missing layers_json to an empty map, not undefined', () => {
+  const { snapshot, error } = parseSettingsSnapshot(rawSnapshot());
+  assert.equal(error, null);
+  assert.deepEqual(snapshot?.layers, {});
+});
+
+test('parseSettingsSnapshot decodes layers_json into a per-layer map when present', () => {
+  const { snapshot, error } = parseSettingsSnapshot(rawSnapshot({
+    layers_json: JSON.stringify({
+      user: { model: 'opus' },
+      local: { providers: { mine: { type: 'openai', models: [{ id: 'm' }] } } },
+    }),
+  }));
+  assert.equal(error, null);
+  assert.deepEqual(snapshot?.layers, {
+    user: { model: 'opus' },
+    local: { providers: { mine: { type: 'openai', models: [{ id: 'm' }] } } },
   });
 });
 
@@ -99,6 +125,7 @@ test('parseSettingsSnapshot decodes the optional fields when present', () => {
     files_json: JSON.stringify([{ layer: 'user', path: '/x', exists: true, parsed: true }]),
     active_json: JSON.stringify({ model: 'sonnet' }),
     locked: ['model'],
+    layers_json: JSON.stringify({ user: { model: 'opus' } }),
   }));
   assert.equal(error, null);
   assert.deepEqual(snapshot, {
@@ -107,6 +134,7 @@ test('parseSettingsSnapshot decodes the optional fields when present', () => {
     files: [{ layer: 'user', path: '/x', exists: true, parsed: true }],
     active: { model: 'sonnet' },
     locked: ['model'],
+    layers: { user: { model: 'opus' } },
   });
 });
 

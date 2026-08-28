@@ -539,6 +539,7 @@ fn settings_snapshot_round_trips() {
         files_json: None,
         active_json: None,
         locked: None,
+        layers_json: None,
     };
     let json = serde_json::to_value(&ev).expect("serialize SettingsSnapshot");
     assert_eq!(json["type"], "settings_snapshot");
@@ -551,13 +552,14 @@ fn settings_snapshot_round_trips() {
         json["provenance_json"].is_string(),
         "provenance_json must be a String"
     );
-    // The three ADDED optional fields stay OFF the wire when unset, which is
+    // The four ADDED optional fields stay OFF the wire when unset, which is
     // what makes the addition additive: a client that predates them decodes
     // the identical two-field payload.
     let json = serde_json::to_value(&ev).expect("serialize SettingsSnapshot");
     assert!(json.get("files_json").is_none());
     assert!(json.get("active_json").is_none());
     assert!(json.get("locked").is_none());
+    assert!(json.get("layers_json").is_none());
     let back: ClientEvent = serde_json::from_value(json).expect("deserialize SettingsSnapshot");
     assert_eq!(back, ev);
 }
@@ -577,6 +579,7 @@ fn settings_snapshot_optional_fields_round_trip() {
         ),
         active_json: Some(r#"{"model":"claude-opus-4-7"}"#.to_string()),
         locked: Some(vec!["telemetryEnabled".to_string()]),
+        layers_json: Some(r#"{"project":{"model":"claude-opus-4-7"}}"#.to_string()),
     };
     let json = serde_json::to_value(&ev).expect("serialize SettingsSnapshot");
     assert!(
@@ -606,6 +609,7 @@ fn settings_snapshot_decodes_a_payload_without_the_added_fields() {
             files_json: None,
             active_json: None,
             locked: None,
+            layers_json: None,
         }
     );
 }

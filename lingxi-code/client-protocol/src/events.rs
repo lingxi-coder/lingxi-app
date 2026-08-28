@@ -299,6 +299,20 @@ pub enum ClientEvent {
         /// the UI must not offer to edit these.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         locked: Option<Vec<String>>,
+        /// `{layer: {key: value}}` — each FILE layer's OWN raw settings map,
+        /// unmerged. `effective_json` is a cross-layer merge and `active_json`
+        /// is the file-layer merge without the managed overlay; NEITHER can
+        /// stand in for "what does layer L's file itself say", which a
+        /// layered editor needs before it writes back to one layer: the
+        /// generic `update_settings` command replaces a key WHOLESALE in one
+        /// layer's file (`migrations/src/settings_update.rs`'s "top-level
+        /// REPLACE, not deep-merge" contract), so pre-merging a write against
+        /// the cross-layer `effective_json` view — which can carry another
+        /// layer's entries for an object-valued key like `providers` — would
+        /// silently fork that other layer's data into the one being saved.
+        /// Additive under decision §0.10 — no major bump.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        layers_json: Option<String>,
     },
 
     AuthState {

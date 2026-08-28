@@ -73,11 +73,15 @@ function invoke(action: () => Promise<unknown>): void {
  * (~lines 1852-2119): connecting/replacing/disconnecting a credential, the
  * four Keychain-availability/runtime-source status states
  * (`credentialStatusKind` above), the pending-model banner and its "use
- * model and return to chat" recovery, and the post-persist recovery UI for
- * when a credential saves but the engine restart doesn't finish. None of
- * that logic was rewritten — `isCurrentCredentialTransaction` and
- * `persistProviderCredentialAndApplyModel` (`bridge/providerCredentials.ts`)
- * are the same already-tested functions `BetaSettings` calls.
+ * model and return to chat" recovery, the post-persist recovery UI for when
+ * a credential saves but the engine restart doesn't finish, and — added in
+ * fix round 1, dropped in the first pass — the deep-link autofocus: moving
+ * focus into the credential input via `requestAnimationFrame` when both
+ * `initialProviderId` and the requested model are set
+ * (`BetaDesktop.tsx:1923-1926`). None of that logic was rewritten —
+ * `isCurrentCredentialTransaction` and `persistProviderCredentialAndApplyModel`
+ * (`bridge/providerCredentials.ts`) are the same already-tested functions
+ * `BetaSettings` calls.
  *
  * One thing this page adds that `BetaSettings`'s Providers section did NOT
  * have: an editor for `apiBaseUrl`. The brief for this task listed
@@ -116,6 +120,7 @@ export function ProviderCredentials({ bridge, initialProviderId, pendingModelRef
   const applyAbortRef = useRef<AbortController | null>(null);
   const recoverySessionIdRef = useRef<string | null>(null);
   const currentModelRef = useRef<string | null>(bridge.desktop.currentModel);
+  const credentialRef = useRef<HTMLInputElement>(null);
   currentModelRef.current = bridge.desktop.currentModel;
 
   useEffect(() => {
@@ -127,6 +132,17 @@ export function ProviderCredentials({ bridge, initialProviderId, pendingModelRef
       applyAbortRef.current?.abort();
     };
   }, []);
+
+  // Fix round 1: this focus move was dropped in the lift. `BetaSettings`
+  // (`BetaDesktop.tsx:1923-1926`) moves focus into the credential input when
+  // the composer's model picker deep-links here (both `initialProviderId`
+  // and the requested model are set) — arriving from that flow means the
+  // person is here specifically to type a key, so the cursor should already
+  // be waiting there instead of leaving them to find the field themselves.
+  useEffect(() => {
+    if (!requestedModelReference || !initialProviderId) return;
+    window.requestAnimationFrame(() => credentialRef.current?.focus());
+  }, [initialProviderId, requestedModelReference]);
 
   // A person may navigate away from this page and back without a fresh
   // deep link; only sync the local base-URL draft from bootstrap when it
@@ -340,6 +356,7 @@ export function ProviderCredentials({ bridge, initialProviderId, pendingModelRef
           <Row title={selectedProvider.keyLabel} desc={selectedMetadata?.configured ? '输入新密钥以替换现有凭据。' : undefined} align="center">
             <div style={{ display: 'flex', gap: 7 }}>
               <input
+                ref={credentialRef}
                 type="password"
                 autoComplete="off"
                 disabled={transactionLocked || bridge.running}

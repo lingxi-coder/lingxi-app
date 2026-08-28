@@ -72,33 +72,51 @@ async fn list_skills_reports_name_and_source_for_a_real_discovered_skill() {
     );
 }
 
-/// Fix round 1 (review "Important"): a skill living under an `/add-dir`
-/// registered root must appear in the listing, not just project/user tiers.
-/// `session_cwd.trusted_dirs()` is the SAME live set `register_repo_root`
-/// grows via `SessionCwd::add_trusted_dir` — this test wires it directly
-/// (via `SessionCwd::new`'s initial `trusted` list) rather than driving a
-/// full `/add-dir` round trip, since `list_skills` only reads the resulting
-/// set.
+/// Fix round 2 (review correction): a skill living under a directory that is
+/// in `session_cwd.trusted_dirs()` but is NOT a registered repo root must
+/// NOT appear in the listing.
+///
+/// Fix round 1 got this backwards: it read `additional_skill_dirs` from
+/// `session_cwd.trusted_dirs()`, which is seeded at boot with `cwd` plus
+/// every settings-tier `permissions.additionalDirectories` entry plus
+/// `--add-dir` (`apps/engine-desktop/src/lib.rs:7538-7568`, `:8666-8688`) —
+/// a materially WIDER set than what the sibling slash commands scan. The
+/// desktop's own `SkillsHandler` (`/skills`) is constructed with
+/// `additional_skill_dirs: Vec::new()` HARDCODED
+/// (`apps/engine-desktop/src/lib.rs:3351-3354`), and its
+/// `ReloadSkillsHandler` counterpart (`/reload-skills`) is wired to
+/// `DesktopRepoRootReloader.registered_roots`, which starts empty with no
+/// desktop-side call site that ever grows it — so on the desktop BOTH
+/// siblings always see an empty additional-roots set. This test pins the
+/// listing to that same empty set by asserting a trusted-but-unregistered
+/// directory's skill is absent, so a future re-introduction of
+/// `trusted_dirs()` (or any other implicit "additional directories" source)
+/// fails loudly instead of silently over-reporting again.
 #[tokio::test]
-async fn list_skills_reports_a_skill_from_an_additional_add_dir_root() {
+async fn list_skills_does_not_report_a_skill_from_a_trusted_but_unregistered_dir() {
     let boot = tempfile::tempdir().expect("tempdir");
-    let extra_root = tempfile::tempdir().expect("tempdir");
+    let trusted_root = tempfile::tempdir().expect("tempdir");
 
-    let extra_skill_dir = extra_root
+    let trusted_skill_dir = trusted_root
         .path()
         .join(branding::DOT_DIR)
         .join("skills")
         .join("multi-root-helper");
-    std::fs::create_dir_all(&extra_skill_dir).expect("create skill dir");
+    std::fs::create_dir_all(&trusted_skill_dir).expect("create skill dir");
     std::fs::write(
-        extra_skill_dir.join("SKILL.md"),
-        "---\nname: multi-root-helper\ndescription: lives in a second workspace root\n---\n\nhi\n",
+        trusted_skill_dir.join("SKILL.md"),
+        "---\nname: multi-root-helper\ndescription: lives in a trusted-but-unregistered root\n---\n\nhi\n",
     )
     .expect("write SKILL.md");
 
+    // `trusted_root` is in `trusted_dirs()` (as an ordinary boot-time trusted
+    // directory, e.g. a settings `additionalDirectories` entry) but was never
+    // registered as a repo root via `register_repo_root`/`/add-dir` — exactly
+    // the case the sibling slash commands' empty additional-roots set also
+    // excludes.
     let session_cwd = tool_api::SessionCwd::new(
         boot.path().to_path_buf(),
-        vec![extra_root.path().to_path_buf()],
+        vec![trusted_root.path().to_path_buf()],
     );
     let orch = Arc::new(
         build_orch(boot.path().to_path_buf())
@@ -108,8 +126,10 @@ async fn list_skills_reports_a_skill_from_an_additional_add_dir_root() {
 
     let v = orch.list_skills().await;
     assert!(
-        v.iter().any(|s| s.name == "multi-root-helper"),
-        "a skill under an /add-dir root must be listed, got: {v:?}"
+        !v.iter().any(|s| s.name == "multi-root-helper"),
+        "a skill under a trusted-but-unregistered dir must NOT be listed \
+         (parity with /skills and /reload-skills' empty additional-roots \
+         set on the desktop), got: {v:?}"
     );
 }
 

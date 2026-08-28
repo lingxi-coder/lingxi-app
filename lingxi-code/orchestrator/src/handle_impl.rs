@@ -870,12 +870,11 @@ impl OrchestratorHandle for ConversationOrchestrator {
     }
 
     async fn list_skills(&self) -> Vec<SkillInfo> {
-        // Desktop Skills settings view (Task 7): re-scan the same tiers
-        // `/skills` and `/reload-skills` scan in this same running app
-        // (`skill_api::load_file_skill_sections_with_roots`), rather than a
-        // Rust-side `SkillRegistry` — the composition root's registry is a
-        // residual empty instance with no turn-loop consumer, so it would
-        // report zero skills unconditionally.
+        // Desktop Skills settings view (Task 7): re-scan the project, user,
+        // and managed tiers via `skill_api::load_file_skill_sections_with_roots`,
+        // rather than a Rust-side `SkillRegistry` — the composition root's
+        // registry is a residual empty instance with no turn-loop consumer,
+        // so it would report zero skills unconditionally.
         //
         // `managed_dir` mirrors the composition root's
         // `SkillsHandler::with_all_roots(.., Some(managed_settings_dir()), ..)`
@@ -885,30 +884,40 @@ impl OrchestratorHandle for ConversationOrchestrator {
         // treats a non-existent managed dir as an empty tier, so this is
         // harmless when no managed policy is installed.
         //
-        // `additional_skill_dirs` mirrors `DesktopRepoRootReloader::reload`'s
-        // `roots.iter().map(|r| r.join(DOT_DIR).join("skills"))`
-        // (`apps/engine-desktop/src/lib.rs:4967-4970`) — but reads the SAME
-        // live-mutable set that reload derives from, `self.session_cwd`'s
-        // trusted-directory list (grown by `/add-dir` via `register_repo_root`
-        // → `SessionCwd::add_trusted_dir`), instead of the composition root's
-        // separate `registered_roots` mirror. Falls back to `vec![]` when no
-        // config home is wired, mirroring `list_mcp_servers`'s "no registry"
-        // default.
+        // `additional_skill_dirs` is deliberately `&[]` (fix round 2): a
+        // first attempt read it from `self.session_cwd.trusted_dirs()`, but
+        // that set is seeded at boot with `cwd` plus every settings-tier
+        // `permissions.additionalDirectories` entry plus `--add-dir`
+        // (`apps/engine-desktop/src/lib.rs:7538-7568`, `:8666-8688`) — a much
+        // wider set than what the sibling slash commands actually scan. The
+        // desktop's own `SkillsHandler` (`/skills`,
+        // `apps/engine-desktop/src/lib.rs:3351-3354`) is constructed with
+        // `additional_skill_dirs: Vec::new()` HARDCODED — it never sees any
+        // additional directory. Its `ReloadSkillsHandler` counterpart
+        // (`/reload-skills`) is wired to `DesktopRepoRootReloader
+        // .registered_roots` (`apps/engine-desktop/src/lib.rs:4919`,
+        // `:4964-4977`), which starts empty and grows only through a live
+        // `register_repo_root` call with no desktop-side call site outside
+        // `apps/cli/src/run.rs` — so on the desktop it is always empty too.
+        // Using `trusted_dirs()` therefore made this listing show skills
+        // NEITHER sibling command reports for any project configuring
+        // `additionalDirectories` — the mirror image of the defect this
+        // parameter previously had. If either construction site above ever
+        // starts supplying real roots, this must be revisited together with
+        // them; until then, pass `&[]` here, not `trusted_dirs()` or any
+        // other implicit "additional directories" source.
+        //
+        // Falls back to `vec![]` when no config home is wired, mirroring
+        // `list_mcp_servers`'s "no registry" default.
         let Some(config_home) = self.config_home.as_ref() else {
             return Vec::new();
         };
         let managed_dir = traits::live_sessions::managed_settings_dir();
-        let additional_skill_dirs: Vec<PathBuf> = self
-            .session_cwd
-            .trusted_dirs()
-            .into_iter()
-            .map(|root| root.join(branding::DOT_DIR).join("skills"))
-            .collect();
         skill_api::load_file_skill_sections_with_roots(
             &self.cwd,
             config_home,
             Some(&managed_dir),
-            &additional_skill_dirs,
+            &[],
         )
         .into_iter()
         .flat_map(|section| {

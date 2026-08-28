@@ -1995,15 +1995,32 @@ pub trait OrchestratorHandle: Send + Sync {
     /// servers are configured.
     async fn list_mcp_servers(&self) -> Vec<McpServerInfo>;
 
-    /// Enumerate skills discovered from `skills/` directories: project,
-    /// user, managed (org policy), and any `/add-dir`-registered additional
-    /// roots — the same tiers `/skills` and `/reload-skills` scan in this
-    /// same running app. Used by the desktop Skills settings view, which is
-    /// a view over what the loader found — not an editor — plus a reload
-    /// action (`/reload-skills`, routed as an ordinary slash command; no
-    /// dedicated command exists for reloading). Returns an empty vector when
-    /// no config home is wired, mirroring `list_mcp_servers`'s "no registry"
-    /// default.
+    /// Enumerate skills discovered from `skills/` directories, scanning
+    /// exactly three tiers: the project tier, the user tier, and the
+    /// managed (org-policy) directory.
+    ///
+    /// Additional skill roots (multi-root `/add-dir` workspaces) are
+    /// deliberately NOT scanned. This is not an oversight to widen later —
+    /// it is parity with what the desktop's own sibling slash commands
+    /// currently scan: `SkillsHandler` (`/skills`) is constructed with
+    /// `additional_skill_dirs: Vec::new()` HARDCODED
+    /// (`apps/engine-desktop/src/lib.rs:3351-3354`), and its
+    /// `ReloadSkillsHandler` counterpart (`/reload-skills`) is wired to
+    /// `DesktopRepoRootReloader.registered_roots`
+    /// (`apps/engine-desktop/src/lib.rs:4919`, `:4964-4977`), which starts
+    /// empty and has no desktop-side call site that ever grows it. If either
+    /// of those two construction sites starts supplying real roots, this
+    /// method's tiers must be revisited alongside them — until then, do NOT
+    /// widen this to any other source of "additional directories" (e.g. the
+    /// live session's trusted-directory set), which is a materially larger
+    /// set and would make this listing show skills neither sibling command
+    /// reports.
+    ///
+    /// Used by the desktop Skills settings view, which is a view over what
+    /// the loader found — not an editor — plus a reload action
+    /// (`/reload-skills`, routed as an ordinary slash command; no dedicated
+    /// command exists for reloading). Returns an empty vector when no config
+    /// home is wired, mirroring `list_mcp_servers`'s "no registry" default.
     async fn list_skills(&self) -> Vec<SkillInfo>;
 
     /// Reconnect MCP servers (`/mcp reconnect [<server>|all]`). `name = None`

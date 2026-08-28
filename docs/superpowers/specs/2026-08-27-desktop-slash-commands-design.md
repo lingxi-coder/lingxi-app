@@ -99,7 +99,7 @@ Submit path in `BetaDesktop.submit` becomes: parse → `resolveDesktopCommand` �
 | `/theme` | open Settings → General | `bridge.setThemePreference('dark' \| 'light')` |
 | `/effort` | open `ModelPicker` (effort lives there) | `bridge.setReasoningSelection(...)` |
 | `/fast` | toggle `bridge.setFastMode` | `on` / `off` |
-| `/config` | `bridge.openSystemSettings(pane)` | pane name selects the pane |
+| `/config` | `bridge.openSystemSettings` on the default pane | the argument names the pane; an unknown pane name → local error line listing the valid panes |
 
 `/agents` is deliberately **not** in this table. The engine has a real handler (`commands/core/src/agents.rs`), so it forwards and its text renders in the new transcript item; the agent panel is sub-project 3.
 
@@ -116,7 +116,7 @@ The cost of keeping the local list in TypeScript is drift; the gate is what make
 
 **The gate must first prove it can go red.** A regex that silently matches nothing would make this test permanently, uselessly green — the exact failure mode where an exit code carries no information. So the test also asserts that the extraction returned at least 15 names and contains the anchors `theme`, `rewind`, and `tasks`. If the Rust file moves or the block is renamed, extraction fails loudly instead of passing vacuously.
 
-A second direction catches typos in the desktop table: every name in the table must appear in the builtin name list in `command-api/src/builtin_support/names.rs`, so `/mdoel` cannot ship as dead code.
+A second direction catches typos in the desktop table: every name in the table must appear in `BUILTIN_COMMAND_NAMES` (`command-api/src/builtin_support/names.rs:97`, a `&[&str; 108]` literal), so `/mdoel` cannot ship as dead code. Every group B name was checked against that array while writing this spec and is present. This extraction carries the same red-proof obligation: assert it returned 108 names before comparing anything against it.
 
 ### 7. Tests
 

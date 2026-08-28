@@ -488,7 +488,7 @@ final class LocalAppsStoreTests: XCTestCase {
         }
         XCTAssertTrue(loaded, "bridge capture WebView did not finish loading")
         _ = try await webView.evaluateJavaScript(
-            "window.__bridgeEnvelope = null; window.lingxi = { __resolve: value => window.__bridgeEnvelope = value };"
+            "window.__bridgeEnvelope = null; window.lingxi = { __resolve: value => window.__bridgeEnvelope = value }; true"
         )
         return webView
     }
@@ -1090,7 +1090,7 @@ final class LocalAppsStoreTests: XCTestCase {
             XCTAssertEqual(value, "Orders")
 
             _ = try await webView.evaluateJavaScript(
-                "window.__bridgeEnvelope = null; window.lingxi = { __resolve: value => window.__bridgeEnvelope = value };"
+                "window.__bridgeEnvelope = null; window.lingxi = { __resolve: value => window.__bridgeEnvelope = value }; true"
             )
             LocalAppWebViewRegistry.shared.resolveBridge(
                 appID: "tracker",
@@ -2555,4 +2555,379 @@ final class LocalAppsStoreTests: XCTestCase {
                 initSessionId: initSessionId)
         }
     #endif
+
+    // MARK: - Smoke-gate spike (master order step 3b) — MEASURED, not designed
+
+    // The verification design's candidate mount point for the smoke gate is a
+    // store-held OFFSCREEN `WKWebView`. It refuses to assume the three cheap
+    // ways of hiding a view are usable:
+    //
+    //   "不得用零尺寸、isHidden=true 或 alpha=0 伪装离屏,
+    //    这三者都可能让 WebKit 不布局/不绘制"
+    //
+    // "可能" is the whole problem. Four paper proposals died to four different
+    // causes — timing, page-load semantics, the permission table, result
+    // observability — and none was findable by re-reading harder. `:21` of
+    // LocalAppWebView.swift already warns that `takeSnapshot` can call back
+    // with NEITHER an image NOR an error for "an offscreen or not-yet-
+    // composited view", which is precisely the failure this spike must rule in
+    // or out on real hardware.
+    //
+    // S1 and S2 are a PAIR. S1 alone proves nothing: a snapshot could come back
+    // red for reasons unrelated to the offscreen container. S2 is the control —
+    // the same page in a zero-sized view must NOT come back painted. If S2 ever
+    // starts passing the way S1 does, S1 has stopped measuring anything.
+
+    private func spikeKeyWindow() throws -> UIWindow {
+        let window = UIApplication.shared.connectedScenes
+            .compactMap { $0 as? UIWindowScene }
+            .flatMap(\.windows)
+            .first { $0.isKeyWindow }
+        return try XCTUnwrap(window, "the unit-test host app must expose a key window")
+    }
+
+    /// Polls the DOM rather than trusting `didFinish`: whether navigation
+    /// callbacks even fire for a view parked outside the visible bounds is one
+    /// of the things under measurement, so it cannot also be the instrument.
+    private func spikeWaitForBody(_ webView: WKWebView) async throws -> Bool {
+        for _ in 0 ..< 200 {
+            if let ready = try? await webView.evaluateJavaScript(
+                "document.getElementById('ready') !== null"
+            ) as? Bool, ready { return true }
+            try await Task.sleep(for: .milliseconds(25))
+        }
+        return false
+    }
+
+    private func spikeSnapshot(_ webView: WKWebView) async throws -> UIImage {
+        let configuration = WKSnapshotConfiguration()
+        configuration.rect = webView.bounds
+        return try await withCheckedThrowingContinuation { continuation in
+            webView.takeSnapshot(with: configuration) { snapshot, error in
+                if let snapshot {
+                    continuation.resume(returning: snapshot)
+                } else {
+                    continuation.resume(throwing: error ?? LocalAppSnapshotError.unavailable)
+                }
+            }
+        }
+    }
+
+    /// The centre pixel, read straight out of the bitmap. A solid fill colour is
+    /// the only assertion here that a blank-but-correctly-sized image cannot pass.
+    private func spikeCentrePixel(_ image: UIImage) throws -> (r: Int, g: Int, b: Int) {
+        let cgImage = try XCTUnwrap(image.cgImage, "snapshot carried no CGImage")
+        let centre = CGRect(x: cgImage.width / 2, y: cgImage.height / 2, width: 1, height: 1)
+        let cropped = try XCTUnwrap(cgImage.cropping(to: centre), "could not crop the centre pixel")
+        var pixel = [UInt8](repeating: 0, count: 4)
+        let context = try XCTUnwrap(CGContext(
+            data: &pixel,
+            width: 1, height: 1,
+            bitsPerComponent: 8, bytesPerRow: 4,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ))
+        context.draw(cropped, in: CGRect(x: 0, y: 0, width: 1, height: 1))
+        return (Int(pixel[0]), Int(pixel[1]), Int(pixel[2]))
+    }
+
+    private static let spikeRedPage = """
+    <body style="margin:0"><div id="ready" \
+    style="width:100vw;height:100vh;background:#FF0000"></div></body>
+    """
+
+    /// A non-throwing centre-pixel read. The negative-path tests need to
+    /// distinguish "no image" from "black image" WITHOUT recording a failure —
+    /// `XCTUnwrap` registers one even when the throw is swallowed by `try?`,
+    /// which is exactly how the first run of this spike produced a red herring.
+    private func spikeCentrePixelIfAny(_ image: UIImage?) -> (r: Int, g: Int, b: Int)? {
+        guard let cgImage = image?.cgImage else { return nil }
+        let centre = CGRect(x: cgImage.width / 2, y: cgImage.height / 2, width: 1, height: 1)
+        guard let cropped = cgImage.cropping(to: centre) else { return nil }
+        var pixel = [UInt8](repeating: 0, count: 4)
+        guard let context = CGContext(
+            data: &pixel,
+            width: 1, height: 1,
+            bitsPerComponent: 8, bytesPerRow: 4,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ) else { return nil }
+        context.draw(cropped, in: CGRect(x: 0, y: 0, width: 1, height: 1))
+        return (Int(pixel[0]), Int(pixel[1]), Int(pixel[2]))
+    }
+
+    private func spikeIsRed(_ pixel: (r: Int, g: Int, b: Int)?) -> Bool {
+        guard let pixel else { return false }
+        return pixel.r > 200 && pixel.g < 60 && pixel.b < 60
+    }
+
+    /// Runs the red page in one placement strategy and reports its centre pixel.
+    /// `nil` means the snapshot produced no bitmap at all.
+    private func spikeMeasure(
+        place: (UIView) -> Void,
+        cleanup: () -> Void
+    ) async throws -> (webKit: (r: Int, g: Int, b: Int)?, uiKit: (r: Int, g: Int, b: Int)?) {
+        let host = UIView(frame: CGRect(x: 0, y: 0, width: 390, height: 844))
+        place(host)
+        defer { cleanup(); host.removeFromSuperview() }
+
+        let webView = WKWebView(frame: host.bounds, configuration: WKWebViewConfiguration())
+        host.addSubview(webView)
+        webView.loadHTMLString(Self.spikeRedPage, baseURL: nil)
+        guard try await spikeWaitForBody(webView) else { return (nil, nil) }
+
+        // Force a layout + let the compositor turn at least once. Omitting this
+        // was the leading alternative explanation for a black snapshot, so it is
+        // done for EVERY strategy — otherwise a negative result is unattributable.
+        host.setNeedsLayout()
+        host.layoutIfNeeded()
+        try await Task.sleep(for: .milliseconds(250))
+
+        // TWO independent instruments. `takeSnapshot` is WebKit's own path and
+        // is documented to return nothing for a non-composited view; UIKit's
+        // `drawHierarchy` renders the layer tree instead. If both come back
+        // black the negative is instrument-independent, which is the only way a
+        // "pixels are impossible offscreen" claim is worth acting on.
+        let byWebKit = spikeCentrePixelIfAny(try? await spikeSnapshot(webView))
+        let byUIKit = spikeCentrePixelIfAny(
+            UIGraphicsImageRenderer(bounds: host.bounds).image { _ in
+                host.drawHierarchy(in: host.bounds, afterScreenUpdates: true)
+            }
+        )
+        return (webKit: byWebKit, uiKit: byUIKit)
+    }
+
+    /// S1 — the candidate's core mechanism, measured across every placement that
+    /// keeps the page off the user's screen. The design named exactly one
+    /// ("non-zero fixed viewport … container moved outside the visible bounds")
+    /// and forbade three others without measuring them. A single strategy
+    /// failing does not condemn the approach; what the gate needs is whether
+    /// ANY offscreen placement composites on real hardware.
+    func testSpikeWhichOffscreenPlacementsActuallyPaint() async throws {
+        let window = try spikeKeyWindow()
+        var extraWindow: UIWindow?
+        var report: [(String, String)] = []
+
+        let strategies: [(String, (UIView) -> Void, () -> Void)] = [
+            ("outside-bounds x=-10000", { host in
+                host.frame.origin = CGPoint(x: -10_000, y: 0)
+                window.addSubview(host)
+            }, {}),
+            ("below-the-fold y=height", { host in
+                host.frame.origin = CGPoint(x: 0, y: window.bounds.height)
+                window.addSubview(host)
+            }, {}),
+            ("behind content, sent to back", { host in
+                window.addSubview(host)
+                window.sendSubviewToBack(host)
+            }, {}),
+            ("alpha 0.01 at origin", { host in
+                host.alpha = 0.01
+                window.addSubview(host)
+            }, {}),
+            ("own window below normal level", { host in
+                let scene = window.windowScene
+                let carrier = scene.map(UIWindow.init(windowScene:)) ?? UIWindow(frame: window.bounds)
+                carrier.frame = window.bounds
+                carrier.windowLevel = .normal - 1
+                carrier.isHidden = false
+                carrier.addSubview(host)
+                extraWindow = carrier
+            }, { extraWindow?.isHidden = true; extraWindow = nil }),
+        ]
+
+        var anyPainted = false
+        for (name, place, cleanup) in strategies {
+            let measured = try await spikeMeasure(place: place, cleanup: cleanup)
+            let painted = spikeIsRed(measured.webKit) || spikeIsRed(measured.uiKit)
+            anyPainted = anyPainted || painted
+            func describe(_ pixel: (r: Int, g: Int, b: Int)?) -> String {
+                guard let pixel else { return "no bitmap" }
+                let tag = spikeIsRed(pixel) ? "PAINTED" : "blank"
+                return "\(tag) rgb(\(pixel.r),\(pixel.g),\(pixel.b))"
+            }
+            report.append((name, "takeSnapshot=\(describe(measured.webKit))  drawHierarchy=\(describe(measured.uiKit))"))
+        }
+
+        let table = report.map { "  \($0.0.padding(toLength: 32, withPad: " ", startingAt: 0)) \($0.1)" }
+            .joined(separator: "\n")
+        print("SPIKE offscreen placement matrix (iOS \(UIDevice.current.systemVersion)):\n\(table)")
+
+        XCTAssertTrue(
+            anyPainted,
+            "NO offscreen placement composites on this device. The smoke gate cannot "
+                + "observe a page without taking the screen. Matrix:\n\(table)"
+        )
+    }
+
+    /// S2 — the control. A zero-sized view is the cheap way to "hide" one and
+    /// the design forbids it. Asserting the NEGATIVE is what makes a positive
+    /// result in the matrix above attributable to layout rather than to WebKit
+    /// painting regardless of geometry.
+    func testSpikeAZeroSizedWebViewCannotStandInForAnOffscreenOne() async throws {
+        let window = try spikeKeyWindow()
+        let host = UIView(frame: .zero)
+        window.addSubview(host)
+        defer { host.removeFromSuperview() }
+
+        let webView = WKWebView(frame: .zero, configuration: WKWebViewConfiguration())
+        host.addSubview(webView)
+        webView.loadHTMLString(Self.spikeRedPage, baseURL: nil)
+        _ = try await spikeWaitForBody(webView)
+
+        let pixel = spikeCentrePixelIfAny(try? await spikeSnapshot(webView))
+        XCTAssertFalse(
+            spikeIsRed(pixel),
+            "a zero-sized view painted the page — the matrix above stops measuring layout"
+        )
+    }
+
+    /// S4 — the open question the placement matrix raises but cannot answer:
+    /// `drawHierarchy` renders the UIKit layer tree, and GPU-composited content
+    /// is exactly what it is known to miss. create-flow is landing `canvas-2d`
+    /// and `threejs` runtime profiles whose ENTIRE surface is a composited
+    /// canvas, so "pixels work offscreen" proven on a solid-colour <div> does
+    /// not transfer to them.
+    ///
+    /// Two sub-probes, because two different things can go wrong:
+    ///   - the canvas backing store may not be captured offscreen at all;
+    ///   - `requestAnimationFrame` may be throttled or parked for a view the
+    ///     system considers non-visible, in which case a three.js app renders
+    ///     NOTHING offscreen regardless of how it is captured.
+    /// Each page therefore paints ONCE synchronously and then keeps painting in
+    /// rAF, so a blank result from the synchronous draw and a blank result from
+    /// the rAF draw are distinguishable.
+    func testSpikeWhetherOffscreenCanvasAndWebGLActuallyRender() async throws {
+        let window = try spikeKeyWindow()
+
+        func page(context: String) -> String {
+            """
+            <body style="margin:0">
+            <canvas id="surface" style="width:100vw;height:100vh;display:block"></canvas>
+            <div id="ready"></div>
+            <script>
+            var c = document.getElementById('surface');
+            c.width = window.innerWidth; c.height = window.innerHeight;
+            var kind = '\(context)';
+            var painted = false;
+            if (kind === '2d') {
+              var ctx = c.getContext('2d');
+              var paint = function () {
+                ctx.fillStyle = '#FF0000';
+                ctx.fillRect(0, 0, c.width, c.height);
+                painted = true;
+              };
+              paint();
+              var loop2d = function () { paint(); requestAnimationFrame(loop2d); };
+              requestAnimationFrame(loop2d);
+              window.__spikeContextOk = !!ctx;
+            } else {
+              var gl = c.getContext('webgl') || c.getContext('experimental-webgl');
+              if (gl) {
+                var paintGl = function () {
+                  gl.clearColor(1, 0, 0, 1);
+                  gl.clear(gl.COLOR_BUFFER_BIT);
+                  painted = true;
+                };
+                paintGl();
+                var loopGl = function () { paintGl(); requestAnimationFrame(loopGl); };
+                requestAnimationFrame(loopGl);
+              }
+              window.__spikeContextOk = !!gl;
+            }
+            window.__spikeFrames = 0;
+            requestAnimationFrame(function tick() {
+              window.__spikeFrames++;
+              requestAnimationFrame(tick);
+            });
+            </script>
+            </body>
+            """
+        }
+
+        var report: [String] = []
+        for kind in ["2d", "webgl"] {
+            let host = UIView(frame: CGRect(x: -10_000, y: 0, width: 390, height: 844))
+            window.addSubview(host)
+            defer { host.removeFromSuperview() }
+
+            let webView = WKWebView(frame: host.bounds, configuration: WKWebViewConfiguration())
+            host.addSubview(webView)
+            webView.loadHTMLString(page(context: kind), baseURL: nil)
+            let loaded = try await spikeWaitForBody(webView)
+            host.setNeedsLayout()
+            host.layoutIfNeeded()
+            try await Task.sleep(for: .milliseconds(400))
+
+            let contextOk = (try? await webView.evaluateJavaScript("window.__spikeContextOk === true")) as? Bool
+            // Does rAF even run for a view the system does not consider visible?
+            let frames = (try? await webView.evaluateJavaScript("window.__spikeFrames || 0")) as? Int
+
+            let byWebKit = spikeCentrePixelIfAny(try? await spikeSnapshot(webView))
+            let byUIKit = spikeCentrePixelIfAny(
+                UIGraphicsImageRenderer(bounds: host.bounds).image { _ in
+                    host.drawHierarchy(in: host.bounds, afterScreenUpdates: true)
+                }
+            )
+            func describe(_ pixel: (r: Int, g: Int, b: Int)?) -> String {
+                guard let pixel else { return "no bitmap" }
+                return "\(spikeIsRed(pixel) ? "PAINTED" : "blank") rgb(\(pixel.r),\(pixel.g),\(pixel.b))"
+            }
+            report.append(
+                "  \(kind.padding(toLength: 6, withPad: " ", startingAt: 0)) "
+                    + "loaded=\(loaded) context=\(contextOk.map(String.init) ?? "nil") "
+                    + "rAFframes=\(frames.map(String.init) ?? "nil")  "
+                    + "takeSnapshot=\(describe(byWebKit))  drawHierarchy=\(describe(byUIKit))"
+            )
+        }
+
+        print("SPIKE offscreen canvas/WebGL (iOS \(UIDevice.current.systemVersion)):\n"
+            + report.joined(separator: "\n"))
+        // Reporting probe: it records what the device does. Phase 2 reads the
+        // table; there is no single pass/fail worth asserting until the design
+        // decides which profiles must carry pixel evidence.
+    }
+
+    /// S3 — criterion 2, "fresh document". `updateUIView` returns early when the
+    /// url is unchanged (`LocalAppWebView.swift:1104`) and a rebuild keeps the
+    /// port stable, which is why a repaired app keeps showing the old page. This
+    /// measures that an EXPLICIT reload of the identical url really does tear the
+    /// document down, so the gate has a real mechanism to build on.
+    func testSpikeReloadingTheIdenticalURLReplacesTheDocument() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let page = directory.appendingPathComponent("index.html")
+        try #"<body><div id="ready">v1</div></body>"#.write(to: page, atomically: true, encoding: .utf8)
+
+        let webView = WKWebView(frame: CGRect(x: 0, y: 0, width: 320, height: 480))
+        webView.loadFileURL(page, allowingReadAccessTo: directory)
+        let firstLoad = try await spikeWaitForBody(webView)
+        XCTAssertTrue(firstLoad, "first load never produced a DOM")
+
+        // Mark THIS document. Only a genuinely new document loses the mark.
+        _ = try await webView.evaluateJavaScript("window.__spikeSameDocument = true; true")
+        let markBefore = try await webView.evaluateJavaScript(
+            "window.__spikeSameDocument === true"
+        ) as? Bool
+        XCTAssertEqual(markBefore, true, "the mark did not take, so its absence later proves nothing")
+
+        webView.loadFileURL(page, allowingReadAccessTo: directory)
+        let secondLoad = try await spikeWaitForBody(webView)
+        XCTAssertTrue(secondLoad, "second load never produced a DOM")
+
+        var markAfter: Bool? = true
+        for _ in 0 ..< 200 {
+            markAfter = try await webView.evaluateJavaScript(
+                "window.__spikeSameDocument === true"
+            ) as? Bool
+            if markAfter == false { break }
+            try await Task.sleep(for: .milliseconds(25))
+        }
+        XCTAssertEqual(
+            markAfter, false,
+            "the identical url was served the SAME document — a rebuilt app would keep showing stale bytes"
+        )
+    }
 }

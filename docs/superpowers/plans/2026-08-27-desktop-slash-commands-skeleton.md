@@ -18,7 +18,7 @@
 - **Command output is never rendered through `MarkdownContent`.** `/help` and `/status` are column-aligned plain text; a markdown pass destroys the alignment.
 - **`pickers.tsx`, `Composer.tsx`, and `settings/SettingsPage.tsx` are dead code** — nothing imports them. The live shell is `App.tsx:90` → `BetaComposer` (`BetaDesktop.tsx:629`), the live settings surface is `BetaSettings` (`BetaDesktop.tsx:1852`). Never wire anything into the dead trio.
 - **Run the full suite, not one file, before every commit:** `cd clients/electron && npm test`. Capture the full output; never grep a run for `FAILED` alone — that drops the block naming the failing test.
-- **Typecheck before every commit:** `cd clients/electron && npm run typecheck`.
+- **Typecheck before every commit:** `cd clients/electron && npm run typecheck`. Note it covers `src/renderer/**` only (`tsconfig.web.json:27`) — test files are executed through the tsx loader without type checking, so a type error in a test surfaces as a runtime failure, not a typecheck failure.
 
 ---
 
@@ -244,7 +244,12 @@ const CommandOutput = memo(function CommandOutput({ item, open, onSetOpen }: {
   );
   if (!commandShouldCollapse(item)) return body;
   return (
-    <Disclosure open={open} onSetOpen={(next) => onSetOpen(item.id, next)} summary={item.name || 'Command output'}>
+    <Disclosure
+      id={item.id}
+      open={open}
+      onToggle={() => onSetOpen(item.id, !open)}
+      summary={item.name || 'Command output'}
+    >
       {body}
     </Disclosure>
   );
@@ -269,7 +274,7 @@ Add the branch before the trailing `return null;` in the `items.map` chain:
           }
 ```
 
-Check `Disclosure`'s actual prop names in `components/Disclosure.tsx` before writing this and match them; if they differ, use the real ones rather than these.
+`Disclosure`'s contract is `{ id, open, onToggle(): void, summary, children }` (`Disclosure.tsx:22-35`) — `onToggle` takes no argument, so the caller computes the next value.
 
 - [ ] **Step 2: Feed the pending name from the bridge**
 
@@ -602,7 +607,7 @@ Create `clients/electron/src/renderer/bridge/slashDispatch.ts`:
  * (`tui/src/command.rs:88`) and is deliberately free of React and `window`, so
  * the whole resolution path is unit-testable.
  */
-import type { PermissionModeId } from './lingxi';
+import type { PermissionModeId } from '@lingxi/bridge-client';
 
 export interface ParsedSlashLine {
   readonly name: string;
@@ -664,7 +669,7 @@ export function resolveDesktopCommand(
 }
 ```
 
-Check the exported name of the permission-mode type in `bridge/lingxi.d.ts` before importing it; `useBridge.ts:94` uses `PermissionModeId`. If the real name differs, use the real one.
+`PermissionModeId` comes from `@lingxi/bridge-client` (`desktopState.ts:7`). The six ids in `PERMISSION_MODE_IDS` below are exactly the ones the main process admits (`validation.ts:191`), so a valid argument can never be rejected downstream.
 
 - [ ] **Step 4: Run and typecheck**
 
@@ -853,28 +858,30 @@ Expected: the six new tests pass. If `/model nope` produced no `emit`, `knownMod
 - [ ] **Step 5: Build the context and dispatch from the composer**
 
 In `BetaDesktop.tsx`:
-- Add `onOpenSettings(): void;` to the `BetaComposer` prop type (`:629-633`) and destructure it.
+- Add `onOpenSettings(): void;` and `onSetTheme(theme: 'dark' | 'light'): void;` to the `BetaComposer` prop type (`:629-633`) and destructure both.
+
+  `onSetTheme` must be the shell's `changeTheme` (`App.tsx:40`), NOT `bridge.setThemePreference` on its own. `changeTheme` does two things — `setTheme(value)` on the React state that actually repaints, and the persistence call. Wiring only the bridge method would persist the preference while leaving the running app's colours unchanged.
 - Add a `useMemo` context near the other composer state:
 
 ```tsx
   const commandContext: DesktopCommandContext = useMemo(() => ({
     setModel: (model) => bridge.setModel(model),
-    knownModel: (model) => bridge.desktop.models.some((entry) => entry.id === model),
+    knownModel: (model) => bridge.desktop.models.includes(model),
     setPermissionMode: (mode) => bridge.setPermissionMode(mode),
     setReasoningLevel: (id) => bridge.setReasoningSelection({ type: 'level', id }),
     setReasoningAutomatic: () => bridge.setReasoningSelection({ type: 'automatic' }),
     setReasoningDisabled: () => bridge.setReasoningSelection({ type: 'disabled' }),
     setFastMode: (enabled) => bridge.setFastMode(enabled),
     fastMode: () => bridge.desktop.fastMode,
-    setTheme: (theme) => { void bridge.setThemePreference(theme); },
+    setTheme: (theme) => onSetTheme(theme),
     openModelPicker: (section) => { setModelOpen(true); setModelSubmenu(section); },
     openPermissionPicker: () => setPermissionOpen(true),
     openSettings: onOpenSettings,
     emit: (output, isError) => bridge.emitCommandOutput(output, isError === true),
-  }), [bridge, onOpenSettings]);
+  }), [bridge, onOpenSettings, onSetTheme]);
 ```
 
-Check the real shape of `bridge.desktop.models` in `desktopState.ts` before writing `knownModel`; use whatever field actually holds the model ids.
+`bridge.desktop.models` is a `string[]` of model ids (`desktopState.ts:22`), not a list of objects.
 
 `emit` needs a bridge method that pushes a `CommandRunItem` locally. Add to `useBridge.ts`, beside `runSlashCommand`, and to the `UseBridge` interface:
 
@@ -907,7 +914,7 @@ Check the real shape of `bridge.desktop.models` in `desktopState.ts` before writ
 
 `beginLocalCommand` is a thin bridge method that calls `beginSlashCommand` so the user's typed line is echoed for a locally-handled command exactly as it is for a forwarded one; add it beside `emitCommandOutput` and to the `UseBridge` interface.
 
-In `App.tsx:90-94`, pass `onOpenSettings={() => setSettingsRoute({})}`.
+In `App.tsx:90-94`, pass `onOpenSettings={() => setSettingsRoute({})}` and `onSetTheme={changeTheme}` (`App.tsx:40`).
 
 - [ ] **Step 6: Run the suite, typecheck, and drive the app**
 

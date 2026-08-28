@@ -100,14 +100,18 @@ Submit path in `BetaDesktop.submit` becomes: parse → `resolveDesktopCommand` �
 
 ### 4. Group B command table
 
+**`pickers.tsx` and `Composer.tsx` are dead code** — nothing imports `Composer`, and `pickers` is imported only by `Composer`. The live shell is `App.tsx:90` → `BetaComposer` (`BetaDesktop.tsx:629`), and the live settings surface is `BetaSettings` (`BetaDesktop.tsx:1852`); `settings/SettingsPage.tsx` has no importers either. Every opener below names the state that actually renders.
+
 | Command | Bare | With args |
 |---|---|---|
-| `/model` | open `ModelPicker` (`pickers.tsx:97`, already `open`/`setOpen`-controlled) | `bridge.setModel(arg)`, emit a confirmation line |
-| `/permissions` | open `PermissionPicker` (`pickers.tsx:10`) | `bridge.setPermissionMode(arg)` for a valid mode id; invalid arg → local error line naming the valid ids |
-| `/theme` | open Settings → General | `bridge.setThemePreference('dark' \| 'light')` |
-| `/effort` | open `ModelPicker` (effort lives there) | `bridge.setReasoningSelection(...)` |
-| `/fast` | toggle `bridge.setFastMode` | `on` / `off` |
-| `/config` | `bridge.openSystemSettings` on the default pane | the argument names the pane; an unknown pane name → local error line listing the valid panes |
+| `/model` | `setModelOpen(true)` + `setModelSubmenu('model')` (`BetaDesktop.tsx:636-637`) | `bridge.setModel(arg)`; a model id absent from `bridge.desktop.models` → local error line |
+| `/permissions` | `setPermissionOpen(true)` (`BetaDesktop.tsx:638`) | `bridge.setPermissionMode(arg)` for an id in `PERM_MODES` (`data/index.ts:216` — `default`, `acceptEdits`, `plan`, `auto`, `dontAsk`, `bypassPermissions`); anything else → local error line naming the six |
+| `/effort` | `setModelOpen(true)` + `setModelSubmenu('effort')` | `bridge.setReasoningSelection({ type: 'level', id: arg })`, or `{ type: 'automatic' }` for `auto`, `{ type: 'disabled' }` for `off` |
+| `/fast` | toggle: `bridge.setFastMode(!bridge.desktop.fastMode)` | `on` / `off`; any other argument → local error line |
+| `/theme` | open settings (the Appearance section lives there, `BetaDesktop.tsx:2069`) | `dark` / `light` via the shell's `onTheme`; anything else → local error line |
+| `/config` | open settings | takes no argument; one supplied → local error line saying so |
+
+`/theme` and `/config` need an opener the composer does not have today: `BetaComposer` gains an `onOpenSettings(): void` prop, wired in `App.tsx` to `setSettingsRoute({})` (`App.tsx:23`, rendered at `App.tsx:121`). `bridge.openSystemSettings` is **not** it — that opens macOS system panes (`'accessibility' | 'screen_recording'`, `lingxi.d.ts:99`) for the computer-access flow, and has nothing to do with app configuration.
 
 `/agents` is deliberately **not** in this table. The engine has a real handler (`commands/core/src/agents.rs`), so it forwards and its text renders in the new transcript item; the agent panel is sub-project 3.
 

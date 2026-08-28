@@ -10,6 +10,43 @@
 
 **Spec:** `docs/superpowers/specs/2026-08-27-desktop-settings-redesign-design.md`
 
+## 契约修订 R1（2026-08-28，执行期实测后写入 —— 覆盖下文 §A2 的 DTO 设计）
+
+下文 Task 3 的接口块是**错的**，执行时以本节为准。三项实测：
+
+1. **`client-protocol` 不得引入 `serde_json`。** 其 `Cargo.toml` 记录着 governing
+   decision §0.4：`serde_json::Value` 不是 UniFFI-representable，故契约里的结构化
+   载荷一律是 JSON **字符串**（既有写法：`ToolUseStarted.input_json`、
+   `ToolUseResult.result_json`）。`serde_json` 只在 `[dev-dependencies]`。
+   `BTreeMap` 同样非 UniFFI-representable。**不要动这个 Cargo.toml。**
+2. **`ClientEvent::SettingsSnapshot { effective_json: String, provenance_json: String }`
+   已经存在**（`client-protocol/src/events.rs:262`）。新增同名变体编译不过。
+3. **读通道已在协议里完整定义但从未接线。**
+   `RefreshListings { which: [{type:"settings"}] }` → `ListingKindDto::Settings`
+   （`commands.rs:681`）→ 上述事件，并有 `version_guard_test.rs:438-440` 的字段级
+   契约钉子。而 `apps/bridge-server/src/router.rs:626` 的处理是
+   `ListingKindDto::Memory | ListingKindDto::Settings => { tracing::debug!(...) }`
+   —— 打一行日志，不发任何事件。
+
+**据此修订：**
+
+- **不新增 `GetSettings` 命令**；接线既有的 `ListingKindDto::Settings` 分支。
+  桌面侧只需在 `AllowedClientCommand` 的 `refresh_listings.which` 联合里加
+  `'settings'`（`refresh_listings` 本就在白名单内）。
+- **`SettingsSnapshot` 扩三个新的可选字段**（F1-09 下 additive，不 bump）：
+  `files_json: Option<String>`、`active_json: Option<String>`、
+  `locked: Option<Vec<String>>`；同步补 `version_guard_test.rs` 的 `put(...)` 行。
+- **写命令**：`UpdateSettings { destination: SettingsDestinationDto, patch_json: String }`。
+  `patch_json` 是一个 JSON 对象，值为 `null` 表示删除该键 —— 语义等价于原文的
+  `Vec<(String, Option<Value>)>`，但不用元组也不用 `Value`。
+  Tasks 5/6/7 的命令同理：结构化入参一律 `_json: String`。
+- **`serde_json::Value` 与 `BTreeMap` 在 `settings_bridge.rs` 内部照常使用** ——
+  bridge-server 本就依赖 serde_json。约束只针对**契约 crate**。
+- 桌面侧收到的是 JSON 字符串，需 `JSON.parse` 后再交给 `useEngineSettings`；
+  Task 13 的 `SettingsSnapshot` TS 接口不变，解析在桥接层做。
+
+---
+
 ## Global Constraints
 
 - `CLIENT_PROTOCOL_VERSION` 保持 `"8.0.0"`。本计划的协议改动全部是新增变体 / 新增可选字段，属 F1-09 guard 的 additive，**不得 bump，不得 re-bless `snapshots/blessed_major.txt`**。

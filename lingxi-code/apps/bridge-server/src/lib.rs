@@ -27,3 +27,4 @@ pub mod boot;
 pub mod driver;
 pub mod router;
 pub mod server;
+pub mod settings_bridge;

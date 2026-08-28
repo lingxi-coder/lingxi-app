@@ -40,8 +40,8 @@ use std::path::{Path, PathBuf};
 
 use client_protocol::ask_user_question::{AskOptionDto, AskQuestionDto, AskUserQuestionRequestDto};
 use client_protocol::commands::{
-    AppCreateModeDto, ClientCommand, ImageRefDto, ListingKindDto, PromptModeDto,
-    ProviderCredentialSecretDto, SettingsDestinationDto,
+    AppCreateModeDto, ClientCommand, ImageRefDto, ListingKindDto, PermissionBehaviorDto,
+    PromptModeDto, ProviderCredentialSecretDto, SettingsDestinationDto,
 };
 use client_protocol::computer_access::{
     AccessTierDto, ComputerAccessRequestDto, ComputerAccessResponseDto, RequestedAppDto,
@@ -1265,6 +1265,30 @@ fn command_goldens() -> Vec<(&'static str, ClientCommand)> {
             ClientCommand::UpdateSettings {
                 destination: SettingsDestinationDto::User,
                 patch_json: r#"{"outputStyle":"terse"}"#.to_string(),
+            },
+        ),
+        (
+            "command/update_permission_rules.json",
+            ClientCommand::UpdatePermissionRules {
+                destination: SettingsDestinationDto::Project,
+                behavior: PermissionBehaviorDto::Allow,
+                add: vec!["Bash(ls:*)".to_string()],
+                remove: vec![],
+            },
+        ),
+        (
+            "command/set_default_permission_mode.json",
+            ClientCommand::SetDefaultPermissionMode {
+                destination: SettingsDestinationDto::User,
+                mode: "acceptEdits".to_string(),
+            },
+        ),
+        (
+            "command/update_workspace_directories.json",
+            ClientCommand::UpdateWorkspaceDirectories {
+                destination: SettingsDestinationDto::Local,
+                add: vec!["/tmp/extra".to_string()],
+                remove: vec![],
             },
         ),
     ]

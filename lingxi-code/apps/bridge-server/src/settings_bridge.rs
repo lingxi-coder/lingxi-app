@@ -179,9 +179,10 @@ pub fn writable_path(paths: &SettingsPaths, layer: SettingsLayer) -> Result<Path
 
 /// Top-level keys with a dedicated writer, and therefore refused on the
 /// generic patch path (I1). Permissions have their own writer
-/// (`permission::persist`, wired by a later task); allowing the generic path
-/// to also touch `permissions` would give the key two write paths, which is
-/// exactly the defect this list exists to prevent.
+/// (`permission::persist`, routed by [`ClientCommand::UpdatePermissionRules`]
+/// et al. — see the `permission_*` functions below); allowing the generic
+/// path to also touch `permissions` would give the key two write paths, which
+/// is exactly the defect this list exists to prevent.
 const RESERVED_KEYS: [(&str, &str); 1] = [("permissions", "update_permission_rules")];
 
 /// Map a wire-writable destination to its file layer. Narrower than
@@ -192,6 +193,97 @@ fn destination_layer(destination: SettingsDestinationDto) -> SettingsLayer {
         SettingsDestinationDto::User => SettingsLayer::User,
         SettingsDestinationDto::Project => SettingsLayer::Project,
         SettingsDestinationDto::Local => SettingsLayer::Local,
+    }
+}
+
+// ── Permission command routing ──────────────────────────────────────────
+//
+// The three permission commands (`UpdatePermissionRules`,
+// `SetDefaultPermissionMode`, `UpdateWorkspaceDirectories`) route to
+// `permission::persist`'s writers rather than through [`apply_patch`] above —
+// that writer already owns per-destination exclusive locks, atomic
+// root-confined replacement, alias-normalizing de-duplication, and
+// unknown-key preservation, and re-deriving any of that here would give the
+// `permissions` key a second, competing write path (exactly what
+// [`RESERVED_KEYS`] refuses on the generic patch). The functions below only
+// translate wire DTOs into the `permission` crate's own types; they never
+// touch a settings file directly.
+
+/// Map a wire-writable destination to the `permission` crate's persistence
+/// target. Narrower than [`permission::PermissionUpdateDestination`]'s full
+/// set by construction (`SettingsDestinationDto` has no `Session` / `CliArg`
+/// variant), so this is infallible — mirrors [`destination_layer`] above at
+/// the `permission` crate's granularity.
+#[must_use]
+pub fn permission_destination(
+    destination: SettingsDestinationDto,
+) -> permission::PermissionUpdateDestination {
+    match destination {
+        SettingsDestinationDto::User => permission::PermissionUpdateDestination::UserSettings,
+        SettingsDestinationDto::Project => {
+            permission::PermissionUpdateDestination::ProjectSettings
+        }
+        SettingsDestinationDto::Local => permission::PermissionUpdateDestination::LocalSettings,
+    }
+}
+
+/// Map a writable destination to the [`permission::PermissionRuleSource`] a
+/// rule created at that layer should carry, so a persisted rule's `source`
+/// matches the file it actually landed in.
+fn permission_rule_source(destination: SettingsDestinationDto) -> permission::PermissionRuleSource {
+    match destination {
+        SettingsDestinationDto::User => permission::PermissionRuleSource::UserSettings,
+        SettingsDestinationDto::Project => permission::PermissionRuleSource::ProjectSettings,
+        SettingsDestinationDto::Local => permission::PermissionRuleSource::LocalSettings,
+    }
+}
+
+/// Map the wire-level rule-behavior bucket to `permission`'s own enum.
+#[must_use]
+pub fn permission_behavior(
+    behavior: client_protocol::commands::PermissionBehaviorDto,
+) -> permission::PermissionBehavior {
+    match behavior {
+        client_protocol::commands::PermissionBehaviorDto::Allow => {
+            permission::PermissionBehavior::Allow
+        }
+        client_protocol::commands::PermissionBehaviorDto::Deny => {
+            permission::PermissionBehavior::Deny
+        }
+        client_protocol::commands::PermissionBehaviorDto::Ask => {
+            permission::PermissionBehavior::Ask
+        }
+    }
+}
+
+/// Build a [`permission::PermissionRule`] from one wire rule string. Parsing
+/// is INFALLIBLE: [`permission::PermissionRuleValue::from_rule_string`]
+/// degrades a malformed string to a bare tool name — 1:1 parity with
+/// claude-code's own `permissionRuleValueFromString` — so there is no
+/// rejected-input case to invent here. Whatever the caller typed becomes some
+/// rule.
+#[must_use]
+pub fn permission_rule_from_wire(
+    raw: &str,
+    behavior: client_protocol::commands::PermissionBehaviorDto,
+    destination: SettingsDestinationDto,
+) -> permission::PermissionRule {
+    permission::PermissionRule {
+        value: permission::PermissionRuleValue::from_rule_string(raw),
+        behavior: permission_behavior(behavior),
+        source: permission_rule_source(destination),
+    }
+}
+
+/// Resolve the `permission` crate's two-root [`permission::PermissionPaths`]
+/// from [`SettingsPaths`]. `PermissionPaths::cwd` is `SettingsPaths::project_dir`
+/// — the SAME root [`apply_patch`] already resolves the project/local file
+/// layers from, not a second source of truth for it.
+#[must_use]
+pub fn permission_paths(paths: &SettingsPaths) -> permission::PermissionPaths {
+    permission::PermissionPaths {
+        lingxi_home: paths.lingxi_home.clone(),
+        cwd: paths.project_dir.clone(),
     }
 }
 
@@ -761,6 +853,100 @@ mod tests {
             map.get("outputStyle"),
             Some(&serde_json::json!("terse")),
             "the patched key must also be applied alongside the untouched ones"
+        );
+    }
+
+    // ── Permission command routing (mapping layer) ────────────────────────
+    //
+    // `persist_permission_rule_set` / `persist_permission_mode` /
+    // `persist_workspace_directories` are exercised end-to-end (through the
+    // router) in `router_test.rs`; the pure translation functions here — the
+    // part genuinely new to this task rather than already covered by
+    // `permission`'s own suite — get direct unit coverage.
+
+    #[test]
+    fn permission_destination_maps_every_writable_layer() {
+        assert_eq!(
+            permission_destination(SettingsDestinationDto::User),
+            permission::PermissionUpdateDestination::UserSettings
+        );
+        assert_eq!(
+            permission_destination(SettingsDestinationDto::Project),
+            permission::PermissionUpdateDestination::ProjectSettings
+        );
+        assert_eq!(
+            permission_destination(SettingsDestinationDto::Local),
+            permission::PermissionUpdateDestination::LocalSettings
+        );
+    }
+
+    #[test]
+    fn permission_behavior_maps_every_bucket() {
+        use client_protocol::commands::PermissionBehaviorDto;
+        assert_eq!(
+            permission_behavior(PermissionBehaviorDto::Allow),
+            permission::PermissionBehavior::Allow
+        );
+        assert_eq!(
+            permission_behavior(PermissionBehaviorDto::Deny),
+            permission::PermissionBehavior::Deny
+        );
+        assert_eq!(
+            permission_behavior(PermissionBehaviorDto::Ask),
+            permission::PermissionBehavior::Ask
+        );
+    }
+
+    /// A well-formed rule string parses to the tool/content split, and the
+    /// resulting rule's `source` names the layer it will be written to — not
+    /// some other layer — so a later `priority()` lookup on the persisted
+    /// rule resolves correctly.
+    #[test]
+    fn permission_rule_from_wire_carries_the_destinations_source() {
+        use client_protocol::commands::PermissionBehaviorDto;
+        let rule = permission_rule_from_wire(
+            "Bash(ls:*)",
+            PermissionBehaviorDto::Allow,
+            SettingsDestinationDto::Project,
+        );
+        assert_eq!(rule.value.tool_name, "Bash");
+        assert_eq!(rule.value.rule_content.as_deref(), Some("ls:*"));
+        assert_eq!(rule.behavior, permission::PermissionBehavior::Allow);
+        assert_eq!(rule.source, permission::PermissionRuleSource::ProjectSettings);
+    }
+
+    /// Correction #1: parsing is infallible. A malformed rule string (an
+    /// unbalanced paren) must NOT be rejected — it degrades to a bare tool
+    /// name carrying the whole input, matching claude-code's own parser. This
+    /// pins that no validation was smuggled into the mapping layer.
+    #[test]
+    fn permission_rule_from_wire_never_rejects_malformed_input() {
+        use client_protocol::commands::PermissionBehaviorDto;
+        let rule = permission_rule_from_wire(
+            "Bash(ls:*",
+            PermissionBehaviorDto::Deny,
+            SettingsDestinationDto::User,
+        );
+        assert_eq!(
+            rule.value.tool_name, "Bash(ls:*",
+            "an unbalanced-paren string must degrade to a bare tool name carrying \
+             the whole input, not be rejected"
+        );
+        assert_eq!(rule.value.rule_content, None);
+    }
+
+    #[test]
+    fn permission_paths_derives_cwd_from_project_dir() {
+        let paths = SettingsPaths {
+            lingxi_home: PathBuf::from("/home/user/.lingxi"),
+            project_dir: PathBuf::from("/repo"),
+        };
+        let perm_paths = permission_paths(&paths);
+        assert_eq!(perm_paths.lingxi_home, PathBuf::from("/home/user/.lingxi"));
+        assert_eq!(
+            perm_paths.cwd,
+            PathBuf::from("/repo"),
+            "PermissionPaths::cwd must be SettingsPaths::project_dir, not a second root"
         );
     }
 }

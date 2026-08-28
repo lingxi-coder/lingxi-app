@@ -43,6 +43,9 @@
 //! | `NewSession` | `clear_session` + optional `switch_model` | `SessionStarted` / `Error` |
 //! | `ResumeSession` | JSONL replay + `resume_session` | `SessionResumed` / `Error` |
 //! | `RefreshListings{Settings}` | `settings_bridge::build_snapshot` | `SettingsSnapshot` |
+//! | `UpdatePermissionRules` | `permission::persist_permission_rule_set` | `SettingsSnapshot` / `Error` |
+//! | `SetDefaultPermissionMode` | `permission::persist_permission_mode` | `SettingsSnapshot` / `Error` |
+//! | `UpdateWorkspaceDirectories` | `permission::persist_workspace_directories` | `SettingsSnapshot` / `Error` |
 //! | `RequestExit` | `request_exit` | — |
 //!
 //! ## Mid-turn semantics
@@ -73,7 +76,9 @@ use client_adapter::lowering::{
     lower_status_snapshot, lower_task_output_chunk, lower_task_record,
 };
 use client_adapter::ClientEventSink;
-use client_protocol::commands::{ClientCommand, ListingKindDto, SettingsDestinationDto};
+use client_protocol::commands::{
+    ClientCommand, ListingKindDto, PermissionBehaviorDto, SettingsDestinationDto,
+};
 use client_protocol::controls::{
     ConversationControlsDto, ReasoningControlStateDto, ReasoningSelectionDto,
 };
@@ -89,7 +94,10 @@ use traits::orchestrator::OrchestratorHandle;
 use traits::task_registry::{TaskListFilter, TaskRegistryHandle};
 use traits::SlashCommandDispatcher;
 
-use crate::settings_bridge::{apply_patch, build_snapshot, lower_snapshot, SettingsContext};
+use crate::settings_bridge::{
+    apply_patch, build_snapshot, lower_snapshot, permission_destination, permission_paths,
+    permission_rule_from_wire, SettingsContext,
+};
 
 /// Default number of recent sessions returned when `ListSessions` omits its
 /// explicit limit. This matches the CLI `/resume` picker and the mobile host.
@@ -394,6 +402,192 @@ impl EngineCommandRouter {
                 })
                 .await;
             }
+        }
+    }
+
+    /// Shared preflight for the three persisted-permission commands
+    /// ([`ClientCommand::UpdatePermissionRules`],
+    /// [`ClientCommand::SetDefaultPermissionMode`],
+    /// [`ClientCommand::UpdateWorkspaceDirectories`]): resolve the active
+    /// [`SettingsContext`] into the `permission` crate's two-root paths, or
+    /// report the same "no settings context" gap
+    /// [`Self::apply_settings_patch`] reports on the generic path.
+    async fn require_permission_paths(
+        &self,
+        sink: &dyn ClientEventSink,
+    ) -> Option<permission::PermissionPaths> {
+        let Some(context) = self.settings.as_ref() else {
+            sink.emit(ClientEvent::Error {
+                kind: ErrorKindDto::Internal,
+                message: "permission update unavailable: this connection was built without a \
+                          settings context"
+                    .to_string(),
+            })
+            .await;
+            return None;
+        };
+        Some(permission_paths(&context.paths))
+    }
+
+    /// Route [`ClientCommand::UpdatePermissionRules`] to
+    /// `permission::persist_permission_rule_set` — never reimplementing its
+    /// per-destination lock, atomic write, or alias-normalizing de-dup. `add`
+    /// and `remove` are each persisted in their own call (the persister does
+    /// one same-behavior set per transaction); a rule string is never
+    /// rejected here — [`permission_rule_from_wire`] parses infallibly,
+    /// matching claude-code's own parser.
+    async fn apply_permission_rule_update(
+        &self,
+        destination: SettingsDestinationDto,
+        behavior: PermissionBehaviorDto,
+        add: Vec<String>,
+        remove: Vec<String>,
+        sink: &dyn ClientEventSink,
+    ) {
+        let Some(paths) = self.require_permission_paths(sink).await else {
+            return;
+        };
+        let dest = permission_destination(destination);
+        let to_add: Vec<permission::PermissionRule> = add
+            .iter()
+            .map(|raw| permission_rule_from_wire(raw, behavior, destination))
+            .collect();
+        let to_remove: Vec<permission::PermissionRule> = remove
+            .iter()
+            .map(|raw| permission_rule_from_wire(raw, behavior, destination))
+            .collect();
+
+        let mut changed = false;
+        for (rules, add_flag) in [(&to_add, true), (&to_remove, false)] {
+            if rules.is_empty() {
+                continue;
+            }
+            match permission::persist_permission_rule_set(rules, add_flag, dest, &paths).await {
+                Ok(did_change) => changed |= did_change,
+                Err(error) => {
+                    sink.emit(ClientEvent::Error {
+                        kind: ErrorKindDto::Internal,
+                        message: format!("failed to persist permission rules: {error}"),
+                    })
+                    .await;
+                    return;
+                }
+            }
+        }
+
+        if changed {
+            self.emit_settings_snapshot(sink).await;
+        } else {
+            // Ok(false) with no error means nothing on disk actually moved —
+            // an empty add/remove set, or every entry already matched what
+            // was there. Silence here would look identical to a successful
+            // write from the caller's side, so it is reported rather than
+            // swallowed.
+            sink.emit(ClientEvent::Error {
+                kind: ErrorKindDto::Rejected,
+                message: "no permission rule changed: `add`/`remove` were empty, or every \
+                          entry already matched the file"
+                    .to_string(),
+            })
+            .await;
+        }
+    }
+
+    /// Route [`ClientCommand::SetDefaultPermissionMode`] to
+    /// `permission::persist_permission_mode`. Distinct from the
+    /// session-scoped [`ClientCommand::SetPermissionMode`]: this writes the
+    /// DEFAULT mode a future session boots into. `persist_permission_mode`
+    /// deliberately refuses to persist `"bypassPermissions"` (a security
+    /// property — persisting it would silently re-enter bypass mode on the
+    /// next session load), and that refusal is reported here rather than
+    /// swallowed.
+    async fn apply_default_permission_mode(
+        &self,
+        destination: SettingsDestinationDto,
+        mode: String,
+        sink: &dyn ClientEventSink,
+    ) {
+        let Some(paths) = self.require_permission_paths(sink).await else {
+            return;
+        };
+        let dest = permission_destination(destination);
+        match permission::persist_permission_mode(&mode, dest, &paths).await {
+            Ok(true) => self.emit_settings_snapshot(sink).await,
+            Ok(false) if mode == "bypassPermissions" => {
+                sink.emit(ClientEvent::Error {
+                    kind: ErrorKindDto::Rejected,
+                    message: "`bypassPermissions` is session-scoped and is deliberately never \
+                              persisted as the default mode"
+                        .to_string(),
+                })
+                .await;
+            }
+            Ok(false) => {
+                sink.emit(ClientEvent::Error {
+                    kind: ErrorKindDto::Rejected,
+                    message: format!(
+                        "default permission mode was not persisted: `{mode}` is unrecognized, \
+                         or already the current default"
+                    ),
+                })
+                .await;
+            }
+            Err(error) => {
+                sink.emit(ClientEvent::Error {
+                    kind: ErrorKindDto::Internal,
+                    message: format!("failed to persist default permission mode: {error}"),
+                })
+                .await;
+            }
+        }
+    }
+
+    /// Route [`ClientCommand::UpdateWorkspaceDirectories`] to
+    /// `permission::persist_workspace_directories`, the same
+    /// add-then-remove, report-if-nothing-changed shape as
+    /// [`Self::apply_permission_rule_update`].
+    async fn apply_workspace_directories_update(
+        &self,
+        destination: SettingsDestinationDto,
+        add: Vec<String>,
+        remove: Vec<String>,
+        sink: &dyn ClientEventSink,
+    ) {
+        let Some(paths) = self.require_permission_paths(sink).await else {
+            return;
+        };
+        let dest = permission_destination(destination);
+
+        let mut changed = false;
+        for (directories, add_flag) in [(&add, true), (&remove, false)] {
+            if directories.is_empty() {
+                continue;
+            }
+            match permission::persist_workspace_directories(directories, add_flag, dest, &paths)
+                .await
+            {
+                Ok(did_change) => changed |= did_change,
+                Err(error) => {
+                    sink.emit(ClientEvent::Error {
+                        kind: ErrorKindDto::Internal,
+                        message: format!("failed to persist workspace directories: {error}"),
+                    })
+                    .await;
+                    return;
+                }
+            }
+        }
+
+        if changed {
+            self.emit_settings_snapshot(sink).await;
+        } else {
+            sink.emit(ClientEvent::Error {
+                kind: ErrorKindDto::Rejected,
+                message: "no workspace directory changed: `add`/`remove` were empty, or every \
+                          entry already matched the file"
+                    .to_string(),
+            })
+            .await;
         }
     }
 
@@ -1082,6 +1276,29 @@ impl CommandRouter for EngineCommandRouter {
                 patch_json,
             } => {
                 self.apply_settings_patch(destination, &patch_json, &*sink)
+                    .await;
+            }
+
+            // ── Permissions (persisted) ─────────────────────────────────────
+            ClientCommand::UpdatePermissionRules {
+                destination,
+                behavior,
+                add,
+                remove,
+            } => {
+                self.apply_permission_rule_update(destination, behavior, add, remove, &*sink)
+                    .await;
+            }
+            ClientCommand::SetDefaultPermissionMode { destination, mode } => {
+                self.apply_default_permission_mode(destination, mode, &*sink)
+                    .await;
+            }
+            ClientCommand::UpdateWorkspaceDirectories {
+                destination,
+                add,
+                remove,
+            } => {
+                self.apply_workspace_directories_update(destination, add, remove, &*sink)
                     .await;
             }
 

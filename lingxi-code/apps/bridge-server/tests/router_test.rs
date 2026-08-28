@@ -38,7 +38,8 @@ use bridge_server::server::BridgeConnection;
 use bridge_server::settings_bridge::{SettingsContext, SettingsPaths};
 use client_adapter::{AdapterPermissionGate, ClientEventSink, PermissionRequestSink};
 use client_protocol::commands::{
-    ClientCommand, ListingKindDto, ProviderCredentialSecretDto, SettingsDestinationDto,
+    ClientCommand, ListingKindDto, PermissionBehaviorDto, ProviderCredentialSecretDto,
+    SettingsDestinationDto,
 };
 use client_protocol::events::{ClientEvent, ErrorKindDto};
 use client_protocol::permission::PermissionRequest;
@@ -2459,5 +2460,324 @@ async fn the_memory_listing_stays_unrouted() {
     assert!(
         sink.events().await.is_empty(),
         "Memory has no engine handle in the foundation and must stay silent"
+    );
+}
+
+// ── Permissions (persisted) ──────────────────────────────────────────────
+//
+// These three commands route to `permission::persist` (per-destination
+// exclusive locks, atomic root-confined replacement, alias-normalizing
+// de-duplication, unknown-key preservation) rather than through
+// `UpdateSettings`, which refuses the `permissions` key precisely to avoid a
+// second write path to it. Each positive test below asserts BOTH that the
+// change landed in the right file AND that an unrelated key in that same
+// file survived — the second half is what proves the write went through
+// `persist.rs` rather than a hand-rolled overwrite that could pass the first
+// half alone.
+
+/// The rule must land in the project layer's `permissions.allow`, and an
+/// unrelated key already in that file must survive untouched.
+#[tokio::test]
+async fn update_permission_rules_writes_the_named_layer_and_preserves_other_keys() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("home");
+    let project = dir.path().join("repo");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(project.join(branding::DOT_DIR)).unwrap();
+    let target = project.join(branding::DOT_DIR).join("settings.json");
+    std::fs::write(&target, r#"{"outputStyle":"terse"}"#).unwrap();
+
+    let router = router_with_settings(SettingsContext {
+        paths: SettingsPaths {
+            lingxi_home: home,
+            project_dir: project,
+        },
+        active: std::collections::BTreeMap::new(),
+        managed: std::collections::BTreeMap::new(),
+    });
+    let sink = CapturingSink::arc();
+
+    router
+        .route(
+            ClientCommand::UpdatePermissionRules {
+                destination: SettingsDestinationDto::Project,
+                behavior: PermissionBehaviorDto::Allow,
+                add: vec!["Bash(ls:*)".to_string()],
+                remove: vec![],
+            },
+            sink.clone(),
+        )
+        .await;
+
+    let written: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&target).unwrap()).unwrap();
+    assert_eq!(
+        written["permissions"]["allow"][0], "Bash(ls:*)",
+        "the rule must land in the project layer's permissions.allow"
+    );
+    assert_eq!(
+        written["outputStyle"], "terse",
+        "unrelated keys must survive verbatim"
+    );
+
+    let events = sink.events().await;
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, ClientEvent::SettingsSnapshot { .. })),
+        "a successful update must resend the settings snapshot, got {events:?}"
+    );
+}
+
+/// A request whose `add`/`remove` are both empty changes nothing on disk —
+/// the router must say so rather than silently resending an unchanged
+/// snapshot that looks identical to a successful write.
+#[tokio::test]
+async fn update_permission_rules_reports_when_nothing_was_requested() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("home");
+    let project = dir.path().join("repo");
+    std::fs::create_dir_all(&home).unwrap();
+
+    let router = router_with_settings(SettingsContext {
+        paths: SettingsPaths {
+            lingxi_home: home,
+            project_dir: project,
+        },
+        active: std::collections::BTreeMap::new(),
+        managed: std::collections::BTreeMap::new(),
+    });
+    let sink = CapturingSink::arc();
+
+    router
+        .route(
+            ClientCommand::UpdatePermissionRules {
+                destination: SettingsDestinationDto::User,
+                behavior: PermissionBehaviorDto::Allow,
+                add: vec![],
+                remove: vec![],
+            },
+            sink.clone(),
+        )
+        .await;
+
+    let events = sink.events().await;
+    let (kind, message) = events
+        .iter()
+        .find_map(|e| match e {
+            ClientEvent::Error { kind, message } => Some((kind.clone(), message.clone())),
+            _ => None,
+        })
+        .expect("a no-op request must be reported, not silently resent as a snapshot");
+    assert_eq!(kind, ErrorKindDto::Rejected);
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, ClientEvent::SettingsSnapshot { .. })),
+        "a no-op must not also emit a snapshot, got {events:?}: {message}"
+    );
+}
+
+/// The default mode must land in the user layer's `defaultMode`, and an
+/// unrelated key in that file must survive.
+#[tokio::test]
+async fn set_default_permission_mode_writes_the_named_layer_and_preserves_other_keys() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("home");
+    let project = dir.path().join("repo");
+    std::fs::create_dir_all(&home).unwrap();
+    let target = home.join("settings.json");
+    std::fs::write(&target, r#"{"outputStyle":"terse"}"#).unwrap();
+
+    let router = router_with_settings(SettingsContext {
+        paths: SettingsPaths {
+            lingxi_home: home,
+            project_dir: project,
+        },
+        active: std::collections::BTreeMap::new(),
+        managed: std::collections::BTreeMap::new(),
+    });
+    let sink = CapturingSink::arc();
+
+    router
+        .route(
+            ClientCommand::SetDefaultPermissionMode {
+                destination: SettingsDestinationDto::User,
+                mode: "acceptEdits".to_string(),
+            },
+            sink.clone(),
+        )
+        .await;
+
+    let written: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&target).unwrap()).unwrap();
+    assert_eq!(written["permissions"]["defaultMode"], "acceptEdits");
+    assert_eq!(
+        written["outputStyle"], "terse",
+        "unrelated keys must survive verbatim"
+    );
+
+    let events = sink.events().await;
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, ClientEvent::SettingsSnapshot { .. })),
+        "a successful update must resend the settings snapshot, got {events:?}"
+    );
+}
+
+/// `persist_permission_mode` deliberately refuses to persist
+/// `"bypassPermissions"` (a security property: persisting it would silently
+/// re-enter bypass mode on the next session load). The refusal must be
+/// reported honestly — the caller must NOT see a `SettingsSnapshot` that
+/// looks like the write happened, and the file must be left untouched.
+#[tokio::test]
+async fn set_default_permission_mode_reports_the_bypass_permissions_refusal() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("home");
+    let project = dir.path().join("repo");
+    std::fs::create_dir_all(&home).unwrap();
+    let target = home.join("settings.json");
+    std::fs::write(&target, r#"{"outputStyle":"terse"}"#).unwrap();
+
+    let router = router_with_settings(SettingsContext {
+        paths: SettingsPaths {
+            lingxi_home: home,
+            project_dir: project,
+        },
+        active: std::collections::BTreeMap::new(),
+        managed: std::collections::BTreeMap::new(),
+    });
+    let sink = CapturingSink::arc();
+
+    router
+        .route(
+            ClientCommand::SetDefaultPermissionMode {
+                destination: SettingsDestinationDto::User,
+                mode: "bypassPermissions".to_string(),
+            },
+            sink.clone(),
+        )
+        .await;
+
+    let on_disk: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&target).unwrap()).unwrap();
+    assert!(
+        on_disk
+            .get("permissions")
+            .and_then(|p| p.get("defaultMode"))
+            .is_none(),
+        "bypassPermissions must never be written to disk, got {on_disk}"
+    );
+
+    let events = sink.events().await;
+    let (kind, message) = events
+        .iter()
+        .find_map(|e| match e {
+            ClientEvent::Error { kind, message } => Some((kind.clone(), message.clone())),
+            _ => None,
+        })
+        .expect("the refusal must be reported, not swallowed");
+    assert_eq!(kind, ErrorKindDto::Rejected);
+    assert!(
+        message.contains("bypassPermissions") || message.contains("session-scoped"),
+        "the message must name what happened, got: {message}"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, ClientEvent::SettingsSnapshot { .. })),
+        "a refused persist must not also claim success via a snapshot, got {events:?}"
+    );
+}
+
+/// The directory must land in the local layer's
+/// `permissions.additionalDirectories`, and an unrelated key in that file
+/// must survive.
+#[tokio::test]
+async fn update_workspace_directories_writes_the_named_layer_and_preserves_other_keys() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("home");
+    let project = dir.path().join("repo");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(project.join(branding::DOT_DIR)).unwrap();
+    let target = project.join(branding::DOT_DIR).join("settings.local.json");
+    std::fs::write(&target, r#"{"outputStyle":"terse"}"#).unwrap();
+
+    let router = router_with_settings(SettingsContext {
+        paths: SettingsPaths {
+            lingxi_home: home,
+            project_dir: project,
+        },
+        active: std::collections::BTreeMap::new(),
+        managed: std::collections::BTreeMap::new(),
+    });
+    let sink = CapturingSink::arc();
+
+    router
+        .route(
+            ClientCommand::UpdateWorkspaceDirectories {
+                destination: SettingsDestinationDto::Local,
+                add: vec!["/tmp/extra".to_string()],
+                remove: vec![],
+            },
+            sink.clone(),
+        )
+        .await;
+
+    let written: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&target).unwrap()).unwrap();
+    assert_eq!(
+        written["permissions"]["additionalDirectories"][0], "/tmp/extra",
+        "the directory must land in the local layer's additionalDirectories"
+    );
+    assert_eq!(
+        written["outputStyle"], "terse",
+        "unrelated keys must survive verbatim"
+    );
+
+    let events = sink.events().await;
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, ClientEvent::SettingsSnapshot { .. })),
+        "a successful update must resend the settings snapshot, got {events:?}"
+    );
+}
+
+/// Without a settings context, all three permission commands must report the
+/// gap instead of panicking or staying silent — the same contract
+/// `apply_settings_patch` already honors for `UpdateSettings`.
+#[tokio::test]
+async fn update_permission_rules_reports_a_missing_context_instead_of_staying_silent() {
+    let router = router_with(
+        Arc::new(MockOrchestratorHandle::new()),
+        Arc::new(MockTaskRegistry { rows: vec![] }),
+    );
+    let sink = CapturingSink::arc();
+
+    router
+        .route(
+            ClientCommand::UpdatePermissionRules {
+                destination: SettingsDestinationDto::User,
+                behavior: PermissionBehaviorDto::Allow,
+                add: vec!["Bash".to_string()],
+                remove: vec![],
+            },
+            sink.clone(),
+        )
+        .await;
+
+    let events = sink.events().await;
+    let message = events
+        .iter()
+        .find_map(|e| match e {
+            ClientEvent::Error { message, .. } => Some(message.clone()),
+            _ => None,
+        })
+        .expect("a missing settings context must be reported, not swallowed");
+    assert!(
+        message.contains("settings context"),
+        "the error must name what is missing, got: {message}"
     );
 }

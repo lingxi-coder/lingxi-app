@@ -613,16 +613,66 @@ pub enum ClientCommand {
     /// does — the receiving end (`bridge-server::settings_bridge`) parses it.
     ///
     /// The `permissions` top-level key is refused here: it has a dedicated
-    /// writer. Only `User` / `Project` / `Local` are valid destinations — the
-    /// engine's full settings-layer enum also has non-writable layers
-    /// (`defaults` / `cli` / `managed` / `env`); [`SettingsDestinationDto`]
-    /// omits them so a write to one is unrepresentable on the wire, rather
-    /// than a runtime rejection.
+    /// writer — the three commands below. Only `User` / `Project` / `Local`
+    /// are valid destinations — the engine's full settings-layer enum also
+    /// has non-writable layers (`defaults` / `cli` / `managed` / `env`);
+    /// [`SettingsDestinationDto`] omits them so a write to one is
+    /// unrepresentable on the wire, rather than a runtime rejection.
     UpdateSettings {
         /// Which writable layer's file to edit.
         destination: SettingsDestinationDto,
         /// A JSON object of top-level key → new value (or `null` to delete).
         patch_json: String,
+    },
+
+    // ── Permissions (persisted) ─────────────────────────────────────────────
+    // `permission/src/persist.rs` already owns permission writing (per-
+    // destination exclusive locks, atomic root-confined replacement, alias-
+    // normalizing de-duplication, unknown-key preservation) — these three
+    // commands route to it directly instead of going through `UpdateSettings`,
+    // which explicitly refuses the `permissions` top-level key precisely to
+    // keep there from being two write paths to one key.
+    /// Add or remove rules in one behavior bucket
+    /// (`permissions.{allow,deny,ask}`) on a single writable layer, in one
+    /// locked atomic transaction.
+    UpdatePermissionRules {
+        /// Which writable layer's file to edit.
+        destination: SettingsDestinationDto,
+        /// The behavior bucket every rule in `add`/`remove` belongs to.
+        behavior: PermissionBehaviorDto,
+        /// Rule strings (`"Tool"` or `"Tool(content)"`) to add. Parsing is
+        /// infallible — a malformed string degrades to a bare tool name,
+        /// matching claude-code's own parser — so there is no rejected-input
+        /// case here.
+        add: Vec<String>,
+        /// Rule strings to remove, same syntax as `add`.
+        remove: Vec<String>,
+    },
+
+    /// Persist the DEFAULT permission mode a future session boots into.
+    /// Distinct from [`Self::SetPermissionMode`], which changes the mode for
+    /// the CURRENT session only and is never written to disk. Persisting
+    /// `"bypassPermissions"` is deliberately refused by the underlying writer
+    /// (persisting it would silently re-enter bypass mode on the next session
+    /// load) — the host reports that refusal rather than pretending it
+    /// happened.
+    SetDefaultPermissionMode {
+        /// Which writable layer's file to edit.
+        destination: SettingsDestinationDto,
+        /// Permission-mode wire id (`default`, `acceptEdits`, `plan`, `auto`,
+        /// `dontAsk`, or `bypassPermissions` — the last is always refused).
+        mode: String,
+    },
+
+    /// Add or remove entries in `permissions.additionalDirectories` on a
+    /// single writable layer, in one locked atomic transaction.
+    UpdateWorkspaceDirectories {
+        /// Which writable layer's file to edit.
+        destination: SettingsDestinationDto,
+        /// Directory strings to add, stored verbatim (no canonicalization).
+        add: Vec<String>,
+        /// Directory strings to remove, compared verbatim against the file.
+        remove: Vec<String>,
     },
 }
 
@@ -642,6 +692,24 @@ pub enum SettingsDestinationDto {
     Project,
     /// `<project_dir>/<DOT_DIR>/settings.local.json`.
     Local,
+}
+
+/// The behavior bucket a permission rule belongs to
+/// (`permissions.{allow,deny,ask}` in a settings file), as named on the wire.
+/// Mirrors `permission::PermissionBehavior` one-to-one; kept as a separate DTO
+/// so the `permission` crate's type never crosses the wire boundary directly.
+///
+/// A bare wire STRING (`"allow"` / `"deny"` / `"ask"`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
+#[serde(rename_all = "snake_case")]
+pub enum PermissionBehaviorDto {
+    /// Allow the call without prompting.
+    Allow,
+    /// Deny the call.
+    Deny,
+    /// Ask the user.
+    Ask,
 }
 
 /// Prompt-input mode for [`ClientCommand::SendPrompt`]. Internally tagged on

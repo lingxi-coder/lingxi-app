@@ -866,6 +866,48 @@ fn current_contract_index() -> ContractIndex {
     );
     put("ClientCommand::UpdateSettings.patch_json", "String");
 
+    put(
+        "ClientCommand::UpdatePermissionRules",
+        "update_permission_rules",
+    );
+    put(
+        "ClientCommand::UpdatePermissionRules.destination",
+        "SettingsDestinationDto",
+    );
+    put(
+        "ClientCommand::UpdatePermissionRules.behavior",
+        "PermissionBehaviorDto",
+    );
+    put("ClientCommand::UpdatePermissionRules.add", "Vec<String>");
+    put("ClientCommand::UpdatePermissionRules.remove", "Vec<String>");
+
+    put(
+        "ClientCommand::SetDefaultPermissionMode",
+        "set_default_permission_mode",
+    );
+    put(
+        "ClientCommand::SetDefaultPermissionMode.destination",
+        "SettingsDestinationDto",
+    );
+    put("ClientCommand::SetDefaultPermissionMode.mode", "String");
+
+    put(
+        "ClientCommand::UpdateWorkspaceDirectories",
+        "update_workspace_directories",
+    );
+    put(
+        "ClientCommand::UpdateWorkspaceDirectories.destination",
+        "SettingsDestinationDto",
+    );
+    put(
+        "ClientCommand::UpdateWorkspaceDirectories.add",
+        "Vec<String>",
+    );
+    put(
+        "ClientCommand::UpdateWorkspaceDirectories.remove",
+        "Vec<String>",
+    );
+
     // ── PromptModeDto (commands.rs) ───────────────────────────────────────
     put("PromptModeDto::Normal", "normal");
     put("PromptModeDto::Bash", "bash");
@@ -899,6 +941,11 @@ fn current_contract_index() -> ContractIndex {
     put("SettingsDestinationDto::User", "user");
     put("SettingsDestinationDto::Project", "project");
     put("SettingsDestinationDto::Local", "local");
+
+    // ── PermissionBehaviorDto (commands.rs) ───────────────────────────────
+    put("PermissionBehaviorDto::Allow", "allow");
+    put("PermissionBehaviorDto::Deny", "deny");
+    put("PermissionBehaviorDto::Ask", "ask");
 
     // ── MessageDto / MessageBlockDto (message.rs) ─────────────────────────
     put("MessageDto.role", "String");
@@ -2091,7 +2138,7 @@ fn current_contract_matches_index_or_version_bumped() {
 fn contract_index_covers_every_dto() {
     use client_protocol::commands::{
         AppCreateModeDto, ClientCommand, CommandResultDto, ImageRefDto, ListingKindDto,
-        PromptModeDto, ProviderCredentialSecretDto, SettingsDestinationDto,
+        PermissionBehaviorDto, PromptModeDto, ProviderCredentialSecretDto, SettingsDestinationDto,
     };
     use client_protocol::computer_access::{
         AccessTierDto, ComputerAccessRequestDto, ComputerAccessResponseDto, RequestedAppDto,
@@ -2323,8 +2370,24 @@ fn contract_index_covers_every_dto() {
             destination: SettingsDestinationDto::User,
             patch_json: String::new(),
         },
+        ClientCommand::UpdatePermissionRules {
+            destination: SettingsDestinationDto::User,
+            behavior: PermissionBehaviorDto::Allow,
+            add: Vec::new(),
+            remove: Vec::new(),
+        },
+        ClientCommand::SetDefaultPermissionMode {
+            destination: SettingsDestinationDto::User,
+            mode: String::new(),
+        },
+        ClientCommand::UpdateWorkspaceDirectories {
+            destination: SettingsDestinationDto::User,
+            add: Vec::new(),
+            remove: Vec::new(),
+        },
     ];
     let _settings_destination = SettingsDestinationDto::User;
+    let _permission_behavior = PermissionBehaviorDto::Allow;
     let _recovery_state = TurnRecoveryStateDto::PausedRecoverable;
     let _mode = PromptModeDto::Normal;
     let _img = ImageRefDto {

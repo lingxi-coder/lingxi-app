@@ -870,27 +870,54 @@ impl OrchestratorHandle for ConversationOrchestrator {
     }
 
     async fn list_skills(&self) -> Vec<SkillInfo> {
-        // Desktop Skills settings view (Task 7): re-scan the same project +
-        // user `skills/` directories `/skills` and `/reload-skills` already
-        // read (`skill_api::load_file_skill_sections_with_roots`), rather than
-        // a Rust-side `SkillRegistry` — the composition root's registry is a
+        // Desktop Skills settings view (Task 7): re-scan the same tiers
+        // `/skills` and `/reload-skills` scan in this same running app
+        // (`skill_api::load_file_skill_sections_with_roots`), rather than a
+        // Rust-side `SkillRegistry` — the composition root's registry is a
         // residual empty instance with no turn-loop consumer, so it would
-        // report zero skills unconditionally. Falls back to `vec![]` when no
+        // report zero skills unconditionally.
+        //
+        // `managed_dir` mirrors the composition root's
+        // `SkillsHandler::with_all_roots(.., Some(managed_settings_dir()), ..)`
+        // (`apps/engine-desktop/src/lib.rs:3351-3354`) exactly — it is the
+        // SAME pure, env/platform-derived function (`traits::live_sessions::
+        // managed_settings_dir`), not a second computation; the loader
+        // treats a non-existent managed dir as an empty tier, so this is
+        // harmless when no managed policy is installed.
+        //
+        // `additional_skill_dirs` mirrors `DesktopRepoRootReloader::reload`'s
+        // `roots.iter().map(|r| r.join(DOT_DIR).join("skills"))`
+        // (`apps/engine-desktop/src/lib.rs:4967-4970`) — but reads the SAME
+        // live-mutable set that reload derives from, `self.session_cwd`'s
+        // trusted-directory list (grown by `/add-dir` via `register_repo_root`
+        // → `SessionCwd::add_trusted_dir`), instead of the composition root's
+        // separate `registered_roots` mirror. Falls back to `vec![]` when no
         // config home is wired, mirroring `list_mcp_servers`'s "no registry"
         // default.
         let Some(config_home) = self.config_home.as_ref() else {
             return Vec::new();
         };
-        skill_api::load_file_skill_sections_with_roots(&self.cwd, config_home, None, &[])
+        let managed_dir = traits::live_sessions::managed_settings_dir();
+        let additional_skill_dirs: Vec<PathBuf> = self
+            .session_cwd
+            .trusted_dirs()
             .into_iter()
-            .flat_map(|section| {
-                section.rows.into_iter().map(|row| SkillInfo {
-                    name: row.name,
-                    source_dir: row.source_dir,
-                    plugin: None,
-                })
+            .map(|root| root.join(branding::DOT_DIR).join("skills"))
+            .collect();
+        skill_api::load_file_skill_sections_with_roots(
+            &self.cwd,
+            config_home,
+            Some(&managed_dir),
+            &additional_skill_dirs,
+        )
+        .into_iter()
+        .flat_map(|section| {
+            section.rows.into_iter().map(|row| SkillInfo {
+                name: row.name,
+                source_dir: row.source_dir,
             })
-            .collect()
+        })
+        .collect()
     }
 
     async fn reconnect_mcp_servers(

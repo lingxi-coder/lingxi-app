@@ -874,7 +874,6 @@
   "SettingsDestinationDto::Project": "project",
   "SettingsDestinationDto::User": "user",
   "SkillDto.name": "String",
-  "SkillDto.plugin": "Option<String>",
   "SkillDto.source_dir": "String",
   "SlashCommandDto.aliases": "Vec<String>",
   "SlashCommandDto.argument_hint": "Option<String>",

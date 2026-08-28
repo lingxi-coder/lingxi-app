@@ -580,18 +580,19 @@ pub struct McpServerInfo {
 /// Skills are discovered from `skills/` directories, not configured
 /// key-by-key — this is a VIEW of what the loader found on disk, not an
 /// editable settings row.
+///
+/// Deliberately carries no `plugin` field: nothing on any LIVE path can
+/// populate one today (the file-based scan has no plugin provenance, and the
+/// only Rust-side thing that models plugins — the composition root's
+/// `SkillRegistry` — is a residual always-empty instance with no turn-loop
+/// consumer). Add the field back when a real producer exists; that is
+/// additive and needs no wire-version bump.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SkillInfo {
     /// Skill display name (matches its directory name, not frontmatter).
     pub name: String,
     /// The skill's own directory on disk (e.g. `<root>/skills/<name>`).
     pub source_dir: std::path::PathBuf,
-    /// Owning plugin name, when the skill was loaded via a plugin rather
-    /// than a directory scan. Always `None` on the current file-based
-    /// discovery path (`skill_api::load_file_skill_sections_with_roots`),
-    /// which carries no plugin provenance — this field exists so a future
-    /// plugin-sourced skill can report one without a wire change.
-    pub plugin: Option<String>,
 }
 
 /// Connection status for an MCP server in [`McpServerInfo`].
@@ -1994,9 +1995,11 @@ pub trait OrchestratorHandle: Send + Sync {
     /// servers are configured.
     async fn list_mcp_servers(&self) -> Vec<McpServerInfo>;
 
-    /// Enumerate skills discovered from `skills/` directories (project and
-    /// user tiers). Used by the desktop Skills settings view, which is a
-    /// view over what the loader found — not an editor — plus a reload
+    /// Enumerate skills discovered from `skills/` directories: project,
+    /// user, managed (org policy), and any `/add-dir`-registered additional
+    /// roots — the same tiers `/skills` and `/reload-skills` scan in this
+    /// same running app. Used by the desktop Skills settings view, which is
+    /// a view over what the loader found — not an editor — plus a reload
     /// action (`/reload-skills`, routed as an ordinary slash command; no
     /// dedicated command exists for reloading). Returns an empty vector when
     /// no config home is wired, mirroring `list_mcp_servers`'s "no registry"

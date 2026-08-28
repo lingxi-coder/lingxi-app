@@ -7,8 +7,7 @@
     },
     {
       "name": "pr-review",
-      "source_dir": "/repo/.lingxi/skills/pr-review",
-      "plugin": "code-review-toolkit"
+      "source_dir": "/repo/.lingxi/skills/pr-review"
     }
   ]
 }

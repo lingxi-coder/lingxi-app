@@ -1109,7 +1109,6 @@ async fn list_skills_routes() {
     handle.set_skills(vec![SkillInfo {
         name: "greet".into(),
         source_dir: std::path::PathBuf::from("/home/user/.lingxi/skills/greet"),
-        plugin: None,
     }]);
     let router = router_with(handle, Arc::new(MockTaskRegistry { rows: vec![] }));
     let sink = CapturingSink::arc();
@@ -1130,7 +1129,6 @@ async fn list_skills_routes() {
             assert_eq!(skills.len(), 1);
             assert_eq!(skills[0].name, "greet");
             assert_eq!(skills[0].source_dir, "/home/user/.lingxi/skills/greet");
-            assert_eq!(skills[0].plugin, None);
         }
         other => panic!("expected Skills, got {other:?}"),
     }

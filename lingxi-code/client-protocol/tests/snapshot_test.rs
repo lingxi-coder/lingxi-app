@@ -506,12 +506,10 @@ fn event_goldens() -> Vec<(&'static str, ClientEvent)> {
                     SkillDto {
                         name: "greet".to_string(),
                         source_dir: "/home/user/.lingxi/skills/greet".to_string(),
-                        plugin: None,
                     },
                     SkillDto {
                         name: "pr-review".to_string(),
                         source_dir: "/repo/.lingxi/skills/pr-review".to_string(),
-                        plugin: Some("code-review-toolkit".to_string()),
                     },
                 ],
             },

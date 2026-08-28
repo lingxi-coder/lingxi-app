@@ -233,6 +233,10 @@ pub enum McpStatusDto {
 /// Skills are directory-discovered, not configured key-by-key: there is no
 /// per-skill enable/disable wire shape, only this listing plus the
 /// `reload-skills` slash command to re-scan disk.
+///
+/// Deliberately carries no `plugin` field: nothing on any live discovery
+/// path can populate one today. Add it back additively when a real producer
+/// exists.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 pub struct SkillDto {
@@ -240,9 +244,6 @@ pub struct SkillDto {
     pub name: String,
     /// The skill's own directory on disk, as a display string.
     pub source_dir: String,
-    /// Owning plugin name, when known. Skipped from the wire when absent.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub plugin: Option<String>,
 }
 
 // ── Hooks ────────────────────────────────────────────────────────────────────

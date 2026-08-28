@@ -332,7 +332,6 @@ pub fn lower_skill_info(info: &SkillInfo) -> SkillDto {
     SkillDto {
         name: info.name.clone(),
         source_dir: info.source_dir.to_string_lossy().into_owned(),
-        plugin: info.plugin.clone(),
     }
 }
 

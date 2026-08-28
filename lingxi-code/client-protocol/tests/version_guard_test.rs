@@ -1325,7 +1325,6 @@ fn current_contract_index() -> ContractIndex {
 
     put("SkillDto.name", "String");
     put("SkillDto.source_dir", "String");
-    put("SkillDto.plugin", "Option<String>");
 
     put("McpStatusDto::Connected", "connected");
     put("McpStatusDto::Disconnected", "disconnected");
@@ -2487,7 +2486,6 @@ fn contract_index_covers_every_dto() {
         SkillDto {
             name: String::new(),
             source_dir: String::new(),
-            plugin: None,
         },
         HookDto {
             name: String::new(),

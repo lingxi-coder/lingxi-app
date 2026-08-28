@@ -103,6 +103,10 @@ http = "1"
 once_cell = "1"
 # S2: deterministic sandbox dirs for the boot/assembly + end-to-end serve tests.
 tempfile = "3"
+# mcp_bridge tests confirm the REAL `mcp/src/json_config.rs` parser accepts
+# what the writer produced, not just that this crate's own reader agrees with
+# its own writer. Dev-only: production mcp_bridge.rs never calls into `mcp`.
+mcp = { path = "../../mcp" }
 
 [lints]
 workspace = true

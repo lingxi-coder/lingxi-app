@@ -77,7 +77,7 @@ use client_adapter::lowering::{
 };
 use client_adapter::ClientEventSink;
 use client_protocol::commands::{
-    ClientCommand, ListingKindDto, PermissionBehaviorDto, SettingsDestinationDto,
+    ClientCommand, ListingKindDto, McpScopeDto, PermissionBehaviorDto, SettingsDestinationDto,
 };
 use client_protocol::controls::{
     ConversationControlsDto, ReasoningControlStateDto, ReasoningSelectionDto,
@@ -94,6 +94,7 @@ use traits::orchestrator::OrchestratorHandle;
 use traits::task_registry::{TaskListFilter, TaskRegistryHandle};
 use traits::SlashCommandDispatcher;
 
+use crate::mcp_bridge::McpPaths;
 use crate::settings_bridge::{
     apply_patch, build_snapshot, lower_snapshot, permission_destination, permission_paths,
     permission_rule_from_wire, SettingsContext,
@@ -202,6 +203,12 @@ pub struct EngineCommandRouter {
     /// users of the routing seam may omit it, in which case the listing
     /// reports the missing context rather than emitting nothing.
     settings: Option<SettingsContext>,
+    /// Optional MCP-scope roots backing `UpsertMcpServer` / `RemoveMcpServer`.
+    /// Production boot wires it from the SAME `.mcp.json` / global-config
+    /// paths `engine_desktop` resolves the read-side registry from;
+    /// lightweight users of the routing seam may omit it, in which case the
+    /// two commands report the missing context rather than doing nothing.
+    mcp: Option<McpPaths>,
     /// Set while a turn is in flight — `ClearSession` is rejected in this window
     /// (plan §2 mid-turn semantics).
     turn_active: AtomicBool,
@@ -235,6 +242,7 @@ impl EngineCommandRouter {
             session_store: None,
             credentials: None,
             settings: None,
+            mcp: None,
             turn_active: AtomicBool::new(false),
         }
     }
@@ -261,6 +269,18 @@ impl EngineCommandRouter {
     #[must_use]
     pub fn with_settings_context(mut self, settings: SettingsContext) -> Self {
         self.settings = Some(settings);
+        self
+    }
+
+    /// Attach the MCP-scope roots the `UpsertMcpServer` / `RemoveMcpServer`
+    /// commands write through. The composition root supplies the SAME
+    /// project directory and global-config path the read-side registry was
+    /// loaded from (`resolve_desktop_config`'s `project_mcp_path` /
+    /// `global_mcp_path`), so a write always lands where the next reload
+    /// would look for it.
+    #[must_use]
+    pub fn with_mcp_paths(mut self, mcp: McpPaths) -> Self {
+        self.mcp = Some(mcp);
         self
     }
 
@@ -604,6 +624,82 @@ impl EngineCommandRouter {
                 message: "no workspace directory changed: `add`/`remove` were empty, or every \
                           entry already matched the file"
                     .to_string(),
+            })
+            .await;
+        }
+    }
+
+    /// Route [`ClientCommand::UpsertMcpServer`] to `mcp_bridge::upsert_server`.
+    /// `config_json` is decoded and validated as a JSON object HERE (a
+    /// malformed client payload is [`ErrorKindDto::Protocol`], matching
+    /// [`apply_settings_patch`](Self::apply_settings_patch)'s
+    /// `patch_json` handling); a write that fails once the shape is valid
+    /// (broken destination file, non-object `mcpServers`, legacy bare-map
+    /// `.mcp.json`, I/O failure) is [`ErrorKindDto::Internal`], matching every
+    /// other write-failure path in this router. There is no dedicated success
+    /// event — the desktop already has the wired `RefreshListings{Mcp}` path
+    /// to observe the change (decision: adding a parallel listing here would
+    /// duplicate that path, and the live `McpRegistry` snapshot it reads is
+    /// not reloaded from disk by a bare file write, so re-emitting it here
+    /// would not even show the new value).
+    async fn apply_mcp_upsert(
+        &self,
+        scope: McpScopeDto,
+        name: &str,
+        config_json: &str,
+        sink: &dyn ClientEventSink,
+    ) {
+        let Some(mcp) = self.mcp.as_ref() else {
+            sink.emit(ClientEvent::Error {
+                kind: ErrorKindDto::Internal,
+                message: "MCP server update unavailable: this connection was built without an \
+                          MCP context"
+                    .to_string(),
+            })
+            .await;
+            return;
+        };
+
+        let config = match parse_mcp_config_json(config_json) {
+            Ok(config) => config,
+            Err(message) => {
+                sink.emit(ClientEvent::Error {
+                    kind: ErrorKindDto::Protocol,
+                    message,
+                })
+                .await;
+                return;
+            }
+        };
+
+        if let Err(message) = crate::mcp_bridge::upsert_server(mcp, scope, name, config) {
+            sink.emit(ClientEvent::Error {
+                kind: ErrorKindDto::Internal,
+                message,
+            })
+            .await;
+        }
+    }
+
+    /// Route [`ClientCommand::RemoveMcpServer`] to `mcp_bridge::remove_server`.
+    /// Same context/error-kind shape as [`Self::apply_mcp_upsert`], minus the
+    /// `config_json` decode (there is nothing to parse for a removal).
+    async fn apply_mcp_remove(&self, scope: McpScopeDto, name: &str, sink: &dyn ClientEventSink) {
+        let Some(mcp) = self.mcp.as_ref() else {
+            sink.emit(ClientEvent::Error {
+                kind: ErrorKindDto::Internal,
+                message: "MCP server update unavailable: this connection was built without an \
+                          MCP context"
+                    .to_string(),
+            })
+            .await;
+            return;
+        };
+
+        if let Err(message) = crate::mcp_bridge::remove_server(mcp, scope, name) {
+            sink.emit(ClientEvent::Error {
+                kind: ErrorKindDto::Internal,
+                message,
             })
             .await;
         }
@@ -1320,6 +1416,19 @@ impl CommandRouter for EngineCommandRouter {
                     .await;
             }
 
+            // ── MCP servers (persisted) ──────────────────────────────────────
+            ClientCommand::UpsertMcpServer {
+                scope,
+                name,
+                config_json,
+            } => {
+                self.apply_mcp_upsert(scope, &name, &config_json, &*sink)
+                    .await;
+            }
+            ClientCommand::RemoveMcpServer { scope, name } => {
+                self.apply_mcp_remove(scope, &name, &*sink).await;
+            }
+
             // ── Auth ───────────────────────────────────────────────────────
             ClientCommand::Login => {
                 let state = match self.auth.login().await {
@@ -1802,6 +1911,55 @@ mod settings_patch_parsing_tests {
         assert!(
             err.contains("JSON"),
             "error must say the patch is not valid JSON, got: {err}"
+        );
+    }
+}
+
+/// Decode a `ClientCommand::UpsertMcpServer.config_json` wire string into the
+/// `serde_json::Value` [`crate::mcp_bridge::upsert_server`] expects. Mirrors
+/// [`parse_settings_patch`]'s object-shape validation: `config_json` must be
+/// a JSON object (a `.mcp.json` entry is always `{command: ...}` or
+/// `{url: ...}` shaped — never a bare string/array/number).
+///
+/// # Errors
+/// `config_json` is not valid JSON, or it parses to something other than a
+/// JSON object.
+fn parse_mcp_config_json(config_json: &str) -> Result<serde_json::Value, String> {
+    match serde_json::from_str::<serde_json::Value>(config_json) {
+        Ok(value @ serde_json::Value::Object(_)) => Ok(value),
+        Ok(other) => Err(format!(
+            "MCP server config must be a JSON object, got: {other}"
+        )),
+        Err(e) => Err(format!("MCP server config is not valid JSON: {e}")),
+    }
+}
+
+#[cfg(test)]
+mod mcp_config_json_parsing_tests {
+    use super::parse_mcp_config_json;
+    use serde_json::json;
+
+    #[test]
+    fn a_json_object_decodes_to_itself() {
+        let value = parse_mcp_config_json(r#"{"command": "npx"}"#).unwrap();
+        assert_eq!(value, json!({ "command": "npx" }));
+    }
+
+    #[test]
+    fn a_non_object_is_rejected() {
+        let err = parse_mcp_config_json(r#"["npx"]"#).unwrap_err();
+        assert!(
+            err.contains("object"),
+            "error must say the config needs to be an object, got: {err}"
+        );
+    }
+
+    #[test]
+    fn invalid_json_is_rejected() {
+        let err = parse_mcp_config_json("{ not json").unwrap_err();
+        assert!(
+            err.contains("JSON"),
+            "error must say the config is not valid JSON, got: {err}"
         );
     }
 }

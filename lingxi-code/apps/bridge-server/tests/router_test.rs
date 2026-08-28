@@ -33,12 +33,13 @@ use std::time::Duration;
 use async_trait::async_trait;
 use bridge::wire::Frame;
 use bridge::{BridgeRequest, Capabilities, ClientHello, McpEndpoint, BRIDGE_PROTOCOL_VERSION};
+use bridge_server::mcp_bridge::McpPaths;
 use bridge_server::router::{CommandRouter, EngineCommandRouter, SessionStoreContext};
 use bridge_server::server::BridgeConnection;
 use bridge_server::settings_bridge::{SettingsContext, SettingsPaths};
 use client_adapter::{AdapterPermissionGate, ClientEventSink, PermissionRequestSink};
 use client_protocol::commands::{
-    ClientCommand, ListingKindDto, PermissionBehaviorDto, ProviderCredentialSecretDto,
+    ClientCommand, ListingKindDto, McpScopeDto, PermissionBehaviorDto, ProviderCredentialSecretDto,
     SettingsDestinationDto,
 };
 use client_protocol::events::{ClientEvent, ErrorKindDto};
@@ -2902,4 +2903,163 @@ async fn update_workspace_directories_reports_a_missing_context_instead_of_stayi
         message.contains("settings context"),
         "the error must name what is missing, got: {message}"
     );
+}
+
+// ── MCP server writes ─────────────────────────────────────────────────────────
+//
+// `mcp_bridge`'s own unit tests (in `apps/bridge-server/src/mcp_bridge.rs`)
+// already cover the scope-to-storage-location mapping across all three
+// scopes against the real `mcp::json_config` parser. What is genuinely new
+// HERE — the router's translation from the wire (`config_json` string,
+// missing-context handling, error-kind selection) into that call — gets its
+// own coverage below, the same way `update_settings_*` covers
+// `apply_settings_patch` end-to-end rather than trusting the unit-tested
+// `parse_settings_patch` decode step alone.
+
+/// Build a router carrying an MCP context, over the same mock engine handles
+/// every other routing test uses.
+fn router_with_mcp(mcp: McpPaths) -> EngineCommandRouter {
+    router_with(
+        Arc::new(MockOrchestratorHandle::new()),
+        Arc::new(MockTaskRegistry { rows: vec![] }),
+    )
+    .with_mcp_paths(mcp)
+}
+
+/// End-to-end: `UpsertMcpServer` routed through a real MCP context actually
+/// lands on disk at `<project>/.mcp.json`, and a second `RemoveMcpServer`
+/// deletes it — mirroring `update_settings_with_a_null_value_deletes_the_key_on_disk`'s
+/// "assert on disk, not on an intermediate value" shape.
+#[tokio::test]
+async fn upsert_then_remove_mcp_server_round_trips_through_the_router() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = dir.path().join("repo");
+    std::fs::create_dir_all(&project).unwrap();
+    let router = router_with_mcp(McpPaths {
+        project_dir: project.clone(),
+        global_config_path: dir.path().join(".lingxi.json"),
+    });
+    let sink = CapturingSink::arc();
+
+    router
+        .route(
+            ClientCommand::UpsertMcpServer {
+                scope: McpScopeDto::Project,
+                name: "linear".to_string(),
+                config_json: r#"{"command":"npx","args":["-y","linear-mcp"]}"#.to_string(),
+            },
+            sink.clone(),
+        )
+        .await;
+
+    let events = sink.events().await;
+    assert!(
+        !events.iter().any(|e| matches!(e, ClientEvent::Error { .. })),
+        "a successful upsert must not emit an Error, got {events:?}"
+    );
+    let raw = std::fs::read_to_string(project.join(".mcp.json")).unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    assert_eq!(parsed["mcpServers"]["linear"]["command"], "npx");
+
+    router
+        .route(
+            ClientCommand::RemoveMcpServer {
+                scope: McpScopeDto::Project,
+                name: "linear".to_string(),
+            },
+            sink.clone(),
+        )
+        .await;
+
+    let raw = std::fs::read_to_string(project.join(".mcp.json")).unwrap();
+    let after: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    assert!(
+        after["mcpServers"].get("linear").is_none(),
+        "removal routed through the router must delete the entry, got: {after}"
+    );
+}
+
+/// A `config_json` that is syntactically valid JSON but not an OBJECT
+/// (`.mcp.json` entries are always object-shaped) must be rejected as a
+/// PROTOCOL violation — the router's own decode step, not `mcp_bridge`'s
+/// file-safety checks.
+#[tokio::test]
+async fn upsert_mcp_server_rejects_a_non_object_config_with_protocol_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let router = router_with_mcp(McpPaths {
+        project_dir: dir.path().to_path_buf(),
+        global_config_path: dir.path().join(".lingxi.json"),
+    });
+    let sink = CapturingSink::arc();
+
+    router
+        .route(
+            ClientCommand::UpsertMcpServer {
+                scope: McpScopeDto::Project,
+                name: "linear".to_string(),
+                config_json: r#"["npx"]"#.to_string(),
+            },
+            sink.clone(),
+        )
+        .await;
+
+    let events = sink.events().await;
+    let (kind, message) = events
+        .iter()
+        .find_map(|e| match e {
+            ClientEvent::Error { kind, message } => Some((kind.clone(), message.clone())),
+            _ => None,
+        })
+        .expect("a non-object config must be reported, not swallowed");
+    assert_eq!(
+        kind,
+        ErrorKindDto::Protocol,
+        "a malformed wire config is a protocol violation, not an internal failure"
+    );
+    assert!(
+        message.contains("object"),
+        "the message must say what shape was expected, got: {message}"
+    );
+    assert!(
+        !dir.path().join(".mcp.json").exists(),
+        "a rejected config must never create the target file"
+    );
+}
+
+/// Without an MCP context, both commands must say so rather than silently
+/// doing nothing — the same contract `apply_settings_patch` /
+/// `require_permission_paths` already hold for their own missing-context case.
+#[tokio::test]
+async fn mcp_commands_report_a_missing_context_instead_of_staying_silent() {
+    let router = router_with(
+        Arc::new(MockOrchestratorHandle::new()),
+        Arc::new(MockTaskRegistry { rows: vec![] }),
+    );
+
+    for command in [
+        ClientCommand::UpsertMcpServer {
+            scope: McpScopeDto::Project,
+            name: "x".to_string(),
+            config_json: r#"{"command":"x"}"#.to_string(),
+        },
+        ClientCommand::RemoveMcpServer {
+            scope: McpScopeDto::Project,
+            name: "x".to_string(),
+        },
+    ] {
+        let sink = CapturingSink::arc();
+        router.route(command, sink.clone()).await;
+        let events = sink.events().await;
+        let message = events
+            .iter()
+            .find_map(|e| match e {
+                ClientEvent::Error { message, .. } => Some(message.clone()),
+                _ => None,
+            })
+            .expect("a missing MCP context must be reported, not swallowed");
+        assert!(
+            message.contains("MCP context"),
+            "the error must name what is missing, got: {message}"
+        );
+    }
 }

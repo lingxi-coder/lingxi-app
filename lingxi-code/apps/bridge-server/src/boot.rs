@@ -41,6 +41,7 @@ use platform_posix::PosixFileSystem;
 use traits::{OrchestratorHandle, OutputStream, SlashCommandDispatcher};
 
 use crate::driver::{CredentialRequiredTurnDriver, OrchestratorTurnDriver};
+use crate::mcp_bridge::McpPaths;
 use crate::router::{EngineCommandRouter, SessionStoreContext};
 use crate::server::{BridgeConnection, TurnDriver};
 use crate::settings_bridge::{build_snapshot, SettingsContext, SettingsPaths};
@@ -803,6 +804,21 @@ pub async fn assemble_with_provider_keys(
         }
     };
 
+    // The MCP write-side roots, captured from `cfg` before it moves into the
+    // desktop composition root below — same pattern as `settings_context`
+    // above. `global_config_path` is resolved the SAME way
+    // `resolve_desktop_config`'s `global_mcp_path` is (rather than being
+    // derived from `cfg.mcp_paths`, which the trust gate can null out): the
+    // desktop's OWN edit to `~/.lingxi.json` is a deliberate user action, not
+    // an automatic load of workspace-supplied config, so it always targets
+    // the real file regardless of whether THIS workspace is currently
+    // trusted to auto-load a repo-supplied `.mcp.json`.
+    let mcp_paths = McpPaths {
+        project_dir: cfg.cwd.clone(),
+        global_config_path: migrations::global_config::global_config_path()
+            .unwrap_or_else(|| PathBuf::from("/dev/null")),
+    };
+
     // The orchestrator's output stream + the gate's request sink BOTH ride the
     // same connection-scoped outbound channel (the F2-06 contract).
     let event_sink = connection.event_sink();
@@ -937,7 +953,8 @@ pub async fn assemble_with_provider_keys(
         )
         .with_credentials(runtime.credentials.clone())
         .with_session_store(session_store)
-        .with_settings_context(settings_context),
+        .with_settings_context(settings_context)
+        .with_mcp_paths(mcp_paths),
     );
 
     let connection = connection

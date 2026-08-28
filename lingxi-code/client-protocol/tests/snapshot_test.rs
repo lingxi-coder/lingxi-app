@@ -40,8 +40,8 @@ use std::path::{Path, PathBuf};
 
 use client_protocol::ask_user_question::{AskOptionDto, AskQuestionDto, AskUserQuestionRequestDto};
 use client_protocol::commands::{
-    AppCreateModeDto, ClientCommand, ImageRefDto, ListingKindDto, PermissionBehaviorDto,
-    PromptModeDto, ProviderCredentialSecretDto, SettingsDestinationDto,
+    AppCreateModeDto, ClientCommand, ImageRefDto, ListingKindDto, McpScopeDto,
+    PermissionBehaviorDto, PromptModeDto, ProviderCredentialSecretDto, SettingsDestinationDto,
 };
 use client_protocol::computer_access::{
     AccessTierDto, ComputerAccessRequestDto, ComputerAccessResponseDto, RequestedAppDto,
@@ -1289,6 +1289,21 @@ fn command_goldens() -> Vec<(&'static str, ClientCommand)> {
                 destination: SettingsDestinationDto::Local,
                 add: vec!["/tmp/extra".to_string()],
                 remove: vec![],
+            },
+        ),
+        (
+            "command/upsert_mcp_server.json",
+            ClientCommand::UpsertMcpServer {
+                scope: McpScopeDto::Project,
+                name: "linear".to_string(),
+                config_json: r#"{"command":"npx","args":["-y","linear-mcp"]}"#.to_string(),
+            },
+        ),
+        (
+            "command/remove_mcp_server.json",
+            ClientCommand::RemoveMcpServer {
+                scope: McpScopeDto::User,
+                name: "linear".to_string(),
             },
         ),
     ]

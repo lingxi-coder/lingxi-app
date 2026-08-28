@@ -908,6 +908,20 @@ fn current_contract_index() -> ContractIndex {
         "Vec<String>",
     );
 
+    put("ClientCommand::UpsertMcpServer", "upsert_mcp_server");
+    put("ClientCommand::UpsertMcpServer.scope", "McpScopeDto");
+    put("ClientCommand::UpsertMcpServer.name", "String");
+    put("ClientCommand::UpsertMcpServer.config_json", "String");
+
+    put("ClientCommand::RemoveMcpServer", "remove_mcp_server");
+    put("ClientCommand::RemoveMcpServer.scope", "McpScopeDto");
+    put("ClientCommand::RemoveMcpServer.name", "String");
+
+    // ── McpScopeDto (commands.rs) ─────────────────────────────────────────
+    put("McpScopeDto::User", "user");
+    put("McpScopeDto::Local", "local");
+    put("McpScopeDto::Project", "project");
+
     // ── PromptModeDto (commands.rs) ───────────────────────────────────────
     put("PromptModeDto::Normal", "normal");
     put("PromptModeDto::Bash", "bash");
@@ -2138,7 +2152,8 @@ fn current_contract_matches_index_or_version_bumped() {
 fn contract_index_covers_every_dto() {
     use client_protocol::commands::{
         AppCreateModeDto, ClientCommand, CommandResultDto, ImageRefDto, ListingKindDto,
-        PermissionBehaviorDto, PromptModeDto, ProviderCredentialSecretDto, SettingsDestinationDto,
+        McpScopeDto, PermissionBehaviorDto, PromptModeDto, ProviderCredentialSecretDto,
+        SettingsDestinationDto,
     };
     use client_protocol::computer_access::{
         AccessTierDto, ComputerAccessRequestDto, ComputerAccessResponseDto, RequestedAppDto,
@@ -2385,7 +2400,17 @@ fn contract_index_covers_every_dto() {
             add: Vec::new(),
             remove: Vec::new(),
         },
+        ClientCommand::UpsertMcpServer {
+            scope: McpScopeDto::Project,
+            name: String::new(),
+            config_json: String::new(),
+        },
+        ClientCommand::RemoveMcpServer {
+            scope: McpScopeDto::Project,
+            name: String::new(),
+        },
     ];
+    let _mcp_scope = McpScopeDto::User;
     let _settings_destination = SettingsDestinationDto::User;
     let _permission_behavior = PermissionBehaviorDto::Allow;
     let _recovery_state = TurnRecoveryStateDto::PausedRecoverable;

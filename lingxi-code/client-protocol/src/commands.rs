@@ -674,6 +674,62 @@ pub enum ClientCommand {
         /// Directory strings to remove, compared verbatim against the file.
         remove: Vec<String>,
     },
+
+    // ── MCP servers (persisted) ──────────────────────────────────────────
+    // MCP does NOT use the settings-layer machinery above: it has its own
+    // three storage locations (`bridge-server::mcp_bridge`) —
+    // User/Local both live inside `~/.lingxi.json` (top-level `mcpServers`,
+    // and `projects[<cwd>].mcpServers`, respectively), Project lives in
+    // `<project>/.mcp.json`. Read access is already wired through
+    // `RefreshListings{Mcp}` → `ClientEvent::McpServers`; these two commands
+    // are the write side only.
+    /// Add or replace one MCP server definition in one writable scope.
+    /// `config_json` is a JSON **object** shaped like a `.mcp.json` entry
+    /// (`{"command": ..., "args": [...], "env": {...}}` or
+    /// `{"url": ..., "type": ...}`); `serde_json::Value` must not enter this
+    /// crate (decision §0.4), so the config travels as a string exactly the
+    /// way [`Self::UpdateSettings::patch_json`] does — the receiving end
+    /// (`bridge-server::mcp_bridge`) parses and validates it.
+    UpsertMcpServer {
+        /// Which writable MCP scope to edit.
+        scope: McpScopeDto,
+        /// Server name (the `mcpServers` map key).
+        name: String,
+        /// A JSON object holding the server's transport config.
+        config_json: String,
+    },
+
+    /// Remove one MCP server definition from one writable scope. Idempotent:
+    /// removing an already-absent name is not an error.
+    RemoveMcpServer {
+        /// Which writable MCP scope to edit.
+        scope: McpScopeDto,
+        /// Server name (the `mcpServers` map key) to remove.
+        name: String,
+    },
+}
+
+/// A writable MCP server-definition scope, as named on the wire. Deliberately
+/// narrower than `mcp::ConfigScope`'s full set (which also has `Dynamic`
+/// (plugins) and `Enterprise` (managed policy)): those are READ-ONLY —
+/// nothing user-initiated ever writes them — so this enum omits them rather
+/// than accepting them and rejecting at runtime.
+///
+/// - `User` → `~/.lingxi.json`, top-level `mcpServers`.
+/// - `Local` → `~/.lingxi.json`, under `projects[<cwd>].mcpServers`.
+/// - `Project` → `<project>/.mcp.json`.
+///
+/// A bare wire STRING (`"user"` / `"local"` / `"project"`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
+#[serde(rename_all = "snake_case")]
+pub enum McpScopeDto {
+    /// `~/.lingxi.json`, top-level `mcpServers`.
+    User,
+    /// `~/.lingxi.json`, `projects[<cwd>].mcpServers`.
+    Local,
+    /// `<project>/.mcp.json`.
+    Project,
 }
 
 /// A writable settings layer, as named on the wire. Deliberately narrower

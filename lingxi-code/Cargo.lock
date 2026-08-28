@@ -802,6 +802,7 @@ dependencies = [
  "engine-desktop",
  "futures-util",
  "http",
+ "mcp",
  "migrations",
  "msgqueue",
  "once_cell",

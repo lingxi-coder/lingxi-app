@@ -1,6 +1,5 @@
 import type {
   AskUserQuestionRequestDto,
-  ClientCommand,
   ClientEvent,
   ComputerAccessRequestDto,
   ComputerAccessResponseDto,
@@ -9,6 +8,9 @@ import type {
   PermissionResponseDto,
   SessionRowDto,
 } from '@lingxi/bridge-client';
+import type { AllowedClientCommand } from '../../shared/clientCommands.js';
+
+export type { AllowedClientCommand } from '../../shared/clientCommands.js';
 
 export type ConnectionState =
   | { status: 'idle' }
@@ -19,11 +21,6 @@ export type ConnectionState =
   | { status: 'disconnected'; reason?: string }
   | { status: 'error'; message: string };
 
-export type AllowedClientCommand = Extract<ClientCommand, {
-  type: 'set_model' | 'list_models' | 'new_session' | 'resume_session' | 'list_sessions' |
-    'task_list' | 'task_output' | 'task_stop' | 'set_permission_mode' | 'run_slash_command' |
-    'get_conversation_controls' | 'set_reasoning_selection' | 'set_fast_mode';
-}> | { type: 'refresh_listings'; which: Array<{ type: 'status' | 'doctor' | 'slash_commands' }> };
 export interface PublicSettings {
   version: 1;
   theme?: 'dark' | 'light';

@@ -86,6 +86,7 @@ export type ListingKindDto =
   | { type: 'sessions' }
   | { type: 'models' }
   | { type: 'mcp' }
+  | { type: 'skills' }
   | { type: 'hooks' }
   | { type: 'agents' }
   | { type: 'slash_commands' }
@@ -95,6 +96,28 @@ export type ListingKindDto =
   | { type: 'auth' }
   | { type: 'doctor' }
   | { type: 'tasks' };
+
+/**
+ * A writable settings layer, as named on the wire (commands.rs
+ * `SettingsDestinationDto`). Deliberately narrower than the engine's full
+ * `SettingsLayer` (which also has `defaults`/`cli`/`managed`/`env`): those
+ * layers cannot be user-written. A bare wire string.
+ */
+export type SettingsDestinationDto = 'user' | 'project' | 'local';
+
+/**
+ * The behavior bucket a permission rule belongs to
+ * (`permissions.{allow,deny,ask}`), as named on the wire (commands.rs
+ * `PermissionBehaviorDto`). A bare wire string.
+ */
+export type PermissionBehaviorDto = 'allow' | 'deny' | 'ask';
+
+/**
+ * A writable MCP server-definition scope, as named on the wire (commands.rs
+ * `McpScopeDto`). Deliberately narrower than the full `ConfigScope` (which
+ * also has read-only `dynamic`/`enterprise`). A bare wire string.
+ */
+export type McpScopeDto = 'user' | 'local' | 'project';
 
 /**
  * The inbound command envelope a client sends to the engine
@@ -225,7 +248,27 @@ export type ClientCommand =
   | { type: 'restore_app_checkpoint'; app_id: string; checkpoint_id: string }
   | { type: 'delete_app'; app_id: string }
   // ── Lifecycle ───────────────────────────────────────────────────────────────
-  | { type: 'request_exit' };
+  | { type: 'request_exit' }
+  // ── Settings (persisted) ─────────────────────────────────────────────────────
+  | { type: 'update_settings'; destination: SettingsDestinationDto; patch_json: string }
+  // ── Permissions (persisted) ──────────────────────────────────────────────────
+  | {
+      type: 'update_permission_rules';
+      destination: SettingsDestinationDto;
+      behavior: PermissionBehaviorDto;
+      add: string[];
+      remove: string[];
+    }
+  | { type: 'set_default_permission_mode'; destination: SettingsDestinationDto; mode: string }
+  | {
+      type: 'update_workspace_directories';
+      destination: SettingsDestinationDto;
+      add: string[];
+      remove: string[];
+    }
+  // ── MCP servers (persisted) ──────────────────────────────────────────────────
+  | { type: 'upsert_mcp_server'; scope: McpScopeDto; name: string; config_json: string }
+  | { type: 'remove_mcp_server'; scope: McpScopeDto; name: string };
 
 // ─────────────────────────────────────────────────────────────────────────────
 // tool_display.rs — the pre-derived render model for one tool call
@@ -1498,7 +1541,28 @@ export type ClientEvent =
   | { type: 'slash_command_result'; turn_id?: number; display: string; is_error?: boolean }
   | { type: 'memory_entries'; entries: MemoryEntryDto[] }
   | { type: 'status_snapshot'; snapshot: StatusSnapshotDto }
-  | { type: 'settings_snapshot'; effective_json: string; provenance_json: string }
+  | {
+      type: 'settings_snapshot';
+      effective_json: string;
+      provenance_json: string;
+      /**
+       * `[{layer, path, exists, parsed, parse_error?}]` — the on-disk state
+       * of every settings file layer, so the UI can show which file backs a
+       * layer and whether it parsed. `parsed` reports JSON validity only; it
+       * says nothing about OS write permission.
+       */
+      files_json?: string;
+      /**
+       * `{key: value}` — the FILE-LAYER values as read at session start. NOT
+       * the session's live configuration: no `cli`/`managed`/`env` overlay is
+       * applied, so this can differ from `effective_json` both because of an
+       * on-disk edit not yet picked up and because `effective_json` carries
+       * the managed overlay that this field does not.
+       */
+      active_json?: string;
+      /** Top-level keys the managed layer locks; editable elsewhere is refused. */
+      locked?: string[];
+    }
   | { type: 'auth_state'; state: AuthStateDto }
   | { type: 'doctor_report'; report: DoctorReportDto }
   | { type: 'task_row'; task: TaskRowDto }

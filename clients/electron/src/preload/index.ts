@@ -1,7 +1,6 @@
 import { contextBridge, ipcRenderer, type IpcRendererEvent } from 'electron';
 import type {
   AskUserQuestionRequestDto,
-  ClientCommand,
   ClientEvent,
   ComputerAccessRequestDto,
   ComputerAccessResponseDto,
@@ -11,6 +10,9 @@ import type {
   SessionRowDto,
 } from '@lingxi/bridge-client';
 import { createRuntimeEventReplayBuffer, type SequencedRuntimeEventEnvelope } from './event-replay.js';
+import type { AllowedClientCommand } from '../shared/clientCommands.js';
+
+export type { AllowedClientCommand } from '../shared/clientCommands.js';
 
 const CH_SEND_PROMPT = 'lingxi:sendPrompt';
 const CH_APPROVE = 'lingxi:approve';
@@ -56,11 +58,6 @@ export type ConnectionState =
   | { status: 'connected' }
   | { status: 'disconnected'; reason?: string }
   | { status: 'error'; message: string };
-
-export type AllowedClientCommand = Extract<ClientCommand, {
-  type: 'set_model' | 'list_models' | 'new_session' | 'resume_session' | 'list_sessions' |
-    'task_list' | 'task_output' | 'task_stop' | 'set_permission_mode' | 'run_slash_command';
-}> | { type: 'refresh_listings'; which: Array<{ type: 'status' | 'doctor' | 'slash_commands' }> };
 
 export interface PublicSettings {
   version: 1;

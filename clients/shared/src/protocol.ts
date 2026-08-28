@@ -723,6 +723,14 @@ export interface McpServerDto {
   transport: string;
 }
 
+/** One discovered skill entry (listings.rs `SkillDto`). */
+export interface SkillDto {
+  /** Skill display name (matches its directory name, not frontmatter). */
+  name: string;
+  /** The skill's own directory on disk, as a display string. */
+  source_dir: string;
+}
+
 /** One hook entry (listings.rs `HookDto`). */
 export interface HookDto {
   name: string;
@@ -1535,6 +1543,7 @@ export type ClientEvent =
       error?: string;
     }
   | { type: 'mcp_servers'; servers: McpServerDto[] }
+  | { type: 'skills'; skills: SkillDto[] }
   | { type: 'hooks'; hooks: HookDto[] }
   | { type: 'agents'; agents: AgentDto[] }
   | { type: 'slash_command_catalog'; commands: SlashCommandDto[] }

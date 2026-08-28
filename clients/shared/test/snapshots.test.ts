@@ -83,6 +83,7 @@ function validateListingKind(v: unknown): void {
       'sessions',
       'models',
       'mcp',
+      'skills',
       'hooks',
       'agents',
       'slash_commands',
@@ -99,6 +100,23 @@ function validateListingKind(v: unknown): void {
 function validatePermissionResponse(v: unknown): void {
   const o = rec(v);
   assert.ok(['allow_once', 'allow_always', 'deny'].includes(o['type'] as string));
+}
+
+function validateSettingsDestination(v: unknown): void {
+  assert.ok(['user', 'project', 'local'].includes(v as string), `unknown SettingsDestinationDto "${String(v)}"`);
+}
+
+function validatePermissionBehavior(v: unknown): void {
+  assert.ok(['allow', 'deny', 'ask'].includes(v as string), `unknown PermissionBehaviorDto "${String(v)}"`);
+}
+
+function validateMcpScope(v: unknown): void {
+  assert.ok(['user', 'local', 'project'].includes(v as string), `unknown McpScopeDto "${String(v)}"`);
+}
+
+function validateStringArray(v: unknown): void {
+  assert.ok(Array.isArray(v));
+  for (const item of v as unknown[]) assert.ok(isString(item));
 }
 
 function validateTaskStatus(v: unknown): void {
@@ -1024,6 +1042,33 @@ function validateCommand(name: string, v: unknown): void {
     case 'restore_app_checkpoint':
       assert.ok(isString(o['app_id']) && isString(o['checkpoint_id']));
       break;
+    case 'update_settings':
+      validateSettingsDestination(o['destination']);
+      assert.ok(isString(o['patch_json']));
+      break;
+    case 'update_permission_rules':
+      validateSettingsDestination(o['destination']);
+      validatePermissionBehavior(o['behavior']);
+      validateStringArray(o['add']);
+      validateStringArray(o['remove']);
+      break;
+    case 'set_default_permission_mode':
+      validateSettingsDestination(o['destination']);
+      assert.ok(isString(o['mode']));
+      break;
+    case 'update_workspace_directories':
+      validateSettingsDestination(o['destination']);
+      validateStringArray(o['add']);
+      validateStringArray(o['remove']);
+      break;
+    case 'upsert_mcp_server':
+      validateMcpScope(o['scope']);
+      assert.ok(isString(o['name']) && isString(o['config_json']));
+      break;
+    case 'remove_mcp_server':
+      validateMcpScope(o['scope']);
+      assert.ok(isString(o['name']));
+      break;
     default:
       assert.fail(`snapshot ${name}: unknown ClientCommand type "${String(o['type'])}"`);
   }
@@ -1220,6 +1265,13 @@ function validateEvent(name: string, v: unknown): void {
         if (status['type'] === 'error') assert.ok(isString(status['reason']));
       }
       break;
+    case 'skills':
+      assert.ok(Array.isArray(o['skills']));
+      for (const s of o['skills'] as unknown[]) {
+        const r = rec(s);
+        assert.ok(isString(r['name']) && isString(r['source_dir']));
+      }
+      break;
     case 'hooks':
       assert.ok(Array.isArray(o['hooks']));
       for (const h of o['hooks'] as unknown[]) {
@@ -1285,6 +1337,9 @@ function validateEvent(name: string, v: unknown): void {
     }
     case 'settings_snapshot':
       assert.ok(isString(o['effective_json']) && isString(o['provenance_json']));
+      if ('files_json' in o) assert.ok(isString(o['files_json']));
+      if ('active_json' in o) assert.ok(isString(o['active_json']));
+      if ('locked' in o) validateStringArray(o['locked']);
       break;
     case 'auth_state': {
       const st = rec(o['state']);
@@ -1461,7 +1516,7 @@ function validateError(v: unknown): void {
 
 test('every command snapshot parses as ClientCommand', () => {
   const files = listSnapshots('command');
-  assert.equal(files.length, 53, `expected 53 command snapshots, found ${files.length}`);
+  assert.equal(files.length, 59, `expected 59 command snapshots, found ${files.length}`);
   for (const file of files) {
     validateCommand(file, loadSnapshot('command', file));
   }
@@ -1499,10 +1554,43 @@ test('workflow model metadata and paused task status pass the wire guards', () =
 
 test('every event snapshot parses as ClientEvent', () => {
   const files = listSnapshots('event');
-  assert.equal(files.length, 67, `expected 67 event snapshots, found ${files.length}`);
+  assert.equal(files.length, 68, `expected 68 event snapshots, found ${files.length}`);
   for (const file of files) {
     validateEvent(file, loadSnapshot('event', file));
   }
+});
+
+// `settings_snapshot`'s three widened fields (files_json/active_json/locked)
+// have no golden that exercises them — the on-disk snapshot predates the
+// widening. Without this test the three `if (...)` checks in the
+// `settings_snapshot` case are dead code that always "passes".
+test('a widened settings_snapshot validates its three new optional fields, and rejects a malformed one', () => {
+  validateEvent('settings_snapshot(widened)', {
+    type: 'settings_snapshot',
+    effective_json: '{"model":"claude-opus-4-7"}',
+    provenance_json: '{"model":"user-settings"}',
+    files_json: '[{"layer":"user","path":"/home/user/.lingxi/settings.json","exists":true,"parsed":true}]',
+    active_json: '{"model":"claude-opus-4-7"}',
+    locked: ['model'],
+  });
+  assert.throws(
+    () => validateEvent('settings_snapshot(bad-locked)', {
+      type: 'settings_snapshot',
+      effective_json: '{}',
+      provenance_json: '{}',
+      locked: [42],
+    }),
+    'a non-string entry in `locked` must be rejected',
+  );
+  assert.throws(
+    () => validateEvent('settings_snapshot(bad-files_json)', {
+      type: 'settings_snapshot',
+      effective_json: '{}',
+      provenance_json: '{}',
+      files_json: 123,
+    }),
+    'a non-string `files_json` must be rejected',
+  );
 });
 
 test('background task app events mirror the Rust wire contract', () => {

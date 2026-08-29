@@ -29,9 +29,7 @@ pub enum SettingsSource {
 pub fn settings_path(source: SettingsSource, lingxi_home: &Path, project_dir: &Path) -> PathBuf {
     match source {
         SettingsSource::User => lingxi_home.join("settings.json"),
-        SettingsSource::Project => project_dir
-            .join(branding::DOT_DIR)
-            .join("settings.json"),
+        SettingsSource::Project => project_dir.join(branding::DOT_DIR).join("settings.json"),
         SettingsSource::Local => project_dir
             .join(branding::DOT_DIR)
             .join("settings.local.json"),
@@ -178,7 +176,9 @@ mod tests {
         let path = settings_path(SettingsSource::Project, home, project);
         assert_eq!(
             path,
-            std::path::Path::new("/work/repo").join(branding::DOT_DIR).join("settings.json"),
+            std::path::Path::new("/work/repo")
+                .join(branding::DOT_DIR)
+                .join("settings.json"),
             "Project source must resolve to <project>/<DOT_DIR>/settings.json, got {}",
             path.display()
         );

@@ -2659,9 +2659,13 @@ async fn update_permission_rules_reports_only_the_error_when_nothing_changed_bef
 
     let events = sink.events().await;
     assert!(
-        events
-            .iter()
-            .any(|e| matches!(e, ClientEvent::Error { kind: ErrorKindDto::Internal, .. })),
+        events.iter().any(|e| matches!(
+            e,
+            ClientEvent::Error {
+                kind: ErrorKindDto::Internal,
+                ..
+            }
+        )),
         "a broken destination file must be reported as an internal failure, got {events:?}"
     );
     assert!(
@@ -2995,7 +2999,9 @@ async fn upsert_then_remove_mcp_server_round_trips_through_the_router() {
 
     let events = sink.events().await;
     assert!(
-        !events.iter().any(|e| matches!(e, ClientEvent::Error { .. })),
+        !events
+            .iter()
+            .any(|e| matches!(e, ClientEvent::Error { .. })),
         "a successful upsert must not emit an Error, got {events:?}"
     );
     let raw = std::fs::read_to_string(project.join(".mcp.json")).unwrap();

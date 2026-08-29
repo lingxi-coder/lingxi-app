@@ -1870,7 +1870,9 @@ fn task_status_wire(status: TaskStatusDto) -> String {
 /// `patch_json` is not valid JSON, or it parses to something other than a
 /// JSON object (a bare array/string/number/bool/null patch is rejected, not
 /// silently coerced).
-fn parse_settings_patch(patch_json: &str) -> Result<Vec<(String, Option<serde_json::Value>)>, String> {
+fn parse_settings_patch(
+    patch_json: &str,
+) -> Result<Vec<(String, Option<serde_json::Value>)>, String> {
     match serde_json::from_str::<serde_json::Value>(patch_json) {
         Ok(serde_json::Value::Object(map)) => Ok(map
             .into_iter()

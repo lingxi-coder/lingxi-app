@@ -255,8 +255,7 @@ async fn settings_listing_returns_a_real_merged_snapshot() {
     )
     .await;
 
-    let (effective_json, provenance_json, files_json, layers_json) = match next_frame(&mut ws)
-        .await
+    let (effective_json, provenance_json, files_json, layers_json) = match next_frame(&mut ws).await
     {
         Frame::Event(ClientEvent::SettingsSnapshot {
             effective_json,

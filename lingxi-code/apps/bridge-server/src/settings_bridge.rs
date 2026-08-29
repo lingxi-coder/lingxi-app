@@ -300,7 +300,11 @@ pub fn writable_path(paths: &SettingsPaths, layer: SettingsLayer) -> Result<Path
             ))
         }
     };
-    Ok(settings_path(source, &paths.lingxi_home, &paths.project_dir))
+    Ok(settings_path(
+        source,
+        &paths.lingxi_home,
+        &paths.project_dir,
+    ))
 }
 
 /// Top-level keys with a dedicated writer, and therefore refused on the
@@ -359,9 +363,7 @@ pub fn permission_destination(
 ) -> permission::PermissionUpdateDestination {
     match destination {
         SettingsDestinationDto::User => permission::PermissionUpdateDestination::UserSettings,
-        SettingsDestinationDto::Project => {
-            permission::PermissionUpdateDestination::ProjectSettings
-        }
+        SettingsDestinationDto::Project => permission::PermissionUpdateDestination::ProjectSettings,
         SettingsDestinationDto::Local => permission::PermissionUpdateDestination::LocalSettings,
     }
 }
@@ -822,11 +824,7 @@ mod tests {
             "a layer that never set `routing` must have no entry for it"
         );
         assert!(
-            snap.layers
-                .get("project")
-                .unwrap()
-                .get("routing")
-                .is_some(),
+            snap.layers.get("project").unwrap().get("routing").is_some(),
             "the layer that DID set `routing` must report it"
         );
 
@@ -1210,11 +1208,7 @@ mod tests {
         // agree even with the old, buggy empty-managed baseline: `None ==
         // None` when re-merged with an empty overlay in `active`'s own
         // build_snapshot call below — this needs a REAL value on both sides).
-        std::fs::write(
-            home.join("settings.json"),
-            r#"{"outputStyle":"from-user"}"#,
-        )
-        .unwrap();
+        std::fs::write(home.join("settings.json"), r#"{"outputStyle":"from-user"}"#).unwrap();
 
         let paths = SettingsPaths {
             lingxi_home: home,
@@ -1406,7 +1400,10 @@ mod tests {
             vec![("permissions".to_string(), Some(serde_json::json!({})))],
         )
         .unwrap_err();
-        assert!(err.contains("permissions"), "error must name the key, got: {err}");
+        assert!(
+            err.contains("permissions"),
+            "error must name the key, got: {err}"
+        );
         assert!(
             err.contains("update_permission_rules"),
             "error must name the rule-set replacement command, got: {err}"
@@ -1473,11 +1470,7 @@ mod tests {
         };
         let path = writable_path(&paths, SettingsLayer::User).unwrap();
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(
-            &path,
-            r#"{"model":"opus","unknownVendorKey":"x"}"#,
-        )
-        .unwrap();
+        std::fs::write(&path, r#"{"model":"opus","unknownVendorKey":"x"}"#).unwrap();
 
         apply_patch(
             &paths,
@@ -1560,7 +1553,10 @@ mod tests {
         assert_eq!(rule.value.tool_name, "Bash");
         assert_eq!(rule.value.rule_content.as_deref(), Some("ls:*"));
         assert_eq!(rule.behavior, permission::PermissionBehavior::Allow);
-        assert_eq!(rule.source, permission::PermissionRuleSource::ProjectSettings);
+        assert_eq!(
+            rule.source,
+            permission::PermissionRuleSource::ProjectSettings
+        );
     }
 
     /// Correction #1: parsing is infallible. A malformed rule string (an

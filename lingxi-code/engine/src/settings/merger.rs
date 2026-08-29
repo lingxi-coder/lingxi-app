@@ -953,7 +953,10 @@ mod tests {
         // the accumulator with `lower` directly would skip the function under
         // test for the first layer and hide whatever it does on the way in.
         let mut raw_merged = std::collections::BTreeMap::new();
-        merge_raw_layer(&mut raw_merged, lower.clone());
+        // The first layer's union report is not what this case asserts on —
+        // `unioned` below (the SECOND layer's) is. Discard it explicitly so
+        // the `#[must_use]` is answered rather than warned about.
+        let _first_layer_union = merge_raw_layer(&mut raw_merged, lower.clone());
         let unioned = merge_raw_layer(&mut raw_merged, upper.clone());
 
         for (key, _, _) in &cases {
@@ -1143,11 +1146,14 @@ mod tests {
         };
         let raw_merge_of = |lower: serde_json::Value, upper: serde_json::Value| {
             let mut acc = std::collections::BTreeMap::new();
-            merge_raw_layer(
+            // This helper asserts on the ACCUMULATOR, not on the union
+            // report; discard both reports explicitly so `#[must_use]` is
+            // answered rather than warned about.
+            let _lower_union = merge_raw_layer(
                 &mut acc,
                 serde_json::from_value(lower).expect("lower is an object"),
             );
-            merge_raw_layer(
+            let _upper_union = merge_raw_layer(
                 &mut acc,
                 serde_json::from_value(upper).expect("upper is an object"),
             );

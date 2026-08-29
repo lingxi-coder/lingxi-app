@@ -104,7 +104,8 @@ fn write_json_object(path: &Path, map: Map<String, Value>) -> Result<(), String>
     }
     let text = serde_json::to_string_pretty(&Value::Object(map))
         .map_err(|e| format!("failed to serialize {}: {e}", path.display()))?;
-    std::fs::write(path, text + "\n").map_err(|e| format!("failed to write {}: {e}", path.display()))
+    std::fs::write(path, text + "\n")
+        .map_err(|e| format!("failed to write {}: {e}", path.display()))
 }
 
 /// Refuse to touch a `mcpServers` value that already exists but is not a JSON
@@ -159,8 +160,16 @@ fn ensure_project_file_is_wrapped_or_empty(map: &Map<String, Value>) -> Result<(
 ///
 /// Reading the ACTUAL post-write state back and checking it is the only way
 /// to tell the caller the truth in either case.
-fn verify_server_present(map: &Map<String, Value>, name: &str, config: &Value) -> Result<(), String> {
-    match map.get("mcpServers").and_then(Value::as_object).and_then(|s| s.get(name)) {
+fn verify_server_present(
+    map: &Map<String, Value>,
+    name: &str,
+    config: &Value,
+) -> Result<(), String> {
+    match map
+        .get("mcpServers")
+        .and_then(Value::as_object)
+        .and_then(|s| s.get(name))
+    {
         Some(actual) if actual == config => Ok(()),
         _ => Err(format!(
             "the write appeared to succeed but `mcpServers.{name}` was not found afterward \
@@ -280,8 +289,8 @@ pub fn upsert_server(
                 proj
             })
             .map_err(|e| e.to_string())?;
-            let after_proj = get_project_config(&paths.global_config_path, &key)
-                .map_err(|e| e.to_string())?;
+            let after_proj =
+                get_project_config(&paths.global_config_path, &key).map_err(|e| e.to_string())?;
             verify_server_present(&after_proj, name, &expected)
         }
     }
@@ -330,8 +339,8 @@ pub fn remove_server(paths: &McpPaths, scope: McpScopeDto, name: &str) -> Result
                 proj
             })
             .map_err(|e| e.to_string())?;
-            let after_proj = get_project_config(&paths.global_config_path, &key)
-                .map_err(|e| e.to_string())?;
+            let after_proj =
+                get_project_config(&paths.global_config_path, &key).map_err(|e| e.to_string())?;
             verify_server_absent(&after_proj, name)
         }
     }
@@ -429,14 +438,13 @@ mod tests {
         );
         assert_eq!(parsed["oauthAccount"]["emailAddress"], "x@y.z");
 
-        let cfgs =
-            mcp::parse_global_config_mcp_servers(&raw, mcp::ConfigScope::User).unwrap();
+        let cfgs = mcp::parse_global_config_mcp_servers(&raw, mcp::ConfigScope::User).unwrap();
         assert_eq!(cfgs.len(), 1);
         assert_eq!(cfgs[0].name, "mem");
 
         remove_server(&p, McpScopeDto::User, "mem").unwrap();
-        let after: Value = serde_json::from_str(&std::fs::read_to_string(&p.global_config_path).unwrap())
-            .unwrap();
+        let after: Value =
+            serde_json::from_str(&std::fs::read_to_string(&p.global_config_path).unwrap()).unwrap();
         assert!(after["mcpServers"].get("mem").is_none());
         assert_eq!(
             after["numStartups"], 7,
@@ -474,13 +482,14 @@ mod tests {
             "Local scope must NOT write the top-level mcpServers (that's User's location)"
         );
 
-        let cfgs = mcp::parse_local_config_mcp_servers(&raw, &key, mcp::ConfigScope::Local).unwrap();
+        let cfgs =
+            mcp::parse_local_config_mcp_servers(&raw, &key, mcp::ConfigScope::Local).unwrap();
         assert_eq!(cfgs.len(), 1);
         assert_eq!(cfgs[0].name, "loc");
 
         remove_server(&p, McpScopeDto::Local, "loc").unwrap();
-        let after: Value = serde_json::from_str(&std::fs::read_to_string(&p.global_config_path).unwrap())
-            .unwrap();
+        let after: Value =
+            serde_json::from_str(&std::fs::read_to_string(&p.global_config_path).unwrap()).unwrap();
         assert!(after["projects"][&key]["mcpServers"].get("loc").is_none());
     }
 
@@ -501,10 +510,12 @@ mod tests {
             upsert_server(&p, scope, "shared-name", json!({ "command": marker })).unwrap();
         }
 
-        let project_raw =
-            std::fs::read_to_string(dir.path().join(".mcp.json")).unwrap();
+        let project_raw = std::fs::read_to_string(dir.path().join(".mcp.json")).unwrap();
         let project: Value = serde_json::from_str(&project_raw).unwrap();
-        assert_eq!(project["mcpServers"]["shared-name"]["command"], "project-cmd");
+        assert_eq!(
+            project["mcpServers"]["shared-name"]["command"],
+            "project-cmd"
+        );
 
         let global_raw = std::fs::read_to_string(&p.global_config_path).unwrap();
         let global: Value = serde_json::from_str(&global_raw).unwrap();
@@ -514,8 +525,7 @@ mod tests {
         );
         let key = project_path_for_config(dir.path());
         assert_eq!(
-            global["projects"][&key]["mcpServers"]["shared-name"]["command"],
-            "local-cmd",
+            global["projects"][&key]["mcpServers"]["shared-name"]["command"], "local-cmd",
             "Local scope must be the global config's projects[<key>] sub-object"
         );
     }
@@ -582,7 +592,13 @@ mod tests {
     fn removing_a_present_server_still_writes() {
         let dir = tempdir().unwrap();
         let p = paths(dir.path());
-        upsert_server(&p, McpScopeDto::Project, "linear", json!({ "command": "npx" })).unwrap();
+        upsert_server(
+            &p,
+            McpScopeDto::Project,
+            "linear",
+            json!({ "command": "npx" }),
+        )
+        .unwrap();
         remove_server(&p, McpScopeDto::Project, "linear").unwrap();
         let raw = std::fs::read_to_string(project_mcp_path(dir.path())).unwrap();
         let parsed: Value = serde_json::from_str(&raw).unwrap();
@@ -602,8 +618,8 @@ mod tests {
         let p = paths(dir.path());
         std::fs::write(&p.global_config_path, r#"{"mcpServers":"oops"}"#).unwrap();
 
-        let err = upsert_server(&p, McpScopeDto::User, "new", json!({ "command": "n" }))
-            .unwrap_err();
+        let err =
+            upsert_server(&p, McpScopeDto::User, "new", json!({ "command": "n" })).unwrap_err();
         assert!(
             err.contains("mcpServers") && err.contains("new"),
             "expected a refusal naming the key and server, got: {err}"
@@ -627,8 +643,8 @@ mod tests {
         let p = paths(dir.path());
         std::fs::write(&p.global_config_path, r#"{"projects":"oops"}"#).unwrap();
 
-        let err = upsert_server(&p, McpScopeDto::Local, "new", json!({ "command": "n" }))
-            .unwrap_err();
+        let err =
+            upsert_server(&p, McpScopeDto::Local, "new", json!({ "command": "n" })).unwrap_err();
         assert!(
             err.contains("new") || err.contains("mcpServers"),
             "expected a refusal naming what could not be confirmed, got: {err}"
@@ -652,8 +668,8 @@ mod tests {
         )
         .unwrap();
 
-        let err = upsert_server(&p, McpScopeDto::Local, "new", json!({ "command": "n" }))
-            .unwrap_err();
+        let err =
+            upsert_server(&p, McpScopeDto::Local, "new", json!({ "command": "n" })).unwrap_err();
         assert!(
             err.contains("mcpServers") && err.contains("new"),
             "expected a refusal naming the key and server, got: {err}"
@@ -674,8 +690,8 @@ mod tests {
         )
         .unwrap();
 
-        let err = upsert_server(&p, McpScopeDto::Project, "new", json!({ "command": "n" }))
-            .unwrap_err();
+        let err =
+            upsert_server(&p, McpScopeDto::Project, "new", json!({ "command": "n" })).unwrap_err();
         assert!(
             err.contains("bare-map"),
             "expected a bare-map refusal, got: {err}"
@@ -695,8 +711,8 @@ mod tests {
         let p = paths(dir.path());
         std::fs::write(project_mcp_path(dir.path()), r#"{"mcpServers":"oops"}"#).unwrap();
 
-        let err = upsert_server(&p, McpScopeDto::Project, "new", json!({ "command": "n" }))
-            .unwrap_err();
+        let err =
+            upsert_server(&p, McpScopeDto::Project, "new", json!({ "command": "n" })).unwrap_err();
         assert!(
             err.contains("not a JSON object"),
             "expected a non-object refusal, got: {err}"

@@ -40,8 +40,8 @@
 //! (`discover_enabled_plugins` probes the single-version case instead).
 
 use crate::manifest::{
-    ComponentPath, PluginChannel, PluginComponents, PluginManifest, UserConfigField,
-    UserConfigSchema,
+    BinaryPin, ComponentPath, HljsLanguageEntry, MonitorTrigger, PluginChannel, PluginComponents,
+    PluginManifest, PluginMonitor, UserConfigField, UserConfigSchema,
 };
 use crate::source::PluginSource;
 use crate::trust::default_trust_for_source;
@@ -123,6 +123,19 @@ struct RawManifest {
     /// union([path, path[]]).optional()`.
     #[serde(default)]
     workflows: Option<PathDecl>,
+    /// Custom highlight.js language grammars (oracle `Hs`). `.strict()` at
+    /// every level — see [`RawSyntaxHighlighting`].
+    #[serde(rename = "syntaxHighlighting", default)]
+    syntax_highlighting: Option<RawSyntaxHighlighting>,
+    /// sha256-pinned files fetched into `bin/` at install time (oracle
+    /// `qs`/`n1e`) — a lenient value; see [`resolve_binaries`].
+    #[serde(default)]
+    binaries: Option<Value>,
+    /// Background watch scripts the host can arm as persistent Monitor tasks
+    /// (oracle `mt`) — a `./…json` path or an inline strict array; see
+    /// [`RawMonitorsDecl`].
+    #[serde(default)]
+    monitors: Option<RawMonitorsDecl>,
     /// Explicitly declared MCP server configs (manifest-declared MCP servers).
     /// Binary: `mcpServers` in `PluginManifestSchema`.
     #[serde(rename = "mcpServers", default)]
@@ -358,6 +371,266 @@ struct RawPluginChannel {
     display_name: Option<String>,
     #[serde(rename = "userConfig", default)]
     user_config: Option<HashMap<String, UserConfigField>>,
+}
+
+/// `syntaxHighlighting` field (oracle `Hs`): `.strict()` at BOTH the wrapper
+/// object and every `hljsLanguages` entry — an unknown key at either level,
+/// an invalid `id`/`remote`/`integrity` shape, or more than
+/// [`MAX_HLJS_LANGUAGES`] entries all fail the WHOLE `plugin.json` parse,
+/// the same "one bad shape sinks the manifest" convention
+/// [`RawCommandEntry`]/[`UserConfigField`] establish. `#[serde(deny_unknown_fields)]`
+/// gives the wrapper-level strictness for free since it has exactly one
+/// field.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawSyntaxHighlighting {
+    #[serde(rename = "hljsLanguages")]
+    hljs_languages: RawHljsLanguageList,
+}
+
+/// oracle `Os`: at most 16 `hljsLanguages` entries.
+const MAX_HLJS_LANGUAGES: usize = 16;
+
+/// Bounded `hljsLanguages` array (oracle `H(Ks()).max(Os)`), already
+/// converted into the public [`HljsLanguageEntry`].
+#[derive(Debug, Clone)]
+struct RawHljsLanguageList(Vec<HljsLanguageEntry>);
+
+impl<'de> Deserialize<'de> for RawHljsLanguageList {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let raw = Vec::<RawHljsLanguageEntry>::deserialize(deserializer)?;
+        if raw.len() > MAX_HLJS_LANGUAGES {
+            return Err(serde::de::Error::custom(format!(
+                "syntaxHighlighting.hljsLanguages must have at most {MAX_HLJS_LANGUAGES} entries, got {}",
+                raw.len()
+            )));
+        }
+        Ok(RawHljsLanguageList(
+            raw.into_iter().map(RawHljsLanguageEntry::into_entry).collect(),
+        ))
+    }
+}
+
+#[derive(Debug, Clone)]
+struct RawHljsLanguageEntry {
+    id: String,
+    remote: Option<String>,
+    integrity: Option<String>,
+}
+
+impl RawHljsLanguageEntry {
+    fn into_entry(self) -> HljsLanguageEntry {
+        HljsLanguageEntry {
+            id: self.id,
+            remote: self.remote,
+            integrity: self.integrity,
+        }
+    }
+}
+
+/// `^[a-z][a-z0-9_-]*$`, <=64 chars (oracle `As`).
+fn is_valid_hljs_id(id: &str) -> bool {
+    if id.is_empty() || id.len() > 64 {
+        return false;
+    }
+    let mut chars = id.chars();
+    match chars.next() {
+        Some(c) if c.is_ascii_lowercase() => {}
+        _ => return false,
+    }
+    chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-')
+}
+
+/// oracle `Ks.remote`'s `npm:` alternative:
+/// `^npm:[@a-z0-9/._-]+(@[a-z0-9._+-]+)?$`.
+static HLJS_REMOTE_NPM_RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+    regex::Regex::new(r"^npm:[@a-z0-9/._-]+(@[a-z0-9._+-]+)?$").unwrap()
+});
+
+/// oracle `Ks.remote`'s `github:` alternative:
+/// `^github:[\w.-]+\/[\w.-]+@[\w./-]+#.+\.js$`.
+static HLJS_REMOTE_GITHUB_RE: std::sync::LazyLock<regex::Regex> =
+    std::sync::LazyLock::new(|| regex::Regex::new(r"^github:[\w.-]+/[\w.-]+@[\w./-]+#.+\.js$").unwrap());
+
+/// oracle `Ks.integrity`: `^sha(256|384|512)-[A-Za-z0-9+/=]+$`.
+static HLJS_INTEGRITY_RE: std::sync::LazyLock<regex::Regex> =
+    std::sync::LazyLock::new(|| regex::Regex::new(r"^sha(256|384|512)-[A-Za-z0-9+/=]+$").unwrap());
+
+/// `npm:<pkg>[@version]` or `github:<owner>/<repo>@<ref>#<path>.js`, <=256
+/// chars (oracle `Ks.remote` regex).
+fn is_valid_hljs_remote(remote: &str) -> bool {
+    remote.len() <= 256
+        && (HLJS_REMOTE_NPM_RE.is_match(remote) || HLJS_REMOTE_GITHUB_RE.is_match(remote))
+}
+
+/// `^sha(256|384|512)-[A-Za-z0-9+/=]+$`, <=512 chars (oracle `Ks.integrity`).
+fn is_valid_hljs_integrity(integrity: &str) -> bool {
+    integrity.len() <= 512 && HLJS_INTEGRITY_RE.is_match(integrity)
+}
+
+impl<'de> Deserialize<'de> for RawHljsLanguageEntry {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Raw {
+            id: String,
+            #[serde(default)]
+            remote: Option<String>,
+            #[serde(default)]
+            integrity: Option<String>,
+        }
+        let raw = Raw::deserialize(deserializer)?;
+        if !is_valid_hljs_id(&raw.id) {
+            return Err(serde::de::Error::custom(format!(
+                "hljsLanguages entry \"id\" {:?} must match ^[a-z][a-z0-9_-]*$ (max 64 chars)",
+                raw.id
+            )));
+        }
+        if let Some(remote) = &raw.remote {
+            if !is_valid_hljs_remote(remote) {
+                return Err(serde::de::Error::custom(
+                    "hljsLanguages entry \"remote\" must be npm:<pkg>[@ver] or \
+                     github:<owner>/<repo>@<ref>#<path>.js (max 256 chars)",
+                ));
+            }
+        }
+        if let Some(integrity) = &raw.integrity {
+            if !is_valid_hljs_integrity(integrity) {
+                return Err(serde::de::Error::custom(
+                    "hljsLanguages entry \"integrity\" must be SRI form: sha256-, sha384-, \
+                     or sha512-<base64> (max 512 chars)",
+                ));
+            }
+        }
+        Ok(RawHljsLanguageEntry {
+            id: raw.id,
+            remote: raw.remote,
+            integrity: raw.integrity,
+        })
+    }
+}
+
+/// `monitors` field only (oracle `mt`): `union([V(), kAn()])` — a
+/// `./…json`-shaped path STRING, or an inline array of `.strict()` monitor
+/// objects with unique names. Reading a declared PATH's file content happens
+/// later ([`resolve_monitors`]) and is a runtime/filesystem concern (warn +
+/// skip on failure, the same convention the sibling `mcpServers`/`hooks`
+/// path forms use); only the SHAPE is checked here — a malformed inline
+/// entry, a duplicate name, or a bare string that is neither `./`-prefixed
+/// nor `.json`-suffixed — fails the WHOLE `plugin.json` parse.
+#[derive(Debug, Clone)]
+enum RawMonitorsDecl {
+    Path(String),
+    Inline(Vec<PluginMonitor>),
+}
+
+impl<'de> Deserialize<'de> for RawMonitorsDecl {
+    // Oracle `V()`/`K()`: `i().startsWith("./")` + `.endsWith(".json")`, a
+    // literal case-SENSITIVE suffix check — kept byte-exact rather than
+    // `Path::extension()`-based, same rationale as `is_mcpb_source`.
+    #[allow(clippy::case_sensitive_file_extension_comparisons)]
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = Value::deserialize(deserializer)?;
+        match value {
+            Value::String(s) => {
+                if s.starts_with("./") && s.ends_with(".json") {
+                    Ok(RawMonitorsDecl::Path(s))
+                } else {
+                    Err(serde::de::Error::custom(
+                        "monitors path must start with \"./\" and end with \".json\"",
+                    ))
+                }
+            }
+            Value::Array(items) => {
+                let entries: Vec<RawPluginMonitor> =
+                    serde_json::from_value(Value::Array(items)).map_err(serde::de::Error::custom)?;
+                let mut seen = BTreeSet::new();
+                for entry in &entries {
+                    if !seen.insert(entry.name.clone()) {
+                        return Err(serde::de::Error::custom(
+                            "Monitor names must be unique within a plugin",
+                        ));
+                    }
+                }
+                Ok(RawMonitorsDecl::Inline(
+                    entries.into_iter().map(RawPluginMonitor::into_monitor).collect(),
+                ))
+            }
+            _ => Err(serde::de::Error::custom(
+                "monitors must be a \"./…json\" path string or an array of monitor objects",
+            )),
+        }
+    }
+}
+
+/// One `monitors` entry (oracle `$s`, a strict object).
+#[derive(Debug, Clone)]
+struct RawPluginMonitor {
+    name: String,
+    command: String,
+    description: String,
+    when: MonitorTrigger,
+}
+
+impl RawPluginMonitor {
+    fn into_monitor(self) -> PluginMonitor {
+        PluginMonitor {
+            name: self.name,
+            command: self.command,
+            description: self.description,
+            when: self.when,
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for RawPluginMonitor {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Raw {
+            name: String,
+            command: String,
+            description: String,
+            #[serde(default)]
+            when: Option<String>,
+        }
+        let raw = Raw::deserialize(deserializer)?;
+        if raw.name.is_empty() {
+            return Err(serde::de::Error::custom("monitor \"name\" must not be empty"));
+        }
+        if raw.command.is_empty() {
+            return Err(serde::de::Error::custom(
+                "monitor \"command\" must not be empty",
+            ));
+        }
+        if raw.description.is_empty() {
+            return Err(serde::de::Error::custom(
+                "monitor \"description\" must not be empty",
+            ));
+        }
+        let when = match raw.when.as_deref() {
+            None => MonitorTrigger::Always,
+            Some(w) => MonitorTrigger::parse(w).map_err(serde::de::Error::custom)?,
+        };
+        Ok(RawPluginMonitor {
+            name: raw.name,
+            command: raw.command,
+            description: raw.description,
+            when,
+        })
+    }
 }
 
 /// The three sub-fields of a parsed `author` value: display name, email,
@@ -892,7 +1165,13 @@ pub(crate) async fn load_plugin_from_path_with_mcp_gate(
 
     let skip_mcp_discovery =
         resolve_skip_mcp_discovery(&parsed.name, sdk_skip_mcp_discovery, install_source_id);
-    let components = detect_components(plugin_dir, &parsed, skip_mcp_discovery).await;
+    // Oracle `pM(e)`: a plugin loaded from an ad-hoc directory (no resolved
+    // `name@marketplace` install-source identity) is "confined" — its
+    // declared MCP sources are read-only-within-directory, and an MCPB/`.dxt`
+    // source is skipped outright rather than resolved (see
+    // `load_declared_mcp_servers`'s `confined` parameter).
+    let confined = install_source_id.is_none();
+    let components = detect_components(plugin_dir, &parsed, skip_mcp_discovery, confined).await;
     let settings = load_plugin_settings(plugin_dir, parsed.settings.as_ref()).await;
     let channels = validate_plugin_channels(
         parsed.channels.as_deref().unwrap_or_default(),
@@ -1004,10 +1283,15 @@ fn validate_plugin_channels(
 /// skills, output styles, hooks, LSP servers) still auto-detects/resolves
 /// normally, matching the oracle's "leaves other components enabled". See
 /// [`resolve_skip_mcp_discovery`] for how the caller decides this bit.
+///
+/// `confined` mirrors oracle `pM(e)` ("directory-loaded plugin"): a
+/// `mcpServers` MCPB/`.dxt` source is skipped outright (not resolved) when
+/// set — see [`load_declared_mcp_servers`].
 async fn detect_components(
     plugin_dir: &Path,
     parsed: &RawManifest,
     skip_mcp_discovery: bool,
+    confined: bool,
 ) -> PluginComponents {
     let default_commands = glob_md(&plugin_dir.join("commands")).await;
     let default_agents = glob_md(&plugin_dir.join("agents")).await;
@@ -1070,10 +1354,20 @@ async fn detect_components(
     hooks.extend(load_declared_hooks(plugin_dir, parsed.hooks.clone()).await);
     let mut mcp_servers = default_mcp_servers;
     if !skip_mcp_discovery {
-        mcp_servers.extend(load_declared_mcp_servers(plugin_dir, parsed.mcp_servers.clone()).await);
+        mcp_servers.extend(
+            load_declared_mcp_servers(plugin_dir, parsed.mcp_servers.clone(), &parsed.name, confined)
+                .await,
+        );
     }
     let mut lsp_servers = default_lsp_servers;
     lsp_servers.extend(load_declared_lsp_servers(plugin_dir, parsed.lsp_servers.clone()).await);
+    let hljs_languages = parsed
+        .syntax_highlighting
+        .as_ref()
+        .map(|s| s.hljs_languages.0.clone())
+        .unwrap_or_default();
+    let binaries = resolve_binaries(parsed.binaries.as_ref());
+    let monitors = resolve_monitors(plugin_dir, parsed.monitors.as_ref()).await;
 
     PluginComponents {
         commands,
@@ -1082,6 +1376,9 @@ async fn detect_components(
         output_styles,
         themes,
         workflows,
+        hljs_languages,
+        binaries,
+        monitors,
         hooks,
         mcp_servers,
         lsp_servers,
@@ -1108,6 +1405,135 @@ fn resolve_declared_relative_path(plugin_dir: &Path, raw: &str) -> Option<PathBu
         return None;
     }
     Some(plugin_dir.join(path))
+}
+
+/// oracle `Jqt`: at most 64 valid `binaries` entries survive.
+const MAX_BINARIES: usize = 64;
+
+/// Safe basename charset (oracle `dCe`: `^[a-z0-9](?:[a-z0-9._-]*[a-z0-9_-])?$`):
+/// first char alnum-lowercase; last char (when length >= 2) alnum-lowercase/
+/// `_`/`-`; any interior chars additionally allow `.`.
+fn is_valid_binary_basename(name: &str) -> bool {
+    let bytes = name.as_bytes();
+    let is_first = |b: u8| b.is_ascii_lowercase() || b.is_ascii_digit();
+    let is_last = |b: u8| is_first(b) || b == b'_' || b == b'-';
+    let is_mid = |b: u8| is_last(b) || b == b'.';
+    match bytes {
+        [] => false,
+        [only] => is_first(*only),
+        [first, .., last] => is_first(*first) && is_last(*last) && bytes[1..bytes.len() - 1].iter().all(|&b| is_mid(b)),
+    }
+}
+
+/// `^[0-9a-f]{64}$` (oracle `Yqt`) — lowercase hex only.
+fn is_valid_sha256_hex(s: &str) -> bool {
+    s.len() == 64 && s.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
+/// `binaries` (oracle `qs`/`n1e`): a LENIENT `.transform()`, never a parse
+/// failure — an invalid key (bad basename) or invalid value (missing/
+/// malformed `sha256`) is silently dropped, one entry at a time; only the
+/// first [`MAX_BINARIES`] valid entries (in manifest key order — this port's
+/// `serde_json::Map` preserves source insertion order, matching JS
+/// `Object.entries`) survive, the rest are dropped without a diagnostic,
+/// matching the oracle's own silent cap. Parsing + validation only: the
+/// actual fetch into `bin/` at install time is a separate concern this
+/// change does not wire.
+fn resolve_binaries(value: Option<&Value>) -> HashMap<String, BinaryPin> {
+    let mut out = HashMap::new();
+    let Some(Value::Object(map)) = value else {
+        return out;
+    };
+    for (name, entry) in map {
+        if out.len() >= MAX_BINARIES {
+            break;
+        }
+        if !is_valid_binary_basename(name) {
+            continue;
+        }
+        let Some(sha256) = entry.get("sha256").and_then(Value::as_str) else {
+            continue;
+        };
+        if !is_valid_sha256_hex(sha256) {
+            continue;
+        }
+        out.insert(
+            name.clone(),
+            BinaryPin {
+                sha256: sha256.to_string(),
+            },
+        );
+    }
+    out
+}
+
+/// Parse a bare JSON array of monitor objects — the same shape used both for
+/// the manifest-inline form (already validated at `RawManifest`-parse time;
+/// see [`RawMonitorsDecl`]) and for a path-form/auto-scanned FILE, which is a
+/// runtime/filesystem concern: `None` on any shape/validation failure
+/// (duplicate name, bad `when`, wrong JSON shape) — the caller warns and
+/// treats it as empty rather than failing the whole plugin, since by this
+/// point the synchronous manifest-parse stage has already succeeded.
+fn parse_monitor_array(raw: &str) -> Option<Vec<PluginMonitor>> {
+    let entries: Vec<RawPluginMonitor> = serde_json::from_str(raw).ok()?;
+    let mut seen = BTreeSet::new();
+    for entry in &entries {
+        if !seen.insert(entry.name.clone()) {
+            return None;
+        }
+    }
+    Some(entries.into_iter().map(RawPluginMonitor::into_monitor).collect())
+}
+
+/// Auto-scan `monitors/monitors.json` (oracle `mt`'s own description: "When
+/// omitted, monitors/monitors.json at the plugin root is loaded if
+/// present") — a bare JSON array of monitor objects, same shape as the
+/// inline manifest form. Only reached when the manifest declares no
+/// `monitors` field at all (REPLACE, not merge — same rule
+/// `outputStyles`/`themes`/`workflows` already follow).
+async fn load_default_monitors(plugin_dir: &Path) -> Vec<PluginMonitor> {
+    let path = plugin_dir.join("monitors").join("monitors.json");
+    let Ok(raw) = tokio::fs::read_to_string(&path).await else {
+        return Vec::new();
+    };
+    let raw = raw.strip_prefix(UTF8_BOM).unwrap_or(raw.as_str());
+    if let Some(monitors) = parse_monitor_array(raw) {
+        monitors
+    } else {
+        tracing::warn!(path = %path.display(), "skipping malformed monitors/monitors.json");
+        Vec::new()
+    }
+}
+
+/// Resolve the `monitors` field: an inline declaration is already fully
+/// validated ([`RawMonitorsDecl::Inline`]); a declared PATH is read + parsed
+/// here (warn + empty on any failure); an absent field falls back to the
+/// [`load_default_monitors`] auto-scan.
+async fn resolve_monitors(
+    plugin_dir: &Path,
+    decl: Option<&RawMonitorsDecl>,
+) -> Vec<PluginMonitor> {
+    match decl {
+        None => load_default_monitors(plugin_dir).await,
+        Some(RawMonitorsDecl::Inline(monitors)) => monitors.clone(),
+        Some(RawMonitorsDecl::Path(raw_path)) => {
+            let Some(abs) = resolve_declared_relative_path(plugin_dir, raw_path) else {
+                tracing::warn!(path = %raw_path, "skipping invalid plugin manifest monitors path");
+                return Vec::new();
+            };
+            let Ok(raw) = tokio::fs::read_to_string(&abs).await else {
+                tracing::warn!(path = %abs.display(), "monitors file not found");
+                return Vec::new();
+            };
+            let raw = raw.strip_prefix(UTF8_BOM).unwrap_or(raw.as_str());
+            if let Some(monitors) = parse_monitor_array(raw) {
+                monitors
+            } else {
+                tracing::warn!(path = %abs.display(), "skipping malformed monitors file");
+                Vec::new()
+            }
+        }
+    }
 }
 
 fn dedup_component_paths(paths: &mut Vec<ComponentPath>) {
@@ -1619,29 +2045,81 @@ async fn load_plugin_settings(
         .collect()
 }
 
+/// `hooks/hooks.json`'s wrapper shape (oracle `ITt`/`PluginHooksSchema`):
+/// `{description?, hooks?, modules?}`, constrained to at most ONE `modules`
+/// entry ("hooks.json `modules` names one hooks module per plugin; a second
+/// entry is refused") and requiring `hooks` or `modules` (or both) —
+/// "hooks.json must have `hooks` (the hook matchers) or `modules` (hooks
+/// modules), or both". A `modules` entry names a path, relative to this
+/// `hooks.json`, of a JS module exporting `register(on)` that PROGRAMMATICALLY
+/// registers hooks when loaded — a wholly different mechanism from the
+/// declarative `hooks` matcher tree this crate already parses into
+/// [`hooks::HookDefinition`]s.
+#[derive(Debug, Deserialize)]
+struct RawHooksFile {
+    #[serde(default)]
+    hooks: Option<Value>,
+    #[serde(default)]
+    modules: Option<Vec<String>>,
+}
+
 /// Parse `hooks/hooks.json` into [`hooks::HookDefinition`]s, if present.
 ///
-/// claude-code's `loadPluginHooks` (`pluginLoader.ts:1224`) validates the file
-/// against `PluginHooksSchema` — a wrapper `{ description?, hooks }` — and
-/// returns the inner `hooks` (`pluginLoader.ts:1238-1241`), whose shape is the
-/// same `HooksSettings` used by settings files. We extract that inner `hooks`
-/// object and feed it to the engine's settings-hook parser as
-/// `{ "hooks": <inner> }`, stamping [`HookSource::Plugin`].
+/// The file's `hooks` half (when present) is validated against the same
+/// `HooksSettings` shape used by settings files and fed to the engine's
+/// settings-hook parser as `{ "hooks": <hooks> }`, stamping
+/// [`HookSource::Plugin`] — see [`RawHooksFile`] for the wrapper shape and
+/// the `hooks`/`modules` constraints enforced here.
+///
+/// A `modules` entry is recognized and validated (the 1-entry cap; the
+/// "hooks or modules, or both" requirement) but NOT executed: running the
+/// JS module it names needs a JS-module-execution subsystem this crate does
+/// not have, so its declared hooks are simply never registered (a warning
+/// names the module path so this is not a silent gap for whoever authored
+/// the plugin).
 async fn load_standard_hooks(plugin_dir: &Path) -> Vec<hooks::HookDefinition> {
     let path = plugin_dir.join("hooks").join("hooks.json");
     let Ok(raw) = tokio::fs::read_to_string(&path).await else {
         return Vec::new();
     };
     let raw = raw.strip_prefix(UTF8_BOM).unwrap_or(raw.as_str());
-    let wrapper: serde_json::Value = match serde_json::from_str(raw) {
+    let wrapper: RawHooksFile = match serde_json::from_str(raw) {
         Ok(v) => v,
         Err(e) => {
             tracing::warn!(error = %e, path = %path.display(), "skipping malformed hooks.json");
             return Vec::new();
         }
     };
+    let module_count = wrapper.modules.as_ref().map_or(0, Vec::len);
+    if module_count > 1 {
+        tracing::warn!(
+            path = %path.display(),
+            "skipping hooks.json: `modules` names one hooks module per plugin; \
+             a second entry is refused"
+        );
+        return Vec::new();
+    }
+    if wrapper.hooks.is_none() && module_count == 0 {
+        tracing::warn!(
+            path = %path.display(),
+            "skipping hooks.json: must have `hooks` (the hook matchers) or `modules` \
+             (hooks modules), or both"
+        );
+        return Vec::new();
+    }
+    if let Some(module_path) = wrapper.modules.as_ref().and_then(|m| m.first()) {
+        tracing::warn!(
+            path = %path.display(),
+            module = %module_path,
+            "hooks.json declares a `modules` hooks module, but this engine cannot execute \
+             hooks modules yet — its programmatically-registered hooks will not run"
+        );
+    }
+    let Some(inner) = wrapper.hooks else {
+        return Vec::new();
+    };
     // The file wraps the settings-shaped hooks under a `hooks` key.
-    parse_hooks_value(&wrapper, &path)
+    parse_hooks_value(&serde_json::json!({ "hooks": inner }), &path)
 }
 
 fn parse_hooks_value(value: &Value, path: &Path) -> Vec<hooks::HookDefinition> {
@@ -1705,18 +2183,184 @@ async fn load_declared_hooks_from_path(plugin_dir: &Path, raw: &str) -> Vec<hook
     parse_hooks_value(&value, &path)
 }
 
+/// True when `raw` names an MCPB/`.dxt` bundle (oracle `DL(e){return
+/// e.endsWith(".mcpb")||e.endsWith(".dxt")}`): a literal, case-SENSITIVE
+/// suffix check on the raw string — deliberately NOT `Path::extension()`
+/// (which would diverge on an edge case like the bare `".mcpb"`, no
+/// basename, and does not apply to a URL string at all), to stay byte-exact
+/// with the oracle.
+#[allow(clippy::case_sensitive_file_extension_comparisons)]
+fn is_mcpb_source(raw: &str) -> bool {
+    raw.ends_with(".mcpb") || raw.ends_with(".dxt")
+}
+
+/// True when `raw` is a URL rather than a relative path (oracle `ZHe`).
+fn is_url_source(raw: &str) -> bool {
+    raw.starts_with("http://") || raw.starts_with("https://")
+}
+
+/// `mcpServers` (oracle `js`): `union([V(), st(), record(string,KY()),
+/// array(union([V(), st(), record(string,KY())]))])` — a `.json` path, an
+/// MCPB/`.dxt` path or URL (oracle's `st`, §14 row 1's MCPB union arm), an
+/// inline `{name: config}` record, or a mixed array of any of the three.
 async fn load_declared_mcp_servers(
     plugin_dir: &Path,
     value: Option<Value>,
+    plugin_name: &str,
+    confined: bool,
 ) -> HashMap<String, mcp::McpServerConfig> {
-    load_declared_json_records(plugin_dir, value, |raw| {
-        mcp::parse_mcp_json_string(raw, mcp::ConfigScope::Dynamic).map(|v| {
+    let Some(value) = value else {
+        return HashMap::new();
+    };
+    let mut out = HashMap::new();
+    match value {
+        Value::String(raw) => {
+            merge_one_declared_mcp_source(plugin_dir, &raw, plugin_name, confined, &mut out).await;
+        }
+        Value::Array(items) => {
+            for item in items {
+                match item {
+                    Value::String(raw) => {
+                        merge_one_declared_mcp_source(plugin_dir, &raw, plugin_name, confined, &mut out)
+                            .await;
+                    }
+                    other => {
+                        if let Ok(parsed) = mcp::parse_mcp_json_string(
+                            &other.to_string(),
+                            mcp::ConfigScope::Dynamic,
+                        ) {
+                            out.extend(parsed.into_iter().map(|cfg| (cfg.name.clone(), cfg)));
+                        }
+                    }
+                }
+            }
+        }
+        other => {
+            if let Ok(parsed) =
+                mcp::parse_mcp_json_string(&other.to_string(), mcp::ConfigScope::Dynamic)
+            {
+                out.extend(parsed.into_iter().map(|cfg| (cfg.name.clone(), cfg)));
+            }
+        }
+    }
+    out
+}
+
+/// Resolve ONE string-valued `mcpServers` entry (the bare field, or one array
+/// item): dispatches to the MCPB loader when it names a `.mcpb`/`.dxt`
+/// source (oracle `DL(F)`), otherwise falls back to the plain `.json`-path
+/// loader shared with `mcpServers`'s non-MCPB forms.
+async fn merge_one_declared_mcp_source(
+    plugin_dir: &Path,
+    raw: &str,
+    plugin_name: &str,
+    confined: bool,
+    out: &mut HashMap<String, mcp::McpServerConfig>,
+) {
+    if is_mcpb_source(raw) {
+        if confined {
+            // Oracle `OL`'s `x(F)` closure, the `DL(F)` branch: "Skipping
+            // MCPB source "{F}" for directory-loaded plugin "{name}": not
+            // resolved without a pre-approval download here — declare MCP
+            // servers inline or via a local in-dir .mcp.json."
+            tracing::warn!(
+                source = %raw,
+                plugin = %plugin_name,
+                "Skipping MCPB source \"{raw}\" for directory-loaded plugin \"{plugin_name}\": \
+                 not resolved without a pre-approval download here — declare MCP servers inline \
+                 or via a local in-dir .mcp.json."
+            );
+            return;
+        }
+        if let Some(cfg) = load_mcpb_mcp_server(plugin_dir, raw, plugin_name).await {
+            out.insert(cfg.name.clone(), cfg);
+        }
+        return;
+    }
+    let parse = |raw_json: &str| {
+        mcp::parse_mcp_json_string(raw_json, mcp::ConfigScope::Dynamic).map(|v| {
             v.into_iter()
                 .map(|cfg| (cfg.name.clone(), cfg))
                 .collect::<HashMap<_, _>>()
         })
-    })
-    .await
+    };
+    merge_declared_json_records(plugin_dir, raw, &parse, out).await;
+}
+
+/// Resolve ONE path-form `.mcpb`/`.dxt` `mcpServers` entry into a single
+/// named MCP server config (oracle `Pit`/`uct`, byte-source recovered from
+/// the 2.1.251 Mach-O @159489593/@160861879). A URL source is recognized
+/// (so it is not silently mistaken for a malformed path) but its network
+/// fetch is DEFERRED — see the module-level notes in `mcpb.rs` — and this
+/// returns `None` with a diagnostic instead.
+async fn load_mcpb_mcp_server(
+    plugin_dir: &Path,
+    raw: &str,
+    plugin_name: &str,
+) -> Option<mcp::McpServerConfig> {
+    if is_url_source(raw) {
+        tracing::warn!(
+            url = %raw,
+            plugin = %plugin_name,
+            "MCPB URL sources are not fetched during plugin discovery (deferred to the install \
+             path); skipping declared MCP server"
+        );
+        return None;
+    }
+    let mcpb_path = resolve_declared_relative_path(plugin_dir, raw)?;
+    let Ok(bytes) = tokio::fs::read(&mcpb_path).await else {
+        // Oracle: "MCPB file not found: {path}".
+        tracing::warn!(path = %mcpb_path.display(), "MCPB file not found: {}", mcpb_path.display());
+        return None;
+    };
+    // Oracle logs the first 16 hex chars of the sha256 content hash.
+    let full_hash = crate::mcpb::sha256_hex(&bytes);
+    let short_hash: String = full_hash.chars().take(16).collect();
+    tracing::info!("MCPB content hash: {short_hash}");
+
+    let cache_dir = plugin_dir.join(".mcpb-cache").join(&full_hash);
+    if !tokio::fs::try_exists(&cache_dir).await.unwrap_or(false) {
+        tokio::fs::create_dir_all(&cache_dir).await.ok()?;
+        if let Err(e) = crate::mcpb::unpack_mcpb(&bytes, &cache_dir) {
+            tracing::warn!(error = %e, path = %mcpb_path.display(), "failed to extract MCPB archive");
+            return None;
+        }
+    }
+
+    let manifest_path = cache_dir.join("manifest.json");
+    let Ok(manifest_raw) = tokio::fs::read_to_string(&manifest_path).await else {
+        // Oracle: "No manifest.json found in MCPB file: {source}".
+        tracing::warn!(
+            source = %raw,
+            "No manifest.json found in MCPB file: {raw}"
+        );
+        return None;
+    };
+    let manifest: crate::mcpb::McpbManifest = match serde_json::from_str(&manifest_raw) {
+        Ok(m) => m,
+        Err(e) => {
+            tracing::warn!(error = %e, path = %manifest_path.display(), "invalid MCPB manifest.json");
+            return None;
+        }
+    };
+    if manifest.server.is_none() {
+        // Oracle: `MCPB manifest for "${pe.name}" does not define a server configuration`.
+        tracing::warn!(
+            plugin = %plugin_name,
+            "MCPB manifest for \"{}\" does not define a server configuration",
+            manifest.name
+        );
+        return None;
+    }
+    let generated = crate::mcpb::generate_mcp_config(&manifest, &cache_dir)?;
+    let cfg = mcp::build_server_from_json_entry(&manifest.name, &generated, mcp::ConfigScope::Dynamic)?;
+    // Oracle: `Loaded MCP server "{name}" from MCPB (extracted to {extractedPath})`.
+    tracing::info!(
+        "Loaded MCP server \"{}\" from MCPB (extracted to {})",
+        cfg.name,
+        cache_dir.display()
+    );
+    Some(cfg)
 }
 
 async fn load_declared_lsp_servers(
@@ -2391,6 +3035,8 @@ mod tests {
         let servers = load_declared_mcp_servers(
             plugin,
             Some(Value::String("./custom-mcp.json".to_string())),
+            "demo",
+            false,
         )
         .await;
         assert!(
@@ -2518,7 +3164,7 @@ mod tests {
             {"inline-server": {"type": "stdio", "command": "echo"}}
         ]);
 
-        let servers = load_declared_mcp_servers(plugin, Some(value)).await;
+        let servers = load_declared_mcp_servers(plugin, Some(value), "demo", false).await;
         assert!(
             servers.contains_key("file-server") && servers.contains_key("inline-server"),
             "a mixed [path, inlineObject] array (oracle `js`) must merge BOTH the \
@@ -2749,6 +3395,517 @@ mod tests {
             "a bare-name _EXCEPT entry must not exempt a directory-loaded plugin \
              (oracle `r=!pM(e)`), got {:?}",
             still_suppressed.components.mcp_servers
+        );
+    }
+
+    // ---------- §14 row 2: hooks.json `modules` ----------
+
+    #[tokio::test]
+    async fn hooks_json_with_only_modules_and_no_hooks_is_accepted_but_registers_nothing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin = tmp.path();
+        fs::create_dir_all(plugin.join("hooks")).unwrap();
+        fs::write(
+            plugin.join("hooks/hooks.json"),
+            r#"{"modules": ["./register.js"]}"#,
+        )
+        .unwrap();
+        let hooks = load_standard_hooks(plugin).await;
+        assert!(
+            hooks.is_empty(),
+            "a modules-only hooks.json has no declarative hooks to register (the module \
+             itself is not executed by this engine), got {hooks:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn hooks_json_with_two_modules_entries_is_refused() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin = tmp.path();
+        fs::create_dir_all(plugin.join("hooks")).unwrap();
+        fs::write(
+            plugin.join("hooks/hooks.json"),
+            r#"{"modules": ["./a.js", "./b.js"]}"#,
+        )
+        .unwrap();
+        assert!(
+            load_standard_hooks(plugin).await.is_empty(),
+            "oracle: \"a second entry is refused\" — a 2-entry `modules` array must not load"
+        );
+    }
+
+    #[tokio::test]
+    async fn hooks_json_with_neither_hooks_nor_modules_is_refused() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin = tmp.path();
+        fs::create_dir_all(plugin.join("hooks")).unwrap();
+        fs::write(plugin.join("hooks/hooks.json"), r#"{"description": "empty"}"#).unwrap();
+        assert!(
+            load_standard_hooks(plugin).await.is_empty(),
+            "oracle: hooks.json must have `hooks` or `modules`, or both"
+        );
+    }
+
+    #[tokio::test]
+    async fn hooks_json_with_too_many_modules_refuses_even_the_valid_declarative_half() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin = tmp.path();
+        fs::create_dir_all(plugin.join("hooks")).unwrap();
+        fs::write(
+            plugin.join("hooks/hooks.json"),
+            r#"{
+                "modules": ["./a.js", "./b.js"],
+                "hooks": {"PreToolUse":[{"matcher":"Write","hooks":[{"type":"command","command":"./fmt.sh"}]}]}
+            }"#,
+        )
+        .unwrap();
+        assert!(
+            load_standard_hooks(plugin).await.is_empty(),
+            "a 2-entry `modules` array must refuse the WHOLE hooks.json, even a valid \
+             declarative `hooks` half — an unvalidated port would keep parsing `hooks` \
+             and ignore the modules-count violation entirely"
+        );
+    }
+
+    #[tokio::test]
+    async fn hooks_json_with_modules_and_hooks_registers_the_declarative_half() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin = tmp.path();
+        fs::create_dir_all(plugin.join("hooks")).unwrap();
+        fs::write(
+            plugin.join("hooks/hooks.json"),
+            r#"{
+                "modules": ["./register.js"],
+                "hooks": {"PreToolUse":[{"matcher":"Write","hooks":[{"type":"command","command":"./fmt.sh"}]}]}
+            }"#,
+        )
+        .unwrap();
+        let hooks = load_standard_hooks(plugin).await;
+        assert_eq!(
+            hooks.len(),
+            1,
+            "both halves declared: the declarative `hooks` still registers, got {hooks:?}"
+        );
+    }
+
+    // ---------- §14 row 3: `syntaxHighlighting.hljsLanguages` ----------
+
+    #[tokio::test]
+    async fn syntax_highlighting_valid_entry_is_parsed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin = tmp.path();
+        fs::create_dir_all(plugin.join(branding::PLUGIN_MANIFEST_DIR)).unwrap();
+        fs::write(
+            plugin
+                .join(branding::PLUGIN_MANIFEST_DIR)
+                .join("plugin.json"),
+            serde_json::json!({
+                "name": "demo",
+                "syntaxHighlighting": {
+                    "hljsLanguages": [
+                        {"id": "mylang", "remote": "npm:hljs-mylang@1.2.3", "integrity": "sha256-abc123=="}
+                    ]
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let (_id, manifest) = load_plugin_from_path(plugin).await.unwrap();
+        assert_eq!(manifest.components.hljs_languages.len(), 1);
+        assert_eq!(manifest.components.hljs_languages[0].id, "mylang");
+        assert_eq!(
+            manifest.components.hljs_languages[0].remote.as_deref(),
+            Some("npm:hljs-mylang@1.2.3")
+        );
+    }
+
+    #[tokio::test]
+    async fn syntax_highlighting_invalid_id_sinks_the_whole_manifest() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin = tmp.path();
+        fs::create_dir_all(plugin.join(branding::PLUGIN_MANIFEST_DIR)).unwrap();
+        fs::write(
+            plugin
+                .join(branding::PLUGIN_MANIFEST_DIR)
+                .join("plugin.json"),
+            serde_json::json!({
+                "name": "demo",
+                "syntaxHighlighting": {"hljsLanguages": [{"id": "Not-Valid"}]}
+            })
+            .to_string(),
+        )
+        .unwrap();
+        assert!(
+            load_plugin_from_path(plugin).await.is_none(),
+            "an id violating ^[a-z][a-z0-9_-]*$ must sink the whole plugin.json parse"
+        );
+    }
+
+    #[tokio::test]
+    async fn syntax_highlighting_unknown_key_sinks_the_whole_manifest() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin = tmp.path();
+        fs::create_dir_all(plugin.join(branding::PLUGIN_MANIFEST_DIR)).unwrap();
+        fs::write(
+            plugin
+                .join(branding::PLUGIN_MANIFEST_DIR)
+                .join("plugin.json"),
+            serde_json::json!({
+                "name": "demo",
+                "syntaxHighlighting": {"hljsLanguages": [], "extra": true}
+            })
+            .to_string(),
+        )
+        .unwrap();
+        assert!(
+            load_plugin_from_path(plugin).await.is_none(),
+            "an unknown syntaxHighlighting key must sink the whole plugin.json parse (`.strict()`)"
+        );
+    }
+
+    #[tokio::test]
+    async fn syntax_highlighting_more_than_16_entries_sinks_the_whole_manifest() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin = tmp.path();
+        fs::create_dir_all(plugin.join(branding::PLUGIN_MANIFEST_DIR)).unwrap();
+        let entries: Vec<_> = (0..17)
+            .map(|i| serde_json::json!({"id": format!("lang{i}")}))
+            .collect();
+        fs::write(
+            plugin
+                .join(branding::PLUGIN_MANIFEST_DIR)
+                .join("plugin.json"),
+            serde_json::json!({"name": "demo", "syntaxHighlighting": {"hljsLanguages": entries}})
+                .to_string(),
+        )
+        .unwrap();
+        assert!(
+            load_plugin_from_path(plugin).await.is_none(),
+            "17 hljsLanguages entries exceed the 16-entry cap and must sink the whole manifest"
+        );
+    }
+
+    // ---------- §14 row 4: `binaries` parsing + validation ----------
+
+    #[tokio::test]
+    async fn binaries_valid_entry_is_parsed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin = tmp.path();
+        fs::create_dir_all(plugin.join(branding::PLUGIN_MANIFEST_DIR)).unwrap();
+        let sha = "a".repeat(64);
+        fs::write(
+            plugin
+                .join(branding::PLUGIN_MANIFEST_DIR)
+                .join("plugin.json"),
+            serde_json::json!({
+                "name": "demo",
+                "binaries": {"mytool-x86_64-linux": {"sha256": sha}}
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let (_id, manifest) = load_plugin_from_path(plugin).await.unwrap();
+        assert_eq!(manifest.components.binaries.len(), 1);
+        assert_eq!(
+            manifest.components.binaries["mytool-x86_64-linux"].sha256,
+            "a".repeat(64)
+        );
+    }
+
+    #[tokio::test]
+    async fn binaries_invalid_entries_are_silently_dropped_not_fatal() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin = tmp.path();
+        fs::create_dir_all(plugin.join(branding::PLUGIN_MANIFEST_DIR)).unwrap();
+        fs::write(
+            plugin
+                .join(branding::PLUGIN_MANIFEST_DIR)
+                .join("plugin.json"),
+            serde_json::json!({
+                "name": "demo",
+                "binaries": {
+                    "Bad-Basename!": {"sha256": "a".repeat(64)},
+                    "good-tool": {"sha256": "not-a-valid-hash"},
+                    "good-tool2": {"sha256": "b".repeat(64)}
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let (_id, manifest) = load_plugin_from_path(plugin).await.unwrap();
+        assert_eq!(
+            manifest.components.binaries.len(),
+            1,
+            "only the one fully-valid entry should survive, got {:?}",
+            manifest.components.binaries
+        );
+        assert!(manifest.components.binaries.contains_key("good-tool2"));
+    }
+
+    #[tokio::test]
+    async fn binaries_caps_at_64_valid_entries_in_source_order() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin = tmp.path();
+        fs::create_dir_all(plugin.join(branding::PLUGIN_MANIFEST_DIR)).unwrap();
+        let mut map = serde_json::Map::new();
+        for i in 0..70 {
+            map.insert(
+                format!("tool{i:02}"),
+                serde_json::json!({"sha256": "c".repeat(64)}),
+            );
+        }
+        fs::write(
+            plugin
+                .join(branding::PLUGIN_MANIFEST_DIR)
+                .join("plugin.json"),
+            serde_json::json!({"name": "demo", "binaries": Value::Object(map)}).to_string(),
+        )
+        .unwrap();
+        let (_id, manifest) = load_plugin_from_path(plugin).await.unwrap();
+        assert_eq!(manifest.components.binaries.len(), 64);
+        assert!(manifest.components.binaries.contains_key("tool00"));
+        assert!(
+            !manifest.components.binaries.contains_key("tool69"),
+            "only the first 64 (in source order) survive the oracle's silent cap"
+        );
+    }
+
+    // ---------- §14 row 5: `monitors` parsing + validation ----------
+
+    #[tokio::test]
+    async fn monitors_inline_array_is_parsed_with_default_when() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin = tmp.path();
+        fs::create_dir_all(plugin.join(branding::PLUGIN_MANIFEST_DIR)).unwrap();
+        fs::write(
+            plugin
+                .join(branding::PLUGIN_MANIFEST_DIR)
+                .join("plugin.json"),
+            serde_json::json!({
+                "name": "demo",
+                "monitors": [{"name": "watch-log", "command": "tail -f log", "description": "watch it"}]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let (_id, manifest) = load_plugin_from_path(plugin).await.unwrap();
+        assert_eq!(manifest.components.monitors.len(), 1);
+        assert_eq!(manifest.components.monitors[0].when, MonitorTrigger::Always);
+    }
+
+    #[tokio::test]
+    async fn monitors_duplicate_names_sink_the_whole_manifest() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin = tmp.path();
+        fs::create_dir_all(plugin.join(branding::PLUGIN_MANIFEST_DIR)).unwrap();
+        fs::write(
+            plugin
+                .join(branding::PLUGIN_MANIFEST_DIR)
+                .join("plugin.json"),
+            serde_json::json!({
+                "name": "demo",
+                "monitors": [
+                    {"name": "dup", "command": "a", "description": "a"},
+                    {"name": "dup", "command": "b", "description": "b"}
+                ]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        assert!(
+            load_plugin_from_path(plugin).await.is_none(),
+            "oracle: \"Monitor names must be unique within a plugin\" must sink the whole manifest"
+        );
+    }
+
+    #[tokio::test]
+    async fn monitors_on_skill_invoke_trigger_round_trips() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin = tmp.path();
+        fs::create_dir_all(plugin.join(branding::PLUGIN_MANIFEST_DIR)).unwrap();
+        fs::write(
+            plugin
+                .join(branding::PLUGIN_MANIFEST_DIR)
+                .join("plugin.json"),
+            serde_json::json!({
+                "name": "demo",
+                "monitors": [{"name": "m", "command": "c", "description": "d", "when": "on-skill-invoke:deploy"}]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let (_id, manifest) = load_plugin_from_path(plugin).await.unwrap();
+        assert_eq!(
+            manifest.components.monitors[0].when,
+            MonitorTrigger::OnSkillInvoke("deploy".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn monitors_default_auto_scan_loads_when_field_absent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin = tmp.path();
+        fs::create_dir_all(plugin.join(branding::PLUGIN_MANIFEST_DIR)).unwrap();
+        fs::create_dir_all(plugin.join("monitors")).unwrap();
+        fs::write(
+            plugin
+                .join(branding::PLUGIN_MANIFEST_DIR)
+                .join("plugin.json"),
+            serde_json::json!({"name": "demo"}).to_string(),
+        )
+        .unwrap();
+        fs::write(
+            plugin.join("monitors/monitors.json"),
+            serde_json::json!([{"name": "auto", "command": "c", "description": "d"}]).to_string(),
+        )
+        .unwrap();
+        let (_id, manifest) = load_plugin_from_path(plugin).await.unwrap();
+        assert_eq!(manifest.components.monitors.len(), 1);
+        assert_eq!(manifest.components.monitors[0].name, "auto");
+    }
+
+    #[tokio::test]
+    async fn monitors_declared_field_replaces_the_default_auto_scan() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin = tmp.path();
+        fs::create_dir_all(plugin.join(branding::PLUGIN_MANIFEST_DIR)).unwrap();
+        fs::create_dir_all(plugin.join("monitors")).unwrap();
+        fs::write(
+            plugin.join("monitors/monitors.json"),
+            serde_json::json!([{"name": "auto", "command": "c", "description": "d"}]).to_string(),
+        )
+        .unwrap();
+        fs::write(
+            plugin
+                .join(branding::PLUGIN_MANIFEST_DIR)
+                .join("plugin.json"),
+            serde_json::json!({
+                "name": "demo",
+                "monitors": [{"name": "declared", "command": "x", "description": "y"}]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let (_id, manifest) = load_plugin_from_path(plugin).await.unwrap();
+        assert_eq!(manifest.components.monitors.len(), 1);
+        assert_eq!(
+            manifest.components.monitors[0].name, "declared",
+            "a declared `monitors` field REPLACES the auto-scan, same rule as themes/workflows"
+        );
+    }
+
+    // ---------- §14 row 1: `mcpServers` MCPB/`.dxt` union arm ----------
+
+    fn build_mcpb_zip(manifest_json: &serde_json::Value) -> Vec<u8> {
+        use std::io::Write;
+        let mut buf = Vec::new();
+        {
+            let mut w = zip::ZipWriter::new(std::io::Cursor::new(&mut buf));
+            w.start_file("manifest.json", zip::write::SimpleFileOptions::default())
+                .unwrap();
+            w.write_all(manifest_json.to_string().as_bytes()).unwrap();
+            w.finish().unwrap();
+        }
+        buf
+    }
+
+    #[tokio::test]
+    async fn mcp_servers_mcpb_path_resolves_to_a_named_server_for_a_non_confined_plugin() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin = tmp.path();
+        fs::create_dir_all(plugin.join(branding::PLUGIN_MANIFEST_DIR)).unwrap();
+        fs::write(
+            plugin
+                .join(branding::PLUGIN_MANIFEST_DIR)
+                .join("plugin.json"),
+            serde_json::json!({"name": "demo", "mcpServers": "./bundle.mcpb"}).to_string(),
+        )
+        .unwrap();
+        let bundle = build_mcpb_zip(&serde_json::json!({
+            "name": "bundled-server",
+            "server": {"mcp_config": {"command": "node", "args": ["${__dirname}/index.js"]}}
+        }));
+        fs::write(plugin.join("bundle.mcpb"), bundle).unwrap();
+
+        // A resolved install-source identity marks this "not directory-loaded"
+        // (oracle `pM(e)` false) — the MCPB source is actually resolved.
+        let (_id, manifest) =
+            load_plugin_from_path_with_mcp_gate(plugin, false, Some("demo@marketplace-x"))
+                .await
+                .unwrap();
+        assert_eq!(manifest.components.mcp_servers.len(), 1);
+        let server = manifest
+            .components
+            .mcp_servers
+            .get("bundled-server")
+            .unwrap_or_else(|| {
+                panic!(
+                    "server must be keyed by the MCPB manifest's own name, got {:?}",
+                    manifest.components.mcp_servers
+                )
+            });
+        match &server.spec {
+            traits::McpTransportSpec::Stdio { command, args, .. } => {
+                assert_eq!(command, "node");
+                assert!(
+                    args[0].ends_with("/index.js") && args[0].contains(plugin.to_str().unwrap()),
+                    "${{__dirname}} must substitute the extracted bundle path, got {args:?}"
+                );
+            }
+            other => panic!("expected a stdio spec, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn mcp_servers_mcpb_source_is_skipped_for_a_directory_loaded_plugin() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin = tmp.path();
+        fs::create_dir_all(plugin.join(branding::PLUGIN_MANIFEST_DIR)).unwrap();
+        fs::write(
+            plugin
+                .join(branding::PLUGIN_MANIFEST_DIR)
+                .join("plugin.json"),
+            serde_json::json!({"name": "demo", "mcpServers": "./bundle.mcpb"}).to_string(),
+        )
+        .unwrap();
+        let bundle = build_mcpb_zip(&serde_json::json!({
+            "name": "bundled-server",
+            "server": {"mcp_config": {"command": "node", "args": []}}
+        }));
+        fs::write(plugin.join("bundle.mcpb"), bundle).unwrap();
+
+        // No install-source identity == directory-loaded (oracle `pM(e)`
+        // true): the MCPB source must be SKIPPED, not resolved.
+        let (_id, manifest) = load_plugin_from_path(plugin).await.unwrap();
+        assert!(
+            manifest.components.mcp_servers.is_empty(),
+            "a directory-loaded plugin's MCPB mcpServers source must be skipped, got {:?}",
+            manifest.components.mcp_servers
+        );
+    }
+
+    #[tokio::test]
+    async fn mcp_servers_mcpb_manifest_with_no_server_yields_no_server() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin = tmp.path();
+        fs::create_dir_all(plugin.join(branding::PLUGIN_MANIFEST_DIR)).unwrap();
+        fs::write(
+            plugin
+                .join(branding::PLUGIN_MANIFEST_DIR)
+                .join("plugin.json"),
+            serde_json::json!({"name": "demo", "mcpServers": "./bundle.mcpb"}).to_string(),
+        )
+        .unwrap();
+        let bundle = build_mcpb_zip(&serde_json::json!({"name": "bundled-server"}));
+        fs::write(plugin.join("bundle.mcpb"), bundle).unwrap();
+        let (_id, manifest) =
+            load_plugin_from_path_with_mcp_gate(plugin, false, Some("demo@marketplace-x"))
+                .await
+                .unwrap();
+        assert!(
+            manifest.components.mcp_servers.is_empty(),
+            "an MCPB manifest with no `server` must yield no server, got {:?}",
+            manifest.components.mcp_servers
         );
     }
 }

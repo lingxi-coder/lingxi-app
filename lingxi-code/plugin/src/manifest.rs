@@ -103,6 +103,124 @@ pub struct PluginManifest {
     pub metadata: Option<serde_json::Value>,
 }
 
+/// One `syntaxHighlighting.hljsLanguages` entry (oracle `Ks`, `.strict()`): a
+/// custom highlight.js language grammar the plugin registers, fetched from an
+/// integrity-pinned `npm:`/`github:` source. Parsed + validated only — no
+/// engine surface fetches or registers these grammars yet.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HljsLanguageEntry {
+    /// highlight.js language id. Oracle `As`: `^[a-z][a-z0-9_-]*$`, <=64 chars.
+    pub id: String,
+    /// `npm:<pkg>[@version]` or `github:<owner>/<repo>@<ref>#<path>.js`,
+    /// <=256 chars. Absent when the plugin ships the grammar file itself.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote: Option<String>,
+    /// Subresource-integrity hash gating the fetched grammar: `sha256-`,
+    /// `sha384-`, or `sha512-` followed by base64, <=512 chars.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub integrity: Option<String>,
+}
+
+/// One `binaries` entry (oracle `Gs`): a sha256-pinned file fetched into
+/// `bin/` at install time, keyed by basename (the target triple is encoded in
+/// the name itself, e.g. `mytool-x86_64-apple-darwin`). Parsed + validated
+/// only here — [`crate::discovery`]'s parser enforces the basename charset,
+/// the 64-hex digest shape, and the 64-entry cap (oracle `n1e`/`Jqt`) the same
+/// way the oracle's lenient `.transform()` does (silently dropping an invalid
+/// entry rather than failing the whole manifest); the actual network fetch
+/// into `bin/` is an install-path concern this change does not wire.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BinaryPin {
+    /// Lowercase 64-hex sha256 digest the fetched file must match.
+    pub sha256: String,
+}
+
+/// A `monitors` entry's arm trigger (oracle `$s.when`): `"always"` arms at
+/// session start and on plugin reload; `"on-skill-invoke:<skill>"` arms the
+/// first time that skill is dispatched. Defaults to `Always`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MonitorTrigger {
+    /// Arms at session start and on plugin reload.
+    Always,
+    /// Arms the first time the named skill is dispatched.
+    OnSkillInvoke(String),
+}
+
+impl Default for MonitorTrigger {
+    fn default() -> Self {
+        Self::Always
+    }
+}
+
+impl MonitorTrigger {
+    /// Parse the oracle `when` string: `"always"`, or `"on-skill-invoke:"`
+    /// followed by a non-empty skill name (oracle: `.refine(e=>e.length>16)`
+    /// — the literal prefix itself is 16 chars, so this is exactly "at least
+    /// one char after the colon").
+    ///
+    /// # Errors
+    /// Returns a byte-faithful message when `raw` matches neither shape.
+    pub fn parse(raw: &str) -> Result<Self, String> {
+        if raw == "always" {
+            return Ok(Self::Always);
+        }
+        match raw.strip_prefix("on-skill-invoke:") {
+            Some(skill) if !skill.is_empty() => Ok(Self::OnSkillInvoke(skill.to_string())),
+            Some(_) => Err("on-skill-invoke: must specify a skill name".to_string()),
+            None => Err(format!(
+                "monitor \"when\" must be \"always\" or \"on-skill-invoke:<skill>\", got {raw:?}"
+            )),
+        }
+    }
+
+    /// Render back to the oracle's on-wire string form.
+    #[must_use]
+    pub fn as_str(&self) -> std::borrow::Cow<'_, str> {
+        match self {
+            Self::Always => std::borrow::Cow::Borrowed("always"),
+            Self::OnSkillInvoke(skill) => std::borrow::Cow::Owned(format!("on-skill-invoke:{skill}")),
+        }
+    }
+}
+
+impl Serialize for MonitorTrigger {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(&self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for MonitorTrigger {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let raw = String::deserialize(deserializer)?;
+        Self::parse(&raw).map_err(serde::de::Error::custom)
+    }
+}
+
+/// One `monitors` entry (oracle `$s`, a strict object): a persistent
+/// background watch script the host can arm as a Monitor task ("unsandboxed,
+/// same trust tier as hooks"). Parsed + validated only —
+/// [`crate::discovery`] enforces the strict shape and the unique-`name`
+/// constraint (oracle `kAn`), but arming one is `tasks::handlers::monitor`'s
+/// concern and is not wired by this change.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PluginMonitor {
+    /// Identifier for this monitor, unique within the plugin.
+    pub name: String,
+    /// Shell command to run as a persistent background monitor.
+    pub command: String,
+    /// Short human-readable description of what is being monitored.
+    pub description: String,
+    /// Arm trigger. Defaults to [`MonitorTrigger::Always`].
+    #[serde(default)]
+    pub when: MonitorTrigger,
+}
+
 /// The 7 component slots a plugin can populate.
 ///
 /// Each slot is materialized into its matching engine registry by
@@ -131,6 +249,25 @@ pub struct PluginComponents {
     /// `workflows/` auto-scan, matching [`Self::output_styles`].
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub workflows: Vec<ComponentPath>,
+    /// Custom highlight.js language grammars this plugin registers
+    /// (`syntaxHighlighting.hljsLanguages` in `plugin.json`, oracle `Hs`).
+    /// Parsed + validated only — nothing fetches or registers these
+    /// grammars yet.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hljs_languages: Vec<HljsLanguageEntry>,
+    /// sha256-pinned files fetched into `bin/` at install time, keyed by
+    /// basename (`binaries` in `plugin.json`, oracle `qs`). Parsed +
+    /// validated only — the actual fetch is an install-path concern this
+    /// change does not wire.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub binaries: HashMap<String, BinaryPin>,
+    /// Background watch scripts the host can arm as persistent Monitor tasks
+    /// (`monitors` in `plugin.json`, or the `monitors/monitors.json`
+    /// auto-scan when the field is absent; oracle `mt`). Parsed + validated
+    /// only — arming one is `tasks::handlers::monitor`'s concern, not wired
+    /// by this change.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub monitors: Vec<PluginMonitor>,
     /// Inline hook definitions.
     pub hooks: Vec<HookDefinition>,
     /// MCP servers contributed by this plugin, keyed by logical name. Always

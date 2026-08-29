@@ -4949,6 +4949,7 @@ dependencies = [
  "outputstyles",
  "platform-posix",
  "protocol",
+ "regex",
  "secret",
  "semver",
  "serde",

@@ -35,6 +35,9 @@ git2 = { path = "../../third_party/git2-rs/git2", default-features = false, feat
 zip = { version = "2", default-features = false, features = ["deflate"] }
 sha2 = "0.10"
 tempfile = "3"
+# syntaxHighlighting.hljsLanguages `remote`/`integrity` shape validation
+# (already a transitive dependency via `mcp`, so this adds no new build).
+regex = "1"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["sync", "fs", "macros", "rt", "rt-multi-thread"] }

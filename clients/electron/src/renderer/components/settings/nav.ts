@@ -23,7 +23,7 @@ export interface NavPage {
 export const SETTINGS_NAV: NavPage[] = [
   { id: 'general', label: '通用', group: '个人', icon: 'cog', needsEngine: false, layered: false, searchKeys: ['general', '通用'], implemented: true },
   { id: 'appearance', label: '外观', group: '个人', icon: 'sun', needsEngine: false, layered: false, searchKeys: ['theme', '主题', '外观', 'appearance', 'dark', 'light', 'system'], implemented: true },
-  { id: 'voice', label: '语音', group: '个人', icon: 'mic', needsEngine: false, layered: false, searchKeys: ['voice', '语音', 'tts', 'stt', 'rate', 'autoPlayReplies'], implemented: true },
+  { id: 'voice', label: '语音', group: '个人', icon: 'mic', needsEngine: false, layered: false, searchKeys: ['voice', '语音', 'tts', 'stt', 'rate'], implemented: true },
   { id: 'projects', label: '项目与信任', group: '个人', icon: 'folder', needsEngine: false, layered: false, searchKeys: ['project', '项目', 'trust', '信任', 'pinned'], implemented: true },
 
   { id: 'provider-credentials', label: 'Provider 凭据', group: '模型与服务', icon: 'key', needsEngine: true, layered: false, searchKeys: ['provider', 'credential', '凭据', 'apiBaseUrl', 'keychain'], implemented: true },

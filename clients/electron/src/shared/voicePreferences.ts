@@ -18,6 +18,17 @@
  * so there is no legacy state to migrate — only normalization (accepting
  * today's contract leniently) is ported.
  *
+ * Also deliberately NOT mirrored: mobile's auto-play-replies flag (iOS's
+ * `voiceAutoPlay`, Android's equivalent). Desktop has no code path that
+ * speaks a reply — the renderer speaks only when the ENGINE sends
+ * `AudioOpDto::Synthesize` — and no manual play control either, so the
+ * setting was persisted and read by nothing. It is omitted rather than kept
+ * "for parity": a preference that saves a value and changes nothing tells the
+ * next reader it works. Persisting it again means implementing the playback
+ * first. The removal needs no schema bump — `parseVoicePreferences` builds a
+ * complete value from known keys only, so a flag left behind in an existing
+ * settings file is simply dropped on the next write.
+ *
  * This lives in `shared/` — not `main/` or `renderer/` — because, like
  * `PublicSettings` in `shared/settings.ts`, it has to be reachable from the
  * main process (which persists it) and eventually the renderer (which will
@@ -51,7 +62,6 @@ export interface VoicePreferences {
   language: string;
   voiceSelection: string;
   rate: number;
-  autoPlayReplies: boolean;
 }
 
 /** The value a fresh install (no persisted voice preferences yet) gets on every platform. */
@@ -62,7 +72,6 @@ export function defaultVoicePreferences(): VoicePreferences {
     language: LANGUAGE_AUTO,
     voiceSelection: DEFAULT_VOICE_SELECTION,
     rate: DEFAULT_RATE,
-    autoPlayReplies: false,
   };
 }
 
@@ -103,6 +112,5 @@ export function parseVoicePreferences(value: unknown): VoicePreferences {
       typeof raw['voiceSelection'] === 'string' ? raw['voiceSelection'] : undefined,
     ),
     rate: normalizeRate(raw['rate']),
-    autoPlayReplies: raw['autoPlayReplies'] === true,
   };
 }

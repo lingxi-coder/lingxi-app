@@ -1,6 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
 import { Card, Row } from '../rows';
-import { Toggle } from '../primitives';
 import { useT } from '../../../theme/ThemeContext';
 import type { PageContentProps } from '../SettingsScreen';
 import { modelReference } from '../../../bridge/modelCatalog';
@@ -121,7 +120,6 @@ export interface VoicePageModel {
   voiceSelection: string;
   effectiveVoiceId: string | null;
   rate: number;
-  autoPlayReplies: boolean;
   notices: string[];
 }
 
@@ -187,7 +185,6 @@ export function voicePageModel(prefs: VoicePreferences, platform: VoicePlatformS
     voiceSelection: prefs.voiceSelection,
     effectiveVoiceId: capability.effectiveVoice?.id ?? null,
     rate: prefs.rate,
-    autoPlayReplies: prefs.autoPlayReplies,
     notices: capability.blockingIssues.map((issue) => BLOCKING_ISSUE_MESSAGES[issue]),
   };
 }
@@ -301,7 +298,6 @@ export function Voice({ bridge }: PageContentProps) {
   };
   const setVoiceSelection = (voiceSelection: string) => persist({ ...prefs, voiceSelection });
   const setRate = (rate: number) => persist({ ...prefs, rate });
-  const setAutoPlayReplies = (autoPlayReplies: boolean) => persist({ ...prefs, autoPlayReplies });
 
   return (
     <>
@@ -405,9 +401,6 @@ export function Voice({ bridge }: PageContentProps) {
             />
             <span style={{ fontSize: 12.5, color: t.text3, minWidth: 40 }}>{model.rate.toFixed(2)}×</span>
           </div>
-        </Row>
-        <Row title="自动朗读回复" desc="收到回复后自动朗读，无需手动点击播放。" align="center">
-          <Toggle value={model.autoPlayReplies} onChange={setAutoPlayReplies} />
         </Row>
       </Card>
 

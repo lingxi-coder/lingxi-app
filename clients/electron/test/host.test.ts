@@ -704,7 +704,7 @@ test('the settings-update IPC handler accepts a voice patch, normalizes it throu
   try {
     const result = await Promise.resolve(update!(event, {
       voice: { schemaVersion: 2, recognitionMode: 'localOnly', language: '  ZH-cn  ', voiceSelection: 'Alex', rate: 99, autoPlayReplies: true },
-    })) as { voice?: { recognitionMode: string; language: string; voiceSelection: string; rate: number; autoPlayReplies: boolean } };
+    })) as { voice?: Record<string, unknown> };
 
     // Normalized through the REAL `parseVoicePreferences` (Task 4), not
     // echoed back raw: language is trimmed (case preserved — only an
@@ -716,8 +716,10 @@ test('the settings-update IPC handler accepts a voice patch, normalizes it throu
       language: 'ZH-cn',
       voiceSelection: 'system:Alex',
       rate: 2.0,
-      autoPlayReplies: true,
     });
+    // The removed auto-play flag cannot re-enter the settings file through a
+    // renderer patch either: `parseVoicePreferences` keeps known keys only.
+    assert.ok(!('autoPlayReplies' in (result.voice ?? {})));
     assert.deepEqual(settings.getPublic().voice, result.voice, 'the IPC response must reflect what was actually persisted, not an optimistic echo');
     assert.equal(restartCalls, 0, 'a voice-only patch must never restart the bridge');
 

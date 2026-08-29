@@ -71,7 +71,6 @@ function subscribe(set: Set<Listener>, listener: Listener) {
         language: 'auto',
         voiceSelection: 'system:default',
         rate: 1,
-        autoPlayReplies: false,
       },
     },
     workspace: { trusted: false },

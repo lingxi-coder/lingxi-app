@@ -346,7 +346,6 @@ test('parseSettings normalizes a persisted voice value, repairing garbage rather
     language: 'auto',
     voiceSelection: 'system:Alex',
     rate: 2,
-    autoPlayReplies: false,
   };
   assert.deepEqual(parsed.voice, expected);
 });
@@ -374,20 +373,18 @@ test('SettingsStore.update writes and reloads voice preferences, normalized', ()
     language: 'ZH-cn',
     voiceSelection: 'system:default',
     rate: 0.5,
-    autoPlayReplies: false,
   };
   assert.deepEqual(result.voice, expected);
   assert.deepEqual(new SettingsStore(userData).getPublic().voice, expected, 'voice preferences must survive a reload');
 
   // A later update() replaces the whole snapshot, matching how both mobile
   // platforms persist it (never a partial per-field merge).
-  const replaced = store.update({ voice: { autoPlayReplies: true } });
+  const replaced = store.update({ voice: { rate: 1.75 } });
   assert.deepEqual(replaced.voice, {
     schemaVersion: 2,
     recognitionMode: 'automatic',
     language: 'auto',
     voiceSelection: 'system:default',
-    rate: 1,
-    autoPlayReplies: true,
-  });
+    rate: 1.75,
+  }, 'the earlier localOnly/ZH-cn values must be replaced wholesale, not merged into');
 });

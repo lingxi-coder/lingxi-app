@@ -151,3 +151,34 @@ test('the voice preference and capability shapes are declared exactly once', () 
     );
   }
 });
+
+// ---------------------------------------------------------------------------
+// Final review, Defects 5 and 10: the 「自动朗读回复」 toggle asserted
+// 「收到回复后自动朗读，无需手动点击播放。」 and did neither. `setAutoPlayReplies`
+// persisted the flag through `bridge.setVoicePreferences` →
+// `host.updateSettings({voice})` → the device settings file, and NO code
+// anywhere read it back: the renderer speaks only when the ENGINE sends
+// `AudioOpDto::Synthesize`, and `useBridge`'s `playback()` passes only
+// `{voiceSelection, rate}`. There is no manual play control either, so the
+// second clause was false too.
+//
+// Implementing auto-playback is a feature, not a review fix (it needs a stop
+// control for a queue `speechSynthesis` shares across sessions, a decision
+// about speaking markdown and code blocks aloud, and per-session scoping) —
+// so the promise was withdrawn instead. This guards the withdrawal: a
+// persisted setting nothing reads is a landmine, because the next reader
+// assumes it works.
+// ---------------------------------------------------------------------------
+
+test('the auto-play-replies setting is gone, not merely disconnected', () => {
+  assert.deepEqual(
+    hits('autoPlayReplies'),
+    [],
+    'a preference that is written and never read tells the next person it works',
+  );
+});
+
+test('no settings copy promises automatic reply playback', () => {
+  assert.deepEqual(hits('自动朗读'), []);
+  assert.deepEqual(hits('无需手动点击播放'), []);
+});

@@ -221,11 +221,24 @@ test('microphone permission is actionable only when denied', () => {
   assert.equal(voicePageModel(prefs(), platform({ microphonePermission: 'unavailable' })).microphoneActionable, false);
 });
 
-test('the model passes through the persisted rate, voice selection, and auto-play preference untouched', () => {
-  const model = voicePageModel(prefs({ rate: 1.5, voiceSelection: 'system:Alex', autoPlayReplies: true }), platform());
+test('the model passes through the persisted rate and voice selection untouched', () => {
+  const model = voicePageModel(prefs({ rate: 1.5, voiceSelection: 'system:Alex' }), platform());
   assert.equal(model.rate, 1.5);
   assert.equal(model.voiceSelection, 'system:Alex');
-  assert.equal(model.autoPlayReplies, true);
+});
+
+test('the page offers no control for a playback this build does not do', () => {
+  // Final review, Defects 5 and 10: the 自动朗读回复 toggle promised that
+  // replies are read aloud on arrival and that no manual play click is
+  // needed. Neither existed — the desktop only ever speaks when the ENGINE
+  // asks it to, and there is no manual play control anywhere in the renderer.
+  // The toggle is gone rather than reworded, because the setting it wrote was
+  // read by nothing.
+  const model = voicePageModel(prefs(), platform());
+  assert.ok(
+    !('autoPlayReplies' in model),
+    'the page model must not carry a preference no code reads — see settings-deadcode-guard.test.ts for the tripwire',
+  );
 });
 
 test('language falls back to the platform locale only for display, never mutating the stored "auto" preference', () => {

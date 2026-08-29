@@ -8,8 +8,13 @@ import {
   patchTouchesReservedKey,
   rawJsonView,
   saveRefusalMessage,
+  saveRefused,
   validateRawLayer,
 } from '../src/renderer/components/settings/pages/RawJson';
+import {
+  ATTEMPT_NOT_DISPATCHED,
+  snapshotLandedAfter,
+} from '../src/renderer/components/settings/useEngineSettings';
 import type { SettingsFile, SettingsSnapshot } from '../src/renderer/components/settings/useEngineSettings';
 
 function snap(overrides: Partial<SettingsSnapshot> = {}): SettingsSnapshot {
@@ -210,4 +215,106 @@ test('layersDiverge is true when a key\'s value differs', () => {
 
 test('layersDiverge is true when one side has an extra key', () => {
   assert.equal(layersDiverge({ a: 1 }, { a: 1, b: 2 }), true);
+});
+
+// ---------------------------------------------------------------------------
+// snapshotLandedAfter / saveRefused — final review, Important + Minor: the
+// refusal banner was derived from a promise that resolves BEFORE the
+// authoritative state arrives.
+//
+// `bridge.updateEngineSettings` resolves once `update_settings` and
+// `refresh_listings` have been SENT; the `SettingsSnapshot` event lands
+// later. So at the instant `saving` flipped false, the layer map on screen
+// was still the PRE-save one, and every successful save rendered
+// `保存未生效…` for a frame — self-clearing to the eye, announced by a screen
+// reader every time.
+// ---------------------------------------------------------------------------
+
+test('snapshotLandedAfter is false with no attempt at all', () => {
+  assert.equal(snapshotLandedAfter(null, { id: 1 }), false);
+});
+
+test('snapshotLandedAfter is false while the attempt is still being dispatched', () => {
+  assert.equal(
+    snapshotLandedAfter({ snapshotAtDispatch: ATTEMPT_NOT_DISPATCHED }, { id: 1 }),
+    false,
+    'the commands are not even on the wire yet — nothing can have answered them',
+  );
+});
+
+test('snapshotLandedAfter is false while the interface still holds the SAME snapshot it dispatched against', () => {
+  const beforeSave = { id: 1 };
+  assert.equal(snapshotLandedAfter({ snapshotAtDispatch: beforeSave }, beforeSave), false);
+});
+
+test('snapshotLandedAfter becomes true only once a DIFFERENT snapshot event has landed', () => {
+  const beforeSave = { id: 1 };
+  const afterSave = { id: 2 };
+  assert.equal(snapshotLandedAfter({ snapshotAtDispatch: beforeSave }, afterSave), true);
+});
+
+test('snapshotLandedAfter treats a first-ever snapshot (dispatched against null) as newer', () => {
+  assert.equal(snapshotLandedAfter({ snapshotAtDispatch: null }, { id: 1 }), true);
+});
+
+test('a successful save is NOT reported as refused before its snapshot arrives', () => {
+  const beforeSave = { id: 1 };
+  const attempt = { value: { outputStyle: 'verbose' }, snapshotAtDispatch: beforeSave };
+  // The pre-save layer map — exactly what the page still holds at the moment
+  // `updateEngineSettings` resolves. The value DIVERGES from what was asked
+  // for, which is precisely why the old promise-timed check fired here.
+  assert.equal(
+    saveRefused(attempt, beforeSave, { outputStyle: 'terse' }),
+    false,
+    'no snapshot newer than the attempt has landed, so this divergence proves nothing yet',
+  );
+});
+
+test('a successful save is not refused once its snapshot lands', () => {
+  const attempt = { value: { outputStyle: 'verbose' }, snapshotAtDispatch: { id: 1 } };
+  assert.equal(saveRefused(attempt, { id: 2 }, { outputStyle: 'verbose' }), false);
+});
+
+test('a genuinely refused save IS reported, once its snapshot lands', () => {
+  const attempt = { value: { permissions: { allow: ['Bash'] } }, snapshotAtDispatch: { id: 1 } };
+  assert.equal(
+    saveRefused(attempt, { id: 2 }, {}),
+    true,
+    'the engine answered and the layer still does not hold what was asked for',
+  );
+});
+
+test('saveRefused is false before any save attempt', () => {
+  assert.equal(saveRefused(null, { id: 1 }, { outputStyle: 'terse' }), false);
+});
+
+// `computeLayerPatch` turns an explicit `{"model": null}` into
+// `patch.model = null`, which `apply_patch` reads as DELETE — so the refreshed
+// layer has NO `model` while the attempt still says `model: null`. Compared by
+// raw JSON.stringify (`undefined` vs `'null'`) those disagree forever, and the
+// refusal banner never cleared on a save that did exactly what was asked.
+
+test('an explicit null and an absent key are the same state, not a permanent refusal', () => {
+  assert.equal(
+    layersDiverge({ model: null }, {}),
+    false,
+    'apply_patch DELETES a null-valued key, so the attempt and the refreshed layer agree',
+  );
+  assert.equal(layersDiverge({}, { model: null }), false, 'and symmetrically');
+});
+
+test('saving an explicit null is not reported as refused after the delete lands', () => {
+  const attempt = { value: { outputStyle: 'terse', model: null }, snapshotAtDispatch: { id: 1 } };
+  assert.equal(
+    saveRefused(attempt, { id: 2 }, { outputStyle: 'terse' }),
+    false,
+    'the engine deleted `model` exactly as asked — the banner must clear, not stick forever',
+  );
+});
+
+test('null-vs-absent leniency does not swallow a real divergence on the same key', () => {
+  assert.equal(layersDiverge({ model: null }, { model: 'opus' }), true);
+  assert.equal(layersDiverge({ model: false }, {}), true, 'false is a value, not an absence');
+  assert.equal(layersDiverge({ model: 0 }, {}), true);
+  assert.equal(layersDiverge({ model: '' }, {}), true);
 });

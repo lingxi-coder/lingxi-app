@@ -122,3 +122,52 @@ export function pendingKeys(snapshot: SettingsSnapshot): string[] {
     (k) => JSON.stringify(snapshot.effective[k]) !== JSON.stringify(snapshot.active[k]),
   ).sort();
 }
+
+/**
+ * 「这次写入还没被引擎回答」的哨兵值。
+ *
+ * 一次写入是从「点了保存」开始的，但那一刻还没有任何东西可以和「引擎回答之后
+ * 的快照」比较 —— 命令甚至还没发出去。用一个绝不会等于任何快照事件的哨兵占住
+ * 这个位置，`snapshotLandedAfter` 在命令真正发完之前就恒为 `false`，页面因此
+ * 不会在自己的写入还在路上的时候，拿写入之前的状态去判定「写入没生效」。
+ */
+export const ATTEMPT_NOT_DISPATCHED: unique symbol = Symbol('settings-attempt-not-dispatched');
+
+/** 一次已经发出、正在等待引擎权威回答的设置写入。 */
+export interface SnapshotBoundAttempt {
+  /**
+   * 这次写入的命令**发完**的那一刻，界面手里的那个快照事件对象（
+   * `UseBridge.settingsSnapshotEvent`，每来一个新事件就是一个新对象），或者
+   * 命令还没发完时的 {@link ATTEMPT_NOT_DISPATCHED}。
+   */
+  readonly snapshotAtDispatch: unknown;
+}
+
+/**
+ * 「比这次写入更新的快照到了吗？」—— 判定一次设置写入是否被引擎拒绝时，唯一
+ * 可信的**时间**依据。
+ *
+ * 为什么不能用 promise：`bridge.updateEngineSettings` 只等到 `update_settings`
+ * 和 `refresh_listings` 两条命令**发出去**为止（`useBridge.ts` 的
+ * `updateEngineSettings`），而 `SettingsSnapshot` 是稍后才到的事件。所以
+ * promise 落地的那一瞬间，页面手里的快照仍然是写入**之前**那一份 —— 任何在这
+ * 一瞬间「拿请求值和快照对比」的判据，都会在一次完全成功的保存上报出「保存未
+ * 生效」。它下一帧就自己消失，但屏幕阅读器每次都会念出来。
+ *
+ * 判据因此落在快照事件的**身份**上，而不是墙上时钟：只有当界面手里的快照对象
+ * 已经不是发命令时的那一个，我们才拥有一份「引擎已经回答过」的状态，可以拿它
+ * 和请求值比较。
+ *
+ * 残余竞态（诚实记录，不是可以靠这个函数关掉的）：协议上没有把一份快照关联回
+ * 某条命令的东西（相关请求 id 需要改协议），所以一份在 `refresh_listings` 发出
+ * 之前就已经在路上的快照，仍然可能被当成「更新的那一份」。把身份取在命令**发
+ * 完**之后（而不是点击那一刻）已经把这个窗口压到最小。
+ */
+export function snapshotLandedAfter(
+  attempt: SnapshotBoundAttempt | null,
+  currentSnapshot: unknown,
+): boolean {
+  if (attempt === null) return false;
+  if (attempt.snapshotAtDispatch === ATTEMPT_NOT_DISPATCHED) return false;
+  return currentSnapshot !== attempt.snapshotAtDispatch;
+}

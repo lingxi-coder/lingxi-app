@@ -1,8 +1,14 @@
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import { Card, ProvenanceBadge, Row, provenanceLabel, type Provenance } from '../rows';
 import { useT } from '../../../theme/ThemeContext';
 import type { PageContentProps } from '../SettingsScreen';
-import type { SettingsFile, SettingsSnapshot } from '../useEngineSettings';
+import {
+  ATTEMPT_NOT_DISPATCHED,
+  snapshotLandedAfter,
+  type SettingsFile,
+  type SettingsSnapshot,
+  type SnapshotBoundAttempt,
+} from '../useEngineSettings';
 import { parseJsonObjectInput } from '../jsonInput';
 import { ghostButtonStyle, inputStyle } from './ghostButton';
 
@@ -163,13 +169,55 @@ export function computeLayerPatch(
  * refusal surfaces as an engine `ClientEvent::Error`, not a rejected
  * `update_settings` promise, so comparing the refreshed snapshot against
  * what was attempted is the only signal that does not lie.
+ *
+ * An ABSENT key and a key whose value is `null` compare EQUAL, which is not
+ * a convenience — it is what makes this comparison agree with the write it
+ * is checking. `computeLayerPatch` turns a `null` in the saved text into
+ * `patch[key] = null`, and `apply_patch` reads that as DELETE. So a save of
+ * `{"model": null}` lands on disk as a layer with no `model` at all: the
+ * attempted value and the refreshed layer are the same state spelled two
+ * ways. Comparing them by raw `JSON.stringify` (`'null'` vs `undefined`)
+ * made them differ FOREVER, and unlike the promise-timing bug this one
+ * never self-cleared — the refusal banner stayed up on a save that did
+ * exactly what it was asked to.
  */
 export function layersDiverge(a: Record<string, unknown>, b: Record<string, unknown>): boolean {
   const keys = new Set([...Object.keys(a), ...Object.keys(b)]);
   for (const key of keys) {
-    if (JSON.stringify(a[key]) !== JSON.stringify(b[key])) return true;
+    if (settledValue(a[key]) !== settledValue(b[key])) return true;
   }
   return false;
+}
+
+/** `undefined` (key absent) and `null` (key explicitly nulled, i.e. deleted by `apply_patch`) are one state — see {@link layersDiverge}. */
+function settledValue(value: unknown): string {
+  return value === undefined || value === null ? 'null' : JSON.stringify(value);
+}
+
+/**
+ * Whether the engine REFUSED `attempt` — the page's one refusal signal,
+ * kept as a pure function so its two failure modes (see below) are
+ * testable without mounting anything.
+ *
+ * Two things must both be true before a divergence means anything:
+ *
+ * 1. **A snapshot newer than the attempt has landed** ({@link
+ *    snapshotLandedAfter}). Without this the comparison is against the
+ *    PRE-save layer map and every successful save renders a refusal alert
+ *    for one frame — invisible to the eye, announced by assistive tech
+ *    every single time, and directly contradicting this module's own claim
+ *    that the comparison "is the only signal that does not lie".
+ * 2. **The attempted value still disagrees with what the layer now holds**
+ *    ({@link layersDiverge}), with an explicit `null` counted as the
+ *    deletion it actually performs.
+ */
+export function saveRefused(
+  attempt: (SnapshotBoundAttempt & { value: Record<string, unknown> }) | null,
+  currentSnapshot: unknown,
+  layerNow: Record<string, unknown>,
+): boolean {
+  if (!snapshotLandedAfter(attempt, currentSnapshot)) return false;
+  return layersDiverge((attempt as { value: Record<string, unknown> }).value, layerNow);
 }
 
 /**
@@ -256,14 +304,28 @@ function EditableLayer({ bridge, editingLayer, oldLayer, initialText }: {
   const [validationError, setValidationError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
-  // The exact object most recently sent for THIS layer, and whether that
-  // attempt touched a reserved key, so a re-render once the refreshed
-  // snapshot lands can tell whether the save actually took AND, if not, say
-  // why with the right cause. `null` before any save attempt, so nothing
-  // here renders as a refusal on first paint.
-  const [lastAttempt, setLastAttempt] = useState<{ value: Record<string, unknown>; touchedReservedKey: boolean } | null>(null);
+  // The exact object most recently sent for THIS layer, whether that attempt
+  // touched a reserved key (so a refusal can name the right cause), and WHICH
+  // snapshot the interface was holding when the attempt finished dispatching.
+  // That last field is what makes the refusal signal honest: see
+  // `snapshotLandedAfter`. `null` before any save attempt, so nothing here
+  // renders as a refusal on first paint.
+  const [lastAttempt, setLastAttempt] = useState<
+    (SnapshotBoundAttempt & { value: Record<string, unknown>; touchedReservedKey: boolean }) | null
+  >(null);
 
-  const refused = lastAttempt !== null && !saving && layersDiverge(lastAttempt.value, oldLayer);
+  // Read inside `.finally` below, where the closure's own render-time value
+  // would be the pre-save snapshot and would hand `snapshotLandedAfter` a
+  // stale "before" reference. Assigning a ref during render is the same
+  // pattern `useBridge.ts` uses for `activeSessionIdRef`.
+  const latestSnapshotRef = useRef<unknown>(bridge.settingsSnapshotEvent);
+  latestSnapshotRef.current = bridge.settingsSnapshotEvent;
+
+  // No `!saving` term here on purpose: "the save is still in flight" is
+  // already expressed by `ATTEMPT_NOT_DISPATCHED`, and expressing it twice
+  // is how the previous version ended up trusting `saving`'s wall-clock
+  // timing instead of the snapshot's arrival.
+  const refused = saveRefused(lastAttempt, bridge.settingsSnapshotEvent, oldLayer);
 
   const handleSave = () => {
     const error = validateRawLayer(text);
@@ -276,11 +338,24 @@ function EditableLayer({ bridge, editingLayer, oldLayer, initialText }: {
     const patch = computeLayerPatch(oldLayer, parsed);
     setSaving(true);
     setSaveError(null);
-    setLastAttempt({ value: parsed, touchedReservedKey: patchTouchesReservedKey(patch) });
+    setLastAttempt({
+      value: parsed,
+      touchedReservedKey: patchTouchesReservedKey(patch),
+      snapshotAtDispatch: ATTEMPT_NOT_DISPATCHED,
+    });
     bridge.clearError();
     void bridge.updateEngineSettings(editingLayer, patch)
       .catch((cause) => setSaveError(cause instanceof Error ? cause.message : '无法保存设置。'))
-      .finally(() => setSaving(false));
+      .finally(() => {
+        // Stamp the attempt with the snapshot that is current NOW — both
+        // commands are on the wire, so any snapshot arriving after this
+        // point is the engine's answer. The save button is `disabled` while
+        // `saving`, so there is never a second attempt to stamp by mistake.
+        setLastAttempt((attempt) => (
+          attempt === null ? attempt : { ...attempt, snapshotAtDispatch: latestSnapshotRef.current }
+        ));
+        setSaving(false);
+      });
   };
 
   return (

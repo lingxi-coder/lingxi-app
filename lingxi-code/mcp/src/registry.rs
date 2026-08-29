@@ -1454,6 +1454,28 @@ impl McpRegistry {
             .ok_or_else(|| McpError::OAuth("server has no oauth config".into()))?;
         let key = oauth::server_key(&config.name, &config.spec);
 
+        // §26b delta 3, second arm: an XAA-flagged server's 403 must stay on
+        // the XAA path exactly as its 401 does (`reauth_oauth_spec` above).
+        // Oracle `pEr` — the ONE entry point to the consent flow — opens with
+        // `if(t.oauth?.xaa){ ...await gt(...); return }` (@182200767), so no
+        // step-up, cached `stepUpScope`, or elevated-scope request can ever
+        // reach `redirectToAuthorization` for an XAA server. Without this
+        // guard the 403 branch WINS the race (it is evaluated before the 401
+        // branch in `connect_locked_inner`) and binds a loopback listener +
+        // opens a browser on an enterprise deployment that has no interactive
+        // consent surface at all. The scope persist below is skipped for the
+        // same reason: the oracle only writes `stepUpScope` from inside
+        // `redirectToAuthorization`, which XAA never reaches.
+        if oauth_cfg.xaa == Some(true) {
+            let token = self
+                .resolve_xaa_token_inner(config, &key, deps, true, resource_metadata_url)
+                .await?;
+            return Ok(inject_bearer(
+                &config.spec,
+                token.access_token.expose_secret(),
+            ));
+        }
+
         // Persist the elevated scope so it survives even if the interactive flow
         // is interrupted and resumed later (auth.ts caches it on the stored
         // entry). Best-effort: a storage failure must not block the step-up.
@@ -1511,8 +1533,9 @@ impl McpRegistry {
     /// re-exchanging.
     ///
     /// §26b delta 4: once a refresh token is on file, it ALWAYS takes the
-    /// ordinary refresh route (`oauth::refresh_tokens`, confidential-client
-    /// `client_secret_basic`) — the full IdP+AS exchange
+    /// ordinary refresh route (`oauth::refresh_tokens`, whose confidential-
+    /// client auth method is chosen from the AS's advertised
+    /// `token_endpoint_auth_methods_supported`) — the full IdP+AS exchange
     /// ([`crate::xaa::perform_cross_app_access`]) is reserved for "no refresh
     /// token stored" (never had one, or the AS just rejected it, which falls
     /// through rather than opening an interactive flow — XAA is never
@@ -1520,7 +1543,10 @@ impl McpRegistry {
     /// silent-triggered only when the access token is missing or expires
     /// within 300s (oracle `!n?.refreshToken && (!n?.accessToken ||
     /// (n.expiresAt-Date.now())/1000<=300)`); otherwise the cached access
-    /// token is reused as-is. `force_fresh` skips both cache-hit checks.
+    /// token is reused as-is. That same 300s window ALSO bounds reuse on the
+    /// refresh-token arm (oracle `tokens()`'s `r<=300&&n.refreshToken`
+    /// proactive refresh, which runs for every server after the XAA block).
+    /// `force_fresh` skips both cache-hit checks.
     async fn resolve_xaa_token_inner(
         &self,
         config: &McpServerConfig,
@@ -1549,7 +1575,23 @@ impl McpRegistry {
                 if let Some(refresh) = s.refresh_token.clone() {
                     // Delta 4: a refresh token on file takes the ordinary
                     // refresh route — never the full exchange below.
-                    if !force_fresh && deps.clock.now() < s.expires_at() {
+                    //
+                    // Reuse is bounded by the SAME 300s proactive window the
+                    // no-refresh-token arm below uses: oracle `tokens()`
+                    // (@182213696) runs `if(r!=null&&r<=300&&n.refreshToken
+                    // &&!d){...refreshAuthorization(n.refreshToken)...}`
+                    // AFTER the XAA block, so a stored refresh token does not
+                    // exempt a token from proactive refresh — it is what
+                    // makes proactive refresh possible. Reusing until hard
+                    // expiry instead hands the transport a token seconds from
+                    // death, buying an avoidable 401 + reauth round-trip (or
+                    // a connect failure if it lapses mid-handshake).
+                    let expiring_soon = s
+                        .expires_at()
+                        .duration_since(deps.clock.now())
+                        .map(|remaining| remaining <= Duration::from_secs(300))
+                        .unwrap_or(true);
+                    if !force_fresh && !expiring_soon {
                         return Ok(s.into_tokens());
                     }
                     let meta = oauth::discover_auth_server_metadata(

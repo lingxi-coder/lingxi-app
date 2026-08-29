@@ -200,12 +200,22 @@ pub fn generate_state_token() -> String {
 struct ProtectedResourceMetadata {
     #[serde(default)]
     authorization_servers: Vec<String>,
-    /// RFC 9728 `resource`. Some real-world servers omit it even though the
-    /// spec requires it; when absent we skip validation rather than treating
-    /// the document as unusable (a permissive simplification — see §24c's
-    /// port-report residual note).
-    #[serde(default)]
-    resource: Option<String>,
+    /// RFC 9728 `resource` — REQUIRED, matching the oracle's PRM schema
+    /// `Wot=Ia({resource:pe().url(), authorization_servers:...optional(), …})`
+    /// (@181753670): `resource` alone carries no `.optional()`, so
+    /// `Wot.parse` THROWS on a document that omits it. `Hxt` swallows that
+    /// throw (`catch(o){if(o instanceof TypeError)throw o}`), leaving the
+    /// resource metadata undefined and falling back to the MCP server's own
+    /// origin as the authorization server.
+    ///
+    /// Modelling it as optional-and-skip-validation was not merely
+    /// permissive: it let a `WWW-Authenticate: resource_metadata="…"`
+    /// challenge point at a document with no `resource` at all, whose
+    /// `authorization_servers[0]` was then trusted un-validated for RFC 8414
+    /// discovery and the interactive PKCE flow. Declaring it required makes
+    /// serde reject such a document, so `discover_auth_server_metadata`'s
+    /// `if let Ok(pr)` skips the whole block exactly as the oracle does.
+    resource: String,
 }
 
 /// A `WWW-Authenticate` challenge's parsed fields (RFC 9728's
@@ -422,10 +432,12 @@ async fn get_json<T: serde::de::DeserializeOwned>(
 ///    NAMES where its PRM document lives, so we fetch it there instead of
 ///    guessing), else the well-known path on the server itself — read
 ///    `authorization_servers[0]`, then RFC 8414 against that issuer. When the
-///    document carries a `resource` field it is validated against
-///    `server_url` (RFC 8707 resource-indicator check, oracle `jc`); a
-///    mismatch is a hard discovery failure, matching the oracle throwing
-///    uncaught out of this same call chain.
+///    document's `resource` (required — see [`ProtectedResourceMetadata`]) is
+///    validated against `server_url` (RFC 8707 resource-indicator check,
+///    oracle `jc`); a mismatch is a hard discovery failure, matching the
+///    oracle throwing uncaught out of this same call chain. A document
+///    MISSING `resource` fails to decode and is ignored wholesale, matching
+///    the oracle's zod schema rejecting it.
 /// 3. Fallback: RFC 8414 directly against the server URL (path-aware).
 ///
 /// # Errors
@@ -454,9 +466,7 @@ pub async fn discover_auth_server_metadata(
         None => well_known_url(server_url, "oauth-protected-resource"),
     };
     if let Ok(pr) = get_json::<ProtectedResourceMetadata>(http, &pr_url).await {
-        if let Some(resource) = &pr.resource {
-            validate_resource_indicator(server_url, resource)?;
-        }
+        validate_resource_indicator(server_url, &pr.resource)?;
         if let Some(issuer) = pr.authorization_servers.first() {
             let as_url = well_known_url(issuer, "oauth-authorization-server");
             if let Ok(meta) = get_json::<AuthServerMetadata>(http, &as_url).await {
@@ -708,15 +718,77 @@ pub async fn exchange_code(
     Ok(tokens)
 }
 
-/// Refresh an access token using a `refresh_token` (auth.ts `_doRefresh`).
+/// Client-authentication method for a token-endpoint grant — oracle `Pc`'s
+/// three return values (`client_secret_basic` / `client_secret_post` /
+/// `none`), consumed by `Tc`'s switch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TokenAuthMethod {
+    /// `zc`: `Authorization: Basic btoa(id:secret)`, nothing in the body.
+    SecretBasic,
+    /// `Cc`: `client_id` (+ `client_secret` when present) in the body.
+    SecretPost,
+    /// `kc`: `client_id` in the body, no credential.
+    None,
+}
+
+/// Oracle `Pc(clientInformation, token_endpoint_auth_methods_supported)`
+/// (@182015400), the selector `ds` runs for EVERY token-endpoint grant —
+/// authorization_code and refresh alike:
 ///
-/// Public-client form (`client_secret: None`): `client_id` in the body, no
-/// `Authorization` header (auth.ts:1421-1423, `token_endpoint_auth_method:
-/// none`). Confidential-client form (`client_secret: Some(_)` — the XAA path,
-/// §26b delta 4: a stored refresh token takes this ordinary route instead of
-/// re-running the full IdP+AS exchange): `client_secret_basic` — the SEP-990
-/// conformance default `xaa.rs::AuthMethod::ClientSecretBasic` also uses —
-/// `Authorization: Basic base64(id:secret)`, `client_id` omitted from the body.
+/// ```text
+/// if(t.length===0)                            return r?"client_secret_basic":"none";
+/// if(r&&t.includes("client_secret_basic"))    return "client_secret_basic";
+/// if(r&&t.includes("client_secret_post"))     return "client_secret_post";
+/// if(t.includes("none"))                      return "none";
+/// return r?"client_secret_post":"none";
+/// ```
+///
+/// where `r = client_secret !== undefined`. `Pc`'s FIRST branch (honour a
+/// `token_endpoint_auth_method` recorded on the client information itself) is
+/// unreachable here: this port's stored credentials carry no registered
+/// method, so there is nothing to honour.
+fn select_token_auth_method(has_secret: bool, supported: &[String]) -> TokenAuthMethod {
+    let advertises = |m: &str| supported.iter().any(|s| s == m);
+    if supported.is_empty() {
+        return if has_secret {
+            TokenAuthMethod::SecretBasic
+        } else {
+            TokenAuthMethod::None
+        };
+    }
+    if has_secret && advertises("client_secret_basic") {
+        return TokenAuthMethod::SecretBasic;
+    }
+    if has_secret && advertises("client_secret_post") {
+        return TokenAuthMethod::SecretPost;
+    }
+    if advertises("none") {
+        return TokenAuthMethod::None;
+    }
+    if has_secret {
+        TokenAuthMethod::SecretPost
+    } else {
+        TokenAuthMethod::None
+    }
+}
+
+/// Refresh an access token using a `refresh_token` (auth.ts `_doRefresh` →
+/// SDK `pQt` → `ds`).
+///
+/// Client authentication is chosen by [`select_token_auth_method`] from what
+/// the authorization server advertises in
+/// `token_endpoint_auth_methods_supported` — the same selection `ds` applies
+/// to every grant, and the same one this port's sibling call sites
+/// ([`crate::xaa`]'s initial exchange, [`revoke_token`]) already honour.
+/// Hardcoding `client_secret_basic` would 401 on an AS that advertises only
+/// `client_secret_post`, sending the XAA resolve back through the full
+/// IdP+AS exchange on every single connect.
+///
+/// The Basic credential is `base64(client_id:client_secret)` over the RAW
+/// bytes (oracle `zc`: `btoa(`${e}:${t}`)`). It is NOT percent-encoded — that
+/// convention belongs to the revocation helper `be()` alone, and applying it
+/// here would change the credential bytes for any secret containing `+`, `/`
+/// or `=`.
 ///
 /// # Errors
 /// [`OAuthError::RefreshRejected`] when the server rejects the refresh token
@@ -736,22 +808,35 @@ pub async fn refresh_tokens(
         ("refresh_token", refresh_token),
     ];
     let mut extra_headers: Vec<(&str, String)> = Vec::new();
-    match client_secret {
-        Some(secret) => {
-            let basic = format!(
-                "{}:{}",
-                urlencoding::encode(client_id),
-                urlencoding::encode(secret)
-            );
+    let supported = meta
+        .token_endpoint_auth_methods_supported
+        .as_deref()
+        .unwrap_or(&[]);
+    match select_token_auth_method(client_secret.is_some(), supported) {
+        // `zc(e,t,r)`: throws without a secret, so this arm is only ever
+        // selected when one is present.
+        TokenAuthMethod::SecretBasic if client_secret.is_some() => {
+            let secret = client_secret.unwrap_or_default();
             extra_headers.push((
                 "authorization",
                 format!(
                     "Basic {}",
-                    base64::engine::general_purpose::STANDARD.encode(basic)
+                    base64::engine::general_purpose::STANDARD
+                        .encode(format!("{client_id}:{secret}"))
                 ),
             ));
         }
-        None => form.push(("client_id", client_id)),
+        // `Cc(e,t,r)`: `client_id` always, `client_secret` when present.
+        TokenAuthMethod::SecretPost => {
+            form.push(("client_id", client_id));
+            if let Some(secret) = client_secret {
+                form.push(("client_secret", secret));
+            }
+        }
+        // `kc(e,t)`: `client_id` only.
+        TokenAuthMethod::SecretBasic | TokenAuthMethod::None => {
+            form.push(("client_id", client_id));
+        }
     }
     match post_token_grant_with_headers(http, clock, &meta.token_endpoint, &form, &extra_headers)
         .await
@@ -2160,7 +2245,7 @@ mod tests {
             (
                 custom_prm,
                 200,
-                r#"{"authorization_servers":["https://as-from-challenge.example.com"]}"#,
+                r#"{"resource":"https://mcp.example.com/","authorization_servers":["https://as-from-challenge.example.com"]}"#,
             ),
             (default_guess, 404, ""),
             (
@@ -2201,7 +2286,7 @@ mod tests {
             (
                 default_guess,
                 200,
-                r#"{"authorization_servers":["https://as-default.example.com"]}"#,
+                r#"{"resource":"https://mcp.example.com/","authorization_servers":["https://as-default.example.com"]}"#,
             ),
             (
                 "https://as-default.example.com/.well-known/oauth-authorization-server",
@@ -2216,6 +2301,276 @@ mod tests {
                 .await
                 .expect("well-known guess path must still work with no challenge");
         assert_eq!(meta.token_endpoint, "https://as-default.example.com/token");
+    }
+
+    /// Oracle PRM schema `Wot` requires `resource`; a document without it
+    /// fails `Wot.parse`, the throw is swallowed by `Hxt`, and the whole
+    /// document is DISCARDED — its `authorization_servers[0]` is never
+    /// trusted. Without this, a `WWW-Authenticate: resource_metadata="…"`
+    /// challenge could hand an attacker-chosen authorization server to RFC
+    /// 8414 discovery and the interactive PKCE flow with no resource-
+    /// indicator check at all.
+    #[tokio::test]
+    async fn discover_auth_server_metadata_discards_a_prm_document_missing_resource() {
+        let custom_prm = "https://mcp.example.com/custom-prm-location";
+        let http = MockPrmHttp::new(&[
+            (
+                custom_prm,
+                200,
+                r#"{"authorization_servers":["https://as.attacker.example"]}"#,
+            ),
+            (
+                "https://as.attacker.example/.well-known/oauth-authorization-server",
+                200,
+                r#"{"authorization_endpoint":"https://as.attacker.example/authorize","token_endpoint":"https://as.attacker.example/token"}"#,
+            ),
+        ]);
+        let http_dyn: Arc<dyn HttpTransport> = http.clone();
+
+        let err = discover_auth_server_metadata(
+            &http_dyn,
+            "https://mcp.example.com/v1",
+            None,
+            Some(custom_prm),
+        )
+        .await
+        .expect_err("a PRM document with no `resource` must be ignored wholesale");
+        // The fallback (RFC 8414 against the MCP server itself) is what runs;
+        // it 404s in this fixture, which is exactly how we prove the
+        // attacker's AS was never consulted.
+        assert!(
+            err.to_string()
+                .contains("https://mcp.example.com/.well-known/oauth-authorization-server"),
+            "must fall through to the server's own well-known, got: {err}"
+        );
+        assert!(
+            !http
+                .requested_urls()
+                .iter()
+                .any(|u| u.contains("as.attacker.example")),
+            "the discarded document's authorization_servers[0] must never be fetched; got {:?}",
+            http.requested_urls()
+        );
+    }
+
+    // -------------------------------------------------------------------
+    // Token-endpoint client authentication (oracle `Pc`/`Tc`).
+    // -------------------------------------------------------------------
+
+    /// Fixed clock — `refresh_tokens` only needs `now()` to stamp expiry.
+    struct TestClock(SystemTime);
+    impl TestClock {
+        fn new(secs: u64) -> Self {
+            Self(SystemTime::UNIX_EPOCH + Duration::from_secs(secs))
+        }
+    }
+    impl Clock for TestClock {
+        fn now(&self) -> SystemTime {
+            self.0
+        }
+    }
+
+    /// Records the exact request the token endpoint receives (headers AND
+    /// form body) and always answers with a valid token response — so a test
+    /// can assert on the CREDENTIAL BYTES on the wire, which is the only
+    /// place a wrong client-auth method or a mangled secret is observable.
+    struct RecordingTokenHttp {
+        seen: std::sync::Mutex<Vec<protocol::HttpRequest>>,
+    }
+    impl RecordingTokenHttp {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                seen: std::sync::Mutex::new(Vec::new()),
+            })
+        }
+        fn last(&self) -> protocol::HttpRequest {
+            self.seen.lock().unwrap().last().cloned().expect("a request")
+        }
+    }
+    #[async_trait::async_trait]
+    impl HttpTransport for RecordingTokenHttp {
+        async fn request(
+            &self,
+            req: protocol::HttpRequest,
+        ) -> Result<protocol::HttpResponse, traits::HttpError> {
+            self.seen.lock().unwrap().push(req);
+            Ok(protocol::HttpResponse {
+                status: 200,
+                headers: vec![],
+                body: r#"{"access_token":"new-at","expires_in":3600}"#.to_string(),
+                body_bytes: Vec::new(),
+            })
+        }
+        async fn stream_sse(
+            &self,
+            _req: protocol::HttpRequest,
+        ) -> Result<traits::http::SseStream, traits::HttpError> {
+            Err(traits::HttpError::Connection("unused".into()))
+        }
+    }
+
+    #[test]
+    fn select_token_auth_method_matches_oracle_pc() {
+        let m = |v: &[&str]| v.iter().map(|s| (*s).to_string()).collect::<Vec<_>>();
+
+        // `if(t.length===0) return r?"client_secret_basic":"none"`
+        assert_eq!(
+            select_token_auth_method(true, &[]),
+            TokenAuthMethod::SecretBasic
+        );
+        assert_eq!(select_token_auth_method(false, &[]), TokenAuthMethod::None);
+
+        // `if(r&&t.includes("client_secret_basic")) return "client_secret_basic"`
+        assert_eq!(
+            select_token_auth_method(true, &m(&["client_secret_post", "client_secret_basic"])),
+            TokenAuthMethod::SecretBasic
+        );
+
+        // `if(r&&t.includes("client_secret_post")) return "client_secret_post"`
+        assert_eq!(
+            select_token_auth_method(true, &m(&["client_secret_post"])),
+            TokenAuthMethod::SecretPost
+        );
+
+        // `if(t.includes("none")) return "none"` — reached even WITH a secret
+        // once neither client_secret_* method is advertised.
+        assert_eq!(
+            select_token_auth_method(true, &m(&["private_key_jwt", "none"])),
+            TokenAuthMethod::None
+        );
+        assert_eq!(
+            select_token_auth_method(false, &m(&["none"])),
+            TokenAuthMethod::None
+        );
+
+        // `return r?"client_secret_post":"none"`
+        assert_eq!(
+            select_token_auth_method(true, &m(&["private_key_jwt"])),
+            TokenAuthMethod::SecretPost
+        );
+        assert_eq!(
+            select_token_auth_method(false, &m(&["client_secret_basic"])),
+            TokenAuthMethod::None
+        );
+    }
+
+    /// An AS that advertises only `client_secret_post` must get the secret in
+    /// the BODY, not an `Authorization: Basic` header it would reject with a
+    /// 401 (sending every XAA resolve back through the full IdP+AS exchange).
+    #[tokio::test]
+    async fn refresh_tokens_honours_client_secret_post_from_as_metadata() {
+        let http = RecordingTokenHttp::new();
+        let http_dyn: Arc<dyn HttpTransport> = http.clone();
+        let clock: Arc<dyn Clock> = Arc::new(TestClock::new(1_000));
+        let meta = AuthServerMetadata {
+            authorization_endpoint: "https://as.example.com/authorize".into(),
+            token_endpoint: "https://as.example.com/token".into(),
+            registration_endpoint: None,
+            scopes_supported: None,
+            scope: None,
+            default_scope: None,
+            revocation_endpoint: None,
+            revocation_endpoint_auth_methods_supported: None,
+            token_endpoint_auth_methods_supported: Some(vec!["client_secret_post".into()]),
+        };
+
+        refresh_tokens(&http_dyn, &clock, &meta, "cid", Some("sec+ret/=" ), "rt")
+            .await
+            .expect("refresh ok");
+
+        let req = http.last();
+        assert!(
+            !req.headers
+                .iter()
+                .any(|(k, _)| k.eq_ignore_ascii_case("authorization")),
+            "client_secret_post must NOT send an Authorization header; got {:?}",
+            req.headers
+        );
+        let body = req.body.clone().unwrap_or_default();
+        assert!(
+            body.contains("client_id=cid"),
+            "client_secret_post sets client_id in the body; got {body}"
+        );
+        assert!(
+            body.contains("client_secret=sec%2Bret%2F%3D"),
+            "client_secret_post sets client_secret in the body; got {body}"
+        );
+    }
+
+    /// `zc(e,t,r){ let s=btoa(`${e}:${t}`); r.set("Authorization",`Basic ${s}`) }`
+    /// — base64 over the RAW `id:secret` bytes. Percent-encoding them first
+    /// (a convention that belongs to the revocation helper `be()` alone)
+    /// silently changes the credential for any secret containing `+`, `/` or
+    /// `=`, which base64-shaped secrets routinely do.
+    #[tokio::test]
+    async fn refresh_tokens_basic_credential_is_base64_of_the_raw_id_and_secret() {
+        let http = RecordingTokenHttp::new();
+        let http_dyn: Arc<dyn HttpTransport> = http.clone();
+        let clock: Arc<dyn Clock> = Arc::new(TestClock::new(1_000));
+        let meta = AuthServerMetadata {
+            authorization_endpoint: "https://as.example.com/authorize".into(),
+            token_endpoint: "https://as.example.com/token".into(),
+            registration_endpoint: None,
+            scopes_supported: None,
+            scope: None,
+            default_scope: None,
+            revocation_endpoint: None,
+            revocation_endpoint_auth_methods_supported: None,
+            // Absent (`t.length===0`) => `r?"client_secret_basic":"none"`.
+            token_endpoint_auth_methods_supported: None,
+        };
+
+        refresh_tokens(&http_dyn, &clock, &meta, "cid", Some("s+e/c="), "rt")
+            .await
+            .expect("refresh ok");
+
+        let req = http.last();
+        let auth = req
+            .headers
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case("authorization"))
+            .map(|(_, v)| v.clone())
+            .expect("client_secret_basic must send an Authorization header");
+        let expected = format!(
+            "Basic {}",
+            base64::engine::general_purpose::STANDARD.encode("cid:s+e/c=")
+        );
+        assert_eq!(auth, expected);
+        assert!(
+            !req.body.clone().unwrap_or_default().contains("client_id="),
+            "client_secret_basic omits client_id from the body"
+        );
+    }
+
+    /// A public client (no secret) still authenticates as `none`: `client_id`
+    /// in the body, no `Authorization` header (oracle `kc`).
+    #[tokio::test]
+    async fn refresh_tokens_public_client_sends_client_id_in_the_body() {
+        let http = RecordingTokenHttp::new();
+        let http_dyn: Arc<dyn HttpTransport> = http.clone();
+        let clock: Arc<dyn Clock> = Arc::new(TestClock::new(1_000));
+        let meta = AuthServerMetadata {
+            authorization_endpoint: "https://as.example.com/authorize".into(),
+            token_endpoint: "https://as.example.com/token".into(),
+            registration_endpoint: None,
+            scopes_supported: None,
+            scope: None,
+            default_scope: None,
+            revocation_endpoint: None,
+            revocation_endpoint_auth_methods_supported: None,
+            token_endpoint_auth_methods_supported: Some(vec!["client_secret_basic".into()]),
+        };
+
+        refresh_tokens(&http_dyn, &clock, &meta, "cid", None, "rt")
+            .await
+            .expect("refresh ok");
+
+        let req = http.last();
+        assert!(!req
+            .headers
+            .iter()
+            .any(|(k, _)| k.eq_ignore_ascii_case("authorization")));
+        assert!(req.body.clone().unwrap_or_default().contains("client_id=cid"));
     }
 
     #[tokio::test]

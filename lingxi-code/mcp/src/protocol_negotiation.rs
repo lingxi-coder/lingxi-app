@@ -20,11 +20,15 @@
 //!    protocol_negotiation_{http,claudeai,ccr}` gate (default off); `stdio`,
 //!    `sse`, `ws`, `ide`, `in-process`, `sdk-control` are unconditionally
 //!    legacy here — no flag can turn auto on for them;
-//! 5. whenever the decision above lands on `auto`, a final server-denylist
-//!    check (`tengu_mcp_negotiation_server_denylist`, an ARRAY flag: a list
-//!    of hostnames, or the literal `"*"` to denylist every server) can still
+//! 5. when — and ONLY when — the FLAG-GATED decision in (4) lands on
+//!    `auto`, a final server-denylist check
+//!    (`tengu_mcp_negotiation_server_denylist`, an ARRAY flag: a list of
+//!    hostnames, or the literal `"*"` to denylist every server) can still
 //!    downgrade it to legacy, logging `MCP era negotiation denylist matched
-//!    <host>; the legacy handshake applies`.
+//!    <host>; the legacy handshake applies`. Steps (2) and (3) `return`
+//!    from `co` before this check exists, so an explicit
+//!    `MCP_PROTOCOL_NEGOTIATION=auto` is NOT denylistable — the guard reads
+//!    `h.mode`, and `h` is the gated switch's result alone.
 //!
 //! `claudeai-proxy` and `ccr-proxy` are two of the oracle's negotiable labels
 //! that this port has no transport for at all (the claude.ai connector
@@ -239,7 +243,9 @@ fn denylist_match_display(url: Option<&str>) -> String {
 /// Pure core: `co(label, url, base_timeout_ms, env_raw, denylist_override)`.
 /// `denylist_override`, when `Some`, replaces the flag-driven denylist check
 /// entirely (oracle's `o??cn(t)`) — used by tests; the real caller
-/// ([`resolve_for_spec`]) always passes `None`.
+/// ([`resolve_for_spec`]) always passes `None`. Note the override is only
+/// consulted on the flag-gated path, exactly where the oracle consults
+/// `o??cn(t)`.
 fn resolve(
     label: &str,
     url: Option<&str>,
@@ -248,20 +254,30 @@ fn resolve(
     denylist_override: Option<bool>,
 ) -> NegotiationResolution {
     let (env_mode, env_warning) = parse_env_mode(env_raw);
-    let mode = match env_mode {
-        Some(EnvMode::Legacy) => NegotiationMode::Legacy,
-        Some(EnvMode::Auto) => {
-            if env_auto_eligible(label) {
-                NegotiationMode::Auto {
-                    probe_timeout_ms: probe_timeout_ms(label, base_timeout_ms),
-                }
-            } else {
-                NegotiationMode::Legacy
-            }
-        }
-        None => gated_mode(label, base_timeout_ms),
-    };
 
+    // Oracle `co`: BOTH explicit-env branches `return` before the denylist
+    // block is ever reached — `if(d==="legacy")return{mode:"legacy"}` and,
+    // inside `if(d==="auto"){...}`, `return e==="stdio"?{mode:"auto",probe:_}:
+    // {mode:"auto",probe:u}`. The denylist guard then tests `h.mode`, where
+    // `h` is the FLAG-GATED switch's result only. So an operator who sets
+    // `MCP_PROTOCOL_NEGOTIATION=auto` overrides the denylist, and the
+    // denylist can only ever downgrade a decision the feature flags made.
+    if let Some(env_mode) = env_mode {
+        let mode = match env_mode {
+            EnvMode::Legacy => NegotiationMode::Legacy,
+            EnvMode::Auto if env_auto_eligible(label) => NegotiationMode::Auto {
+                probe_timeout_ms: probe_timeout_ms(label, base_timeout_ms),
+            },
+            EnvMode::Auto => NegotiationMode::Legacy,
+        };
+        return NegotiationResolution {
+            mode,
+            env_warning,
+            denylist_warning: None,
+        };
+    }
+
+    let mode = gated_mode(label, base_timeout_ms);
     if !matches!(mode, NegotiationMode::Auto { .. }) {
         return NegotiationResolution {
             mode,
@@ -543,14 +559,18 @@ mod tests {
     }
 
     #[test]
-    fn resolve_denylist_override_downgrades_auto_to_legacy_with_log() {
+    fn resolve_denylist_override_downgrades_the_gated_auto_to_legacy_with_log() {
+        // env UNSET: the only path the oracle ever applies the denylist to.
+        let _guard = flag_test_lock().lock().unwrap_or_else(|e| e.into_inner());
+        telemetry::test_set_flag(FLAG_HTTP, true);
         let out = resolve(
             "http",
             Some("https://blocked.example.com/mcp"),
             30_000,
-            Some("auto"),
+            None,
             Some(true),
         );
+        telemetry::test_clear_flag(FLAG_HTTP);
         assert_eq!(out.mode, NegotiationMode::Legacy);
         assert_eq!(
             out.denylist_warning.as_deref(),
@@ -559,14 +579,65 @@ mod tests {
     }
 
     #[test]
-    fn resolve_denylist_override_false_leaves_auto_untouched() {
-        let out = resolve("http", None, 30_000, Some("auto"), Some(false));
+    fn resolve_denylist_override_false_leaves_the_gated_auto_untouched() {
+        let _guard = flag_test_lock().lock().unwrap_or_else(|e| e.into_inner());
+        telemetry::test_set_flag(FLAG_HTTP, true);
+        let out = resolve("http", None, 30_000, None, Some(false));
+        telemetry::test_clear_flag(FLAG_HTTP);
         assert_eq!(
             out.mode,
             NegotiationMode::Auto {
                 probe_timeout_ms: 5_000
             }
         );
+        assert_eq!(out.denylist_warning, None);
+    }
+
+    /// Oracle `co`'s `if(d==="auto"){...return...}` block RETURNS before the
+    /// denylist guard exists, and that guard then tests `h.mode` — the
+    /// flag-gated result alone. So an operator's explicit
+    /// `MCP_PROTOCOL_NEGOTIATION=auto` beats the denylist: mode stays `auto`
+    /// with the 5000ms probe budget and NOTHING is logged.
+    #[test]
+    fn resolve_explicit_env_auto_is_never_downgraded_by_the_denylist() {
+        let out = resolve(
+            "http",
+            Some("https://blocked.example.com/mcp"),
+            30_000,
+            Some("auto"),
+            Some(true),
+        );
+        assert_eq!(
+            out.mode,
+            NegotiationMode::Auto {
+                probe_timeout_ms: 5_000
+            },
+            "an explicit MCP_PROTOCOL_NEGOTIATION=auto outranks the denylist"
+        );
+        assert_eq!(out.denylist_warning, None);
+        // `stdio` (also in Kr) takes the same early return, with its own cap.
+        let out = resolve("stdio", None, 30_000, Some("auto"), Some(true));
+        assert_eq!(
+            out.mode,
+            NegotiationMode::Auto {
+                probe_timeout_ms: 3_000
+            }
+        );
+        assert_eq!(out.denylist_warning, None);
+    }
+
+    /// An explicit `legacy` also returns early — the denylist never runs and
+    /// therefore never logs, even for a denylisted host.
+    #[test]
+    fn resolve_explicit_env_legacy_never_consults_the_denylist() {
+        let out = resolve(
+            "http",
+            Some("https://blocked.example.com/mcp"),
+            30_000,
+            Some("legacy"),
+            Some(true),
+        );
+        assert_eq!(out.mode, NegotiationMode::Legacy);
         assert_eq!(out.denylist_warning, None);
     }
 
@@ -583,6 +654,59 @@ mod tests {
             env: std::collections::HashMap::new(),
         };
         assert_eq!(resolve_for_spec(&spec, 30_000), NegotiationMode::Legacy);
+        telemetry::test_clear_flag(FLAG_HTTP);
+    }
+
+    /// The `denylist_override` used by the tests above short-circuits the
+    /// ONE production call site of `telemetry::flag_string_list`, so without
+    /// this test nothing in the tree ever reads `FLAG_SERVER_DENYLIST`
+    /// through the real reader: a misspelled key, a wrong `FeatureValue`
+    /// arm, or an override layer consulted in the wrong order would all stay
+    /// green. This drives `resolve_for_spec` end to end — live env var, live
+    /// boolean gate, live ARRAY flag.
+    ///
+    /// It writes the flag under the ORACLE's literal key rather than through
+    /// `FLAG_SERVER_DENYLIST`: routing both sides through the same constant
+    /// would make the test agree with any misspelling of it (verified — a
+    /// deliberately corrupted constant left the whole module green).
+    #[test]
+    fn resolve_for_spec_denylist_flag_downgrades_the_gated_auto_mode() {
+        // Oracle `cn(e)=Ot("tengu_mcp_negotiation_server_denylist",e)`.
+        const ORACLE_DENYLIST_FLAG: &str = "tengu_mcp_negotiation_server_denylist";
+        let _guard = flag_test_lock().lock().unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var(ENV_VAR);
+        telemetry::test_set_flag(FLAG_HTTP, true);
+        telemetry::test_clear_flag_list(ORACLE_DENYLIST_FLAG);
+        let spec = http_spec("https://mcp.example.com/v1");
+
+        // Baseline: the gate alone yields auto, so any Legacy below is the
+        // denylist's doing and not the gate's.
+        assert_eq!(
+            resolve_for_spec(&spec, 30_000),
+            NegotiationMode::Auto {
+                probe_timeout_ms: 5_000
+            },
+            "flag on + empty denylist must resolve to auto"
+        );
+
+        // A non-matching host leaves it alone.
+        telemetry::test_set_flag_list(ORACLE_DENYLIST_FLAG, vec!["other.example".to_string()]);
+        assert_eq!(
+            resolve_for_spec(&spec, 30_000),
+            NegotiationMode::Auto {
+                probe_timeout_ms: 5_000
+            }
+        );
+
+        // The server's own hostname, read through `flag_string_list`, wins.
+        telemetry::test_set_flag_list(ORACLE_DENYLIST_FLAG, vec!["mcp.example.com".to_string()]);
+        assert_eq!(resolve_for_spec(&spec, 30_000), NegotiationMode::Legacy);
+
+        // And so does the `"*"` wildcard.
+        telemetry::test_set_flag_list(ORACLE_DENYLIST_FLAG, vec!["*".to_string()]);
+        assert_eq!(resolve_for_spec(&spec, 30_000), NegotiationMode::Legacy);
+
+        telemetry::test_clear_flag_list(ORACLE_DENYLIST_FLAG);
         telemetry::test_clear_flag(FLAG_HTTP);
     }
 

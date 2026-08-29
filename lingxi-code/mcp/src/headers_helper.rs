@@ -267,7 +267,10 @@ fn parse_helper_output(bytes: &[u8], server_name: &str) -> Result<McpHeaders, Mc
 /// from a "helper is configured" predicate that can't tell which header a
 /// helper actually mints.
 fn merge_dynamic_headers(spec: &McpTransportSpec, dynamic: McpHeaders) -> (McpTransportSpec, bool) {
-    let minted_authorization = dynamic.contains_key("Authorization");
+    // Oracle `J8e(q)` — case-INSENSITIVE, so a helper that emits
+    // `{"authorization": "Bearer ..."}` (a legal spelling) still reports as
+    // minting the credential and still suppresses OAuth.
+    let minted_authorization = crate::negotiation::has_authorization_key(&dynamic);
     let mut resolved = spec.clone();
     let headers = match &mut resolved {
         McpTransportSpec::Sse { headers, .. }
@@ -336,6 +339,31 @@ mod tests {
             McpHeaders::from_iter([("X-Api-Key".into(), "k".into())]),
         );
         assert!(!minted_authorization);
+    }
+
+    /// Oracle `te = ... && J8e(q)` lowercases every key of the helper's raw
+    /// output before comparing. A helper that emits the legal lowercase
+    /// spelling must still report as minting the credential — otherwise
+    /// `connect_locked_inner` builds an OAuth provider and its bearer
+    /// overwrites the helper-minted one on the wire (§19 gaps 2+3).
+    #[test]
+    fn merge_dynamic_headers_reports_minted_authorization_case_insensitively() {
+        let spec = McpTransportSpec::Http {
+            url: "https://mcp.example".into(),
+            headers: McpHeaders::new(),
+            headers_helper: Some("helper".into()),
+            oauth: None,
+        };
+        for spelling in ["authorization", "AUTHORIZATION", "Authorization"] {
+            let (_, minted_authorization) = merge_dynamic_headers(
+                &spec,
+                McpHeaders::from_iter([((*spelling).to_string(), "Bearer minted".into())]),
+            );
+            assert!(
+                minted_authorization,
+                "helper output spelled `{spelling}` must count as helperMintsAuthHeader"
+            );
+        }
     }
 
     #[test]

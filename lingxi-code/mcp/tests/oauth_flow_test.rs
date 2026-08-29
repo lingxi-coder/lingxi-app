@@ -231,10 +231,9 @@ struct RecordingTransport {
     /// carrying the configured required scope (step-up path).
     fail_403_first: AtomicUsize,
     fail_403_scope: Mutex<String>,
-    /// §24c: when set, a 401 failure is a STRUCTURED `McpError::HttpResponse`
-    /// carrying this exact `WWW-Authenticate` value (the shape task 1's port
-    /// threads through from a real handshake) instead of the flattened
-    /// `Connection("HTTP 401 Unauthorized")` string every other 401 test uses.
+    /// §24c: when set, the 401 failure carries this exact `WWW-Authenticate`
+    /// value; otherwise it is the same structured `McpError::HttpResponse`
+    /// with no challenge header.
     structured_401_challenge: Mutex<Option<String>>,
 }
 impl RecordingTransport {
@@ -302,7 +301,18 @@ impl McpTransport for RecordingTransport {
                     www_authenticate: Some(challenge),
                 });
             }
-            return Err(McpError::Connection("HTTP 401 Unauthorized".into()));
+            // Every wired transport reports a real 401 STRUCTURALLY —
+            // `SseConnectError::HttpResponse` for SSE's pre-flight GET
+            // (platforms/common/src/mcp_sse.rs) and `handshake_error`'s
+            // `data:{httpStatus,wwwAuthenticate}` unwrap for Streamable HTTP
+            // (platforms/posix/src/mcp.rs) — so the mock must too. A
+            // flattened `Connection("HTTP 401 …")` string is not a shape any
+            // production path can still produce, and pretending otherwise
+            // hid that `classify_auth_failure`'s gate was substring-based.
+            return Err(McpError::HttpResponse {
+                status: 401,
+                www_authenticate: None,
+            });
         }
         Ok(McpRawConnection {
             connection_id: protocol::McpConnectionId::new(),
@@ -759,7 +769,7 @@ impl HttpTransport for ChallengeAwareAs {
         let (status, body) = if req.url == "https://mcp.example.com/custom-prm-location" {
             (
                 200,
-                r#"{"authorization_servers":["https://as-from-challenge.example.com"]}"#
+                r#"{"resource":"https://mcp.example.com/","authorization_servers":["https://as-from-challenge.example.com"]}"#
                     .to_string(),
             )
         } else if req.url.contains("oauth-protected-resource") {
@@ -2117,5 +2127,177 @@ async fn xaa_401_reauth_never_falls_to_interactive_consent() {
     assert!(
         url_rx.try_recv().is_err(),
         "no interactive authorization URL should ever be surfaced for an XAA server"
+    );
+}
+
+/// §26b delta 3, second arm: a 403 `insufficient_scope` must stay on the XAA
+/// path exactly as the 401 does. `connect_locked_inner` evaluates the 403
+/// branch BEFORE the 401 branch, so a `step_up_oauth_spec` without an xaa
+/// guard WINS the race and drives `run_interactive_oauth` — binding a
+/// loopback listener and opening a browser on a deployment that has no
+/// interactive consent surface, contradicting `resolve_oauth_spec`'s own
+/// "XAA is the ONLY auth path" comment. Oracle `pEr` (@182200767) opens with
+/// `if(t.oauth?.xaa){...await gt(...);return}`, so no step-up can ever reach
+/// `redirectToAuthorization`.
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn xaa_403_step_up_never_falls_to_interactive_consent() {
+    let _guard = XAA_ENV_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    std::env::set_var("LINGXI_ENABLE_XAA", "1");
+
+    // First connect 403s with `insufficient_scope`; the retry succeeds.
+    let transport = RecordingTransport::with_403_first("mcp:elevated");
+    let storage = MemStorage::new();
+    let clock = TestClock::new(1_000);
+    let (on_url, mut url_rx) = url_capture();
+
+    let oauth = McpOAuthConfigDto {
+        client_id: Some("as-client".into()),
+        callback_port: None,
+        auth_server_metadata_url: None,
+        scopes: None,
+        xaa: Some(true),
+    };
+    let config = http_cfg("xaa-403", Some(oauth));
+    let key = oauth::server_key("xaa-403", &config.spec);
+
+    let stored = oauth::StoredTokens {
+        access_token: "xaa-access-old".into(),
+        refresh_token: None,
+        expires_at_unix: 1_000 + 3_600,
+        client_id: Some("as-client".into()),
+        client_secret: Some("as-secret".into()),
+        step_up_scope: None,
+    };
+    let bytes = serde_json::to_vec(&stored).unwrap();
+    storage
+        .store(
+            oauth::MCP_OAUTH_SERVICE,
+            &key,
+            SecureStorageData::new(
+                bytes,
+                SecureStorageMetadata {
+                    created_at: SystemTime::UNIX_EPOCH,
+                    last_accessed: None,
+                    kind: SecretKindDto("mcp_oauth_tokens".into()),
+                },
+            ),
+        )
+        .await
+        .unwrap();
+
+    let registry =
+        McpRegistry::new(transport.clone() as Arc<dyn McpTransport>).with_oauth(OAuthDeps {
+            http: Arc::new(XaaHttp) as Arc<dyn HttpTransport>,
+            clock: clock as Arc<dyn Clock>,
+            storage: storage as Arc<dyn SecureStorage>,
+            on_authorization_url: on_url,
+            xaa_config: Some(Arc::new(XaaTestProvider)),
+        });
+
+    let outcome = tokio::time::timeout(Duration::from_secs(2), registry.connect(config)).await;
+    std::env::remove_var("LINGXI_ENABLE_XAA");
+
+    let connect_result = outcome.expect(
+        "connect() must not hang waiting for interactive consent — an XAA 403          insufficient_scope must stay on the silent exchange path, never run_interactive_oauth",
+    );
+    connect_result.expect("xaa connect ok after 403 step-up");
+
+    assert_eq!(
+        transport.connect_count(),
+        2,
+        "403 once, freshly-exchanged bearer retries"
+    );
+    assert_eq!(
+        spec_auth_header(&transport.last_spec()).as_deref(),
+        Some("Bearer xaa-access")
+    );
+    assert!(
+        url_rx.try_recv().is_err(),
+        "no interactive authorization URL should ever be surfaced for an XAA server"
+    );
+}
+
+/// §26b delta 1, refresh-token arm: oracle `tokens()` (@182213696) applies its
+/// 300s proactive window to the case where a refresh token IS stored —
+/// `if(r!=null&&r<=300&&n.refreshToken&&!d){...refreshAuthorization(...)}`
+/// runs after the XAA block for every server. Gating reuse on hard expiry
+/// instead hands the transport a token 60 seconds from death.
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn xaa_stored_refresh_token_inside_300s_window_refreshes_proactively() {
+    let _guard = XAA_ENV_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    std::env::set_var("LINGXI_ENABLE_XAA", "1");
+
+    let transport = RecordingTransport::new(0);
+    let storage = MemStorage::new();
+    let clock = TestClock::new(1_000);
+    let (on_url, _rx) = url_capture();
+    let http = XaaRefreshOnlyAs::new();
+
+    let oauth = McpOAuthConfigDto {
+        client_id: Some("as-client".into()),
+        callback_port: None,
+        auth_server_metadata_url: None,
+        scopes: None,
+        xaa: Some(true),
+    };
+    let config = http_cfg("xaa-proactive", Some(oauth));
+    let key = oauth::server_key("xaa-proactive", &config.spec);
+
+    let stored = oauth::StoredTokens {
+        access_token: "xaa-nearly-dead".into(),
+        refresh_token: Some("xaa-refresh-1".into()),
+        // Still VALID (clock = 1000) but only 60s of life left — inside the
+        // 300s window, so the oracle refreshes rather than serving it.
+        expires_at_unix: 1_000 + 60,
+        client_id: Some("as-client".into()),
+        client_secret: Some("as-secret".into()),
+        step_up_scope: None,
+    };
+    let bytes = serde_json::to_vec(&stored).unwrap();
+    storage
+        .store(
+            oauth::MCP_OAUTH_SERVICE,
+            &key,
+            SecureStorageData::new(
+                bytes,
+                SecureStorageMetadata {
+                    created_at: SystemTime::UNIX_EPOCH,
+                    last_accessed: None,
+                    kind: SecretKindDto("mcp_oauth_tokens".into()),
+                },
+            ),
+        )
+        .await
+        .unwrap();
+
+    let registry =
+        McpRegistry::new(transport.clone() as Arc<dyn McpTransport>).with_oauth(OAuthDeps {
+            http: http.clone() as Arc<dyn HttpTransport>,
+            clock: clock as Arc<dyn Clock>,
+            storage: storage as Arc<dyn SecureStorage>,
+            on_authorization_url: on_url,
+            xaa_config: Some(Arc::new(XaaTestProvider)),
+        });
+
+    registry.connect(config).await.expect("xaa connect ok");
+    std::env::remove_var("LINGXI_ENABLE_XAA");
+
+    assert_eq!(
+        spec_auth_header(&transport.last_spec()).as_deref(),
+        Some("Bearer xaa-refreshed"),
+        "a token inside the 300s window must be refreshed BEFORE it is used"
+    );
+    assert!(
+        http.requests()
+            .iter()
+            .any(|r| r.url == "https://as.example.com/token"),
+        "the proactive refresh leg must actually be hit; got {:?}",
+        http.requests().iter().map(|r| r.url.clone()).collect::<Vec<_>>()
     );
 }

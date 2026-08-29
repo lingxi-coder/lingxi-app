@@ -174,19 +174,30 @@ export interface SystemColorSchemeQuery {
 
 /**
  * Resolves `preference` to a `ThemeMode` and reports it via `onChange`. For
- * `'system'` this also subscribes to the OS query's `change` event, so a
- * user flipping their OS appearance while the app is open is followed live
- * — resolving once at mount and never again would pass a cursory look but
- * silently stop tracking the OS. Returns a cleanup function that removes any
- * listener it attached (a no-op when `preference` wasn't `'system'`).
+ * `'system'` — and for an ABSENT preference, which means the same thing —
+ * this also subscribes to the OS query's `change` event, so a user flipping
+ * their OS appearance while the app is open is followed live; resolving once
+ * at mount and never again would pass a cursory look but silently stop
+ * tracking the OS. Returns a cleanup function that removes any listener it
+ * attached (a no-op for an explicit `'dark'`/`'light'`).
+ *
+ * An absent preference is `'system'`, not "do nothing". `Appearance.tsx`
+ * renders `settings.theme ?? 'system'` as the selected pill, and
+ * `resolveThemeMode` already reads `undefined` as "ask the OS" — an early
+ * return here was the one place in that chain that disagreed, and it
+ * disagreed silently. On a fresh install with no persisted preference, the
+ * app kept `App.tsx`'s `useState<ThemeMode>('dark')` seed no matter what the
+ * OS said, while Settings → 外观 highlighted 跟随系统 and flipping the OS
+ * theme changed nothing; clicking the already-selected 跟随系统 pill was the
+ * only way out, and it fixed it permanently, which is the signature of a
+ * default that was never resolved rather than of a preference.
  */
 export function watchThemePreference(
   preference: ThemePreference | undefined,
   query: SystemColorSchemeQuery,
   onChange: (mode: ThemeMode) => void,
 ): () => void {
-  if (preference === undefined) return () => {};
-  if (preference !== 'system') {
+  if (preference === 'dark' || preference === 'light') {
     onChange(preference);
     return () => {};
   }

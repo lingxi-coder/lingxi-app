@@ -36,13 +36,30 @@ test("watchThemePreference resolves once for 'dark'/'light' and never attaches a
   cleanup();
 });
 
-test("watchThemePreference does nothing for an absent preference", () => {
-  const query = fakeMediaQuery(true);
+// Final review, Minor (user-visible): this test used to PIN the no-op as
+// intended. It is not: `Appearance.tsx` renders `settings.theme ?? 'system'`
+// as the selected pill and `resolveThemeMode` already reads `undefined` as
+// "ask the OS", so a fresh install with no persisted preference showed
+// 跟随系统 selected while the app stayed on `App.tsx`'s hardcoded `'dark'`
+// seed and ignored the OS entirely.
+test("watchThemePreference treats an absent preference as 'system' — resolving AND following the OS", () => {
+  const query = fakeMediaQuery(false);
   const seen: string[] = [];
   const cleanup = watchThemePreference(undefined, query, (mode) => seen.push(mode));
-  assert.deepEqual(seen, []);
-  assert.equal(query.listenerCount(), 0);
+  assert.deepEqual(
+    seen, ['light'],
+    'no stored preference means "follow the OS", so it must resolve from the OS immediately',
+  );
+  assert.equal(
+    query.listenerCount(), 1,
+    'and keep following it — resolving once at mount would stop tracking the OS',
+  );
+
+  query.fireChange(true);
+  assert.deepEqual(seen, ['light', 'dark'], 'flipping the OS theme must reach the app');
+
   cleanup();
+  assert.equal(query.listenerCount(), 0, 'cleanup must remove the change listener');
 });
 
 test("watchThemePreference follows the OS when the preference is 'system', and stops after cleanup", () => {

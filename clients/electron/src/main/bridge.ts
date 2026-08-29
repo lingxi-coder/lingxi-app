@@ -254,6 +254,25 @@ const TRANSCRIPT_REPLAY_BASE_EVENTS = new Set<ClientEvent['type']>([
   'session_resumed',
 ]);
 
+/**
+ * Engine events that must be answered EXACTLY ONCE, and therefore go to a
+ * single renderer rather than to every registered one.
+ *
+ * `audio_request` is not a notification. `audio_bridge.rs` parks the engine
+ * call waiting for one `audio_response` (5s / 30s / 180s per op). Broadcast to
+ * N windows, each renderer would service it independently: N calls to
+ * `getUserMedia`, N real recordings, N answers. The engine drops all but the
+ * first, so the WIRE looks correct and nothing reports a problem — but the
+ * DEVICE is wrong, and the user sees two recording indicators.
+ *
+ * Only one `BrowserWindow` exists today (`main/index.ts`), which is precisely
+ * why this is enforced structurally instead of noted in a comment: whoever
+ * adds a second window will not be looking for this, and the symptom would
+ * appear at the microphone rather than in any test or log. Any future
+ * engine->client request that expects a single reply belongs in this set.
+ */
+const SINGLE_RESPONDER_EVENTS = new Set<ClientEvent['type']>(['audio_request']);
+
 const TRANSCRIPT_REPLAY_EVENTS = new Set<ClientEvent['type']>([
   'turn_started',
   'turn_ended',
@@ -414,7 +433,29 @@ export class SessionRuntime {
     webContents.send(CH_EVENT, this.opts.envelopeEvents ? envelope : event);
   }
 
+  /**
+   * The one renderer that answers single-responder requests: the
+   * first-registered live window. Deterministic (a `Map` preserves insertion
+   * order) and self-healing — destroyed windows are dropped as they are
+   * encountered, the same bookkeeping `broadcast` does.
+   */
+  private responderTarget(): WebContents | null {
+    for (const webContents of this.targets.keys()) {
+      if (webContents.isDestroyed()) this.targets.delete(webContents);
+      else return webContents;
+    }
+    return null;
+  }
+
   private broadcastClientEvent(event: ClientEvent): void {
+    if (SINGLE_RESPONDER_EVENTS.has(event.type)) {
+      // Sent to one window, or to none — never to several. See
+      // SINGLE_RESPONDER_EVENTS. `sendClientEvent` handles both the
+      // enveloped and bare wire shapes, so this needs no second branch.
+      const responder = this.responderTarget();
+      if (responder) this.sendClientEvent(responder, event, false);
+      return;
+    }
     const envelope = this.eventEnvelope(event, true);
     if (!this.opts.envelopeEvents) {
       this.broadcast(CH_EVENT, event);

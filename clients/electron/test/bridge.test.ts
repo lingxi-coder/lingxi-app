@@ -954,3 +954,79 @@ test('a real protocol command outside the desktop surface never reaches the engi
   await assert.rejects((manager as any).dispatchCommand({ type: 'login' }), /command is not allowed/);
   assert.equal(commands.length, 0, 'a rejected command must never be forwarded');
 });
+
+// ---------------------------------------------------------------------------
+// An engine request that must be answered EXACTLY ONCE cannot be broadcast.
+//
+// `audio_request` is not a notification: `audio_bridge.rs` parks a call
+// waiting for one `audio_response`. Sent to every registered renderer, each
+// one would service it independently — two windows would each call
+// `getUserMedia` and start a real recording. The engine drops the second
+// answer, so the WIRE stays correct and the bug is invisible there; the
+// DEVICE does not. Only one window exists today, which is exactly why this
+// has to be structural rather than a comment: whoever adds the second window
+// will not be looking for this.
+// ---------------------------------------------------------------------------
+
+function eventsFor(sent: Array<{ channel: string; payload: unknown }>): unknown[] {
+  return sent
+    .filter((entry) => entry.channel === 'lingxi:event')
+    .map((entry) => (entry.payload as { event?: unknown }).event ?? entry.payload);
+}
+
+test('an audio request goes to exactly one renderer, while ordinary events reach all of them', () => {
+  const first: Array<{ channel: string; payload: unknown }> = [];
+  const second: Array<{ channel: string; payload: unknown }> = [];
+  const runtime = new SessionRuntime({
+    launchConfig: { workspace: '/workspace', sessionId: '44444444-5555-4666-8777-888888888888', trusted: true },
+    sessionId: '44444444-5555-4666-8777-888888888888',
+    projectPath: '/workspace',
+    envelopeEvents: true,
+  } as any);
+  runtime.registerWindow(fakeWebContents(first) as any, 'app://desktop/index.html');
+  runtime.registerWindow(fakeWebContents(second) as any, 'app://desktop/index.html');
+
+  // `broadcastClientEvent` is private; every other test in this file reaches
+  // into SessionRuntime's internals the same way, and there is no public
+  // entry point that does not require a live bridge client.
+  const dispatch = (event: unknown) => (runtime as any).broadcastClientEvent(event);
+
+  dispatch({ type: 'text_delta', text: 'hello' });
+  assert.equal(eventsFor(first).length, 1, 'an ordinary event must still reach every window');
+  assert.equal(eventsFor(second).length, 1, 'an ordinary event must still reach every window');
+
+  dispatch({ type: 'audio_request', request_id: 1, op: { type: 'start_recording', sample_rate_hz: 16000, format: 'webm' } });
+
+  const audioFirst = eventsFor(first).filter((event: any) => event.type === 'audio_request');
+  const audioSecond = eventsFor(second).filter((event: any) => event.type === 'audio_request');
+  assert.equal(
+    audioFirst.length + audioSecond.length,
+    1,
+    'exactly one renderer may be asked to drive the microphone; two would start two recordings',
+  );
+  assert.deepEqual(audioFirst.length, 1, 'the first registered renderer is the deterministic responder');
+});
+
+test('the audio responder falls through to a live window when the first is destroyed', () => {
+  const first: Array<{ channel: string; payload: unknown }> = [];
+  const second: Array<{ channel: string; payload: unknown }> = [];
+  const runtime = new SessionRuntime({
+    launchConfig: { workspace: '/workspace', sessionId: '55555555-6666-4777-8888-999999999999', trusted: true },
+    sessionId: '55555555-6666-4777-8888-999999999999',
+    projectPath: '/workspace',
+    envelopeEvents: true,
+  } as any);
+  const dead = fakeWebContents(first);
+  dead.isDestroyed = () => true;
+  runtime.registerWindow(dead as any, 'app://desktop/index.html');
+  runtime.registerWindow(fakeWebContents(second) as any, 'app://desktop/index.html');
+
+  (runtime as any).broadcastClientEvent({ type: 'audio_request', request_id: 2, op: { type: 'is_recording' } });
+
+  assert.equal(eventsFor(first).length, 0, 'a destroyed window must never be picked as the responder');
+  assert.equal(
+    eventsFor(second).filter((event: any) => event.type === 'audio_request').length,
+    1,
+    'the request must fall through to a live window, not be dropped into a 5-second stall',
+  );
+});

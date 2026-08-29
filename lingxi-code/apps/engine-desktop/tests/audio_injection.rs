@@ -202,16 +202,19 @@ async fn a_build_with_no_audio_config_advertises_no_audio_tools() {
     let (_tmp, cfg) = sandbox_config(None);
     let runtime = Box::pin(run_build(cfg)).await;
     assert!(
-        runtime.audio.is_none(),
+        !runtime.has_audio(),
         "a config with no audio must not conjure a capability"
     );
+    let names = runtime.registered_tool_names();
     assert!(
-        runtime.tools.find_by_name("voice").is_none(),
-        "no capability ⇒ the voice tool must not be in the assembled registry"
+        !names.contains(&"voice".to_string()),
+        "no capability ⇒ the voice tool must not be in the assembled registry; \
+         registered: {names:?}"
     );
     assert!(
-        runtime.tools.find_by_name("speech").is_none(),
-        "no capability ⇒ the speech tool must not be in the assembled registry"
+        !names.contains(&"speech".to_string()),
+        "no capability ⇒ the speech tool must not be in the assembled registry; \
+         registered: {names:?}"
     );
 }
 
@@ -220,18 +223,24 @@ async fn a_build_with_an_audio_config_advertises_both_audio_tools() {
     let (_tmp, cfg) = sandbox_config(Some(DesktopAudio::from_single(Arc::new(StubAudio))));
     let runtime = Box::pin(run_build(cfg)).await;
     assert!(
-        runtime.audio.is_some(),
+        runtime.has_audio(),
         "the runtime must surface the capability it was built with"
     );
-    // The registry is the proof that the capability reached the TOOL CONTEXT:
-    // registration is gated on `ctx.voice` / `ctx.stt` / `ctx.tts`, so a build
-    // that dropped the config field on the floor registers neither tool.
+    // The registry is the proof that the capability reached the TOOL CONTEXT,
+    // and it is a SEPARATE observation from `has_audio` above (which reads the
+    // capability itself). Registration is gated on `ctx.voice` / `ctx.stt` /
+    // `ctx.tts`, so a build that carried the config field onto the runtime but
+    // dropped it on the way to the context passes the first assertion and fails
+    // these two.
+    let names = runtime.registered_tool_names();
     assert!(
-        runtime.tools.find_by_name("voice").is_some(),
-        "DesktopConfig::audio must reach the tool context and register the voice tool"
+        names.contains(&"voice".to_string()),
+        "DesktopConfig::audio must reach the tool context and register the voice \
+         tool; registered: {names:?}"
     );
     assert!(
-        runtime.tools.find_by_name("speech").is_some(),
-        "DesktopConfig::audio must reach the tool context and register the speech tool"
+        names.contains(&"speech".to_string()),
+        "DesktopConfig::audio must reach the tool context and register the speech \
+         tool; registered: {names:?}"
     );
 }

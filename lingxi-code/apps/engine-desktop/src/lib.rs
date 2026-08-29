@@ -3900,18 +3900,54 @@ pub struct DesktopRuntime {
     /// every connected server's `roots/list` reflects the new working directory.
     pub mcp_registry: Arc<mcp::McpRegistry>,
     /// The assembled tool registry — the SAME `Arc` the orchestrator dispatches
-    /// through. Surfaced read-only so a composition root (or its tests) can ask
-    /// what this build actually registered, which is the only honest way to
-    /// check a capability-gated tool made it all the way from a `DesktopConfig`
-    /// field to the model's tool list.
-    pub tools: Arc<ToolRegistry>,
+    /// through.
+    ///
+    /// PRIVATE, and the `Arc` must not escape: `ToolRegistry`'s MCP partition
+    /// sits behind an `RwLock`, so `register_mcp_tools` / `unregister_mcp_tools`
+    /// take `&self`. Anyone holding a clone of this handle could drop a live
+    /// connection's tools out of dispatch while `McpRegistry` still believes
+    /// that connection is up — a mid-session tool-list flap racing the
+    /// generation-checked catalog-refresh task, which is the ONE legitimate
+    /// `&self` caller. [`DesktopRuntime::registered_tool_names`] answers the
+    /// only question anyone outside has needed so far, and answers it by value.
+    tools: Arc<ToolRegistry>,
     /// The device-audio capability this runtime was built with — the very
     /// `Arc`s placed in the tool context, not a second read of the config.
-    /// `None` unless the host filled [`DesktopConfig::audio`]. The bridge
-    /// composition root holds the same `AudioBridge` on its side of the
-    /// connection; surfacing it here lets a test drive the exact object the
-    /// engine's audio tools would call.
-    pub audio: Option<DesktopAudio>,
+    /// `None` unless the host filled [`DesktopConfig::audio`].
+    ///
+    /// PRIVATE: nothing outside needs the trait objects (the tools hold their
+    /// own clones through the context). It is kept because
+    /// [`DesktopRuntime::has_audio`] must answer from the config→build path
+    /// INDEPENDENTLY of the registry — deriving audio-presence from the
+    /// registered tool names would make "the capability reached the tool
+    /// context" unfalsifiable, since the tools are registered *because* of the
+    /// capability.
+    audio: Option<DesktopAudio>,
+}
+
+impl DesktopRuntime {
+    /// The names of every tool this build registered, by value.
+    ///
+    /// The honest observation point for a capability-gated tool: the tool
+    /// context itself is consumed by [`build`], so "did the capability reach
+    /// the engine" can only be asked of what the registry ended up holding.
+    /// Returns names rather than the registry handle — see the `tools` field
+    /// for why that handle must not escape.
+    #[must_use]
+    pub fn registered_tool_names(&self) -> Vec<String> {
+        self.tools.all_names()
+    }
+
+    /// Whether this runtime was built with a device-audio capability
+    /// ([`DesktopConfig::audio`]).
+    ///
+    /// Read from the capability itself, not from the tool list, so the two
+    /// together distinguish "the config never reached the runtime" from "it
+    /// reached the runtime but not the tool context".
+    #[must_use]
+    pub fn has_audio(&self) -> bool {
+        self.audio.is_some()
+    }
 }
 
 /// Push-only workflow updates emitted by the desktop composition root.

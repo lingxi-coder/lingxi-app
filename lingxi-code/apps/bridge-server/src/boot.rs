@@ -40,7 +40,7 @@ use engine_desktop::{build, DesktopAudio, DesktopConfig, DesktopRuntime};
 use platform_posix::PosixFileSystem;
 use traits::{OrchestratorHandle, OutputStream, SlashCommandDispatcher};
 
-use crate::audio_bridge::new_audio_bridge;
+use crate::audio_bridge::{new_audio_bridge, AudioBridge};
 use crate::driver::{CredentialRequiredTurnDriver, OrchestratorTurnDriver};
 use crate::mcp_bridge::McpPaths;
 use crate::router::{EngineCommandRouter, SessionStoreContext};
@@ -554,10 +554,16 @@ pub struct BoundServer {
     pub connection: BridgeConnection,
     /// The desktop runtime — held (not read) so its handles and the spawned
     /// background tasks it owns (the cost-persist drain, the orchestrator's
-    /// registries) stay alive for as long as the server serves. Read through
-    /// [`BoundServer::runtime`] rather than exposed as a field, so the
-    /// hold-alive ownership stays with this struct.
+    /// registries) stay alive for as long as the server serves. Not exposed:
+    /// `DesktopRuntime` carries broad handles (the tool registry among them)
+    /// that nothing outside this struct has a reason to hold.
     runtime: DesktopRuntime,
+    /// The request half of THIS connection's audio bridge — the same object
+    /// that went into `DesktopConfig::audio` and whose responder half is bound
+    /// to `connection`. Held so the pairing is visible at the composition root
+    /// rather than only implied by the order of two statements inside
+    /// [`assemble_with_provider_keys`].
+    audio: Arc<AudioBridge>,
     /// Keeps the cross-session live identity and inbox registered for the
     /// lifetime of this bridge process.
     #[allow(dead_code)]
@@ -565,15 +571,21 @@ pub struct BoundServer {
 }
 
 impl BoundServer {
-    /// The engine runtime this server serves, borrowed for inspection.
+    /// The names of the tools the assembled engine registered.
     ///
-    /// The host's normal use of it is ownership (keeping it alive); this
-    /// accessor exists so the composition root and its tests can ask what the
-    /// assembly actually produced — e.g. whether the connection-scoped audio
-    /// capability was injected and which tools it registered.
+    /// Delegates to [`DesktopRuntime::registered_tool_names`]; the runtime
+    /// itself stays inside this struct.
     #[must_use]
-    pub fn runtime(&self) -> &DesktopRuntime {
-        &self.runtime
+    pub fn registered_tool_names(&self) -> Vec<String> {
+        self.runtime.registered_tool_names()
+    }
+
+    /// This connection's audio bridge — the engine-side object every
+    /// `SpeechToText` / `TextToSpeech` / `VoiceRecorder` call on this
+    /// connection goes through.
+    #[must_use]
+    pub fn audio(&self) -> &Arc<AudioBridge> {
+        &self.audio
     }
 }
 
@@ -894,7 +906,7 @@ pub async fn assemble_with_provider_keys(
     // only have been built over some other connection, and the engine's audio
     // calls must reach THIS one.
     let (audio_bridge, audio_responder) = new_audio_bridge(connection.audio_sink());
-    cfg.audio = Some(DesktopAudio::from_single(audio_bridge));
+    cfg.audio = Some(DesktopAudio::from_single(audio_bridge.clone()));
     let (ask_user_question_tx, ask_user_question_rx) = tokio::sync::mpsc::channel::<
         tui_core::ask_user_question_bridge::AskUserQuestionExchange,
     >(8);
@@ -1024,6 +1036,7 @@ pub async fn assemble_with_provider_keys(
     Ok(BoundServer {
         connection,
         runtime,
+        audio: audio_bridge,
         live_session,
     })
 }

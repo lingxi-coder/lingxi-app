@@ -22,9 +22,11 @@
 //!    immediately instead of leaving the engine to wait out a 180s deadline.
 //!
 //! No orchestrator is needed: unlike the computer-access prompt, the audio
-//! traits are called directly, so the test IS the engine task. It calls the
-//! bridge through `runtime.audio`, which is the very `Arc` `build` placed in the
-//! tool context.
+//! traits are called directly, so the test IS the engine task. It calls
+//! `BoundServer::audio()` — the request half `assemble` built, the same object
+//! it put on `DesktopConfig::audio`. That the engine got THAT object is what
+//! property 1 asserts, through the registry: the two tools are registered only
+//! when the tool context carries the capability.
 
 #![allow(clippy::unwrap_used)]
 
@@ -40,7 +42,7 @@ use engine_desktop::DesktopConfig;
 use futures_util::{SinkExt, StreamExt};
 use tokio_tungstenite::tungstenite::handshake::client::generate_key;
 use tokio_tungstenite::tungstenite::Message;
-use traits::stt::{SttError, SttOpts, SttTranscript};
+use traits::stt::{SpeechToText, SttError, SttOpts, SttTranscript};
 
 const TEST_TOKEN: &str = "audio-asm-token-32chars000000000";
 
@@ -214,17 +216,17 @@ async fn assemble_gives_the_engine_an_audio_capability_and_its_two_tools() {
         .await
         .expect("assemble must succeed");
 
+    // The registry is the assertion that matters: registration is gated on the
+    // tool context carrying the capability, so these two names are present only
+    // if the bridge `assemble` built travelled config → `build` → tool context.
+    let names = bound.registered_tool_names();
     assert!(
-        bound.runtime().audio.is_some(),
-        "assemble must build an AudioBridge over the connection and inject it"
+        names.contains(&"voice".to_string()),
+        "the injected capability must register the voice tool; registered: {names:?}"
     );
     assert!(
-        bound.runtime().tools.find_by_name("voice").is_some(),
-        "the injected capability must register the voice tool"
-    );
-    assert!(
-        bound.runtime().tools.find_by_name("speech").is_some(),
-        "the injected capability must register the speech tool"
+        names.contains(&"speech".to_string()),
+        "the injected capability must register the speech tool; registered: {names:?}"
     );
 }
 
@@ -247,11 +249,7 @@ async fn a_response_on_another_connection_cannot_resolve_this_connections_reques
     let bound_a = Box::pin(boot::assemble(cfg_a)).await.expect("assemble A");
     let bound_b = Box::pin(boot::assemble(cfg_b)).await.expect("assemble B");
 
-    let audio_a = bound_a
-        .runtime()
-        .audio
-        .clone()
-        .expect("assemble must inject audio");
+    let audio_a = bound_a.audio().clone();
     let endpoint_a = McpEndpoint::start_on_ephemeral_port_with_pump(Arc::new(bound_a.connection))
         .await
         .expect("endpoint A must start");
@@ -265,7 +263,7 @@ async fn a_response_on_another_connection_cannot_resolve_this_connections_reques
 
     // The engine task: one `transcribe` on A's capability.
     let call: tokio::task::JoinHandle<Result<SttTranscript, SttError>> =
-        tokio::spawn(async move { audio_a.stt.transcribe(SttOpts::default()).await });
+        tokio::spawn(async move { audio_a.transcribe(SttOpts::default()).await });
 
     let (request_id, op) = next_audio_request(&mut ws_a).await;
     assert!(
@@ -333,11 +331,7 @@ async fn dropping_the_client_fails_an_assembled_connections_parked_call() {
     let bound = Box::pin(boot::assemble(cfg))
         .await
         .expect("assemble must succeed");
-    let audio = bound
-        .runtime()
-        .audio
-        .clone()
-        .expect("assemble must inject audio");
+    let audio = bound.audio().clone();
     let endpoint = McpEndpoint::start_on_ephemeral_port_with_pump(Arc::new(bound.connection))
         .await
         .expect("endpoint must start");
@@ -345,7 +339,7 @@ async fn dropping_the_client_fails_an_assembled_connections_parked_call() {
     let mut ws = connect(endpoint.port()).await;
 
     let call: tokio::task::JoinHandle<Result<SttTranscript, SttError>> =
-        tokio::spawn(async move { audio.stt.transcribe(SttOpts::default()).await });
+        tokio::spawn(async move { audio.transcribe(SttOpts::default()).await });
     let (_request_id, _op) = next_audio_request(&mut ws).await;
 
     drop(ws);

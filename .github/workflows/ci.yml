@@ -21,16 +21,25 @@ jobs:
 
   # The mobile clients are the only consumers that turn `client-protocol`'s
   # `uniffi` feature on, and NOTHING else in this file builds with it: the
-  # desktop suites (`unit-tests`, bridge-server, electron) all resolve
-  # `client-protocol` with default features, where the entire UniFFI derive
-  # surface is `cfg`'d out. That blind spot let a `ClientCommand` that no longer
-  # compiles for iOS/Android land green on 2026-08-27 — the enum's compile-time
-  # UniFFI metadata had grown past `uniffi_core`'s hardcoded 16384-byte
-  # `MetadataBuffer`, which is a `const`-eval `assert!`, not a warning.
+  # On 2026-08-27 `ClientCommand` grew past `uniffi_core`'s hardcoded
+  # 16384-byte `MetadataBuffer` and stopped compiling for iOS/Android. Be
+  # precise about what missed it, because the obvious story is wrong:
+  # `unit-tests` runs `cargo test --workspace --all-features`, and
+  # `--all-features` turns on `client-protocol`'s own `uniffi` feature, so CI
+  # WOULD have gone red. What was blind was per-package local verification
+  # (`cargo test -p bridge-server`, `-p engine`, the electron suites) — none of
+  # which enables the feature — so the break survived a whole 21-task run and
+  # two rounds of review before any workspace-wide build ran.
   #
-  # This job is deliberately its OWN job rather than a step in `compile-check`,
-  # so it reports under its own name and cannot be hidden behind an unrelated
-  # failure earlier in that job's script.
+  # This job exists for how it fails, not whether. `--all-features` fails as a
+  # `const`-eval `assert!` inside a dependency: the whole workspace stops
+  # compiling and the message names `uniffi_core/src/metadata.rs`, not the enum
+  # that outgrew it. This job names the thing, and its budget test goes red
+  # ~4 KiB EARLIER, while the crate still compiles and a test can still run to
+  # say WHICH type is running out of room.
+  #
+  # Its own job, not a step in `compile-check`, so it reports under its own
+  # name and cannot hide behind an unrelated earlier failure in that script.
   mobile-ffi-surface:
     name: Mobile FFI surface (client-protocol --features uniffi)
     runs-on: ubuntu-latest

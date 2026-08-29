@@ -201,6 +201,8 @@ mod tests {
             version: "1.0.0".into(),
             description: String::new(),
             author: None,
+            author_email: None,
+            author_url: None,
             homepage: None,
             source: PluginSource::BuiltIn,
             components: Default::default(),
@@ -210,6 +212,10 @@ mod tests {
             user_config: Some(UserConfigSchema { fields: map }),
             channels: Vec::new(),
             settings: HashMap::new(),
+            keywords: Vec::new(),
+            license: None,
+            repository: None,
+            metadata: None,
         }
     }
 

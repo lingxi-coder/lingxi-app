@@ -49,8 +49,17 @@ pub struct PluginManifest {
     pub version: String,
     /// Free-form description.
     pub description: String,
-    /// Optional author string.
+    /// Optional author display name (`author.name`, or the bare-string form).
     pub author: Option<String>,
+    /// Optional author contact email (`author.email`). Oracle: "Contact
+    /// email for support or feedback." Parsed but not yet consumed by any
+    /// engine surface.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub author_email: Option<String>,
+    /// Optional author website/profile URL (`author.url`). Oracle: "Website,
+    /// GitHub profile, or organization URL."
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub author_url: Option<String>,
     /// Optional homepage / repo URL.
     pub homepage: Option<String>,
     /// Where the plugin came from.
@@ -71,6 +80,27 @@ pub struct PluginManifest {
     pub channels: Vec<PluginChannel>,
     /// Free-form settings the plugin author wants to ship with the manifest.
     pub settings: HashMap<String, serde_json::Value>,
+    /// Discovery/categorization tags (`keywords` in `plugin.json`). Oracle:
+    /// "Tags for plugin discovery and categorization." Not consumed by any
+    /// engine surface today; carried for marketplace-search parity.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub keywords: Vec<String>,
+    /// SPDX license identifier (`license` in `plugin.json`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub license: Option<String>,
+    /// Source-code repository URL (`repository` in `plugin.json`). Oracle
+    /// schema `Cs`: a plain string ("Source code repository URL"), not the
+    /// npm-style `{type,url,directory}` object.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repository: Option<String>,
+    /// Free-form author-owned metadata (`metadata` in `plugin.json`).
+    /// Oracle: "Free-form metadata for the plugin author's own use (e.g.
+    /// entitlement or catalog fields). Preserved on the parsed manifest but
+    /// not read by Claude Code." Only object-shaped values survive parsing
+    /// (see `discovery::load_plugin_from_path_with_mcp_gate`); anything else
+    /// is `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<serde_json::Value>,
 }
 
 /// The 7 component slots a plugin can populate.
@@ -230,6 +260,16 @@ impl PluginUserConfig {
 pub struct PluginChannel {
     /// MCP server name (must match a key in [`PluginComponents::mcp_servers`]).
     pub server: String,
+    /// Human-readable label for the config dialog title. Oracle: "Defaults
+    /// to the server name" when absent — this field only carries an
+    /// explicit override; a consumer wanting the effective label should
+    /// fall back to [`Self::server`] itself when this is `None`.
+    #[serde(
+        rename = "displayName",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub display_name: Option<String>,
     /// Optional channel-scoped user-config schema.
     #[serde(
         rename = "userConfig",

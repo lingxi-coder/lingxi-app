@@ -68,7 +68,7 @@ const UTF8_BOM: char = '\u{feff}';
 /// - Identity: `name`, `version`, `description`, `author`, `homepage`.
 /// - Component declarations: `skills`, `commands`, `agents`, `outputStyles`,
 ///   `hooks`, `mcpServers`, `lspServers`, `channels`.
-/// - Metadata: `keywords`, `license`, `repository`.
+/// - Metadata: `keywords`, `license`, `repository`, `metadata`.
 ///
 /// `name` is required; all other fields are optional. Unknown top-level
 /// fields are silently ignored by serde. Component path fields follow Claude
@@ -144,9 +144,21 @@ struct RawManifest {
     /// SPDX license identifier. Binary: `license`.
     #[serde(default)]
     license: Option<String>,
-    /// Repository URL or object. Binary: `repository`.
+    /// Source-code repository URL. Binary `Cs`: `repository:i().optional()`
+    /// ("Source code repository URL") — a plain string, NOT the npm-style
+    /// `{type,url,directory}` object this field's type previously assumed.
     #[serde(default)]
-    repository: Option<serde_json::Value>,
+    repository: Option<String>,
+    /// Free-form author-owned metadata, preserved unread. Binary `Cs`:
+    /// `metadata:Sa((e)=>He(e)?e:void 0,De(i(),_e()).optional())` —
+    /// `z.preprocess` maps anything that is not a plain JSON object to
+    /// `undefined` before validating as `record(string, unknown)`, so an
+    /// array/string/number/bool value here is silently dropped, not an
+    /// error. Kept as a generic `Value` here; [`load_plugin_from_path_with_mcp_gate`]
+    /// applies the same "object or nothing" filter before it reaches
+    /// [`PluginManifest::metadata`].
+    #[serde(default)]
+    metadata: Option<serde_json::Value>,
 }
 
 fn default_plugin_enabled() -> bool {
@@ -255,9 +267,12 @@ impl<'de> Deserialize<'de> for RawCommandEntry {
     }
 }
 
-/// `author` may be a string or an object (`{ name, email, url }`); claude-code
-/// uses the object form (`PluginAuthorSchema`, `schemas.ts:250`). Accept both
-/// and reduce to the display name.
+/// `author` may be a string or an object (`{ name, email, url }`). Binary
+/// `ke`: `f({name:i().min(1,...), email:i().optional()..., url:i().optional()...})`
+/// — the oracle's own author schema is object-only (`name` required), but
+/// this port additionally accepts a bare string for leniency (unflagged by
+/// the byte-alignment audit; kept as-is). Accept both shapes and preserve all
+/// three sub-fields; a bare string has no email/url.
 #[derive(Debug, Deserialize)]
 #[serde(untagged)]
 enum RawAuthor {
@@ -265,24 +280,35 @@ enum RawAuthor {
     Object {
         #[serde(default)]
         name: Option<String>,
+        #[serde(default)]
+        email: Option<String>,
+        #[serde(default)]
+        url: Option<String>,
     },
 }
 
 /// Public `plugin.json` channel shape. `userConfig` is a direct field map,
 /// just like top-level `userConfig`; [`UserConfigSchema`] is the engine's
-/// internal wrapper.
+/// internal wrapper. `displayName` (binary `Bs`'s channel entry:
+/// `displayName:i().optional().describe('Human-readable name shown in the
+/// config dialog title (e.g., "Telegram"). Defaults to the server name.')`)
+/// is UI-only label carried through to [`PluginChannel::display_name`].
 #[derive(Debug, Clone, Deserialize)]
 struct RawPluginChannel {
     server: String,
+    #[serde(rename = "displayName", default)]
+    display_name: Option<String>,
     #[serde(rename = "userConfig", default)]
     user_config: Option<HashMap<String, UserConfigField>>,
 }
 
+/// The three sub-fields of a parsed `author` value: display name, email,
+/// url. A bare string author yields only a name.
 impl RawAuthor {
-    fn into_display(self) -> Option<String> {
+    fn into_parts(self) -> (Option<String>, Option<String>, Option<String>) {
         match self {
-            RawAuthor::Name(s) => Some(s),
-            RawAuthor::Object { name } => name,
+            RawAuthor::Name(s) => (Some(s), None, None),
+            RawAuthor::Object { name, email, url } => (name, email, url),
         }
     }
 }
@@ -827,6 +853,15 @@ pub(crate) async fn load_plugin_from_path_with_mcp_gate(
         }
     };
 
+    let (author, author_email, author_url) = match parsed.author {
+        Some(raw) => raw.into_parts(),
+        None => (None, None, None),
+    };
+    // Oracle preprocess: only a plain JSON object survives `metadata`; an
+    // array/string/number/bool/null value is silently dropped to `undefined`
+    // rather than rejected (`Sa((e)=>He(e)?e:void 0,...)`).
+    let metadata = parsed.metadata.filter(|v| v.is_object());
+
     let manifest = PluginManifest {
         id,
         name: parsed.name,
@@ -834,7 +869,9 @@ pub(crate) async fn load_plugin_from_path_with_mcp_gate(
         default_enabled: parsed.default_enabled,
         version: parsed.version.unwrap_or_default(),
         description: parsed.description.unwrap_or_default(),
-        author: parsed.author.and_then(RawAuthor::into_display),
+        author,
+        author_email,
+        author_url,
         homepage: parsed.homepage,
         source,
         components,
@@ -844,6 +881,10 @@ pub(crate) async fn load_plugin_from_path_with_mcp_gate(
         user_config: parsed.user_config.map(|fields| UserConfigSchema { fields }),
         channels,
         settings,
+        keywords: parsed.keywords.unwrap_or_default(),
+        license: parsed.license,
+        repository: parsed.repository,
+        metadata,
     };
     Some((id, manifest))
 }
@@ -878,6 +919,7 @@ fn validate_plugin_channels(
         }
         channels.push(PluginChannel {
             server: channel.server.clone(),
+            display_name: channel.display_name.clone(),
             user_config: channel
                 .user_config
                 .clone()

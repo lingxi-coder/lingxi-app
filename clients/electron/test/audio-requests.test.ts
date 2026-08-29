@@ -516,13 +516,22 @@ test('the gate check above can actually fail', () => {
 // `src/` being two doc comments deferring the wiring to "a later task". So
 // the call site is asserted here too.
 //
-// It is asserted structurally rather than by running the hook because
-// `useBridge`'s subscription lives in a `useEffect`, and the only renderer
-// this test setup has is `react-dom/server`'s `renderToString`, which runs
-// the component body and deliberately skips effects (see the note in
-// `bridge-error-reaches-callers.test.ts`). Each check below is paired with a
-// positive control, because a structural check that silently matches nothing
-// is worth less than no check at all.
+// THE AUTHORITATIVE PROOF IS ELSEWHERE: `audio-request-interaction.test.mjs`
+// mounts the real hook in a real Electron renderer — where `useEffect`
+// genuinely runs, unlike `react-dom/server`'s `renderToString`, which this
+// suite is limited to — delivers a real `audio_request` and asserts the real
+// `audio_response` that comes back. Deleting the subscription turns THAT test
+// red with `timed out waiting for: window.__audioRequestTest.commands().length
+// > 0`, which is the production symptom itself.
+//
+// The checks below are kept as a fast tripwire that runs in this suite rather
+// than behind a 2-second Electron boot, and because they can name a specific
+// regression (`capture` as the reporter, a per-request recorder) that the
+// round-trip test would not distinguish. They are NOT the evidence that the
+// wiring works. Each is paired with a positive control, because a structural
+// check that silently matches nothing is worth less than no check at all —
+// measured in this very task, where an `includes()` check stayed green
+// through an `if (false && …)` mutation.
 // ---------------------------------------------------------------------------
 
 /** The body of the `host.onEvent(...)` subscription in `useBridge.ts`. */

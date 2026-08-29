@@ -149,14 +149,15 @@ test('the settings-focus trap moves focus in on mount, wraps Tab both directions
   assert.equal(afterClose.activeElementId, 'opener', 'closing must restore focus to whatever had it before the dialog mounted');
 });
 
-test('an unimplemented page renders an explicit placeholder, not a blank panel — implemented pages without content yet get a different, honest message', async () => {
-  const { voice, notWired } = await runScenario('placeholder');
+test('an unimplemented page renders an explicit placeholder, not a blank panel', async () => {
+  const { voice } = await runScenario('placeholder');
   assert.equal(voice.placeholderKind, 'not-implemented', 'voice is implemented:false and must say so plainly');
-  // `raw-json`, not `permissions`: Task 16 registered the five client-owned
-  // pages, Task 18 registers all six 编码 pages (including `permissions`),
-  // so `raw-json` — registered only in Task 19 — is the still-honest
-  // "not wired yet" example now.
-  assert.equal(notWired.placeholderKind, 'not-wired', 'raw-json is implemented:true but has no page component registered yet');
+  // Task 19 (raw-json) was the last content page in this plan: every
+  // `implemented: true` entry in `SETTINGS_NAV` now has a real
+  // `PAGE_CONTENT` component, so there is no more honest "implemented but
+  // not wired yet" example left for this scenario to select — see
+  // `all six Task 18 pages...` below (extended to seven) for the positive
+  // check that every one of them actually renders real content.
 });
 
 test('a malformed settings snapshot surfaces as an error banner instead of throwing through the render', async () => {
@@ -164,21 +165,22 @@ test('a malformed settings snapshot surfaces as an error banner instead of throw
   assert.equal(state.hasSnapshotError, true);
 });
 
-test('all six Task 18 pages are actually registered in PAGE_CONTENT, not just declared in nav.ts', async () => {
+test('all six Task 18 pages plus Task 19\'s raw-json are actually registered in PAGE_CONTENT, not just declared in nav.ts', async () => {
   // Task 18 fix round 1, Important: the older registration test only
   // checked `nav.ts`'s `implemented` flag — true before Task 18's diff too,
   // since `nav.ts` was untouched. This checks the thing Task 18 actually
   // added: selecting each page renders real content (`placeholderKind ===
   // null`), not the "not wired yet" placeholder a forgotten `PAGE_CONTENT`
-  // entry would silently fall back to.
+  // entry would silently fall back to. Task 19 extended the same check to
+  // `raw-json`.
   const { placeholderKinds, afterHooksEscapeHatch } = await runScenario('page-content');
-  for (const id of ['permissions', 'tools-agent', 'skills', 'mcp', 'hooks', 'plugins']) {
+  for (const id of ['permissions', 'tools-agent', 'skills', 'mcp', 'hooks', 'plugins', 'raw-json']) {
     assert.equal(placeholderKinds[id], null, `${id} must render real content, not a placeholder`);
   }
   // hooksPageModel().escapeHatch actually drives the button's navigation
-  // target: clicking it must land on `raw-json`'s own "not wired yet"
-  // placeholder (Task 19 hasn't registered it), not a no-op.
-  assert.equal(afterHooksEscapeHatch.placeholderKind, 'not-wired', 'the escape-hatch button must navigate to raw-json');
+  // target: clicking it must land on `raw-json`'s REAL content (Task 19
+  // registered it), not a no-op and not a placeholder.
+  assert.equal(afterHooksEscapeHatch.placeholderKind, null, 'the escape-hatch button must navigate to raw-json, which now renders real content');
 });
 
 test('switching layers re-seeds a dirty draft field instead of leaving stale text next to a different layer\'s data', async () => {

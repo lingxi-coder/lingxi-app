@@ -70,12 +70,14 @@ async function runPlaceholderScenario(webContents) {
   const voice = await webContents.executeJavaScript('window.__settingsScreenTest.state()');
   // `diagnostics` used to be the "implemented but not wired" example here,
   // then `permissions` (Task 16 registered diagnostics; Task 18 registers
-  // permissions along with the rest of the 编码 group) — `raw-json`
-  // (implemented:true, registered only in Task 19) is the still-honest
-  // example now.
-  await webContents.executeJavaScript('window.__settingsScreenTest.selectPage("raw-json")');
-  const notWired = await webContents.executeJavaScript('window.__settingsScreenTest.state()');
-  return { voice, notWired };
+  // permissions along with the rest of the 编码 group), then `raw-json`
+  // (registered only in Task 19). Task 19 was the last content page in this
+  // plan, so every `implemented: true` entry in `SETTINGS_NAV` now has a
+  // real `PAGE_CONTENT` component — there is no more honest "implemented
+  // but not wired yet" example left to select here. `voice` (the one
+  // remaining `implemented: false` page) is the only placeholder kind this
+  // scenario can still demonstrate.
+  return { voice };
 }
 
 async function runMalformedSnapshotScenario(webContents) {
@@ -137,7 +139,7 @@ async function runPageContentScenario(webContents) {
   // pages renders real content or the "not wired yet" placeholder. This
   // scenario selects each and reports `placeholderKind`, which is `null`
   // only when a real component is mounted.
-  const ids = ['permissions', 'tools-agent', 'skills', 'mcp', 'hooks', 'plugins'];
+  const ids = ['permissions', 'tools-agent', 'skills', 'mcp', 'hooks', 'plugins', 'raw-json'];
   const placeholderKinds = {};
   for (const id of ids) {
     await webContents.executeJavaScript(`window.__settingsScreenTest.selectPage(${JSON.stringify(id)})`);
@@ -149,9 +151,10 @@ async function runPageContentScenario(webContents) {
   // what actually drives the "在 JSON 中编辑" button, not a hardcoded
   // `'raw-json'` literal at the call site that happens to agree with it.
   // Proven here by actually clicking the button and checking the shell
-  // navigated to `raw-json` (observable as its own "not wired yet"
-  // placeholder, since Task 19 hasn't registered it) rather than by reading
-  // the model's field in isolation.
+  // navigated to `raw-json` — now (Task 19 registered it) observable as
+  // REAL content (`placeholderKind === null`), not the "not wired yet"
+  // placeholder this assertion used to see — rather than by reading the
+  // model's field in isolation.
   await webContents.executeJavaScript('window.__settingsScreenTest.selectPage("hooks")');
   await webContents.executeJavaScript('document.querySelector(\'[data-testid="hooks-open-raw-json"]\')?.click()');
   const afterHooksEscapeHatch = await webContents.executeJavaScript('window.__settingsScreenTest.state()');

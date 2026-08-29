@@ -16,6 +16,7 @@ import { Permissions } from './pages/Permissions';
 import { Plugins } from './pages/Plugins';
 import { Projects } from './pages/Projects';
 import { ProviderCredentials } from './pages/ProviderCredentials';
+import { RawJson } from './pages/RawJson';
 import { Skills } from './pages/Skills';
 import { ToolsAgent } from './pages/ToolsAgent';
 import { provenanceLabel, type Provenance } from './rows';
@@ -179,6 +180,12 @@ function messageFrom(cause: unknown): string {
  * `layered: false`), `hooks` (read-only listing + a jump to `raw-json`),
  * and `plugins` (`enabledPlugins`/`pluginConfigs`/`additionalMarketplaces`
  * via the generic patch).
+ *
+ * Task 19 adds `raw-json`: the escape hatch for every field no dedicated
+ * page covers, and the one sanctioned exception to `apply_patch` refusing
+ * the `permissions` key (see `RawJson.tsx`'s own doc for what was actually
+ * investigated there and what still cannot be done without an engine
+ * change).
  */
 const PAGE_CONTENT: Partial<Record<string, ComponentType<PageContentProps>>> = {
   general: General,
@@ -194,6 +201,7 @@ const PAGE_CONTENT: Partial<Record<string, ComponentType<PageContentProps>>> = {
   mcp: McpServers,
   hooks: Hooks,
   plugins: Plugins,
+  'raw-json': RawJson,
 };
 
 export interface PageContentProps {

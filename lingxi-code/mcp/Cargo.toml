@@ -13,6 +13,7 @@ jsonrpc = { path = "../jsonrpc" }
 # the canonical project key is resolved by migrations::global_config.
 migrations = { path = "../migrations" }
 branding = { path = "../branding" }
+telemetry = { path = "../telemetry" }
 serde.workspace = true
 serde_json.workspace = true
 indexmap.workspace = true

@@ -954,6 +954,27 @@ impl McpRegistry {
             self.resolve_oauth_spec(&resolved_config).await?
         };
 
+        // §17: resolve the MCP protocol-era negotiation mode for this
+        // connect attempt (oracle `co(Wr(t.type,...), t, cn(t))`), logging
+        // its two possible `warn`-level messages exactly as the oracle does.
+        // The resolved mode is not yet consumed to change the connect
+        // timeout or the `initialize` wire frame — that requires the
+        // `server/discover` era-probe sub-protocol and its pinned-legacy
+        // reconnect ladder, deferred (see `protocol_negotiation` module
+        // docs). Every label reachable in this port resolves to `Legacy`
+        // without an explicit `MCP_PROTOCOL_NEGOTIATION=auto` AND a wired
+        // feature-flag fetcher (neither exists by default), so today's
+        // connect flow is already byte-exact with the legacy path.
+        let negotiation_mode = crate::protocol_negotiation::resolve_for_spec(
+            &connect_spec,
+            connect_timeout.as_millis() as u64,
+        );
+        tracing::debug!(
+            server = %config.name,
+            mode = ?negotiation_mode,
+            "MCP protocol-era negotiation resolved"
+        );
+
         let attempt =
             |spec: McpTransportSpec| self.connect_attempt(spec, connect_timeout, &config.name);
 
@@ -2492,7 +2513,7 @@ impl McpRegistry {
 /// `getConnectionTimeoutMs()` (`services/mcp/client.ts:456-458`):
 /// `parseInt(process.env.MCP_TIMEOUT || '', 10) || 30000` — a positive integer
 /// number of milliseconds, defaulting to 30s when unset / non-numeric / zero.
-fn mcp_connection_timeout() -> Duration {
+pub(crate) fn mcp_connection_timeout() -> Duration {
     let ms = std::env::var("MCP_TIMEOUT")
         .ok()
         .and_then(|s| s.trim().parse::<u64>().ok())

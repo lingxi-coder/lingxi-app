@@ -28,6 +28,7 @@ pub mod mcp_output_storage;
 pub mod negotiation;
 pub mod normalization;
 pub mod oauth;
+pub mod protocol_negotiation;
 pub mod raw_conn;
 pub mod registry;
 pub mod server_gate;

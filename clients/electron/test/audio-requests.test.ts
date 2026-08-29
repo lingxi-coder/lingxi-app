@@ -12,6 +12,8 @@ import {
 } from '../src/renderer/audio/requests';
 import { MicrophoneCaptureError, type CapturedRecording, type MicrophoneCaptureOptions } from '../src/renderer/audio/capture';
 import { validateClientCommand } from '../src/main/validation';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 
 /**
  * A recorder stand-in with the same surface `MicrophoneCapture` exposes, so
@@ -201,6 +203,36 @@ test('a response the engine drops is inert, not fatal', async () => {
     audioRequest(999, { type: 'is_recording' }),
     () => deps,
     () => { throw new Error('the bridge is gone'); },
+  ));
+});
+
+test('a diagnostics callback that throws cannot strand the engine either', async () => {
+  // `useBridge`'s own `capture` helper sets the global error AND RETHROWS —
+  // that rethrow is pinned by `bridge-error-reaches-callers.test.ts`, because
+  // every settings page depends on it. It is therefore the obvious thing for
+  // a future caller to hand to `onError`, and if a throw from there escaped,
+  // the response would never be sent and the engine would sit on its
+  // deadline.
+  const sent: AudioResponseCommand[] = [];
+  const rethrow = (cause: unknown) => { throw cause; };
+
+  await assert.doesNotReject(() => handleAudioRequestEvent(
+    'session-1',
+    audioRequest(14, { type: 'is_recording' }),
+    () => { throw new Error('no microphone bindings'); },
+    async (_sessionId, command) => { sent.push(command); },
+    rethrow,
+  ));
+  assert.equal(sent.length, 1, 'the response must survive a throwing diagnostics callback');
+
+  // The same hazard on the send path: there the response is already gone, so
+  // only the crash matters.
+  await assert.doesNotReject(() => handleAudioRequestEvent(
+    'session-1',
+    audioRequest(15, { type: 'is_recording' }),
+    () => harness().deps,
+    async () => { throw new Error('the bridge is gone'); },
+    rethrow,
   ));
 });
 
@@ -394,4 +426,117 @@ test('the gate check above can actually fail', () => {
     () => validateClientCommand({ type: 'audio_response', request_id: 5, result: { type: 'failed', kind: 'other', message: '' } }),
     /invalid audio error message/,
   );
+});
+
+// ---------------------------------------------------------------------------
+// The wiring itself.
+//
+// Everything above tests a function nobody has to call. Tasks 1-7 shipped a
+// capture module and a synthesis module in exactly that state — complete,
+// green, and unreachable, with the only mentions of `audio_request` under
+// `src/` being two doc comments deferring the wiring to "a later task". So
+// the call site is asserted here too.
+//
+// It is asserted structurally rather than by running the hook because
+// `useBridge`'s subscription lives in a `useEffect`, and the only renderer
+// this test setup has is `react-dom/server`'s `renderToString`, which runs
+// the component body and deliberately skips effects (see the note in
+// `bridge-error-reaches-callers.test.ts`). Each check below is paired with a
+// positive control, because a structural check that silently matches nothing
+// is worth less than no check at all.
+// ---------------------------------------------------------------------------
+
+/** The body of the `host.onEvent(...)` subscription in `useBridge.ts`. */
+function onEventHandlerSource(): string {
+  const source = readFileSync(join(import.meta.dirname, '../src/renderer/bridge/useBridge.ts'), 'utf8');
+  const start = source.indexOf('host.onEvent(');
+  assert.notEqual(start, -1, 'useBridge no longer subscribes to engine events at all');
+  let depth = 0;
+  for (let index = source.indexOf('(', start); index < source.length; index += 1) {
+    if (source[index] === '(') depth += 1;
+    else if (source[index] === ')') {
+      depth -= 1;
+      if (depth === 0) return source.slice(start, index + 1);
+    }
+  }
+  assert.fail('the host.onEvent(...) call is unbalanced');
+}
+
+test('useBridge answers audio requests from inside its engine-event subscription', () => {
+  const handler = onEventHandlerSource();
+
+  // Positive control: the extraction really did capture the handler body.
+  assert.ok(
+    handler.includes('reduceEvent(') && handler.includes("event.type === 'error'"),
+    'the extracted source is not the event handler, so every assertion below would prove nothing',
+  );
+
+  assert.ok(
+    handler.includes('handleAudioRequestEvent('),
+    'nothing services ClientEvent::AudioRequest — the engine would park every microphone '
+    + 'and speech call until its deadline expired',
+  );
+
+  // The branch is matched in full, not just searched for the wire name: a
+  // `handleAudioRequestEvent` sitting behind an extra condition (`if (false
+  // && …)`, a feature flag defaulting off) is unreachable in exactly the way
+  // this test exists to catch, and a mere `includes` cannot tell the two
+  // apart — measured, by mutating the branch to `if (false && …)` and
+  // watching the looser check stay green.
+  const branch = /if \(event\.type === 'audio_request'\) \{/;
+  assert.match(
+    handler,
+    branch,
+    'the audio_request branch must be reached unconditionally; anything guarding it further '
+    + 'silently un-wires every microphone and speech call',
+  );
+  assert.ok(
+    !branch.test("if (false && event.type === 'audio_request') {"),
+    'if this regex accepted a disabled branch, the assertion above would prove nothing',
+  );
+});
+
+test('the audio dispatch is not handed useBridge\'s rethrowing capture helper', () => {
+  // `capture` sets the global error AND RETHROWS. Passed as the reporter, a
+  // failure to build the microphone bindings would throw before the response
+  // was sent, stranding the parked engine call — the one hazard this whole
+  // module exists to avoid.
+  const handler = onEventHandlerSource();
+  const start = handler.indexOf('handleAudioRequestEvent(');
+  assert.notEqual(start, -1);
+  let depth = 0;
+  let end = start;
+  for (let index = handler.indexOf('(', start); index < handler.length; index += 1) {
+    if (handler[index] === '(') depth += 1;
+    else if (handler[index] === ')') {
+      depth -= 1;
+      if (depth === 0) { end = index + 1; break; }
+    }
+  }
+  const call = handler.slice(start, end);
+  assert.ok(call.length > 'handleAudioRequestEvent()'.length, 'failed to slice the call arguments');
+  assert.ok(!/(^|[\s,(])capture([\s,)])/.test(call), `capture must not be the audio reporter: ${call}`);
+  // Positive control for that regex: it does find a bare argument.
+  assert.ok(/(^|[\s,(])capture([\s,)])/.test('handleAudioRequestEvent(sessionId, event, deps, send, capture)'));
+});
+
+test('the production microphone and speech bindings are the ones actually used', () => {
+  // `AudioRequestDeps` is an interface; importing only the type would type-check
+  // perfectly while the hook fed it nothing real.
+  const source = readFileSync(join(import.meta.dirname, '../src/renderer/bridge/useBridge.ts'), 'utf8');
+  for (const binding of ['browserMicrophoneCaptureDeps', 'browserSynthesisDeps', 'new MicrophoneCapture(']) {
+    assert.ok(source.includes(binding), `useBridge must build its audio deps with ${binding}`);
+  }
+
+  // The recorder must be RETAINED, not rebuilt per request: a capture spans a
+  // `start_recording`/`stop_recording` pair of separate engine requests, so a
+  // fresh `MicrophoneCapture` each time would answer `not_recording` to every
+  // stop and never release the microphone (leaving the OS recording indicator
+  // lit — `capture.ts`'s hazard 2). Structurally, that means the construction
+  // sits behind the once-only guard rather than in the request path.
+  const guard = source.indexOf('if (!audioBindings.current)');
+  const construction = source.indexOf('new MicrophoneCapture(');
+  assert.notEqual(guard, -1, 'the audio bindings are no longer built once and cached');
+  assert.equal(source.indexOf('new MicrophoneCapture(', construction + 1), -1, 'the recorder is constructed in more than one place');
+  assert.ok(guard < construction, 'the recorder must be constructed inside the once-only guard, not per request');
 });

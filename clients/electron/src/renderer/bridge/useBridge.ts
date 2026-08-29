@@ -14,6 +14,10 @@ import type {
   SettingsDestinationDto,
 } from '@lingxi/bridge-client';
 
+import { browserMicrophoneCaptureDeps, MicrophoneCapture } from '../audio/capture';
+import { handleAudioRequestEvent, type AudioRequestDeps } from '../audio/requests';
+import { browserSynthesisDeps, synthesize } from '../audio/synthesis';
+import { defaultVoicePreferences } from '../../shared/voicePreferences';
 import {
   appendPendingUserPrompt,
   appendUserPrompt,
@@ -477,6 +481,36 @@ export function useBridge(): UseBridge {
     throw cause;
   }, []);
 
+  /**
+   * The microphone/speaker bindings the engine's `audio_request` events are
+   * serviced with, built on first use and then kept for the life of the
+   * hook. One `MicrophoneCapture` instance, not one per request: a capture
+   * spans a `start_recording`/`stop_recording` PAIR of engine requests, so a
+   * fresh recorder per request would report "not recording" for every stop
+   * and never release the microphone. Built lazily because it touches
+   * `navigator.mediaDevices` and `window.speechSynthesis`, which a
+   * server-rendered probe of this hook has neither of.
+   */
+  const audioBindings = useRef<AudioRequestDeps | null>(null);
+  const audioRequestDeps = useCallback((): AudioRequestDeps => {
+    if (!audioBindings.current) {
+      const synthesisDeps = browserSynthesisDeps();
+      audioBindings.current = {
+        recorder: new MicrophoneCapture(browserMicrophoneCaptureDeps()),
+        synthesize: (text, voiceId, rate) => synthesize(text, voiceId, rate, synthesisDeps),
+        // `AudioOpDto::Synthesize` carries the text and sometimes a voice,
+        // never a rate — that is a device preference. Read through the ref
+        // on every request so a settings change takes effect without
+        // rebuilding these bindings.
+        playback: () => {
+          const preferences = bootstrapRef.current?.settings.voice ?? defaultVoicePreferences();
+          return { voiceSelection: preferences.voiceSelection, rate: preferences.rate };
+        },
+      };
+    }
+    return audioBindings.current;
+  }, []);
+
   const runtime = activeSessionId ? runtimeStates.get(activeSessionId) : undefined;
   const connection: ConnectionState = sessionLoading
     ? { status: 'spawning' }
@@ -725,6 +759,29 @@ export function useBridge(): UseBridge {
         updateRuntime(sessionId, (state) => ({ ...state, error: event.message }));
         if (activeSessionIdRef.current === sessionId) setError(event.message);
       }
+      if (event.type === 'audio_request') {
+        // The engine has no microphone or speaker of its own on desktop: it
+        // asks the connected client and PARKS the call on a deadline (5s /
+        // 30s / 180s per op, `audio_bridge.rs`). Every request must produce
+        // exactly one `audio_response`, which is what
+        // `handleAudioRequestEvent` guarantees — including on its error
+        // paths, so `void` here can never leave a request unanswered nor
+        // raise an unhandled rejection.
+        void handleAudioRequestEvent(
+          sessionId,
+          event,
+          audioRequestDeps,
+          (target, command) => host.command(target, command),
+          // Deliberately NOT `capture`: that helper rethrows, which would
+          // strand the parked engine call. A failure to answer at all is
+          // reported the same way an engine `error` event is, above.
+          (cause) => {
+            const message = messageFrom(cause);
+            updateRuntime(sessionId, (state) => ({ ...state, error: message }));
+            if (activeSessionIdRef.current === sessionId) setError(message);
+          },
+        );
+      }
     });
     const offState = host.onConnectionStateChanged((envelope) => {
       const sessionId = envelope.sessionId;
@@ -827,7 +884,7 @@ export function useBridge(): UseBridge {
       offPermission();
       offComputerAccess();
     };
-  }, [applyBootstrap, capture, host, scheduleProjectCatalogRefresh, updateRuntime]);
+  }, [applyBootstrap, audioRequestDeps, capture, host, scheduleProjectCatalogRefresh, updateRuntime]);
 
   useEffect(() => {
     if (sessionLoading || !host || !activeSessionId || connection.status !== 'connected') return;

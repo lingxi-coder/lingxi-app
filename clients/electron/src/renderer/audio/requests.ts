@@ -119,6 +119,25 @@ export type AudioResponseCommand = { type: 'audio_response'; request_id: number;
  */
 export type AudioResponseSender = (sessionId: string, command: AudioResponseCommand) => Promise<void> | void;
 
+/**
+ * Reports a cause that was turned into a failure, or that the send itself
+ * produced. Diagnostics only, and {@link report} invokes it defensively:
+ * `useBridge`'s own `capture` helper sets the global error AND RETHROWS
+ * (pinned by `bridge-error-reaches-callers.test.ts`, since every settings
+ * page depends on that rethrow), which makes it the obvious thing to pass
+ * here — and a throw out of it would cost the parked engine call its answer.
+ */
+export type AudioFailureReporter = (cause: unknown) => void;
+
+/** Invokes a reporter without ever letting it become this function's problem. */
+function report(onError: AudioFailureReporter | undefined, cause: unknown): void {
+  try {
+    onError?.(cause);
+  } catch {
+    // A diagnostics callback that throws must not strand the engine.
+  }
+}
+
 /** A non-empty, bounded description of an arbitrary thrown value. */
 function describe(cause: unknown): string {
   const raw = cause instanceof Error ? cause.message : String(cause);
@@ -239,7 +258,7 @@ export async function handleAudioRequestEvent(
   event: ClientEvent,
   deps: () => AudioRequestDeps,
   send: AudioResponseSender,
-  onError?: (cause: unknown) => void,
+  onError?: AudioFailureReporter,
 ): Promise<void> {
   if (event.type !== 'audio_request') return;
 
@@ -250,7 +269,7 @@ export async function handleAudioRequestEvent(
     // `serviceAudioOp` is written not to throw, but `deps()` can, and the
     // engine is parked either way — so a throw that reaches here becomes a
     // reported failure instead of an unanswered request.
-    onError?.(cause);
+    report(onError, cause);
     result = failed('other', `the desktop client could not service the audio request: ${describe(cause)}`);
   }
 
@@ -259,6 +278,6 @@ export async function handleAudioRequestEvent(
   } catch (cause) {
     // The engine drops responses for request ids it no longer knows. Losing
     // the UI over one is far worse than losing the answer.
-    onError?.(cause);
+    report(onError, cause);
   }
 }

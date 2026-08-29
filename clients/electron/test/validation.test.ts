@@ -289,3 +289,121 @@ test('IPC sender validation requires an allowlisted webContents, top frame, and 
   assert.equal(isAllowedIpcSender({ senderId: 8, frameId: 2, topFrameId: 2, url: 'https://localhost:5173/app' }, allowedIds, allowedOrigins), false);
   assert.equal(isAllowedIpcSender({ senderId: 7, frameId: 2, topFrameId: 2, url: 'https://evil.test/' }, allowedIds, allowedOrigins), false);
 });
+
+// ---------------------------------------------------------------------------
+// `audio_response` — the renderer's answer to `ClientEvent::AudioRequest`.
+//
+// Every one of these assertions guards an engine call that is PARKED on a
+// deadline (5s for `is_recording`, 30s for start/stop, 180s for
+// transcribe/synthesize — `audio_bridge.rs`'s `STATE_QUERY_DEADLINE` /
+// `DEVICE_CONTROL_DEADLINE` / `CAPTURE_DEADLINE`). A response this gate
+// rejects is a response the engine never sees, so a wrong bound here is not
+// a cosmetic validation bug: it is a stall of exactly that length.
+// ---------------------------------------------------------------------------
+
+test('the audio response command passes the runtime allowlist in every shape the renderer produces', () => {
+  assert.deepEqual(
+    validateClientCommand({ type: 'audio_response', request_id: 7, result: { type: 'ok' } }),
+    { type: 'audio_response', request_id: 7, result: { type: 'ok' } },
+  );
+  assert.deepEqual(
+    validateClientCommand({ type: 'audio_response', request_id: 0, result: { type: 'recording_state', recording: false } }),
+    { type: 'audio_response', request_id: 0, result: { type: 'recording_state', recording: false } },
+  );
+  assert.deepEqual(
+    validateClientCommand({
+      type: 'audio_response',
+      request_id: 3,
+      result: { type: 'recording', audio_base64: 'AAEC', mime_type: 'audio/webm;codecs=opus' },
+    }),
+    {
+      type: 'audio_response',
+      request_id: 3,
+      result: { type: 'recording', audio_base64: 'AAEC', mime_type: 'audio/webm;codecs=opus' },
+    },
+  );
+  assert.deepEqual(
+    validateClientCommand({
+      type: 'audio_response',
+      request_id: 4,
+      result: { type: 'failed', kind: 'permission_denied', message: 'microphone permission denied: NotAllowedError' },
+    }),
+    {
+      type: 'audio_response',
+      request_id: 4,
+      result: { type: 'failed', kind: 'permission_denied', message: 'microphone permission denied: NotAllowedError' },
+    },
+  );
+});
+
+test('the empty-PCM played-in-place synthesis answer survives the gate', () => {
+  // `synthesis.ts` answers a successful `speechSynthesis` playback with
+  // `{ pcm_base64: '', sample_rate_hz: 0 }` — "already played in place", a
+  // genuine success pinned on the Rust side by
+  // `synthesize_treats_empty_pcm_as_played_in_place_not_a_failure`. Every
+  // other string this file validates is rejected when empty, so this is the
+  // one place that rule must NOT apply: rejecting it here would make every
+  // desktop TTS call wait out the 180s `CAPTURE_DEADLINE` and then fail.
+  assert.deepEqual(
+    validateClientCommand({ type: 'audio_response', request_id: 9, result: { type: 'audio', pcm_base64: '', sample_rate_hz: 0 } }),
+    { type: 'audio_response', request_id: 9, result: { type: 'audio', pcm_base64: '', sample_rate_hz: 0 } },
+  );
+});
+
+test('every AudioErrorKindDto the wire declares survives the gate', () => {
+  // The kinds exist so `permission_denied` / `unavailable` / `not_recording`
+  // stay distinguishable end to end (`audio_bridge.rs`'s `voice_error` /
+  // `stt_error` / `tts_error` branch on each one). A kind this gate drops
+  // would silently collapse to a stalled request, not to `other`.
+  for (const kind of [
+    'permission_denied', 'no_speech', 'not_recording', 'unavailable',
+    'busy', 'retriable', 'synthesis_failed', 'other',
+  ]) {
+    assert.deepEqual(
+      validateClientCommand({ type: 'audio_response', request_id: 1, result: { type: 'failed', kind, message: 'why' } }),
+      { type: 'audio_response', request_id: 1, result: { type: 'failed', kind, message: 'why' } },
+    );
+  }
+  assert.throws(
+    () => validateClientCommand({ type: 'audio_response', request_id: 1, result: { type: 'failed', kind: 'invented', message: 'why' } }),
+    /invalid audio error kind/,
+  );
+});
+
+test('a transcript cannot be sent from this renderer at all', () => {
+  // Desktop has no speech recognizer and cannot reach a provider
+  // transcription API (the renderer holds no credential — `host.ts` forwards
+  // it straight to the engine and keeps nothing). `Transcribe` is answered
+  // `failed`/`unavailable`, never with text. Keeping `transcript` OFF this
+  // gate means a fabricated transcript cannot leave the renderer even if
+  // some future code tried to send one — the same bounded-surface discipline
+  // that removed `new_session`/`resume_session` from the allowlist.
+  assert.throws(
+    () => validateClientCommand({ type: 'audio_response', request_id: 1, result: { type: 'transcript', text: 'invented words' } }),
+    /invalid audio result/,
+  );
+});
+
+test('malformed audio responses are rejected rather than forwarded', () => {
+  assert.throws(() => validateClientCommand({ type: 'audio_response', request_id: -1, result: { type: 'ok' } }), /invalid audio request id/);
+  assert.throws(() => validateClientCommand({ type: 'audio_response', request_id: 1.5, result: { type: 'ok' } }), /invalid audio request id/);
+  assert.throws(() => validateClientCommand({ type: 'audio_response', result: { type: 'ok' } }), /invalid audio request id/);
+  assert.throws(() => validateClientCommand({ type: 'audio_response', request_id: 1, result: { type: 'ok' }, extra: 1 }), /unsupported fields/);
+  assert.throws(() => validateClientCommand({ type: 'audio_response', request_id: 1, result: { type: 'ok', recording: true } }), /unsupported fields/);
+  assert.throws(() => validateClientCommand({ type: 'audio_response', request_id: 1, result: { type: 'recording_state', recording: 'yes' } }), /invalid audio recording state/);
+  assert.throws(() => validateClientCommand({ type: 'audio_response', request_id: 1, result: { type: 'recording', audio_base64: 'not base64!', mime_type: 'audio/webm' } }), /invalid audio base64/);
+  assert.throws(() => validateClientCommand({ type: 'audio_response', request_id: 1, result: { type: 'recording', audio_base64: 'AAEC', mime_type: '' } }), /invalid audio mime type/);
+  assert.throws(() => validateClientCommand({ type: 'audio_response', request_id: 1, result: { type: 'audio', pcm_base64: '', sample_rate_hz: -1 } }), /invalid audio sample rate/);
+  assert.throws(() => validateClientCommand({ type: 'audio_response', request_id: 1, result: { type: 'failed', kind: 'other', message: '' } }), /invalid audio error message/);
+  assert.throws(() => validateClientCommand({ type: 'audio_response', request_id: 1, result: 'ok' }), /invalid payload/);
+});
+
+test('an audio response is never blocked by an active turn', () => {
+  // Audio requests are emitted BY a running turn (the `speech` tool asks the
+  // client for its microphone mid-turn). If `audio_response` ever joined
+  // `assertCommandAllowedDuringTurn`'s blocked set, every audio request in
+  // the product would park until its deadline expired and then fail.
+  assert.doesNotThrow(
+    () => assertCommandAllowedDuringTurn({ type: 'audio_response', request_id: 1, result: { type: 'ok' } }, true),
+  );
+});

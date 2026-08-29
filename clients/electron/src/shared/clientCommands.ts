@@ -33,6 +33,13 @@ export const ALLOWED_CLIENT_COMMAND_TYPES = [
   'update_workspace_directories',
   'upsert_mcp_server',
   'remove_mcp_server',
+  // The renderer's answer to `ClientEvent::AudioRequest` — the client side of
+  // `audio_bridge.rs`'s `AudioBridge`. Unlike every other entry here it is
+  // never sent because a user clicked something: the engine PARKS a call on a
+  // deadline waiting for it (5s / 30s / 180s per op), so leaving it off this
+  // array is not "one fewer feature", it is every microphone and
+  // text-to-speech call in the product stalling and then failing.
+  'audio_response',
 ] as const;
 
 /**

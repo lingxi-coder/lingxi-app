@@ -1,4 +1,6 @@
 import type {
+  AudioErrorKindDto,
+  AudioResultDto,
   ClientCommand,
   ComputerAccessResponseDto,
   ImageRefDto,
@@ -17,6 +19,34 @@ const MAX_PATH_LENGTH = 4096;
 const SETTINGS_DESTINATIONS = ['user', 'project', 'local'] as const;
 const PERMISSION_BEHAVIORS = ['allow', 'deny', 'ask'] as const;
 const MCP_SCOPES = ['user', 'local', 'project'] as const;
+/**
+ * Every failure class `AudioResultDto`'s `failed` variant may carry. Listed
+ * in full, not narrowed: the kinds exist precisely so `permission_denied` /
+ * `unavailable` / `not_recording` stay distinguishable end to end
+ * (`audio_bridge.rs`'s `voice_error`/`stt_error`/`tts_error` branch on each),
+ * and a kind dropped here does not degrade to `other` — it makes the engine
+ * wait out its deadline instead.
+ */
+const AUDIO_ERROR_KINDS: readonly AudioErrorKindDto[] = [
+  'permission_denied',
+  'no_speech',
+  'not_recording',
+  'unavailable',
+  'busy',
+  'retriable',
+  'synthesis_failed',
+  'other',
+];
+/**
+ * Bound on a base64 audio payload from the renderer. Generous by design: a
+ * `stop_recording` answer carries a whole clip, whose length the user (not
+ * this process) chooses. 24 MiB of base64 is ~18 MiB of Opus — hours of
+ * speech — while still bounding an IPC frame.
+ */
+const MAX_AUDIO_BASE64_LENGTH = 24 * 1024 * 1024;
+/** Highest plausible PCM sample rate; `0` is legal — see `validateAudioResult`. */
+const MAX_AUDIO_SAMPLE_RATE_HZ = 768_000;
+const MAX_AUDIO_MESSAGE_LENGTH = 4096;
 
 /**
  * The runtime membership check for the Desktop command surface, built from
@@ -114,6 +144,86 @@ function decodeImageBase64(value: unknown): Uint8Array {
     throw new Error('invalid image base64');
   }
   return new Uint8Array(bytes);
+}
+
+/**
+ * A base64 audio payload. Unlike {@link decodeImageBase64} this deliberately
+ * ACCEPTS the empty string and does not decode-and-re-encode:
+ *
+ * - `''` is the desktop's "already played in place" synthesis answer
+ *   (`renderer/audio/synthesis.ts`; pinned on the Rust side by
+ *   `audio_bridge.rs`'s `synthesize_treats_empty_pcm_as_played_in_place_not_a_failure`).
+ *   `string()` rejects empty strings, so this cannot reuse it.
+ * - A clip may be tens of megabytes; round-tripping it through `Buffer` just
+ *   to compare it with itself would double the copy for no extra safety that
+ *   the pattern below does not already give.
+ */
+function audioBase64(value: unknown, name: string): string {
+  if (
+    typeof value !== 'string'
+    || value.length > MAX_AUDIO_BASE64_LENGTH
+    || value.length % 4 !== 0
+    || !BASE64_PATTERN.test(value)
+  ) {
+    throw new Error(`invalid ${name}`);
+  }
+  return value;
+}
+
+/**
+ * One `AudioResultDto`, narrowed to the outcomes this renderer can honestly
+ * produce.
+ *
+ * `transcript` is deliberately ABSENT. Desktop has no speech recognizer, and
+ * the renderer cannot reach a provider transcription API either — `host.ts`
+ * forwards a provider credential straight to the engine and keeps nothing,
+ * so there is no key here to call one with. `renderer/audio/requests.ts`
+ * therefore answers `AudioOpDto::Transcribe` with `failed`/`unavailable`,
+ * and leaving `transcript` off this gate means a fabricated transcript
+ * cannot leave the renderer even if some future code tried to send one. Wire
+ * real transcription first, then widen this — the same bounded-surface
+ * discipline that keeps `new_session`/`resume_session` off
+ * `ALLOWED_CLIENT_COMMAND_TYPES`.
+ */
+function validateAudioResult(value: unknown): AudioResultDto {
+  const input = object(value);
+  const type = string(input['type'], 'audio result type', 64);
+  switch (type) {
+    case 'ok':
+      exactKeys(input, ['type']);
+      return { type };
+    case 'recording_state':
+      exactKeys(input, ['type', 'recording']);
+      if (typeof input['recording'] !== 'boolean') throw new Error('invalid audio recording state');
+      return { type, recording: input['recording'] };
+    case 'recording':
+      exactKeys(input, ['type', 'audio_base64', 'mime_type']);
+      return {
+        type,
+        audio_base64: audioBase64(input['audio_base64'], 'audio base64'),
+        // The mime type the recorder actually used. It travels verbatim into
+        // `VoiceRecording.mime_type`, so a wrong value is a lie that reaches
+        // whatever decodes the bytes — bounded here, never rewritten.
+        mime_type: string(input['mime_type'], 'audio mime type', 256),
+      };
+    case 'audio':
+      exactKeys(input, ['type', 'pcm_base64', 'sample_rate_hz']);
+      return {
+        type,
+        pcm_base64: audioBase64(input['pcm_base64'], 'audio pcm base64'),
+        // `0` is legal, and required: it is half of the played-in-place pair.
+        sample_rate_hz: integer(input['sample_rate_hz'], 'audio sample rate', 0, MAX_AUDIO_SAMPLE_RATE_HZ),
+      };
+    case 'failed':
+      exactKeys(input, ['type', 'kind', 'message']);
+      return {
+        type,
+        kind: enumValue(input['kind'], 'audio error kind', AUDIO_ERROR_KINDS),
+        message: string(input['message'], 'audio error message', MAX_AUDIO_MESSAGE_LENGTH),
+      };
+    default:
+      throw new Error('invalid audio result');
+  }
 }
 
 export function validateImageRefs(value: unknown): ImageRefDto[] {
@@ -333,6 +443,13 @@ export function validateClientCommand(value: unknown, workspace?: string): Clien
         type,
         scope: enumValue(input['scope'], 'mcp scope', MCP_SCOPES),
         name: string(input['name'], 'mcp server name', 256),
+      };
+    case 'audio_response':
+      exactKeys(input, ['type', 'request_id', 'result']);
+      return {
+        type,
+        request_id: integer(input['request_id'], 'audio request id', 0),
+        result: validateAudioResult(input['result']),
       };
     default:
       throw new Error('command is not allowed');

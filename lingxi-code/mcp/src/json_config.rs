@@ -603,9 +603,12 @@ pub fn load_mcp_json_with_precedence(
         }
     }
 
-    // Project overrides on name collision.
-    if let Ok(raw) = std::fs::read_to_string(project_path) {
-        match parse_mcp_json_string(&raw, ConfigScope::Project) {
+    // Project overrides on name collision. Byte-faithful `Iqe` shape/size
+    // guard (`crate::config_diagnostics::read_mcp_config_file`) — a missing
+    // file is routine and stays silent (matching oracle); a shape/size
+    // rejection or other read error is already logged inside that call.
+    match crate::config_diagnostics::read_mcp_config_file(project_path, ConfigScope::Project) {
+        Ok(raw) => match parse_mcp_json_string(&raw, ConfigScope::Project) {
             Ok(cfgs) => {
                 for c in cfgs {
                     by_name.insert(c.name.clone(), c);
@@ -616,7 +619,8 @@ pub fn load_mcp_json_with_precedence(
                 path = %project_path.display(),
                 "skipping malformed project .mcp.json"
             ),
-        }
+        },
+        Err(_) => {}
     }
 
     let mut out: Vec<McpServerConfig> = by_name.into_values().collect();
@@ -688,9 +692,11 @@ pub fn load_mcp_servers(
         }
     }
 
-    // PROJECT (middle): `<cwd>/.mcp.json` (bare-map fallback allowed).
-    if let Ok(raw) = std::fs::read_to_string(project_mcp_path) {
-        match parse_mcp_json_string(&raw, ConfigScope::Project) {
+    // PROJECT (middle): `<cwd>/.mcp.json` (bare-map fallback allowed). Byte-
+    // faithful `Iqe` shape/size guard — see the sibling call in
+    // [`load_mcp_json_with_precedence`] for the rationale.
+    match crate::config_diagnostics::read_mcp_config_file(project_mcp_path, ConfigScope::Project) {
+        Ok(raw) => match parse_mcp_json_string(&raw, ConfigScope::Project) {
             Ok(cfgs) => {
                 // Approval is evaluated before precedence. A pending/rejected
                 // project entry remains visible when it is the only candidate,
@@ -718,7 +724,8 @@ pub fn load_mcp_servers(
                 path = %project_mcp_path.display(),
                 "skipping malformed project .mcp.json"
             ),
-        }
+        },
+        Err(_) => {}
     }
 
     // LOCAL (highest): global config `projects.<cwd_key>.mcpServers`.
@@ -1592,5 +1599,47 @@ mod tests {
         // ...and the fields were actually captured on the config.
         assert_eq!(b[0].timeout_ms, Some(12345));
         assert!(b[0].always_load);
+    }
+
+    // ── §23b: the `Iqe` shape/size guard wired into the loaders ───────────
+
+    /// A valid-JSON `.mcp.json` (one "big" server) padded with trailing
+    /// whitespace past `MCP_CONFIG_MAX_BYTES`. `serde_json` accepts trailing
+    /// whitespace, so this is ONLY rejected by the shape/size guard — if that
+    /// guard were removed, both loaders below would happily read and parse
+    /// it, and "big" would appear in the result.
+    fn oversized_but_well_formed_mcp_json() -> Vec<u8> {
+        let mut body = br#"{"mcpServers":{"big":{"command":"c"}}}"#.to_vec();
+        let target = crate::config_diagnostics::MCP_CONFIG_MAX_BYTES as usize + 1;
+        body.resize(target, b' ');
+        body
+    }
+
+    #[test]
+    fn precedence_loader_skips_an_oversized_project_mcp_json() {
+        let dir = TempDir::new().unwrap();
+        let project = dir.path().join(".mcp.json");
+        let global = dir.path().join("user-mcp.json"); // absent
+        fs::write(&project, oversized_but_well_formed_mcp_json()).unwrap();
+
+        let cfgs = load_mcp_json_with_precedence(&project, &global);
+        assert!(
+            cfgs.is_empty(),
+            "an over-cap .mcp.json must be rejected by the shape/size guard, not parsed"
+        );
+    }
+
+    #[test]
+    fn load_mcp_servers_skips_an_oversized_project_mcp_json() {
+        let dir = TempDir::new().unwrap();
+        let project = dir.path().join(".mcp.json");
+        let global = dir.path().join(".lingxi.json"); // absent
+        fs::write(&project, oversized_but_well_formed_mcp_json()).unwrap();
+
+        let cfgs = load_mcp_servers(&project, &global, dir.path());
+        assert!(
+            cfgs.is_empty(),
+            "an over-cap .mcp.json must be rejected by the shape/size guard, not parsed"
+        );
     }
 }

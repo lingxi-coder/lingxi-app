@@ -1111,6 +1111,60 @@ test('a responder destroyed with no window left fails the request instead of str
   });
 });
 
+// ---------------------------------------------------------------------------
+// A request that arrives when there is NO window is the same stall, one step
+// earlier.
+//
+// The rescue above only fires for a request already handed to a window that
+// then died. On macOS the app outlives its last window (`main/index.ts`'s
+// `window-all-closed` deliberately does not quit), and the bridge child and
+// its WebSocket stay up — so `FrameAudioSink::emit_request` reports success
+// and the engine PARKS. Dropping the event here leaves nobody to answer it
+// and nothing recorded to rescue later, so the engine waits out its whole
+// deadline for an answer that was never going to come.
+// ---------------------------------------------------------------------------
+
+const NO_WINDOW_MESSAGE =
+  'no desktop window is open to perform this audio operation';
+
+test('an audio request that arrives with no window registered is failed, not dropped', () => {
+  const commands: unknown[] = [];
+  const runtime = audioRuntime('aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee');
+  (runtime as any).client = { sendCommand: (command: unknown) => { commands.push(command); } };
+
+  // No window has ever registered: the app is running headless on macOS.
+  (runtime as any).broadcastClientEvent(START_RECORDING);
+
+  assert.deepEqual(commands, [{
+    type: 'audio_response',
+    request_id: 77,
+    result: { type: 'failed', kind: 'unavailable', message: NO_WINDOW_MESSAGE },
+  }], 'a request nobody can service must be answered here, not left to time out');
+});
+
+test('an audio request that arrives after the last window closed is failed, not dropped', () => {
+  const sent: Array<{ channel: string; payload: unknown }> = [];
+  const commands: unknown[] = [];
+  const runtime = audioRuntime('bbbbbbbb-cccc-4ddd-8eee-ffffffffffff');
+  (runtime as any).client = { sendCommand: (command: unknown) => { commands.push(command); } };
+  const only = fakeWebContents(sent);
+  runtime.registerWindow(only as any, 'app://desktop/index.html');
+
+  // The user closes the last window BEFORE the model asks for the microphone.
+  only.isDestroyed = () => true;
+  runtime.unregisterWindow(only as any);
+  assert.deepEqual(commands, [], 'nothing was outstanding, so closing answers nothing');
+
+  (runtime as any).broadcastClientEvent(START_RECORDING);
+
+  assert.equal(eventsFor(sent).length, 0, 'a destroyed window must never be handed the request');
+  assert.deepEqual(commands, [{
+    type: 'audio_response',
+    request_id: 77,
+    result: { type: 'failed', kind: 'unavailable', message: NO_WINDOW_MESSAGE },
+  }], 'closed-first / asked-second must fail as immediately as asked-first / closed-second');
+});
+
 test('an answered request is forgotten, so a later window close does not fail it twice', async () => {
   const sent: Array<{ channel: string; payload: unknown }> = [];
   const commands: unknown[] = [];
@@ -1137,7 +1191,31 @@ test('an answered request is forgotten, so a later window close does not fail it
   );
 });
 
-test('a turn ending forgets outstanding audio requests', () => {
+// ---------------------------------------------------------------------------
+// The end of a TURN is not the end of an audio request.
+//
+// `AudioResponder::drain()` has exactly one call site on the Rust side,
+// `BridgeConnection::close_connection`, and server.rs says so in as many
+// words: "Audio requests are drained on DISCONNECT only, never at end-of-turn
+// (they are not in `TurnInteractions`)". `speech`/`voice` do not override
+// `Tool::interrupt_behavior` either, whose default `Block` keeps the parked
+// call alive through a Stop. So forgetting the tracking at turn end — or, from
+// `cancelTurn`, in the same tick as the Stop and before the engine has read
+// the frame — disarms the window-close rescue for a request that IS still
+// parked.
+// ---------------------------------------------------------------------------
+
+const CLOSED_BEFORE_ANSWER = {
+  type: 'audio_response',
+  request_id: 77,
+  result: {
+    type: 'failed',
+    kind: 'unavailable',
+    message: 'the desktop window that was asked to perform this audio operation closed before it could answer',
+  },
+};
+
+test('a turn ending keeps outstanding audio requests, because the engine does not drop them', () => {
   const sent: Array<{ channel: string; payload: unknown }> = [];
   const commands: unknown[] = [];
   const runtime = audioRuntime('99999999-aaaa-4bbb-8ccc-dddddddddddd');
@@ -1146,14 +1224,67 @@ test('a turn ending forgets outstanding audio requests', () => {
   runtime.registerWindow(only as any, 'app://desktop/index.html');
 
   (runtime as any).broadcastClientEvent(START_RECORDING);
-  // The engine drains its own pending audio requests when a turn ends, so a
-  // window closing afterwards must not answer a request nobody is waiting on.
   (runtime as any).clearTurnInteractions();
 
   only.isDestroyed = () => true;
   runtime.unregisterWindow(only as any);
 
-  assert.deepEqual(commands, [], 'no answer may be sent for a request the engine has already dropped');
+  assert.deepEqual(
+    commands,
+    [CLOSED_BEFORE_ANSWER],
+    'the engine is still parked after a turn ends, so the window-close rescue must still fire',
+  );
+});
+
+test('pressing Stop keeps outstanding audio requests, because Block tools survive a cancel', () => {
+  const sent: Array<{ channel: string; payload: unknown }> = [];
+  const commands: unknown[] = [];
+  const runtime = audioRuntime('aaaaaaaa-1111-4222-8333-444444444444');
+  (runtime as any).client = {
+    cancel: () => undefined,
+    sendCommand: (command: unknown) => { commands.push(command); },
+  };
+  (runtime as any).activeWorkspace = '/workspace';
+  (runtime as any).refreshAccessState = () => { (runtime as any).activeWorkspaceTrusted = true; };
+  (runtime as any).activeTurn = true;
+  const only = fakeWebContents(sent);
+  runtime.registerWindow(only as any, 'app://desktop/index.html');
+
+  (runtime as any).broadcastClientEvent(START_RECORDING);
+  runtime.cancelTurn(undefined);
+
+  only.isDestroyed = () => true;
+  runtime.unregisterWindow(only as any);
+
+  assert.deepEqual(
+    commands,
+    [CLOSED_BEFORE_ANSWER],
+    'Stop does not kill a parked audio call, so closing the window afterwards must still answer it',
+  );
+});
+
+test('losing the engine connection forgets outstanding audio requests, because that IS the drain', async () => {
+  const sent: Array<{ channel: string; payload: unknown }> = [];
+  const commands: unknown[] = [];
+  const runtime = audioRuntime('bbbbbbbb-2222-4333-8444-555555555555');
+  (runtime as any).client = {
+    sendCommand: (command: unknown) => { commands.push(command); },
+    close: () => undefined,
+  };
+  const only = fakeWebContents(sent);
+  runtime.registerWindow(only as any, 'app://desktop/index.html');
+
+  (runtime as any).broadcastClientEvent(START_RECORDING);
+  await (runtime as any).stopBridge();
+
+  only.isDestroyed = () => true;
+  runtime.unregisterWindow(only as any);
+
+  assert.deepEqual(
+    commands,
+    [],
+    'close_connection drains the audio responder, so a later window close must not answer a dead request',
+  );
 });
 
 test('a window detached while still alive does not have its own request handed back to it', () => {

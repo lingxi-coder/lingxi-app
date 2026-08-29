@@ -281,6 +281,18 @@ const SINGLE_RESPONDER_EVENTS = new Set<ClientEvent['type']>(['audio_request']);
  */
 const MAX_OUTSTANDING_RESPONDER_REQUESTS = 32;
 
+/**
+ * What the engine is told when a single-responder request arrives with no
+ * window that could service it.
+ *
+ * Distinct from `reassignResponderRequests`' message on purpose: that one names
+ * a window that WAS asked and then closed, this one names a request that never
+ * reached a renderer at all. Both are answered from main rather than dropped,
+ * for the same reason — see `broadcastClientEvent`.
+ */
+const NO_RESPONDER_WINDOW_MESSAGE =
+  'no desktop window is open to perform this audio operation';
+
 /** The correlation id of a single-responder event, or `null` if it carries none. */
 function singleResponderRequestId(event: ClientEvent): number | null {
   const requestId = (event as { request_id?: unknown }).request_id;
@@ -480,10 +492,22 @@ export class SessionRuntime {
       // Sent to one window, or to none — never to several. See
       // SINGLE_RESPONDER_EVENTS. `sendClientEvent` handles both the
       // enveloped and bare wire shapes, so this needs no second branch.
-      const responder = this.responderTarget();
-      if (!responder) return;
-      this.sendClientEvent(responder, event, false);
       const requestId = singleResponderRequestId(event);
+      const responder = this.responderTarget();
+      if (!responder) {
+        // Nobody can service it, and — unlike the post-dispatch case
+        // `reassignResponderRequests` handles — there is nothing recorded for a
+        // later reopen to rescue either. The engine parked the moment the sink
+        // accepted this event (`FrameAudioSink::emit_request` reports success
+        // while main's socket is up, which it is: `main/index.ts` keeps the app
+        // and the bridge alive on macOS when the last window closes), so
+        // returning silently costs it the full deadline and a failure with
+        // nothing to explain it. Answer from here instead, for the same reason
+        // `reassignResponderRequests` does.
+        if (requestId !== null) this.failResponderRequest(requestId, NO_RESPONDER_WINDOW_MESSAGE);
+        return;
+      }
+      this.sendClientEvent(responder, event, false);
       if (requestId === null) return;
       if (this.outstandingResponderRequests.size >= MAX_OUTSTANDING_RESPONDER_REQUESTS) {
         this.diagnostics.add('warn', 'host', 'too many outstanding audio requests to track');
@@ -571,13 +595,27 @@ export class SessionRuntime {
     this.pendingAskUserQuestionIds.delete(requestId);
   }
 
+  /**
+   * Forgets the interactions the engine itself drops when a turn ends.
+   *
+   * `outstandingResponderRequests` is deliberately NOT among them. The engine
+   * drains parked audio requests from `BridgeConnection::close_connection`
+   * only — `AudioResponder::drain()` has no other call site, `TurnInteractions`
+   * carries the permission gate, the computer-access broker, the
+   * AskUserQuestion broker and the tool-name map but no audio responder, and
+   * server.rs says so in as many words: "Audio requests are drained on
+   * DISCONNECT only, never at end-of-turn". `cancel_active_turn` sets a
+   * cooperative token rather than aborting the tool future, and neither
+   * `speech` nor `voice` overrides `Tool::interrupt_behavior`, whose default
+   * `Block` keeps the parked call alive across a Stop. So an audio request is
+   * still parked after this runs, and dropping the tracking here would disarm
+   * the window-close rescue for exactly the case it was written for. The
+   * matching clear lives in `stopBridge`, which is where the disconnect — and
+   * therefore the engine's own drain — actually happens.
+   */
   private clearTurnInteractions(): void {
     this.pendingPermissionIds.clear();
     this.pendingComputerAccessIds.clear();
-    // The engine drops its own parked audio requests when a turn ends
-    // (`AudioBridge`'s drain), so a window closing later must not answer one
-    // nobody is waiting on any more.
-    this.outstandingResponderRequests.clear();
     for (const requestId of [...this.pendingAskUserQuestionIds]) {
       this.clearPendingAskUserQuestion(requestId);
     }
@@ -1312,6 +1350,12 @@ export class SessionRuntime {
     ++this.generation;
     this.rejectPendingSessionResume(new Error('session resume was interrupted'));
     this.clearTurnInteractions();
+    // Losing the connection IS the engine's own drain: `close_connection`
+    // drops every parked audio sender, so each in-flight call has already
+    // failed and a window closing later must not answer one nobody is waiting
+    // on. This is the only place that premise holds — see
+    // `clearTurnInteractions`.
+    this.outstandingResponderRequests.clear();
     for (const pending of this.pendingCredentialOperations.values()) {
       clearTimeout(pending.timer);
       pending.reject(new Error('bridge credential operation was interrupted'));

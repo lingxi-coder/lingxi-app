@@ -618,21 +618,38 @@ async fn post_token_grant(
     token_endpoint: &str,
     form: &[(&str, &str)],
 ) -> Result<(Tokens, u16, String), OAuthError> {
+    post_token_grant_with_headers(http, clock, token_endpoint, form, &[]).await
+}
+
+/// [`post_token_grant`] with additional request headers — used for a
+/// confidential-client grant that authenticates via `client_secret_basic`
+/// (an `Authorization: Basic` header) rather than a body-embedded secret.
+async fn post_token_grant_with_headers(
+    http: &Arc<dyn HttpTransport>,
+    clock: &Arc<dyn Clock>,
+    token_endpoint: &str,
+    form: &[(&str, &str)],
+    extra_headers: &[(&str, String)],
+) -> Result<(Tokens, u16, String), OAuthError> {
     let body = form
         .iter()
         .map(|(k, v)| format!("{}={}", urlencoding::encode(k), urlencoding::encode(v)))
         .collect::<Vec<_>>()
         .join("&");
+    let mut headers = vec![
+        (
+            "content-type".into(),
+            "application/x-www-form-urlencoded".into(),
+        ),
+        ("accept".into(), "application/json".into()),
+    ];
+    for (k, v) in extra_headers {
+        headers.push(((*k).to_string(), v.clone()));
+    }
     let req = HttpRequest {
         method: HttpMethod::Post,
         url: token_endpoint.to_string(),
-        headers: vec![
-            (
-                "content-type".into(),
-                "application/x-www-form-urlencoded".into(),
-            ),
-            ("accept".into(), "application/json".into()),
-        ],
+        headers,
         body: Some(body),
         body_bytes: None,
         timeout: Some(OAUTH_HTTP_TIMEOUT),
@@ -693,26 +710,52 @@ pub async fn exchange_code(
 
 /// Refresh an access token using a `refresh_token` (auth.ts `_doRefresh`).
 ///
-/// Public-client form: `client_id` in the body, no `Authorization` header
-/// (auth.ts:1421-1423, `token_endpoint_auth_method: none`).
+/// Public-client form (`client_secret: None`): `client_id` in the body, no
+/// `Authorization` header (auth.ts:1421-1423, `token_endpoint_auth_method:
+/// none`). Confidential-client form (`client_secret: Some(_)` — the XAA path,
+/// §26b delta 4: a stored refresh token takes this ordinary route instead of
+/// re-running the full IdP+AS exchange): `client_secret_basic` — the SEP-990
+/// conformance default `xaa.rs::AuthMethod::ClientSecretBasic` also uses —
+/// `Authorization: Basic base64(id:secret)`, `client_id` omitted from the body.
 ///
 /// # Errors
 /// [`OAuthError::RefreshRejected`] when the server rejects the refresh token
-/// (4xx / `invalid_grant`) — the caller must trigger a fresh interactive flow;
+/// (4xx / `invalid_grant`) — the caller must trigger a fresh interactive flow
+/// (or, on the XAA path, fall back to the silent IdP+AS exchange);
 /// [`OAuthError::Token`] on other failures.
 pub async fn refresh_tokens(
     http: &Arc<dyn HttpTransport>,
     clock: &Arc<dyn Clock>,
     meta: &AuthServerMetadata,
     client_id: &str,
+    client_secret: Option<&str>,
     refresh_token: &str,
 ) -> Result<Tokens, OAuthError> {
-    let form = [
+    let mut form = vec![
         ("grant_type", "refresh_token"),
         ("refresh_token", refresh_token),
-        ("client_id", client_id),
     ];
-    match post_token_grant(http, clock, &meta.token_endpoint, &form).await {
+    let mut extra_headers: Vec<(&str, String)> = Vec::new();
+    match client_secret {
+        Some(secret) => {
+            let basic = format!(
+                "{}:{}",
+                urlencoding::encode(client_id),
+                urlencoding::encode(secret)
+            );
+            extra_headers.push((
+                "authorization",
+                format!(
+                    "Basic {}",
+                    base64::engine::general_purpose::STANDARD.encode(basic)
+                ),
+            ));
+        }
+        None => form.push(("client_id", client_id)),
+    }
+    match post_token_grant_with_headers(http, clock, &meta.token_endpoint, &form, &extra_headers)
+        .await
+    {
         Ok((mut tokens, _status, _body)) => {
             // RFC 6749 §6: a refresh response MAY omit a new refresh token, in
             // which case the existing one stays valid — carry it forward.

@@ -162,6 +162,13 @@ pub struct McpRegistry {
     /// holding the public connection-state lock across transport or OAuth I/O.
     /// Different servers still progress independently.
     lifecycle_locks: StdMutex<HashMap<String, Arc<Mutex<()>>>>,
+    /// Single-flight guard for the XAA token resolve chain, keyed by
+    /// `oauth::server_key`. Mirrors the oracle's `_refreshInProgress`
+    /// promise-sharing guard on `tokens()`/`xaaRefresh()` (@182213696, §26b
+    /// delta 2): concurrent resolves for the SAME server share one exchange —
+    /// a resolver that has to wait re-reads storage once it acquires the lock
+    /// and reuses whatever the winner just persisted instead of re-exchanging.
+    xaa_refresh_locks: StdMutex<HashMap<String, Arc<Mutex<()>>>>,
     /// Side-channel cache of [`McpClient`] handles per server name.
     ///
     /// Populated by [`Self::register_client`] / [`Self::register_connected_client`].
@@ -264,6 +271,7 @@ impl McpRegistry {
             connections: RwLock::new(HashMap::new()),
             pending_servers: std::sync::atomic::AtomicBool::new(false),
             lifecycle_locks: StdMutex::new(HashMap::new()),
+            xaa_refresh_locks: StdMutex::new(HashMap::new()),
             clients: RwLock::new(IndexMap::new()),
             catalog_changes,
             agent_scoped: RwLock::new(HashMap::new()),
@@ -288,6 +296,20 @@ impl McpRegistry {
         Arc::clone(
             locks
                 .entry(name.to_string())
+                .or_insert_with(|| Arc::new(Mutex::new(()))),
+        )
+    }
+
+    /// Per-server-key single-flight lock for the XAA resolve chain (§26b
+    /// delta 2). See [`Self::xaa_refresh_locks`].
+    fn xaa_refresh_lock(&self, key: &str) -> Arc<Mutex<()>> {
+        let mut locks = self
+            .xaa_refresh_locks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        Arc::clone(
+            locks
+                .entry(key.to_string())
                 .or_insert_with(|| Arc::new(Mutex::new(()))),
         )
     }
@@ -1261,6 +1283,7 @@ impl McpRegistry {
                             &deps.clock,
                             &meta,
                             &client_id,
+                            None, // public client — no confidential secret to send
                             &refresh,
                         )
                         .await?;
@@ -1304,6 +1327,24 @@ impl McpRegistry {
             .ok_or_else(|| McpError::OAuth("server has no oauth config".into()))?;
         let key = oauth::server_key(&config.name, &config.spec);
 
+        // §26b delta 3: an XAA-flagged server's 401 must stay on the XAA
+        // path — never fall through to the refresh-or-interactive-consent
+        // logic below, matching this module's own guarantee (see
+        // `resolve_oauth_spec`) that XAA is the ONLY auth path. The server
+        // just rejected whatever was cached, so `force_fresh` skips reusing
+        // it: a stored refresh token drives the ordinary refresh grant; its
+        // absence (or rejection) drives a fresh silent IdP+AS exchange.
+        // Interactive consent is never reachable from this arm.
+        if oauth_cfg.xaa == Some(true) {
+            let token = self
+                .resolve_xaa_token_inner(config, &key, deps, true, resource_metadata_url)
+                .await?;
+            return Ok(inject_bearer(
+                &config.spec,
+                token.access_token.expose_secret(),
+            ));
+        }
+
         let stored = oauth::load_tokens(&deps.storage, &key).await?;
         let token = match stored.as_ref().and_then(|t| t.refresh_token.clone()) {
             Some(refresh) => {
@@ -1321,8 +1362,15 @@ impl McpRegistry {
                     .and_then(|t| t.client_id.clone())
                     .or_else(|| oauth_cfg.client_id.clone())
                     .unwrap_or_default();
-                match oauth::refresh_tokens(&deps.http, &deps.clock, &meta, &client_id, &refresh)
-                    .await
+                match oauth::refresh_tokens(
+                    &deps.http,
+                    &deps.clock,
+                    &meta,
+                    &client_id,
+                    None, // public client — no confidential secret to send
+                    &refresh,
+                )
+                .await
                 {
                     Ok(t) => {
                         oauth::save_tokens(&deps.storage, &deps.clock, &key, &t).await?;
@@ -1410,21 +1458,55 @@ impl McpRegistry {
     }
 
     /// Resolve an access token for an XAA-flagged server (auth.ts
-    /// `performMCPXaaAuth`, 664-845). Reuses a stored, unexpired XAA token if
-    /// present; otherwise runs the cross-app-access token-exchange chain
-    /// ([`crate::xaa::perform_cross_app_access`]) and persists the result
-    /// (including the confidential `client_secret`, so RFC-7009 revocation can
-    /// authenticate, and the AS URL via the persisted `client_id`).
-    ///
-    /// Gating (auth.ts:871-876): `LINGXI_ENABLE_XAA` must be truthy or this
-    /// hard-fails with actionable copy. When no [`XaaConfigProvider`] is wired
-    /// (the IdP-login/secret config seam — a noted residual), it returns a clear
-    /// residual error rather than silently degrading to the consent flow.
+    /// `performMCPXaaAuth`, 664-845). Thin wrapper over
+    /// [`Self::resolve_xaa_token_inner`] for the per-connect (non-401) resolve
+    /// path, which may reuse a cached token.
     async fn resolve_xaa_token(
         &self,
         config: &McpServerConfig,
         key: &str,
         deps: &OAuthDeps,
+    ) -> Result<oauth::Tokens, McpError> {
+        self.resolve_xaa_token_inner(config, key, deps, false, None)
+            .await
+    }
+
+    /// Core of the XAA resolve chain (oracle `tokens()`, @182213696), shared by
+    /// the per-connect resolve ([`Self::resolve_xaa_token`], `force_fresh:
+    /// false` — may reuse a cached token) and the post-401 re-auth
+    /// ([`Self::reauth_oauth_spec`]'s xaa arm, `force_fresh: true` — the
+    /// server just rejected whatever is cached, so the cache-hit branches
+    /// below are skipped and a refresh/exchange is always attempted).
+    /// `resource_metadata_url` (§24c) is the live 401 challenge's
+    /// `resource_metadata` param, when any (`None` from the per-connect
+    /// wrapper, which has no live challenge to read).
+    ///
+    /// Gating (auth.ts:871-876): `LINGXI_ENABLE_XAA` must be truthy or this
+    /// hard-fails with actionable copy. Single-flight (§26b delta 2, oracle
+    /// `_refreshInProgress`): callers for the SAME `key` serialize on
+    /// [`Self::xaa_refresh_lock`], so at most one refresh/exchange runs at a
+    /// time; a resolver that has to wait re-reads storage once it acquires the
+    /// lock and reuses whatever the winner just persisted instead of
+    /// re-exchanging.
+    ///
+    /// §26b delta 4: once a refresh token is on file, it ALWAYS takes the
+    /// ordinary refresh route (`oauth::refresh_tokens`, confidential-client
+    /// `client_secret_basic`) — the full IdP+AS exchange
+    /// ([`crate::xaa::perform_cross_app_access`]) is reserved for "no refresh
+    /// token stored" (never had one, or the AS just rejected it, which falls
+    /// through rather than opening an interactive flow — XAA is never
+    /// interactive). §26b delta 1: absent a refresh token, the exchange is
+    /// silent-triggered only when the access token is missing or expires
+    /// within 300s (oracle `!n?.refreshToken && (!n?.accessToken ||
+    /// (n.expiresAt-Date.now())/1000<=300)`); otherwise the cached access
+    /// token is reused as-is. `force_fresh` skips both cache-hit checks.
+    async fn resolve_xaa_token_inner(
+        &self,
+        config: &McpServerConfig,
+        key: &str,
+        deps: &OAuthDeps,
+        force_fresh: bool,
+        resource_metadata_url: Option<&str>,
     ) -> Result<oauth::Tokens, McpError> {
         // Gate on the enable flag (mirror of CLAUDE_CODE_ENABLE_XAA).
         if !traits::env::is_env_truthy(std::env::var("LINGXI_ENABLE_XAA").ok().as_deref()) {
@@ -1435,10 +1517,89 @@ impl McpRegistry {
             )));
         }
 
-        // Reuse a stored, unexpired XAA token if present (no fresh exchange).
-        if let Some(stored) = oauth::load_tokens(&deps.storage, key).await? {
-            if deps.clock.now() < stored.expires_at() {
-                return Ok(stored.into_tokens());
+        // Single-flight: serialize concurrent resolves for this server key.
+        let lock = self.xaa_refresh_lock(key);
+        let _single_flight = lock.lock().await;
+
+        let stored = oauth::load_tokens(&deps.storage, key).await?;
+
+        match stored {
+            Some(s) => {
+                if let Some(refresh) = s.refresh_token.clone() {
+                    // Delta 4: a refresh token on file takes the ordinary
+                    // refresh route — never the full exchange below.
+                    if !force_fresh && deps.clock.now() < s.expires_at() {
+                        return Ok(s.into_tokens());
+                    }
+                    let meta = oauth::discover_auth_server_metadata(
+                        &deps.http,
+                        spec_url(&config.spec),
+                        None,
+                        resource_metadata_url,
+                    )
+                    .await?;
+                    let client_id = s.client_id.clone().unwrap_or_default();
+                    let client_secret = s.client_secret.clone();
+                    match oauth::refresh_tokens(
+                        &deps.http,
+                        &deps.clock,
+                        &meta,
+                        &client_id,
+                        client_secret.as_deref(),
+                        &refresh,
+                    )
+                    .await
+                    {
+                        Ok(refreshed) => {
+                            let stored_new = oauth::StoredTokens {
+                                access_token: refreshed.access_token.expose_secret().clone(),
+                                refresh_token: refreshed
+                                    .refresh_token
+                                    .as_ref()
+                                    .map(|t| t.expose_secret().clone()),
+                                expires_at_unix: refreshed
+                                    .expires_at
+                                    .duration_since(SystemTime::UNIX_EPOCH)
+                                    .unwrap_or_default()
+                                    .as_secs(),
+                                client_id: Some(client_id),
+                                client_secret,
+                                step_up_scope: None,
+                            };
+                            oauth::store_tokens(&deps.storage, &deps.clock, key, &stored_new)
+                                .await
+                                .map_err(McpError::from)?;
+                            return Ok(stored_new.into_tokens());
+                        }
+                        // The refresh token itself is dead — fall through to
+                        // the silent IdP+AS exchange below rather than a
+                        // fresh interactive flow (XAA is never interactive).
+                        Err(oauth::OAuthError::RefreshRejected(_)) => {}
+                        Err(e) => return Err(e.into()),
+                    }
+                } else if !force_fresh {
+                    // Delta 1: no refresh token — reuse the cached access
+                    // token outright unless it is missing or expiring within
+                    // 300s (`Err` from `duration_since` means already past).
+                    let expiring_soon = s
+                        .expires_at()
+                        .duration_since(deps.clock.now())
+                        .map(|remaining| remaining <= Duration::from_secs(300))
+                        .unwrap_or(true);
+                    if !expiring_soon {
+                        return Ok(s.into_tokens());
+                    }
+                    tracing::debug!(
+                        server = %config.name,
+                        "XAA: access_token expiring, attempting silent exchange"
+                    );
+                }
+            }
+            None => {
+                tracing::debug!(
+                    server = %config.name,
+                    "XAA: no access_token yet, attempting silent exchange"
+                );
             }
         }
 
@@ -1479,6 +1640,7 @@ impl McpRegistry {
         {
             Ok(r) => r,
             Err(e) => {
+                tracing::debug!(server = %config.name, "XAA silent exchange failed: {e}");
                 // 4xx token-exchange ⇒ the cached id_token was rejected; drop it
                 // so the next resolve re-acquires (auth.ts:1840-1847
                 // `clearIdpIdToken(idp.issuer)`). 5xx (IdP outage) keeps it.
@@ -3978,6 +4140,250 @@ mod tests {
     async fn notify_roots_list_changed_all_on_empty_registry_notifies_none() {
         let registry = McpRegistry::new(Arc::new(BridgeMock::new(&[])));
         assert_eq!(registry.notify_roots_list_changed_all().await, 0);
+    }
+
+    // -----------------------------------------------------------------
+    // §26b delta 2: XAA single-flight. `resolve_xaa_token`/
+    // `resolve_xaa_token_inner` are crate-private, so this lives here
+    // (rather than in the integration suite, `mcp/tests/oauth_flow_test.rs`)
+    // where it can call them directly — the public `connect()` entry point
+    // already serializes per server name via `lifecycle_lock`, which would
+    // mask whether the XAA-specific guard does anything at all.
+    // -----------------------------------------------------------------
+
+    struct FixedClock(std::time::SystemTime);
+    impl traits::Clock for FixedClock {
+        fn now(&self) -> std::time::SystemTime {
+            self.0
+        }
+    }
+
+    #[derive(Default)]
+    struct XaaMemStorage {
+        map: TestMutex<HashMap<(String, String), protocol::SecureStorageData>>,
+    }
+    #[async_trait]
+    impl traits::SecureStorage for XaaMemStorage {
+        async fn store(
+            &self,
+            service: &str,
+            account: &str,
+            data: protocol::SecureStorageData,
+        ) -> Result<(), traits::SecureStorageError> {
+            self.map
+                .lock()
+                .unwrap()
+                .insert((service.into(), account.into()), data);
+            Ok(())
+        }
+        async fn retrieve(
+            &self,
+            service: &str,
+            account: &str,
+        ) -> Result<Option<protocol::SecureStorageData>, traits::SecureStorageError> {
+            Ok(self
+                .map
+                .lock()
+                .unwrap()
+                .get(&(service.into(), account.into()))
+                .cloned())
+        }
+        async fn delete(
+            &self,
+            service: &str,
+            account: &str,
+        ) -> Result<(), traits::SecureStorageError> {
+            self.map
+                .lock()
+                .unwrap()
+                .remove(&(service.into(), account.into()));
+            Ok(())
+        }
+        async fn list(&self, service: &str) -> Result<Vec<String>, traits::SecureStorageError> {
+            Ok(self
+                .map
+                .lock()
+                .unwrap()
+                .keys()
+                .filter(|(s, _)| s == service)
+                .map(|(_, a)| a.clone())
+                .collect())
+        }
+        fn is_encrypted(&self) -> bool {
+            false
+        }
+        fn backend(&self) -> traits::SecureStorageBackend {
+            traits::SecureStorageBackend::PlainText
+        }
+    }
+
+    /// XAA config provider handing back fixed IdP+AS inputs.
+    struct FixedXaaProvider;
+    #[async_trait]
+    impl XaaConfigProvider for FixedXaaProvider {
+        async fn xaa_inputs(
+            &self,
+            _server_name: &str,
+            _server_url: &str,
+        ) -> Result<Option<XaaInputs>, McpError> {
+            Ok(Some(XaaInputs {
+                client_id: "as-client".into(),
+                client_secret: "as-secret".into(),
+                idp_client_id: "idp-client".into(),
+                idp_client_secret: None,
+                idp_id_token: "the-id-token".into(),
+                idp_token_endpoint: "https://idp.example.com/token".into(),
+            }))
+        }
+    }
+
+    /// HTTP mock answering the XAA discovery/exchange legs; the AS
+    /// jwt-bearer POST (the "mint the access token" step) counts its hits
+    /// and sleeps briefly before completing, giving a concurrent second
+    /// resolve every opportunity to race ahead if the single-flight guard
+    /// is missing.
+    struct GatedXaaHttp {
+        exchange_calls: std::sync::atomic::AtomicUsize,
+    }
+    impl GatedXaaHttp {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                exchange_calls: std::sync::atomic::AtomicUsize::new(0),
+            })
+        }
+    }
+    #[async_trait]
+    impl traits::HttpTransport for GatedXaaHttp {
+        async fn request(
+            &self,
+            req: protocol::HttpRequest,
+        ) -> Result<protocol::HttpResponse, traits::HttpError> {
+            let url = req.url.clone();
+            if url.contains("oauth-protected-resource") {
+                return Ok(protocol::HttpResponse {
+                    status: 200,
+                    headers: vec![],
+                    body: r#"{"resource":"https://mcp.example.com/v1","authorization_servers":["https://as.example.com"]}"#.into(),
+                    body_bytes: Vec::new(),
+                });
+            }
+            if url.contains("oauth-authorization-server") {
+                return Ok(protocol::HttpResponse {
+                    status: 200,
+                    headers: vec![],
+                    body: r#"{"issuer":"https://as.example.com","token_endpoint":"https://as.example.com/token","grant_types_supported":["urn:ietf:params:oauth:grant-type:jwt-bearer"]}"#.into(),
+                    body_bytes: Vec::new(),
+                });
+            }
+            if url.contains("idp.example.com/token") {
+                return Ok(protocol::HttpResponse {
+                    status: 200,
+                    headers: vec![],
+                    body: r#"{"access_token":"id-jag","issued_token_type":"urn:ietf:params:oauth:token-type:id-jag"}"#.into(),
+                    body_bytes: Vec::new(),
+                });
+            }
+            if url == "https://as.example.com/token" {
+                self.exchange_calls
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                return Ok(protocol::HttpResponse {
+                    status: 200,
+                    headers: vec![],
+                    body:
+                        r#"{"access_token":"xaa-access","token_type":"Bearer","expires_in":3600}"#
+                            .into(),
+                    body_bytes: Vec::new(),
+                });
+            }
+            Ok(protocol::HttpResponse {
+                status: 404,
+                headers: vec![],
+                body: String::new(),
+                body_bytes: Vec::new(),
+            })
+        }
+        async fn stream_sse(
+            &self,
+            _req: protocol::HttpRequest,
+        ) -> Result<traits::http::SseStream, traits::HttpError> {
+            Err(traits::HttpError::InvalidRequest("unused".into()))
+        }
+    }
+
+    fn xaa_unit_test_config(name: &str) -> McpServerConfig {
+        McpServerConfig {
+            name: name.into(),
+            spec: McpTransportSpec::Http {
+                url: "https://mcp.example.com/v1".into(),
+                headers: traits::McpHeaders::new(),
+                headers_helper: None,
+                oauth: Some(traits::McpOAuthConfigDto {
+                    client_id: Some("as-client".into()),
+                    callback_port: None,
+                    auth_server_metadata_url: None,
+                    scopes: None,
+                    xaa: Some(true),
+                }),
+            },
+            scope: ConfigScope::Project,
+            disabled: false,
+            timeout_ms: None,
+            always_load: false,
+            config_error: None,
+        }
+    }
+
+    /// §26b delta 2: two concurrent `resolve_xaa_token` calls for the SAME
+    /// server key must share one exchange. Without the `xaa_refresh_lock`
+    /// guard, task B (spawned once task A's exchange is confirmed in
+    /// flight, and given a 50ms window while A "sleeps" mid-request) would
+    /// independently run its own full IdP+AS chain and land on the same AS
+    /// jwt-bearer endpoint too, driving `exchange_calls` to 2.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn xaa_concurrent_resolves_share_one_exchange() {
+        std::env::set_var("LINGXI_ENABLE_XAA", "1");
+
+        let http = GatedXaaHttp::new();
+        let registry = Arc::new(McpRegistry::new(Arc::new(BridgeMock::new(&[]))).with_oauth(
+            OAuthDeps {
+                http: http.clone() as Arc<dyn traits::HttpTransport>,
+                clock: Arc::new(FixedClock(
+                    std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(1_000),
+                )),
+                storage: Arc::new(XaaMemStorage::default()) as Arc<dyn traits::SecureStorage>,
+                on_authorization_url: Arc::new(|_url: &str| {}),
+                xaa_config: Some(Arc::new(FixedXaaProvider)),
+            },
+        ));
+
+        let config = xaa_unit_test_config("xaa-concurrent");
+        let key = oauth::server_key(&config.name, &config.spec);
+
+        let (r1, c1, k1) = (registry.clone(), config.clone(), key.clone());
+        let task_a = tokio::spawn(async move {
+            let deps = r1.oauth.as_ref().unwrap().clone();
+            r1.resolve_xaa_token(&c1, &k1, &deps).await
+        });
+        let (r2, c2, k2) = (registry.clone(), config.clone(), key.clone());
+        let task_b = tokio::spawn(async move {
+            let deps = r2.oauth.as_ref().unwrap().clone();
+            r2.resolve_xaa_token(&c2, &k2, &deps).await
+        });
+
+        let (res_a, res_b) = tokio::join!(task_a, task_b);
+        std::env::remove_var("LINGXI_ENABLE_XAA");
+
+        let tok_a = res_a.unwrap().expect("task A resolves");
+        let tok_b = res_b.unwrap().expect("task B resolves");
+        assert_eq!(tok_a.access_token.expose_secret(), "xaa-access");
+        assert_eq!(tok_b.access_token.expose_secret(), "xaa-access");
+        assert_eq!(
+            http.exchange_calls
+                .load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "single-flight: exactly one AS jwt-bearer exchange for two concurrent resolves"
+        );
     }
 }
 

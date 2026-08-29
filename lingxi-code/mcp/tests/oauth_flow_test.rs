@@ -1682,3 +1682,440 @@ async fn xaa_enabled_drives_exchange_and_attaches_bearer() {
     assert_eq!(stored.client_id.as_deref(), Some("as-client"));
     assert_eq!(stored.client_secret.as_deref(), Some("as-secret"));
 }
+
+// ---------------------------------------------------------------------------
+// §26b: XAA refresh — no proactive window absent a refresh token (delta 1),
+// a stored refresh token takes the ordinary refresh route (delta 4), and a
+// 401 re-auth stays on the XAA path instead of falling to interactive
+// consent (delta 3). Single-flight (delta 2) is crate-private and covered by
+// `resolve_xaa_token_inner`'s in-crate unit test in `mcp/src/registry.rs`.
+// ---------------------------------------------------------------------------
+
+/// Panics if ever asked to make a request — proves a code path took NO
+/// network action at all (the "reuse the cache, don't touch the wire" case).
+struct PanicOnRequest;
+#[async_trait]
+impl HttpTransport for PanicOnRequest {
+    async fn request(&self, req: HttpRequest) -> Result<HttpResponse, HttpError> {
+        panic!(
+            "XAA must reuse the cached access token without any network call; \
+             got a request to {}",
+            req.url
+        );
+    }
+    async fn stream_sse(&self, _req: HttpRequest) -> Result<SseStream, HttpError> {
+        Err(HttpError::InvalidRequest("unused".into()))
+    }
+}
+
+/// §26b delta 1 (regression guard): a cached XAA access token far from expiry
+/// (well outside the 300s window) and with no refresh token is reused
+/// outright — no silent exchange, no network call at all.
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn xaa_no_refresh_token_far_from_expiry_reuses_cache_without_exchange() {
+    let _guard = XAA_ENV_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    std::env::set_var("LINGXI_ENABLE_XAA", "1");
+
+    let transport = RecordingTransport::new(0);
+    let storage = MemStorage::new();
+    let clock = TestClock::new(1_000);
+    let (on_url, _rx) = url_capture();
+
+    let oauth = McpOAuthConfigDto {
+        client_id: Some("as-client".into()),
+        callback_port: None,
+        auth_server_metadata_url: None,
+        scopes: None,
+        xaa: Some(true),
+    };
+    let config = http_cfg("xaa-farexp", Some(oauth));
+    let key = oauth::server_key("xaa-farexp", &config.spec);
+
+    let stored = oauth::StoredTokens {
+        access_token: "cached-far".into(),
+        refresh_token: None,
+        expires_at_unix: 1_000 + 3_600, // 3600s away — well outside the 300s window
+        client_id: Some("as-client".into()),
+        client_secret: Some("as-secret".into()),
+        step_up_scope: None,
+    };
+    let bytes = serde_json::to_vec(&stored).unwrap();
+    storage
+        .store(
+            oauth::MCP_OAUTH_SERVICE,
+            &key,
+            SecureStorageData::new(
+                bytes,
+                SecureStorageMetadata {
+                    created_at: SystemTime::UNIX_EPOCH,
+                    last_accessed: None,
+                    kind: SecretKindDto("mcp_oauth_tokens".into()),
+                },
+            ),
+        )
+        .await
+        .unwrap();
+
+    let registry =
+        McpRegistry::new(transport.clone() as Arc<dyn McpTransport>).with_oauth(OAuthDeps {
+            http: Arc::new(PanicOnRequest) as Arc<dyn HttpTransport>,
+            clock: clock as Arc<dyn Clock>,
+            storage: storage as Arc<dyn SecureStorage>,
+            on_authorization_url: on_url,
+            xaa_config: Some(Arc::new(XaaTestProvider)),
+        });
+
+    registry
+        .connect(config)
+        .await
+        .expect("xaa connect ok, cache reused");
+    std::env::remove_var("LINGXI_ENABLE_XAA");
+
+    assert_eq!(
+        spec_auth_header(&transport.last_spec()).as_deref(),
+        Some("Bearer cached-far")
+    );
+}
+
+/// §26b delta 1: a cached XAA access token with NO refresh token that expires
+/// within 300s drives the silent exchange even though it is not yet
+/// literally expired — the oracle's proactive window. Before the fix, the
+/// port only re-exchanged on ACTUAL expiry, so this asserts the FRESH
+/// exchanged token, not the stale-but-not-yet-expired cached one.
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn xaa_no_refresh_token_near_expiry_triggers_silent_exchange() {
+    let _guard = XAA_ENV_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    std::env::set_var("LINGXI_ENABLE_XAA", "1");
+
+    let transport = RecordingTransport::new(0);
+    let storage = MemStorage::new();
+    let clock = TestClock::new(1_000);
+    let (on_url, _rx) = url_capture();
+
+    let oauth = McpOAuthConfigDto {
+        client_id: Some("as-client".into()),
+        callback_port: None,
+        auth_server_metadata_url: None,
+        scopes: None,
+        xaa: Some(true),
+    };
+    let config = http_cfg("xaa-nearexp", Some(oauth));
+    let key = oauth::server_key("xaa-nearexp", &config.spec);
+
+    let stored = oauth::StoredTokens {
+        access_token: "cached-near".into(),
+        refresh_token: None,
+        expires_at_unix: 1_000 + 100, // 100s away — inside the 300s window
+        client_id: Some("as-client".into()),
+        client_secret: Some("as-secret".into()),
+        step_up_scope: None,
+    };
+    let bytes = serde_json::to_vec(&stored).unwrap();
+    storage
+        .store(
+            oauth::MCP_OAUTH_SERVICE,
+            &key,
+            SecureStorageData::new(
+                bytes,
+                SecureStorageMetadata {
+                    created_at: SystemTime::UNIX_EPOCH,
+                    last_accessed: None,
+                    kind: SecretKindDto("mcp_oauth_tokens".into()),
+                },
+            ),
+        )
+        .await
+        .unwrap();
+
+    let registry =
+        McpRegistry::new(transport.clone() as Arc<dyn McpTransport>).with_oauth(OAuthDeps {
+            http: Arc::new(XaaHttp) as Arc<dyn HttpTransport>,
+            clock: clock as Arc<dyn Clock>,
+            storage: storage as Arc<dyn SecureStorage>,
+            on_authorization_url: on_url,
+            xaa_config: Some(Arc::new(XaaTestProvider)),
+        });
+
+    registry
+        .connect(config)
+        .await
+        .expect("xaa connect ok via silent exchange");
+    std::env::remove_var("LINGXI_ENABLE_XAA");
+
+    assert_eq!(
+        spec_auth_header(&transport.last_spec()).as_deref(),
+        Some("Bearer xaa-access"),
+        "must be the FRESH exchanged token, not the stale (soon-to-expire) cached one"
+    );
+}
+
+/// HTTP mock for §26b delta 4: answers PRM + AS-metadata discovery and an
+/// ordinary `refresh_token` grant authenticated via `client_secret_basic`;
+/// panics if the `IdP` token-exchange leg or a `jwt-bearer` grant is ever hit —
+/// proving a stored refresh token takes the ordinary refresh route instead of
+/// re-running the full IdP+AS exchange chain.
+struct XaaRefreshOnlyAs {
+    requests: Mutex<Vec<HttpRequest>>,
+}
+impl XaaRefreshOnlyAs {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            requests: Mutex::new(Vec::new()),
+        })
+    }
+    fn requests(&self) -> Vec<HttpRequest> {
+        self.requests.lock().unwrap().clone()
+    }
+}
+#[async_trait]
+impl HttpTransport for XaaRefreshOnlyAs {
+    async fn request(&self, req: HttpRequest) -> Result<HttpResponse, HttpError> {
+        self.requests.lock().unwrap().push(req.clone());
+        let url = &req.url;
+        let body = req.body.as_deref().unwrap_or("");
+        assert!(
+            !url.contains("idp.example.com"),
+            "delta 4: a stored refresh token must never drive the IdP token-exchange leg"
+        );
+        if url.contains("oauth-protected-resource") {
+            return Ok(HttpResponse {
+                status: 200,
+                headers: vec![],
+                body: r#"{"resource":"https://mcp.example.com/v1","authorization_servers":["https://as.example.com"]}"#.into(),
+                body_bytes: Vec::new(),
+            });
+        }
+        if url.contains("oauth-authorization-server") {
+            return Ok(HttpResponse {
+                status: 200,
+                headers: vec![],
+                body: r#"{"issuer":"https://as.example.com","authorization_endpoint":"https://as.example.com/authorize","token_endpoint":"https://as.example.com/token"}"#.into(),
+                body_bytes: Vec::new(),
+            });
+        }
+        if url == "https://as.example.com/token" {
+            assert!(
+                body.contains("grant_type=refresh_token"),
+                "must be an ordinary refresh grant; body={body}"
+            );
+            assert!(
+                !body.contains("jwt-bearer") && !body.contains("assertion="),
+                "must NOT be the XAA jwt-bearer grant; body={body}"
+            );
+            let auth = req
+                .headers
+                .iter()
+                .find(|(k, _)| k.eq_ignore_ascii_case("authorization"))
+                .map(|(_, v)| v.clone());
+            assert!(
+                auth.as_deref().is_some_and(|v| v.starts_with("Basic ")),
+                "confidential client must authenticate via client_secret_basic; got {auth:?}"
+            );
+            return Ok(HttpResponse {
+                status: 200,
+                headers: vec![],
+                body: r#"{"access_token":"xaa-refreshed","refresh_token":"xaa-refresh-2","token_type":"Bearer","expires_in":3600}"#.into(),
+                body_bytes: Vec::new(),
+            });
+        }
+        Ok(HttpResponse {
+            status: 404,
+            headers: vec![],
+            body: String::new(),
+            body_bytes: Vec::new(),
+        })
+    }
+    async fn stream_sse(&self, _req: HttpRequest) -> Result<SseStream, HttpError> {
+        Err(HttpError::InvalidRequest("unused".into()))
+    }
+}
+
+/// §26b delta 4: a stored, expired XAA token WITH a refresh token drives the
+/// ordinary refresh grant (confidential `client_secret_basic`) rather than
+/// re-running the full IdP+AS exchange chain.
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn xaa_stored_refresh_token_uses_ordinary_refresh_not_full_exchange() {
+    let _guard = XAA_ENV_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    std::env::set_var("LINGXI_ENABLE_XAA", "1");
+
+    let transport = RecordingTransport::new(0);
+    let storage = MemStorage::new();
+    let clock = TestClock::new(1_000);
+    let (on_url, _rx) = url_capture();
+    let http = XaaRefreshOnlyAs::new();
+
+    let oauth = McpOAuthConfigDto {
+        client_id: Some("as-client".into()),
+        callback_port: None,
+        auth_server_metadata_url: None,
+        scopes: None,
+        xaa: Some(true),
+    };
+    let config = http_cfg("xaa-refresh", Some(oauth));
+    let key = oauth::server_key("xaa-refresh", &config.spec);
+
+    let stored = oauth::StoredTokens {
+        access_token: "xaa-stale".into(),
+        refresh_token: Some("xaa-refresh-1".into()),
+        expires_at_unix: 500, // already expired (clock = 1000)
+        client_id: Some("as-client".into()),
+        client_secret: Some("as-secret".into()),
+        step_up_scope: None,
+    };
+    let bytes = serde_json::to_vec(&stored).unwrap();
+    storage
+        .store(
+            oauth::MCP_OAUTH_SERVICE,
+            &key,
+            SecureStorageData::new(
+                bytes,
+                SecureStorageMetadata {
+                    created_at: SystemTime::UNIX_EPOCH,
+                    last_accessed: None,
+                    kind: SecretKindDto("mcp_oauth_tokens".into()),
+                },
+            ),
+        )
+        .await
+        .unwrap();
+
+    let registry =
+        McpRegistry::new(transport.clone() as Arc<dyn McpTransport>).with_oauth(OAuthDeps {
+            http: http.clone() as Arc<dyn HttpTransport>,
+            clock: clock as Arc<dyn Clock>,
+            storage: storage.clone() as Arc<dyn SecureStorage>,
+            on_authorization_url: on_url,
+            xaa_config: Some(Arc::new(XaaTestProvider)),
+        });
+
+    registry
+        .connect(config)
+        .await
+        .expect("xaa connect ok via ordinary refresh");
+    std::env::remove_var("LINGXI_ENABLE_XAA");
+
+    assert_eq!(
+        spec_auth_header(&transport.last_spec()).as_deref(),
+        Some("Bearer xaa-refreshed")
+    );
+    assert!(
+        http.requests()
+            .iter()
+            .any(|r| r.url == "https://as.example.com/token"),
+        "the ordinary refresh leg was hit"
+    );
+    let restored = oauth::load_tokens(&(storage as Arc<dyn SecureStorage>), &key)
+        .await
+        .unwrap()
+        .expect("refreshed tokens persisted");
+    assert_eq!(restored.access_token, "xaa-refreshed");
+    assert_eq!(restored.refresh_token.as_deref(), Some("xaa-refresh-2"));
+    assert_eq!(
+        restored.client_secret.as_deref(),
+        Some("as-secret"),
+        "the confidential client_secret must survive the refresh round-trip"
+    );
+}
+
+/// §26b delta 3: a server 401 for an XAA-flagged server must stay on the XAA
+/// path — never fall through to `run_interactive_oauth` (a 300s wait for a
+/// browser callback that will never arrive in this test). The registry's own
+/// module comment already promises this ("XAA is the ONLY auth path"); this
+/// asserts it holds across a 401 specifically. A short `tokio::time::timeout`
+/// races the real 300s callback wait so a regression fails in ~2s instead of
+/// hanging for 5 minutes.
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn xaa_401_reauth_never_falls_to_interactive_consent() {
+    let _guard = XAA_ENV_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    std::env::set_var("LINGXI_ENABLE_XAA", "1");
+
+    // First connect attempt 401s (the cached XAA token was rejected by the
+    // server even though the registry still considers it locally unexpired
+    // and far from the 300s window); the retry (post re-auth) succeeds.
+    let transport = RecordingTransport::new(1);
+    let storage = MemStorage::new();
+    let clock = TestClock::new(1_000);
+    let (on_url, mut url_rx) = url_capture();
+
+    let oauth = McpOAuthConfigDto {
+        client_id: Some("as-client".into()),
+        callback_port: None,
+        auth_server_metadata_url: None,
+        scopes: None,
+        xaa: Some(true),
+    };
+    let config = http_cfg("xaa-401", Some(oauth));
+    let key = oauth::server_key("xaa-401", &config.spec);
+
+    // No refresh token stored — the shape §26b delta 3 targets: the old
+    // `reauth_oauth_spec` had no xaa arm, so a refresh-token-less XAA server
+    // fell into `None => run_interactive_oauth(...)`.
+    let stored = oauth::StoredTokens {
+        access_token: "xaa-access-old".into(),
+        refresh_token: None,
+        expires_at_unix: 1_000 + 3_600,
+        client_id: Some("as-client".into()),
+        client_secret: Some("as-secret".into()),
+        step_up_scope: None,
+    };
+    let bytes = serde_json::to_vec(&stored).unwrap();
+    storage
+        .store(
+            oauth::MCP_OAUTH_SERVICE,
+            &key,
+            SecureStorageData::new(
+                bytes,
+                SecureStorageMetadata {
+                    created_at: SystemTime::UNIX_EPOCH,
+                    last_accessed: None,
+                    kind: SecretKindDto("mcp_oauth_tokens".into()),
+                },
+            ),
+        )
+        .await
+        .unwrap();
+
+    let registry =
+        McpRegistry::new(transport.clone() as Arc<dyn McpTransport>).with_oauth(OAuthDeps {
+            http: Arc::new(XaaHttp) as Arc<dyn HttpTransport>,
+            clock: clock as Arc<dyn Clock>,
+            storage: storage as Arc<dyn SecureStorage>,
+            on_authorization_url: on_url,
+            xaa_config: Some(Arc::new(XaaTestProvider)),
+        });
+
+    let outcome = tokio::time::timeout(Duration::from_secs(2), registry.connect(config)).await;
+    std::env::remove_var("LINGXI_ENABLE_XAA");
+
+    let connect_result = outcome.expect(
+        "connect() must not hang waiting for interactive consent — an XAA 401 must stay \
+         on the silent exchange/refresh path (§26b delta 3), never run_interactive_oauth",
+    );
+    connect_result.expect("xaa connect ok after 401 reauth");
+
+    assert_eq!(
+        transport.connect_count(),
+        2,
+        "stale bearer 401s, freshly-exchanged bearer retries"
+    );
+    assert_eq!(
+        spec_auth_header(&transport.last_spec()).as_deref(),
+        Some("Bearer xaa-access")
+    );
+    assert!(
+        url_rx.try_recv().is_err(),
+        "no interactive authorization URL should ever be surfaced for an XAA server"
+    );
+}

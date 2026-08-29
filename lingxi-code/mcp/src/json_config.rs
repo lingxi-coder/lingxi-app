@@ -229,7 +229,11 @@ fn build_servers_from_map(
 #[must_use]
 pub fn server_entry_shape_is_valid(raw_entry: &serde_json::Value) -> bool {
     McpJsonEntry::deserialize(raw_entry)
-        .map(|e| e.command.is_some() || e.url.is_some())
+        .map(|e| {
+            // `type:"sdk"` (oracle `MAn`) needs neither `command` nor `url` —
+            // see [`build_server_from_json_entry`].
+            e.command.is_some() || e.url.is_some() || e.transport_type.as_deref() == Some("sdk")
+        })
         .unwrap_or(false)
 }
 
@@ -276,7 +280,25 @@ pub fn build_server_from_json_entry(
         // claude `configError` (`configErrorReason:"url_invalid"`): set when a
         // remote `url` expands to empty; carried on the config, never fatal.
         let mut config_error: Option<String> = None;
-        let spec = if let Some(cmd) = entry.command {
+        let spec = if entry.transport_type.as_deref() == Some("sdk") {
+            // Oracle `MAn` @154585319 (v2.1.251 Mach-O, minified `mcp-sdk.js`
+            // chunk): `f({type:N("sdk"),name:i(),timeout:o().optional(),
+            // alwaysLoad:q().optional()})` — no `command`, no `url`. Checked
+            // FIRST (ahead of the command/url branches below) so this
+            // oracle-valid shape is never routed into the "missing transport"
+            // rejection just because it lacks both fields.
+            //
+            // The schema's own `name` is always the entry's map key — every
+            // construction site in the oracle stamps it that way
+            // (`d[S]={type:"sdk",name:S,...}` @174336969,
+            // `P[Fe]={type:"sdk",name:Fe,...}` @176568709) — so the
+            // control-channel id is this server's NAME, never a URL (a stray
+            // `url` field on an sdk entry is schema-unknown and would be
+            // silently stripped by zod, so it is likewise ignored here).
+            McpTransportSpec::SdkControl {
+                control_channel_id: name.clone(),
+            }
+        } else if let Some(cmd) = entry.command {
             McpTransportSpec::Stdio {
                 command: expand_field(&cmd, &mut missing),
                 args: entry
@@ -336,16 +358,10 @@ pub fn build_server_from_json_entry(
                     headers_helper,
                     oauth: entry.oauth,
                 },
-                // `sdk`: binary-confirmed at offsets 194710219 and 196781049.
-                // Used by Agent SDK embedded servers. When the type is "sdk"
-                // the URL is a control-channel identifier; wire it into
-                // `SdkControl` so the platform can distinguish it from a plain
-                // HTTP endpoint. The `CLAUDE_AGENT_SDK_MCP_NO_PREFIX` gate
-                // (handled in `McpClient::list_tools`) then skips the `mcp__`
-                // prefix for tools from this transport.
-                Some("sdk") => McpTransportSpec::SdkControl {
-                    control_channel_id: url,
-                },
+                // `"sdk"` is handled above (before this url branch even runs)
+                // since the oracle `MAn` schema carries no `url` field at all;
+                // this match is only reached for a `command`-less entry that
+                // DOES have a `url`, so `sdk` never appears as an arm here.
                 Some("ws" | "websocket") => McpTransportSpec::WebSocket {
                     url,
                     headers,
@@ -628,6 +644,48 @@ mod tests {
                 assert_eq!(url, "https://example.test/mcp");
             }
             other => panic!("expected Http, got {other:?}"),
+        }
+    }
+
+    /// Oracle `MAn`: `{type:"sdk",name,timeout,alwaysLoad}` — NO `url` and NO
+    /// `command`. Before this fix the entry fell through to the
+    /// "missing both command and url" branch and was silently dropped, even
+    /// though `KNOWN_MCP_TYPES` (config_diagnostics.rs) already blessed `sdk`
+    /// as a recognized type. The control-channel id must come from the
+    /// server's own NAME (the map key), never a url — sdk entries have none.
+    #[test]
+    fn sdk_entry_with_no_url_is_accepted_and_keyed_by_name() {
+        let raw = r#"{
+          "mcpServers": {
+            "claude-vscode": { "type": "sdk", "timeout": 5000, "alwaysLoad": true }
+          }
+        }"#;
+        let cfgs = parse_mcp_json_string(raw, ConfigScope::User).unwrap();
+        assert_eq!(cfgs.len(), 1, "sdk entry without url/command must be kept");
+        assert_eq!(cfgs[0].name, "claude-vscode");
+        match &cfgs[0].spec {
+            McpTransportSpec::SdkControl { control_channel_id } => {
+                assert_eq!(control_channel_id, "claude-vscode");
+            }
+            other => panic!("expected SdkControl, got {other:?}"),
+        }
+        // timeout/alwaysLoad are still honoured (all-transports fields).
+        assert_eq!(cfgs[0].timeout_ms, Some(5000));
+        assert!(cfgs[0].always_load);
+    }
+
+    /// A stray `url` on an sdk entry is schema-unknown (oracle `MAn` has no
+    /// `url` field) and must be ignored, not used as the control-channel id.
+    #[test]
+    fn sdk_entry_ignores_a_stray_url_field() {
+        let raw = r#"{"mcpServers":{"srv":{"type":"sdk","url":"should-be-ignored"}}}"#;
+        let cfgs = parse_mcp_json_string(raw, ConfigScope::User).unwrap();
+        assert_eq!(cfgs.len(), 1);
+        match &cfgs[0].spec {
+            McpTransportSpec::SdkControl { control_channel_id } => {
+                assert_eq!(control_channel_id, "srv", "must key off name, not url");
+            }
+            other => panic!("expected SdkControl, got {other:?}"),
         }
     }
 

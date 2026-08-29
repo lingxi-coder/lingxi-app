@@ -202,11 +202,13 @@ pub fn collect_mcp_config_warnings(
 }
 
 /// Loader validity per type (aligned with [`crate::json_config`]): stdio needs
-/// a `command`, every remote type needs a `url`. The remote schemas (`cLi`
-/// @226761199, `J5n` @226762069) declare `url: E.string()` with NO `.min(1)`
-/// — unlike stdio's `command: E.string().min(1)` — so a present-but-blank
-/// `url` is schema-VALID and the entry loads (it then reports as
-/// `- Not configured`, claude `zar`).
+/// a `command`, every remote type needs a `url` — EXCEPT `sdk`, whose oracle
+/// schema (`MAn`) carries neither `command` nor `url` (only `name`, which is
+/// always the entry's own map key, never validated here). The remote schemas
+/// (`cLi` @226761199, `J5n` @226762069) declare `url: E.string()` with NO
+/// `.min(1)` — unlike stdio's `command: E.string().min(1)` — so a
+/// present-but-blank `url` is schema-VALID and the entry loads (it then
+/// reports as `- Not configured`, claude `zar`).
 /// Complete, stable issue list for one MCP entry. Unlike the old single
 /// best-effort reason, this retains every failing field path so users can fix a
 /// malformed record in one pass.
@@ -269,6 +271,11 @@ fn validation_issues(entry: &Value, ty: &str) -> Vec<String> {
                 }
             }
         }
+        // Oracle `MAn`: `{type:"sdk",name,timeout,alwaysLoad}` — no `url`
+        // field at all (confirmed at the 2.1.251 Mach-O, @154585319). Unlike
+        // every remote type, an sdk entry must NOT be flagged for lacking a
+        // `url` — see [`crate::json_config::build_server_from_json_entry`].
+        "sdk" => {}
         _ => match object.get("url") {
             Some(Value::String(_)) => {}
             None => issues.push("url: expected string, received undefined".to_string()),
@@ -577,6 +584,19 @@ mod tests {
             w[0].message,
             "Skipped \u{2014} invalid MCP server config for \"bad\": url: expected string, received undefined"
         );
+    }
+
+    /// Oracle `MAn`: `{type:"sdk",name,timeout,alwaysLoad}` carries NO `url`.
+    /// An `sdk` entry with neither `url` NOR `command` must NOT be reported as
+    /// an invalid config — unlike every other KNOWN_MCP_TYPES member, `sdk`
+    /// has no transport field to require. (Before this fix `validation_issues`
+    /// fell through to the `_` arm's url-required check for every non-stdio
+    /// type, so a bare `{"type":"sdk"}` was flagged "invalid ... url: expected
+    /// string, received undefined" even though the loader now accepts it.)
+    #[test]
+    fn sdk_entry_with_no_url_is_not_flagged_invalid() {
+        let w = only(&json!({"mcpServers":{"claude-vscode":{"type":"sdk"}}}));
+        assert!(w.is_empty(), "sdk entry without url must not warn: {w:?}");
     }
 
     #[test]

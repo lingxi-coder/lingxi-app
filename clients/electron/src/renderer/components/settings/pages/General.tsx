@@ -36,7 +36,7 @@ function EntryRow({ icon, title, desc, onClick }: { icon: string; title: string;
 
 /**
  * This round only carries cross-page entry points, not new unimplemented
- * toggles: the old `SettingsGeneralPage.tsx` mock has many (run-on-startup,
+ * toggles: the old mock General settings page (retired in Task 20) had many (run-on-startup,
  * shortcuts, browser-use switches, …) with no real IPC behind any of them —
  * building "working" controls on top of that here would just add more
  * computed-but-never-wired surface, the exact defect class this shell

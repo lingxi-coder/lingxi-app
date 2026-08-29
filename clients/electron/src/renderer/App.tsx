@@ -3,7 +3,6 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode }
 import { useBridge } from './bridge/useBridge';
 import {
   BetaComposer,
-  BetaSettings,
   BetaSidebar,
   BetaTasks,
   BetaTopBar,
@@ -13,6 +12,7 @@ import { ComputerAccessPrompt } from './components/ComputerAccessPrompt';
 import { AskUserQuestionPrompt } from './components/AskUserQuestionPrompt';
 import { PermissionPrompt } from './components/PermissionPrompt';
 import { PlanTasks } from './components/PlanTasks';
+import { SettingsScreen } from './components/settings/SettingsScreen';
 import { Stage } from './components/Stage';
 import { Theme } from './theme/ThemeContext';
 import { tokens, watchThemePreference, type ThemeMode } from './theme/tokens';
@@ -136,7 +136,7 @@ export function App() {
         </SettingsBackground>
 
         {settingsRoute && (
-          <BetaSettings
+          <SettingsScreen
             bridge={bridge}
             theme={theme}
             onTheme={changeTheme}

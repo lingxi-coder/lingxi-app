@@ -12,11 +12,11 @@ function levelColor(t: ReturnType<typeof useT>, level: DiagnosticEntry['level'])
 }
 
 /**
- * Copy report / export JSON / refresh, lifted from `BetaSettings`'s
+ * Copy report / export JSON / refresh, lifted from the old settings modal's
  * Diagnostics section in `BetaDesktop.tsx` (`bridge.copyDiagnostics` /
  * `exportDiagnostics` / `refreshDiagnostics`, and the same sanitized-log
  * rendering). The restart action is NOT part of that lifted section —
- * `BetaSettings`'s Diagnostics block has no restart button — it is added
+ * that Diagnostics block had no restart button — it is added
  * here per this task's brief, reusing `bridge.restartBridge` and the
  * already-tested `restartDisabledReason` the settings shell itself uses for
  * its own pending-settings restart action.

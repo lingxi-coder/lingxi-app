@@ -17,9 +17,10 @@ export interface ProjectRow {
  * be tested without mounting anything.
  *
  * Lifted from `BetaSidebar`'s project loop in `BetaDesktop.tsx` — NOT
- * `BetaSettings` as the task brief said. `BetaSettings` (the settings
- * dialog) has no project list or trust UI at all; that behaviour lives in
- * `BetaSidebar`, a separate exported component in the same file. See this
+ * the old settings modal as the task brief said. That modal (the settings
+ * dialog, retired in Task 20) had no project list or trust UI at all; that
+ * behaviour lives in `BetaSidebar`, a separate exported component in the
+ * same file. See this
  * task's report for the full correction.
  */
 export function projectRows(settings: { projects: string[]; activeProject?: string } | undefined): ProjectRow[] {

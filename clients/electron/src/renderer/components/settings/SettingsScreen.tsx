@@ -38,10 +38,10 @@ const LAYER_DISABLED_REASON_ID = 'settings-layer-switcher-disabled-reason';
 const RESTART_DISABLED_REASON_ID = 'settings-restart-disabled-reason';
 
 /**
- * Props are deliberately isomorphic to the existing `BetaSettingsProps`
- * (`clients/electron/src/renderer/components/BetaDesktop.tsx`) so a later
- * task can swap `<BetaSettings ... />` for `<SettingsScreen ... />` in
- * `App.tsx` without touching the call site's shape — same field names, same
+ * Props were built field-for-field isomorphic to the old settings modal's
+ * props (`BetaDesktop.tsx`, retired in Task 20) so that task could swap
+ * `<SettingsScreen ... />` into `App.tsx` in place of the modal without
+ * touching the call site's shape — same field names, same
  * optionality, same deep-link contract (`initialProviderId` +
  * `pendingModelReference` are what the model picker uses to open Settings on
  * the provider blocking a model; `onClose` is expected to restore focus to
@@ -216,7 +216,7 @@ export interface PageContentProps {
   pendingModelReference?: string;
   /**
    * Closes the WHOLE settings surface, not just this page. `ProviderCredentials`
-   * needs this to reproduce `BetaSettings`' deep-link behaviour: once a
+   * needs this to reproduce the old settings modal's deep-link behaviour: once a
    * blocking model's provider connects and the pending model applies, the
    * original dialog closed itself and returned focus to the composer rather
    * than leaving the person parked on a settings page they didn't navigate to
@@ -428,7 +428,7 @@ export function SettingsScreen({
   // Tab still walks it. This captures whatever had focus before mount,
   // moves focus onto the close button, traps Tab inside `panelRef`'s
   // focusable descendants (wrapping via the same `dialogFocusTarget` helper
-  // `BetaSettings` uses), and restores focus to whatever had it on unmount.
+  // the old settings modal used), and restores focus to whatever had it on unmount.
   // This is a DIFFERENT concern from `SettingsScreenProps.onClose` /
   // `SettingsRoute.restoreFocus` in `App.tsx`: that restores focus to the
   // opener once the WHOLE settings surface closes; this is about focus while

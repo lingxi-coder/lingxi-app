@@ -43,7 +43,7 @@ async function runRecoveryScenario(webContents) {
   await webContents.executeJavaScript('window.__settingsTransactionTest.resolvePersistence()');
   await waitFor(
     webContents,
-    'window.__settingsTransactionTest.state().restartErrors === 1 && Boolean([...document.querySelectorAll("button")].find((button) => button.textContent?.trim() === "Retry engine connection"))',
+    'window.__settingsTransactionTest.state().restartErrors === 1 && Boolean([...document.querySelectorAll("button")].find((button) => button.textContent?.trim() === "重试引擎连接"))',
   );
   const afterFirstFailure = await webContents.executeJavaScript('window.__settingsTransactionTest.state()');
   await webContents.executeJavaScript('window.__settingsTransactionTest.setSessionState("session-b", false)');

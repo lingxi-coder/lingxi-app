@@ -12,9 +12,9 @@ import { ghostButtonStyle } from './ghostButton';
 /**
  * Which provider is pre-selected on mount. Pure so it's testable without
  * mounting anything — same shape `Projects.tsx`'s `projectRows` uses.
- * Mirrors `BetaSettings`'s own
+ * Mirrors the old settings modal's own
  * `providerById(initialProviderId ?? '') ? initialProviderId! : 'anthropic'`
- * (`BetaDesktop.tsx`), which is how the composer's model-picker deep link
+ * (`BetaDesktop.tsx`, retired in Task 20), which is how the composer's model-picker deep link
  * (`SettingsRoute.providerId`) lands this page on the provider actually
  * blocking the chosen model instead of always opening on Anthropic.
  */
@@ -26,7 +26,7 @@ export type CredentialStatusKind = 'runtime' | 'secure' | 'fallback-configured' 
 
 /**
  * Which of the four Keychain-availability/runtime-source status paragraphs
- * `BetaSettings` shows for the selected provider — pure so each of the four
+ * the old settings modal showed for the selected provider — pure so each of the four
  * states (plus "none of the above") can be asserted by name without
  * mounting anything. The four conditions and their order are copied
  * verbatim from `BetaDesktop.tsx`'s `beta-provider-form` block: `runtimeOnly`
@@ -45,7 +45,7 @@ export function credentialStatusKind(metadata?: Pick<ProviderCredentialMetadata,
 
 /**
  * The connect/replace/use-entered-key button's label, in the same priority
- * order `BetaSettings` uses: an in-flight connect or model-apply wins over
+ * order the old settings modal used: an in-flight connect or model-apply wins over
  * anything else so the button never invites a second click mid-transaction;
  * otherwise `runtimeOnly` offers "use entered key" (there's a live value to
  * override), and plain `configured` offers "replace" instead of "connect".
@@ -69,8 +69,9 @@ function invoke(action: () => Promise<unknown>): void {
 }
 
 /**
- * Lifted from `BetaSettings`'s "Providers" section in `BetaDesktop.tsx`
- * (~lines 1852-2119): connecting/replacing/disconnecting a credential, the
+ * Lifted from the old settings modal's "Providers" section in
+ * `BetaDesktop.tsx` (retired in Task 20; it lived at ~lines 1852-2119):
+ * connecting/replacing/disconnecting a credential, the
  * four Keychain-availability/runtime-source status states
  * (`credentialStatusKind` above), the pending-model banner and its "use
  * model and return to chat" recovery, the post-persist recovery UI for when
@@ -78,14 +79,14 @@ function invoke(action: () => Promise<unknown>): void {
  * fix round 1, dropped in the first pass — the deep-link autofocus: moving
  * focus into the credential input via `requestAnimationFrame` when both
  * `initialProviderId` and the requested model are set
- * (`BetaDesktop.tsx:1923-1926`). None of that logic was rewritten —
+ * (that modal's own lines 1923-1926). None of that logic was rewritten —
  * `isCurrentCredentialTransaction` and `persistProviderCredentialAndApplyModel`
  * (`bridge/providerCredentials.ts`) are the same already-tested functions
- * `BetaSettings` calls.
+ * that modal called.
  *
- * One thing this page adds that `BetaSettings`'s Providers section did NOT
+ * One thing this page adds that the old modal's Providers section did NOT
  * have: an editor for `apiBaseUrl`. The brief for this task listed
- * `apiBaseUrl` among the state lifted from `BetaSettings`, but grepping
+ * `apiBaseUrl` among the state lifted from that modal, but grepping
  * `BetaDesktop.tsx` turned up no such UI — `apiBaseUrl` exists only as a
  * `PublicSettings` field and a `host.updateSettings` patch key
  * (`lingxi.d.ts`, `main/settings.ts`, `main/host.ts`), wired end-to-end on
@@ -133,8 +134,8 @@ export function ProviderCredentials({ bridge, initialProviderId, pendingModelRef
     };
   }, []);
 
-  // Fix round 1: this focus move was dropped in the lift. `BetaSettings`
-  // (`BetaDesktop.tsx:1923-1926`) moves focus into the credential input when
+  // Fix round 1: this focus move was dropped in the lift. The old settings
+  // modal (`BetaDesktop.tsx:1923-1926`, retired in Task 20) moved focus into the credential input when
   // the composer's model picker deep-links here (both `initialProviderId`
   // and the requested model are set) — arriving from that flow means the
   // person is here specifically to type a key, so the cursor should already

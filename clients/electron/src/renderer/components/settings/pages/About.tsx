@@ -4,8 +4,8 @@ import type { PageContentProps } from '../SettingsScreen';
 
 /**
  * App / Electron / engine version numbers. None of these were previously
- * reachable by the renderer — `BetaSettings`'s own About section (the thing
- * this task's brief pointed at) only ever showed static prose, never real
+ * reachable by the renderer — the old settings modal's own About section
+ * (the thing this task's brief pointed at) only ever showed static prose, never real
  * numbers. The three values themselves were already computed in the main
  * process (for `diagnosticReport`'s `runtime`/`bridgeRuntime` fields, used
  * by `copyDiagnostics`/`exportDiagnostics`) but never exposed as structured

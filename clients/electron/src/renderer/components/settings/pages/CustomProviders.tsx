@@ -109,8 +109,8 @@ const inputStyle = (t: ReturnType<typeof useT>) => ({
 } as const);
 
 /**
- * Edits `settings.providers` and `settings.routing`. Both are new UI —
- * `BetaSettings` has no equivalent, there is nothing to lift here. Writes go
+ * Edits `settings.providers` and `settings.routing`. Both are new UI — the
+ * old settings modal had no equivalent, there is nothing to lift here. Writes go
  * through `bridge.updateEngineSettings(editingLayer, patch)`, this task's
  * addition wrapping the engine's generic `update_settings` wire command
  * (`clients/electron/src/renderer/bridge/useBridge.ts`); no per-key command

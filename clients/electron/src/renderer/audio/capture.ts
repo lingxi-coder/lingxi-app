@@ -6,9 +6,10 @@
  * `lingxi-code/apps/bridge-server/src/audio_bridge.rs`'s `AudioBridge`: the
  * engine has no microphone of its own on desktop, so it asks the connected
  * client (`AudioOpDto::StartRecording` / `StopRecording`) and this module is
- * what actually talks to the OS microphone in response. Wiring this into the
- * bridge's `audio_request`/`audio_response` round trip is a later task; this
- * module only has to produce the bytes and the honest mime type.
+ * what actually talks to the OS microphone in response. `requests.ts` is the
+ * caller that services those requests and lowers the outcome onto
+ * `audio_response`; this module only has to produce the bytes and the honest
+ * mime type.
  *
  * Two real-world hazards drive this file's shape:
  *
@@ -34,13 +35,13 @@
  * to `VoiceError::PermissionDenied` / a `VoiceError::Other` naming
  * unavailability). `classifyGetUserMediaError` mirrors that split locally
  * with `MicrophoneErrorKind` rather than importing the wire `AudioErrorKindDto`
- * type — this module has no bridge wiring yet, and coupling it to that wire
- * shape before there is a caller to feed it would be the same premature
- * coupling `capabilities.ts`'s `ProviderConfiguredFact` doc comment already
- * argues against. The two kinds it does distinguish use the WIRE's own
- * string spelling (`'permission_denied'`, `'unavailable'`) so a future
- * caller's translation to `AudioErrorKindDto` is a checked literal match,
- * not a fresh vocabulary to invent.
+ * type — this module stays independent of the wire shape rather than coupling
+ * to it, the same premature coupling `capabilities.ts`'s
+ * `ProviderConfiguredFact` doc comment already argues against. The two kinds
+ * it does distinguish use the WIRE's own string spelling
+ * (`'permission_denied'`, `'unavailable'`) so that `requests.ts`'s
+ * translation to `AudioErrorKindDto` is a checked literal match, not a fresh
+ * vocabulary to invent.
  *
  * Every browser entry point is injected (`MicrophoneCaptureDeps`) so every
  * branch — permission granted/denied/no-device, which mime type actually

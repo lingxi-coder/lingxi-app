@@ -4,9 +4,10 @@
  * This is the client side of the engine's `TextToSpeech` trait
  * (`lingxi-code/traits/src/tts.rs`), proxied over the wire by
  * `lingxi-code/apps/bridge-server/src/audio_bridge.rs`'s `AudioBridge`
- * (`AudioOpDto::Synthesize` / `AudioResultDto::Audio`). Wiring this into the
- * bridge's `audio_request`/`audio_response` round trip is a later task; this
- * module only has to actually speak the text and report the outcome.
+ * (`AudioOpDto::Synthesize` / `AudioResultDto::Audio`). `requests.ts` is the
+ * caller that services those requests and lowers the outcome onto
+ * `audio_response`; this module only has to actually speak the text and
+ * report the outcome.
  *
  * ## The empty-PCM "played in place" convention — read this before touching
  * ## the return value

@@ -646,6 +646,110 @@ async fn enable_materializes_declared_workflow_into_plugin_workflow_registry() {
     );
 }
 
+/// A manifest declaring `themes` as a single `.json` file with a `base`,
+/// `name`, and one valid + one invalid override.
+fn write_theme_plugin(root: &Path, dir_name: &str, plugin_name: &str) {
+    let plugin_dir = root.join(dir_name);
+    fs::create_dir_all(plugin_dir.join(".lingxi-plugin")).unwrap();
+    fs::write(
+        plugin_dir.join(".lingxi-plugin").join("plugin.json"),
+        format!(
+            r#"{{"name":"{plugin_name}","version":"1.0.0","themes":"./palettes/purple.json"}}"#
+        ),
+    )
+    .unwrap();
+    fs::create_dir_all(plugin_dir.join("palettes")).unwrap();
+    fs::write(
+        plugin_dir.join("palettes").join("purple.json"),
+        r##"{
+            "name": "Acme Purple",
+            "base": "dark",
+            "overrides": {
+                "claude": "#8844ff",
+                "bogus": "not-a-color"
+            }
+        }"##,
+    )
+    .unwrap();
+}
+
+/// §14 — a plugin's declared `themes` file joins the live plugin-theme
+/// registry: `PluginManager::enable` parses+validates it (oracle `j(e,t,r)`)
+/// and namespaces it `{plugin}:{basename}` (oracle `w0e`'s `${P.name}:`
+/// prefix), the SAME namespacing rule (c)/(d) apply to skills/output-styles/
+/// workflows. `disable` removes exactly the slug this plugin seeded,
+/// symmetric with every other component slot.
+#[tokio::test]
+async fn enable_materializes_declared_theme_into_plugin_theme_registry() {
+    let tmp = tempfile::tempdir().unwrap();
+    write_theme_plugin(tmp.path(), "th", "themeplugin");
+
+    let command_registry = Arc::new(RwLock::new(CommandRegistry::new()));
+    let hook_registry = Arc::new(RwLock::new(HookRegistry::new()));
+    let skill_registry = Arc::new(RwLock::new(SkillRegistry::new()));
+    let output_style_registry = Arc::new(RwLock::new(OutputStyleRegistry::new()));
+    let tool_registry = Arc::new(RwLock::new(ToolRegistry::new()));
+    let lsp_registry = Arc::new(LspRegistry::new(Arc::new(PosixLspTransport::new())));
+    let mcp_registry = Arc::new(McpRegistry::new(Arc::new(PosixMcpTransport::new())));
+
+    let storage = PlainTextSecureStorage::new(tmp.path().join("secrets"))
+        .await
+        .unwrap();
+    let credentials = Arc::new(CredentialManager::new(
+        Arc::new(storage),
+        Arc::new(PosixClock::new()),
+        Arc::new(PosixHttp::new()),
+    ));
+
+    let manager = PluginManager::new(
+        tmp.path().to_path_buf(),
+        Arc::new(PosixFileSystem::new(tmp.path().to_path_buf())),
+        Arc::new(PosixHttp::new()),
+        Arc::new(PosixRuntime::new()),
+        credentials,
+        Arc::new(PluginBlocklist::new(String::new())),
+        Arc::new(StrictPluginOnlyPolicy::empty()),
+        command_registry,
+        skill_registry,
+        hook_registry,
+        output_style_registry,
+        mcp_registry,
+        lsp_registry,
+        tool_registry,
+    );
+    let plugin_themes = manager.plugin_themes();
+
+    let discovered = plugin::discover_installed_plugins(tmp.path()).await;
+    assert_eq!(discovered.len(), 1);
+    let (id, manifest, dir) = discovered.into_iter().next().unwrap();
+
+    manager
+        .enable(&id, manifest, dir)
+        .await
+        .expect("enable should materialize the declared theme");
+
+    let theme = plugin_themes
+        .get("themeplugin:purple")
+        .expect("plugin theme should be namespaced {plugin}:{basename}");
+    assert_eq!(theme.name, "Acme Purple");
+    assert_eq!(theme.base, "dark");
+    assert_eq!(
+        theme.overrides.get("claude"),
+        Some(&"#8844ff".to_string()),
+        "a valid override color must survive"
+    );
+    assert!(
+        !theme.overrides.contains_key("bogus"),
+        "an invalid override color must be dropped"
+    );
+
+    manager.disable(&id).await.expect("disable should unload");
+    assert!(
+        plugin_themes.get("themeplugin:purple").is_none(),
+        "plugin theme should be removed from the registry on unload"
+    );
+}
+
 /// Initialise a git repo at `dir` containing a single-plugin tree (manifest +
 /// one command) and commit it, so it can be cloned via `file://`.
 fn init_git_plugin_repo(dir: &Path, plugin_name: &str) {

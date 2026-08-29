@@ -14,9 +14,10 @@
  *
  * An unanswered request is NOT a no-op. `AudioBridge::request` parks the
  * engine call on a deadline — 5s for `is_recording` (`STATE_QUERY_DEADLINE`),
- * 30s for start/stop (`DEVICE_CONTROL_DEADLINE`), 180s for transcribe and
- * synthesize (`CAPTURE_DEADLINE`) — so a dropped response is a hang of
- * exactly that length followed by a failure. That is why
+ * 30s for start/stop (`DEVICE_CONTROL_DEADLINE`), 180s for transcribe
+ * (`CAPTURE_DEADLINE`), and for synthesize one derived from the text
+ * (`synthesis_deadline`) — so a dropped response is a hang of exactly that
+ * length followed by a failure. That is why
  * {@link handleAudioRequestEvent} has exactly ONE `send` call on every path
  * past its early return, why {@link serviceAudioOp} answers rather than
  * throws (including for an op this build has never heard of — `AudioOpDto`

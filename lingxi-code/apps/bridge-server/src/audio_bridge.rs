@@ -43,9 +43,10 @@
 //!   [`AudioFailure::NoAnswer`].
 //! - **The client is connected but never answers.** Each request carries a
 //!   deadline (see [`STATE_QUERY_DEADLINE`], [`DEVICE_CONTROL_DEADLINE`],
-//!   [`CAPTURE_DEADLINE`]); when it expires the request is un-parked and fails
-//!   with [`AudioFailure::NoAnswer`]. This is the only exit for a client that
-//!   holds the socket open and drops the request on the floor.
+//!   [`CAPTURE_DEADLINE`], and [`synthesis_deadline`] for the one op whose
+//!   duration the caller chooses); when it expires the request is un-parked and
+//!   fails with [`AudioFailure::NoAnswer`]. This is the only exit for a client
+//!   that holds the socket open and drops the request on the floor.
 //!
 //! Which error each of those becomes, per trait, is documented on
 //! [`stt_error`], [`tts_error`] and [`voice_error`].
@@ -83,15 +84,59 @@ const STATE_QUERY_DEADLINE: Duration = Duration::from_secs(5);
 const DEVICE_CONTROL_DEADLINE: Duration = Duration::from_secs(30);
 
 /// Deadline for an op that legitimately waits on a person or a network
-/// (`Transcribe` / `Synthesize`).
+/// (`Transcribe`).
 ///
 /// `Transcribe` holds the microphone open for a whole utterance and may then
-/// round-trip to a network recognizer; `Synthesize` may send a long text to a
-/// network voice. Minutes, not seconds, is the honest ceiling here — a shorter
-/// one would abort work that was going to succeed, which is worse than the
-/// hang it is meant to prevent. It exists only to bound a client that never
-/// answers at all.
+/// round-trip to a network recognizer. Minutes, not seconds, is the honest
+/// ceiling here — a shorter one would abort work that was going to succeed,
+/// which is worse than the hang it is meant to prevent. It exists only to bound
+/// a client that never answers at all.
+///
+/// `Synthesize` used to share this constant and must not: its duration is
+/// chosen by the caller (the length of the text), so a flat bound is reachable
+/// by an ordinary long `speak` — see [`synthesis_deadline`]. `Transcribe`'s is
+/// not: the person speaking decides when to stop, and no caller can hand it a
+/// longer job.
 const CAPTURE_DEADLINE: Duration = Duration::from_secs(180);
+
+/// Fixed part of a [`AudioOpDto::Synthesize`] deadline: acquiring the audio
+/// session, picking the voice, and — because `window.speechSynthesis` is one
+/// global queue shared by every session — waiting behind an utterance another
+/// session started. Generous on purpose: firing early aborts work that was
+/// going to succeed, which is the failure this whole derivation exists to
+/// remove.
+const SYNTHESIS_START_ALLOWANCE_SECS: u64 = 90;
+
+/// How long one character of text may take to speak, at the SLOWEST rate the
+/// device offers (`normalizeRate` clamps to `[0.5, 2.0]`, and the Web Speech
+/// API's default is ~175 wpm, so half of that is ~7 characters a second). 200ms
+/// leaves margin on top of that. The client's own watchdog uses the same
+/// number — see `spokenTextTimeoutMs` in
+/// `clients/electron/src/renderer/audio/synthesis.ts`.
+const SYNTHESIS_MILLIS_PER_CHAR: u64 = 200;
+
+/// Ceiling on the derived deadline, so no single call can park a turn for
+/// hours. The desktop client refuses a text longer than `MAX_SPOKEN_CHARACTERS`
+/// outright — instantly, with a named failure — so this clamp is not the
+/// operative bound for it; it exists for any other caller of the trait.
+const MAX_SYNTHESIS_DEADLINE_SECS: u64 = 1200;
+
+/// The deadline for speaking `text`.
+///
+/// A flat deadline is the wrong instrument here. `Synthesize` is the one op
+/// whose duration is chosen by the CALLER: the client answers when the whole
+/// utterance has finished playing, so "read this document aloud" legitimately
+/// takes minutes, and a fixed 180s reported a failure to the model while the
+/// machine was audibly still talking — after which a retry queued a second
+/// utterance behind the first. Deriving the bound from the text means the
+/// deadline can only fire for a client that is not speaking at a plausible
+/// rate, which is what a deadline is for.
+fn synthesis_deadline(text: &str) -> Duration {
+    let chars = u64::try_from(text.chars().count()).unwrap_or(u64::MAX);
+    let secs = SYNTHESIS_START_ALLOWANCE_SECS
+        .saturating_add(chars.saturating_mul(SYNTHESIS_MILLIS_PER_CHAR) / 1000);
+    Duration::from_secs(secs.min(MAX_SYNTHESIS_DEADLINE_SECS))
+}
 
 /// Transport-supplied destination for an outbound [`ClientEvent::AudioRequest`].
 ///
@@ -450,13 +495,15 @@ impl TextToSpeech for AudioBridge {
     /// true, "sample_rate_hz": …, "pcm_bytes_len": …}`, which on desktop
     /// reads "spoke, produced 0 bytes." Accurate, not false.
     async fn synthesize(&self, opts: TtsOpts) -> Result<TtsAudio, TtsError> {
+        // Derived from the text, not flat: see [`synthesis_deadline`].
+        let deadline = synthesis_deadline(&opts.text);
         let result = self
             .request(
                 AudioOpDto::Synthesize {
                     text: opts.text,
                     voice: opts.voice,
                 },
-                CAPTURE_DEADLINE,
+                deadline,
             )
             .await
             .map_err(tts_error)?;
@@ -571,7 +618,11 @@ mod tests {
     use traits::tts::{TextToSpeech, TtsError, TtsOpts};
     use traits::voice::{VoiceError, VoiceRecorder, VoiceRecordingOpts};
 
-    use super::{new_audio_bridge, AudioBridge, AudioRequestSink, AudioResponder};
+    use super::{
+        new_audio_bridge, synthesis_deadline, AudioBridge, AudioRequestSink, AudioResponder,
+        Duration, MAX_SYNTHESIS_DEADLINE_SECS, SYNTHESIS_MILLIS_PER_CHAR,
+        SYNTHESIS_START_ALLOWANCE_SECS,
+    };
 
     /// An [`AudioRequestSink`] that captures every emitted request so a test can
     /// read back the assigned `request_id`, and that can be switched to
@@ -1226,6 +1277,81 @@ mod tests {
             ),
             other => panic!("voice reports Other on a silent client, got {other:?}"),
         }
+    }
+
+    /// A `speak` whose duration the CALLER chose must not be abandoned while
+    /// the client is still speaking it.
+    ///
+    /// `speech {action:"speak", text: <~600 words>}` — "read this document
+    /// aloud" — is an ordinary request. The desktop client answers only when
+    /// the whole utterance has finished playing (`utterance.onend`), and at the
+    /// slowest supported rate that text takes minutes. A flat deadline reports
+    /// a failure to the model while the machine is audibly still talking, and a
+    /// retry then stacks a second utterance on top of the first.
+    #[tokio::test(start_paused = true)]
+    async fn a_long_speak_is_not_abandoned_while_the_client_is_still_speaking() {
+        let (bridge, responder, mut emitted) = test_bridge();
+        // 3000 characters: ~600 words, roughly one page read aloud.
+        let text = "word ".repeat(600);
+        let spoken_for = Duration::from_millis(
+            u64::try_from(text.chars().count()).unwrap() * SYNTHESIS_MILLIS_PER_CHAR,
+        );
+
+        let task = tokio::spawn({
+            let bridge = bridge.clone();
+            let text = text.clone();
+            async move { bridge.synthesize(TtsOpts { text, voice: None }).await }
+        });
+        let (request_id, _) = next_request(&mut emitted).await;
+
+        // The client is speaking the whole time, then answers correctly.
+        tokio::time::sleep(spoken_for).await;
+        assert!(
+            responder
+                .resolve(
+                    request_id,
+                    AudioResultDto::Audio {
+                        pcm_base64: String::new(),
+                        sample_rate_hz: 0,
+                    },
+                )
+                .await,
+            "the engine gave up on a client that was answering correctly, just slowly: \
+             the deadline for a {}-character utterance must cover the time it takes to speak it",
+            text.chars().count()
+        );
+        assert!(
+            task.await.unwrap().is_ok(),
+            "a completed utterance must be a success, not a reported failure"
+        );
+    }
+
+    /// The deadline is a function of the text, and bounded whatever the text.
+    #[test]
+    fn the_synthesis_deadline_grows_with_the_text_and_stops_growing() {
+        let short = synthesis_deadline("hi");
+        let long = synthesis_deadline(&"word ".repeat(600));
+        assert!(
+            short < long,
+            "a deadline that does not depend on the text is the wrong instrument for an \
+             operation whose duration the caller chose"
+        );
+        assert!(
+            short >= Duration::from_secs(SYNTHESIS_START_ALLOWANCE_SECS),
+            "even an empty text needs room to acquire the audio session"
+        );
+        assert_eq!(
+            synthesis_deadline(&"x".repeat(10_000_000)),
+            Duration::from_secs(MAX_SYNTHESIS_DEADLINE_SECS),
+            "an unbounded derivation would let one call park a turn for hours"
+        );
+    }
+
+    /// Counted in Unicode scalar values, matching the renderer's own
+    /// `[...text].length` — see `spokenTextTimeoutMs` in `synthesis.ts`.
+    #[test]
+    fn the_synthesis_deadline_counts_characters_not_bytes() {
+        assert_eq!(synthesis_deadline("aaaa"), synthesis_deadline("你好世界"));
     }
 
     /// A disconnect drains every parked request instead of leaving the caller

@@ -73,13 +73,115 @@ export interface SynthesisDeps {
    * module doc for why.
    */
   speak(text: string, voice: SpeechSynthesisVoice | null, rate: number): Promise<void>;
+  /**
+   * Stops whatever the synthesizer is speaking or has queued.
+   *
+   * The Web Speech API has no per-utterance stop — `speechSynthesis.cancel()`
+   * clears the whole queue — so this is only ever called when this module has
+   * ALREADY abandoned an utterance, which is exactly when leaving the device
+   * talking would make the reported state and the real state disagree.
+   */
+  cancel(): void;
   /** Overrides `readSystemVoices`'s wait bound; tests use a short value. */
   voiceListTimeoutMs?: number;
+}
+
+/**
+ * How long one character of text may take to speak, at the SLOWEST rate the
+ * device offers. `normalizeRate` clamps to `[0.5, 2.0]` and the Web Speech
+ * API's default is ~175 wpm, so the floor is ~7 characters a second; 200ms
+ * leaves margin on top of that. `SYNTHESIS_MILLIS_PER_CHAR` in
+ * `audio_bridge.rs` is the same number on the engine side, and
+ * `audio-engine-bounds.test.ts` pins the engine's derived deadline above this
+ * client's own bound so the honest, device-stopping failure below always wins
+ * the race.
+ */
+export const SPEECH_MILLIS_PER_CHARACTER = 200;
+
+/**
+ * Fixed part of the bound: acquiring the audio session, picking the voice, and
+ * — because `window.speechSynthesis` is ONE global queue shared by every
+ * session — waiting behind an utterance another session started. Generous on
+ * purpose: firing early aborts work that was going to succeed, and because
+ * `cancel()` clears the whole queue, firing early would also cut off the other
+ * session's speech.
+ */
+export const SPEECH_START_ALLOWANCE_MS = 60_000;
+
+/**
+ * The longest text this client will speak in one call.
+ *
+ * Without it the derivation below is unbounded — a caller could park the
+ * engine's tool call for hours — and clamping the derivation instead would
+ * just recreate the defect for texts past the clamp: a bound that reports
+ * failure while the machine is still talking. Refusing up front is the honest
+ * answer, and it is instant: nothing is queued, nothing is cut off, and the
+ * model is told to split the text.
+ */
+export const MAX_SPOKEN_CHARACTERS = 4000;
+
+/**
+ * How long `text` may take to finish being spoken.
+ *
+ * Counted in Unicode scalar values (`[...text]`), NOT `text.length`: the engine
+ * counts `text.chars()`, and a UTF-16 count would be larger for any non-BMP
+ * character — which would make this client wait longer than the engine for the
+ * same text, so the engine's deadline would fire first and the whole point of
+ * this bound (a failure that also stops the device) would be lost.
+ */
+export function spokenTextTimeoutMs(text: string): number {
+  return SPEECH_START_ALLOWANCE_MS + [...text].length * SPEECH_MILLIS_PER_CHARACTER;
 }
 
 /** Strips the `system:` selection prefix, or returns `null` for anything else (a foreign `sherpa:` id, an empty selection, garbage). */
 function systemVoiceName(voiceId: string): string | null {
   return voiceId.startsWith(SYSTEM_VOICE_PREFIX) ? voiceId.slice(SYSTEM_VOICE_PREFIX.length) : null;
+}
+
+/**
+ * Speaks `text`, and stops the device on any path that gives up waiting.
+ *
+ * Two things travel together here on purpose. The bound exists because
+ * `deps.speak` resolves only on `utterance.onend`, which a stalled synthesizer
+ * never fires — without it the only thing that ever fires is the ENGINE's
+ * deadline, in a process that cannot reach `speechSynthesis`. And the
+ * `cancel()` exists because the engine's deadline could only ever abandon the
+ * WAIT: the machine kept talking, the model was told the synthesis failed, and
+ * a retry queued a second utterance behind the still-playing first. Whoever
+ * stops waiting has to stop the device, which is only possible here.
+ *
+ * The timer is cleared on the success path so a finished utterance leaves
+ * nothing pending behind it.
+ */
+async function speakWithin(
+  text: string,
+  voice: SpeechSynthesisVoice | null,
+  rate: number,
+  deps: SynthesisDeps,
+): Promise<void> {
+  const limit = spokenTextTimeoutMs(text);
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await new Promise<void>((resolve, reject) => {
+      timer = setTimeout(() => {
+        reject(new Error(
+          `the system speech synthesizer stopped responding: it did not finish speaking `
+          + `${[...text].length} characters within ${Math.round(limit / 1000)}s`,
+        ));
+      }, limit);
+      deps.speak(text, voice, rate).then(resolve, reject);
+    });
+  } catch (cause) {
+    try {
+      deps.cancel();
+    } catch {
+      // A synthesizer that cannot even be cancelled must not replace the real
+      // failure with its own.
+    }
+    throw cause;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 /**
@@ -94,11 +196,22 @@ export async function synthesize(
   rate: number,
   deps: SynthesisDeps,
 ): Promise<SynthesisResult> {
+  const characters = [...text].length;
+  if (characters > MAX_SPOKEN_CHARACTERS) {
+    // Refused before anything is queued: see `MAX_SPOKEN_CHARACTERS`. The
+    // caller lowers this to `synthesis_failed`, so the model is told to split
+    // the text rather than left waiting on speech that would outlast any bound.
+    throw new Error(
+      `this text is too long to speak in one call: ${characters} characters, over the `
+      + `${MAX_SPOKEN_CHARACTERS} this client will speak at once — split it into shorter calls`,
+    );
+  }
+
   const targetName = systemVoiceName(voiceId);
   const voices = targetName != null ? await readSystemVoices(deps.synth, deps.voiceListTimeoutMs) : [];
   const voice = targetName != null ? voices.find((candidate) => candidate.name === targetName) ?? null : null;
 
-  await deps.speak(text, voice, rate);
+  await speakWithin(text, voice, rate, deps);
 
   // See the module doc's "empty-PCM 'played in place' convention" section —
   // this is a success, not a placeholder for a missing implementation.
@@ -109,6 +222,7 @@ export async function synthesize(
 export function browserSynthesisDeps(): SynthesisDeps {
   return {
     synth: window.speechSynthesis,
+    cancel: () => window.speechSynthesis.cancel(),
     speak: (text, voice, rate) => new Promise<void>((resolve, reject) => {
       const utterance = new SpeechSynthesisUtterance(text);
       utterance.voice = voice;

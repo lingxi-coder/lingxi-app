@@ -23,6 +23,11 @@ import {
   MAX_AUDIO_BASE64_LENGTH,
   MAX_AUDIO_MIME_TYPE_LENGTH,
 } from '../src/shared/audioResponse';
+import {
+  MAX_SPOKEN_CHARACTERS,
+  SPEECH_MILLIS_PER_CHARACTER,
+  spokenTextTimeoutMs,
+} from '../src/renderer/audio/synthesis';
 
 const ENGINE_ROOT = join(import.meta.dirname, '..', '..', '..', 'lingxi-code');
 
@@ -95,5 +100,50 @@ test('the largest audio response this client can build fits in one engine frame'
     bytes <= MAX_BRIDGE_FRAME_BYTES,
     `a maximal audio_response is ${bytes} bytes, over the engine's ${MAX_BRIDGE_FRAME_BYTES}-byte frame limit: `
     + 'the engine would not reject the response, it would tear down the connection',
+  );
+});
+
+// ---------------------------------------------------------------------------
+// Synthesis deadlines.
+//
+// Only one of the two bounds on a `speak` can stop the device. The engine's
+// deadline runs in a process with no access to `window.speechSynthesis`, so
+// when it fires it abandons the WAIT and the machine keeps talking; the
+// client's own watchdog can call `cancel()`. So the client's bound has to be
+// the one that fires first, for every text the client will accept — otherwise
+// the engine reports a failure for an utterance that is still playing, and the
+// retry stacks a second one behind it.
+// ---------------------------------------------------------------------------
+
+test('the engine always waits longer for an utterance than this client does', () => {
+  const source = engineSource('apps', 'bridge-server', 'src', 'audio_bridge.rs');
+  const startAllowanceMs = rustConst(source, 'SYNTHESIS_START_ALLOWANCE_SECS') * 1000;
+  const perCharMs = rustConst(source, 'SYNTHESIS_MILLIS_PER_CHAR');
+  const clampMs = rustConst(source, 'MAX_SYNTHESIS_DEADLINE_SECS') * 1000;
+
+  assert.equal(
+    perCharMs,
+    SPEECH_MILLIS_PER_CHARACTER,
+    'the two sides disagree on how long a character takes to say',
+  );
+
+  for (const characters of [0, 1, 100, 1000, MAX_SPOKEN_CHARACTERS]) {
+    // `synthesis_deadline` in whole seconds, floor-divided exactly as the Rust does.
+    const engineMs = Math.min(
+      startAllowanceMs + Math.floor((characters * perCharMs) / 1000) * 1000,
+      clampMs,
+    );
+    const clientMs = spokenTextTimeoutMs('x'.repeat(characters));
+    assert.ok(
+      engineMs > clientMs,
+      `for ${characters} characters the engine gives up at ${engineMs}ms and this client at ${clientMs}ms: `
+      + 'the engine would report a failure while the speaker is still talking, with no way to stop it',
+    );
+  }
+
+  assert.ok(
+    startAllowanceMs + MAX_SPOKEN_CHARACTERS * perCharMs <= clampMs,
+    'the engine clamp truncates the deadline for a text this client will accept, so the clamp — not the '
+    + "text — would decide when a legitimate utterance is declared failed",
   );
 });

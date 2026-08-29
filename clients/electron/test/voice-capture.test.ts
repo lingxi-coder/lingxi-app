@@ -8,7 +8,14 @@ import {
   type MediaStreamLike,
   type MicrophoneCaptureDeps,
 } from '../src/renderer/audio/capture';
-import { synthesize, type SynthesisDeps } from '../src/renderer/audio/synthesis';
+import {
+  MAX_SPOKEN_CHARACTERS,
+  SPEECH_MILLIS_PER_CHARACTER,
+  SPEECH_START_ALLOWANCE_MS,
+  spokenTextTimeoutMs,
+  synthesize,
+  type SynthesisDeps,
+} from '../src/renderer/audio/synthesis';
 
 // ---------------------------------------------------------------------------
 // MicrophoneCapture fixtures
@@ -201,22 +208,34 @@ function voice(overrides: Partial<SpeechSynthesisVoice> & { name: string }): Spe
 
 interface SpeakCall { text: string; voice: SpeechSynthesisVoice | null; rate: number }
 
-function fakeSynthesisDeps(opts: { voices?: SpeechSynthesisVoice[]; failWith?: string } = {}): SynthesisDeps & { speakCalls: SpeakCall[] } {
+function fakeSynthesisDeps(
+  opts: { voices?: SpeechSynthesisVoice[]; failWith?: string; neverFinishes?: boolean } = {},
+): SynthesisDeps & { speakCalls: SpeakCall[]; cancelCalls: number } {
   const speakCalls: SpeakCall[] = [];
   const voices = opts.voices ?? [];
-  return {
+  const deps = {
     synth: {
       getVoices: () => voices,
       addEventListener: () => {},
       removeEventListener: () => {},
     },
     voiceListTimeoutMs: 5,
-    async speak(text, spokenVoice, rate) {
+    async speak(text: string, spokenVoice: SpeechSynthesisVoice | null, rate: number) {
       speakCalls.push({ text, voice: spokenVoice, rate });
       if (opts.failWith) throw new Error(opts.failWith);
+      // `utterance.onend` never fires — the shape a stalled synthesizer has.
+      if (opts.neverFinishes) await new Promise<void>(() => {});
     },
+    cancel() { deps.cancelCalls += 1; },
     speakCalls,
+    cancelCalls: 0,
   };
+  return deps;
+}
+
+/** Runs the microtask queue so an `await`ed voice lookup has settled. */
+function flush(): Promise<void> {
+  return new Promise((resolve) => { setImmediate(resolve); });
 }
 
 test('synthesize resolves the system:<name> voice, speaks at the given rate, and reports the played-in-place convention', async () => {
@@ -243,4 +262,65 @@ test('an unmatched voice id still plays, using the platform default rather than 
 test('a synthesis failure rejects rather than reporting a false played-in-place success', async () => {
   const deps = fakeSynthesisDeps({ voices: [], failWith: 'audio-hardware' });
   await assert.rejects(() => synthesize('hi', 'system:default', 1.0, deps), /audio-hardware/);
+});
+
+// ---------------------------------------------------------------------------
+// Abandoning the wait has to stop the speaking.
+//
+// The engine parks `Synthesize` on a deadline, and `speechSynthesis` is a
+// PLAY-IN-PLACE API: nothing here ever called `speechSynthesis.cancel()`, so
+// when a wait was abandoned the machine kept talking. The model was told the
+// synthesis failed, and a retry queued a SECOND utterance behind the first —
+// more speech on top of audio the engine believes never happened. Whatever
+// stops waiting must also stop the device.
+// ---------------------------------------------------------------------------
+
+test('a text longer than this client will speak is refused before anything is spoken', async () => {
+  const deps = fakeSynthesisDeps({ voices: [voice({ name: 'Alex' })] });
+  await assert.rejects(
+    () => synthesize('x'.repeat(MAX_SPOKEN_CHARACTERS + 1), 'system:Alex', 1, deps),
+    new RegExp(String(MAX_SPOKEN_CHARACTERS)),
+    'an unbounded text turns any bound into either a false timeout or an unbounded wait',
+  );
+  assert.deepEqual(deps.speakCalls, [], 'nothing may be queued for an utterance that is being refused');
+  assert.equal(deps.cancelCalls, 0, 'refusing before speaking must not disturb whatever else is speaking');
+});
+
+test('an utterance the synthesizer never finishes is abandoned AND the speaker stopped', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const deps = fakeSynthesisDeps({ voices: [voice({ name: 'Alex' })], neverFinishes: true });
+
+  const settled = synthesize('hello', 'system:Alex', 1, deps)
+    .then(() => 'resolved', (cause: Error) => `rejected: ${cause.message}`);
+  await flush();
+  t.mock.timers.tick(spokenTextTimeoutMs('hello'));
+
+  const outcome = await Promise.race([settled, flush().then(() => 'still waiting')]);
+  assert.match(
+    String(outcome),
+    /rejected: .*stopped responding/,
+    'the renderer waits forever on an utterance that never ends, so the only thing that fires is the '
+    + "engine's deadline — which reports a failure and cannot stop the speaker",
+  );
+  assert.equal(deps.cancelCalls, 1, 'abandoning the wait must stop the device, or the two disagree');
+});
+
+test('a synthesis error also stops the speaker, so a retry cannot stack on it', async () => {
+  const deps = fakeSynthesisDeps({ voices: [], failWith: 'audio-hardware' });
+  await assert.rejects(() => synthesize('hi', 'system:default', 1.0, deps), /audio-hardware/);
+  assert.equal(deps.cancelCalls, 1);
+});
+
+test('the watchdog is derived from the text, counted the way the engine counts it', () => {
+  assert.equal(spokenTextTimeoutMs(''), SPEECH_START_ALLOWANCE_MS);
+  assert.equal(
+    spokenTextTimeoutMs('hello'),
+    SPEECH_START_ALLOWANCE_MS + 5 * SPEECH_MILLIS_PER_CHARACTER,
+  );
+  assert.equal(
+    spokenTextTimeoutMs('\u{1F600}\u{1F600}'),
+    SPEECH_START_ALLOWANCE_MS + 2 * SPEECH_MILLIS_PER_CHARACTER,
+    'counted in code points, matching `text.chars().count()` in audio_bridge.rs — counting UTF-16 units '
+    + 'would make this client wait LONGER than the engine for the same text, so the engine would give up first',
+  );
 });

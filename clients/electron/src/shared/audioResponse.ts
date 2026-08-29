@@ -11,8 +11,9 @@ import { isBase64 } from './base64.js';
  * - `main/validation.ts` ENFORCES them. A response that fails its gate never
  *   reaches the engine at all.
  * - `renderer/audio/requests.ts` must STAY INSIDE them. The engine parks the
- *   originating call on a deadline (5s / 30s / 180s per op, see
- *   `audio_bridge.rs`), so a response rejected at the gate is not a validation
+ *   originating call on a deadline (5s / 30s / 180s per op, and a
+ *   text-derived one for `synthesize`; see `audio_bridge.rs`), so a response
+ *   rejected at the gate is not a validation
  *   error the user sees — it is a silent stall of exactly that length,
  *   followed by a failure with no explanation. The renderer therefore checks
  *   these bounds itself and answers with a real, honest failure instead.

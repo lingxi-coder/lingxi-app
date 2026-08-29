@@ -62,6 +62,12 @@ fn serialize_process_globals() -> std::sync::MutexGuard<'static, ()> {
 
 const TEST_TOKEN: &str = "settings-e2e-token-32chars000000000";
 
+/// The sandbox's stand-in for the machine's managed (policy) settings root —
+/// see `sandbox_config` for why this must never be the real one.
+fn managed_dir(tmp: &tempfile::TempDir) -> std::path::PathBuf {
+    tmp.path().join("managed")
+}
+
 /// A deterministic, env-free `DesktopConfig` with `lingxi_home` and `cwd`
 /// rooted at two SEPARATE sandbox directories (see module doc for why this
 /// must not share a root the way `e2e_serve_test.rs`'s helper does). The api
@@ -75,6 +81,28 @@ fn sandbox_config() -> (tempfile::TempDir, DesktopConfig) {
     let lingxi_home = tmp.path().join("home");
     std::fs::create_dir_all(&cwd).expect("create sandbox repo dir");
     std::fs::create_dir_all(&lingxi_home).expect("create sandbox home dir");
+    std::fs::create_dir_all(managed_dir(&tmp)).expect("create sandbox managed dir");
+    // The FOURTH root this harness has to isolate, and the one `cwd` /
+    // `lingxi_home` / `isolated_credential_storage` do NOT cover:
+    // `boot::assemble` folds `engine_desktop::managed_settings_overlay()` on
+    // top of the file layers, and that resolves through
+    // `settings_watch::managed_settings_dir()`, which falls back to the
+    // machine's REAL policy directory (`/Library/Application
+    // Support/LingXi/…` on macOS) unless `LINGXI_MANAGED_DIR` is set. On a
+    // machine with an installed managed policy, that policy's keys would
+    // show up in every `locked`/`effective` assertion below — the suite would
+    // pass or fail depending on whose laptop ran it.
+    //
+    // `set_var` is process-global, which is exactly why this lives here:
+    // every test in this file takes `serialize_process_globals()` BEFORE
+    // calling `sandbox_config`, so the write happens inside that guard's
+    // lifetime and no other test in this binary can be reading the variable
+    // while it changes. (Integration tests are one binary per file, so the
+    // only readers are this file's own five tests.)
+    std::env::set_var(
+        engine_desktop::settings_watch::MANAGED_DIR_ENV,
+        managed_dir(&tmp),
+    );
     let cfg = DesktopConfig {
         api_base: "https://api.anthropic.com".to_string(),
         api_key: String::new(),
@@ -551,6 +579,79 @@ async fn merged_keys_reflects_a_real_cross_layer_union() {
                 merged.contains(&"hooks".to_string()),
                 "hooks resolved from two real layers at once and must be named in \
                  merged_keys, got {merged:?}"
+            );
+        }
+        other => panic!("expected a SettingsSnapshot event, got {other:?}"),
+    }
+
+    endpoint.shutdown().await;
+}
+
+/// (6) The managed (policy) layer this suite reads is the SANDBOX's, not the
+/// machine's.
+///
+/// This is the A/B for `sandbox_config`'s `LINGXI_MANAGED_DIR` override, not
+/// just a feature test for the managed tier: it writes a policy file into the
+/// sandbox's managed root and asserts the value reaches `effective_json` and
+/// the key reaches `locked`. Without the override,
+/// `settings_watch::managed_settings_dir()` resolves to the real OS policy
+/// directory, this file is never read, and both assertions fail — which is
+/// the same reason the other five tests were previously at the mercy of
+/// whatever policy the developer's machine happened to have installed.
+#[tokio::test]
+async fn the_managed_layer_comes_from_the_sandbox_not_the_machine() {
+    // Serialized: `boot::assemble` writes process-global live-session
+    // statics every test in this file shares, and `sandbox_config` writes the
+    // process-global `LINGXI_MANAGED_DIR` (see `PROCESS_GLOBALS_SERIAL`'s doc
+    // above and `sandbox_config`'s own).
+    let _serial = serialize_process_globals();
+    let (tmp, cfg) = sandbox_config();
+    let home = cfg.lingxi_home.clone();
+    std::fs::write(home.join("settings.json"), r#"{"outputStyle":"from-user"}"#).unwrap();
+    std::fs::write(
+        managed_dir(&tmp).join("managed-settings.json"),
+        r#"{"outputStyle":"from-sandbox-policy"}"#,
+    )
+    .unwrap();
+
+    let bound = boot::assemble(cfg).await.expect("assemble must succeed");
+    let endpoint = McpEndpoint::start_on_ephemeral_port_with_pump(Arc::new(bound.connection))
+        .await
+        .expect("endpoint must start");
+    endpoint.set_auth_token(TEST_TOKEN.to_string());
+    let mut ws = connect(endpoint.port()).await;
+
+    send_frame(
+        &mut ws,
+        &submit(&ClientCommand::RefreshListings {
+            which: vec![ListingKindDto::Settings],
+        }),
+    )
+    .await;
+
+    match next_frame(&mut ws).await {
+        Frame::Event(ClientEvent::SettingsSnapshot {
+            effective_json,
+            provenance_json,
+            locked,
+            ..
+        }) => {
+            let effective: Value = serde_json::from_str(&effective_json).unwrap();
+            assert_eq!(
+                effective["outputStyle"], "from-sandbox-policy",
+                "the managed overlay this suite reads must be the sandbox's file, not the \
+                 machine's real policy directory, got {effective}"
+            );
+            let provenance: Value = serde_json::from_str(&provenance_json).unwrap();
+            assert_eq!(
+                provenance["outputStyle"], "managed",
+                "a key the managed overlay supplies must be attributed to `managed`, got \
+                 {provenance}"
+            );
+            let locked = locked.expect("locked must be populated");
+            assert!(
+                locked.contains(&"outputStyle".to_string()),
+                "the sandbox policy's keys are the locked set, got {locked:?}"
             );
         }
         other => panic!("expected a SettingsSnapshot event, got {other:?}"),

@@ -12,7 +12,12 @@ import {
 } from '../src/renderer/audio/requests';
 import { MicrophoneCaptureError, type CapturedRecording, type MicrophoneCaptureOptions } from '../src/renderer/audio/capture';
 import { validateClientCommand } from '../src/main/validation';
-import { MAX_AUDIO_BASE64_LENGTH } from '../src/shared/audioResponse';
+import {
+  isSendableAudioText,
+  MAX_AUDIO_BASE64_LENGTH,
+  MAX_AUDIO_FAILURE_MESSAGE_LENGTH,
+  MAX_AUDIO_MIME_TYPE_LENGTH,
+} from '../src/shared/audioResponse';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
@@ -362,6 +367,216 @@ test('an op this build does not know is reported unavailable, not silently ignor
 
   assert.equal(result.type === 'failed' ? result.kind : null, 'unavailable');
   assert.match(result.type === 'failed' ? result.message : '', /record_video/);
+});
+
+// ---------------------------------------------------------------------------
+// EVERY value the gate rejects, swept — not the ones this author imagined.
+//
+// The gate-survival test below enumerates scenarios: an empty message, a
+// 200 000-character message, a missing mime type. That is a test of the bounds
+// its author thought of, and it missed a real one — a NUL in a `DOMException`
+// message reaches `describe()` untouched, and `main/validation.ts`'s `string()`
+// refuses any string containing `'\0'`. The response is dropped at the gate,
+// nothing reaches the engine, and the call parks for its whole deadline.
+//
+// So this block sweeps the input space mechanically instead: every C0 control
+// character and DEL, in both string fields, plus every numeric and base64
+// shape the validator can refuse. The invariant is one sentence — whatever
+// `serviceAudioOp` returns, `validateClientCommand` accepts — and it is
+// asserted over generated inputs rather than chosen ones.
+// ---------------------------------------------------------------------------
+
+/** Every code point `main/validation.ts` could plausibly refuse inside a string. */
+const CONTROL_CODE_POINTS = [...Array.from({ length: 0x20 }, (_unused, index) => index), 0x7f];
+
+function assertGateAccepts(result: AudioResultDto, why: string): void {
+  assert.doesNotThrow(
+    () => validateClientCommand({ type: 'audio_response', request_id: 6, result }),
+    `${why}: a response the gate rejects never reaches the engine, which then parks for its full deadline`,
+  );
+}
+
+test('a failure message survives the gate whatever control character the error carries', async () => {
+  for (const codePoint of CONTROL_CODE_POINTS) {
+    const character = String.fromCharCode(codePoint);
+    const h = harness();
+    h.synthesisError.value = new Error(`speech synthesis failed${character}mid-utterance`);
+
+    const result = await serviceAudioOp({ type: 'synthesize', text: 'hello' }, h.deps);
+
+    assert.equal(result.type, 'failed', `U+${codePoint.toString(16).padStart(4, '0')} must still produce a failure`);
+    assertGateAccepts(result, `a message containing U+${codePoint.toString(16).padStart(4, '0')}`);
+  }
+});
+
+test('the control-character sweep can actually fail', () => {
+  // If the gate tolerated a NUL, every assertion in the sweep above would
+  // prove nothing. This is the specific value the review reproduced.
+  assert.throws(
+    () => validateClientCommand({
+      type: 'audio_response',
+      request_id: 6,
+      result: { type: 'failed', kind: 'other', message: `bad thing${String.fromCharCode(0)}happened` },
+    }),
+    /invalid audio error message/,
+  );
+});
+
+test('the sanitized message still says what actually went wrong', async () => {
+  // The A/B for the sweep: sanitizing must not be achieved by discarding the
+  // message. An error the user can act on has to survive the scrub.
+  const h = harness();
+  h.synthesisError.value = new Error(`speech synthesis failed${String.fromCharCode(0)}: voice unavailable`);
+
+  const result = await serviceAudioOp({ type: 'synthesize', text: 'hello' }, h.deps);
+
+  const message = result.type === 'failed' ? result.message : '';
+  assert.match(message, /speech synthesis failed/);
+  assert.match(message, /voice unavailable/);
+  assert.ok(!message.includes(String.fromCharCode(0)), 'the NUL itself must be gone');
+});
+
+test('a recorder reporting an unusable mime type fails instead of stalling', async () => {
+  // Unlike the message, a mime type is a REPORTED FACT - `capture.ts` insists
+  // it is never invented, and it travels verbatim into
+  // `VoiceRecording.mime_type`. So an unusable one is reported as a failure
+  // rather than scrubbed into something the recorder never said.
+  //
+  // Swept over every control code point rather than a chosen few, because a
+  // chosen few is how this was got wrong TWICE: the first version quoted the
+  // offending mime type into the failure message with `JSON.stringify`, which
+  // escapes U+0000-U+001F but NOT U+007F - so a DEL in a mime type produced a
+  // failure message the gate then refused, and the stall came back one layer
+  // up from where it was fixed.
+  const mimeTypes = [
+    ...CONTROL_CODE_POINTS.map((codePoint) => `audio/webm${String.fromCharCode(codePoint)};codecs=opus`),
+    '',
+    'x'.repeat(MAX_AUDIO_MIME_TYPE_LENGTH + 1),
+  ];
+  for (const mimeType of mimeTypes) {
+    const h = harness();
+    h.recorder.recording = true;
+    h.recorder.clip = { audioBase64: 'AAEC', mimeType };
+
+    const result = await serviceAudioOp({ type: 'stop_recording' }, h.deps);
+
+    // The expectation is DERIVED from the same rule the gate applies, not
+    // chosen: a mime type the gate would refuse must become a failure, and
+    // one it accepts must be delivered verbatim (a tab is silly but legal,
+    // and `capture.ts` reports what the recorder actually used - inventing a
+    // "cleaner" mime type would be the dishonesty that file forbids).
+    if (isSendableAudioText(mimeType, MAX_AUDIO_MIME_TYPE_LENGTH)) {
+      assert.equal(result.type, 'recording', `mime type ${JSON.stringify(mimeType)} is legal and must be delivered`);
+      assert.equal(result.type === 'recording' ? result.mime_type : null, mimeType, 'delivered verbatim, never rewritten');
+    } else {
+      assert.equal(result.type, 'failed', `mime type ${JSON.stringify(mimeType)} must be reported, not sent`);
+    }
+    assertGateAccepts(result, `a recorder reporting mime type ${JSON.stringify(mimeType)}`);
+  }
+
+  // Independent anchors, so the derived branch above cannot be vacuous.
+  for (const unusable of ['', 'x'.repeat(MAX_AUDIO_MIME_TYPE_LENGTH + 1), `audio/webm${String.fromCharCode(0)}`]) {
+    const h = harness();
+    h.recorder.recording = true;
+    h.recorder.clip = { audioBase64: 'AAEC', mimeType: unusable };
+    const result = await serviceAudioOp({ type: 'stop_recording' }, h.deps);
+    assert.equal(result.type, 'failed', `${JSON.stringify(unusable)} must be reported by name, not by a derived rule`);
+  }
+});
+
+test('no failure this module can build is refusable by the gate, whatever text it quotes', async () => {
+  // The invariant stated once, at the level it actually has to hold: every
+  // `failed(...)` this module constructs must be sendable, no matter which
+  // call site built the message or what it interpolated. Sanitizing at one
+  // input path (`describe`) left the mime-type path exposed; sanitizing in
+  // the constructor cannot.
+  for (const codePoint of CONTROL_CODE_POINTS) {
+    const character = String.fromCharCode(codePoint);
+    for (const arrange of [
+      (h: Harness) => { h.recorder.recording = true; h.recorder.clip = { audioBase64: 'AAEC', mimeType: `audio/webm${character}` }; },
+      (h: Harness) => { h.recorder.recording = true; h.recorder.clip = { audioBase64: `AA${character}=`, mimeType: 'audio/webm' }; },
+      (h: Harness) => { h.recorder.startError = new Error(`denied${character}by policy`); },
+      (h: Harness) => { h.synthesisError.value = new Error(`interrupted${character}mid-utterance`); },
+    ]) {
+      for (const op of [
+        { type: 'stop_recording' } as const,
+        { type: 'start_recording', sample_rate_hz: 16_000, format: 'webm' } as const,
+        { type: 'synthesize', text: 'hello' } as const,
+      ]) {
+        const h = harness();
+        arrange(h);
+        const result = await serviceAudioOp(op, h.deps);
+        assertGateAccepts(result, `U+${codePoint.toString(16).padStart(4, '0')} through ${op.type}`);
+      }
+    }
+  }
+});
+
+test('a good mime type is still delivered untouched', async () => {
+  const h = harness();
+  h.recorder.recording = true;
+  h.recorder.clip = { audioBase64: 'AAEC', mimeType: 'audio/webm;codecs=opus' };
+
+  const result = await serviceAudioOp({ type: 'stop_recording' }, h.deps);
+
+  assert.deepEqual(result, { type: 'recording', audio_base64: 'AAEC', mime_type: 'audio/webm;codecs=opus' });
+});
+
+test('a synthesizer reporting an impossible sample rate fails instead of stalling', async () => {
+  // Not a character class at all — found by asking the same question of every
+  // field the validator checks, rather than only the ones the review named.
+  // `integer()` refuses a fractional, negative, NaN or out-of-range value.
+  for (const sampleRateHz of [44100.5, -1, Number.NaN, Number.POSITIVE_INFINITY, 1e12]) {
+    const h = harness();
+    h.deps = { ...h.deps, synthesize: async () => ({ pcmBase64: '', sampleRateHz }) };
+
+    const result = await serviceAudioOp({ type: 'synthesize', text: 'hello' }, h.deps);
+
+    assert.equal(result.type, 'failed', `sample rate ${sampleRateHz} must be reported, not sent`);
+    assertGateAccepts(result, `a synthesizer reporting sample rate ${sampleRateHz}`);
+  }
+});
+
+test('a malformed base64 payload fails instead of stalling', async () => {
+  for (const audioBase64 of ['not base64!', 'AAE', 'AA=A']) {
+    const h = harness();
+    h.recorder.recording = true;
+    h.recorder.clip = { audioBase64, mimeType: 'audio/webm' };
+
+    const result = await serviceAudioOp({ type: 'stop_recording' }, h.deps);
+
+    assert.equal(result.type, 'failed', `base64 ${JSON.stringify(audioBase64)} must be reported, not sent`);
+    assertGateAccepts(result, `a recorder producing base64 ${JSON.stringify(audioBase64)}`);
+  }
+});
+
+test('a non-boolean recording flag still answers a shape the gate accepts', async () => {
+  const h = harness();
+  h.recorder.isRecording = (() => 'yes') as unknown as () => boolean;
+
+  const result = await serviceAudioOp({ type: 'is_recording' }, h.deps);
+
+  assertGateAccepts(result, 'a recorder reporting a non-boolean state');
+});
+
+test('the message bound and the gate bound are the same number', () => {
+  // `describe()` truncates to `MAX_AUDIO_FAILURE_MESSAGE_LENGTH`; the gate
+  // refuses anything longer. If those ever came from two constants, the
+  // symptom would be the stall again.
+  assert.equal(typeof MAX_AUDIO_FAILURE_MESSAGE_LENGTH, 'number');
+  assert.throws(
+    () => validateClientCommand({
+      type: 'audio_response',
+      request_id: 6,
+      result: { type: 'failed', kind: 'other', message: 'x'.repeat(MAX_AUDIO_FAILURE_MESSAGE_LENGTH + 1) },
+    }),
+    /invalid audio error message/,
+  );
+  assert.doesNotThrow(() => validateClientCommand({
+    type: 'audio_response',
+    request_id: 6,
+    result: { type: 'failed', kind: 'other', message: 'x'.repeat(MAX_AUDIO_FAILURE_MESSAGE_LENGTH) },
+  }));
 });
 
 // ---------------------------------------------------------------------------

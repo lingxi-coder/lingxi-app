@@ -59,7 +59,14 @@
 
 import type { AudioErrorKindDto, AudioOpDto, AudioResultDto, ClientEvent } from '@lingxi/bridge-client';
 
-import { MAX_AUDIO_BASE64_LENGTH, MAX_AUDIO_FAILURE_MESSAGE_LENGTH } from '../../shared/audioResponse.js';
+import {
+  isSendableAudioBase64,
+  isSendableAudioSampleRate,
+  isSendableAudioText,
+  MAX_AUDIO_BASE64_LENGTH,
+  MAX_AUDIO_MIME_TYPE_LENGTH,
+  sanitizeAudioMessage,
+} from '../../shared/audioResponse.js';
 import { MicrophoneCaptureError, type CapturedRecording, type MicrophoneCaptureOptions } from './capture.js';
 import type { SynthesisResult } from './synthesis.js';
 
@@ -131,19 +138,35 @@ function report(onError: AudioFailureReporter | undefined, cause: unknown): void
   }
 }
 
-/** A non-empty, bounded description of an arbitrary thrown value. */
+/**
+ * The text of an arbitrary thrown value. Deliberately does NOT sanitize:
+ * {@link failed} does that for every message, however it was composed, and a
+ * second scrub here would suggest the safety lives at this call site when it
+ * does not.
+ */
 function describe(cause: unknown): string {
-  const raw = cause instanceof Error ? cause.message : String(cause);
-  const trimmed = raw.trim();
-  // The gate rejects an empty message, and `new Error('')` produces one.
-  if (trimmed.length === 0) return 'the desktop client reported an unnamed audio failure';
-  return trimmed.length > MAX_AUDIO_FAILURE_MESSAGE_LENGTH
-    ? `${trimmed.slice(0, MAX_AUDIO_FAILURE_MESSAGE_LENGTH - 1)}…`
-    : trimmed;
+  return cause instanceof Error ? cause.message : String(cause);
 }
 
+/**
+ * Builds a failure. EVERY failure this module reports goes through here, and
+ * the message is sanitized here rather than at the places that compose it.
+ *
+ * That placement is the whole point. The first version of this scrubbed inside
+ * `describe()` — the path that turns a thrown value into text — which left
+ * every other call site free to interpolate raw text into a message. It did:
+ * the unusable-mime-type failure quoted the offending value with
+ * `JSON.stringify`, which escapes U+0000-U+001F but NOT U+007F, so a DEL in a
+ * mime type produced a message the gate refused and the stall reappeared one
+ * layer above where it had just been fixed. Sanitizing in the constructor of
+ * the only failure shape there is means no call site can reintroduce it.
+ */
 function failed(kind: AudioErrorKindDto, message: string): AudioResultDto {
-  return { type: 'failed', kind, message };
+  return {
+    type: 'failed',
+    kind,
+    message: sanitizeAudioMessage(message, 'the desktop client reported an unnamed audio failure'),
+  };
 }
 
 /**
@@ -191,7 +214,10 @@ export async function serviceAudioOp(op: AudioOpDto, deps: AudioRequestDeps): Pr
   switch (op.type) {
     case 'is_recording':
       try {
-        return { type: 'recording_state', recording: deps.recorder.isRecording() };
+        // `Boolean(...)` rather than the raw value: the wire field is a
+        // boolean and the gate refuses anything else, so a recorder returning
+        // a truthy non-boolean would stall rather than answer.
+        return { type: 'recording_state', recording: Boolean(deps.recorder.isRecording()) };
       } catch (cause) {
         return failureFrom(cause, 'other');
       }
@@ -221,14 +247,24 @@ export async function serviceAudioOp(op: AudioOpDto, deps: AudioRequestDeps): Pr
           return failed('not_recording', 'the desktop client is not recording, so there is nothing to stop');
         }
         const recording = await deps.recorder.stop();
-        if (recording.mimeType.trim().length === 0) {
-          // The mime type travels verbatim into `VoiceRecording.mime_type`.
-          // An empty one is rejected by the command gate, which would strand
-          // the engine for 30s — report the broken recorder instead.
-          return failed('other', 'the microphone recorder reported no mime type for the captured clip');
+        // The mime type travels VERBATIM into `VoiceRecording.mime_type`, so
+        // an unusable one is reported rather than scrubbed: `capture.ts`
+        // insists this value is never invented, and rewriting it here would
+        // be inventing it. Anything the gate would refuse - empty, overlong,
+        // a control character - becomes a named failure, not a 30s stall.
+        if (!isSendableAudioText(recording.mimeType, MAX_AUDIO_MIME_TYPE_LENGTH)) {
+          return failed(
+            'other',
+            'the microphone recorder reported an unusable mime type for the captured clip: '
+            + JSON.stringify(recording.mimeType).slice(0, 128),
+          );
         }
-        return oversizePayload(recording.audioBase64, 'captured clip')
-          ?? { type: 'recording', audio_base64: recording.audioBase64, mime_type: recording.mimeType };
+        const oversize = oversizePayload(recording.audioBase64, 'captured clip');
+        if (oversize) return oversize;
+        if (!isSendableAudioBase64(recording.audioBase64)) {
+          return failed('other', 'the microphone recorder produced a clip that is not valid base64');
+        }
+        return { type: 'recording', audio_base64: recording.audioBase64, mime_type: recording.mimeType };
       } catch (cause) {
         return failureFrom(cause, 'other');
       }
@@ -244,8 +280,21 @@ export async function serviceAudioOp(op: AudioOpDto, deps: AudioRequestDeps): Pr
         // `{ pcm_base64: '', sample_rate_hz: 0 }` is a SUCCESS — the
         // "already played in place" convention documented in `synthesis.ts`
         // and on `TextToSpeech::synthesize` in `audio_bridge.rs`.
-        return oversizePayload(result.pcmBase64, 'synthesized audio')
-          ?? { type: 'audio', pcm_base64: result.pcmBase64, sample_rate_hz: result.sampleRateHz };
+        const oversize = oversizePayload(result.pcmBase64, 'synthesized audio');
+        if (oversize) return oversize;
+        // Every field the gate inspects, checked before it can strand the
+        // caller: a fractional, negative or absurd sample rate is refused by
+        // the gate just as firmly as a NUL in a string.
+        if (!isSendableAudioSampleRate(result.sampleRateHz)) {
+          return failed(
+            'synthesis_failed',
+            `the synthesizer reported an unusable sample rate: ${String(result.sampleRateHz)}`,
+          );
+        }
+        if (!isSendableAudioBase64(result.pcmBase64)) {
+          return failed('synthesis_failed', 'the synthesizer produced audio that is not valid base64');
+        }
+        return { type: 'audio', pcm_base64: result.pcmBase64, sample_rate_hz: result.sampleRateHz };
       } catch (cause) {
         return failureFrom(cause, 'synthesis_failed');
       }

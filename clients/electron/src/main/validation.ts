@@ -9,11 +9,13 @@ import type {
 } from '@lingxi/bridge-client';
 import { detectImageMediaType, isSupportedImageMediaType, MAX_IMAGE_ATTACHMENTS, MAX_IMAGE_BYTES } from '../shared/imageInput.js';
 import { ALLOWED_CLIENT_COMMAND_TYPES, ALLOWED_REFRESH_LISTING_KINDS } from '../shared/clientCommands.js';
+import { isBase64 } from '../shared/base64.js';
 import {
-  MAX_AUDIO_BASE64_LENGTH,
+  isSendableAudioBase64,
+  isSendableAudioSampleRate,
+  isSendableAudioText,
   MAX_AUDIO_FAILURE_MESSAGE_LENGTH,
   MAX_AUDIO_MIME_TYPE_LENGTH,
-  MAX_AUDIO_SAMPLE_RATE_HZ,
 } from '../shared/audioResponse.js';
 
 const MAX_PROMPT_LENGTH = 256 * 1024;
@@ -122,7 +124,6 @@ export function validatePrompt(value: unknown): string {
   return value;
 }
 
-const BASE64_PATTERN = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
 const MAX_IMAGE_BASE64_LENGTH = Math.ceil(MAX_IMAGE_BYTES / 3) * 4;
 
 function decodeImageBase64(value: unknown): Uint8Array {
@@ -131,8 +132,11 @@ function decodeImageBase64(value: unknown): Uint8Array {
     || value.length === 0
     || value.length > MAX_IMAGE_BASE64_LENGTH
     || value.startsWith('data:')
-    || value.length % 4 !== 0
-    || !BASE64_PATTERN.test(value)
+    // `isBase64` rather than a grouped regex: the obvious pattern throws
+    // `RangeError: Maximum call stack size exceeded` past ~4 MB, so a 4.5 MB
+    // pasted image used to fail the whole prompt with a stack overflow
+    // instead of being validated. See `shared/base64.ts`.
+    || !isBase64(value)
   ) {
     throw new Error('invalid image base64');
   }
@@ -152,18 +156,27 @@ function decodeImageBase64(value: unknown): Uint8Array {
  *   `audio_bridge.rs`'s `synthesize_treats_empty_pcm_as_played_in_place_not_a_failure`).
  *   `string()` rejects empty strings, so this cannot reuse it.
  * - A clip may be tens of megabytes; round-tripping it through `Buffer` just
- *   to compare it with itself would double the copy for no extra safety that
- *   the pattern below does not already give.
+ *   to compare it with itself would double the copy for no extra safety.
+ *
+ * The RULE itself lives in `shared/audioResponse.ts`, because the renderer
+ * has to obey the same one — see that file's header for why a second
+ * statement of it here would reintroduce a stall rather than a validation
+ * error. Same for {@link audioText} and {@link audioSampleRate} below.
  */
 function audioBase64(value: unknown, name: string): string {
-  if (
-    typeof value !== 'string'
-    || value.length > MAX_AUDIO_BASE64_LENGTH
-    || value.length % 4 !== 0
-    || !BASE64_PATTERN.test(value)
-  ) {
-    throw new Error(`invalid ${name}`);
-  }
+  if (!isSendableAudioBase64(value)) throw new Error(`invalid ${name}`);
+  return value;
+}
+
+/** A wire string field of an audio result. */
+function audioText(value: unknown, maxLength: number, name: string): string {
+  if (!isSendableAudioText(value, maxLength)) throw new Error(`invalid ${name}`);
+  return value;
+}
+
+/** A sample rate. `0` is legal — it is half of the played-in-place pair. */
+function audioSampleRate(value: unknown): number {
+  if (!isSendableAudioSampleRate(value)) throw new Error('invalid audio sample rate');
   return value;
 }
 
@@ -201,7 +214,7 @@ function validateAudioResult(value: unknown): AudioResultDto {
         // The mime type the recorder actually used. It travels verbatim into
         // `VoiceRecording.mime_type`, so a wrong value is a lie that reaches
         // whatever decodes the bytes — bounded here, never rewritten.
-        mime_type: string(input['mime_type'], 'audio mime type', MAX_AUDIO_MIME_TYPE_LENGTH),
+        mime_type: audioText(input['mime_type'], MAX_AUDIO_MIME_TYPE_LENGTH, 'audio mime type'),
       };
     case 'audio':
       exactKeys(input, ['type', 'pcm_base64', 'sample_rate_hz']);
@@ -209,14 +222,14 @@ function validateAudioResult(value: unknown): AudioResultDto {
         type,
         pcm_base64: audioBase64(input['pcm_base64'], 'audio pcm base64'),
         // `0` is legal, and required: it is half of the played-in-place pair.
-        sample_rate_hz: integer(input['sample_rate_hz'], 'audio sample rate', 0, MAX_AUDIO_SAMPLE_RATE_HZ),
+        sample_rate_hz: audioSampleRate(input['sample_rate_hz']),
       };
     case 'failed':
       exactKeys(input, ['type', 'kind', 'message']);
       return {
         type,
         kind: enumValue(input['kind'], 'audio error kind', AUDIO_ERROR_KINDS),
-        message: string(input['message'], 'audio error message', MAX_AUDIO_FAILURE_MESSAGE_LENGTH),
+        message: audioText(input['message'], MAX_AUDIO_FAILURE_MESSAGE_LENGTH, 'audio error message'),
       };
     default:
       throw new Error('invalid audio result');

@@ -30,12 +30,27 @@
 //!    `MCP_PROTOCOL_NEGOTIATION=auto` is NOT denylistable — the guard reads
 //!    `h.mode`, and `h` is the gated switch's result alone.
 //!
-//! `claudeai-proxy` and `ccr-proxy` are two of the oracle's negotiable labels
-//! that this port has no transport for at all (the claude.ai connector
-//! surface and Claude-Code-Router proxying are both explicit non-goals — see
-//! the batch brief's out-of-scope list) — their branches are kept, unreached,
+//! `ccr-proxy` is one of the oracle's negotiable labels this port has no
+//! transport for at all (Claude-Code-Router proxying is an explicit non-goal
+//! — see the batch brief's out-of-scope list); its branch is kept, unreached,
 //! for byte-exact parity with `Kr`/the gated switch, exactly like the sibling
 //! `negotiation.rs`'s `_ => 401` fallback arm.
+//!
+//! ⚠️ KNOWN DIVERGENCE — `claudeai-proxy` is NOT in that category. Oracle
+//! `Wr` (@182281901) labels the CONFIG type
+//! (`case"claudeai-proxy":return"claudeai-proxy"`), but
+//! `json_config::build_entry` dials such a server as
+//! [`McpTransportSpec::Http`], which erases the discriminator, so
+//! [`transport_label`] returns `"http"` and [`gated_mode`] consults
+//! [`FLAG_HTTP`] instead of [`FLAG_CLAUDEAI`] — the `claudeai-proxy` arm of
+//! that switch is therefore dead. Latent today on two counts: `telemetry::
+//! flag_bool` defaults `false` with no flag fetcher wired (so both arms
+//! resolve `Legacy`), and the resolved mode is not yet consumed by the
+//! connect flow at all. `Kr` (`env_auto_eligible`) lists BOTH labels, so an
+//! explicit `MCP_PROTOCOL_NEGOTIATION=auto` is unaffected either way. Fixing
+//! it needs the `claudeai-proxy` discriminator carried on
+//! [`McpTransportSpec`] (or on `McpServerConfig`) — a cross-crate change out
+//! of scope for this batch; reported, not fixed.
 //!
 //! Downstream of the resolved mode, the oracle also gates `skills-capable` /
 //! `channel-capable` / `live-connection` off the NEGOTIATED protocol
@@ -57,8 +72,11 @@ use traits::{McpTransportKind, McpTransportSpec};
 
 /// `tengu_mcp_protocol_negotiation_http` — default off.
 const FLAG_HTTP: &str = "tengu_mcp_protocol_negotiation_http";
-/// `tengu_mcp_protocol_negotiation_claudeai` — default off. Unreached: no
-/// `claudeai-proxy` transport exists in this port.
+/// `tengu_mcp_protocol_negotiation_claudeai` — default off. Currently
+/// UNREACHED, but not because the transport is absent: a `claudeai-proxy`
+/// server loads and dials as [`McpTransportSpec::Http`], so
+/// [`transport_label`] labels it `"http"` and [`FLAG_HTTP`] gates it. See the
+/// module-level KNOWN DIVERGENCE note.
 const FLAG_CLAUDEAI: &str = "tengu_mcp_protocol_negotiation_claudeai";
 /// `tengu_mcp_protocol_negotiation_ccr` — default off. Unreached: no
 /// `ccr-proxy` transport exists in this port.
@@ -130,7 +148,9 @@ fn parse_env_mode(raw: Option<&str>) -> (Option<EnvMode>, Option<String>) {
 
 /// `Kr` — labels an explicit `MCP_PROTOCOL_NEGOTIATION=auto` can actually
 /// engage for. `claudeai-proxy`/`ccr-proxy` are kept for parity; unreached in
-/// this port (see module docs).
+/// this port (see module docs). Harmless for `claudeai-proxy`: it and the
+/// `"http"` label this port hands it instead are BOTH in `Kr`, so the
+/// env-var path lands on the same mode either way.
 fn env_auto_eligible(label: &str) -> bool {
     matches!(label, "http" | "claudeai-proxy" | "ccr-proxy" | "stdio")
 }
@@ -171,6 +191,9 @@ fn gated_mode(label: &str, base_timeout_ms: u64) -> NegotiationMode {
 /// here — no `ccr-proxy` config concept exists in [`McpTransportSpec`] — so
 /// `Http` always maps to `"http"`, never `"ccr-proxy"`; kept as a documented
 /// simplification, not a silent gap (see module docs).
+///
+/// ⚠️ `Http` ALSO swallows `claudeai-proxy`, which the oracle labels
+/// separately — see the module-level KNOWN DIVERGENCE note.
 fn transport_label(kind: McpTransportKind) -> &'static str {
     match kind {
         McpTransportKind::InProcess => "in-process",

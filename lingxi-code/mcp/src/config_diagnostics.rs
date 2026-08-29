@@ -526,7 +526,17 @@ fn validation_issues(entry: &Value, ty: &str) -> Vec<String> {
             )),
         },
     }
-    if ty != "stdio" {
+    // `headers: De(i(),i()).optional()` is declared by `OAn`/`sGt`/`LAn`
+    // only. `fYe` (stdio) does not declare it — nor does `NAn`
+    // (claudeai-proxy, @154585377), whose keys are exactly
+    // `type,url,id,displayName,iconUrl,timeout,alwaysLoad,toolPermissions,
+    // stateless,cachedInitResponse,discoverSupport,cachedDiscoverResponse,
+    // eligible,ineligibleReason,enterpriseManaged`. `f` (@154568943) is a
+    // catchall-free `z.object`, so a malformed `headers` on either of those
+    // two is STRIPPED, not reported. Keeping the check for `claudeai-proxy`
+    // made this warn about an entry
+    // `json_config::strip_to_claudeai_proxy_schema` now loads.
+    if !matches!(ty, "stdio" | "claudeai-proxy") {
         if let Some(headers) = object.get("headers") {
             match headers {
                 Value::Object(values) => {
@@ -636,6 +646,14 @@ fn collect_whitespace_fields(entry: &Value, ty: &str) -> Vec<String> {
 /// claude `Osg` — the env-var references left unresolved after expanding the
 /// fields Osg expands (stdio: command/args/env values; sse/http/ws: url/headers
 /// values; other types expand nothing). Deduped, first-seen order (`Fo`).
+///
+/// `streamable-http` belongs to the url/headers family even though `Osg`
+/// (`fAn` @160896200) has no `case "streamable-http"`: it runs on the PARSED
+/// entry (`xqe` @160909118: `let fe=me.data; … ge=r?fAn(fe):void 0`) and
+/// `sGt` (@154584848) declares `type: ie(["http","streamable-http"])
+/// .transform(()=>"http")`, so a `streamable-http` entry reaches `fAn` already
+/// retyped as `"http"` and DOES expand. `ty` here is the RAW config string
+/// (pre-transform), so the alias must be listed explicitly.
 fn collect_missing_env_vars(entry: &Value, ty: &str) -> Vec<String> {
     let mut all: Vec<String> = Vec::new();
     let push = |s: &str, all: &mut Vec<String>| {
@@ -661,7 +679,7 @@ fn collect_missing_env_vars(entry: &Value, ty: &str) -> Vec<String> {
                 }
             }
         }
-        "sse" | "http" | "ws" => {
+        "sse" | "http" | "streamable-http" | "ws" => {
             if let Some(u) = entry.get("url").and_then(Value::as_str) {
                 push(u, &mut all);
             }
@@ -673,7 +691,8 @@ fn collect_missing_env_vars(entry: &Value, ty: &str) -> Vec<String> {
                 }
             }
         }
-        // sdk / claudeai-proxy / streamable-http / ide → Osg expands nothing.
+        // sdk / claudeai-proxy / ide → `fAn` passes the entry through
+        // untouched (`case"claudeai-proxy":u=e;break`), so Osg expands nothing.
         _ => {}
     }
     // `Fo` — dedup preserving first-seen order.
@@ -922,6 +941,59 @@ mod tests {
              url: expected string, received undefined; \
              id: expected string, received undefined"
         );
+    }
+
+    /// `NAn` (@154585377) declares no `headers` key and `f` (@154568943) is a
+    /// catchall-free `z.object`, so a malformed `headers` on a
+    /// `claudeai-proxy` entry is STRIPPED — the oracle loads the server and
+    /// says nothing. The shared post-match `headers` check ran for every
+    /// non-`stdio` type, so the port warned about (and, in the loader,
+    /// dropped) an entry claude-code keeps. `sse`/`http`/`ws`, whose
+    /// `OAn`/`sGt`/`LAn` DO declare `headers: De(i(),i()).optional()`, are the
+    /// positive control.
+    #[test]
+    fn claudeai_proxy_headers_are_stripped_not_validated() {
+        let c = json!({"mcpServers":{"p":{
+            "type":"claudeai-proxy","url":"https://x.test","id":"c1","headers":"nope"
+        }}});
+        assert!(
+            only(&c).is_empty(),
+            "`NAn` has no `headers`: {:?}",
+            only(&c)
+        );
+        // Positive control: the same malformed value under `http` IS reported.
+        let c = json!({"mcpServers":{"h":{
+            "type":"http","url":"https://x.test","headers":"nope"
+        }}});
+        let w = only(&c);
+        assert_eq!(
+            w[0].message,
+            "Skipped \u{2014} invalid MCP server config for \"h\": headers: expected record, received string"
+        );
+    }
+
+    /// `Osg`/`fAn` (@160896200) has no `case "streamable-http"`, but it runs
+    /// on the PARSED entry (`xqe` @160909118: `let fe=me.data; …
+    /// ge=r?fAn(fe):void 0`) and `sGt` (@154584848) declares
+    /// `type: ie(["http","streamable-http"]).transform(()=>"http")` — so a
+    /// `streamable-http` entry arrives already retyped as `"http"`, expands,
+    /// and `M(U,Pe)` (@160910700) reports its missing vars. `ty` here is the
+    /// RAW string, so the alias was falling into the expands-nothing arm and
+    /// the warning vanished.
+    #[test]
+    fn streamable_http_reports_missing_env_vars_like_http() {
+        let expected = "Missing environment variables: LINGXI_DIAG_UNSET_SHTTP";
+        for ty in ["streamable-http", "http"] {
+            let c = json!({"mcpServers":{"m":{
+                "type": ty, "url":"https://${LINGXI_DIAG_UNSET_SHTTP}.example/mcp"
+            }}});
+            let w = only(&c);
+            assert_eq!(
+                w.iter().map(|x| x.message.as_str()).collect::<Vec<_>>(),
+                vec![expected],
+                "type {ty:?} must report the same missing var as its `sGt` twin"
+            );
+        }
     }
 
     #[test]

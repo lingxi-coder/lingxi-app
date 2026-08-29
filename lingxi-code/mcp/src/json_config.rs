@@ -153,8 +153,95 @@ struct McpJsonEntry {
     /// everywhere else (mirrored here: only the claudeai-proxy branch reads
     /// it). The claude.ai connector surface is out of scope, so the value
     /// itself is validated for presence and otherwise unused.
+    ///
+    /// Held as OPAQUE JSON, not `Option<String>`: a serde-declared field is
+    /// type-checked for EVERY `type`, whereas zod strips `id` off every union
+    /// member but `NAn`. `f` (@154568943) is `new BEt({type:"object",shape,
+    /// ...})` with NO `catchall` — contrast its siblings `ot` (`catchall:
+    /// UEt()`, strict) and `un` (`catchall:_e()`, loose) — so
+    /// `{"command":"c","id":7}` parses fine against `fYe` and the stdio
+    /// server LOADS. Typing this `Option<String>` made that entry fail
+    /// `McpJsonEntry::deserialize`, so [`build_entry`] skipped it (and
+    /// `config_diagnostics`, whose `stdio` arm never looks at `id`, stayed
+    /// silent — a loader/diagnostics disagreement), and
+    /// [`server_entry_shape_is_valid`] returned `false`, dropping the WHOLE
+    /// JSON agent. Only the `claudeai-proxy` arm reads it, and it requires a
+    /// `Value::String` there — mirroring `NAn`'s required `i()`.
     #[serde(default)]
-    id: Option<String>,
+    id: Option<serde_json::Value>,
+}
+
+/// The keys oracle `NAn` (@154585377) declares, plus the LingXi-original
+/// `disabled` extension (see [`McpJsonEntry::disabled`]).
+///
+/// `NAn` is built with `f` (@154568943), a plain `z.object` with NO
+/// `catchall` — its siblings `ot`/`un` are the strict/loose factories, and
+/// `NAn` uses neither — so every key NOT listed here is STRIPPED off a
+/// `claudeai-proxy` entry before `me.data` is used: never type-checked, never
+/// carried onto the config. Serde cannot strip per-variant (a declared field
+/// is type-checked for every `type`), so [`strip_to_claudeai_proxy_schema`]
+/// mirrors the strip on the raw value instead.
+const CLAUDEAI_PROXY_SCHEMA_KEYS: &[&str] = &[
+    "type",
+    "url",
+    "id",
+    "displayName",
+    "iconUrl",
+    "timeout",
+    "alwaysLoad",
+    "toolPermissions",
+    "stateless",
+    "cachedInitResponse",
+    "discoverSupport",
+    "cachedDiscoverResponse",
+    "eligible",
+    "ineligibleReason",
+    "enterpriseManaged",
+    // LingXi-original extension, read off the raw entry like every other
+    // transport's — NOT part of `NAn`, but load-bearing for `crate::registry`.
+    "disabled",
+];
+
+/// Mirror `f`'s unknown-key strip for `claudeai-proxy` — the ONE union member
+/// whose schema (`NAn`) diverges wholesale from the shared [`McpJsonEntry`]
+/// shape: it declares no `headers`, no `headersHelper`, no `oauth`, no
+/// `command`/`args`/`env`/`name`, and no `request_timeout_ms`.
+///
+/// Without this the port both (a) DROPS entries the oracle keeps — e.g.
+/// `{"type":"claudeai-proxy","url":"…","id":"c","headers":"nope"}` fails the
+/// `McpHeaders` decode, so the whole entry is skipped where zod strips
+/// `headers` and loads the server — and (b) FORWARDS `headers` /
+/// `headersHelper` / `oauth` onto the dialled `McpTransportSpec::Http`, which
+/// for `headersHelper` means [`crate::registry`] EXECUTES a shell command the
+/// oracle never runs (`crate::headers_helper::resolve_headers_helper_in`).
+///
+/// Every other `type` is returned borrowed and untouched: the same strip is
+/// owed to `stdio`/`sdk`/`sse-ide`/`ws-ide` for `headers`/`name`/… but that
+/// is a separate, pre-existing family (see the batch report), and widening it
+/// here would break the loader↔diagnostics agreement in the other direction.
+fn strip_to_claudeai_proxy_schema(
+    raw: &serde_json::Value,
+) -> std::borrow::Cow<'_, serde_json::Value> {
+    use std::borrow::Cow;
+    let Some(object) = raw.as_object() else {
+        return Cow::Borrowed(raw);
+    };
+    if object.get("type").and_then(serde_json::Value::as_str) != Some("claudeai-proxy") {
+        return Cow::Borrowed(raw);
+    }
+    if object
+        .keys()
+        .all(|k| CLAUDEAI_PROXY_SCHEMA_KEYS.contains(&k.as_str()))
+    {
+        return Cow::Borrowed(raw);
+    }
+    Cow::Owned(serde_json::Value::Object(
+        object
+            .iter()
+            .filter(|(k, _)| CLAUDEAI_PROXY_SCHEMA_KEYS.contains(&k.as_str()))
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect(),
+    ))
 }
 
 /// Coerce a JSON value to a positive-integer millisecond count, mirroring the
@@ -387,8 +474,12 @@ fn entry_satisfies_schema(entry: &McpJsonEntry, ide_transports_allowed: bool) ->
         // `command`, no `url`.
         Some("sdk") => entry.name.is_some(),
         // `NAn` @154585377: `url:i(),id:i()` — BOTH required, `id` with no
-        // `.optional()` sibling in common with the rest of the union.
-        Some("claudeai-proxy") => entry.url.is_some() && entry.id.is_some(),
+        // `.optional()` sibling in common with the rest of the union. `id` is
+        // held opaque (see the field doc), so the STRING check lives here,
+        // where the schema actually declares it.
+        Some("claudeai-proxy") => {
+            entry.url.is_some() && matches!(entry.id, Some(serde_json::Value::String(_)))
+        }
         // Every remaining remote member declares a required `url: i()`.
         Some(t) if CONFIG_REMOTE_TYPES.contains(&t) => entry.url.is_some(),
         Some(t) if ide_transports_allowed && IDE_ONLY_TYPES.contains(&t) => entry.url.is_some(),
@@ -412,7 +503,7 @@ fn entry_satisfies_schema(entry: &McpJsonEntry, ide_transports_allowed: bool) ->
 /// `sse-ide` entry must not take the whole agent down with it.
 #[must_use]
 pub fn server_entry_shape_is_valid(raw_entry: &serde_json::Value) -> bool {
-    McpJsonEntry::deserialize(raw_entry)
+    McpJsonEntry::deserialize(strip_to_claudeai_proxy_schema(raw_entry).as_ref())
         .map(|e| entry_satisfies_schema(&e, true))
         .unwrap_or(false)
 }
@@ -449,7 +540,12 @@ fn build_entry(
         // Per-entry validation: a shape that fails to deserialize is logged and
         // skipped (TS `safeParse` failure → `logForDebugging` + `continue`),
         // keeping the valid siblings rather than dropping the whole file.
-        let entry: McpJsonEntry = match McpJsonEntry::deserialize(raw_entry) {
+        // `f` strips every key the selected union member does not declare
+        // BEFORE `me.data` is used; serde cannot do that per-variant, so
+        // `claudeai-proxy` gets the strip explicitly (see
+        // [`strip_to_claudeai_proxy_schema`]).
+        let raw_entry = strip_to_claudeai_proxy_schema(raw_entry);
+        let entry: McpJsonEntry = match McpJsonEntry::deserialize(raw_entry.as_ref()) {
             Ok(e) => e,
             Err(e) => {
                 tracing::warn!(
@@ -589,7 +685,23 @@ fn build_entry(
                 );
                 return None;
             };
-            let url = expand_field(&raw_url, &mut missing);
+            // Oracle `fAn` (@160896200) — the expander — switches on the
+            // PARSED entry's `type` and passes `claudeai-proxy` straight
+            // through: `case"claudeai-proxy":u=e;break`. No `${VAR}` is
+            // expanded, no missing-var name is collected, and `r`
+            // (`urlExpandedToEmpty`) stays `false`, so the `url_invalid`
+            // `configError` below can never be stamped for this transport
+            // either. (`sse-ide`/`ws-ide` and `sdk` are passed through by the
+            // same switch — a separate, unassigned §10 finding, left as-is.)
+            // `config_diagnostics::collect_missing_env_vars` already routes
+            // `claudeai-proxy` to its expands-nothing arm, so this also
+            // restores loader↔diagnostics agreement.
+            let expands_env_vars = ty != Some("claudeai-proxy");
+            let url = if expands_env_vars {
+                expand_field(&raw_url, &mut missing)
+            } else {
+                raw_url.clone()
+            };
             // `ey_`'s `urlExpandedToEmpty` = `url.trim() !== "" && expanded
             // .trim() === ""`. A url that was ALREADY blank is not that case:
             // the remote schemas (`cLi` @226761199, `J5n` @226762069) declare
@@ -637,29 +749,37 @@ fn build_entry(
                 // URL + OAuth handling are resolved by the platform layer.
                 // Parsed as Http so the transport chain receives the URL —
                 // the platform recognises the `claudeai-proxy` discriminator
-                // via the `type` tag when it serializes the spec. Out of
-                // scope (claude.ai connector surface): the oracle's `NAn`
-                // schema has no `oauth` field at all, left unvalidated here.
+                // via the `type` tag when it serializes the spec.
                 Some("claudeai-proxy") => {
                     // `NAn` @154585377 declares `id: i()` with NO
                     // `.optional()` — in pointed contrast to `displayName`/
                     // `iconUrl` and the rest of the schema's tail — so an
-                    // entry with no `id` fails `safeParse` and must be
-                    // skipped, the same way a nameless `sdk` entry is
-                    // skipped above. The port has no use for the value
-                    // itself (out of scope); only presence is checked.
-                    if entry.id.is_none() {
+                    // entry with no `id` (or a non-string one) fails
+                    // `safeParse` and must be skipped, the same way a
+                    // nameless `sdk` entry is skipped above. The port has no
+                    // use for the value itself (out of scope); only the
+                    // presence of a STRING is checked.
+                    if !matches!(entry.id, Some(serde_json::Value::String(_))) {
                         tracing::warn!(
                             server = %name,
                             "mcp.json: claudeai-proxy server is missing the required \"id\"; skipping entry"
                         );
                         return None;
                     }
+                    // `NAn` declares NO `headers`, NO `headersHelper` and NO
+                    // `oauth`, so `f` strips all three: they never reach
+                    // `me.data` and can never reach the dialled transport.
+                    // [`strip_to_claudeai_proxy_schema`] already removed them
+                    // from the raw entry (so `headers`/`headers_helper` here
+                    // are provably empty), but spell the intent out — the
+                    // `headersHelper` leak in particular made
+                    // [`crate::registry`] EXECUTE a command the oracle never
+                    // runs.
                     McpTransportSpec::Http {
                         url,
-                        headers,
-                        headers_helper,
-                        oauth: entry.oauth,
+                        headers: McpHeaders::default(),
+                        headers_helper: None,
+                        oauth: None,
                     }
                 }
                 // Reachable ONLY on the plugin `.mcp.json` layer
@@ -1173,22 +1293,31 @@ mod tests {
             "websocket",
             "bogus",
         ] {
-            let entry = serde_json::json!({
-                "type": ty, "url": "https://x.test/mcp", "command": "c", "name": "n",
-                "id": "conn-1"
-            });
-            let loader_kept =
-                build_server_from_json_entry("srv", &entry, ConfigScope::Project).is_some();
-            let diagnostics_kept = crate::config_diagnostics::collect_mcp_config_warnings(
-                &serde_json::json!({ "mcpServers": { "srv": entry } }),
-                ConfigScope::Project,
-                None,
-            )
-            .is_empty();
-            assert_eq!(
-                loader_kept, diagnostics_kept,
-                "type {ty:?}: loader kept={loader_kept} but diagnostics silent={diagnostics_kept}"
-            );
+            // Sweep BOTH an `id` the `claudeai-proxy` arm accepts and one it
+            // rejects. Pinning only the string spelling let a shared
+            // `id: Option<String>` field silently narrow every OTHER type's
+            // acceptance: the loader dropped `{"command":"c","id":7}` (serde
+            // type-checks a declared field for every `type`, where zod's
+            // catchall-free `f` strips it) while the `stdio` arm of
+            // `validation_issues`, which never looks at `id`, stayed silent.
+            for id in [serde_json::json!("conn-1"), serde_json::json!(7)] {
+                let entry = serde_json::json!({
+                    "type": ty, "url": "https://x.test/mcp", "command": "c", "name": "n",
+                    "id": id
+                });
+                let loader_kept =
+                    build_server_from_json_entry("srv", &entry, ConfigScope::Project).is_some();
+                let diagnostics_kept = crate::config_diagnostics::collect_mcp_config_warnings(
+                    &serde_json::json!({ "mcpServers": { "srv": entry.clone() } }),
+                    ConfigScope::Project,
+                    None,
+                )
+                .is_empty();
+                assert_eq!(
+                    loader_kept, diagnostics_kept,
+                    "{entry}: loader kept={loader_kept} but diagnostics silent={diagnostics_kept}"
+                );
+            }
         }
     }
 
@@ -1431,6 +1560,136 @@ mod tests {
         let raw = r#"{"mcpServers":{"r":{"type":"claudeai-proxy","url":"https://x.test","id":"conn-1","timeout":9000,"request_timeout_ms":45000}}}"#;
         let cfgs = parse_mcp_json_string(raw, ConfigScope::User).unwrap();
         assert_eq!(cfgs[0].timeout_ms, Some(9000));
+    }
+
+    /// `id` is declared by `NAn` ALONE. `f` (@154568943) — the factory every
+    /// member of `ZGn`/`KY` is built with — is `new BEt({type:"object",shape,
+    /// ...})` with NO `catchall` (contrast `ot`, `catchall:UEt()`, and `un`,
+    /// `catchall:_e()`), so an `id` of ANY type is STRIPPED off every other
+    /// member and the server loads. Modelling `id` as `Option<String>` on the
+    /// shared [`McpJsonEntry`] type-checked it for every `type` instead:
+    /// `{"command":"c","id":7}` failed `McpJsonEntry::deserialize`, so the
+    /// loader skipped it in total diagnostic silence (the `stdio` arm of
+    /// `validation_issues` never looks at `id`) and
+    /// [`server_entry_shape_is_valid`] returned `false`, which
+    /// `agent::catalog` turns into dropping the WHOLE JSON agent.
+    #[test]
+    fn a_non_string_id_is_stripped_everywhere_but_claudeai_proxy() {
+        for entry in [
+            serde_json::json!({"command": "mcp-memory", "id": 123}),
+            serde_json::json!({"type": "stdio", "command": "c", "id": 123}),
+            serde_json::json!({"type": "http", "url": "https://x.test/mcp", "id": 42}),
+            serde_json::json!({"type": "sse", "url": "https://x.test/sse", "id": [1]}),
+            serde_json::json!({"type": "ws", "url": "wss://x.test", "id": {"a": 1}}),
+            serde_json::json!({"type": "sdk", "name": "n", "id": 7}),
+        ] {
+            assert!(
+                build_server_from_json_entry("srv", &entry, ConfigScope::Project).is_some(),
+                "`f` has no catchall, so a non-string `id` is stripped, not \
+                 type-checked: {entry}"
+            );
+            assert!(
+                server_entry_shape_is_valid(&entry),
+                "the shape validator drops the whole JSON agent on `false`: {entry}"
+            );
+        }
+        // `NAn` is the one member that DECLARES `id: i()`, so there — and only
+        // there — a non-string value really does fail `safeParse`.
+        let proxy = serde_json::json!({
+            "type": "claudeai-proxy", "url": "https://x.test", "id": 7
+        });
+        assert!(build_server_from_json_entry("p", &proxy, ConfigScope::Project).is_none());
+        assert!(!server_entry_shape_is_valid(&proxy));
+    }
+
+    /// `NAn` (@154585377) declares NO `headers`, NO `headersHelper` and NO
+    /// `oauth`, and `f` has no catchall, so all three are STRIPPED off a
+    /// `claudeai-proxy` entry: a malformed one must not drop the server, and
+    /// a well-formed one must not reach the dialled transport. The
+    /// `headersHelper` half is the one with teeth —
+    /// `registry::has_headers_helper` / `resolve_headers_helper_in` EXECUTE
+    /// the string as a shell command on connect.
+    #[test]
+    fn claudeai_proxy_strips_the_keys_nan_does_not_declare() {
+        // (a) A malformed `headers` is stripped, not decoded: the server loads.
+        let malformed = serde_json::json!({
+            "type": "claudeai-proxy", "url": "https://x.test", "id": "c1", "headers": "nope"
+        });
+        assert!(
+            build_server_from_json_entry("p", &malformed, ConfigScope::Project).is_some(),
+            "`NAn` has no `headers` key, so `f` strips it and the server loads"
+        );
+        assert!(server_entry_shape_is_valid(&malformed));
+
+        // (b) Well-formed `headers`/`headersHelper`/`oauth` never reach the spec.
+        let raw = r#"{"mcpServers":{"p":{"type":"claudeai-proxy","url":"https://x.test",
+            "id":"c1","headers":{"X":"y"},"headersHelper":"echo leak",
+            "oauth":{"clientId":"z"}}}}"#;
+        let cfgs = parse_mcp_json_string(raw, ConfigScope::User).unwrap();
+        assert_eq!(cfgs.len(), 1);
+        match &cfgs[0].spec {
+            McpTransportSpec::Http {
+                headers,
+                headers_helper,
+                oauth,
+                ..
+            } => {
+                assert!(headers.is_empty(), "`NAn` declares no `headers`: {headers:?}");
+                assert_eq!(
+                    headers_helper.as_deref(),
+                    None,
+                    "a forwarded `headersHelper` is EXECUTED on connect"
+                );
+                assert!(oauth.is_none(), "`NAn` declares no `oauth`");
+            }
+            other => panic!("claudeai-proxy dials as Http: {other:?}"),
+        }
+        assert!(!crate::headers_helper::has_headers_helper(&cfgs[0].spec));
+    }
+
+    /// Oracle `fAn` (@160896200) passes `claudeai-proxy` through untouched —
+    /// `case"claudeai-proxy":u=e;break` — so no `${VAR}` in `url` is expanded
+    /// and `urlExpandedToEmpty` (`r`) stays `false`, which means the
+    /// `url_invalid` `configError` can never be stamped for this transport.
+    /// `sse`/`http`/`ws` (the `case"sse":case"http":case"ws"` arm) still do
+    /// both — the positive control below.
+    #[test]
+    fn claudeai_proxy_never_expands_env_vars() {
+        // Names unique to this test, so no sibling test can observe them.
+        std::env::set_var("LX_PROXY_EXPAND_PROBE", "real.example");
+        std::env::set_var("LX_PROXY_EMPTY_PROBE", "");
+        let raw = r#"{"mcpServers":{"p":{"type":"claudeai-proxy",
+            "url":"https://${LX_PROXY_EXPAND_PROBE}/mcp","id":"c1"}}}"#;
+        let cfgs = parse_mcp_json_string(raw, ConfigScope::User).unwrap();
+        match &cfgs[0].spec {
+            McpTransportSpec::Http { url, .. } => assert_eq!(
+                url, "https://${LX_PROXY_EXPAND_PROBE}/mcp",
+                "`fAn` does not expand claudeai-proxy"
+            ),
+            other => panic!("{other:?}"),
+        }
+        // Positive control: the same url under `http` DOES expand.
+        let raw = r#"{"mcpServers":{"h":{"type":"http",
+            "url":"https://${LX_PROXY_EXPAND_PROBE}/mcp"}}}"#;
+        let cfgs = parse_mcp_json_string(raw, ConfigScope::User).unwrap();
+        match &cfgs[0].spec {
+            McpTransportSpec::Http { url, .. } => assert_eq!(url, "https://real.example/mcp"),
+            other => panic!("{other:?}"),
+        }
+        // A url that WOULD expand to empty gets no `configError` either.
+        let raw = r#"{"mcpServers":{"p":{"type":"claudeai-proxy",
+            "url":"${LX_PROXY_EMPTY_PROBE}","id":"c1"}}}"#;
+        let cfgs = parse_mcp_json_string(raw, ConfigScope::User).unwrap();
+        assert_eq!(
+            cfgs[0].config_error, None,
+            "`r` stays false for claudeai-proxy, so `Oe=fe` with no configError"
+        );
+        // Positive control: `http` stamps it.
+        let raw = r#"{"mcpServers":{"h":{"type":"http","url":"${LX_PROXY_EMPTY_PROBE}"}}}"#;
+        let cfgs = parse_mcp_json_string(raw, ConfigScope::User).unwrap();
+        assert!(cfgs[0].config_error.is_some());
+        std::env::remove_var("LX_PROXY_EXPAND_PROBE");
+        std::env::remove_var("LX_PROXY_EMPTY_PROBE");
     }
 
     /// Oracle `NAn` @154585377 declares `id: i()` with NO `.optional()` — in

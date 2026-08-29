@@ -95,6 +95,14 @@ function Fixture() {
     removeProject: noopAsyncVoid,
     activateProject: noopAsyncNull,
     setThemePreference: noopAsyncVoid,
+    // `voice` (Task 9 of the desktop-audio-capability plan) joined the
+    // `page-content` scenario's list alongside the Task 18 pages — same
+    // reasoning as the "write-side commands" block below: no scenario here
+    // clicks a voice-preference control yet, but rendering the page reads
+    // `bridge.openSystemSettings`/`setVoicePreferences` off this object, so
+    // they need to exist or selecting "voice" throws through the render.
+    openSystemSettings: noopAsyncVoid,
+    setVoicePreferences: noopAsyncVoid,
     sessionRuntimeStatus: () => undefined,
     // Write-side commands for Task 18's pages — none of these scenarios
     // click a save/add/remove button on them, but they are here so a future

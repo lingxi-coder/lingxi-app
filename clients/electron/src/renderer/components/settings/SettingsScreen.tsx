@@ -19,6 +19,7 @@ import { ProviderCredentials } from './pages/ProviderCredentials';
 import { RawJson } from './pages/RawJson';
 import { Skills } from './pages/Skills';
 import { ToolsAgent } from './pages/ToolsAgent';
+import { Voice } from './pages/Voice';
 import { provenanceLabel, type Provenance } from './rows';
 import { pendingKeys, type SettingsSnapshot } from './useEngineSettings';
 
@@ -186,6 +187,12 @@ function messageFrom(cause: unknown): string {
  * the `permissions` key (see `RawJson.tsx`'s own doc for what was actually
  * investigated there and what still cannot be done without an engine
  * change).
+ *
+ * Task 9 of the desktop-audio-capability plan adds `voice`: the one
+ * `SETTINGS_NAV` entry this task's own predecessors (Tasks 15-19) left
+ * `implemented: false` on purpose, since the page's contents (Tasks 4-8's
+ * voice preferences/capability probe/capture/synthesis modules) did not
+ * exist yet. With this, every page declared in `nav.ts` is implemented.
  */
 // Exported (not just module-private) so a test can assert, statically, that
 // every `implemented: true` `SETTINGS_NAV` entry has a real entry here —
@@ -195,6 +202,7 @@ function messageFrom(cause: unknown): string {
 export const PAGE_CONTENT: Partial<Record<string, ComponentType<PageContentProps>>> = {
   general: General,
   appearance: Appearance,
+  voice: Voice,
   projects: Projects,
   diagnostics: Diagnostics,
   about: About,

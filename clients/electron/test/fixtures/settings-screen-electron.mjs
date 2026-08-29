@@ -65,21 +65,6 @@ async function runPendingBannerScenario(webContents) {
   return { noSnapshot, pending, midTurn, afterRestart, resolved };
 }
 
-async function runPlaceholderScenario(webContents) {
-  await webContents.executeJavaScript('window.__settingsScreenTest.selectPage("voice")');
-  const voice = await webContents.executeJavaScript('window.__settingsScreenTest.state()');
-  // `diagnostics` used to be the "implemented but not wired" example here,
-  // then `permissions` (Task 16 registered diagnostics; Task 18 registers
-  // permissions along with the rest of the 编码 group), then `raw-json`
-  // (registered only in Task 19). Task 19 was the last content page in this
-  // plan, so every `implemented: true` entry in `SETTINGS_NAV` now has a
-  // real `PAGE_CONTENT` component — there is no more honest "implemented
-  // but not wired yet" example left to select here. `voice` (the one
-  // remaining `implemented: false` page) is the only placeholder kind this
-  // scenario can still demonstrate.
-  return { voice };
-}
-
 async function runMalformedSnapshotScenario(webContents) {
   await webContents.executeJavaScript('window.__settingsScreenTest.setMalformedSnapshot()');
   const state = await webContents.executeJavaScript('window.__settingsScreenTest.state()');
@@ -139,7 +124,16 @@ async function runPageContentScenario(webContents) {
   // pages renders real content or the "not wired yet" placeholder. This
   // scenario selects each and reports `placeholderKind`, which is `null`
   // only when a real component is mounted.
-  const ids = ['permissions', 'tools-agent', 'skills', 'mcp', 'hooks', 'plugins', 'raw-json'];
+  //
+  // `voice` joined this list in Task 9 of the desktop-audio-capability
+  // plan. Before that it was the one remaining `implemented: false` page —
+  // a dedicated `placeholder` scenario used to select it and assert
+  // `placeholderKind === 'not-implemented'` here. With `Voice.tsx` landed
+  // there is no more honest `implemented: false` page left to demonstrate
+  // that placeholder kind with, so that scenario was retired; `voice` now
+  // gets the same positive "renders real content" check as every other
+  // page in this list instead.
+  const ids = ['permissions', 'tools-agent', 'skills', 'mcp', 'hooks', 'plugins', 'raw-json', 'voice'];
   const placeholderKinds = {};
   for (const id of ids) {
     await webContents.executeJavaScript(`window.__settingsScreenTest.selectPage(${JSON.stringify(id)})`);
@@ -346,7 +340,6 @@ async function main() {
     const scenario = process.env.LINGXI_SETTINGS_SCREEN_SCENARIO ?? 'layer-switcher';
     const result = scenario === 'project-tabs' ? await runProjectTabsScenario(webContents)
       : scenario === 'pending-banner' ? await runPendingBannerScenario(webContents)
-      : scenario === 'placeholder' ? await runPlaceholderScenario(webContents)
       : scenario === 'malformed-snapshot' ? await runMalformedSnapshotScenario(webContents)
       : scenario === 'session-loading-guard' ? await runSessionLoadingGuardScenario(webContents)
       : scenario === 'restart-error' ? await runRestartErrorScenario(webContents)

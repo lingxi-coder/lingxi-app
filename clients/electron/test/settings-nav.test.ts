@@ -56,13 +56,19 @@ test('search finds nothing for a key no page declares', () => {
   );
 });
 
-test('voice is declared but not yet built; every other page is', () => {
+// Until Task 9 of the desktop-audio-capability plan, `voice` was the one
+// `implemented: false` entry left in `SETTINGS_NAV` — every OTHER page had
+// already been built by Tasks 15-19. `voice` needed the voice preferences/
+// capability-probe/capture/synthesis modules those tasks' own predecessors
+// (Tasks 4-8) built first, which did not exist yet when `nav.ts` was
+// written. With `Voice.tsx` landed, there is no more honest
+// `implemented: false` page left to demonstrate — see
+// `settings-screen.test.mjs`'s `page-content` scenario, which now checks
+// `voice` renders real content the same way it already checks the other
+// fourteen pages.
+test('every declared settings page is implemented', () => {
   for (const page of SETTINGS_NAV) {
-    const expected = page.id !== 'voice';
-    assert.equal(
-      page.implemented, expected,
-      `${page.id}.implemented must be ${expected}`,
-    );
+    assert.equal(page.implemented, true, `${page.id}.implemented must be true`);
   }
 });
 

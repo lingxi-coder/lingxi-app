@@ -149,32 +149,38 @@ test('the settings-focus trap moves focus in on mount, wraps Tab both directions
   assert.equal(afterClose.activeElementId, 'opener', 'closing must restore focus to whatever had it before the dialog mounted');
 });
 
-test('an unimplemented page renders an explicit placeholder, not a blank panel', async () => {
-  const { voice } = await runScenario('placeholder');
-  assert.equal(voice.placeholderKind, 'not-implemented', 'voice is implemented:false and must say so plainly');
-  // Task 19 (raw-json) was the last content page in this plan: every
-  // `implemented: true` entry in `SETTINGS_NAV` now has a real
-  // `PAGE_CONTENT` component, so there is no more honest "implemented but
-  // not wired yet" example left for this scenario to select — see
-  // `all six Task 18 pages...` below (extended to seven) for the positive
-  // check that every one of them actually renders real content.
-});
+// This scenario used to select `voice` (the one remaining `implemented:
+// false` page after Task 19) and assert `placeholderKind === 'not-
+// implemented'`, proving the shell renders an explicit placeholder rather
+// than a blank panel for a declared-but-unbuilt page. Task 9 of the
+// desktop-audio-capability plan built `Voice.tsx`, so `voice` is now
+// `implemented: true` too (pinned by `settings-nav.test.ts`'s "every
+// declared settings page is implemented") — there is no more honest
+// `implemented: false` page left anywhere in `SETTINGS_NAV` for this
+// scenario to demonstrate the `not-implemented` placeholder with, so the
+// scenario and this test were retired rather than kept pointed at a page
+// that no longer proves anything. `voice` now gets the same positive
+// "renders real content, not a placeholder" check as every other page —
+// see `all six Task 18 pages...` below (extended to eight).
 
 test('a malformed settings snapshot surfaces as an error banner instead of throwing through the render', async () => {
   const { state } = await runScenario('malformed-snapshot');
   assert.equal(state.hasSnapshotError, true);
 });
 
-test('all six Task 18 pages plus Task 19\'s raw-json are actually registered in PAGE_CONTENT, not just declared in nav.ts', async () => {
+test('all six Task 18 pages plus Task 19\'s raw-json and Task 9\'s voice are actually registered in PAGE_CONTENT, not just declared in nav.ts', async () => {
   // Task 18 fix round 1, Important: the older registration test only
   // checked `nav.ts`'s `implemented` flag — true before Task 18's diff too,
   // since `nav.ts` was untouched. This checks the thing Task 18 actually
   // added: selecting each page renders real content (`placeholderKind ===
   // null`), not the "not wired yet" placeholder a forgotten `PAGE_CONTENT`
   // entry would silently fall back to. Task 19 extended the same check to
-  // `raw-json`.
+  // `raw-json`; Task 9 of the desktop-audio-capability plan extends it to
+  // `voice` — the actual instrument (not just a source-text guard) that
+  // `Voice.tsx` is reachable and mounted, per that task's own warning that
+  // a wiring check can pass while the code it names stays dead.
   const { placeholderKinds, afterHooksEscapeHatch } = await runScenario('page-content');
-  for (const id of ['permissions', 'tools-agent', 'skills', 'mcp', 'hooks', 'plugins', 'raw-json']) {
+  for (const id of ['permissions', 'tools-agent', 'skills', 'mcp', 'hooks', 'plugins', 'raw-json', 'voice']) {
     assert.equal(placeholderKinds[id], null, `${id} must render real content, not a placeholder`);
   }
   // hooksPageModel().escapeHatch actually drives the button's navigation

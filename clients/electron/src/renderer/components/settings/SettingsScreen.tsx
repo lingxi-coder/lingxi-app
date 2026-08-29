@@ -187,7 +187,12 @@ function messageFrom(cause: unknown): string {
  * investigated there and what still cannot be done without an engine
  * change).
  */
-const PAGE_CONTENT: Partial<Record<string, ComponentType<PageContentProps>>> = {
+// Exported (not just module-private) so a test can assert, statically, that
+// every `implemented: true` `SETTINGS_NAV` entry has a real entry here —
+// `Partial<Record<...>>` would otherwise accept a silently-omitted or
+// typo'd key with no type error, and the only visible symptom would be the
+// `not-wired` placeholder quietly standing in for a page that should exist.
+export const PAGE_CONTENT: Partial<Record<string, ComponentType<PageContentProps>>> = {
   general: General,
   appearance: Appearance,
   projects: Projects,

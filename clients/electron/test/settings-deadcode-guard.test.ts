@@ -29,6 +29,7 @@ test('the mock settings pages are gone', () => {
   assert.deepEqual(hits('SettingsPrivacyPage'), []);
   assert.deepEqual(hits('SettingsCodePage'), []);
   assert.deepEqual(hits('SettingsGeneralPage'), []);
+  assert.deepEqual(hits('SettingsPage'), []);
 });
 
 test('BetaSettings is gone', () => {

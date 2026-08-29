@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { SETTINGS_NAV, searchNav } from '../src/renderer/components/settings/nav';
+import { PAGE_CONTENT } from '../src/renderer/components/settings/SettingsScreen';
 
 test('the nav declares all fifteen pages across four groups', () => {
   assert.equal(SETTINGS_NAV.length, 15);
@@ -61,6 +62,25 @@ test('voice is declared but not yet built; every other page is', () => {
     assert.equal(
       page.implemented, expected,
       `${page.id}.implemented must be ${expected}`,
+    );
+  }
+});
+
+// Task 20 fix round 1, Important: before this, every `implemented: true`
+// page having a `PAGE_CONTENT` entry was true by coincidence — the fourteen
+// ids on each side happened to line up. `PAGE_CONTENT` is a
+// `Partial<Record<string, ...>>`, so a silently-dropped or typo'd key would
+// type-check fine and just fall through to the `not-wired` placeholder at
+// runtime. This pins the correspondence directly: every page this shell
+// claims is built must actually have a component registered for it, so the
+// layer-switcher-over-placeholder state this task closed off cannot come
+// back through a future edit that adds a nav entry (or a `PAGE_CONTENT` key)
+// without its other half.
+test('every implemented nav page has a real PAGE_CONTENT entry — not by coincidence', () => {
+  for (const page of SETTINGS_NAV.filter((p) => p.implemented)) {
+    assert.ok(
+      PAGE_CONTENT[page.id],
+      `${page.id} is implemented:true but has no PAGE_CONTENT component — it would silently fall back to the "not-wired" placeholder`,
     );
   }
 });

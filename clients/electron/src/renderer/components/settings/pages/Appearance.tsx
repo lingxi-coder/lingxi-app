@@ -51,11 +51,13 @@ export function Appearance({ bridge, onTheme }: PageContentProps) {
   return (
     <Card title="外观">
       <Row title="主题" desc="选择浅色或深色外观，或跟随系统设置自动切换。" align="center">
-        {/* Not `primitives.tsx`'s `Segmented`: that file is legacy scaffolding
-            used only by the eight mock settings pages a later task deletes —
-            coupling this page to it would work against the plan it's built
-            to support. This inline three-way pill mirrors the same look
-            `SettingsScreen.tsx`'s own `LayerSwitcher` already uses. */}
+        {/* Not `primitives.tsx`'s `Segmented` — that export is gone (Task 20
+            trimmed the file to just `Toggle`, the one primitive Skills/
+            ToolsAgent/Plugins still import). Local pill, kept in this page
+            rather than pulled from a shared file, since `Toggle` is the only
+            thing left in there and it isn't this control. This inline
+            three-way pill mirrors the same look `SettingsScreen.tsx`'s own
+            `LayerSwitcher` already uses. */}
         <div style={{ display: 'inline-flex', padding: 3, gap: 2, borderRadius: 9, background: t.sidebarBg, border: `0.5px solid ${t.border}` }}>
           {appearanceOptions().map((option) => {
             const active = preference === option.id;

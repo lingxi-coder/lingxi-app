@@ -2,7 +2,17 @@ import { createHash } from 'node:crypto';
 import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, readlinkSync, realpathSync, renameSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, isAbsolute, join, normalize, resolve } from 'node:path';
 
-export const SETTINGS_VERSION = 1 as const;
+import { SETTINGS_VERSION } from '../shared/settings.js';
+import type { PinnedSessionRecord, PublicSettings, SessionRef } from '../shared/settings.js';
+
+export { SETTINGS_VERSION } from '../shared/settings.js';
+export type {
+  PinnedSessionRecord,
+  PublicSettings,
+  SessionPinInput,
+  SessionRef,
+} from '../shared/settings.js';
+
 export const MAX_PROJECTS = 50;
 export const MAX_PINNED_SESSIONS = 100;
 export const MAX_DIAGNOSTICS = 200;
@@ -42,18 +52,6 @@ export interface TrustRecord {
   trustedAt: string;
 }
 
-export interface PinnedSessionRecord {
-  projectPath: string;
-  sessionId: string;
-  title: string;
-  pinnedAt: string;
-}
-
-export interface SessionRef {
-  projectPath: string;
-  sessionId: string;
-}
-
 export interface PersistedSettings {
   version: typeof SETTINGS_VERSION;
   theme?: 'dark' | 'light' | 'system';
@@ -67,27 +65,6 @@ export interface PersistedSettings {
   /** One-time acknowledgement that the user accepted Bypass Permissions mode
    * (oracle `bypassPermissionsModeAccepted`). Persisted so the blocking
    * acceptance dialog is shown ONCE, not on every activation. */
-  bypassPermissionsModeAccepted?: boolean;
-}
-
-export interface PublicSettings {
-  version: typeof SETTINGS_VERSION;
-  theme?: 'dark' | 'light' | 'system';
-  model?: string;
-  apiBaseUrl?: string;
-  activeProject?: string;
-  activeSession?: SessionRef;
-  projects: string[];
-  pinnedSessions: PinnedSessionRecord[];
-  /**
-   * Read-only surface of `PersistedSettings.bypassPermissionsModeAccepted`
-   * (Task 18: the Permissions settings page renders this as a fixed `设备`
-   * row so a person can see whether the one-time Bypass Permissions
-   * acceptance has already happened, without exposing a way to SET it from
-   * here — the only writer stays the blocking acceptance dialog
-   * (`src/main/index.ts`). Omitted (not `false`) when unset, matching every
-   * other optional field here.
-   */
   bypassPermissionsModeAccepted?: boolean;
 }
 

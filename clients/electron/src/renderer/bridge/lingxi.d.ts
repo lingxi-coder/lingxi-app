@@ -9,8 +9,15 @@ import type {
   SessionRowDto,
 } from '@lingxi/bridge-client';
 import type { AllowedClientCommand } from '../../shared/clientCommands.js';
+import type { PinnedSessionRecord, PublicSettings, SessionRef } from '../../shared/settings.js';
 
 export type { AllowedClientCommand } from '../../shared/clientCommands.js';
+export type {
+  PinnedSessionRecord,
+  PublicSettings,
+  SessionPinInput,
+  SessionRef,
+} from '../../shared/settings.js';
 
 export type ConnectionState =
   | { status: 'idle' }
@@ -21,22 +28,6 @@ export type ConnectionState =
   | { status: 'disconnected'; reason?: string }
   | { status: 'error'; message: string };
 
-export interface PublicSettings {
-  version: 1;
-  theme?: 'dark' | 'light' | 'system';
-  model?: string;
-  apiBaseUrl?: string;
-  activeProject?: string;
-  activeSession?: SessionRef;
-  projects: string[];
-  pinnedSessions: PinnedSessionRecord[];
-  /** Device-owned (Electron store), never an engine settings layer — see `host-utils.ts`'s `PublicSettings`. */
-  bypassPermissionsModeAccepted?: boolean;
-}
-export interface SessionRef {
-  projectPath: string;
-  sessionId: string;
-}
 export interface RuntimeEventEnvelope<T = unknown> {
   sessionId: string;
   event: T;
@@ -54,13 +45,6 @@ export interface ProjectSessionCatalogState {
   sessions: SessionRowDto[];
   error?: string;
 }
-export interface PinnedSessionRecord {
-  projectPath: string;
-  sessionId: string;
-  title: string;
-  pinnedAt: string;
-}
-export type SessionPinInput = Omit<PinnedSessionRecord, 'pinnedAt'>;
 export interface WorkspaceMetadata {
   path?: string;
   trusted: boolean;

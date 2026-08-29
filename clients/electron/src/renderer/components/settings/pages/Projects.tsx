@@ -54,6 +54,27 @@ function basename(path: string): string {
   return parts[parts.length - 1] ?? path;
 }
 
+/**
+ * Why 移除 is unavailable for a project, or `null` when it is available.
+ *
+ * The reason has to be VISIBLE text a screen reader can reach, not a native
+ * `title=` tooltip: Chromium does not dispatch the pointer events a native
+ * tooltip needs on a DISABLED control, so the tooltip never appears at all,
+ * and a tooltip is invisible to keyboard and assistive-tech users even on an
+ * enabled one. `SettingsScreen.tsx` already carries this reasoning for the
+ * layer switcher and the restart button; this page had the exact pattern
+ * those two comments describe as wrong, so its reason text — the one thing
+ * that explains why a visibly present button does nothing — never showed.
+ */
+export function removeDisabledReason(activeWork: boolean): string | null {
+  return activeWork ? '该项目有正在运行的会话，无法移除' : null;
+}
+
+/** Element id for {@link removeDisabledReason}'s visible text, so the disabled button can point at it with `aria-describedby`. */
+export function removeDisabledReasonId(projectPath: string): string {
+  return `projects-remove-disabled-${encodeURIComponent(projectPath)}`;
+}
+
 export function Projects({ bridge }: PageContentProps) {
   const t = useT();
   const [busyPath, setBusyPath] = useState<string | null>(null);
@@ -129,6 +150,7 @@ export function Projects({ bridge }: PageContentProps) {
         {rows.map((row) => {
           const busy = busyPath === row.path;
           const activeWork = hasActiveWork(row.path);
+          const removeReason = removeDisabledReason(activeWork);
           return (
             <Row
               key={row.path}
@@ -146,16 +168,25 @@ export function Projects({ bridge }: PageContentProps) {
               }
               desc={row.path}
             >
-              <div style={{ display: 'flex', gap: 7 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
                 {!row.active && (
                   <button type="button" disabled={busy} onClick={() => handleActivate(row.path)} style={ghostButtonStyle(t, busy)}>
                     切换
                   </button>
                 )}
+                {removeReason && (
+                  <span
+                    id={removeDisabledReasonId(row.path)}
+                    data-testid="projects-remove-disabled-reason"
+                    style={{ fontSize: 11, color: t.text4 }}
+                  >
+                    {removeReason}
+                  </span>
+                )}
                 <button
                   type="button"
                   disabled={busy || activeWork}
-                  title={activeWork ? '该项目有正在运行的会话，无法移除' : undefined}
+                  aria-describedby={removeReason ? removeDisabledReasonId(row.path) : undefined}
                   onClick={() => handleRemove(row.path)}
                   style={ghostButtonStyle(t, busy || activeWork, true)}
                 >

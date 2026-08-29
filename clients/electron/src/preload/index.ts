@@ -11,8 +11,15 @@ import type {
 } from '@lingxi/bridge-client';
 import { createRuntimeEventReplayBuffer, type SequencedRuntimeEventEnvelope } from './event-replay.js';
 import type { AllowedClientCommand } from '../shared/clientCommands.js';
+import type { PublicSettings, SessionPinInput, SessionRef } from '../shared/settings.js';
 
 export type { AllowedClientCommand } from '../shared/clientCommands.js';
+export type {
+  PinnedSessionRecord,
+  PublicSettings,
+  SessionPinInput,
+  SessionRef,
+} from '../shared/settings.js';
 
 const CH_SEND_PROMPT = 'lingxi:sendPrompt';
 const CH_APPROVE = 'lingxi:approve';
@@ -59,22 +66,6 @@ export type ConnectionState =
   | { status: 'disconnected'; reason?: string }
   | { status: 'error'; message: string };
 
-export interface PublicSettings {
-  version: 1;
-  theme?: 'dark' | 'light' | 'system';
-  model?: string;
-  apiBaseUrl?: string;
-  activeProject?: string;
-  activeSession?: SessionRef;
-  projects: string[];
-  pinnedSessions: PinnedSessionRecord[];
-}
-
-export interface SessionRef {
-  projectPath: string;
-  sessionId: string;
-}
-
 export interface RuntimeEventEnvelope<T = unknown> {
   sessionId: string;
   event: T;
@@ -93,14 +84,6 @@ export interface ProjectSessionCatalogState {
   sessions: SessionRowDto[];
   error?: string;
 }
-
-export interface PinnedSessionRecord {
-  projectPath: string;
-  sessionId: string;
-  title: string;
-  pinnedAt: string;
-}
-export type SessionPinInput = Omit<PinnedSessionRecord, 'pinnedAt'>;
 
 export interface WorkspaceMetadata {
   path?: string;

@@ -118,15 +118,15 @@ export interface WorkspaceFileSearchResult { files: string[]; truncated: boolean
 
 export type Unsubscribe = () => void;
 
-/** The two macOS System Settings deep links the computer-access TCC panel opens. */
-export type SystemSettingsPane = 'accessibility' | 'screen_recording';
+/** The macOS System Settings deep links this app opens: the computer-access TCC panel's two panes, plus the voice settings page's `microphone` row. */
+export type SystemSettingsPane = 'accessibility' | 'screen_recording' | 'microphone';
 
 export interface LingxiApi {
   platform: NodeJS.Platform;
   isElectron: true;
   bootstrap(): Promise<BootstrapState>;
   settings(): Promise<PublicSettings>;
-  updateSettings(patch: { theme?: 'dark' | 'light' | 'system'; model?: string | null; apiBaseUrl?: string | null }): Promise<PublicSettings>;
+  updateSettings(patch: { theme?: 'dark' | 'light' | 'system'; model?: string | null; apiBaseUrl?: string | null; voice?: unknown }): Promise<PublicSettings>;
   pickWorkspace(): Promise<WorkspaceMetadata | null>;
   setWorkspace(path: string): Promise<WorkspaceMetadata>;
   removeProject(path: string): Promise<BootstrapState>;

@@ -17,7 +17,7 @@ import type {
 import { browserMicrophoneCaptureDeps, MicrophoneCapture } from '../audio/capture';
 import { handleAudioRequestEvent, type AudioRequestDeps } from '../audio/requests';
 import { browserSynthesisDeps, synthesize } from '../audio/synthesis';
-import { defaultVoicePreferences } from '../../shared/voicePreferences';
+import { defaultVoicePreferences, type VoicePreferences } from '../../shared/voicePreferences';
 import {
   appendPendingUserPrompt,
   appendUserPrompt,
@@ -105,6 +105,18 @@ export interface UseBridge {
   setThemePreference(theme: 'dark' | 'light' | 'system'): Promise<void>;
   /** The device-level (Electron store) custom API base URL override — `null` clears it. Distinct from `updateEngineSettings` below, which writes to an engine settings FILE layer. */
   setApiBaseUrl(apiBaseUrl: string | null): Promise<void>;
+  /**
+   * Writes the WHOLE voice-preferences object at once, through the same
+   * device-settings path `setThemePreference`/`setApiBaseUrl` already use
+   * (`host.updateSettings({ voice })` → `SettingsStore.update()` →
+   * `parseVoicePreferences`, Task 4). The voice settings page is the only
+   * caller and always supplies a complete `VoicePreferences`, matching how
+   * both phones persist voice settings (whole-snapshot writes, never a
+   * partial per-field merge) — see `shared/voicePreferences.ts`'s own doc.
+   * Never restarts the bridge: unlike `model`/`apiBaseUrl`, nothing here
+   * changes what the running engine talks to.
+   */
+  setVoicePreferences(voice: VoicePreferences): Promise<void>;
   /**
    * Writes a JSON-object patch into one engine settings file layer via the
    * `update_settings` wire command (`patch_json`; a `null` value in the patch
@@ -1162,6 +1174,11 @@ export function useBridge(): UseBridge {
     try { patchBootstrap({ settings: await host.updateSettings({ apiBaseUrl }) }); } catch (cause) { capture(cause); }
   }, [capture, host, patchBootstrap]);
 
+  const setVoicePreferences = useCallback(async (voice: VoicePreferences) => {
+    if (!host) return;
+    try { patchBootstrap({ settings: await host.updateSettings({ voice }) }); } catch (cause) { capture(cause); }
+  }, [capture, host, patchBootstrap]);
+
   const restartBridge = useCallback(async (requestedSessionId?: string) => {
     const sessionId = requestedSessionId ?? activeSessionIdRef.current;
     const preconditionError = restartBridgePreconditionError(sessionLoadingRef.current, Boolean(host), sessionId);
@@ -1340,6 +1357,7 @@ export function useBridge(): UseBridge {
     clearProviderCredential,
     setThemePreference,
     setApiBaseUrl,
+    setVoicePreferences,
     updateEngineSettings,
     updatePermissionRules,
     setDefaultPermissionMode,

@@ -4,6 +4,7 @@ import { createElement } from 'react';
 import { renderToString } from 'react-dom/server';
 
 import { useBridge, type UseBridge } from '../src/renderer/bridge/useBridge';
+import { defaultVoicePreferences } from '../src/shared/voicePreferences';
 
 /**
  * Whether a failing host IPC call reaches the page that asked for it.
@@ -81,4 +82,29 @@ test('a successful host updateSettings resolves — the A/B for the two rejectio
   });
 
   await bridge.setApiBaseUrl('https://example.test');
+});
+
+test('a rejected host updateSettings reaches the caller for voice preferences too', async () => {
+  // Task 9 (desktop-audio-capability plan): the voice settings page relies
+  // on the exact same rethrow — it has no dedicated inline error row of its
+  // own for a voice-preference write and depends entirely on the shell's
+  // global `<ErrorBanner>` to surface a failed write, which only happens if
+  // `setVoicePreferences` actually rejects.
+  const bridge = bridgeWithHost({
+    updateSettings: async () => { throw new Error('unsupported setting'); },
+  });
+
+  await assert.rejects(
+    () => bridge.setVoicePreferences(defaultVoicePreferences()),
+    /unsupported setting/,
+    'Voice.tsx has no inline error row; if this resolved instead of rejecting, a failed write would be reported nowhere at all',
+  );
+});
+
+test('a successful host updateSettings resolves for voice preferences too', async () => {
+  const bridge = bridgeWithHost({
+    updateSettings: async () => ({ version: 1, projects: [], pinnedSessions: [], voice: defaultVoicePreferences() }),
+  });
+
+  await bridge.setVoicePreferences(defaultVoicePreferences());
 });

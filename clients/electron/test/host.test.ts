@@ -4,7 +4,7 @@ import { mkdtempSync, realpathSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { CH_BRIDGE_RESTART, HostController } from '../src/main/host';
+import { CH_BRIDGE_RESTART, CH_SETTINGS_UPDATE, HostController } from '../src/main/host';
 import { DiagnosticBuffer } from '../src/main/host-utils';
 import { SettingsStore } from '../src/main/settings';
 
@@ -665,4 +665,70 @@ test('host catalog generations keep only the newest deferred response', async ()
   await firstLoad;
 
   assert.equal((host as any).bootstrap().projectCatalogs[projectPath].sessions[0].title, 'new');
+});
+
+test('the settings-update IPC handler accepts a voice patch, normalizes it through the real store, and never restarts the bridge for it', async () => {
+  const userData = mkdtempSync(join(tmpdir(), 'lingxi-settings-update-voice-'));
+  const settings = new SettingsStore(userData);
+  const handlers = new Map<string, (...args: unknown[]) => unknown>();
+  const ipc = {
+    handle: (channel: string, handler: (...args: unknown[]) => unknown) => { handlers.set(channel, handler); },
+    removeHandler: (channel: string) => { handlers.delete(channel); },
+  };
+  let restartCalls = 0;
+  const bridge = {
+    registerIpc: () => undefined,
+    registerWindow: () => undefined,
+    // If a `voice`-only patch ever triggered a restart, this would be
+    // called — `main/host.ts`'s own `restartsBridge` check only looks at
+    // `'model' in patch || 'apiBaseUrl' in patch`, deliberately excluding
+    // `voice` (see its comment: recognition/synthesis read
+    // `bootstrap.settings.voice` fresh on every audio request, so a write
+    // takes effect on the next request with no restart needed).
+    restart: async () => { restartCalls += 1; },
+  };
+  const host = new HostController(settings, bridge as any, new DiagnosticBuffer(), undefined, ipc as any);
+  const frame = { url: 'http://127.0.0.1:4242' };
+  const sender = {
+    mainFrame: frame,
+    isDestroyed: () => false,
+    once: () => undefined,
+    removeListener: () => undefined,
+  };
+  host.registerWindow(sender as any, frame.url);
+  host.registerIpc();
+  const update = handlers.get(CH_SETTINGS_UPDATE);
+  assert.ok(update);
+  const event = { sender, senderFrame: frame };
+
+  try {
+    const result = await Promise.resolve(update!(event, {
+      voice: { schemaVersion: 2, recognitionMode: 'localOnly', language: '  ZH-cn  ', voiceSelection: 'Alex', rate: 99, autoPlayReplies: true },
+    })) as { voice?: { recognitionMode: string; language: string; voiceSelection: string; rate: number; autoPlayReplies: boolean } };
+
+    // Normalized through the REAL `parseVoicePreferences` (Task 4), not
+    // echoed back raw: language is trimmed (case preserved — only an
+    // "auto"-insensitive match is special-cased), `rate` is clamped into
+    // [0.5, 2.0], and the bare voice name gets its `system:` prefix.
+    assert.deepEqual(result.voice, {
+      schemaVersion: 2,
+      recognitionMode: 'localOnly',
+      language: 'ZH-cn',
+      voiceSelection: 'system:Alex',
+      rate: 2.0,
+      autoPlayReplies: true,
+    });
+    assert.deepEqual(settings.getPublic().voice, result.voice, 'the IPC response must reflect what was actually persisted, not an optimistic echo');
+    assert.equal(restartCalls, 0, 'a voice-only patch must never restart the bridge');
+
+    // The allowlist genuinely rejects anything else — `voice` joining it
+    // must not have accidentally opened the gate to arbitrary keys.
+    await assert.rejects(
+      () => Promise.resolve(update!(event, { notARealSetting: true })),
+      /unsupported setting/,
+    );
+  } finally {
+    host.dispose();
+    rmSync(userData, { recursive: true, force: true });
+  }
 });

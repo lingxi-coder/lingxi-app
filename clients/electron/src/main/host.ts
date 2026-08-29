@@ -59,14 +59,17 @@ export const CH_SESSION_NEW = 'lingxi:session:new';
 export const CH_SESSION_OPEN = 'lingxi:session:open';
 
 /**
- * The only two macOS System Settings deep links the `computer` tool's TCC
- * panel ever opens (Accessibility / Screen Recording). A fixed allowlist, not
- * a renderer-supplied URL — `shell.openExternal` must never be handed an
- * arbitrary string from the renderer.
+ * The macOS System Settings deep links this app ever opens: the `computer`
+ * tool's TCC panel (Accessibility / Screen Recording), plus `microphone`
+ * (Task 9 of the desktop-audio-capability plan: the voice settings page's
+ * denied-microphone row). A fixed allowlist, not a renderer-supplied URL —
+ * `shell.openExternal` must never be handed an arbitrary string from the
+ * renderer.
  */
 const SYSTEM_SETTINGS_PANES = {
   accessibility: 'x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility',
   screen_recording: 'x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture',
+  microphone: 'x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone',
 } as const;
 const SESSION_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 export type SystemSettingsPane = keyof typeof SYSTEM_SETTINGS_PANES;
@@ -178,10 +181,15 @@ export class HostController {
       this.assertSender(event);
       if (!patch || typeof patch !== 'object' || Array.isArray(patch)) throw new Error('invalid settings patch');
       const keys = Object.keys(patch);
-      if (keys.some((key) => key !== 'theme' && key !== 'model' && key !== 'apiBaseUrl')) throw new Error('unsupported setting');
+      if (keys.some((key) => key !== 'theme' && key !== 'model' && key !== 'apiBaseUrl' && key !== 'voice')) throw new Error('unsupported setting');
       const restartsBridge = 'model' in patch || 'apiBaseUrl' in patch;
       if (restartsBridge) this.assertNoActiveTurn();
-      const result = this.settings.update(patch as { theme?: 'dark' | 'light' | 'system'; model?: string | null; apiBaseUrl?: string | null });
+      // `voice` never restarts the bridge: recognition/synthesis read
+      // `bootstrap.settings.voice` fresh on every audio request
+      // (`renderer/audio/requests.ts`'s `playback()`), so a write here takes
+      // effect on the NEXT request with no engine restart needed — unlike
+      // `model`/`apiBaseUrl`, which change what the running engine talks to.
+      const result = this.settings.update(patch as { theme?: 'dark' | 'light' | 'system'; model?: string | null; apiBaseUrl?: string | null; voice?: unknown });
       if (restartsBridge) await this.restartIfConfigured();
       return result;
     });

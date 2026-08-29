@@ -87,6 +87,20 @@ struct McpJsonEntry {
     headers_helper: Option<String>,
     #[serde(default)]
     oauth: Option<McpOAuthConfigDto>,
+    /// LingXi-original extension: a per-entry on/off switch checked directly
+    /// on the raw JSON server object. Confirmed ABSENT from every member of
+    /// the oracle's on-disk union (2.1.251 Mach-O @154583724 — none of
+    /// `fYe`/`OAn`/`l`/`d`/`sGt`/`LAn`/`MAn`/`NAn` declare a `disabled` key),
+    /// so a real claude-code `.mcp.json` sharing this field would have it
+    /// silently stripped by zod (schemas here are not `.strict()`) and the
+    /// server would load enabled regardless. Kept anyway: real Claude Code's
+    /// only per-server disable knobs live OUTSIDE `.mcp.json` — the
+    /// `disabledMcpServers` / `disabledMcpjsonServers` project-settings lists
+    /// (see [`crate::server_gate`]) — so this field adds a strictly
+    /// *additional* way to suppress a server from within its own config
+    /// entry; it never makes the port accept something the oracle would
+    /// reject. Do not remove without a replacement — this is load-bearing
+    /// for [`crate::registry`]'s disabled-server handling.
     #[serde(default)]
     disabled: bool,
     /// Per-server `tools/call` timeout in ms. claude-code zod schema
@@ -141,6 +155,54 @@ where
         )),
         other => Ok(other),
     }
+}
+
+/// Validate the `oauth` child, mirroring the oracle's `a()` zod schema
+/// (2.1.251 Mach-O @154583724):
+/// ```text
+/// a = z.object({
+///   clientId: z.string().optional(),
+///   callbackPort: z.number().int().positive().optional(),
+///   authServerMetadataUrl: z.string().url()
+///     .startsWith("https://", {message:"authServerMetadataUrl must use https://"})
+///     .optional(),
+///   scopes: z.string().min(1).optional(),
+///   xaa: z.boolean().optional(),
+/// })
+/// ```
+/// Unlike `role`/`request_timeout_ms` (which use `.catch(void 0)` to
+/// silently discard a bad value), `oauth: a().optional()` has NO `.catch`:
+/// the child schema only short-circuits when the KEY is absent, so a
+/// PRESENT-but-invalid `oauth` object fails the containing entry's whole
+/// `safeParse`, exactly like a malformed `command`/`url`/`headers`. Returns
+/// `None` when the entry must be rejected outright; `Some(oauth)` otherwise
+/// (including `Some(None)` when no `oauth` block was given at all).
+///
+/// `callbackPort` is only checked against `Some(0)` here — a value the oracle
+/// schema also rejects. Ports above `u16::MAX` are schema-valid at the oracle
+/// (`z.number().int().positive()` has no upper bound) but already fail to
+/// deserialize into this port's `McpOAuthConfigDto::callback_port: u16`
+/// (`traits/src/mcp.rs`, owned by another batch) before this function ever
+/// runs — a stricter, not more permissive, divergence, and out of scope for
+/// this fix (changing the DTO's field type is a wire-shape change).
+fn validate_oauth_child(oauth: Option<McpOAuthConfigDto>) -> Option<Option<McpOAuthConfigDto>> {
+    let Some(cfg) = oauth else {
+        return Some(None);
+    };
+    if cfg.callback_port == Some(0) {
+        return None;
+    }
+    if let Some(url) = &cfg.auth_server_metadata_url {
+        if !url.starts_with("https://") || url::Url::parse(url).is_err() {
+            return None;
+        }
+    }
+    if let Some(scopes) = &cfg.scopes {
+        if scopes.is_empty() {
+            return None;
+        }
+    }
+    Some(Some(cfg))
 }
 
 /// Parse a `.mcp.json` payload (raw file contents) into a list of configs.
@@ -280,13 +342,27 @@ pub fn build_server_from_json_entry(
         // claude `configError` (`configErrorReason:"url_invalid"`): set when a
         // remote `url` expands to empty; carried on the config, never fatal.
         let mut config_error: Option<String> = None;
-        let spec = if entry.transport_type.as_deref() == Some("sdk") {
+        // Discriminate by `type` FIRST, mirroring the oracle's
+        // `z.discriminatedUnion("type", [stdio, sse, sse-ide, ws-ide, http,
+        // ws, sdk, claudeai-proxy])` (`KY`, 2.1.251 Mach-O @154583724). An
+        // absent `type` is a VALID "stdio" discriminator — zod's
+        // `getDiscriminator` unwraps `ZodOptional` so `fYe`'s
+        // `type: N("stdio").optional()` registers `[undefined, "stdio"]` —
+        // so a `type`-less entry is validated as stdio and ONLY as stdio,
+        // never guessed from whichever other fields happen to be present.
+        // A `type` value matching none of the union's literals fails the
+        // whole entry. This fixes §12's shape-driven bugs: a bare
+        // `{"url":...}` (no `type`, no `command`) used to fall through to
+        // Http; `{"type":"http","command":"x"}` used to be parsed as Stdio
+        // because the old code checked `command` before `type`;
+        // `{"type":"bogus",...}` and the non-oracle alias `"websocket"` used
+        // to silently default to Http/WebSocket instead of being rejected.
+        let ty = entry.transport_type.as_deref();
+        let is_stdio = matches!(ty, None | Some("stdio"));
+        let spec = if ty == Some("sdk") {
             // Oracle `MAn` @154585319 (v2.1.251 Mach-O, minified `mcp-sdk.js`
             // chunk): `f({type:N("sdk"),name:i(),timeout:o().optional(),
-            // alwaysLoad:q().optional()})` — no `command`, no `url`. Checked
-            // FIRST (ahead of the command/url branches below) so this
-            // oracle-valid shape is never routed into the "missing transport"
-            // rejection just because it lacks both fields.
+            // alwaysLoad:q().optional()})` — no `command`, no `url`.
             //
             // The schema's own `name` is always the entry's map key — every
             // construction site in the oracle stamps it that way
@@ -298,7 +374,30 @@ pub fn build_server_from_json_entry(
             McpTransportSpec::SdkControl {
                 control_channel_id: name.clone(),
             }
-        } else if let Some(cmd) = entry.command {
+        } else if is_stdio {
+            let Some(cmd) = entry.command else {
+                // No `type` (or explicit `type:"stdio"`) and no `command`:
+                // TS `safeParse` rejects it → log + skip, keeping valid
+                // siblings. Covers the old bug where a bare `{"url":...}`
+                // (no `type`) was accepted as Http — it is really an
+                // implicit stdio attempt with a missing `command`.
+                tracing::warn!(
+                    server = %name,
+                    "mcp.json: entry missing both command and url; skipping"
+                );
+                return None;
+            };
+            // Oracle `fYe`: `command: i().min(1,"Command cannot be empty")`
+            // — an explicit empty string fails validation (a whitespace-only
+            // string still satisfies `.min(1)`; this is a length check, not
+            // a trim check).
+            if cmd.is_empty() {
+                tracing::warn!(
+                    server = %name,
+                    "mcp.json: stdio server has an empty \"command\"; skipping entry (oracle: \"Command cannot be empty\")"
+                );
+                return None;
+            }
             McpTransportSpec::Stdio {
                 command: expand_field(&cmd, &mut missing),
                 args: entry
@@ -308,7 +407,39 @@ pub fn build_server_from_json_entry(
                     .collect(),
                 env: expand_map_values(entry.env, &mut missing),
             }
-        } else if let Some(raw_url) = entry.url {
+        } else {
+            // Every remaining oracle-recognized `type` is a URL transport.
+            // `sse-ide`/`ws-ide` are deliberately included here even though
+            // the oracle requires `ideName` on both (§10 — a DIFFERENT,
+            // unassigned finding): they are preserved dialling as Http
+            // exactly as before, rather than newly rejected by this change.
+            let recognized = matches!(
+                ty,
+                Some("sse" | "http" | "streamable-http" | "ws" | "claudeai-proxy" | "sse-ide" | "ws-ide")
+            );
+            if !recognized {
+                // A `type` string outside the oracle's 8-member union (e.g.
+                // `"bogus"`, or the non-oracle alias `"websocket"`) fails the
+                // whole entry — it must NOT silently default to Http/WebSocket.
+                tracing::warn!(
+                    server = %name,
+                    r#type = ?ty,
+                    "mcp.json: unknown MCP server type; skipping entry"
+                );
+                return None;
+            }
+            let Some(raw_url) = entry.url else {
+                // A recognized remote type with no `url` at all (e.g.
+                // `{"type":"http","command":"x"}`, no `url`): the remote
+                // schemas require `url` (a required `i()`, not `.optional()`),
+                // so this must be rejected — NOT reinterpreted as stdio just
+                // because `command` happens to be present.
+                tracing::warn!(
+                    server = %name,
+                    "mcp.json: entry missing both command and url; skipping"
+                );
+                return None;
+            };
             let url = expand_field(&raw_url, &mut missing);
             // `ey_`'s `urlExpandedToEmpty` = `url.trim() !== "" && expanded
             // .trim() === ""`. A url that was ALREADY blank is not that case:
@@ -339,49 +470,59 @@ pub fn build_server_from_json_entry(
             let headers_helper = entry
                 .headers_helper
                 .map(|helper| expand_field(&helper, &mut missing));
-            match entry.transport_type.as_deref() {
-                Some("sse") => McpTransportSpec::Sse {
-                    url,
-                    headers,
-                    headers_helper,
-                    oauth: entry.oauth,
-                },
+            match ty {
+                Some("sse") => {
+                    let Some(oauth) = validate_oauth_child(entry.oauth) else {
+                        tracing::warn!(server = %name, "mcp.json: invalid oauth config; skipping entry");
+                        return None;
+                    };
+                    McpTransportSpec::Sse {
+                        url,
+                        headers,
+                        headers_helper,
+                        oauth,
+                    }
+                }
                 // `claudeai-proxy`: binary-confirmed at offsets 74175408 and
                 // 81811504. Used for claude.ai hosted MCP servers; the proxy
                 // URL + OAuth handling are resolved by the platform layer.
                 // Parsed as Http so the transport chain receives the URL —
                 // the platform recognises the `claudeai-proxy` discriminator
-                // via the `type` tag when it serializes the spec.
+                // via the `type` tag when it serializes the spec. Out of
+                // scope (claude.ai connector surface): the oracle's `NAn`
+                // schema has no `oauth` field at all, left unvalidated here.
                 Some("claudeai-proxy") => McpTransportSpec::Http {
                     url,
                     headers,
                     headers_helper,
                     oauth: entry.oauth,
                 },
-                // `"sdk"` is handled above (before this url branch even runs)
-                // since the oracle `MAn` schema carries no `url` field at all;
-                // this match is only reached for a `command`-less entry that
-                // DOES have a `url`, so `sdk` never appears as an arm here.
-                Some("ws" | "websocket") => McpTransportSpec::WebSocket {
-                    url,
-                    headers,
-                    headers_helper,
-                },
-                _ => McpTransportSpec::Http {
+                // §10 (unmodelled ideName/authToken) — preserved as before.
+                Some("sse-ide" | "ws-ide") => McpTransportSpec::Http {
                     url,
                     headers,
                     headers_helper,
                     oauth: entry.oauth,
                 },
+                Some("ws") => McpTransportSpec::WebSocket {
+                    url,
+                    headers,
+                    headers_helper,
+                },
+                // Only "http" | "streamable-http" remain reachable here.
+                _ => {
+                    let Some(oauth) = validate_oauth_child(entry.oauth) else {
+                        tracing::warn!(server = %name, "mcp.json: invalid oauth config; skipping entry");
+                        return None;
+                    };
+                    McpTransportSpec::Http {
+                        url,
+                        headers,
+                        headers_helper,
+                        oauth,
+                    }
+                }
             }
-        } else {
-            // Entry has neither `command` nor `url`: invalid transport. TS
-            // `safeParse` rejects it → log + skip, keeping valid siblings.
-            tracing::warn!(
-                server = %name,
-                "mcp.json: entry missing both command and url; skipping"
-            );
-            return None;
         };
         if !missing.is_empty() {
             // Dedup preserving first-seen order (TS `[...new Set(missingVars)]`).
@@ -398,15 +539,21 @@ pub fn build_server_from_json_entry(
         //   RAn({request_timeout_ms:e, ...t}) =>
         //     {...t, ...(t.timeout===void 0 && e!==void 0 && {timeout: min(e, 300_000)})}
         // i.e. when `timeout` is unset and `request_timeout_ms` is set, fold the
-        // alias in capped at 300_000ms (LTm). The stdio / sdk-control / ide
-        // schemas carry no `request_timeout_ms` field (zod strips it), so the
-        // alias is honoured for remote HTTP-family transports only.
+        // alias in capped at 300_000ms (LTm). The stdio / sdk-control / ws /
+        // ide schemas carry no `request_timeout_ms` field at all (oracle
+        // `LAn`, the `ws` schema, has no such key — zod would strip it even
+        // if present), so the alias is honoured for the sse/http-family
+        // transports only. `McpTransportSpec::Http` here may also carry a
+        // claudeai-proxy or sse-ide/ws-ide entry (out of scope, §10/claude.ai
+        // surface); those already produced `Http` before this change, so
+        // folding the alias for them too is pre-existing behaviour, not a
+        // new divergence introduced by this fix.
         let timeout_ms = match &spec {
-            McpTransportSpec::Sse { .. }
-            | McpTransportSpec::Http { .. }
-            | McpTransportSpec::WebSocket { .. } => entry.timeout.or_else(|| {
-                as_positive_int_ms(entry.request_timeout_ms.as_ref()).map(|e| e.min(300_000))
-            }),
+            McpTransportSpec::Sse { .. } | McpTransportSpec::Http { .. } => {
+                entry.timeout.or_else(|| {
+                    as_positive_int_ms(entry.request_timeout_ms.as_ref()).map(|e| e.min(300_000))
+                })
+            }
             _ => entry.timeout,
         };
         let always_load = entry.always_load.unwrap_or(false);
@@ -632,9 +779,13 @@ mod tests {
 
     #[test]
     fn parse_http_url_transport() {
+        // §12: an http entry MUST name its type explicitly — the oracle's
+        // remote schemas are only reached via the `type` discriminator, never
+        // inferred from `url` alone (see [`bare_url_without_type_is_rejected`]
+        // for the case this replaces).
         let raw = r#"{
           "mcpServers": {
-            "remote": { "url": "https://example.test/mcp" }
+            "remote": { "type": "http", "url": "https://example.test/mcp" }
           }
         }"#;
         let cfgs = parse_mcp_json_string(raw, ConfigScope::User).unwrap();
@@ -645,6 +796,57 @@ mod tests {
             }
             other => panic!("expected Http, got {other:?}"),
         }
+    }
+
+    /// §12 fix: before this change, `{"url":...}` with NO `type` (and no
+    /// `command`) was silently accepted as Http. The oracle's discriminated
+    /// union treats an absent `type` as an IMPLICIT `stdio` attempt (zod's
+    /// `getDiscriminator` on `fYe`'s `type: N("stdio").optional()` registers
+    /// `[undefined, "stdio"]`), which then fails `command.min(1)` because
+    /// there is no `command` — the whole entry is skipped, not routed to Http.
+    #[test]
+    fn bare_url_without_type_is_rejected() {
+        let raw = r#"{"mcpServers":{"remote":{"url":"https://example.test/mcp"}}}"#;
+        let cfgs = parse_mcp_json_string(raw, ConfigScope::User).unwrap();
+        assert!(
+            cfgs.is_empty(),
+            "a url-only entry with no type is an implicit (and invalid) stdio attempt, not Http"
+        );
+    }
+
+    /// §12 fix: `{"type":"bogus","url":...}` must fail the whole entry — the
+    /// oracle's discriminated union has no arm for an unrecognized `type`
+    /// string, so it does NOT fall back to Http just because a `url` happens
+    /// to be present.
+    #[test]
+    fn unknown_type_with_url_is_rejected_not_defaulted_to_http() {
+        let raw = r#"{"mcpServers":{"remote":{"type":"bogus","url":"https://example.test/mcp"}}}"#;
+        let cfgs = parse_mcp_json_string(raw, ConfigScope::User).unwrap();
+        assert!(cfgs.is_empty(), "an unrecognized type must reject the entry");
+    }
+
+    /// §12 fix: `{"type":"http","command":"x"}` (no `url`) used to be parsed
+    /// as Stdio because the old loader checked `command` before `type`. The
+    /// oracle's `http` schema requires `url` (a required field, not a
+    /// `command`), so this entry must be rejected entirely.
+    #[test]
+    fn http_type_with_command_but_no_url_is_rejected() {
+        let raw = r#"{"mcpServers":{"remote":{"type":"http","command":"x"}}}"#;
+        let cfgs = parse_mcp_json_string(raw, ConfigScope::User).unwrap();
+        assert!(
+            cfgs.is_empty(),
+            "an http-typed entry must never be reinterpreted as stdio"
+        );
+    }
+
+    /// §12 fix: oracle `fYe`: `command: i().min(1,"Command cannot be empty")`
+    /// — an explicit empty string must fail the entry, not pass through as a
+    /// (useless) empty-command stdio server.
+    #[test]
+    fn empty_stdio_command_is_rejected() {
+        let raw = r#"{"mcpServers":{"s":{"command":""}}}"#;
+        let cfgs = parse_mcp_json_string(raw, ConfigScope::Project).unwrap();
+        assert!(cfgs.is_empty(), "an empty stdio command must reject the entry");
     }
 
     /// Oracle `MAn`: `{type:"sdk",name,timeout,alwaysLoad}` — NO `url` and NO
@@ -723,12 +925,61 @@ mod tests {
         assert_eq!(oauth.scopes.as_deref(), Some("read write"));
     }
 
+    // ── §12 OAuth-child validation (oracle `a()`, 2.1.251 Mach-O @154583724):
+    //    `callbackPort: v().int().positive()`, `authServerMetadataUrl: i()
+    //    .url().startsWith("https://")`, `scopes: i().min(1)` — all
+    //    `.optional()` but NONE `.catch()`, so a PRESENT-but-invalid value
+    //    fails the WHOLE entry, exactly like a malformed `command`/`url`. ──
+
+    #[test]
+    fn oauth_callback_port_zero_rejects_the_whole_entry() {
+        let raw = r#"{"mcpServers":{"remote":{"type":"http","url":"https://x.test","oauth":{"callbackPort":0}}}}"#;
+        let cfgs = parse_mcp_json_string(raw, ConfigScope::User).unwrap();
+        assert!(
+            cfgs.is_empty(),
+            "callbackPort:0 fails `.int().positive()`; the server must be skipped, not connected with port 0"
+        );
+    }
+
+    #[test]
+    fn oauth_non_https_auth_server_metadata_url_rejects_the_whole_entry() {
+        let raw = r#"{"mcpServers":{"remote":{"type":"http","url":"https://x.test","oauth":{"authServerMetadataUrl":"http://auth.example/.well-known/oauth-authorization-server"}}}}"#;
+        let cfgs = parse_mcp_json_string(raw, ConfigScope::User).unwrap();
+        assert!(
+            cfgs.is_empty(),
+            "a non-https authServerMetadataUrl must fail `.startsWith(\"https://\")`"
+        );
+
+        // An arbitrary non-URL string must also reject (the `.url()` half).
+        let raw = r#"{"mcpServers":{"remote":{"type":"http","url":"https://x.test","oauth":{"authServerMetadataUrl":"not-a-url"}}}}"#;
+        let cfgs = parse_mcp_json_string(raw, ConfigScope::User).unwrap();
+        assert!(cfgs.is_empty(), "a non-URL authServerMetadataUrl must fail `.url()`");
+    }
+
+    #[test]
+    fn oauth_empty_scopes_rejects_the_whole_entry() {
+        let raw = r#"{"mcpServers":{"remote":{"type":"http","url":"https://x.test","oauth":{"scopes":""}}}}"#;
+        let cfgs = parse_mcp_json_string(raw, ConfigScope::User).unwrap();
+        assert!(cfgs.is_empty(), "an empty scopes string fails `.min(1)`");
+    }
+
+    #[test]
+    fn oauth_valid_https_metadata_url_is_kept() {
+        let raw = r#"{"mcpServers":{"remote":{"type":"http","url":"https://x.test","oauth":{"authServerMetadataUrl":"https://auth.example/.well-known/oauth-authorization-server","callbackPort":8123,"scopes":"read"}}}}"#;
+        let cfgs = parse_mcp_json_string(raw, ConfigScope::User).unwrap();
+        assert_eq!(cfgs.len(), 1, "a fully valid oauth child must keep the server");
+    }
+
     #[test]
     fn websocket_accepts_ordered_headers_and_helper() {
+        // §12: only the oracle's literal `"ws"` is a valid ws discriminator
+        // (`LAn`, 2.1.251 Mach-O @154583724) — the non-oracle alias
+        // `"websocket"` is exercised separately in
+        // [`non_oracle_websocket_alias_is_rejected`].
         let raw = r#"{
           "mcpServers": {
             "remote": {
-              "type": "websocket",
+              "type": "ws",
               "url": "wss://example.test/mcp",
               "headers": {"X-First": "1", "X-Second": "2"},
               "headersHelper": "helper"
@@ -749,6 +1000,30 @@ mod tests {
             ["X-First", "X-Second"]
         );
         assert_eq!(headers_helper.as_deref(), Some("helper"));
+    }
+
+    /// §12 fix: `"websocket"` is not one of the oracle's 8 discriminated-union
+    /// literals (only `"ws"` is) — it must reject, not silently alias to
+    /// `McpTransportSpec::WebSocket`.
+    #[test]
+    fn non_oracle_websocket_alias_is_rejected() {
+        let raw = r#"{"mcpServers":{"remote":{"type":"websocket","url":"wss://example.test/mcp"}}}"#;
+        let cfgs = parse_mcp_json_string(raw, ConfigScope::User).unwrap();
+        assert!(cfgs.is_empty(), "\"websocket\" is not an oracle-valid type");
+    }
+
+    /// §12 fix: oracle `LAn` (the `ws` schema) has no `request_timeout_ms`
+    /// field at all — unlike `sse`/`http`, the alias must never be folded
+    /// into `timeout` for a `ws` transport.
+    #[test]
+    fn ws_ignores_request_timeout_ms() {
+        let raw = r#"{"mcpServers":{"r":{"type":"ws","url":"wss://x.test","request_timeout_ms":45000}}}"#;
+        let cfgs = parse_mcp_json_string(raw, ConfigScope::User).unwrap();
+        assert_eq!(cfgs.len(), 1);
+        assert_eq!(
+            cfgs[0].timeout_ms, None,
+            "ws must not fold request_timeout_ms (oracle schema strips it)"
+        );
     }
 
     #[test]
@@ -924,6 +1199,7 @@ mod tests {
         let raw = r#"{
           "mcpServers": {
             "r": {
+              "type": "http",
               "url": "${BASE:-https://example.test}/mcp",
               "headers": { "Authorization": "Bearer ${TOKEN:-xyz}" }
             }
@@ -1210,12 +1486,12 @@ mod tests {
     fn http_request_timeout_ms_folds_into_timeout_capped_at_300_000() {
         // RAn: `timeout` unset + `request_timeout_ms` set → timeout =
         // min(request_timeout_ms, 300_000). A huge alias is capped.
-        let raw = r#"{"mcpServers":{"r":{"url":"https://x.test","request_timeout_ms":999999999}}}"#;
+        let raw = r#"{"mcpServers":{"r":{"type":"http","url":"https://x.test","request_timeout_ms":999999999}}}"#;
         let cfgs = parse_mcp_json_string(raw, ConfigScope::User).unwrap();
         assert_eq!(cfgs[0].timeout_ms, Some(300_000), "capped at LTm=300_000");
 
         // Under the cap it is folded verbatim.
-        let raw = r#"{"mcpServers":{"r":{"url":"https://x.test","request_timeout_ms":45000}}}"#;
+        let raw = r#"{"mcpServers":{"r":{"type":"http","url":"https://x.test","request_timeout_ms":45000}}}"#;
         let cfgs = parse_mcp_json_string(raw, ConfigScope::User).unwrap();
         assert_eq!(cfgs[0].timeout_ms, Some(45000));
     }
@@ -1224,7 +1500,7 @@ mod tests {
     fn http_timeout_wins_over_request_timeout_ms() {
         // RAn only folds when `timeout` is UNSET; an explicit `timeout` wins and
         // is NOT capped at 300_000.
-        let raw = r#"{"mcpServers":{"r":{"url":"https://x.test","timeout":600000,"request_timeout_ms":10}}}"#;
+        let raw = r#"{"mcpServers":{"r":{"type":"http","url":"https://x.test","timeout":600000,"request_timeout_ms":10}}}"#;
         let cfgs = parse_mcp_json_string(raw, ConfigScope::User).unwrap();
         assert_eq!(cfgs[0].timeout_ms, Some(600000));
     }
@@ -1250,7 +1526,7 @@ mod tests {
         // `nil()` has `.catch(void 0)`: a bad value becomes undefined rather than
         // failing the entry. A string alias must NOT skip the server; it is just
         // ignored (no fold).
-        let raw = r#"{"mcpServers":{"r":{"url":"https://x.test","request_timeout_ms":"nope"}}}"#;
+        let raw = r#"{"mcpServers":{"r":{"type":"http","url":"https://x.test","request_timeout_ms":"nope"}}}"#;
         let cfgs = parse_mcp_json_string(raw, ConfigScope::User).unwrap();
         assert_eq!(
             cfgs.len(),
@@ -1260,7 +1536,7 @@ mod tests {
         assert_eq!(cfgs[0].timeout_ms, None);
 
         // Non-positive alias is also coerced away (.positive()).
-        let raw = r#"{"mcpServers":{"r":{"url":"https://x.test","request_timeout_ms":0}}}"#;
+        let raw = r#"{"mcpServers":{"r":{"type":"http","url":"https://x.test","request_timeout_ms":0}}}"#;
         let cfgs = parse_mcp_json_string(raw, ConfigScope::User).unwrap();
         assert_eq!(cfgs[0].timeout_ms, None);
     }
@@ -1290,8 +1566,11 @@ mod tests {
 
         // Same for a remote entry with a non-positive `timeout` (the direct
         // `timeout` field, distinct from the `.catch`-lenient
-        // `request_timeout_ms` alias).
-        let raw = r#"{"mcpServers":{"r":{"url":"https://x.test","timeout":0}}}"#;
+        // `request_timeout_ms` alias). `type` must be explicit here — without
+        // it this would already be rejected as a type-less (implicit-stdio)
+        // entry for an unrelated reason, which would pin nothing about
+        // `timeout:0` specifically.
+        let raw = r#"{"mcpServers":{"r":{"type":"http","url":"https://x.test","timeout":0}}}"#;
         let cfgs = parse_mcp_json_string(raw, ConfigScope::User).unwrap();
         assert!(cfgs.is_empty(), "timeout:0 must drop the remote server");
     }

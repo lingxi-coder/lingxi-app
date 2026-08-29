@@ -191,12 +191,146 @@ pub fn generate_state_token() -> String {
 // Discovery (RFC 9728 → RFC 8414).
 // ---------------------------------------------------------------------------
 
-/// `.well-known/oauth-protected-resource` body (RFC 9728). We only need the
-/// `authorization_servers` list (the first entry is the AS issuer URL).
+/// `.well-known/oauth-protected-resource` body (RFC 9728). `authorization_servers`
+/// (the first entry is the AS issuer URL) drives RFC 8414 discovery;
+/// `resource` (the protected-resource identifier the document echoes back) is
+/// checked against the server URL actually being connected to — §24c,
+/// `validate_resource_indicator` below.
 #[derive(Debug, Deserialize)]
 struct ProtectedResourceMetadata {
     #[serde(default)]
     authorization_servers: Vec<String>,
+    /// RFC 9728 `resource` — REQUIRED, matching the oracle's PRM schema
+    /// `Wot=Ia({resource:pe().url(), authorization_servers:...optional(), …})`
+    /// (@181753670): `resource` alone carries no `.optional()`, so
+    /// `Wot.parse` THROWS on a document that omits it. `Hxt` swallows that
+    /// throw (`catch(o){if(o instanceof TypeError)throw o}`), leaving the
+    /// resource metadata undefined and falling back to the MCP server's own
+    /// origin as the authorization server.
+    ///
+    /// Modelling it as optional-and-skip-validation was not merely
+    /// permissive: it let a `WWW-Authenticate: resource_metadata="…"`
+    /// challenge point at a document with no `resource` at all, whose
+    /// `authorization_servers[0]` was then trusted un-validated for RFC 8414
+    /// discovery and the interactive PKCE flow. Declaring it required makes
+    /// serde reject such a document, so `discover_auth_server_metadata`'s
+    /// `if let Ok(pr)` skips the whole block exactly as the oracle does.
+    resource: String,
+}
+
+/// A `WWW-Authenticate` challenge's parsed fields (RFC 9728's
+/// `resource_metadata` param + RFC 6750's `scope`/`error`/`error_description`).
+/// Oracle `Be`/`H0e` (auth.ts, @182022194 / @182113452): fields are extracted
+/// ONLY when the challenge's auth-scheme token is (case-insensitively)
+/// `Bearer` and something follows it — any other scheme, or a bare `Bearer`
+/// with nothing after it, yields every field `None`, matching the oracle's
+/// `if(r?.toLowerCase()!=="bearer"||!s)return{}` gate byte-for-byte (including
+/// its incidental quirk: a DOUBLE space after `Bearer` also yields `None`,
+/// because `t.split(" ")`'s second element is then the empty string between
+/// the two spaces).
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub(crate) struct WwwAuthChallenge {
+    /// RFC 9728 `resource_metadata` — a URL naming where THIS server's
+    /// Protected Resource Metadata document actually lives (may differ from
+    /// the well-known guess). `None` when absent, unparseable as a URL, or the
+    /// Bearer-scheme gate above failed.
+    pub resource_metadata_url: Option<String>,
+    /// RFC 6750 `scope` — the scope the server says is required.
+    #[allow(dead_code)] // parsed for oracle parity; not consumed at this call site (see doc comment on the function below), same as the oracle's own `Be`/`H0e` callers.
+    pub scope: Option<String>,
+    /// RFC 6750 `error` (e.g. `invalid_token`, `insufficient_scope`).
+    #[allow(dead_code)] // see `scope`.
+    pub error: Option<String>,
+    /// RFC 6750 `error_description`.
+    #[allow(dead_code)] // see `scope`.
+    pub error_description: Option<String>,
+}
+
+/// Parse a raw `WWW-Authenticate` header value into its challenge fields.
+/// Faithful port of oracle `Be`/`H0e` + their shared `Tr`/`T` param extractor
+/// (`<param>=(?:"([^"]+)"|([^\s,]+))`).
+pub(crate) fn parse_www_authenticate_challenge(header: &str) -> WwwAuthChallenge {
+    // `t.split(" ")` splits on every literal space (not whitespace-runs);
+    // `[r,s]` destructures the first two elements. Mirrored with `.split(' ')`
+    // + `.next()` twice rather than `splitn(2, ' ')` so a double space after
+    // the scheme reproduces the oracle's empty-second-element quirk.
+    let mut tokens = header.split(' ');
+    let scheme = tokens.next().unwrap_or("");
+    let second = tokens.next();
+    let gate_ok = scheme.eq_ignore_ascii_case("bearer") && second.is_some_and(|s| !s.is_empty());
+    if !gate_ok {
+        return WwwAuthChallenge::default();
+    }
+    let resource_metadata_url = challenge_param(header, "resource_metadata")
+        .filter(|url| url::Url::parse(url).is_ok());
+    WwwAuthChallenge {
+        resource_metadata_url,
+        scope: challenge_param(header, "scope"),
+        error: challenge_param(header, "error"),
+        error_description: challenge_param(header, "error_description"),
+    }
+}
+
+/// `<name>=(?:"([^"]+)"|([^\s,]+))` against the raw header text — the
+/// oracle's `Tr`/`T` helper. Returns the quoted or bare value, whichever
+/// matched.
+fn challenge_param(header: &str, name: &str) -> Option<String> {
+    let pattern = format!(r#"{}=(?:"([^"]+)"|([^\s,]+))"#, regex::escape(name));
+    let re = regex::Regex::new(&pattern).ok()?;
+    let caps = re.captures(header)?;
+    caps.get(1)
+        .or_else(|| caps.get(2))
+        .map(|m| m.as_str().to_string())
+}
+
+/// RFC 8707 resource-indicator validation (oracle `jc`/`Ms`/`js`, auth.ts).
+/// The PRM document's `resource` field must name the same origin as the MCP
+/// `server_url` actually being connected to, and its path must be a prefix of
+/// (or equal to) the server URL's path — otherwise a malicious or
+/// misconfigured protected-resource document could bind tokens to the wrong
+/// audience. `server_url` is canonicalized (fragment stripped, oracle `Ms`)
+/// before comparison; the error message's expected-side uses that
+/// canonicalized form (`${s}` where `s = Ms(e)` is a `URL`, stringified),
+/// while the offending side is the RAW `resource` string (oracle interpolates
+/// `r.resource` directly, never reparsed).
+fn validate_resource_indicator(server_url: &str, resource: &str) -> Result<(), OAuthError> {
+    let mut requested = url::Url::parse(server_url).map_err(|e| {
+        OAuthError::Discovery(format!("invalid server URL '{server_url}': {e}"))
+    })?;
+    requested.set_fragment(None);
+    let configured = url::Url::parse(resource).map_err(|e| {
+        OAuthError::Discovery(format!(
+            "protected-resource metadata `resource` is not a valid URL: '{resource}' ({e})"
+        ))
+    })?;
+    if resource_matches(&requested, &configured) {
+        Ok(())
+    } else {
+        Err(OAuthError::Discovery(format!(
+            "Protected resource {resource} does not match expected {requested} (or origin)"
+        )))
+    }
+}
+
+/// Oracle `js({requestedResource, configuredResource})`: same origin, and the
+/// configured (PRM) path is a prefix of the requested (server URL) path once
+/// both are trailing-slash-normalized.
+fn resource_matches(requested: &url::Url, configured: &url::Url) -> bool {
+    if requested.origin() != configured.origin() {
+        return false;
+    }
+    let (requested_path, configured_path) = (requested.path(), configured.path());
+    if requested_path.len() < configured_path.len() {
+        return false;
+    }
+    let with_trailing_slash = |p: &str| {
+        if p.ends_with('/') {
+            p.to_string()
+        } else {
+            format!("{p}/")
+        }
+    };
+    with_trailing_slash(requested_path).starts_with(&with_trailing_slash(configured_path))
 }
 
 /// Authorization-server metadata (RFC 8414, `.well-known/oauth-authorization-server`).
@@ -292,16 +426,28 @@ async fn get_json<T: serde::de::DeserializeOwned>(
 ///
 /// Order (auth.ts:243-310):
 /// 1. If `configured_url` is set, fetch it directly (must be https).
-/// 2. RFC 9728: probe `/.well-known/oauth-protected-resource` on the server,
-///    read `authorization_servers[0]`, then RFC 8414 against that issuer.
+/// 2. RFC 9728: probe for the protected-resource document — at
+///    `resource_metadata_url` when the caller has one from a live
+///    `WWW-Authenticate` challenge (oracle `Hxt`/`Uc`/`kxt`, §24c: the server
+///    NAMES where its PRM document lives, so we fetch it there instead of
+///    guessing), else the well-known path on the server itself — read
+///    `authorization_servers[0]`, then RFC 8414 against that issuer. When the
+///    document's `resource` (required — see [`ProtectedResourceMetadata`]) is
+///    validated against `server_url` (RFC 8707 resource-indicator check,
+///    oracle `jc`); a mismatch is a hard discovery failure, matching the
+///    oracle throwing uncaught out of this same call chain. A document
+///    MISSING `resource` fails to decode and is ignored wholesale, matching
+///    the oracle's zod schema rejecting it.
 /// 3. Fallback: RFC 8414 directly against the server URL (path-aware).
 ///
 /// # Errors
-/// [`OAuthError::Discovery`] if no usable metadata can be located.
+/// [`OAuthError::Discovery`] if no usable metadata can be located, or if the
+/// protected-resource document's `resource` fails the indicator check above.
 pub async fn discover_auth_server_metadata(
     http: &Arc<dyn HttpTransport>,
     server_url: &str,
     configured_url: Option<&str>,
+    resource_metadata_url: Option<&str>,
 ) -> Result<AuthServerMetadata, OAuthError> {
     if let Some(cfg) = configured_url {
         if !cfg.starts_with("https://") {
@@ -312,9 +458,15 @@ pub async fn discover_auth_server_metadata(
         return get_json::<AuthServerMetadata>(http, cfg).await;
     }
 
-    // RFC 9728: protected-resource probe → issuer → RFC 8414.
-    let pr_url = well_known_url(server_url, "oauth-protected-resource");
+    // RFC 9728: protected-resource probe → issuer → RFC 8414. A challenge-named
+    // URL (§24c) is fetched AT THAT EXACT ADDRESS; otherwise fall back to the
+    // well-known guess on the server itself.
+    let pr_url = match resource_metadata_url {
+        Some(named) => named.to_string(),
+        None => well_known_url(server_url, "oauth-protected-resource"),
+    };
     if let Ok(pr) = get_json::<ProtectedResourceMetadata>(http, &pr_url).await {
+        validate_resource_indicator(server_url, &pr.resource)?;
         if let Some(issuer) = pr.authorization_servers.first() {
             let as_url = well_known_url(issuer, "oauth-authorization-server");
             if let Ok(meta) = get_json::<AuthServerMetadata>(http, &as_url).await {
@@ -476,21 +628,38 @@ async fn post_token_grant(
     token_endpoint: &str,
     form: &[(&str, &str)],
 ) -> Result<(Tokens, u16, String), OAuthError> {
+    post_token_grant_with_headers(http, clock, token_endpoint, form, &[]).await
+}
+
+/// [`post_token_grant`] with additional request headers — used for a
+/// confidential-client grant that authenticates via `client_secret_basic`
+/// (an `Authorization: Basic` header) rather than a body-embedded secret.
+async fn post_token_grant_with_headers(
+    http: &Arc<dyn HttpTransport>,
+    clock: &Arc<dyn Clock>,
+    token_endpoint: &str,
+    form: &[(&str, &str)],
+    extra_headers: &[(&str, String)],
+) -> Result<(Tokens, u16, String), OAuthError> {
     let body = form
         .iter()
         .map(|(k, v)| format!("{}={}", urlencoding::encode(k), urlencoding::encode(v)))
         .collect::<Vec<_>>()
         .join("&");
+    let mut headers = vec![
+        (
+            "content-type".into(),
+            "application/x-www-form-urlencoded".into(),
+        ),
+        ("accept".into(), "application/json".into()),
+    ];
+    for (k, v) in extra_headers {
+        headers.push(((*k).to_string(), v.clone()));
+    }
     let req = HttpRequest {
         method: HttpMethod::Post,
         url: token_endpoint.to_string(),
-        headers: vec![
-            (
-                "content-type".into(),
-                "application/x-www-form-urlencoded".into(),
-            ),
-            ("accept".into(), "application/json".into()),
-        ],
+        headers,
         body: Some(body),
         body_bytes: None,
         timeout: Some(OAUTH_HTTP_TIMEOUT),
@@ -549,28 +718,129 @@ pub async fn exchange_code(
     Ok(tokens)
 }
 
-/// Refresh an access token using a `refresh_token` (auth.ts `_doRefresh`).
+/// Client-authentication method for a token-endpoint grant — oracle `Pc`'s
+/// three return values (`client_secret_basic` / `client_secret_post` /
+/// `none`), consumed by `Tc`'s switch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TokenAuthMethod {
+    /// `zc`: `Authorization: Basic btoa(id:secret)`, nothing in the body.
+    SecretBasic,
+    /// `Cc`: `client_id` (+ `client_secret` when present) in the body.
+    SecretPost,
+    /// `kc`: `client_id` in the body, no credential.
+    None,
+}
+
+/// Oracle `Pc(clientInformation, token_endpoint_auth_methods_supported)`
+/// (@182015400), the selector `ds` runs for EVERY token-endpoint grant —
+/// authorization_code and refresh alike:
 ///
-/// Public-client form: `client_id` in the body, no `Authorization` header
-/// (auth.ts:1421-1423, `token_endpoint_auth_method: none`).
+/// ```text
+/// if(t.length===0)                            return r?"client_secret_basic":"none";
+/// if(r&&t.includes("client_secret_basic"))    return "client_secret_basic";
+/// if(r&&t.includes("client_secret_post"))     return "client_secret_post";
+/// if(t.includes("none"))                      return "none";
+/// return r?"client_secret_post":"none";
+/// ```
+///
+/// where `r = client_secret !== undefined`. `Pc`'s FIRST branch (honour a
+/// `token_endpoint_auth_method` recorded on the client information itself) is
+/// unreachable here: this port's stored credentials carry no registered
+/// method, so there is nothing to honour.
+fn select_token_auth_method(has_secret: bool, supported: &[String]) -> TokenAuthMethod {
+    let advertises = |m: &str| supported.iter().any(|s| s == m);
+    if supported.is_empty() {
+        return if has_secret {
+            TokenAuthMethod::SecretBasic
+        } else {
+            TokenAuthMethod::None
+        };
+    }
+    if has_secret && advertises("client_secret_basic") {
+        return TokenAuthMethod::SecretBasic;
+    }
+    if has_secret && advertises("client_secret_post") {
+        return TokenAuthMethod::SecretPost;
+    }
+    if advertises("none") {
+        return TokenAuthMethod::None;
+    }
+    if has_secret {
+        TokenAuthMethod::SecretPost
+    } else {
+        TokenAuthMethod::None
+    }
+}
+
+/// Refresh an access token using a `refresh_token` (auth.ts `_doRefresh` →
+/// SDK `pQt` → `ds`).
+///
+/// Client authentication is chosen by [`select_token_auth_method`] from what
+/// the authorization server advertises in
+/// `token_endpoint_auth_methods_supported` — the same selection `ds` applies
+/// to every grant, and the same one this port's sibling call sites
+/// ([`crate::xaa`]'s initial exchange, [`revoke_token`]) already honour.
+/// Hardcoding `client_secret_basic` would 401 on an AS that advertises only
+/// `client_secret_post`, sending the XAA resolve back through the full
+/// IdP+AS exchange on every single connect.
+///
+/// The Basic credential is `base64(client_id:client_secret)` over the RAW
+/// bytes (oracle `zc`: `btoa(`${e}:${t}`)`). It is NOT percent-encoded — that
+/// convention belongs to the revocation helper `be()` alone, and applying it
+/// here would change the credential bytes for any secret containing `+`, `/`
+/// or `=`.
 ///
 /// # Errors
 /// [`OAuthError::RefreshRejected`] when the server rejects the refresh token
-/// (4xx / `invalid_grant`) — the caller must trigger a fresh interactive flow;
+/// (4xx / `invalid_grant`) — the caller must trigger a fresh interactive flow
+/// (or, on the XAA path, fall back to the silent IdP+AS exchange);
 /// [`OAuthError::Token`] on other failures.
 pub async fn refresh_tokens(
     http: &Arc<dyn HttpTransport>,
     clock: &Arc<dyn Clock>,
     meta: &AuthServerMetadata,
     client_id: &str,
+    client_secret: Option<&str>,
     refresh_token: &str,
 ) -> Result<Tokens, OAuthError> {
-    let form = [
+    let mut form = vec![
         ("grant_type", "refresh_token"),
         ("refresh_token", refresh_token),
-        ("client_id", client_id),
     ];
-    match post_token_grant(http, clock, &meta.token_endpoint, &form).await {
+    let mut extra_headers: Vec<(&str, String)> = Vec::new();
+    let supported = meta
+        .token_endpoint_auth_methods_supported
+        .as_deref()
+        .unwrap_or(&[]);
+    match select_token_auth_method(client_secret.is_some(), supported) {
+        // `zc(e,t,r)`: throws without a secret, so this arm is only ever
+        // selected when one is present.
+        TokenAuthMethod::SecretBasic if client_secret.is_some() => {
+            let secret = client_secret.unwrap_or_default();
+            extra_headers.push((
+                "authorization",
+                format!(
+                    "Basic {}",
+                    base64::engine::general_purpose::STANDARD
+                        .encode(format!("{client_id}:{secret}"))
+                ),
+            ));
+        }
+        // `Cc(e,t,r)`: `client_id` always, `client_secret` when present.
+        TokenAuthMethod::SecretPost => {
+            form.push(("client_id", client_id));
+            if let Some(secret) = client_secret {
+                form.push(("client_secret", secret));
+            }
+        }
+        // `kc(e,t)`: `client_id` only.
+        TokenAuthMethod::SecretBasic | TokenAuthMethod::None => {
+            form.push(("client_id", client_id));
+        }
+    }
+    match post_token_grant_with_headers(http, clock, &meta.token_endpoint, &form, &extra_headers)
+        .await
+    {
         Ok((mut tokens, _status, _body)) => {
             // RFC 6749 §6: a refresh response MAY omit a new refresh token, in
             // which case the existing one stays valid — carry it forward.
@@ -705,6 +975,14 @@ fn authorize_url_scope(
 ///
 /// # Errors
 /// Any [`OAuthError`] from the constituent steps.
+///
+/// This is the CLI's standalone entry point (`mcp login`, `apps/cli/src/
+/// commands/mcp.rs`) — a user-initiated flow with no live connect-time
+/// `WWW-Authenticate` challenge to consult, so discovery always uses the
+/// well-known guess. [`crate::registry::McpRegistry`] drives the flow off a
+/// LIVE 401/403 instead, via the crate-internal
+/// [`perform_oauth_flow_for_reauth`], which can supply a challenge-named
+/// `resource_metadata` URL (§24c).
 pub async fn perform_oauth_flow(
     http: &Arc<dyn HttpTransport>,
     clock: &Arc<dyn Clock>,
@@ -723,6 +1001,7 @@ pub async fn perform_oauth_flow(
         on_auth_url,
         scope_override,
         None,
+        None,
     )
     .await
 }
@@ -731,7 +1010,7 @@ pub async fn perform_oauth_flow(
 /// authorization code from `manual_input`. The loopback listener remains live,
 /// so a browser on the same host can still complete the callback normally; the
 /// first valid source wins. This is the headless/SSH companion to
-/// [`perform_oauth_flow`].
+/// [`perform_oauth_flow`] (same no-live-challenge caveat above).
 pub async fn perform_oauth_flow_with_manual_input(
     http: &Arc<dyn HttpTransport>,
     clock: &Arc<dyn Clock>,
@@ -750,7 +1029,38 @@ pub async fn perform_oauth_flow_with_manual_input(
         server_url,
         on_auth_url,
         scope_override,
+        None,
         Some(manual_input),
+    )
+    .await
+}
+
+/// [`perform_oauth_flow`], plus a `resource_metadata_url` extracted from the
+/// live `WWW-Authenticate` challenge that triggered this flow (a connect-time
+/// 401 reauth, or a 403 `insufficient_scope` step-up) — §24c. Used only by
+/// [`crate::registry::McpRegistry`]; the CLI's `mcp login` has no such
+/// challenge in scope and keeps calling the two functions above.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn perform_oauth_flow_for_reauth(
+    http: &Arc<dyn HttpTransport>,
+    clock: &Arc<dyn Clock>,
+    oauth: &traits::McpOAuthConfigDto,
+    server_name: &str,
+    server_url: &str,
+    on_auth_url: &OnAuthorizationUrl,
+    scope_override: Option<&str>,
+    resource_metadata_url: Option<&str>,
+) -> Result<Tokens, OAuthError> {
+    perform_oauth_flow_inner(
+        http,
+        clock,
+        oauth,
+        server_name,
+        server_url,
+        on_auth_url,
+        scope_override,
+        resource_metadata_url,
+        None,
     )
     .await
 }
@@ -764,12 +1074,17 @@ async fn perform_oauth_flow_inner(
     server_url: &str,
     on_auth_url: &OnAuthorizationUrl,
     scope_override: Option<&str>,
+    resource_metadata_url: Option<&str>,
     manual_input: Option<&mut (dyn AsyncBufRead + Unpin + Send)>,
 ) -> Result<Tokens, OAuthError> {
     // 1. Discovery.
-    let meta =
-        discover_auth_server_metadata(http, server_url, oauth.auth_server_metadata_url.as_deref())
-            .await?;
+    let meta = discover_auth_server_metadata(
+        http,
+        server_url,
+        oauth.auth_server_metadata_url.as_deref(),
+        resource_metadata_url,
+    )
+    .await?;
 
     // 2. Bind the loopback listener FIRST so the redirect_uri is known before
     //    the authorize URL is built (claude-code's listen(0) pattern). A
@@ -1310,6 +1625,8 @@ async fn revoke_at_endpoint(
         http,
         server_url,
         oauth_cfg.auth_server_metadata_url.as_deref(),
+        // Logout/disconnect has no live challenge to consult.
+        None,
     )
     .await?;
 
@@ -1724,5 +2041,590 @@ mod tests {
             Some("the-client"),
             "client_id from a grant must persist so refresh re-sends it (not empty)"
         );
+    }
+
+    // -------------------------------------------------------------------
+    // §24c: WWW-Authenticate challenge parsing (oracle `Be`/`H0e`) and
+    // resource-indicator validation (oracle `jc`/`Ms`/`js`).
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn parse_www_authenticate_challenge_extracts_quoted_fields() {
+        let header = r#"Bearer resource_metadata="https://rs.example.com/.well-known/oauth-protected-resource", scope="mcp:read mcp:write", error="invalid_token", error_description="token expired""#;
+        let c = parse_www_authenticate_challenge(header);
+        assert_eq!(
+            c.resource_metadata_url.as_deref(),
+            Some("https://rs.example.com/.well-known/oauth-protected-resource")
+        );
+        assert_eq!(c.scope.as_deref(), Some("mcp:read mcp:write"));
+        assert_eq!(c.error.as_deref(), Some("invalid_token"));
+        assert_eq!(c.error_description.as_deref(), Some("token expired"));
+    }
+
+    #[test]
+    fn parse_www_authenticate_challenge_extracts_unquoted_values() {
+        // Unquoted values run to the first whitespace or comma.
+        let header = "Bearer resource_metadata=https://rs.example.com/prm, scope=mcp:read";
+        let c = parse_www_authenticate_challenge(header);
+        assert_eq!(
+            c.resource_metadata_url.as_deref(),
+            Some("https://rs.example.com/prm")
+        );
+        assert_eq!(c.scope.as_deref(), Some("mcp:read"));
+    }
+
+    #[test]
+    fn parse_www_authenticate_challenge_rejects_non_bearer_scheme() {
+        // Oracle gate: scheme must be (case-insensitively) "bearer" — every
+        // field is dropped for e.g. Basic, even though resource_metadata is
+        // present in the raw text.
+        let header = r#"Basic realm="x", resource_metadata="https://rs.example.com/prm""#;
+        assert_eq!(
+            parse_www_authenticate_challenge(header),
+            WwwAuthChallenge::default()
+        );
+    }
+
+    #[test]
+    fn parse_www_authenticate_challenge_bare_bearer_returns_default() {
+        assert_eq!(
+            parse_www_authenticate_challenge("Bearer"),
+            WwwAuthChallenge::default()
+        );
+    }
+
+    #[test]
+    fn parse_www_authenticate_challenge_double_space_quirk_matches_oracle() {
+        // Oracle's `t.split(" ")` destructures the first TWO elements; a
+        // double space after "Bearer" makes the second element the empty
+        // string between the two spaces, so the whole extraction bails even
+        // though real content follows later in the header. An incidental
+        // quirk of the oracle's own gate, reproduced for byte-exact parity.
+        let header = "Bearer  resource_metadata=\"https://rs.example.com/prm\"";
+        assert_eq!(
+            parse_www_authenticate_challenge(header),
+            WwwAuthChallenge::default()
+        );
+    }
+
+    #[test]
+    fn parse_www_authenticate_challenge_drops_unparseable_resource_metadata_url() {
+        let header = r#"Bearer resource_metadata="not a url at all", scope="x""#;
+        let c = parse_www_authenticate_challenge(header);
+        assert_eq!(
+            c.resource_metadata_url, None,
+            "an invalid URL is swallowed, mirroring the oracle's try/catch"
+        );
+        assert_eq!(c.scope.as_deref(), Some("x"));
+    }
+
+    #[test]
+    fn resource_matches_same_origin_path_prefix() {
+        let requested = url::Url::parse("https://mcp.example.com/v1/sub").unwrap();
+        let configured = url::Url::parse("https://mcp.example.com/v1").unwrap();
+        assert!(resource_matches(&requested, &configured));
+    }
+
+    #[test]
+    fn resource_matches_exact_equal_paths() {
+        let requested = url::Url::parse("https://mcp.example.com/v1").unwrap();
+        let configured = url::Url::parse("https://mcp.example.com/v1").unwrap();
+        assert!(resource_matches(&requested, &configured));
+    }
+
+    #[test]
+    fn resource_matches_rejects_different_origin() {
+        let requested = url::Url::parse("https://mcp.example.com/v1").unwrap();
+        let configured = url::Url::parse("https://other.example.com/v1").unwrap();
+        assert!(!resource_matches(&requested, &configured));
+    }
+
+    #[test]
+    fn resource_matches_rejects_configured_path_longer_than_requested() {
+        let requested = url::Url::parse("https://mcp.example.com/v1").unwrap();
+        let configured = url::Url::parse("https://mcp.example.com/v1/sub").unwrap();
+        assert!(!resource_matches(&requested, &configured));
+    }
+
+    #[test]
+    fn resource_matches_rejects_sibling_path_that_merely_shares_a_prefix() {
+        // "/v1x" is NOT under "/v1" once both are trailing-slash-normalized —
+        // guards a naive (non-slash-aware) `starts_with` implementation.
+        let requested = url::Url::parse("https://mcp.example.com/v1x").unwrap();
+        let configured = url::Url::parse("https://mcp.example.com/v1").unwrap();
+        assert!(!resource_matches(&requested, &configured));
+    }
+
+    #[test]
+    fn validate_resource_indicator_error_message_is_byte_exact() {
+        let err = validate_resource_indicator(
+            "https://mcp.example.com/v1",
+            "https://other.example.com/x",
+        )
+        .expect_err("mismatch must fail");
+        assert_eq!(
+            err.to_string(),
+            "oauth discovery failed: Protected resource https://other.example.com/x does not \
+             match expected https://mcp.example.com/v1 (or origin)"
+        );
+    }
+
+    #[test]
+    fn validate_resource_indicator_accepts_matching_resource() {
+        validate_resource_indicator("https://mcp.example.com/v1", "https://mcp.example.com/v1")
+            .expect("exact match must pass");
+        validate_resource_indicator(
+            "https://mcp.example.com/v1/tools",
+            "https://mcp.example.com/v1",
+        )
+        .expect("prefix match must pass");
+    }
+
+    // -- discover_auth_server_metadata: challenge override + validation wiring. --
+
+    /// Minimal `HttpTransport` mock: exact-URL routing table, plus a log of
+    /// every URL actually requested — so a test can assert a URL was NEVER
+    /// hit (proving an override REPLACED the well-known guess, rather than
+    /// merely being tried first).
+    struct MockPrmHttp {
+        routes: Vec<(String, u16, String)>,
+        requested: std::sync::Mutex<Vec<String>>,
+    }
+    impl MockPrmHttp {
+        fn new(routes: &[(&str, u16, &str)]) -> Arc<Self> {
+            Arc::new(Self {
+                routes: routes
+                    .iter()
+                    .copied()
+                    .map(|(u, s, b)| (u.to_string(), s, b.to_string()))
+                    .collect(),
+                requested: std::sync::Mutex::new(Vec::new()),
+            })
+        }
+        fn requested_urls(&self) -> Vec<String> {
+            self.requested.lock().unwrap().clone()
+        }
+    }
+    #[async_trait::async_trait]
+    impl HttpTransport for MockPrmHttp {
+        async fn request(
+            &self,
+            req: protocol::HttpRequest,
+        ) -> Result<protocol::HttpResponse, traits::HttpError> {
+            self.requested.lock().unwrap().push(req.url.clone());
+            for (pat, status, body) in &self.routes {
+                if req.url == *pat {
+                    return Ok(protocol::HttpResponse {
+                        status: *status,
+                        headers: vec![],
+                        body: body.clone(),
+                        body_bytes: Vec::new(),
+                    });
+                }
+            }
+            Ok(protocol::HttpResponse {
+                status: 404,
+                headers: vec![],
+                body: String::new(),
+                body_bytes: Vec::new(),
+            })
+        }
+        async fn stream_sse(
+            &self,
+            _req: protocol::HttpRequest,
+        ) -> Result<traits::http::SseStream, traits::HttpError> {
+            Err(traits::HttpError::Connection("unused".into()))
+        }
+    }
+
+    #[tokio::test]
+    async fn discover_auth_server_metadata_uses_challenge_url_not_well_known_guess() {
+        let custom_prm = "https://mcp.example.com/custom-prm-location";
+        let default_guess = "https://mcp.example.com/.well-known/oauth-protected-resource/v1";
+        let http = MockPrmHttp::new(&[
+            (
+                custom_prm,
+                200,
+                r#"{"resource":"https://mcp.example.com/","authorization_servers":["https://as-from-challenge.example.com"]}"#,
+            ),
+            (default_guess, 404, ""),
+            (
+                "https://as-from-challenge.example.com/.well-known/oauth-authorization-server",
+                200,
+                r#"{"authorization_endpoint":"https://as-from-challenge.example.com/authorize","token_endpoint":"https://as-from-challenge.example.com/token"}"#,
+            ),
+        ]);
+        let http_dyn: Arc<dyn HttpTransport> = http.clone();
+
+        let meta = discover_auth_server_metadata(
+            &http_dyn,
+            "https://mcp.example.com/v1",
+            None,
+            Some(custom_prm),
+        )
+        .await
+        .expect("discovery via the challenge-named URL must succeed");
+
+        assert_eq!(
+            meta.token_endpoint,
+            "https://as-from-challenge.example.com/token"
+        );
+        assert!(
+            http.requested_urls().contains(&custom_prm.to_string()),
+            "the challenge-named URL must actually be fetched"
+        );
+        assert!(
+            !http.requested_urls().contains(&default_guess.to_string()),
+            "the well-known guess must NOT be tried once a challenge URL is supplied"
+        );
+    }
+
+    #[tokio::test]
+    async fn discover_auth_server_metadata_falls_back_to_well_known_guess_without_challenge() {
+        let default_guess = "https://mcp.example.com/.well-known/oauth-protected-resource/v1";
+        let http = MockPrmHttp::new(&[
+            (
+                default_guess,
+                200,
+                r#"{"resource":"https://mcp.example.com/","authorization_servers":["https://as-default.example.com"]}"#,
+            ),
+            (
+                "https://as-default.example.com/.well-known/oauth-authorization-server",
+                200,
+                r#"{"authorization_endpoint":"https://as-default.example.com/authorize","token_endpoint":"https://as-default.example.com/token"}"#,
+            ),
+        ]);
+        let http_dyn: Arc<dyn HttpTransport> = http.clone();
+
+        let meta =
+            discover_auth_server_metadata(&http_dyn, "https://mcp.example.com/v1", None, None)
+                .await
+                .expect("well-known guess path must still work with no challenge");
+        assert_eq!(meta.token_endpoint, "https://as-default.example.com/token");
+    }
+
+    /// Oracle PRM schema `Wot` requires `resource`; a document without it
+    /// fails `Wot.parse`, the throw is swallowed by `Hxt`, and the whole
+    /// document is DISCARDED — its `authorization_servers[0]` is never
+    /// trusted. Without this, a `WWW-Authenticate: resource_metadata="…"`
+    /// challenge could hand an attacker-chosen authorization server to RFC
+    /// 8414 discovery and the interactive PKCE flow with no resource-
+    /// indicator check at all.
+    #[tokio::test]
+    async fn discover_auth_server_metadata_discards_a_prm_document_missing_resource() {
+        let custom_prm = "https://mcp.example.com/custom-prm-location";
+        let http = MockPrmHttp::new(&[
+            (
+                custom_prm,
+                200,
+                r#"{"authorization_servers":["https://as.attacker.example"]}"#,
+            ),
+            (
+                "https://as.attacker.example/.well-known/oauth-authorization-server",
+                200,
+                r#"{"authorization_endpoint":"https://as.attacker.example/authorize","token_endpoint":"https://as.attacker.example/token"}"#,
+            ),
+        ]);
+        let http_dyn: Arc<dyn HttpTransport> = http.clone();
+
+        let err = discover_auth_server_metadata(
+            &http_dyn,
+            "https://mcp.example.com/v1",
+            None,
+            Some(custom_prm),
+        )
+        .await
+        .expect_err("a PRM document with no `resource` must be ignored wholesale");
+        // The fallback (RFC 8414 against the MCP server itself) is what runs;
+        // it 404s in this fixture, which is exactly how we prove the
+        // attacker's AS was never consulted.
+        assert!(
+            err.to_string()
+                .contains("https://mcp.example.com/.well-known/oauth-authorization-server"),
+            "must fall through to the server's own well-known, got: {err}"
+        );
+        assert!(
+            !http
+                .requested_urls()
+                .iter()
+                .any(|u| u.contains("as.attacker.example")),
+            "the discarded document's authorization_servers[0] must never be fetched; got {:?}",
+            http.requested_urls()
+        );
+    }
+
+    // -------------------------------------------------------------------
+    // Token-endpoint client authentication (oracle `Pc`/`Tc`).
+    // -------------------------------------------------------------------
+
+    /// Fixed clock — `refresh_tokens` only needs `now()` to stamp expiry.
+    struct TestClock(SystemTime);
+    impl TestClock {
+        fn new(secs: u64) -> Self {
+            Self(SystemTime::UNIX_EPOCH + Duration::from_secs(secs))
+        }
+    }
+    impl Clock for TestClock {
+        fn now(&self) -> SystemTime {
+            self.0
+        }
+    }
+
+    /// Records the exact request the token endpoint receives (headers AND
+    /// form body) and always answers with a valid token response — so a test
+    /// can assert on the CREDENTIAL BYTES on the wire, which is the only
+    /// place a wrong client-auth method or a mangled secret is observable.
+    struct RecordingTokenHttp {
+        seen: std::sync::Mutex<Vec<protocol::HttpRequest>>,
+    }
+    impl RecordingTokenHttp {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                seen: std::sync::Mutex::new(Vec::new()),
+            })
+        }
+        fn last(&self) -> protocol::HttpRequest {
+            self.seen.lock().unwrap().last().cloned().expect("a request")
+        }
+    }
+    #[async_trait::async_trait]
+    impl HttpTransport for RecordingTokenHttp {
+        async fn request(
+            &self,
+            req: protocol::HttpRequest,
+        ) -> Result<protocol::HttpResponse, traits::HttpError> {
+            self.seen.lock().unwrap().push(req);
+            Ok(protocol::HttpResponse {
+                status: 200,
+                headers: vec![],
+                body: r#"{"access_token":"new-at","expires_in":3600}"#.to_string(),
+                body_bytes: Vec::new(),
+            })
+        }
+        async fn stream_sse(
+            &self,
+            _req: protocol::HttpRequest,
+        ) -> Result<traits::http::SseStream, traits::HttpError> {
+            Err(traits::HttpError::Connection("unused".into()))
+        }
+    }
+
+    #[test]
+    fn select_token_auth_method_matches_oracle_pc() {
+        let m = |v: &[&str]| v.iter().map(|s| (*s).to_string()).collect::<Vec<_>>();
+
+        // `if(t.length===0) return r?"client_secret_basic":"none"`
+        assert_eq!(
+            select_token_auth_method(true, &[]),
+            TokenAuthMethod::SecretBasic
+        );
+        assert_eq!(select_token_auth_method(false, &[]), TokenAuthMethod::None);
+
+        // `if(r&&t.includes("client_secret_basic")) return "client_secret_basic"`
+        assert_eq!(
+            select_token_auth_method(true, &m(&["client_secret_post", "client_secret_basic"])),
+            TokenAuthMethod::SecretBasic
+        );
+
+        // `if(r&&t.includes("client_secret_post")) return "client_secret_post"`
+        assert_eq!(
+            select_token_auth_method(true, &m(&["client_secret_post"])),
+            TokenAuthMethod::SecretPost
+        );
+
+        // `if(t.includes("none")) return "none"` — reached even WITH a secret
+        // once neither client_secret_* method is advertised.
+        assert_eq!(
+            select_token_auth_method(true, &m(&["private_key_jwt", "none"])),
+            TokenAuthMethod::None
+        );
+        assert_eq!(
+            select_token_auth_method(false, &m(&["none"])),
+            TokenAuthMethod::None
+        );
+
+        // `return r?"client_secret_post":"none"`
+        assert_eq!(
+            select_token_auth_method(true, &m(&["private_key_jwt"])),
+            TokenAuthMethod::SecretPost
+        );
+        assert_eq!(
+            select_token_auth_method(false, &m(&["client_secret_basic"])),
+            TokenAuthMethod::None
+        );
+    }
+
+    /// An AS that advertises only `client_secret_post` must get the secret in
+    /// the BODY, not an `Authorization: Basic` header it would reject with a
+    /// 401 (sending every XAA resolve back through the full IdP+AS exchange).
+    #[tokio::test]
+    async fn refresh_tokens_honours_client_secret_post_from_as_metadata() {
+        let http = RecordingTokenHttp::new();
+        let http_dyn: Arc<dyn HttpTransport> = http.clone();
+        let clock: Arc<dyn Clock> = Arc::new(TestClock::new(1_000));
+        let meta = AuthServerMetadata {
+            authorization_endpoint: "https://as.example.com/authorize".into(),
+            token_endpoint: "https://as.example.com/token".into(),
+            registration_endpoint: None,
+            scopes_supported: None,
+            scope: None,
+            default_scope: None,
+            revocation_endpoint: None,
+            revocation_endpoint_auth_methods_supported: None,
+            token_endpoint_auth_methods_supported: Some(vec!["client_secret_post".into()]),
+        };
+
+        refresh_tokens(&http_dyn, &clock, &meta, "cid", Some("sec+ret/=" ), "rt")
+            .await
+            .expect("refresh ok");
+
+        let req = http.last();
+        assert!(
+            !req.headers
+                .iter()
+                .any(|(k, _)| k.eq_ignore_ascii_case("authorization")),
+            "client_secret_post must NOT send an Authorization header; got {:?}",
+            req.headers
+        );
+        let body = req.body.clone().unwrap_or_default();
+        assert!(
+            body.contains("client_id=cid"),
+            "client_secret_post sets client_id in the body; got {body}"
+        );
+        assert!(
+            body.contains("client_secret=sec%2Bret%2F%3D"),
+            "client_secret_post sets client_secret in the body; got {body}"
+        );
+    }
+
+    /// `zc(e,t,r){ let s=btoa(`${e}:${t}`); r.set("Authorization",`Basic ${s}`) }`
+    /// — base64 over the RAW `id:secret` bytes. Percent-encoding them first
+    /// (a convention that belongs to the revocation helper `be()` alone)
+    /// silently changes the credential for any secret containing `+`, `/` or
+    /// `=`, which base64-shaped secrets routinely do.
+    #[tokio::test]
+    async fn refresh_tokens_basic_credential_is_base64_of_the_raw_id_and_secret() {
+        let http = RecordingTokenHttp::new();
+        let http_dyn: Arc<dyn HttpTransport> = http.clone();
+        let clock: Arc<dyn Clock> = Arc::new(TestClock::new(1_000));
+        let meta = AuthServerMetadata {
+            authorization_endpoint: "https://as.example.com/authorize".into(),
+            token_endpoint: "https://as.example.com/token".into(),
+            registration_endpoint: None,
+            scopes_supported: None,
+            scope: None,
+            default_scope: None,
+            revocation_endpoint: None,
+            revocation_endpoint_auth_methods_supported: None,
+            // Absent (`t.length===0`) => `r?"client_secret_basic":"none"`.
+            token_endpoint_auth_methods_supported: None,
+        };
+
+        refresh_tokens(&http_dyn, &clock, &meta, "cid", Some("s+e/c="), "rt")
+            .await
+            .expect("refresh ok");
+
+        let req = http.last();
+        let auth = req
+            .headers
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case("authorization"))
+            .map(|(_, v)| v.clone())
+            .expect("client_secret_basic must send an Authorization header");
+        let expected = format!(
+            "Basic {}",
+            base64::engine::general_purpose::STANDARD.encode("cid:s+e/c=")
+        );
+        assert_eq!(auth, expected);
+        assert!(
+            !req.body.clone().unwrap_or_default().contains("client_id="),
+            "client_secret_basic omits client_id from the body"
+        );
+    }
+
+    /// A public client (no secret) still authenticates as `none`: `client_id`
+    /// in the body, no `Authorization` header (oracle `kc`).
+    #[tokio::test]
+    async fn refresh_tokens_public_client_sends_client_id_in_the_body() {
+        let http = RecordingTokenHttp::new();
+        let http_dyn: Arc<dyn HttpTransport> = http.clone();
+        let clock: Arc<dyn Clock> = Arc::new(TestClock::new(1_000));
+        let meta = AuthServerMetadata {
+            authorization_endpoint: "https://as.example.com/authorize".into(),
+            token_endpoint: "https://as.example.com/token".into(),
+            registration_endpoint: None,
+            scopes_supported: None,
+            scope: None,
+            default_scope: None,
+            revocation_endpoint: None,
+            revocation_endpoint_auth_methods_supported: None,
+            token_endpoint_auth_methods_supported: Some(vec!["client_secret_basic".into()]),
+        };
+
+        refresh_tokens(&http_dyn, &clock, &meta, "cid", None, "rt")
+            .await
+            .expect("refresh ok");
+
+        let req = http.last();
+        assert!(!req
+            .headers
+            .iter()
+            .any(|(k, _)| k.eq_ignore_ascii_case("authorization")));
+        assert!(req.body.clone().unwrap_or_default().contains("client_id=cid"));
+    }
+
+    #[tokio::test]
+    async fn discover_auth_server_metadata_rejects_resource_mismatch() {
+        let custom_prm = "https://mcp.example.com/custom-prm-location";
+        let http = MockPrmHttp::new(&[(
+            custom_prm,
+            200,
+            r#"{"resource":"https://other.example.com/","authorization_servers":["https://as.example.com"]}"#,
+        )]);
+        let http_dyn: Arc<dyn HttpTransport> = http.clone();
+
+        let err = discover_auth_server_metadata(
+            &http_dyn,
+            "https://mcp.example.com/v1",
+            None,
+            Some(custom_prm),
+        )
+        .await
+        .expect_err("resource-indicator mismatch must hard-fail discovery");
+        let msg = err.to_string();
+        assert!(
+            msg.contains(
+                "Protected resource https://other.example.com/ does not match expected \
+                 https://mcp.example.com/v1"
+            ),
+            "got: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn discover_auth_server_metadata_accepts_matching_resource() {
+        let custom_prm = "https://mcp.example.com/custom-prm-location";
+        let http = MockPrmHttp::new(&[
+            (
+                custom_prm,
+                200,
+                r#"{"resource":"https://mcp.example.com/v1","authorization_servers":["https://as.example.com"]}"#,
+            ),
+            (
+                "https://as.example.com/.well-known/oauth-authorization-server",
+                200,
+                r#"{"authorization_endpoint":"https://as.example.com/authorize","token_endpoint":"https://as.example.com/token"}"#,
+            ),
+        ]);
+        let http_dyn: Arc<dyn HttpTransport> = http.clone();
+
+        discover_auth_server_metadata(
+            &http_dyn,
+            "https://mcp.example.com/v1",
+            None,
+            Some(custom_prm),
+        )
+        .await
+        .expect("a matching resource must not be rejected");
     }
 }

@@ -722,6 +722,23 @@ pub enum ClientCommand {
         /// Server name (the `mcpServers` map key) to remove.
         name: String,
     },
+
+    // ── Audio (engine -> client mic/speaker requests) ────────────────────
+    /// Answer to an engine
+    /// [`ClientEvent::AudioRequest`](crate::events::ClientEvent::AudioRequest),
+    /// correlated by `request_id`. Mirrors the
+    /// [`ComputerAccessRequestDto`](crate::computer_access::ComputerAccessRequestDto)
+    /// engine->client shape, but as a single typed reply rather than an
+    /// approve/deny split: an audio operation's outcome is a value
+    /// (recording bytes, a transcript, synthesized audio, a recording-state
+    /// flag) or a typed failure, not a binary grant.
+    AudioResponse {
+        /// Correlator with the originating
+        /// [`ClientEvent::AudioRequest`](crate::events::ClientEvent::AudioRequest).
+        request_id: u64,
+        /// The client's outcome for the requested operation.
+        result: AudioResultDto,
+    },
 }
 
 /// A writable MCP server-definition scope, as named on the wire. Deliberately
@@ -868,4 +885,116 @@ pub enum ListingKindDto {
     Tasks,
     /// Coordinator-team roster → `CoordinatorWorker` (one per worker) (T18).
     Coordinator,
+}
+
+/// Coarse, branchable failure class for [`AudioResultDto::Failed`] — the
+/// union of `traits::{SttError, VoiceError, TtsError}`'s failure modes,
+/// collapsed to a shared tag so a caller can branch on the SAME kind
+/// whichever trait produced the underlying failure. Mirrors
+/// `traits::SttError::Busy`'s own doc comment: `VoiceError::Busy` and
+/// `SttError::Busy` report the same audio-session contention, and a caller
+/// branching on one should not have to also recognize the other.
+///
+/// Mapping (pinned total across all three source enums by
+/// `audio_error_kind_mapping_is_total_across_all_three_traits` in
+/// `tests/commands_test.rs`, via an exhaustive `match` with no wildcard arm):
+/// - `PermissionDenied` <- `SttError::PermissionDenied`, `VoiceError::PermissionDenied`
+/// - `NoSpeech` <- `SttError::NoSpeech`
+/// - `Unavailable` <- `SttError::Unavailable`, `TtsError::Unavailable`
+/// - `Busy` <- `SttError::Busy`, `VoiceError::Busy`
+/// - `Retriable` <- `SttError::Retriable(_)`
+/// - `Other` <- everything else, including `VoiceError::NotRecording` and
+///   `TtsError::SynthesisFailed(_)` — neither was named as a distinction that
+///   must survive the collapse.
+///
+/// A bare wire STRING (`"permission_denied"` / `"no_speech"` / …), like
+/// [`crate::computer_access::AccessTierDto`]. `#[non_exhaustive]` so a future
+/// kind is additive.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum AudioErrorKindDto {
+    /// The user denied microphone permission
+    /// (`SttError`/`VoiceError::PermissionDenied`).
+    PermissionDenied,
+    /// No speech was detected before the listen timeout (`SttError::NoSpeech`).
+    NoSpeech,
+    /// The device has no usable speech/TTS service
+    /// (`SttError`/`TtsError::Unavailable`).
+    Unavailable,
+    /// The platform audio session is held by another consumer
+    /// (`SttError`/`VoiceError::Busy`).
+    Busy,
+    /// A transient failure, safe to retry (`SttError::Retriable`).
+    Retriable,
+    /// Any other failure not covered above.
+    Other,
+}
+
+/// A finished microphone/speaker operation, or a typed failure — the wire
+/// lowering of `traits::{VoiceRecording, SttTranscript, TtsAudio}` plus the
+/// unioned failure kind from `traits::{SttError, VoiceError, TtsError}`.
+/// Carried by [`ClientCommand::AudioResponse`]. Internally tagged on `type`,
+/// `snake_case`. `#[non_exhaustive]` so a future outcome is additive.
+///
+/// Binary payloads travel as base64 [`String`]s, the same convention as
+/// [`ImageRefDto`]: `Recording.audio_base64` lowers
+/// `VoiceRecording::audio_bytes` (`Vec<u8>`) and `Audio.pcm_base64` lowers
+/// `TtsAudio::pcm` (`Vec<u8>`); `serde_json::Value`/raw bytes never enter this
+/// crate (decision §0.4).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
+#[serde(tag = "type", rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum AudioResultDto {
+    /// A void success. No host trait op returns this today; reserved for a
+    /// future op with no payload.
+    Ok,
+    /// Answers `AudioOpDto::IsRecording` — `VoiceRecorder::is_recording`
+    /// returns a bare `bool` with no error channel, so this variant is the
+    /// ONLY way that op's outcome is expressed (it is never `Failed`).
+    RecordingState {
+        /// Whether a recording session is currently active.
+        recording: bool,
+    },
+    /// Answers `AudioOpDto::StopRecording` — `VoiceRecording` lowered.
+    Recording {
+        /// Base64-encoded `VoiceRecording::audio_bytes`.
+        audio_base64: String,
+        /// `VoiceRecording::mime_type` (e.g. `"audio/m4a"`).
+        mime_type: String,
+    },
+    /// Answers `AudioOpDto::Transcribe` — `SttTranscript` lowered.
+    Transcript {
+        /// Recognized text (empty when nothing was heard —
+        /// `SttError::NoSpeech` is a distinct `Failed` kind, not this case).
+        text: String,
+        /// BCP-47 language actually detected, when the provider reports it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        language: Option<String>,
+        /// Confidence in `[0, 1]`, when the provider reports it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        confidence: Option<f32>,
+    },
+    /// Answers `AudioOpDto::Synthesize` — `TtsAudio` lowered.
+    Audio {
+        /// Base64-encoded `TtsAudio::pcm` (16-bit signed little-endian PCM,
+        /// mono).
+        pcm_base64: String,
+        /// `TtsAudio::sample_rate_hz`.
+        sample_rate_hz: u32,
+    },
+    /// The operation failed. `kind` is the coarse, branchable failure class
+    /// (see [`AudioErrorKindDto`]); `message` is the human-readable detail —
+    /// kept as separate fields so a caller can branch on `kind` without
+    /// parsing `message` (a single `{ message: String }` shape would collapse
+    /// `Retriable`/`PermissionDenied`/a generic failure into one
+    /// indistinguishable case).
+    Failed {
+        /// Coarse, branchable failure class.
+        kind: AudioErrorKindDto,
+        /// Human-readable detail for logs/UI.
+        message: String,
+    },
 }

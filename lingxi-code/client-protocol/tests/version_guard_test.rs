@@ -560,6 +560,22 @@ fn current_contract_index() -> ContractIndex {
     put("ClientEvent::ApiRetry.max_retries", "u32");
     put("ClientEvent::ApiRetry.delay_ms", "u64");
 
+    put("ClientEvent::AudioRequest", "audio_request");
+    put("ClientEvent::AudioRequest.request_id", "u64");
+    put("ClientEvent::AudioRequest.op", "AudioOpDto");
+
+    // ── AudioOpDto (events.rs) ────────────────────────────────────────────
+    put("AudioOpDto::StartRecording", "start_recording");
+    put("AudioOpDto::StartRecording.sample_rate_hz", "u32");
+    put("AudioOpDto::StartRecording.format", "String");
+    put("AudioOpDto::StopRecording", "stop_recording");
+    put("AudioOpDto::IsRecording", "is_recording");
+    put("AudioOpDto::Transcribe", "transcribe");
+    put("AudioOpDto::Transcribe.language", "Option<String>");
+    put("AudioOpDto::Synthesize", "synthesize");
+    put("AudioOpDto::Synthesize.text", "String");
+    put("AudioOpDto::Synthesize.voice", "Option<String>");
+
     // ── ErrorKindDto (events.rs) ──────────────────────────────────────────
     put("ErrorKindDto::Transport", "transport");
     put("ErrorKindDto::Protocol", "protocol");
@@ -927,6 +943,36 @@ fn current_contract_index() -> ContractIndex {
     put("ClientCommand::RemoveMcpServer", "remove_mcp_server");
     put("ClientCommand::RemoveMcpServer.scope", "McpScopeDto");
     put("ClientCommand::RemoveMcpServer.name", "String");
+
+    put("ClientCommand::AudioResponse", "audio_response");
+    put("ClientCommand::AudioResponse.request_id", "u64");
+    put("ClientCommand::AudioResponse.result", "AudioResultDto");
+
+    // ── AudioErrorKindDto (commands.rs) ────────────────────────────────────
+    put("AudioErrorKindDto::PermissionDenied", "permission_denied");
+    put("AudioErrorKindDto::NoSpeech", "no_speech");
+    put("AudioErrorKindDto::Unavailable", "unavailable");
+    put("AudioErrorKindDto::Busy", "busy");
+    put("AudioErrorKindDto::Retriable", "retriable");
+    put("AudioErrorKindDto::Other", "other");
+
+    // ── AudioResultDto (commands.rs) ───────────────────────────────────────
+    put("AudioResultDto::Ok", "ok");
+    put("AudioResultDto::RecordingState", "recording_state");
+    put("AudioResultDto::RecordingState.recording", "bool");
+    put("AudioResultDto::Recording", "recording");
+    put("AudioResultDto::Recording.audio_base64", "String");
+    put("AudioResultDto::Recording.mime_type", "String");
+    put("AudioResultDto::Transcript", "transcript");
+    put("AudioResultDto::Transcript.text", "String");
+    put("AudioResultDto::Transcript.language", "Option<String>");
+    put("AudioResultDto::Transcript.confidence", "Option<f32>");
+    put("AudioResultDto::Audio", "audio");
+    put("AudioResultDto::Audio.pcm_base64", "String");
+    put("AudioResultDto::Audio.sample_rate_hz", "u32");
+    put("AudioResultDto::Failed", "failed");
+    put("AudioResultDto::Failed.kind", "AudioErrorKindDto");
+    put("AudioResultDto::Failed.message", "String");
 
     // ── McpScopeDto (commands.rs) ─────────────────────────────────────────
     put("McpScopeDto::User", "user");
@@ -2166,9 +2212,9 @@ fn current_contract_matches_index_or_version_bumped() {
 #[allow(clippy::too_many_lines, clippy::no_effect_underscore_binding)]
 fn contract_index_covers_every_dto() {
     use client_protocol::commands::{
-        AppCreateModeDto, ClientCommand, CommandResultDto, ImageRefDto, ListingKindDto,
-        McpScopeDto, PermissionBehaviorDto, PromptModeDto, ProviderCredentialSecretDto,
-        SettingsDestinationDto,
+        AppCreateModeDto, AudioErrorKindDto, AudioResultDto, ClientCommand, CommandResultDto,
+        ImageRefDto, ListingKindDto, McpScopeDto, PermissionBehaviorDto, PromptModeDto,
+        ProviderCredentialSecretDto, SettingsDestinationDto,
     };
     use client_protocol::computer_access::{
         AccessTierDto, ComputerAccessRequestDto, ComputerAccessResponseDto, RequestedAppDto,
@@ -2181,7 +2227,7 @@ fn contract_index_covers_every_dto() {
     };
     use client_protocol::error::ClientError;
     use client_protocol::events::{
-        ClientEvent, CostDto, ErrorKindDto, TurnOutcomeDto, TurnRecoverySnapshotDto,
+        AudioOpDto, ClientEvent, CostDto, ErrorKindDto, TurnOutcomeDto, TurnRecoverySnapshotDto,
         TurnRecoveryStateDto,
     };
     use client_protocol::listings::{
@@ -2285,8 +2331,26 @@ fn contract_index_covers_every_dto() {
             sequence: 0,
             event_json: String::new(),
         },
+        ClientEvent::AudioRequest {
+            request_id: 0,
+            op: AudioOpDto::IsRecording,
+        },
     ];
     let _outcome = TurnOutcomeDto::EndTurn;
+    // Every `AudioOpDto` variant, so a removed op fails THIS compile.
+    let _audio_ops: Vec<AudioOpDto> = vec![
+        AudioOpDto::StartRecording {
+            sample_rate_hz: 16_000,
+            format: String::new(),
+        },
+        AudioOpDto::StopRecording,
+        AudioOpDto::IsRecording,
+        AudioOpDto::Transcribe { language: None },
+        AudioOpDto::Synthesize {
+            text: String::new(),
+            voice: None,
+        },
+    ];
 
     // tool_display.rs — the pre-derived render model.
     let _verb = ToolVerbDto::Update;
@@ -2424,6 +2488,41 @@ fn contract_index_covers_every_dto() {
             scope: McpScopeDto::Project,
             name: String::new(),
         },
+        ClientCommand::AudioResponse {
+            request_id: 0,
+            result: AudioResultDto::Ok,
+        },
+    ];
+    // Every `AudioResultDto` variant, so a removed outcome fails THIS compile.
+    let _audio_results: Vec<AudioResultDto> = vec![
+        AudioResultDto::Ok,
+        AudioResultDto::RecordingState { recording: false },
+        AudioResultDto::Recording {
+            audio_base64: String::new(),
+            mime_type: String::new(),
+        },
+        AudioResultDto::Transcript {
+            text: String::new(),
+            language: None,
+            confidence: None,
+        },
+        AudioResultDto::Audio {
+            pcm_base64: String::new(),
+            sample_rate_hz: 0,
+        },
+        AudioResultDto::Failed {
+            kind: AudioErrorKindDto::Other,
+            message: String::new(),
+        },
+    ];
+    // Every `AudioErrorKindDto` variant, so a removed kind fails THIS compile.
+    let _audio_error_kinds: Vec<AudioErrorKindDto> = vec![
+        AudioErrorKindDto::PermissionDenied,
+        AudioErrorKindDto::NoSpeech,
+        AudioErrorKindDto::Unavailable,
+        AudioErrorKindDto::Busy,
+        AudioErrorKindDto::Retriable,
+        AudioErrorKindDto::Other,
     ];
     let _mcp_scope = McpScopeDto::User;
     let _settings_destination = SettingsDestinationDto::User;

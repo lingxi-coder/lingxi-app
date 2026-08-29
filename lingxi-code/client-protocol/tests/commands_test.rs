@@ -16,8 +16,8 @@
 //! input lives in JSON Strings elsewhere.
 
 use client_protocol::commands::{
-    AppCreateModeDto, ClientCommand, CommandResultDto, ImageRefDto, ListingKindDto, PromptModeDto,
-    ProviderCredentialSecretDto,
+    AppCreateModeDto, AudioErrorKindDto, AudioResultDto, ClientCommand, CommandResultDto,
+    ImageRefDto, ListingKindDto, PromptModeDto, ProviderCredentialSecretDto,
 };
 use client_protocol::controls::ReasoningSelectionDto;
 use client_protocol::listings::TaskStatusDto;
@@ -26,6 +26,7 @@ use client_protocol::local_apps::{
     AppRuntimeProfileDto, AppSurfaceDto,
 };
 use client_protocol::permission::PermissionResponseDto;
+use traits::{SttError, TtsError, VoiceError};
 
 /// `SendPrompt` — the core inbound command. Carries the text, an optional
 /// prompt mode, inline image bytes (decision §0.8), and an optional client
@@ -917,5 +918,223 @@ fn no_live_command_carries_session_id() {
             .expect("object")
             .contains_key("session_id"),
         "ResumeSession is the ONE command that names a session_id target (§0.5)"
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Audio contract (engine <-> client mic/speaker requests)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// `ClientCommand::AudioResponse` round trip for the request/response example
+/// from the wire contract: `request_id: 7`, a `Transcript` result carrying a
+/// non-ASCII transcript + language + confidence.
+#[test]
+fn audio_response_transcript_round_trips_on_the_wire() {
+    let response = ClientCommand::AudioResponse {
+        request_id: 7,
+        result: AudioResultDto::Transcript {
+            text: "你好".to_string(),
+            language: Some("zh-CN".to_string()),
+            confidence: Some(0.9),
+        },
+    };
+    let round: ClientCommand =
+        serde_json::from_value(serde_json::to_value(&response).unwrap()).unwrap();
+    assert_eq!(round, response, "the response must survive a wire round trip");
+}
+
+/// Enumerate every `AudioResultDto` variant and assert the `snake_case` wire
+/// tag plus a byte-stable round trip.
+#[test]
+fn audio_result_variants_round_trip_with_expected_tags() {
+    let cases = [
+        (AudioResultDto::Ok, "ok"),
+        (
+            AudioResultDto::RecordingState { recording: true },
+            "recording_state",
+        ),
+        (
+            AudioResultDto::Recording {
+                audio_base64: "AAAA".to_string(),
+                mime_type: "audio/m4a".to_string(),
+            },
+            "recording",
+        ),
+        (
+            AudioResultDto::Transcript {
+                text: "hello".to_string(),
+                language: Some("en-US".to_string()),
+                confidence: Some(0.5),
+            },
+            "transcript",
+        ),
+        (
+            AudioResultDto::Audio {
+                pcm_base64: "AAAA".to_string(),
+                sample_rate_hz: 22_050,
+            },
+            "audio",
+        ),
+        (
+            AudioResultDto::Failed {
+                kind: AudioErrorKindDto::Retriable,
+                message: "network ASR timed out".to_string(),
+            },
+            "failed",
+        ),
+    ];
+    for (result, tag) in cases {
+        let json = serde_json::to_value(&result).expect("serialize AudioResultDto");
+        assert_eq!(json["type"], tag, "AudioResultDto::{result:?} tag mismatch");
+        let back: AudioResultDto =
+            serde_json::from_value(json).expect("deserialize AudioResultDto");
+        assert_eq!(back, result);
+    }
+}
+
+/// `AudioResultDto::Failed` carries a BRANCHABLE `kind` distinct from
+/// `message` — collapsing to one `{ message: String }` shape would make
+/// `Retriable` indistinguishable from a permanent failure on the wire. Assert
+/// the `kind` tag survives the round trip independently of the message text.
+#[test]
+fn failed_kind_is_distinguishable_from_a_generic_message() {
+    let retriable = AudioResultDto::Failed {
+        kind: AudioErrorKindDto::Retriable,
+        message: "recognizer busy, try again".to_string(),
+    };
+    let permission_denied = AudioResultDto::Failed {
+        kind: AudioErrorKindDto::PermissionDenied,
+        message: "recognizer busy, try again".to_string(), // same message, different kind
+    };
+    let retriable_json = serde_json::to_value(&retriable).unwrap();
+    let denied_json = serde_json::to_value(&permission_denied).unwrap();
+    assert_eq!(retriable_json["kind"], "retriable");
+    assert_eq!(denied_json["kind"], "permission_denied");
+    assert_ne!(
+        retriable, permission_denied,
+        "two Failed values with identical messages but different kinds must remain distinct"
+    );
+}
+
+/// `AudioOpDto::IsRecording` answers with a bare `RecordingState { recording }`
+/// — `VoiceRecorder::is_recording` returns a bare `bool` with no error
+/// channel, so this is the one audio result that can never be `Failed` from
+/// the trait's own signature (a transport-level failure is a Task 2 proxy
+/// concern, not expressible in this contract).
+#[test]
+fn recording_state_has_no_engine_defined_failure_channel() {
+    let state = AudioResultDto::RecordingState { recording: false };
+    let json = serde_json::to_value(&state).unwrap();
+    assert_eq!(json["type"], "recording_state");
+    assert_eq!(json["recording"], false);
+}
+
+/// Map one `traits::SttError` variant to its `AudioErrorKindDto`. The `match`
+/// has NO wildcard arm, so adding a new `SttError` variant upstream fails
+/// THIS compile rather than silently falling through to `Other`.
+fn stt_error_kind(error: &SttError) -> AudioErrorKindDto {
+    match error {
+        SttError::PermissionDenied => AudioErrorKindDto::PermissionDenied,
+        SttError::NoSpeech => AudioErrorKindDto::NoSpeech,
+        SttError::Unavailable => AudioErrorKindDto::Unavailable,
+        SttError::Busy => AudioErrorKindDto::Busy,
+        SttError::Retriable(_) => AudioErrorKindDto::Retriable,
+        SttError::Other(_) => AudioErrorKindDto::Other,
+    }
+}
+
+/// Map one `traits::VoiceError` variant to its `AudioErrorKindDto`. Same
+/// exhaustive-match-with-no-wildcard totality guarantee as `stt_error_kind`.
+fn voice_error_kind(error: &VoiceError) -> AudioErrorKindDto {
+    match error {
+        VoiceError::PermissionDenied => AudioErrorKindDto::PermissionDenied,
+        VoiceError::Busy => AudioErrorKindDto::Busy,
+        // `NotRecording` has no dedicated kind in the frozen `AudioErrorKindDto`
+        // set and maps to `Other` — unlike `Busy`/`PermissionDenied`, it was
+        // not named as a distinction that must survive collapse.
+        VoiceError::NotRecording | VoiceError::Other(_) => AudioErrorKindDto::Other,
+    }
+}
+
+/// Map one `traits::TtsError` variant to its `AudioErrorKindDto`. Same
+/// exhaustive-match-with-no-wildcard totality guarantee as `stt_error_kind`.
+fn tts_error_kind(error: &TtsError) -> AudioErrorKindDto {
+    match error {
+        TtsError::Unavailable => AudioErrorKindDto::Unavailable,
+        TtsError::SynthesisFailed(_) | TtsError::Other(_) => AudioErrorKindDto::Other,
+    }
+}
+
+/// Pin the mapping from every variant of all three trait error enums
+/// (`traits::{SttError, VoiceError, TtsError}`) to an `AudioErrorKindDto`.
+///
+/// Totality is enforced TWO ways: the exhaustive `match` in each `*_kind`
+/// helper above (no wildcard arm — a new upstream variant fails to compile),
+/// and this test pinning the CONCRETE mapping so a silent remap (e.g.
+/// `SttError::Busy` drifting from `Busy` to `Other`) is caught even though it
+/// would still compile. `SttError::Busy` and `VoiceError::Busy` intentionally
+/// map to the SAME kind (`traits::SttError::Busy`'s own doc comment: a caller
+/// branching on one contention should not have to also recognize the other).
+#[test]
+fn audio_error_kind_mapping_is_total_across_all_three_traits() {
+    assert_eq!(
+        stt_error_kind(&SttError::PermissionDenied),
+        AudioErrorKindDto::PermissionDenied
+    );
+    assert_eq!(
+        stt_error_kind(&SttError::NoSpeech),
+        AudioErrorKindDto::NoSpeech
+    );
+    assert_eq!(
+        stt_error_kind(&SttError::Unavailable),
+        AudioErrorKindDto::Unavailable
+    );
+    assert_eq!(stt_error_kind(&SttError::Busy), AudioErrorKindDto::Busy);
+    assert_eq!(
+        stt_error_kind(&SttError::Retriable("network blip".to_string())),
+        AudioErrorKindDto::Retriable
+    );
+    assert_eq!(
+        stt_error_kind(&SttError::Other("native crash".to_string())),
+        AudioErrorKindDto::Other
+    );
+
+    assert_eq!(
+        voice_error_kind(&VoiceError::PermissionDenied),
+        AudioErrorKindDto::PermissionDenied
+    );
+    assert_eq!(
+        voice_error_kind(&VoiceError::NotRecording),
+        AudioErrorKindDto::Other
+    );
+    assert_eq!(voice_error_kind(&VoiceError::Busy), AudioErrorKindDto::Busy);
+    assert_eq!(
+        voice_error_kind(&VoiceError::Other("native crash".to_string())),
+        AudioErrorKindDto::Other
+    );
+
+    assert_eq!(
+        tts_error_kind(&TtsError::Unavailable),
+        AudioErrorKindDto::Unavailable
+    );
+    assert_eq!(
+        tts_error_kind(&TtsError::SynthesisFailed("bad voice id".to_string())),
+        AudioErrorKindDto::Other
+    );
+    assert_eq!(
+        tts_error_kind(&TtsError::Other("native crash".to_string())),
+        AudioErrorKindDto::Other
+    );
+
+    // `Busy` from two different source traits collapses to the SAME kind —
+    // the whole point of unioning rather than double-encoding contention.
+    assert_eq!(
+        stt_error_kind(&SttError::Busy),
+        voice_error_kind(&VoiceError::Busy)
+    );
+    // `PermissionDenied` likewise unions across Stt and Voice.
+    assert_eq!(
+        stt_error_kind(&SttError::PermissionDenied),
+        voice_error_kind(&VoiceError::PermissionDenied)
     );
 }

@@ -40,7 +40,7 @@ use std::path::{Path, PathBuf};
 
 use client_protocol::ask_user_question::{AskOptionDto, AskQuestionDto, AskUserQuestionRequestDto};
 use client_protocol::commands::{
-    AppCreateModeDto, ClientCommand, ImageRefDto, ListingKindDto, McpScopeDto,
+    AppCreateModeDto, AudioResultDto, ClientCommand, ImageRefDto, ListingKindDto, McpScopeDto,
     PermissionBehaviorDto, PromptModeDto, ProviderCredentialSecretDto, SettingsDestinationDto,
 };
 use client_protocol::computer_access::{
@@ -54,8 +54,8 @@ use client_protocol::controls::{
 };
 use client_protocol::error::ClientError;
 use client_protocol::events::{
-    AttachmentDto, ClientEvent, CostDto, ErrorKindDto, TurnOutcomeDto, TurnRecoverySnapshotDto,
-    TurnRecoveryStateDto,
+    AttachmentDto, AudioOpDto, ClientEvent, CostDto, ErrorKindDto, TurnOutcomeDto,
+    TurnRecoverySnapshotDto, TurnRecoveryStateDto,
 };
 use client_protocol::listings::{
     AgentDto, AuthStateDto, CheckStatusDto, CoordinatorWorkerDto, DoctorCheckDto, DoctorReportDto,
@@ -946,6 +946,15 @@ fn event_goldens() -> Vec<(&'static str, ClientEvent)> {
                 },
             },
         ),
+        (
+            "event/audio_request.json",
+            ClientEvent::AudioRequest {
+                request_id: 7,
+                op: AudioOpDto::Transcribe {
+                    language: Some("zh-CN".to_string()),
+                },
+            },
+        ),
     ]
 }
 
@@ -1321,6 +1330,17 @@ fn command_goldens() -> Vec<(&'static str, ClientCommand)> {
             ClientCommand::RemoveMcpServer {
                 scope: McpScopeDto::User,
                 name: "linear".to_string(),
+            },
+        ),
+        (
+            "command/audio_response.json",
+            ClientCommand::AudioResponse {
+                request_id: 7,
+                result: AudioResultDto::Transcript {
+                    text: "你好".to_string(),
+                    language: Some("zh-CN".to_string()),
+                    confidence: Some(0.9),
+                },
             },
         ),
     ]

@@ -205,16 +205,19 @@ export function Voice({ bridge }: PageContentProps) {
   const credentials = bridge.bootstrap?.providerCredentials ?? [];
   const activeProviderId = activeVoiceProviderId(bridge.bootstrap?.settings?.model);
 
-  // Only the ONE credential entry matching `activeProviderId` can change
-  // `resolveActiveProviderVoiceCapability`'s answer (see its own doc) — so
-  // the probe effect below depends on this single boolean rather than the
-  // whole `credentials` array, which is a fresh reference on every
-  // bootstrap patch (including ones unrelated to providers, e.g. a new
-  // diagnostic log line). Depending on the array directly would re-probe
-  // the microphone permission and voice list on every unrelated settings
-  // change while this page happens to be open.
-  const activeProviderConfigured = activeProviderId != null
-    && credentials.some((entry) => entry.providerId === activeProviderId && entry.configured);
+  // Only which providers are CONFIGURED can change
+  // `resolveActiveProviderVoiceCapability`'s answer (see its own doc) — so the
+  // probe effect below depends on a stable key of that set rather than on the
+  // whole `credentials` array, which is a fresh reference on every bootstrap
+  // patch (including ones unrelated to providers, e.g. a new diagnostic log
+  // line). Depending on the array directly would re-probe the microphone
+  // permission and voice list on every unrelated settings change while this
+  // page happens to be open.
+  const configuredProviderIds = credentials
+    .filter((entry) => entry.configured)
+    .map((entry) => entry.providerId)
+    .sort()
+    .join(',');
 
   // Always the LATEST credentials at probe time, without being a probe
   // dependency itself — same "ref for latest value, narrow effect deps"
@@ -243,7 +246,7 @@ export function Voice({ bridge }: PageContentProps) {
       if (!cancelled) setPlatform(snapshot);
     });
     return () => { cancelled = true; };
-  }, [activeProviderId, activeProviderConfigured, grantGeneration, readMicrophonePermission]);
+  }, [activeProviderId, configuredProviderIds, grantGeneration, readMicrophonePermission]);
 
   // The microphone grant lives in System Settings, not in this app, and the
   // user can change it while this page is open — most often by acting on the

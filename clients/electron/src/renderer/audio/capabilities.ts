@@ -63,19 +63,24 @@ export interface VoicePlatformSnapshot {
   localeTag: string;
   microphonePermission: VoicePermissionStatus;
   /**
-   * Whether the currently active provider has ANY credential configured.
+   * Whether ANY provider has a credential configured — the account-level
+   * fact `ProviderCredentialRequired` claims, and deliberately not "the
+   * provider named by the current chat model is configured": see
+   * `resolveActiveProviderVoiceCapability` for why that scoping made the
+   * Status card tell a user who had just connected Anthropic that nothing
+   * was connected.
+   *
    * NOT sufficient on its own to say speech recognition will work — see
    * `providerTranscriptionCapable`. Kept as its own field because the UI
-   * needs "nothing is configured" (→ connect a provider) told apart from
-   * "something is configured but it can't transcribe" (→ connect a
-   * DIFFERENT provider). Collapsing the two back into one boolean is
-   * exactly the dishonesty this probe exists to remove: it would tell a
-   * user who already connected Anthropic to "connect a provider", which is
+   * needs "nothing is configured" told apart from "something is configured
+   * but it can't transcribe": collapsing the two back into one boolean is
+   * exactly the dishonesty this probe exists to remove, since it would tell
+   * a user who already connected Anthropic to connect a provider, which is
    * both wrong and unactionable.
    */
   providerConfigured: boolean;
   /**
-   * Whether the currently configured provider exposes a hosted
+   * Whether the provider a transcription call would go to exposes a hosted
    * transcription endpoint reachable with that credential (see
    * `shared/providers.ts`'s `ProviderDefinition.transcriptionCapable`).
    * Always `false` when `providerConfigured` is `false` — there is no
@@ -380,21 +385,46 @@ export interface ProviderConfiguredFact {
  * exactly wrong for a configured Anthropic key, which has no transcription
  * endpoint at all).
  *
- * `providerConfigured` is derived from `credentials` rather than trusted
- * as a caller-supplied boolean, so "capable" can never be claimed for a
- * provider that in fact has no credential on file — the same defensive
- * posture `probePlatform` already enforces on its own inputs.
+ * The two answers are deliberately scoped DIFFERENTLY, because the two
+ * claims the UI makes from them are about different things:
+ *
+ * - `providerConfigured` is an ACCOUNT-level fact ("is any provider
+ *   connected"), so it is read off the whole credential list. It used to be
+ *   scoped to the active provider, which made it `false` for a user who had
+ *   just connected Anthropic: saving that key makes `host.ts` write
+ *   `settings.model = provider.defaultModel`, and Anthropic's default model
+ *   (`claude-sonnet-5`) is the one entry in the table with no
+ *   `<provider>/` prefix, so `activeVoiceProviderId` honestly answers
+ *   `null` — "we do not know which provider is active". Rendering that
+ *   unknown as `ProviderCredentialRequired` turned it into the definite
+ *   claim 「当前没有连接任何 Provider。」, one nav item away from the
+ *   Provider 凭据 page showing Anthropic 已配置.
+ *
+ * - `providerTranscriptionCapable` stays scoped to the ACTIVE provider
+ *   whenever we know which one that is, because that is the provider a
+ *   transcription call would actually go to — a connected, capable OpenAI
+ *   key does not make a chat turn routed to Anthropic transcribable. When
+ *   the active provider is unknown, it falls back to "does ANY connected
+ *   provider expose transcription", so the page never asserts 「当前连接的
+ *   Provider 不提供语音转写接口」 about a set it did not check.
+ *
+ * Both stay derived from `credentials` rather than trusted as caller-supplied
+ * booleans, so "capable" can never be claimed for a provider that in fact has
+ * no credential on file — the same defensive posture `probePlatform` already
+ * enforces on its own inputs.
  */
 export function resolveActiveProviderVoiceCapability(
   activeProviderId: string | null,
   credentials: readonly ProviderConfiguredFact[],
 ): { providerConfigured: boolean; providerTranscriptionCapable: boolean } {
-  const providerConfigured =
-    activeProviderId != null
-    && credentials.some((entry) => entry.providerId === activeProviderId && entry.configured);
-  const providerTranscriptionCapable =
-    providerConfigured
-    && (providerById(activeProviderId as string)?.transcriptionCapable ?? false);
+  const configured = credentials.filter((entry) => entry.configured);
+  const providerConfigured = configured.length > 0;
+  const capable = (providerId: string) => providerById(providerId)?.transcriptionCapable ?? false;
+  const activeConfigured =
+    activeProviderId != null && configured.some((entry) => entry.providerId === activeProviderId);
+  const providerTranscriptionCapable = activeConfigured
+    ? capable(activeProviderId as string)
+    : configured.some((entry) => capable(entry.providerId));
   return { providerConfigured, providerTranscriptionCapable };
 }
 

@@ -3,7 +3,12 @@ import assert from 'node:assert/strict';
 
 import { activeVoiceProviderId, voicePageModel } from '../src/renderer/components/settings/pages/Voice';
 import { defaultVoicePreferences, type VoicePreferences } from '../src/shared/voicePreferences';
-import type { VoiceOption, VoicePlatformSnapshot } from '../src/renderer/audio/capabilities';
+import {
+  resolveActiveProviderVoiceCapability,
+  type VoiceOption,
+  type VoicePlatformSnapshot,
+} from '../src/renderer/audio/capabilities';
+import { providerById } from '../src/shared/providers';
 
 function prefs(overrides: Partial<VoicePreferences> = {}): VoicePreferences {
   return { ...defaultVoicePreferences(), ...overrides };
@@ -254,4 +259,92 @@ test('activeVoiceProviderId never guesses: an absent or unqualified model has no
   assert.equal(activeVoiceProviderId(undefined), null);
   assert.equal(activeVoiceProviderId(''), null);
   assert.equal(activeVoiceProviderId('sonnet'), null);
+});
+
+// ---------------------------------------------------------------------------
+// Final review, Defect 6: the 状态 card asserted 「当前没有连接任何 Provider。」
+// to a user who had just connected Anthropic.
+//
+// Saving an Anthropic key makes `host.ts` write `settings.model =
+// provider.defaultModel`, and Anthropic's `defaultModel` is the one entry in
+// the table with no `<provider>/` prefix. `activeVoiceProviderId` then
+// honestly answers `null` ("no QUALIFIED provider prefix, we do not know"),
+// but the old join turned that unknown into `providerConfigured: false`, and
+// `resolveCapabilities` renders THAT as a definite negative claim about the
+// user's account — false for every user in this state, and not an exotic one:
+// `App.tsx`'s `ready` gate means the app is only usable once at least one
+// provider IS connected.
+// ---------------------------------------------------------------------------
+
+test('fixture sanity: connecting Anthropic really does leave an unqualified model selected', () => {
+  // If this ever changes, the scenario below stops being the real one.
+  assert.equal(providerById('anthropic')?.defaultModel, 'claude-sonnet-5');
+  assert.equal(activeVoiceProviderId('claude-sonnet-5'), null);
+});
+
+test('the Status card never says nothing is connected right after the user connects Anthropic', () => {
+  const credentials = [{ providerId: 'anthropic', configured: true }];
+  const joined = resolveActiveProviderVoiceCapability(activeVoiceProviderId('claude-sonnet-5'), credentials);
+  const model = voicePageModel(prefs(), platform({
+    providerConfigured: joined.providerConfigured,
+    providerTranscriptionCapable: joined.providerTranscriptionCapable,
+  }));
+
+  assert.ok(
+    !model.notices.some((notice) => /没有连接任何 Provider/.test(notice)),
+    'the Provider 凭据 page one nav item away shows Anthropic 已配置; this card claimed the opposite',
+  );
+  // The true fact about that account, which the card must still say.
+  assert.ok(
+    model.notices.some((notice) => /不提供语音转写接口/.test(notice)),
+    'a connected Anthropic key genuinely cannot transcribe — that stays reported',
+  );
+});
+
+test('"nothing is connected" is still reported when nothing really is connected', () => {
+  // The claim is not being softened away — it is being made true. An account
+  // with no configured credential still gets it.
+  const joined = resolveActiveProviderVoiceCapability(null, [{ providerId: 'anthropic', configured: false }]);
+  const model = voicePageModel(prefs(), platform({
+    providerConfigured: joined.providerConfigured,
+    providerTranscriptionCapable: joined.providerTranscriptionCapable,
+  }));
+  assert.ok(model.notices.some((notice) => /没有连接任何 Provider/.test(notice)));
+  assert.equal(joined.providerConfigured, false);
+});
+
+test('a connected provider the current model does not name still counts as connected', () => {
+  // Same unknown-active-provider shape, reached the other way: an unqualified
+  // model with OpenAI connected. "A provider is connected" is an account-level
+  // fact and must not depend on parsing the chat model string.
+  const joined = resolveActiveProviderVoiceCapability(
+    activeVoiceProviderId('some-unqualified-model'),
+    [{ providerId: 'openai', configured: true }],
+  );
+  assert.equal(joined.providerConfigured, true);
+  // And OpenAI genuinely does host a transcription endpoint, so the "cannot
+  // transcribe" claim must not be made about it either.
+  assert.equal(joined.providerTranscriptionCapable, true);
+  const model = voicePageModel(prefs(), platform({
+    providerConfigured: joined.providerConfigured,
+    providerTranscriptionCapable: joined.providerTranscriptionCapable,
+    voices: [{ name: 'Alex', default: true, localService: true }],
+  }));
+  assert.deepEqual(model.notices, [], 'no provider claim is true about this account, so the card has nothing to say');
+});
+
+test('the active provider still decides transcription capability when the model names one', () => {
+  // Ruling 3 is unchanged where it applies: with a QUALIFIED model, the
+  // provider that a transcription call would actually go to is the one
+  // reported on — not "some other connected provider could have done it".
+  const credentials = [
+    { providerId: 'anthropic', configured: true },
+    { providerId: 'openai', configured: true },
+  ];
+  const anthropicActive = resolveActiveProviderVoiceCapability(activeVoiceProviderId('anthropic/claude-opus-5'), credentials);
+  assert.equal(anthropicActive.providerConfigured, true);
+  assert.equal(anthropicActive.providerTranscriptionCapable, false);
+
+  const openaiActive = resolveActiveProviderVoiceCapability(activeVoiceProviderId('openai/gpt-5.6-sol'), credentials);
+  assert.equal(openaiActive.providerTranscriptionCapable, true);
 });

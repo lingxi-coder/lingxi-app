@@ -93,12 +93,24 @@ fn sandbox_config() -> (tempfile::TempDir, DesktopConfig) {
     // show up in every `locked`/`effective` assertion below — the suite would
     // pass or fail depending on whose laptop ran it.
     //
-    // `set_var` is process-global, which is exactly why this lives here:
-    // every test in this file takes `serialize_process_globals()` BEFORE
-    // calling `sandbox_config`, so the write happens inside that guard's
-    // lifetime and no other test in this binary can be reading the variable
-    // while it changes. (Integration tests are one binary per file, so the
-    // only readers are this file's own five tests.)
+    // `set_var` is process-global, so read carefully before copying this
+    // pattern. What makes it safe here is NOT "integration tests are one
+    // binary per file" — that only bounds who the readers are. It is that
+    // every test binds `serialize_process_globals()` to a NAMED guard at the
+    // top of its body, so the guard lives until the whole async fn returns,
+    // `endpoint.shutdown().await` included. No second test can be between
+    // `set_var` and its read. Bind it to a bare `_` instead and the guard
+    // drops immediately, serializing nothing while looking identical here.
+    //
+    // Second load-bearing fact: `MANAGED_DIR_ENV` is read exactly once,
+    // synchronously, inside `boot::assemble` (see `boot.rs`, which caches
+    // the resolved `managed` value rather than re-reading per request). It
+    // is worth stating why that matters, because `McpEndpoint::shutdown`
+    // documents that it does NOT await in-flight per-connection tasks — a
+    // prior test's orphaned connection task can still be alive when the next
+    // test calls `set_var`. That window is inert only because nothing on the
+    // live request path reads this variable. If any request-path code ever
+    // starts reading env vars, this guard stops being sufficient.
     std::env::set_var(
         engine_desktop::settings_watch::MANAGED_DIR_ENV,
         managed_dir(&tmp),

@@ -36,10 +36,11 @@ use serde::Deserialize;
 
 use bridge::lockfile::{IdeLockfile, LockfileGuard};
 use bridge::McpEndpoint;
-use engine_desktop::{build, DesktopConfig, DesktopRuntime};
+use engine_desktop::{build, DesktopAudio, DesktopConfig, DesktopRuntime};
 use platform_posix::PosixFileSystem;
 use traits::{OrchestratorHandle, OutputStream, SlashCommandDispatcher};
 
+use crate::audio_bridge::new_audio_bridge;
 use crate::driver::{CredentialRequiredTurnDriver, OrchestratorTurnDriver};
 use crate::mcp_bridge::McpPaths;
 use crate::router::{EngineCommandRouter, SessionStoreContext};
@@ -553,14 +554,27 @@ pub struct BoundServer {
     pub connection: BridgeConnection,
     /// The desktop runtime — held (not read) so its handles and the spawned
     /// background tasks it owns (the cost-persist drain, the orchestrator's
-    /// registries) stay alive for as long as the server serves. Private so the
-    /// `_` hold-alive intent is expressed without a `pub` dead-field lint.
-    #[allow(dead_code)]
+    /// registries) stay alive for as long as the server serves. Read through
+    /// [`BoundServer::runtime`] rather than exposed as a field, so the
+    /// hold-alive ownership stays with this struct.
     runtime: DesktopRuntime,
     /// Keeps the cross-session live identity and inbox registered for the
     /// lifetime of this bridge process.
     #[allow(dead_code)]
     live_session: LiveSessionGuard,
+}
+
+impl BoundServer {
+    /// The engine runtime this server serves, borrowed for inspection.
+    ///
+    /// The host's normal use of it is ownership (keeping it alive); this
+    /// accessor exists so the composition root and its tests can ask what the
+    /// assembly actually produced — e.g. whether the connection-scoped audio
+    /// capability was injected and which tools it registered.
+    #[must_use]
+    pub fn runtime(&self) -> &DesktopRuntime {
+        &self.runtime
+    }
 }
 
 /// Process-local live-session registration owned by a bridge runtime.
@@ -856,6 +870,31 @@ pub async fn assemble_with_provider_keys(
     let computer_access_broker = Arc::new(client_adapter::BridgeComputerAccessBroker::new(
         connection.computer_access_sink(),
     ));
+    // Device audio (microphone / recognizer / synthesizer). The desktop has no
+    // native implementation — those devices belong to the Electron client — so
+    // one `AudioBridge` over THIS connection's sink stands in for all three
+    // traits: each engine-side call becomes a `ClientEvent::AudioRequest` parked
+    // until the client's `ClientCommand::AudioResponse` comes back.
+    //
+    // Both halves are connection-scoped ON PURPOSE, and this is the only place
+    // that can make that true: the bridge parks into a table the responder
+    // resolves out of, and BOTH are created here, per `assemble`, per
+    // `BridgeConnection`. A later connection gets a fresh pair, so its
+    // `AudioResponse` cannot resolve a request this one parked (the ids are
+    // per-bridge counters into per-bridge tables), and `on_close` drains what is
+    // still parked instead of leaving a caller to wait out its deadline.
+    //
+    // There is deliberately NO capability handshake: this runs before any
+    // client connects, so the desktop cannot know whether the renderer that
+    // eventually attaches implements audio at all. That is answered honestly at
+    // call time instead — `AudioBridge` reports "no desktop client is connected"
+    // when nothing is listening, and a deadline when nothing answers.
+    //
+    // Any capability the caller put on `cfg` is REPLACED, not honored: it could
+    // only have been built over some other connection, and the engine's audio
+    // calls must reach THIS one.
+    let (audio_bridge, audio_responder) = new_audio_bridge(connection.audio_sink());
+    cfg.audio = Some(DesktopAudio::from_single(audio_bridge));
     let (ask_user_question_tx, ask_user_question_rx) = tokio::sync::mpsc::channel::<
         tui_core::ask_user_question_bridge::AskUserQuestionExchange,
     >(8);
@@ -976,7 +1015,12 @@ pub async fn assemble_with_provider_keys(
         .bind(gate, driver)
         .bind_router(router)
         .bind_computer_access(computer_access_broker, computer_access_rx)
-        .bind_ask_user_question(ask_user_question_broker, ask_user_question_rx);
+        .bind_ask_user_question(ask_user_question_broker, ask_user_question_rx)
+        // The response half of the SAME pair whose request half went into
+        // `cfg.audio` above — this is what makes an inbound `AudioResponse` on
+        // this connection resolve a call the engine parked on this connection,
+        // and a disconnect drain them.
+        .bind_audio(audio_responder);
     Ok(BoundServer {
         connection,
         runtime,
@@ -1479,6 +1523,9 @@ mod tests {
             bg_session_forker: None,
             worktree_launch: None,
             tmux_launch: None,
+            // `assemble` fills this with the connection's own bridge; a
+            // caller-supplied value would be a lie about which connection the
+            // engine's audio calls reach.
             audio: None,
         };
         let bound = assemble(cfg).await.expect("assemble must succeed");

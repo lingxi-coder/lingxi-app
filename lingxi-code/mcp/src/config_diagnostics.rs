@@ -127,14 +127,17 @@ fn oracle_scope_label(scope: ConfigScope) -> &'static str {
 ///
 /// Binary-confirmed evidence for WHICH scopes actually reach `Iqe`: the
 /// caller switch at offset 160900580 shows `case"project"` (walking the
-/// ancestor directories for `.mcp.json`) and `case"enterprise"` calling
+/// ancestor directories for `.mcp.json`) and `case"enterprise"`
+/// (`Iqe({filePath:J$t(),expandVars:t,scope:"enterprise"})`) calling
 /// `Iqe(...)`, and the `--mcp-config` dynamic path at 166778794 doing the
 /// same; but `case"user"` and `case"local"` call `xqe({configObject:...})`
 /// directly on an ALREADY-PARSED settings object (`oe().mcpServers` /
 /// `li().mcpServers`) and never invoke `Iqe` at all — so this guard is wired
-/// ONLY into this port's project-scope `.mcp.json` reads, never the global
-/// config file read (see the §23b report: applying it there would be a
-/// fabrication, not a port).
+/// into this port's project-scope `.mcp.json` reads AND both enterprise
+/// `managed-mcp.json` reads ([`crate::enterprise_policy::load_enterprise_servers_at`]
+/// and [`crate::enterprise_policy::enterprise_mcp_active_at`], the port's
+/// `$7t`), never the global config file read (see the §23b report: applying
+/// it there would be a fabrication, not a port).
 ///
 /// # Errors
 /// Returns a fatal [`McpConfigWarning`] for: shape/size rejection, "file not
@@ -408,8 +411,8 @@ pub fn collect_mcp_config_warnings(
 
 /// Loader validity per type (aligned with [`crate::json_config`]): stdio needs
 /// a `command`, every remote type needs a `url` — EXCEPT `sdk`, whose oracle
-/// schema (`MAn`) carries neither `command` nor `url` (only `name`, which is
-/// always the entry's own map key, never validated here). The remote schemas
+/// schema (`MAn`) carries neither `command` nor `url` and instead REQUIRES its
+/// own `name: i()`. The remote schemas
 /// (`cLi` @226761199, `J5n` @226762069) declare `url: E.string()` with NO
 /// `.min(1)` — unlike stdio's `command: E.string().min(1)` — so a
 /// present-but-blank `url` is schema-VALID and the entry loads (it then
@@ -476,11 +479,23 @@ fn validation_issues(entry: &Value, ty: &str) -> Vec<String> {
                 }
             }
         }
-        // Oracle `MAn`: `{type:"sdk",name,timeout,alwaysLoad}` — no `url`
-        // field at all (confirmed at the 2.1.251 Mach-O, @154585319). Unlike
-        // every remote type, an sdk entry must NOT be flagged for lacking a
-        // `url` — see [`crate::json_config::build_server_from_json_entry`].
-        "sdk" => {}
+        // Oracle `MAn` @154585319:
+        // `f({type:N("sdk"),name:i(),timeout:o().optional(),alwaysLoad:q().optional()})`
+        // — no `url` and no `command` field at all, so an sdk entry must NOT
+        // be flagged for lacking a `url`. But `name` is a REQUIRED `i()`
+        // (every sibling carries `.optional()`), so `{"type":"sdk"}` fails
+        // `safeParse` and the oracle reports it. `i()` has no `.min(1)`, so
+        // an EMPTY string is schema-valid — hence a plain required-string
+        // check, not `require_nonempty_string`. See
+        // [`crate::json_config::build_server_from_json_entry`].
+        "sdk" => match object.get("name") {
+            Some(Value::String(_)) => {}
+            None => issues.push("name: expected string, received undefined".to_string()),
+            Some(value) => issues.push(format!(
+                "name: expected string, received {}",
+                json_type_name(value)
+            )),
+        },
         _ => match object.get("url") {
             Some(Value::String(_)) => {}
             None => issues.push("url: expected string, received undefined".to_string()),
@@ -814,12 +829,39 @@ mod tests {
     /// an invalid config — unlike every other KNOWN_MCP_TYPES member, `sdk`
     /// has no transport field to require. (Before this fix `validation_issues`
     /// fell through to the `_` arm's url-required check for every non-stdio
-    /// type, so a bare `{"type":"sdk"}` was flagged "invalid ... url: expected
-    /// string, received undefined" even though the loader now accepts it.)
+    /// type, so a bare sdk entry was flagged "invalid ... url: expected
+    /// string, received undefined" even though the loader accepts it.)
     #[test]
     fn sdk_entry_with_no_url_is_not_flagged_invalid() {
-        let w = only(&json!({"mcpServers":{"claude-vscode":{"type":"sdk"}}}));
+        let w = only(
+            &json!({"mcpServers":{"claude-vscode":{"type":"sdk","name":"claude-vscode"}}}),
+        );
         assert!(w.is_empty(), "sdk entry without url must not warn: {w:?}");
+    }
+
+    /// Oracle `MAn` @154585319 declares `name: i()` with NO `.optional()` —
+    /// the ONLY required field the sdk arm has. `xqe` runs
+    /// `ZGn["sdk"]().safeParse(entry)`, which fails, and reports
+    /// `Skipped — invalid MCP server config for "x": name: expected string,
+    /// received undefined`. The port previously suppressed EVERY diagnostic
+    /// for the type (`"sdk" => {}`), so a phantom sdk server loaded in total
+    /// silence.
+    #[test]
+    fn sdk_entry_without_name_is_flagged_invalid() {
+        let w = only(&json!({"mcpServers":{"x":{"type":"sdk"}}}));
+        assert_eq!(w.len(), 1, "a nameless sdk entry must warn: {w:?}");
+        assert_eq!(
+            w[0].message,
+            "Skipped \u{2014} invalid MCP server config for \"x\": name: expected string, received undefined"
+        );
+        // A non-string `name` is the same schema failure, different received.
+        let w = only(&json!({"mcpServers":{"x":{"type":"sdk","name":7}}}));
+        assert_eq!(
+            w[0].message,
+            "Skipped \u{2014} invalid MCP server config for \"x\": name: expected string, received number"
+        );
+        // `i()` carries no `.min(1)`, so an EMPTY name is schema-valid.
+        assert!(only(&json!({"mcpServers":{"x":{"type":"sdk","name":""}}})).is_empty());
     }
 
     #[test]
@@ -835,7 +877,8 @@ mod tests {
             Some("Rename this server in your MCP config \u{2014} \"workspace\" is reserved for internal use")
         );
         // An SDK server with a reserved name is NOT flagged (claude `m.type!=="sdk"`).
-        let c2 = json!({"mcpServers":{"workspace":{"type":"sdk","url":"chan"}}});
+        // `name` is `MAn`'s one required field; the stray `url` is stripped.
+        let c2 = json!({"mcpServers":{"workspace":{"type":"sdk","name":"chan","url":"chan"}}});
         assert!(only(&c2).is_empty());
     }
 

@@ -949,7 +949,12 @@ async fn load_mcp_servers(plugin_dir: &Path) -> HashMap<String, mcp::McpServerCo
     };
     // Plugin MCP servers are dynamic-scoped (`addPluginScopeToServers` uses
     // `scope: 'dynamic'`, `mcpPluginIntegration.ts:353`).
-    match mcp::parse_mcp_json_string(&raw, mcp::ConfigScope::Dynamic) {
+    //
+    // The PLUGIN layer validates against the full 8-arm union `KY`
+    // (`vve`: `let B=KY().safeParse(U)`), not the 7-key config table `ZGn`
+    // that `.mcp.json` / settings / `--mcp-config` go through — so the two
+    // internal-only IDE transports are accepted here and rejected there.
+    match mcp::parse_plugin_mcp_json_string(&raw, mcp::ConfigScope::Dynamic) {
         Ok(configs) => configs.into_iter().map(|c| (c.name.clone(), c)).collect(),
         Err(e) => {
             tracing::warn!(error = %e, path = %path.display(), "skipping malformed plugin .mcp.json");
@@ -1152,7 +1157,9 @@ async fn load_declared_mcp_servers(
     value: Option<Value>,
 ) -> HashMap<String, mcp::McpServerConfig> {
     load_declared_json_records(plugin_dir, value, |raw| {
-        mcp::parse_mcp_json_string(raw, mcp::ConfigScope::Dynamic).map(|v| {
+        // Manifest-declared `mcpServers` land in the same plugin schema
+        // layer as the plugin `.mcp.json` above (oracle `KY`, not `ZGn`).
+        mcp::parse_plugin_mcp_json_string(raw, mcp::ConfigScope::Dynamic).map(|v| {
             v.into_iter()
                 .map(|cfg| (cfg.name.clone(), cfg))
                 .collect::<HashMap<_, _>>()

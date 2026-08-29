@@ -78,6 +78,20 @@ struct McpJsonEntry {
     env: HashMap<String, String>,
     #[serde(default)]
     url: Option<String>,
+    /// `sdk`-only: the host control-channel identifier. Oracle `MAn`
+    /// (2.1.251 Mach-O @154585319) is
+    /// `f({type:N("sdk"),name:i(),timeout:o().optional(),alwaysLoad:q().optional()})`
+    /// — `name` is a REQUIRED `i()`, in pointed contrast to its `.optional()`
+    /// siblings, so `{"type":"sdk"}` fails `safeParse` and the entry is
+    /// skipped. It is a plain `i()` with no `.min(1)`, so an EMPTY string is
+    /// schema-valid. No other member of the union declares `name`, so zod
+    /// strips it everywhere else (mirrored here: only the sdk branch reads
+    /// it). The declared value is what the oracle carries on the config and
+    /// compares in `tUt` (@160913341:
+    /// `Object.values(e).every(t=>t.type==="sdk"&&t.name==="claude-vscode")`)
+    /// — it is NOT forced to equal the entry's map key.
+    #[serde(default)]
+    name: Option<String>,
     /// "http" | "sse" — only honoured when `url` is set.
     #[serde(default, rename = "type")]
     transport_type: Option<String>,
@@ -241,7 +255,34 @@ pub fn parse_mcp_json_string(
     let serde_json::Value::Object(entries) = server_map else {
         return Ok(Vec::new());
     };
-    Ok(build_servers_from_map(entries, scope))
+    Ok(build_servers_from_map(entries, scope, false))
+}
+
+/// Parse a PLUGIN `.mcp.json` payload (or a plugin manifest's inline
+/// `mcpServers` record). Identical to [`parse_mcp_json_string`] except that
+/// the two internal-only IDE transports ([`IDE_ONLY_TYPES`]) are recognized.
+///
+/// The oracle's plugin loader `vve` validates each entry against the FULL
+/// 8-arm union — `let B=KY().safeParse(U); if(B.success) M[F]=B.data; else
+/// n(`Invalid MCP server config for ${F} in ${d}: ...`)` — rather than the
+/// 7-key config table `ZGn` that `xqe` uses for `.mcp.json` / settings /
+/// `--mcp-config`. Same file name, different schema layer.
+///
+/// # Errors
+/// Returns [`McpJsonError::Json`] when `raw` is not valid JSON.
+pub fn parse_plugin_mcp_json_string(
+    raw: &str,
+    scope: ConfigScope,
+) -> Result<Vec<McpServerConfig>, McpJsonError> {
+    let parsed: serde_json::Value = serde_json::from_str(raw)?;
+    let server_map = match parsed.get("mcpServers") {
+        Some(v) => v,
+        None => &parsed,
+    };
+    let serde_json::Value::Object(entries) = server_map else {
+        return Ok(Vec::new());
+    };
+    Ok(build_servers_from_map(entries, scope, true))
 }
 
 /// Parse MCP servers from a GLOBAL CONFIG file (`~/.lingxi.json`): reads ONLY the
@@ -261,7 +302,7 @@ pub fn parse_global_config_mcp_servers(
     let Some(serde_json::Value::Object(entries)) = parsed.get("mcpServers") else {
         return Ok(Vec::new());
     };
-    Ok(build_servers_from_map(entries, scope))
+    Ok(build_servers_from_map(entries, scope, false))
 }
 
 /// Build validated `McpServerConfig`s from a `{ name: entry }` server map.
@@ -271,10 +312,11 @@ pub fn parse_global_config_mcp_servers(
 fn build_servers_from_map(
     entries: &serde_json::Map<String, serde_json::Value>,
     scope: ConfigScope,
+    ide_transports_allowed: bool,
 ) -> Vec<McpServerConfig> {
     let mut out = Vec::new();
     for (name, raw_entry) in entries {
-        if let Some(cfg) = build_server_from_json_entry(name, raw_entry, scope) {
+        if let Some(cfg) = build_entry(name, raw_entry, scope, ide_transports_allowed) {
             out.push(cfg);
         }
     }
@@ -282,20 +324,77 @@ fn build_servers_from_map(
     out
 }
 
+/// The REMOTE transport `type` values the on-disk CONFIG layer recognizes.
+///
+/// Oracle `ZGn` (2.1.251 Mach-O @160905638) is the lookup table `xqe` uses for
+/// every config source — `.mcp.json` (project/enterprise, via `Iqe`), the
+/// `user`/`local` settings `configObject`s, and the `--mcp-config` inline
+/// payload:
+/// ```text
+/// var ZGn={stdio:fYe,sse:OAn,http:sGt,"streamable-http":sGt,ws:LAn,sdk:MAn,"claudeai-proxy":NAn};
+/// ```
+/// `sse-ide` and `ws-ide` are ABSENT from it — see [`IDE_ONLY_TYPES`].
+const CONFIG_REMOTE_TYPES: &[&str] = &["sse", "http", "streamable-http", "ws", "claudeai-proxy"];
+
+/// The two internal-only IDE transports.
+///
+/// They ARE members of the 8-arm union `KY` (@154586195:
+/// `KY=m(()=>dt([fYe(),OAn(),l(),d(),sGt(),LAn(),MAn(),NAn()]))`, where `l` is
+/// `sse-ide` and `d` is `ws-ide`), which is what the PLUGIN `.mcp.json` loader
+/// `vve` validates against (`let B=KY().safeParse(U)`, @160865300 region) and
+/// what agent frontmatter declares (`Dnt=m(()=>dt([i(),De(i(),KY())]))`
+/// @160484780) — but they are NOT keys of `ZGn`, so at the config layer
+/// `xqe` emits `Skipped — unknown MCP server type "sse-ide" for server "…"`
+/// and never loads the entry. Two different schema layers wear the same
+/// on-disk file name; the port keeps them apart via `ide_transports_allowed`.
+///
+/// The agent layer accepts them at the SCHEMA level and then drops them per
+/// entry in `esn` (@160485539: `Skipping internal-only MCP transport '…'`),
+/// which the port does in `agent::mcp_servers` before this module is reached.
+const IDE_ONLY_TYPES: &[&str] = &["sse-ide", "ws-ide"];
+
+/// Does `entry` satisfy the REQUIRED fields of the union member its `type`
+/// selects? The single source of truth shared by
+/// [`server_entry_shape_is_valid`] (the quiet JSON-agent validator) and
+/// [`build_server_from_json_entry`] (the loader), so the two can never again
+/// disagree about which shapes are acceptable.
+///
+/// `ide_transports_allowed` selects the schema LAYER: `false` = the config
+/// lookup table [`CONFIG_REMOTE_TYPES`] (oracle `ZGn`, 7 keys); `true` = the
+/// full union `KY` (8 arms), which additionally admits [`IDE_ONLY_TYPES`].
+fn entry_satisfies_schema(entry: &McpJsonEntry, ide_transports_allowed: bool) -> bool {
+    match entry.transport_type.as_deref() {
+        // `fYe`: `type: N("stdio").optional()`, `command: i().min(1,"Command
+        // cannot be empty")`. An absent `type` is a valid stdio entry.
+        None | Some("stdio") => entry.command.as_deref().is_some_and(|c| !c.is_empty()),
+        // `MAn`: `name: i()` REQUIRED (no `.min(1)`, so `""` is valid); no
+        // `command`, no `url`.
+        Some("sdk") => entry.name.is_some(),
+        // Every remote member declares a required `url: i()`.
+        Some(t) if CONFIG_REMOTE_TYPES.contains(&t) => entry.url.is_some(),
+        Some(t) if ide_transports_allowed && IDE_ONLY_TYPES.contains(&t) => entry.url.is_some(),
+        // A `type` outside the layer's union rejects the whole entry.
+        _ => false,
+    }
+}
+
 /// Quiet shape check for one raw `.mcp.json`-style entry value: does it
-/// deserialize as a server entry AND carry a transport (`command` or `url`)?
+/// deserialize as a server entry AND satisfy the required fields of the union
+/// member its `type` selects ([`entry_satisfies_schema`])?
+///
 /// Mirrors the zod `safeParse` success predicate WITHOUT logging — used by the
 /// strict JSON-agent `mcpServers` validator (`z.array(AgentMcpServerSpecSchema)`,
 /// where any invalid record value drops the whole agent) so validation at parse
 /// time does not double-log the entry the conversion would log again later.
+///
+/// The agent layer validates against `KY` (`Dnt=m(()=>dt([i(),De(i(),KY())]))`,
+/// @160484780), the 8-arm union, so [`IDE_ONLY_TYPES`] are accepted HERE and
+/// dropped per entry later by `agent::mcp_servers` (oracle `esn`) — an
+/// `sse-ide` entry must not take the whole agent down with it.
 #[must_use]
 pub fn server_entry_shape_is_valid(raw_entry: &serde_json::Value) -> bool {
     McpJsonEntry::deserialize(raw_entry)
-        .map(|e| {
-            // `type:"sdk"` (oracle `MAn`) needs neither `command` nor `url` —
-            // see [`build_server_from_json_entry`].
-            e.command.is_some() || e.url.is_some() || e.transport_type.as_deref() == Some("sdk")
-        })
+        .map(|e| entry_satisfies_schema(&e, true))
         .unwrap_or(false)
 }
 
@@ -313,6 +412,19 @@ pub fn build_server_from_json_entry(
     name: &str,
     raw_entry: &serde_json::Value,
     scope: ConfigScope,
+) -> Option<McpServerConfig> {
+    build_entry(name, raw_entry, scope, false)
+}
+
+/// [`build_server_from_json_entry`] with the schema layer selected explicitly.
+/// `ide_transports_allowed` = `false` is the config layer (oracle `ZGn`);
+/// `true` is the plugin `.mcp.json` layer (oracle `KY`, see
+/// [`parse_plugin_mcp_json_string`]).
+fn build_entry(
+    name: &str,
+    raw_entry: &serde_json::Value,
+    scope: ConfigScope,
+    ide_transports_allowed: bool,
 ) -> Option<McpServerConfig> {
     {
         // Per-entry validation: a shape that fails to deserialize is logged and
@@ -342,38 +454,51 @@ pub fn build_server_from_json_entry(
         // claude `configError` (`configErrorReason:"url_invalid"`): set when a
         // remote `url` expands to empty; carried on the config, never fatal.
         let mut config_error: Option<String> = None;
-        // Discriminate by `type` FIRST, mirroring the oracle's
-        // `z.discriminatedUnion("type", [stdio, sse, sse-ide, ws-ide, http,
-        // ws, sdk, claudeai-proxy])` (`KY`, 2.1.251 Mach-O @154583724). An
-        // absent `type` is a VALID "stdio" discriminator — zod's
-        // `getDiscriminator` unwraps `ZodOptional` so `fYe`'s
-        // `type: N("stdio").optional()` registers `[undefined, "stdio"]` —
-        // so a `type`-less entry is validated as stdio and ONLY as stdio,
-        // never guessed from whichever other fields happen to be present.
-        // A `type` value matching none of the union's literals fails the
-        // whole entry. This fixes §12's shape-driven bugs: a bare
-        // `{"url":...}` (no `type`, no `command`) used to fall through to
-        // Http; `{"type":"http","command":"x"}` used to be parsed as Stdio
-        // because the old code checked `command` before `type`;
-        // `{"type":"bogus",...}` and the non-oracle alias `"websocket"` used
-        // to silently default to Http/WebSocket instead of being rejected.
+        // Discriminate by `type` FIRST. The oracle's config loader `xqe`
+        // (@160909118) does exactly this: `let W = typeof B.type==="string" ?
+        // B.type : "stdio"` picks the key, `ZGn[W]` picks the schema, and the
+        // ONE schema it picked is `safeParse`d — no other arm is tried. (`KY`
+        // itself is `dt([...])` and `dt` is `z.union`, NOT
+        // `z.discriminatedUnion` — @154569475
+        // `function dt(e,t){return new yn({type:"union",options:e,...})}`,
+        // `yn = ZodUnion`; the discriminated-union factory is the sibling
+        // `ps`. Under a plain union every arm is tried and the entry survives
+        // if ANY matches, which for these schemas selects the same arm the
+        // `type` literal names and rejects the same inputs — but do not reason
+        // from "the discriminator picks exactly one arm" when editing this.)
+        // An absent `type` is `fYe`, i.e. stdio, and ONLY stdio: it is never
+        // guessed from whichever other fields happen to be present. A `type`
+        // value outside the layer's union fails the whole entry. This fixes
+        // §12's shape-driven bugs: a bare `{"url":...}` (no `type`, no
+        // `command`) used to fall through to Http; `{"type":"http",
+        // "command":"x"}` used to be parsed as Stdio because the old code
+        // checked `command` before `type`; `{"type":"bogus",...}` and the
+        // non-oracle alias `"websocket"` used to silently default to
+        // Http/WebSocket instead of being rejected.
         let ty = entry.transport_type.as_deref();
         let is_stdio = matches!(ty, None | Some("stdio"));
         let spec = if ty == Some("sdk") {
             // Oracle `MAn` @154585319 (v2.1.251 Mach-O, minified `mcp-sdk.js`
             // chunk): `f({type:N("sdk"),name:i(),timeout:o().optional(),
-            // alwaysLoad:q().optional()})` — no `command`, no `url`.
+            // alwaysLoad:q().optional()})` — no `command`, no `url`, and
+            // `name` is REQUIRED (its siblings all carry `.optional()`), so
+            // `{"type":"sdk"}` fails `safeParse` and the entry is skipped.
             //
-            // The schema's own `name` is always the entry's map key — every
-            // construction site in the oracle stamps it that way
-            // (`d[S]={type:"sdk",name:S,...}` @174336969,
-            // `P[Fe]={type:"sdk",name:Fe,...}` @176568709) — so the
-            // control-channel id is this server's NAME, never a URL (a stray
-            // `url` field on an sdk entry is schema-unknown and would be
-            // silently stripped by zod, so it is likewise ignored here).
-            McpTransportSpec::SdkControl {
-                control_channel_id: name.clone(),
-            }
+            // The control-channel id is that DECLARED `name`, not the map
+            // key: the oracle keeps it on the config and reads it back in
+            // `tUt` (@160913341,
+            // `every(t=>t.type==="sdk"&&t.name==="claude-vscode")`), which
+            // gates the enterprise/remote sdk carve-out. The map key stays
+            // the registry key (`A[U]=Oe`). A stray `url` on an sdk entry is
+            // schema-unknown and silently stripped by zod, so it is ignored.
+            let Some(control_channel_id) = entry.name.clone() else {
+                tracing::warn!(
+                    server = %name,
+                    "mcp.json: sdk server is missing the required \"name\"; skipping entry"
+                );
+                return None;
+            };
+            McpTransportSpec::SdkControl { control_channel_id }
         } else if is_stdio {
             let Some(cmd) = entry.command else {
                 // No `type` (or explicit `type:"stdio"`) and no `command`:
@@ -408,19 +533,24 @@ pub fn build_server_from_json_entry(
                 env: expand_map_values(entry.env, &mut missing),
             }
         } else {
-            // Every remaining oracle-recognized `type` is a URL transport.
-            // `sse-ide`/`ws-ide` are deliberately included here even though
-            // the oracle requires `ideName` on both (§10 — a DIFFERENT,
-            // unassigned finding): they are preserved dialling as Http
-            // exactly as before, rather than newly rejected by this change.
-            let recognized = matches!(
-                ty,
-                Some("sse" | "http" | "streamable-http" | "ws" | "claudeai-proxy" | "sse-ide" | "ws-ide")
-            );
+            // Every remaining recognized `type` is a URL transport. WHICH
+            // ones are recognized depends on the schema layer: the config
+            // layer sees only `ZGn`'s keys ([`CONFIG_REMOTE_TYPES`]), the
+            // plugin `.mcp.json` layer additionally sees the two
+            // [`IDE_ONLY_TYPES`] arms of `KY`.
+            let recognized = ty.is_some_and(|t| {
+                CONFIG_REMOTE_TYPES.contains(&t)
+                    || (ide_transports_allowed && IDE_ONLY_TYPES.contains(&t))
+            });
             if !recognized {
-                // A `type` string outside the oracle's 8-member union (e.g.
-                // `"bogus"`, or the non-oracle alias `"websocket"`) fails the
-                // whole entry — it must NOT silently default to Http/WebSocket.
+                // A `type` string this layer's union has no arm for — e.g.
+                // `"bogus"`, the non-oracle alias `"websocket"`, or (at the
+                // config layer) `"sse-ide"`/`"ws-ide"` — fails the whole
+                // entry; it must NOT silently default to Http/WebSocket.
+                // Matches `xqe`'s `Skipped — unknown MCP server type "<t>"
+                // for server "<name>"` and the port's own
+                // `config_diagnostics::KNOWN_MCP_TYPES`, which has always
+                // listed exactly `ZGn`'s 7 keys.
                 tracing::warn!(
                     server = %name,
                     r#type = ?ty,
@@ -497,7 +627,12 @@ pub fn build_server_from_json_entry(
                     headers_helper,
                     oauth: entry.oauth,
                 },
-                // §10 (unmodelled ideName/authToken) — preserved as before.
+                // Reachable ONLY on the plugin `.mcp.json` layer
+                // (`ide_transports_allowed`), which validates against `KY`.
+                // §10 (unmodelled `ideName`/`authToken`, and the unused
+                // `McpTransportSpec::SseIde` variant) is a DIFFERENT,
+                // unassigned finding — these keep dialling as Http exactly as
+                // before rather than being newly rejected on that layer.
                 Some("sse-ide" | "ws-ide") => McpTransportSpec::Http {
                     url,
                     headers,
@@ -543,11 +678,14 @@ pub fn build_server_from_json_entry(
         // ide schemas carry no `request_timeout_ms` field at all (oracle
         // `LAn`, the `ws` schema, has no such key — zod would strip it even
         // if present), so the alias is honoured for the sse/http-family
-        // transports only. `McpTransportSpec::Http` here may also carry a
-        // claudeai-proxy or sse-ide/ws-ide entry (out of scope, §10/claude.ai
-        // surface); those already produced `Http` before this change, so
-        // folding the alias for them too is pre-existing behaviour, not a
-        // new divergence introduced by this fix.
+        // transports only.
+        //
+        // KNOWN RESIDUAL (reported, NOT fixed here — the claude.ai connector
+        // surface is out of scope by instruction): `McpTransportSpec::Http`
+        // also carries `claudeai-proxy`, whose schema `NAn` (@154585377)
+        // declares neither `request_timeout_ms` nor `.transform(iGt)`, so the
+        // oracle strips the alias for it. The sse-ide/ws-ide half of that
+        // residual is now confined to the plugin layer.
         let timeout_ms = match &spec {
             McpTransportSpec::Sse { .. } | McpTransportSpec::Http { .. } => {
                 entry.timeout.or_else(|| {
@@ -652,7 +790,7 @@ pub fn parse_local_config_mcp_servers(
     else {
         return Ok(Vec::new());
     };
-    Ok(build_servers_from_map(entries, scope))
+    Ok(build_servers_from_map(entries, scope, false))
 }
 
 /// Load + merge MCP servers across all THREE claude-code config scopes, with
@@ -787,9 +925,9 @@ mod tests {
     #[test]
     fn parse_http_url_transport() {
         // §12: an http entry MUST name its type explicitly — the oracle's
-        // remote schemas are only reached via the `type` discriminator, never
-        // inferred from `url` alone (see [`bare_url_without_type_is_rejected`]
-        // for the case this replaces).
+        // remote schemas are only reached by naming the `type` key `xqe`
+        // looks up in `ZGn`, never inferred from `url` alone (see
+        // [`bare_url_without_type_is_rejected`] for the case this replaces).
         let raw = r#"{
           "mcpServers": {
             "remote": { "type": "http", "url": "https://example.test/mcp" }
@@ -806,11 +944,19 @@ mod tests {
     }
 
     /// §12 fix: before this change, `{"url":...}` with NO `type` (and no
-    /// `command`) was silently accepted as Http. The oracle's discriminated
-    /// union treats an absent `type` as an IMPLICIT `stdio` attempt (zod's
-    /// `getDiscriminator` on `fYe`'s `type: N("stdio").optional()` registers
-    /// `[undefined, "stdio"]`), which then fails `command.min(1)` because
-    /// there is no `command` — the whole entry is skipped, not routed to Http.
+    /// `command`) was silently accepted as Http. At the config layer `xqe`
+    /// computes `let W = typeof B.type==="string" ? B.type : "stdio"`, so an
+    /// absent `type` selects `ZGn["stdio"] = fYe`, which then fails
+    /// `command: i().min(1)` because there is no `command` — the whole entry
+    /// is skipped, not routed to Http. (The oracle even has a dedicated
+    /// message for this exact shape: `Skipped — MCP server "<n>" has a "url"
+    /// but no "type"; add "type": "http" (or "sse" / "ws") to this entry`,
+    /// reproduced in `config_diagnostics`.) NOTE the union `KY` is built with
+    /// `dt` = `z.union`, NOT `z.discriminatedUnion` (@154569475:
+    /// `function dt(e,t){return new yn({type:"union",...})}`, `yn=ZodUnion`);
+    /// under a plain union every arm is tried and all of them reject this
+    /// shape, so the outcome is the same — but the mechanism is not a
+    /// discriminator.
     #[test]
     fn bare_url_without_type_is_rejected() {
         let raw = r#"{"mcpServers":{"remote":{"url":"https://example.test/mcp"}}}"#;
@@ -822,9 +968,10 @@ mod tests {
     }
 
     /// §12 fix: `{"type":"bogus","url":...}` must fail the whole entry — the
-    /// oracle's discriminated union has no arm for an unrecognized `type`
-    /// string, so it does NOT fall back to Http just because a `url` happens
-    /// to be present.
+    /// oracle's config table `ZGn` has no key for an unrecognized `type`
+    /// string (`Object.hasOwn(ZGn,W)` is false → `Skipped — unknown MCP
+    /// server type`), so it does NOT fall back to Http just because a `url`
+    /// happens to be present.
     #[test]
     fn unknown_type_with_url_is_rejected_not_defaulted_to_http() {
         let raw = r#"{"mcpServers":{"remote":{"type":"bogus","url":"https://example.test/mcp"}}}"#;
@@ -857,16 +1004,14 @@ mod tests {
     }
 
     /// Oracle `MAn`: `{type:"sdk",name,timeout,alwaysLoad}` — NO `url` and NO
-    /// `command`. Before this fix the entry fell through to the
-    /// "missing both command and url" branch and was silently dropped, even
-    /// though `KNOWN_MCP_TYPES` (config_diagnostics.rs) already blessed `sdk`
-    /// as a recognized type. The control-channel id must come from the
-    /// server's own NAME (the map key), never a url — sdk entries have none.
+    /// `command`, so the entry must not fall through to the "missing both
+    /// command and url" branch. The control-channel id is the entry's own
+    /// DECLARED `name`, never a url — sdk entries have none.
     #[test]
     fn sdk_entry_with_no_url_is_accepted_and_keyed_by_name() {
         let raw = r#"{
           "mcpServers": {
-            "claude-vscode": { "type": "sdk", "timeout": 5000, "alwaysLoad": true }
+            "claude-vscode": { "type": "sdk", "name": "claude-vscode", "timeout": 5000, "alwaysLoad": true }
           }
         }"#;
         let cfgs = parse_mcp_json_string(raw, ConfigScope::User).unwrap();
@@ -883,11 +1028,54 @@ mod tests {
         assert!(cfgs[0].always_load);
     }
 
+    /// Oracle `MAn` @154585319:
+    /// `f({type:N("sdk"),name:i(),timeout:o().optional(),alwaysLoad:q().optional()})`
+    /// — `name` is the ONE field with no `.optional()`, so `{"type":"sdk"}`
+    /// fails `ZGn["sdk"]().safeParse` and `xqe` emits `Skipped — invalid MCP
+    /// server config for "x": name: expected string, received undefined`.
+    /// The port used to accept it and register a phantom `SdkControl` server
+    /// with no SDK instance behind it.
+    #[test]
+    fn sdk_entry_without_name_is_rejected() {
+        let raw = r#"{"mcpServers":{"x":{"type":"sdk","timeout":5000}}}"#;
+        let cfgs = parse_mcp_json_string(raw, ConfigScope::User).unwrap();
+        assert!(
+            cfgs.is_empty(),
+            "`MAn.name` is required; a nameless sdk entry must be skipped"
+        );
+        // `i()` has no `.min(1)`, so an EMPTY name is schema-valid and kept.
+        let raw = r#"{"mcpServers":{"x":{"type":"sdk","name":""}}}"#;
+        let cfgs = parse_mcp_json_string(raw, ConfigScope::User).unwrap();
+        assert_eq!(cfgs.len(), 1, "an empty `name` still satisfies `i()`");
+    }
+
+    /// The oracle keeps the DECLARED `name` on the config — it is what `tUt`
+    /// (@160913341, `every(t=>t.type==="sdk"&&t.name==="claude-vscode")`)
+    /// compares for the enterprise/remote sdk carve-out — while the map key
+    /// stays the registry key (`A[U]=Oe`). The port used to discard the
+    /// declared name and substitute the map key.
+    #[test]
+    fn sdk_entry_uses_the_declared_name_not_the_map_key() {
+        let raw = r#"{"mcpServers":{"vscode":{"type":"sdk","name":"claude-vscode"}}}"#;
+        let cfgs = parse_mcp_json_string(raw, ConfigScope::User).unwrap();
+        assert_eq!(cfgs.len(), 1);
+        assert_eq!(cfgs[0].name, "vscode", "registry key is the map key");
+        match &cfgs[0].spec {
+            McpTransportSpec::SdkControl { control_channel_id } => {
+                assert_eq!(
+                    control_channel_id, "claude-vscode",
+                    "the control channel is the DECLARED name, not the map key"
+                );
+            }
+            other => panic!("expected SdkControl, got {other:?}"),
+        }
+    }
+
     /// A stray `url` on an sdk entry is schema-unknown (oracle `MAn` has no
     /// `url` field) and must be ignored, not used as the control-channel id.
     #[test]
     fn sdk_entry_ignores_a_stray_url_field() {
-        let raw = r#"{"mcpServers":{"srv":{"type":"sdk","url":"should-be-ignored"}}}"#;
+        let raw = r#"{"mcpServers":{"srv":{"type":"sdk","name":"srv","url":"should-be-ignored"}}}"#;
         let cfgs = parse_mcp_json_string(raw, ConfigScope::User).unwrap();
         assert_eq!(cfgs.len(), 1);
         match &cfgs[0].spec {
@@ -896,6 +1084,147 @@ mod tests {
             }
             other => panic!("expected SdkControl, got {other:?}"),
         }
+    }
+
+    // ── §12 follow-up: the CONFIG layer's type table is `ZGn` (7 keys), not
+    //    the 8-arm union `KY`. `xqe` looks the entry's `type` up in
+    //    `ZGn={stdio:fYe,sse:OAn,http:sGt,"streamable-http":sGt,ws:LAn,
+    //    sdk:MAn,"claudeai-proxy":NAn}` (@160905638) and, finding no key,
+    //    emits `Skipped — unknown MCP server type "sse-ide" for server "ide"`.
+    //    The PLUGIN `.mcp.json` loader `vve` validates against `KY` instead
+    //    (`let B=KY().safeParse(U)`), which DOES have `sse-ide`/`ws-ide`
+    //    arms. Same file name, two schema layers. ──
+
+    #[test]
+    fn ide_only_types_are_rejected_at_the_config_layer() {
+        for ty in ["sse-ide", "ws-ide"] {
+            let raw = format!(
+                r#"{{"mcpServers":{{"ide":{{"type":"{ty}","url":"http://127.0.0.1:9999/sse","ideName":"VS Code"}}}}}}"#
+            );
+            let cfgs = parse_mcp_json_string(&raw, ConfigScope::Project).unwrap();
+            assert!(
+                cfgs.is_empty(),
+                "{ty} is absent from ZGn; a .mcp.json entry naming it must be skipped, not dialled as HTTP"
+            );
+            // Every config entry point shares the table.
+            let global = format!(r#"{{"mcpServers":{{"ide":{{"type":"{ty}","url":"http://x/sse"}}}}}}"#);
+            assert!(parse_global_config_mcp_servers(&global, ConfigScope::User)
+                .unwrap()
+                .is_empty());
+        }
+    }
+
+    /// The port's own `config_diagnostics::KNOWN_MCP_TYPES` already listed
+    /// exactly `ZGn`'s 7 keys, so before this fix the loader CONNECTED a
+    /// server that `/doctor` and startup reported as skipped. Pin the two
+    /// against each other so they cannot drift apart again.
+    #[test]
+    fn loader_and_diagnostics_agree_on_the_config_type_table() {
+        for ty in [
+            "stdio",
+            "sse",
+            "http",
+            "streamable-http",
+            "ws",
+            "sdk",
+            "claudeai-proxy",
+            "sse-ide",
+            "ws-ide",
+            "websocket",
+            "bogus",
+        ] {
+            let entry = serde_json::json!({
+                "type": ty, "url": "https://x.test/mcp", "command": "c", "name": "n"
+            });
+            let loader_kept =
+                build_server_from_json_entry("srv", &entry, ConfigScope::Project).is_some();
+            let diagnostics_kept = crate::config_diagnostics::collect_mcp_config_warnings(
+                &serde_json::json!({ "mcpServers": { "srv": entry } }),
+                ConfigScope::Project,
+                None,
+            )
+            .is_empty();
+            assert_eq!(
+                loader_kept, diagnostics_kept,
+                "type {ty:?}: loader kept={loader_kept} but diagnostics silent={diagnostics_kept}"
+            );
+        }
+    }
+
+    /// The plugin layer is `KY`, so the two IDE arms survive there (they are
+    /// still dialled as Http — §10, unmodelled `ideName`/`authToken`, is a
+    /// separate finding). This is what keeps the config-layer tightening from
+    /// silently amputating plugin-declared IDE servers.
+    #[test]
+    fn plugin_layer_still_accepts_the_ide_only_types() {
+        for ty in ["sse-ide", "ws-ide"] {
+            let raw = format!(
+                r#"{{"mcpServers":{{"ide":{{"type":"{ty}","url":"http://127.0.0.1:9999/sse","ideName":"VS Code"}}}}}}"#
+            );
+            let cfgs = parse_plugin_mcp_json_string(&raw, ConfigScope::Dynamic).unwrap();
+            assert_eq!(cfgs.len(), 1, "{ty} is an arm of KY, which the plugin loader uses");
+        }
+        // The plugin layer is not a free-for-all: a type outside KY still fails.
+        let raw = r#"{"mcpServers":{"x":{"type":"bogus","url":"http://x"}}}"#;
+        assert!(parse_plugin_mcp_json_string(raw, ConfigScope::Dynamic)
+            .unwrap()
+            .is_empty());
+    }
+
+    /// [`server_entry_shape_is_valid`] documents itself as mirroring the zod
+    /// `safeParse` success predicate, and the JSON-agent validator
+    /// (`agent::catalog::validate_mcp_servers_schema`) drops a whole agent on
+    /// a `false`. It was left on the old `command || url || type=="sdk"` rule
+    /// while the loader was tightened four ways, so an agent could pass
+    /// validation and then silently lose the very server the validator
+    /// blessed. Both now route through `entry_satisfies_schema`; this pins
+    /// them together over every shape the loader tests exercise.
+    #[test]
+    fn shape_validator_agrees_with_the_loader() {
+        let cases = [
+            // (entry, expected-accepted)
+            (serde_json::json!({"command": "docs-server"}), true),
+            (serde_json::json!({"type": "stdio", "command": "c"}), true),
+            (serde_json::json!({"command": ""}), false),
+            (serde_json::json!({"url": "https://x.test/mcp"}), false),
+            (
+                serde_json::json!({"type": "bogus", "url": "https://x.test/mcp"}),
+                false,
+            ),
+            (
+                serde_json::json!({"type": "websocket", "url": "wss://x.test"}),
+                false,
+            ),
+            (serde_json::json!({"type": "http", "command": "x"}), false),
+            (
+                serde_json::json!({"type": "http", "url": "https://x.test/mcp"}),
+                true,
+            ),
+            (serde_json::json!({"type": "ws", "url": "wss://x.test"}), true),
+            (serde_json::json!({"type": "sdk"}), false),
+            (serde_json::json!({"type": "sdk", "name": "n"}), true),
+            (serde_json::json!({"timeout": 0, "command": "c"}), false),
+        ];
+        // Collect ALL mismatches rather than aborting on the first, so a
+        // regression names every shape it broke.
+        let mut bad: Vec<String> = Vec::new();
+        for (entry, expected) in cases {
+            let validator = server_entry_shape_is_valid(&entry);
+            let loader = build_server_from_json_entry("srv", &entry, ConfigScope::Agent).is_some();
+            if validator != expected || loader != expected {
+                bad.push(format!(
+                    "{entry}: expected {expected}, validator={validator}, loader={loader}"
+                ));
+            }
+        }
+        assert!(bad.is_empty(), "validator/loader disagreed on: {bad:#?}");
+        // The one deliberate difference: the agent schema is `KY`, so the two
+        // internal-only IDE transports pass validation (the agent-level drop
+        // happens later, in `agent::mcp_servers`, mirroring oracle `esn`) even
+        // though the CONFIG-layer loader rejects them.
+        let ide = serde_json::json!({"type": "sse-ide", "url": "http://x/sse", "ideName": "VS Code"});
+        assert!(server_entry_shape_is_valid(&ide));
+        assert!(build_server_from_json_entry("ide", &ide, ConfigScope::Agent).is_none());
     }
 
     #[test]
@@ -979,8 +1308,8 @@ mod tests {
 
     #[test]
     fn websocket_accepts_ordered_headers_and_helper() {
-        // §12: only the oracle's literal `"ws"` is a valid ws discriminator
-        // (`LAn`, 2.1.251 Mach-O @154583724) — the non-oracle alias
+        // §12: only the oracle's literal `"ws"` names the ws schema
+        // (`LAn`, 2.1.251 Mach-O @154585377) — the non-oracle alias
         // `"websocket"` is exercised separately in
         // [`non_oracle_websocket_alias_is_rejected`].
         let raw = r#"{
@@ -1009,7 +1338,7 @@ mod tests {
         assert_eq!(headers_helper.as_deref(), Some("helper"));
     }
 
-    /// §12 fix: `"websocket"` is not one of the oracle's 8 discriminated-union
+    /// §12 fix: `"websocket"` is not one of the oracle's union
     /// literals (only `"ws"` is) — it must reject, not silently alias to
     /// `McpTransportSpec::WebSocket`.
     #[test]

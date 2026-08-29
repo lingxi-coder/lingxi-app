@@ -66,9 +66,16 @@ pub const ENTERPRISE_EXCLUSIVE_CONTROL_MESSAGE: &str =
 /// testable without touching the process-global managed dir / env.
 #[must_use]
 pub fn enterprise_mcp_active_at(path: &Path) -> bool {
-    // claude's `$7t` gates on "regular file within size limit"; here a failed
-    // read (ENOENT / not-a-file / unreadable) is the same not-active signal.
-    let Ok(raw) = std::fs::read_to_string(path) else {
+    // claude's `$7t` IS `Iqe` at `scope:"enterprise"` (`zit`'s
+    // `case"enterprise"` calls `Iqe({filePath:J$t(),expandVars:t,
+    // scope:"enterprise"})`, 2.1.251 @160901500), so the read goes through
+    // `Atr(d,t,mcn)` — `if(!o.isFile()||o.size>r)return null`, @156004982 —
+    // and is REFUSED for a non-regular file (a FIFO would otherwise block
+    // boot forever waiting for a writer) or one over 2 MiB. A refused or
+    // failed read (ENOENT / not-a-file / oversized / unreadable) is the same
+    // not-active signal.
+    let Ok(raw) = crate::config_diagnostics::read_mcp_config_file(path, ConfigScope::Enterprise)
+    else {
         return false;
     };
     if raw.trim().is_empty() {
@@ -1382,7 +1389,25 @@ pub fn is_server_allowed(config: &McpServerConfig, policy: &McpPolicy) -> bool {
 /// missing/malformed file.
 #[must_use]
 pub fn load_enterprise_servers() -> Vec<McpServerConfig> {
-    let Ok(raw) = std::fs::read_to_string(managed_mcp_config_path()) else {
+    load_enterprise_servers_at(&managed_mcp_config_path())
+}
+
+/// The [`load_enterprise_servers`] core, parameterized on the config path so it
+/// is testable without touching the process-global managed dir / env.
+///
+/// The read goes through the same `Iqe` shape/size guard the project-scope
+/// `.mcp.json` walk uses: `zit`'s `case"enterprise"` calls
+/// `Iqe({filePath:J$t(),expandVars:t,scope:"enterprise"})` (2.1.251
+/// @160901500), and every non-`dynamic` scope inside `Iqe` reads via
+/// `Atr(d,t,mcn)` (`if(!o.isFile()||o.size>r)return null`, @156004982). A
+/// managed `managed-mcp.json` that is a FIFO or larger than
+/// [`crate::config_diagnostics::MCP_CONFIG_MAX_BYTES`] is refused rather than
+/// read — an unguarded `read_to_string` on a writer-less FIFO blocks boot
+/// forever.
+#[must_use]
+pub fn load_enterprise_servers_at(path: &Path) -> Vec<McpServerConfig> {
+    let Ok(raw) = crate::config_diagnostics::read_mcp_config_file(path, ConfigScope::Enterprise)
+    else {
         return Vec::new();
     };
     crate::json_config::parse_mcp_json_string(&raw, ConfigScope::Enterprise).unwrap_or_default()
@@ -1417,6 +1442,54 @@ pub fn apply_enterprise_mcp_policy_with(configs: &mut Vec<McpServerConfig>, poli
 
 #[cfg(test)]
 mod tests {
+
+    /// The enterprise `managed-mcp.json` read goes through the same `Iqe`
+    /// shape/size guard the project `.mcp.json` walk uses: `zit`'s
+    /// `case"enterprise"` calls `Iqe({filePath:J$t(),expandVars:t,
+    /// scope:"enterprise"})` (2.1.251 @160901500) and every non-`dynamic`
+    /// scope inside `Iqe` reads via `Atr(d,t,mcn)` —
+    /// `if(!o.isFile()||o.size>r)return null` with `mcn=2097152` (@156004982,
+    /// @160911363). Both enterprise readers were doing a bare
+    /// `std::fs::read_to_string`, so an oversized managed config was read in
+    /// full and a FIFO would have blocked boot forever waiting for a writer.
+    #[test]
+    fn enterprise_managed_config_is_refused_when_it_exceeds_the_byte_cap() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("managed-mcp.json");
+
+        // Comfortably UNDER the cap: loads normally, so the test cannot pass
+        // by simply failing to read anything.
+        std::fs::write(
+            &path,
+            r#"{"mcpServers":{"srv":{"type":"stdio","command":"c"}}}"#,
+        )
+        .unwrap();
+        assert!(super::enterprise_mcp_active_at(&path));
+        let servers = super::load_enterprise_servers_at(&path);
+        assert_eq!(servers.len(), 1, "a small managed config must still load");
+        assert_eq!(servers[0].name, "srv");
+
+        // Same content, padded past `mcn` with whitespace inside the object so
+        // it stays valid JSON: the guard must refuse the read outright.
+        let cap = crate::config_diagnostics::MCP_CONFIG_MAX_BYTES as usize;
+        let padded = format!(
+            "{{\"mcpServers\":{{\"srv\":{{\"type\":\"stdio\",\"command\":\"c\"}}}}{}}}",
+            " ".repeat(cap + 1)
+        );
+        std::fs::write(&path, &padded).unwrap();
+        assert!(
+            std::fs::metadata(&path).unwrap().len() > crate::config_diagnostics::MCP_CONFIG_MAX_BYTES,
+            "fixture must actually cross the {cap}-byte threshold it names"
+        );
+        assert!(
+            !super::enterprise_mcp_active_at(&path),
+            "an over-cap managed-mcp.json must not activate enterprise MCP control"
+        );
+        assert!(
+            super::load_enterprise_servers_at(&path).is_empty(),
+            "an over-cap managed-mcp.json must be refused, not read in full"
+        );
+    }
 
     /// Within the FILE tier, a `managed-settings.d` drop-in OVERRIDES the base
     /// `managed-settings.json`, and the drop-ins are applied in sorted order.

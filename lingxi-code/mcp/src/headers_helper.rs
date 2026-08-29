@@ -270,6 +270,51 @@ fn merge_dynamic_headers(spec: &McpTransportSpec, dynamic: McpHeaders) -> McpTra
 mod tests {
     use super::*;
 
+    /// Which scopes the trust gate covers is oracle `Hr` (2.1.251 @182175156):
+    /// ```text
+    /// function Hr(e){switch(e){
+    ///   case"project": case"local": return"repo";
+    ///   case"user": case"dynamic": case"enterprise": case"claudeai":
+    ///   case"managed": case"agent": return"operator";
+    ///   default: return e}}
+    /// function Fr(e){return Hr(e.scope)==="repo" || ...}
+    /// ```
+    /// and `jht` only returns `missing_trust` when `isRepoResidentConfig`
+    /// (= `Fr`) is set (@157454467). So exactly `project` and `local` are
+    /// gated; every other scope — `dynamic` included — runs the helper
+    /// without a trust record.
+    ///
+    /// This is load-bearing for `--mcp-config`: those entries are stamped
+    /// `dynamic` (oracle `Tl={...ws,scope:"dynamic"}`, port
+    /// `apps/cli/src/init.rs`), which moved them OUT of this gated set. The
+    /// change is oracle-faithful, but it is a security-relevant boundary and
+    /// must not drift silently — hence this pin.
+    #[test]
+    fn only_project_and_local_scopes_are_trust_gated() {
+        let cwd = std::path::Path::new("/definitely/not/a/trusted/workspace");
+        for scope in [ConfigScope::Project, ConfigScope::Local] {
+            let err = ensure_helper_source_trusted(scope, cwd)
+                .expect_err("repo-resident scopes must require a trust record");
+            assert_eq!(
+                err.to_string(),
+                "connection failed: project/local MCP headersHelper is disabled until this workspace is trusted"
+            );
+        }
+        for scope in [
+            ConfigScope::User,
+            ConfigScope::Dynamic,
+            ConfigScope::Enterprise,
+            ConfigScope::ClaudeAi,
+            ConfigScope::Managed,
+            ConfigScope::Agent,
+        ] {
+            assert!(
+                ensure_helper_source_trusted(scope, cwd).is_ok(),
+                "`Hr` maps {scope:?} to \"operator\", which `Fr` leaves ungated"
+            );
+        }
+    }
+
     #[test]
     fn dynamic_headers_replace_static_values() {
         let spec = McpTransportSpec::Http {

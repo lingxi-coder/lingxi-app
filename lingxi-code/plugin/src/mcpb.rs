@@ -9,7 +9,7 @@
 
 use std::collections::HashMap;
 use std::io::Read;
-use std::path::{Component, Path};
+use std::path::{Component, Path, PathBuf};
 
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -161,10 +161,13 @@ pub fn ensure_plugin_manifest(dir: &Path) -> Result<(), String> {
 // 2.1.251 Mach-O.
 //
 // What this module implements: parsing a (lenient — see [`McpbManifest`])
-// subset of that manifest, applying the `darwin`-only `platform_overrides`
-// merge, the `hasRequiredConfigMissing` gate, and the `${__dirname}` /
-// `${pathSeparator}` / `${/}` / `${user_config.KEY}` template substitution —
-// [`generate_mcp_config`] is a direct, byte-faithful port of oracle `x`+`m`.
+// subset of that manifest, applying the `darwin` `platform_overrides` merge
+// (on every host, per the oracle — see [`generate_mcp_config`]), the
+// `hasRequiredConfigMissing` gate, and the `${__dirname}` /
+// `${pathSeparator}` / `${/}` / `${HOME}` / `${DESKTOP}` / `${DOCUMENTS}` /
+// `${DOWNLOADS}` / `${user_config.KEY}` template substitution —
+// [`generate_mcp_config`] is a direct, byte-faithful port of oracle `x`+`m`,
+// and [`system_dirs_in`] of the `systemDirs` its one call site feeds it.
 //
 // What is NOT modelled: a persisted per-MCPB `user_config` store (oracle
 // reads one via `dye(repository, manifest.name, …)`; this crate's discovery
@@ -344,6 +347,110 @@ fn substitute_string(s: &str, vars: &HashMap<String, TemplateVar>) -> String {
     out
 }
 
+/// JS truthiness for a `platform_overrides.darwin` field (oracle `c.x||s.x`):
+/// `undefined`, `null`, `false`, `0` and `""` all fall back to the base
+/// value. An empty array/object is truthy in JS, so both are kept.
+fn is_truthy(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::Null => false,
+        serde_json::Value::Bool(b) => *b,
+        serde_json::Value::Number(n) => n.as_f64().is_some_and(|f| f != 0.0),
+        serde_json::Value::String(s) => !s.is_empty(),
+        _ => true,
+    }
+}
+
+/// The platform arm oracle `JHe`'s `switch(t)` selects (@159481081). `wsl`
+/// shares the `linux` arm, and `unknown` shares the `macos`/default arm, so
+/// three variants cover every branch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SystemDirPlatform {
+    Windows,
+    Linux,
+    MacOs,
+}
+
+/// Oracle `JHe(e)` (@159481081) with its inputs made explicit:
+/// `{HOME, DESKTOP, DOCUMENTS, DOWNLOADS}`, in that order.
+///
+/// - `windows`: the three subdirectories hang off `USERPROFILE || homedir`,
+///   while `HOME` stays the home dir itself.
+/// - `linux`/`wsl`: `XDG_DESKTOP_DIR` / `XDG_DOCUMENTS_DIR` /
+///   `XDG_DOWNLOAD_DIR` override the defaults when set.
+/// - `macos`/default: plain `join(homedir, …)`.
+fn system_dirs_in(
+    platform: SystemDirPlatform,
+    home: &Path,
+    env: &dyn Fn(&str) -> Option<String>,
+) -> Vec<(&'static str, String)> {
+    let show = |p: &Path| p.to_string_lossy().into_owned();
+    let under = |base: &Path, leaf: &str| show(&base.join(leaf));
+    let home_s = show(home);
+    match platform {
+        SystemDirPlatform::Windows => {
+            let base = env("USERPROFILE").map_or_else(|| home.to_path_buf(), PathBuf::from);
+            vec![
+                ("HOME", home_s),
+                ("DESKTOP", under(&base, "Desktop")),
+                ("DOCUMENTS", under(&base, "Documents")),
+                ("DOWNLOADS", under(&base, "Downloads")),
+            ]
+        }
+        SystemDirPlatform::Linux => vec![
+            ("HOME", home_s),
+            (
+                "DESKTOP",
+                env("XDG_DESKTOP_DIR").unwrap_or_else(|| under(home, "Desktop")),
+            ),
+            (
+                "DOCUMENTS",
+                env("XDG_DOCUMENTS_DIR").unwrap_or_else(|| under(home, "Documents")),
+            ),
+            (
+                "DOWNLOADS",
+                env("XDG_DOWNLOAD_DIR").unwrap_or_else(|| under(home, "Downloads")),
+            ),
+        ],
+        SystemDirPlatform::MacOs => vec![
+            ("HOME", home_s),
+            ("DESKTOP", under(home, "Desktop")),
+            ("DOCUMENTS", under(home, "Documents")),
+            ("DOWNLOADS", under(home, "Downloads")),
+        ],
+    }
+}
+
+/// `os.homedir()`: `USERPROFILE` on Windows, `$HOME` elsewhere (this repo's
+/// established convention — `migrations::global_config` reads `HOME` the same
+/// way).
+fn home_dir() -> Option<PathBuf> {
+    if cfg!(windows) {
+        std::env::var_os("USERPROFILE")
+            .or_else(|| std::env::var_os("HOME"))
+            .map(PathBuf::from)
+    } else {
+        std::env::var_os("HOME").map(PathBuf::from)
+    }
+}
+
+/// [`system_dirs_in`] bound to the running host. Yields nothing when the home
+/// directory cannot be resolved at all (the oracle's `os.homedir()` always
+/// returns one; here an unresolvable home simply leaves the tokens alone
+/// rather than substituting a bogus root).
+fn system_dirs() -> Vec<(&'static str, String)> {
+    let Some(home) = home_dir() else {
+        return Vec::new();
+    };
+    let platform = if cfg!(windows) {
+        SystemDirPlatform::Windows
+    } else if cfg!(target_os = "macos") {
+        SystemDirPlatform::MacOs
+    } else {
+        SystemDirPlatform::Linux
+    };
+    system_dirs_in(platform, &home, &|k| std::env::var(k).ok())
+}
+
 /// Oracle `x()`/`getMcpConfigForManifest`: generate the MCP server config an
 /// MCPB `manifest.server.mcp_config` resolves to once extracted at
 /// `extension_path`. Returns `None` when the manifest has no `server` (or no
@@ -360,22 +467,24 @@ pub fn generate_mcp_config(
     let server = manifest.server.as_ref()?;
     let mut config = server.mcp_config.clone();
 
-    // Oracle: only a `darwin` platform override is ever applied at load
-    // time (`win32`/`linux` keys are read by the manifest-AUTHORING prompts
-    // only) — `cfg!` reads the actual build target, matching the oracle's
-    // own `process.platform` runtime check for a native (non-cross-run)
-    // binary.
-    if cfg!(target_os = "macos") {
-        if let Some(darwin) = config
-            .get("platform_overrides")
-            .and_then(|overrides| overrides.get("darwin"))
-            .cloned()
-        {
-            if let Some(obj) = config.as_object_mut() {
-                for key in ["command", "args", "env"] {
-                    if let Some(v) = darwin.get(key) {
-                        obj.insert(key.to_string(), v.clone());
-                    }
+    // Oracle @171172343, verbatim: `if(a.platform_overrides){if("darwin"in
+    // a.platform_overrides){let c=a.platform_overrides.darwin;
+    // s.command=c.command||s.command,s.args=c.args||s.args,
+    // s.env=c.env||s.env}}`. Two things this is NOT: it is not gated on the
+    // host platform (there is no `process.platform` test anywhere in `x`, so
+    // the `darwin` block is merged on Linux and Windows too — `win32`/`linux`
+    // keys are simply never read at load time), and it is not an
+    // unconditional insert — `||` is a JS falsy fallback, so an override of
+    // `""`, `null` or `false` keeps the base value.
+    if let Some(darwin) = config
+        .get("platform_overrides")
+        .and_then(|overrides| overrides.get("darwin"))
+        .cloned()
+    {
+        if let Some(obj) = config.as_object_mut() {
+            for key in ["command", "args", "env"] {
+                if let Some(v) = darwin.get(key).filter(|v| is_truthy(v)) {
+                    obj.insert(key.to_string(), v.clone());
                 }
             }
         }
@@ -395,6 +504,15 @@ pub fn generate_mcp_config(
     // portably and always use `/` here, never `std::path::MAIN_SEPARATOR`.
     vars.insert("pathSeparator".to_string(), TemplateVar::Scalar("/".to_string()));
     vars.insert("/".to_string(), TemplateVar::Scalar("/".to_string()));
+    // Oracle `p={__dirname:r,pathSeparator:t,"/":t,...n}` where `n` is the
+    // `systemDirs` argument, and the one call site (`MY` @159485465) always
+    // passes `JHe()`. Without these, `${DOCUMENTS}`/`${DESKTOP}`/
+    // `${DOWNLOADS}` reach the spawned server as literal tokens — the
+    // downstream `${VAR}` process-env expansion cannot rescue them because
+    // they are never environment variables.
+    for (key, value) in system_dirs() {
+        vars.insert(key.to_string(), TemplateVar::Scalar(value));
+    }
     for (key, field) in &manifest.user_config {
         if let Some(default) = &field.default {
             vars.insert(
@@ -563,11 +681,14 @@ mod tests {
         assert!(generate_mcp_config(&manifest, Path::new("/x")).is_none());
     }
 
-    /// darwin `platform_overrides` replace `command`/`args`/`env` on macOS
-    /// only (oracle: `win32`/`linux` overrides are never applied at load
-    /// time, only read by the manifest-authoring prompts).
+    /// Oracle `getMcpConfigForManifest` @171172343, verbatim:
+    /// `if(a.platform_overrides){if("darwin"in a.platform_overrides){let
+    /// c=a.platform_overrides.darwin;s.command=c.command||s.command,
+    /// s.args=c.args||s.args,s.env=c.env||s.env}}`. There is no
+    /// `process.platform` test anywhere in the function — the merge runs on
+    /// EVERY platform, gated only on the `darwin` key being present.
     #[test]
-    fn darwin_platform_override_replaces_command_on_macos_only() {
+    fn darwin_platform_override_applies_on_every_platform() {
         let manifest = manifest_from(serde_json::json!({
             "name": "demo",
             "server": {
@@ -581,12 +702,119 @@ mod tests {
             }
         }));
         let generated = generate_mcp_config(&manifest, Path::new("/x")).unwrap();
-        if cfg!(target_os = "macos") {
-            assert_eq!(generated["command"], "node-darwin");
-            assert_eq!(generated["args"], serde_json::json!(["mac-server.js"]));
-        } else {
-            assert_eq!(generated["command"], "node");
-            assert_eq!(generated["args"], serde_json::json!(["server/index.js"]));
-        }
+        assert_eq!(generated["command"], "node-darwin");
+        assert_eq!(generated["args"], serde_json::json!(["mac-server.js"]));
+    }
+
+    /// `c.command||s.command` is a JS falsy fallback: an empty string, `null`
+    /// or `false` in the override keeps the BASE value rather than clobbering
+    /// it. An absent key falls back for the same reason.
+    #[test]
+    fn falsy_darwin_platform_override_values_fall_back_to_the_base() {
+        let manifest = manifest_from(serde_json::json!({
+            "name": "demo",
+            "server": {
+                "mcp_config": {
+                    "command": "node",
+                    "args": ["server/index.js"],
+                    "env": {"A": "1"},
+                    "platform_overrides": {
+                        "darwin": {"command": "", "args": null}
+                    }
+                }
+            }
+        }));
+        let generated = generate_mcp_config(&manifest, Path::new("/x")).unwrap();
+        assert_eq!(
+            generated["command"], "node",
+            "an empty-string override is falsy and must keep the base command"
+        );
+        assert_eq!(
+            generated["args"],
+            serde_json::json!(["server/index.js"]),
+            "a null override is falsy and must keep the base args"
+        );
+        assert_eq!(generated["env"], serde_json::json!({"A": "1"}));
+    }
+
+    /// Oracle `JHe` @159481081: `{HOME, DESKTOP, DOCUMENTS, DOWNLOADS}` with
+    /// a per-platform base — windows resolves the three subdirectories under
+    /// `USERPROFILE` (falling back to the home dir) while `HOME` stays the
+    /// home dir itself; linux/wsl honour `XDG_*`; macos/default joins the
+    /// home dir.
+    #[test]
+    fn system_dirs_match_the_oracle_per_platform() {
+        let home = Path::new("/home/me");
+        let none = |_: &str| None;
+
+        let mac = system_dirs_in(SystemDirPlatform::MacOs, home, &none);
+        assert_eq!(
+            mac,
+            vec![
+                ("HOME", "/home/me".to_string()),
+                ("DESKTOP", "/home/me/Desktop".to_string()),
+                ("DOCUMENTS", "/home/me/Documents".to_string()),
+                ("DOWNLOADS", "/home/me/Downloads".to_string()),
+            ]
+        );
+
+        let xdg = |k: &str| match k {
+            "XDG_DOCUMENTS_DIR" => Some("/data/docs".to_string()),
+            _ => None,
+        };
+        let linux = system_dirs_in(SystemDirPlatform::Linux, home, &xdg);
+        assert_eq!(linux[2], ("DOCUMENTS", "/data/docs".to_string()));
+        assert_eq!(linux[1], ("DESKTOP", "/home/me/Desktop".to_string()));
+
+        let profile = |k: &str| match k {
+            "USERPROFILE" => Some("/users/other".to_string()),
+            _ => None,
+        };
+        let win = system_dirs_in(SystemDirPlatform::Windows, home, &profile);
+        assert_eq!(
+            win[0],
+            ("HOME", "/home/me".to_string()),
+            "windows keeps HOME as the home dir, not USERPROFILE"
+        );
+        assert_eq!(win[3], ("DOWNLOADS", "/users/other/Downloads".to_string()));
+    }
+
+    /// Oracle `x()` builds `p={__dirname:r,pathSeparator:t,"/":t,...n}` where
+    /// `n` IS `systemDirs` (`JHe()` at the one call site, `MY` @159485465).
+    /// Without them `${DOCUMENTS}` survives verbatim into the spawned
+    /// server's argv — `expand_env_vars_in_string` cannot rescue it because
+    /// DOCUMENTS/DESKTOP/DOWNLOADS are never process env vars.
+    #[test]
+    fn system_dir_tokens_are_substituted_into_the_generated_config() {
+        let manifest = manifest_from(serde_json::json!({
+            "name": "demo",
+            "server": {
+                "mcp_config": {
+                    "command": "node",
+                    "args": ["--vault", "${DOCUMENTS}/vault", "${DESKTOP}", "${DOWNLOADS}"],
+                    "env": {"H": "${HOME}"}
+                }
+            }
+        }));
+        let generated = generate_mcp_config(&manifest, Path::new("/x")).unwrap();
+        let rendered = generated.to_string();
+        assert!(
+            !rendered.contains("${DOCUMENTS}")
+                && !rendered.contains("${DESKTOP}")
+                && !rendered.contains("${DOWNLOADS}")
+                && !rendered.contains("${HOME}"),
+            "systemDirs tokens must be substituted, got {rendered}"
+        );
+        let args = generated["args"].as_array().unwrap();
+        assert!(
+            args[1].as_str().unwrap().ends_with("/Documents/vault"),
+            "got {:?}",
+            args[1]
+        );
+        assert!(
+            args[2].as_str().unwrap().ends_with("/Desktop"),
+            "got {:?}",
+            args[2]
+        );
     }
 }

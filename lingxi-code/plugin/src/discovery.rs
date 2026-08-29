@@ -123,10 +123,13 @@ struct RawManifest {
     /// union([path, path[]]).optional()`.
     #[serde(default)]
     workflows: Option<PathDecl>,
-    /// Custom highlight.js language grammars (oracle `Hs`). `.strict()` at
-    /// every level — see [`RawSyntaxHighlighting`].
-    #[serde(rename = "syntaxHighlighting", default)]
-    syntax_highlighting: Option<RawSyntaxHighlighting>,
+    /// Components whose manifest shape may still change (oracle `Vs`). The
+    /// ONLY layer that accepts `syntaxHighlighting` — see
+    /// [`RawExperimental`]. A top-level `syntaxHighlighting` key is not in
+    /// `PluginManifestSchema` at all and is silently stripped, like any other
+    /// unknown top-level field.
+    #[serde(default)]
+    experimental: Option<RawExperimental>,
     /// sha256-pinned files fetched into `bin/` at install time (oracle
     /// `qs`/`n1e`) — a lenient value; see [`resolve_binaries`].
     #[serde(default)]
@@ -373,14 +376,62 @@ struct RawPluginChannel {
     user_config: Option<HashMap<String, UserConfigField>>,
 }
 
-/// `syntaxHighlighting` field (oracle `Hs`): `.strict()` at BOTH the wrapper
-/// object and every `hljsLanguages` entry — an unknown key at either level,
-/// an invalid `id`/`remote`/`integrity` shape, or more than
+/// `experimental` (oracle `Vs`, @154647440):
+/// `f({experimental: Sa((e)=>He(e)?e:void 0, f({...pt().partial().shape,
+/// ...Hs().partial().shape, ...mt().partial().shape, ...ct().partial().shape,
+/// evals:…}).passthrough().optional()…)})`.
+///
+/// Two properties of that shape matter here:
+/// - the preprocess drops a NON-OBJECT `experimental` to `undefined` instead
+///   of rejecting it (the same `Sa((e)=>He(e)?e:void 0,…)` guard
+///   `RawManifest::metadata` gets), and
+/// - the inner object is `.passthrough()`, so an unrecognized key inside
+///   `experimental` is kept rather than failing — but a key the schema DOES
+///   declare must still validate, and `Hs` is `.strict()`, so a malformed
+///   `experimental.syntaxHighlighting` fails the whole `plugin.json`.
+///
+/// `Hs` is referenced exactly once in the 2.1.251 binary — right here. The
+/// plugin-manifest schema `jpe` (@154647878) composes
+/// `Cs,zs,Rs,Us,Es,ct,pt,Ls,Bs,js,Ws,mt,Ys,Fs,qs,Vs` and does NOT include
+/// it, and `jpe` is a plain `f()` (z.object with no catchall, unlike the
+/// strict `ot`), so a TOP-LEVEL `syntaxHighlighting` is stripped, never
+/// rejected. `claude plugin validate` says as much: "Unknown field
+/// 'syntaxHighlighting'. Claude Code ignores it at load time."
+///
+/// Only `syntaxHighlighting` is read out of `experimental` here;
+/// `experimental`'s other declared keys (`themes`, `monitors`, `hooks`,
+/// `evals`) are not wired to anything in this port yet.
+#[derive(Debug, Clone, Default)]
+struct RawExperimental {
+    syntax_highlighting: Option<RawSyntaxHighlighting>,
+}
+
+impl<'de> Deserialize<'de> for RawExperimental {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = Value::deserialize(deserializer)?;
+        let Some(raw) = value.as_object().and_then(|o| o.get("syntaxHighlighting")) else {
+            return Ok(RawExperimental::default());
+        };
+        let syntax_highlighting =
+            RawSyntaxHighlighting::deserialize(raw).map_err(serde::de::Error::custom)?;
+        Ok(RawExperimental {
+            syntax_highlighting: Some(syntax_highlighting),
+        })
+    }
+}
+
+/// `experimental.syntaxHighlighting` (oracle `Hs`): `.strict()` at BOTH the
+/// wrapper object and every `hljsLanguages` entry — an unknown key at either
+/// level, an invalid `id`/`remote`/`integrity` shape, or more than
 /// [`MAX_HLJS_LANGUAGES`] entries all fail the WHOLE `plugin.json` parse,
 /// the same "one bad shape sinks the manifest" convention
 /// [`RawCommandEntry`]/[`UserConfigField`] establish. `#[serde(deny_unknown_fields)]`
 /// gives the wrapper-level strictness for free since it has exactly one
-/// field.
+/// field. Reached only through [`RawExperimental`] — never from the top
+/// level.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawSyntaxHighlighting {
@@ -1165,12 +1216,17 @@ pub(crate) async fn load_plugin_from_path_with_mcp_gate(
 
     let skip_mcp_discovery =
         resolve_skip_mcp_discovery(&parsed.name, sdk_skip_mcp_discovery, install_source_id);
-    // Oracle `pM(e)`: a plugin loaded from an ad-hoc directory (no resolved
-    // `name@marketplace` install-source identity) is "confined" — its
-    // declared MCP sources are read-only-within-directory, and an MCPB/`.dxt`
-    // source is skipped outright rather than resolved (see
-    // `load_declared_mcp_servers`'s `confined` parameter).
-    let confined = install_source_id.is_none();
+    // Oracle `pM(e)` (@157119272), verbatim:
+    // `e.scope==="project" && e.source.endsWith(`@${Zc}`)` with
+    // `Zc="skills-dir"` — TRUE only for a plugin AUTO-LOADED from
+    // `.claude/skills/`. It is NOT "loaded from a directory": a
+    // `--plugin-dir` session plugin is stamped `<name>@inline` (`Om`, the
+    // default `marketplaceName` of the session loader @162854959) and an
+    // installed plugin `<name>@<marketplace>`, so `pM` is false for both and
+    // neither is confined. This port has no `.claude/skills/` plugin
+    // auto-loader at all, so `pM` is uniformly false here; the `confined`
+    // plumbing below stays wired for when one lands.
+    let confined = false;
     let components = detect_components(plugin_dir, &parsed, skip_mcp_discovery, confined).await;
     let settings = load_plugin_settings(plugin_dir, parsed.settings.as_ref()).await;
     let channels = validate_plugin_channels(
@@ -1362,8 +1418,9 @@ async fn detect_components(
     let mut lsp_servers = default_lsp_servers;
     lsp_servers.extend(load_declared_lsp_servers(plugin_dir, parsed.lsp_servers.clone()).await);
     let hljs_languages = parsed
-        .syntax_highlighting
+        .experimental
         .as_ref()
+        .and_then(|e| e.syntax_highlighting.as_ref())
         .map(|s| s.hljs_languages.0.clone())
         .unwrap_or_default();
     let binaries = resolve_binaries(parsed.binaries.as_ref());
@@ -1836,9 +1893,12 @@ fn except_exempts(name: &str, install_source_id: Option<&str>) -> bool {
     let Some(except) = skip_plugin_mcp_servers_except() else {
         return false;
     };
-    // Oracle `r=!pM(e)`: bare-name matching is only meaningful for a plugin
-    // resolved through a marketplace-qualified install (this crate's stand-in
-    // for "not directory-loaded" — see the module note above).
+    // Oracle `r=!pM(e)`: bare-name matching is suppressed only for a plugin
+    // auto-loaded from `.claude/skills/` (`scope==="project"` AND
+    // `source.endsWith("@skills-dir")`), which this port never produces — so
+    // `r` is uniformly true and a bare name matches `manifest.name` on every
+    // load path, `--plugin-dir` included. See the `confined` note in
+    // `load_plugin_from_path_with_mcp_gate`.
     except.split(',').any(|raw| {
         let entry = raw.trim();
         if entry.is_empty() {
@@ -1847,7 +1907,7 @@ fn except_exempts(name: &str, install_source_id: Option<&str>) -> bool {
         if entry.contains('@') {
             install_source_id.is_some_and(|id| qy_eq(entry, id))
         } else {
-            install_source_id.is_some() && qy_eq(entry, name)
+            qy_eq(entry, name)
         }
     })
 }
@@ -2318,16 +2378,29 @@ async fn load_mcpb_mcp_server(
     let short_hash: String = full_hash.chars().take(16).collect();
     tracing::info!("MCPB content hash: {short_hash}");
 
-    let cache_dir = plugin_dir.join(".mcpb-cache").join(&full_hash);
-    if !tokio::fs::try_exists(&cache_dir).await.unwrap_or(false) {
+    // Oracle `uct`: `ge=tE(x,W)` where `x=join(pluginPath,".mcpb-cache")` and
+    // `W` is the 16-char content-hash prefix — that directory IS the
+    // `extensionPath` `${__dirname}` expands to, so keying it on the full
+    // 64-hex digest diverges from claude-code's on-disk layout and argv.
+    let cache_dir = plugin_dir.join(".mcpb-cache").join(&short_hash);
+    let manifest_path = cache_dir.join("manifest.json");
+    // Oracle `uct` gates its fast path on the cache METADATA record (`rje`,
+    // written by `Zpe` only AFTER a successful extraction) plus the `k4t`
+    // freshness check — never on bare directory existence — so an extraction
+    // that threw is simply retried next session. This port has no metadata
+    // store, so the extracted `manifest.json` is the completion marker, and a
+    // failed unpack tears its own directory back down; otherwise the very
+    // directory created one line before the unpack would cache the FAILURE
+    // forever.
+    if !tokio::fs::try_exists(&manifest_path).await.unwrap_or(false) {
         tokio::fs::create_dir_all(&cache_dir).await.ok()?;
         if let Err(e) = crate::mcpb::unpack_mcpb(&bytes, &cache_dir) {
             tracing::warn!(error = %e, path = %mcpb_path.display(), "failed to extract MCPB archive");
+            tokio::fs::remove_dir_all(&cache_dir).await.ok();
             return None;
         }
     }
 
-    let manifest_path = cache_dir.join("manifest.json");
     let Ok(manifest_raw) = tokio::fs::read_to_string(&manifest_path).await else {
         // Oracle: "No manifest.json found in MCPB file: {source}".
         tracing::warn!(
@@ -3366,8 +3439,15 @@ mod tests {
         assert!(still_suppressed.components.mcp_servers.is_empty());
     }
 
+    /// Oracle `SCn`: `r=!pM(e)` and a bare-name entry matches when
+    /// `r && qy(u, e.name)`. `pM(e)` is
+    /// `e.scope==="project" && e.source.endsWith("@skills-dir")` — TRUE only
+    /// for a plugin auto-loaded from `.claude/skills/`. A `--plugin-dir`
+    /// session plugin is stamped `<name>@inline` and an installed plugin
+    /// `<name>@<marketplace>`, so `r` is TRUE for both and a bare name
+    /// re-admits them whether or not this port resolved an install-source id.
     #[tokio::test]
-    async fn except_bare_name_only_exempts_non_directory_loaded_plugins() {
+    async fn except_bare_name_exempts_a_plugin_with_or_without_an_install_source_id() {
         let _g = skip_mcp_env_guard();
         let tmp = tempfile::tempdir().unwrap();
         let plugin = tmp.path();
@@ -3375,27 +3455,33 @@ mod tests {
         std::env::set_var("CLAUDE_CODE_SKIP_PLUGIN_MCP_SERVERS", "1");
         std::env::set_var("CLAUDE_CODE_SKIP_PLUGIN_MCP_SERVERS_EXCEPT", "demo");
 
-        // Known install-source id (this crate's "not directory-loaded") — a
-        // bare-name `_EXCEPT` entry matches `manifest.name` and re-admits it.
         let (_id, exempted) =
             load_plugin_from_path_with_mcp_gate(plugin, false, Some("demo@marketplace-x"))
                 .await
                 .unwrap();
         assert_eq!(exempted.components.mcp_servers.len(), 2);
 
-        // No install-source id (an ad-hoc directory load, e.g. `--plugin-dir`)
-        // — the oracle restricts bare-name matching to non-directory-loaded
-        // plugins, so the same name must NOT re-admit it here even though
-        // `manifest.name == "demo"` matches the `_EXCEPT` entry exactly.
-        let (_id, still_suppressed) = load_plugin_from_path_with_mcp_gate(plugin, false, None)
+        // An ad-hoc directory load (`--plugin-dir`) has no install-source id
+        // here, but its oracle source is `demo@inline`, NOT `demo@skills-dir`
+        // — so `pM` is false and the bare name re-admits it too.
+        let (_id, also_exempted) = load_plugin_from_path_with_mcp_gate(plugin, false, None)
             .await
             .unwrap();
-        assert!(
-            still_suppressed.components.mcp_servers.is_empty(),
-            "a bare-name _EXCEPT entry must not exempt a directory-loaded plugin \
-             (oracle `r=!pM(e)`), got {:?}",
-            still_suppressed.components.mcp_servers
+        assert_eq!(
+            also_exempted.components.mcp_servers.len(),
+            2,
+            "a bare-name _EXCEPT entry must exempt a `--plugin-dir` plugin too \
+             (oracle `pM` is false for `<name>@inline`), got {:?}",
+            also_exempted.components.mcp_servers
         );
+
+        // Guard against a tautology: a NON-matching bare name leaves the
+        // same fixture suppressed on both paths.
+        std::env::set_var("CLAUDE_CODE_SKIP_PLUGIN_MCP_SERVERS_EXCEPT", "someone-else");
+        let (_id, suppressed) = load_plugin_from_path_with_mcp_gate(plugin, false, None)
+            .await
+            .unwrap();
+        assert!(suppressed.components.mcp_servers.is_empty());
     }
 
     // ---------- §14 row 2: hooks.json `modules` ----------
@@ -3488,28 +3574,95 @@ mod tests {
         );
     }
 
-    // ---------- §14 row 3: `syntaxHighlighting.hljsLanguages` ----------
+    // ---------- §14 row 3: `experimental.syntaxHighlighting.hljsLanguages` ----------
 
-    #[tokio::test]
-    async fn syntax_highlighting_valid_entry_is_parsed() {
-        let tmp = tempfile::tempdir().unwrap();
-        let plugin = tmp.path();
+    fn write_manifest(plugin: &Path, manifest: &serde_json::Value) {
         fs::create_dir_all(plugin.join(branding::PLUGIN_MANIFEST_DIR)).unwrap();
         fs::write(
             plugin
                 .join(branding::PLUGIN_MANIFEST_DIR)
                 .join("plugin.json"),
-            serde_json::json!({
-                "name": "demo",
-                "syntaxHighlighting": {
-                    "hljsLanguages": [
-                        {"id": "mylang", "remote": "npm:hljs-mylang@1.2.3", "integrity": "sha256-abc123=="}
-                    ]
-                }
-            })
-            .to_string(),
+            manifest.to_string(),
         )
         .unwrap();
+    }
+
+    /// The oracle's `PluginManifestSchema` (`jpe`) composes
+    /// `Cs,zs,Rs,Us,Es,ct,pt,Ls,Bs,js,Ws,mt,Ys,Fs,qs,Vs` — `Hs`
+    /// (`syntaxHighlighting`) is NOT among them, and `Hs` is referenced
+    /// exactly once in the binary, inside `Vs` = `experimental`. `jpe` is a
+    /// plain `f()` (z.object, no catchall), so a TOP-LEVEL
+    /// `syntaxHighlighting` is silently STRIPPED: the plugin still loads and
+    /// contributes no hljs languages.
+    #[tokio::test]
+    async fn top_level_syntax_highlighting_is_stripped_not_read() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin = tmp.path();
+        write_manifest(
+            plugin,
+            &serde_json::json!({
+                "name": "demo",
+                "syntaxHighlighting": {
+                    "hljsLanguages": [{"id": "mylang", "remote": "npm:hljs-mylang@1.2.3"}]
+                }
+            }),
+        );
+        let (_id, manifest) = load_plugin_from_path(plugin)
+            .await
+            .expect("a top-level syntaxHighlighting key must not sink the manifest");
+        assert!(
+            manifest.components.hljs_languages.is_empty(),
+            "a top-level syntaxHighlighting key is not in `jpe` and must be stripped, got {:?}",
+            manifest.components.hljs_languages
+        );
+    }
+
+    /// The §0(b) schema-layer trap: because the top-level key is stripped
+    /// BEFORE any shape check, a manifest claude-code loads fine must not
+    /// make the whole plugin vanish here. Each of the three shapes that the
+    /// `experimental` arm does reject is exercised at top level and must load.
+    #[tokio::test]
+    async fn top_level_syntax_highlighting_shape_violations_do_not_sink_the_manifest() {
+        let entries: Vec<_> = (0..17)
+            .map(|i| serde_json::json!({"id": format!("lang{i}")}))
+            .collect();
+        for (label, bad) in [
+            ("invalid id", serde_json::json!({"hljsLanguages": [{"id": "Not-Valid"}]})),
+            ("unknown key", serde_json::json!({"hljsLanguages": [], "extra": true})),
+            ("17 entries", serde_json::json!({"hljsLanguages": entries})),
+        ] {
+            let tmp = tempfile::tempdir().unwrap();
+            let plugin = tmp.path();
+            write_manifest(
+                plugin,
+                &serde_json::json!({"name": "demo", "syntaxHighlighting": bad}),
+            );
+            let (_id, manifest) = load_plugin_from_path(plugin).await.unwrap_or_else(|| {
+                panic!("a top-level syntaxHighlighting with {label} must still load the plugin")
+            });
+            assert!(manifest.components.hljs_languages.is_empty());
+        }
+    }
+
+    /// `Vs` = `f({experimental: Sa(…, f({…pt, …Hs, …mt, …ct, evals}).passthrough()…)})`:
+    /// `experimental.syntaxHighlighting` is the ONLY layer the oracle reads.
+    #[tokio::test]
+    async fn experimental_syntax_highlighting_valid_entry_is_parsed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin = tmp.path();
+        write_manifest(
+            plugin,
+            &serde_json::json!({
+                "name": "demo",
+                "experimental": {
+                    "syntaxHighlighting": {
+                        "hljsLanguages": [
+                            {"id": "mylang", "remote": "npm:hljs-mylang@1.2.3", "integrity": "sha256-abc123=="}
+                        ]
+                    }
+                }
+            }),
+        );
         let (_id, manifest) = load_plugin_from_path(plugin).await.unwrap();
         assert_eq!(manifest.components.hljs_languages.len(), 1);
         assert_eq!(manifest.components.hljs_languages[0].id, "mylang");
@@ -3519,70 +3672,57 @@ mod tests {
         );
     }
 
+    /// Inside `experimental`, `Hs` is still `.strict()` at both levels, so a
+    /// shape violation there DOES fail the whole `plugin.json`.
     #[tokio::test]
-    async fn syntax_highlighting_invalid_id_sinks_the_whole_manifest() {
-        let tmp = tempfile::tempdir().unwrap();
-        let plugin = tmp.path();
-        fs::create_dir_all(plugin.join(branding::PLUGIN_MANIFEST_DIR)).unwrap();
-        fs::write(
-            plugin
-                .join(branding::PLUGIN_MANIFEST_DIR)
-                .join("plugin.json"),
-            serde_json::json!({
-                "name": "demo",
-                "syntaxHighlighting": {"hljsLanguages": [{"id": "Not-Valid"}]}
-            })
-            .to_string(),
-        )
-        .unwrap();
-        assert!(
-            load_plugin_from_path(plugin).await.is_none(),
-            "an id violating ^[a-z][a-z0-9_-]*$ must sink the whole plugin.json parse"
-        );
-    }
-
-    #[tokio::test]
-    async fn syntax_highlighting_unknown_key_sinks_the_whole_manifest() {
-        let tmp = tempfile::tempdir().unwrap();
-        let plugin = tmp.path();
-        fs::create_dir_all(plugin.join(branding::PLUGIN_MANIFEST_DIR)).unwrap();
-        fs::write(
-            plugin
-                .join(branding::PLUGIN_MANIFEST_DIR)
-                .join("plugin.json"),
-            serde_json::json!({
-                "name": "demo",
-                "syntaxHighlighting": {"hljsLanguages": [], "extra": true}
-            })
-            .to_string(),
-        )
-        .unwrap();
-        assert!(
-            load_plugin_from_path(plugin).await.is_none(),
-            "an unknown syntaxHighlighting key must sink the whole plugin.json parse (`.strict()`)"
-        );
-    }
-
-    #[tokio::test]
-    async fn syntax_highlighting_more_than_16_entries_sinks_the_whole_manifest() {
-        let tmp = tempfile::tempdir().unwrap();
-        let plugin = tmp.path();
-        fs::create_dir_all(plugin.join(branding::PLUGIN_MANIFEST_DIR)).unwrap();
+    async fn experimental_syntax_highlighting_shape_violations_sink_the_whole_manifest() {
         let entries: Vec<_> = (0..17)
             .map(|i| serde_json::json!({"id": format!("lang{i}")}))
             .collect();
-        fs::write(
-            plugin
-                .join(branding::PLUGIN_MANIFEST_DIR)
-                .join("plugin.json"),
-            serde_json::json!({"name": "demo", "syntaxHighlighting": {"hljsLanguages": entries}})
-                .to_string(),
-        )
-        .unwrap();
-        assert!(
-            load_plugin_from_path(plugin).await.is_none(),
-            "17 hljsLanguages entries exceed the 16-entry cap and must sink the whole manifest"
-        );
+        for (label, bad) in [
+            ("an id violating ^[a-z][a-z0-9_-]*$", serde_json::json!({"hljsLanguages": [{"id": "Not-Valid"}]})),
+            ("an unknown sibling key (`.strict()`)", serde_json::json!({"hljsLanguages": [], "extra": true})),
+            ("17 entries (cap is 16)", serde_json::json!({"hljsLanguages": entries})),
+        ] {
+            let tmp = tempfile::tempdir().unwrap();
+            let plugin = tmp.path();
+            write_manifest(
+                plugin,
+                &serde_json::json!({
+                    "name": "demo",
+                    "experimental": {"syntaxHighlighting": bad}
+                }),
+            );
+            assert!(
+                load_plugin_from_path(plugin).await.is_none(),
+                "{label} under experimental.syntaxHighlighting must sink the whole plugin.json parse"
+            );
+        }
+    }
+
+    /// `Vs`'s preprocess `Sa((e)=>He(e)?e:void 0,…)` drops a NON-OBJECT
+    /// `experimental` to `undefined` instead of rejecting it, and the inner
+    /// object is `.passthrough()`, so an unknown key inside `experimental`
+    /// is kept rather than failing.
+    #[tokio::test]
+    async fn non_object_experimental_is_dropped_and_unknown_experimental_keys_pass_through() {
+        for value in [
+            serde_json::json!("nope"),
+            serde_json::json!([1, 2, 3]),
+            serde_json::json!(7),
+            serde_json::json!({"somethingElse": {"whatever": true}}),
+        ] {
+            let tmp = tempfile::tempdir().unwrap();
+            let plugin = tmp.path();
+            write_manifest(
+                plugin,
+                &serde_json::json!({"name": "demo", "experimental": value}),
+            );
+            let (_id, manifest) = load_plugin_from_path(plugin).await.unwrap_or_else(|| {
+                panic!("experimental = {value} must not sink the manifest")
+            });
+            assert!(manifest.components.hljs_languages.is_empty());
+        }
     }
 
     // ---------- §14 row 4: `binaries` parsing + validation ----------
@@ -3811,6 +3951,12 @@ mod tests {
 
     #[tokio::test]
     async fn mcp_servers_mcpb_path_resolves_to_a_named_server_for_a_non_confined_plugin() {
+        // Every MCPB test asserts on the CONTENTS of `components.mcp_servers`,
+        // which `CLAUDE_CODE_SKIP_PLUGIN_MCP_SERVERS` empties process-wide.
+        // The env tests set that var while other tests run in parallel, so
+        // take the same serializing guard here — otherwise these assertions
+        // are scheduling-dependent.
+        let _g = skip_mcp_env_guard();
         let tmp = tempfile::tempdir().unwrap();
         let plugin = tmp.path();
         fs::create_dir_all(plugin.join(branding::PLUGIN_MANIFEST_DIR)).unwrap();
@@ -3856,8 +4002,15 @@ mod tests {
         }
     }
 
+    /// Oracle `pM(e)` is `e.scope==="project" && e.source.endsWith("@skills-dir")`,
+    /// so a `--plugin-dir` plugin (source `<name>@inline`) is NOT confined:
+    /// `OL`'s `x(F)` closure returns false and `Pit` resolves the bundle.
+    /// This port has no `.claude/skills/` plugin auto-loader, so nothing it
+    /// loads is confined — an ad-hoc directory load with no install-source
+    /// id must still resolve its MCPB source.
     #[tokio::test]
-    async fn mcp_servers_mcpb_source_is_skipped_for_a_directory_loaded_plugin() {
+    async fn mcp_servers_mcpb_source_resolves_for_a_plugin_dir_load_too() {
+        let _g = skip_mcp_env_guard();
         let tmp = tempfile::tempdir().unwrap();
         let plugin = tmp.path();
         fs::create_dir_all(plugin.join(branding::PLUGIN_MANIFEST_DIR)).unwrap();
@@ -3874,18 +4027,142 @@ mod tests {
         }));
         fs::write(plugin.join("bundle.mcpb"), bundle).unwrap();
 
-        // No install-source identity == directory-loaded (oracle `pM(e)`
-        // true): the MCPB source must be SKIPPED, not resolved.
         let (_id, manifest) = load_plugin_from_path(plugin).await.unwrap();
         assert!(
-            manifest.components.mcp_servers.is_empty(),
-            "a directory-loaded plugin's MCPB mcpServers source must be skipped, got {:?}",
+            manifest.components.mcp_servers.contains_key("bundled-server"),
+            "a `--plugin-dir` plugin is not `pM(e)`, so its MCPB source must resolve, got {:?}",
             manifest.components.mcp_servers
+        );
+    }
+
+    /// Oracle `uct`: `W=sha256(F).substring(0,16)` and the extract dir is
+    /// `tE(x,W)` = `<plugin>/.mcpb-cache/<16 hex>`. That directory IS the
+    /// `extensionPath` `${__dirname}` expands to, so a 64-hex path diverges
+    /// byte-for-byte from claude-code's.
+    #[tokio::test]
+    async fn mcpb_extract_dir_is_keyed_on_the_16_hex_short_hash() {
+        let _g = skip_mcp_env_guard();
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin = tmp.path();
+        fs::create_dir_all(plugin.join(branding::PLUGIN_MANIFEST_DIR)).unwrap();
+        fs::write(
+            plugin
+                .join(branding::PLUGIN_MANIFEST_DIR)
+                .join("plugin.json"),
+            serde_json::json!({"name": "demo", "mcpServers": "./bundle.mcpb"}).to_string(),
+        )
+        .unwrap();
+        let bundle = build_mcpb_zip(&serde_json::json!({
+            "name": "bundled-server",
+            "server": {"mcp_config": {"command": "node", "args": ["${__dirname}/index.js"]}}
+        }));
+        fs::write(plugin.join("bundle.mcpb"), &bundle).unwrap();
+        let expected: String = crate::mcpb::sha256_hex(&bundle).chars().take(16).collect();
+
+        let (_id, manifest) =
+            load_plugin_from_path_with_mcp_gate(plugin, false, Some("demo@marketplace-x"))
+                .await
+                .unwrap();
+        let server = manifest
+            .components
+            .mcp_servers
+            .get("bundled-server")
+            .unwrap();
+        let traits::McpTransportSpec::Stdio { args, .. } = &server.spec else {
+            panic!("expected a stdio spec, got {:?}", server.spec)
+        };
+        assert_eq!(
+            args[0],
+            plugin
+                .join(".mcpb-cache")
+                .join(&expected)
+                .join("index.js")
+                .display()
+                .to_string(),
+            "${{__dirname}} must be `<plugin>/.mcpb-cache/<16-hex>`, not the full 64-hex digest"
+        );
+        assert!(
+            plugin.join(".mcpb-cache").join(&expected).is_dir(),
+            "the on-disk cache layout must use the 16-hex short hash"
+        );
+    }
+
+    /// Oracle `uct` writes its cache record (`Zpe`) only AFTER a successful
+    /// extraction and gates the fast path on that METADATA (`rje` plus the
+    /// `k4t` freshness check), never on bare directory existence — so an
+    /// extraction that threw is simply retried next session. A gate that keys
+    /// off the directory the port itself created just before unpacking caches
+    /// the FAILURE forever.
+    #[tokio::test]
+    async fn a_stale_cache_dir_does_not_suppress_re_extraction() {
+        let _g = skip_mcp_env_guard();
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin = tmp.path();
+        fs::create_dir_all(plugin.join(branding::PLUGIN_MANIFEST_DIR)).unwrap();
+        fs::write(
+            plugin
+                .join(branding::PLUGIN_MANIFEST_DIR)
+                .join("plugin.json"),
+            serde_json::json!({"name": "demo", "mcpServers": "./bundle.mcpb"}).to_string(),
+        )
+        .unwrap();
+        let bundle = build_mcpb_zip(&serde_json::json!({
+            "name": "bundled-server",
+            "server": {"mcp_config": {"command": "node", "args": []}}
+        }));
+        fs::write(plugin.join("bundle.mcpb"), &bundle).unwrap();
+
+        // Exactly the state an interrupted / failed unpack leaves behind: the
+        // hash-keyed cache directory exists but holds no extracted manifest.
+        let short: String = crate::mcpb::sha256_hex(&bundle).chars().take(16).collect();
+        fs::create_dir_all(plugin.join(".mcpb-cache").join(&short)).unwrap();
+
+        let (_id, manifest) =
+            load_plugin_from_path_with_mcp_gate(plugin, false, Some("demo@marketplace-x"))
+                .await
+                .unwrap();
+        assert!(
+            manifest.components.mcp_servers.contains_key("bundled-server"),
+            "an empty cache directory must be re-extracted into, not treated as a \
+             completed extraction, got {:?}",
+            manifest.components.mcp_servers
+        );
+    }
+
+    /// The other half of the same rule: a failed unpack must not leave the
+    /// directory it created behind, or the next load reads it as a cache hit.
+    #[tokio::test]
+    async fn a_failed_mcpb_extraction_leaves_no_cache_dir_behind() {
+        let _g = skip_mcp_env_guard();
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin = tmp.path();
+        fs::create_dir_all(plugin.join(branding::PLUGIN_MANIFEST_DIR)).unwrap();
+        fs::write(
+            plugin
+                .join(branding::PLUGIN_MANIFEST_DIR)
+                .join("plugin.json"),
+            serde_json::json!({"name": "demo", "mcpServers": "./bundle.mcpb"}).to_string(),
+        )
+        .unwrap();
+        let bad = b"not a zip archive";
+        fs::write(plugin.join("bundle.mcpb"), bad).unwrap();
+
+        let (_id, manifest) =
+            load_plugin_from_path_with_mcp_gate(plugin, false, Some("demo@marketplace-x"))
+                .await
+                .unwrap();
+        assert!(manifest.components.mcp_servers.is_empty());
+        let short: String = crate::mcpb::sha256_hex(bad).chars().take(16).collect();
+        assert!(
+            !plugin.join(".mcpb-cache").join(&short).exists(),
+            "a failed extraction must not leave a directory a later load mistakes \
+             for a completed extraction"
         );
     }
 
     #[tokio::test]
     async fn mcp_servers_mcpb_manifest_with_no_server_yields_no_server() {
+        let _g = skip_mcp_env_guard();
         let tmp = tempfile::tempdir().unwrap();
         let plugin = tmp.path();
         fs::create_dir_all(plugin.join(branding::PLUGIN_MANIFEST_DIR)).unwrap();

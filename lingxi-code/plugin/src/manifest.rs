@@ -103,7 +103,8 @@ pub struct PluginManifest {
     pub metadata: Option<serde_json::Value>,
 }
 
-/// One `syntaxHighlighting.hljsLanguages` entry (oracle `Ks`, `.strict()`): a
+/// One `experimental.syntaxHighlighting.hljsLanguages` entry (oracle `Ks`,
+/// `.strict()`): a
 /// custom highlight.js language grammar the plugin registers, fetched from an
 /// integrity-pinned `npm:`/`github:` source. Parsed + validated only — no
 /// engine surface fetches or registers these grammars yet.
@@ -240,6 +241,8 @@ pub struct PluginComponents {
     /// When set, the themes/ directory is not auto-loaded — list its files
     /// here if you want both." A manifest declaration REPLACES (does not
     /// merge with) the `themes/` auto-scan, matching [`Self::output_styles`].
+    /// Discovered only — `PluginManager::load_plugin` does not materialize
+    /// themes into any registry yet.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub themes: Vec<ComponentPath>,
     /// Workflow script files (`.js`; `workflows` in `plugin.json`). Oracle:
@@ -247,11 +250,14 @@ pub struct PluginComponents {
     /// root. When set, the workflows/ directory is not auto-loaded — list
     /// its files here if you want both." Replaces (does not merge with) the
     /// `workflows/` auto-scan, matching [`Self::output_styles`].
+    /// Discovered only — `PluginManager::load_plugin` does not materialize
+    /// workflows into any registry yet.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub workflows: Vec<ComponentPath>,
     /// Custom highlight.js language grammars this plugin registers
-    /// (`syntaxHighlighting.hljsLanguages` in `plugin.json`, oracle `Hs`).
-    /// Parsed + validated only — nothing fetches or registers these
+    /// (`experimental.syntaxHighlighting.hljsLanguages` in `plugin.json`,
+    /// oracle `Hs` — accepted ONLY under `experimental`, never at the top
+    /// level). Parsed + validated only — nothing fetches or registers these
     /// grammars yet.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub hljs_languages: Vec<HljsLanguageEntry>,

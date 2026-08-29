@@ -59,9 +59,28 @@ static ASSEMBLE_SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new((
 /// build (otherwise a machine that has ever logged in assembles a different
 /// runtime than one that has not), and `session_persistence: false` keeps it off
 /// the real transcript store. No turn is ever driven here.
+///
+/// The managed (policy) root is the fourth thing that has to be isolated and the
+/// one `cwd` / `lingxi_home` / `isolated_credential_storage` do not cover:
+/// `boot::assemble` folds `engine_desktop::managed_settings_overlay()` over the
+/// file layers, and that falls back to the machine's REAL policy directory
+/// (`/Library/Application Support/LingXi/…` on macOS) unless `LINGXI_MANAGED_DIR`
+/// is set. Nothing this suite asserts reads a settings VALUE, so an installed
+/// policy is unlikely to flip a result today — but "unlikely" is not a property
+/// of the harness, and a policy that made `assemble` behave differently would
+/// make these tests pass or fail depending on whose laptop ran them.
+///
+/// `set_var` is process-global. What makes it safe is that every test binds
+/// `ASSEMBLE_SERIAL` to a NAMED guard before calling this, so the guard lives
+/// until the whole async fn returns and no other test can run between the write
+/// and `assemble`'s synchronous read of it. Bound to a bare `_` instead, the
+/// guard would drop immediately and serialize nothing while looking identical.
 fn sandbox_config() -> (tempfile::TempDir, DesktopConfig) {
     let tmp = tempfile::tempdir().expect("tempdir");
     let cwd = tmp.path().to_path_buf();
+    let managed = tmp.path().join("managed");
+    std::fs::create_dir_all(&managed).expect("create sandbox managed dir");
+    std::env::set_var(engine_desktop::settings_watch::MANAGED_DIR_ENV, &managed);
     let cfg = DesktopConfig {
         cwd: cwd.clone(),
         lingxi_home: cwd.join(".lingxi"),
@@ -244,9 +263,12 @@ async fn assemble_gives_the_engine_an_audio_capability_and_its_two_tools() {
 #[tokio::test]
 async fn a_response_on_another_connection_cannot_resolve_this_connections_request() {
     let _serial = ASSEMBLE_SERIAL.lock().await;
+    // Assembled one at a time: `sandbox_config` writes the process-global
+    // `LINGXI_MANAGED_DIR`, so building both configs up front would leave A
+    // reading B's managed root.
     let (_tmp_a, cfg_a) = sandbox_config();
-    let (_tmp_b, cfg_b) = sandbox_config();
     let bound_a = Box::pin(boot::assemble(cfg_a)).await.expect("assemble A");
+    let (_tmp_b, cfg_b) = sandbox_config();
     let bound_b = Box::pin(boot::assemble(cfg_b)).await.expect("assemble B");
 
     let audio_a = bound_a.audio().clone();

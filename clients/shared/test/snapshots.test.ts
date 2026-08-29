@@ -27,6 +27,7 @@ import type {
   PermissionRequest,
   PermissionResolved,
 } from '../src/protocol.js';
+import { ALL_CLIENT_COMMAND_TYPES, ALL_CLIENT_EVENT_TYPES } from '../src/protocolCoverage.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const SNAP_ROOT = join(
@@ -48,6 +49,22 @@ function listSnapshots(category: string): string[] {
   return readdirSync(join(SNAP_ROOT, category))
     .filter((f) => f.endsWith('.json'))
     .sort();
+}
+
+/**
+ * The distinct `type` tag values actually carried by every golden under
+ * `category` — read from each file's JSON CONTENT, never its filename:
+ * several `event/` goldens share the `app_event` tag but are named after
+ * their inner `AppEventDto` variant instead (e.g. `app_details_changed.json`
+ * holds `{"type":"app_event","event":{"type":"app_details_changed",...}}`).
+ */
+function typeTagsOnDisk(category: string): Set<string> {
+  const tags = new Set<string>();
+  for (const file of listSnapshots(category)) {
+    const { type } = loadSnapshot<{ type: string }>(category, file);
+    tags.add(type);
+  }
+  return tags;
 }
 
 // ── Generic structural helpers ───────────────────────────────────────────────
@@ -319,6 +336,16 @@ function validateCost(v: unknown): void {
       isNumber(o['api_calls']) &&
       isNumber(o['session_duration_secs']) &&
       isString(o['formatted']),
+  );
+}
+
+function validateTurnRecoveryState(v: unknown): void {
+  const o = rec(v);
+  assert.ok(
+    ['running', 'waiting_for_user', 'paused_recoverable', 'completed', 'failed', 'cancelled'].includes(
+      o['type'] as string,
+    ),
+    `unknown TurnRecoveryStateDto "${String(o['type'])}"`,
   );
 }
 
@@ -1226,6 +1253,7 @@ function validateEvent(name: string, v: unknown): void {
           isNumber(snapshot['last_sequence']) &&
           isBool(snapshot['safe_to_resume']),
       );
+      validateTurnRecoveryState(snapshot['state']);
       if ('reason' in snapshot) assert.ok(isString(snapshot['reason']));
       break;
     }
@@ -1636,6 +1664,68 @@ test('every event snapshot parses as ClientEvent', () => {
   for (const file of files) {
     validateEvent(file, loadSnapshot('event', file));
   }
+});
+
+// The two tests above only prove every golden's `type` tag is HANDLED by the
+// hand-written `switch` in validateCommand/validateEvent — they cast the
+// loaded JSON `as ClientCommand`/`as ClientEvent` and never check that tag
+// against the actual TS union. That is exactly how `attach_turn`/
+// `resume_turn`/`pause_turn` and `turn_recovery_state`/`turn_event_replay`
+// went missing from the unions while staying fully validated and
+// snapshotted: nothing tied the switch to the union. `ALL_CLIENT_COMMAND_TYPES`
+// / `ALL_CLIENT_EVENT_TYPES` (src/protocolCoverage.ts) close that at COMPILE
+// time — a `Record<Union['type'], true>` can only type-check when its key set
+// is exactly the union's `type` values. These two tests close the remaining
+// runtime direction: the record's keys must also match what the goldens
+// actually carry, so a golden with no union member (or a union member with no
+// golden) fails HERE, by name, instead of staying silent.
+test('ALL_CLIENT_COMMAND_TYPES matches the `type` tags on disk exactly', () => {
+  const onDisk = [...typeTagsOnDisk('command')].sort();
+  const declared = Object.keys(ALL_CLIENT_COMMAND_TYPES).sort();
+  assert.deepEqual(
+    declared,
+    onDisk,
+    'ALL_CLIENT_COMMAND_TYPES (src/protocolCoverage.ts) must declare exactly the `type` tags carried by the command goldens — no more, no fewer',
+  );
+});
+
+test('ALL_CLIENT_EVENT_TYPES matches the `type` tags on disk exactly', () => {
+  const onDisk = [...typeTagsOnDisk('event')].sort();
+  const declared = Object.keys(ALL_CLIENT_EVENT_TYPES).sort();
+  assert.deepEqual(
+    declared,
+    onDisk,
+    'ALL_CLIENT_EVENT_TYPES (src/protocolCoverage.ts) must declare exactly the `type` tags carried by the event goldens — no more, no fewer',
+  );
+});
+
+// `turn_recovery_state`'s golden only exercises `paused_recoverable` — this
+// test both proves `state` is checked against the real 6-kind
+// TurnRecoveryStateDto (until now that field wasn't checked at all: the
+// switch case validated every other field but never `state`'s tag) and that
+// an unrecognized kind is rejected rather than silently accepted.
+test('turn_recovery_state validates its `state` kind, not just the surrounding fields', () => {
+  const base = {
+    session_id: '11111111-1111-4111-8111-111111111111',
+    turn_id: 1,
+    first_sequence: 1,
+    last_sequence: 7,
+    safe_to_resume: true,
+  };
+  for (const kind of ['running', 'waiting_for_user', 'paused_recoverable', 'completed', 'failed', 'cancelled']) {
+    validateEvent(`turn_recovery_state(${kind})`, {
+      type: 'turn_recovery_state',
+      snapshot: { ...base, state: { type: kind } },
+    });
+  }
+  assert.throws(
+    () =>
+      validateEvent('turn_recovery_state(bogus-state)', {
+        type: 'turn_recovery_state',
+        snapshot: { ...base, state: { type: 'bogus_state' } },
+      }),
+    'an unknown TurnRecoveryStateDto kind must be rejected',
+  );
 });
 
 // The on-disk goldens only exercise `AudioOpDto::Transcribe` and

@@ -59,16 +59,9 @@
 
 import type { AudioErrorKindDto, AudioOpDto, AudioResultDto, ClientEvent } from '@lingxi/bridge-client';
 
+import { MAX_AUDIO_BASE64_LENGTH, MAX_AUDIO_FAILURE_MESSAGE_LENGTH } from '../../shared/audioResponse.js';
 import { MicrophoneCaptureError, type CapturedRecording, type MicrophoneCaptureOptions } from './capture.js';
 import type { SynthesisResult } from './synthesis.js';
-
-/**
- * Upper bound on a failure message this module reports. `main/validation.ts`
- * caps an audio failure message at 4096 characters and a response over that
- * cap is a parked engine call, not a truncated string — so the trimming
- * happens here, before the gate, with headroom.
- */
-const MAX_FAILURE_MESSAGE_LENGTH = 1024;
 
 /**
  * What `AudioOpDto::Transcribe` is answered with. Exported so the test that
@@ -144,11 +137,35 @@ function describe(cause: unknown): string {
   const trimmed = raw.trim();
   // The gate rejects an empty message, and `new Error('')` produces one.
   if (trimmed.length === 0) return 'the desktop client reported an unnamed audio failure';
-  return trimmed.length > MAX_FAILURE_MESSAGE_LENGTH ? `${trimmed.slice(0, MAX_FAILURE_MESSAGE_LENGTH - 1)}…` : trimmed;
+  return trimmed.length > MAX_AUDIO_FAILURE_MESSAGE_LENGTH
+    ? `${trimmed.slice(0, MAX_AUDIO_FAILURE_MESSAGE_LENGTH - 1)}…`
+    : trimmed;
 }
 
 function failed(kind: AudioErrorKindDto, message: string): AudioResultDto {
   return { type: 'failed', kind, message };
+}
+
+/**
+ * Rejects a base64 payload the command gate would drop for size.
+ *
+ * Unlike every other bound here this one is reachable by ordinary use — the
+ * USER decides how long to hold the microphone — and the consequence of
+ * sending it anyway is not a validation error anybody sees: the gate drops the
+ * response, nothing reaches the engine, and `stop_recording` parks for its
+ * full 30-second deadline before failing with no explanation. Reporting it as
+ * a failure turns that stall into an immediate, named answer.
+ *
+ * The fix for a clip that genuinely needs to be larger is a chunked wire
+ * format, not a bigger constant — see `shared/audioResponse.ts`.
+ */
+function oversizePayload(base64: string, what: string): AudioResultDto | null {
+  if (base64.length <= MAX_AUDIO_BASE64_LENGTH) return null;
+  return failed(
+    'other',
+    `the ${what} is too large to send to the engine: ${base64.length} base64 characters, `
+    + `over the ${MAX_AUDIO_BASE64_LENGTH} limit`,
+  );
 }
 
 /**
@@ -210,7 +227,8 @@ export async function serviceAudioOp(op: AudioOpDto, deps: AudioRequestDeps): Pr
           // the engine for 30s — report the broken recorder instead.
           return failed('other', 'the microphone recorder reported no mime type for the captured clip');
         }
-        return { type: 'recording', audio_base64: recording.audioBase64, mime_type: recording.mimeType };
+        return oversizePayload(recording.audioBase64, 'captured clip')
+          ?? { type: 'recording', audio_base64: recording.audioBase64, mime_type: recording.mimeType };
       } catch (cause) {
         return failureFrom(cause, 'other');
       }
@@ -226,7 +244,8 @@ export async function serviceAudioOp(op: AudioOpDto, deps: AudioRequestDeps): Pr
         // `{ pcm_base64: '', sample_rate_hz: 0 }` is a SUCCESS — the
         // "already played in place" convention documented in `synthesis.ts`
         // and on `TextToSpeech::synthesize` in `audio_bridge.rs`.
-        return { type: 'audio', pcm_base64: result.pcmBase64, sample_rate_hz: result.sampleRateHz };
+        return oversizePayload(result.pcmBase64, 'synthesized audio')
+          ?? { type: 'audio', pcm_base64: result.pcmBase64, sample_rate_hz: result.sampleRateHz };
       } catch (cause) {
         return failureFrom(cause, 'synthesis_failed');
       }

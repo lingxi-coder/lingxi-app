@@ -12,6 +12,7 @@ import {
 } from '../src/renderer/audio/requests';
 import { MicrophoneCaptureError, type CapturedRecording, type MicrophoneCaptureOptions } from '../src/renderer/audio/capture';
 import { validateClientCommand } from '../src/main/validation';
+import { MAX_AUDIO_BASE64_LENGTH } from '../src/shared/audioResponse';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
@@ -364,6 +365,75 @@ test('an op this build does not know is reported unavailable, not silently ignor
 });
 
 // ---------------------------------------------------------------------------
+// An oversize clip must FAIL, not stall.
+//
+// The user chooses how long to hold the microphone, so a clip larger than the
+// wire bound is reachable by ordinary use. If it were sent anyway, the command
+// gate would reject it, nothing would reach the engine, and `stop_recording`
+// would park for its full 30-second `DEVICE_CONTROL_DEADLINE` before failing
+// with no explanation — the exact outcome the rest of this module exists to
+// prevent. Detecting it here turns a silent 30s stall into an immediate,
+// named failure.
+// ---------------------------------------------------------------------------
+
+/** A base64 string that genuinely crosses `MAX_AUDIO_BASE64_LENGTH`. */
+const OVERSIZE_BASE64 = 'A'.repeat(MAX_AUDIO_BASE64_LENGTH + 4);
+
+test('a clip too large for the wire is reported as a failure, not sent and stalled', async () => {
+  assert.ok(OVERSIZE_BASE64.length > MAX_AUDIO_BASE64_LENGTH, 'the fixture must actually cross the bound it names');
+
+  const h = harness();
+  h.recorder.recording = true;
+  h.recorder.clip = { audioBase64: OVERSIZE_BASE64, mimeType: 'audio/webm;codecs=opus' };
+
+  const result = await serviceAudioOp({ type: 'stop_recording' }, h.deps);
+
+  assert.equal(result.type, 'failed', 'an oversize clip must be reported, never handed to a gate that will drop it');
+  assert.equal(result.type === 'failed' ? result.kind : null, 'other');
+  assert.match(
+    result.type === 'failed' ? result.message : '',
+    new RegExp(String(MAX_AUDIO_BASE64_LENGTH)),
+    'the message must name the limit the clip crossed, so the failure is actionable',
+  );
+
+  // And the failure itself must survive the gate — otherwise the fix would
+  // have traded one stall for another.
+  assert.doesNotThrow(() => validateClientCommand({ type: 'audio_response', request_id: 8, result }));
+});
+
+test('a clip just inside the bound is still sent', async () => {
+  // The A/B for the test above: the check must reject only what actually
+  // exceeds the bound, not shrink the usable recording length.
+  const h = harness();
+  h.recorder.recording = true;
+  h.recorder.clip = { audioBase64: 'A'.repeat(MAX_AUDIO_BASE64_LENGTH), mimeType: 'audio/webm' };
+
+  const result = await serviceAudioOp({ type: 'stop_recording' }, h.deps);
+
+  assert.equal(result.type, 'recording', 'a clip exactly at the bound is legal and must be delivered');
+});
+
+test('the audio payload bounds have exactly one declaration', () => {
+  // The renderer must stay inside the same numbers `main/validation.ts`
+  // enforces. Two copies would drift, and the symptom of the drift is the
+  // stall above — the hardest possible thing to attribute back to a constant.
+  const validation = readFileSync(join(import.meta.dirname, '../src/main/validation.ts'), 'utf8');
+  const requests = readFileSync(join(import.meta.dirname, '../src/renderer/audio/requests.ts'), 'utf8');
+  for (const [name, source] of [['validation.ts', validation], ['requests.ts', requests]] as const) {
+    assert.ok(
+      /from '\.\.\/shared\/audioResponse\.js'|from '\.\.\/\.\.\/shared\/audioResponse\.js'/.test(source),
+      `${name} must import the audio bounds from shared/audioResponse.ts rather than restating them`,
+    );
+    assert.ok(
+      !/(?:const|let)\s+MAX_AUDIO_BASE64_LENGTH\s*=/.test(source),
+      `${name} must not declare its own MAX_AUDIO_BASE64_LENGTH`,
+    );
+  }
+  // Positive control for that second regex.
+  assert.ok(/(?:const|let)\s+MAX_AUDIO_BASE64_LENGTH\s*=/.test('const MAX_AUDIO_BASE64_LENGTH = 1;'));
+});
+
+// ---------------------------------------------------------------------------
 // The seam with the command gate.
 //
 // A response `main/validation.ts` rejects never reaches the engine, which
@@ -405,6 +475,15 @@ test('every response this module produces survives the runtime command gate', as
       name: 'a recorder with no mime type',
       op: { type: 'stop_recording' },
       arrange: (h) => { h.recorder.recording = true; h.recorder.clip = { audioBase64: 'AAEC', mimeType: '' }; },
+    },
+    {
+      // Same hazard, reachable by simply recording for a while.
+      name: 'an oversize clip',
+      op: { type: 'stop_recording' },
+      arrange: (h) => {
+        h.recorder.recording = true;
+        h.recorder.clip = { audioBase64: OVERSIZE_BASE64, mimeType: 'audio/webm' };
+      },
     },
   ];
 

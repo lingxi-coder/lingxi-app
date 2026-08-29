@@ -9,6 +9,12 @@ import type {
 } from '@lingxi/bridge-client';
 import { detectImageMediaType, isSupportedImageMediaType, MAX_IMAGE_ATTACHMENTS, MAX_IMAGE_BYTES } from '../shared/imageInput.js';
 import { ALLOWED_CLIENT_COMMAND_TYPES, ALLOWED_REFRESH_LISTING_KINDS } from '../shared/clientCommands.js';
+import {
+  MAX_AUDIO_BASE64_LENGTH,
+  MAX_AUDIO_FAILURE_MESSAGE_LENGTH,
+  MAX_AUDIO_MIME_TYPE_LENGTH,
+  MAX_AUDIO_SAMPLE_RATE_HZ,
+} from '../shared/audioResponse.js';
 
 const MAX_PROMPT_LENGTH = 256 * 1024;
 const MAX_ID_LENGTH = 512;
@@ -37,16 +43,7 @@ const AUDIO_ERROR_KINDS: readonly AudioErrorKindDto[] = [
   'synthesis_failed',
   'other',
 ];
-/**
- * Bound on a base64 audio payload from the renderer. Generous by design: a
- * `stop_recording` answer carries a whole clip, whose length the user (not
- * this process) chooses. 24 MiB of base64 is ~18 MiB of Opus — hours of
- * speech — while still bounding an IPC frame.
- */
-const MAX_AUDIO_BASE64_LENGTH = 24 * 1024 * 1024;
-/** Highest plausible PCM sample rate; `0` is legal — see `validateAudioResult`. */
-const MAX_AUDIO_SAMPLE_RATE_HZ = 768_000;
-const MAX_AUDIO_MESSAGE_LENGTH = 4096;
+
 
 /**
  * The runtime membership check for the Desktop command surface, built from
@@ -204,7 +201,7 @@ function validateAudioResult(value: unknown): AudioResultDto {
         // The mime type the recorder actually used. It travels verbatim into
         // `VoiceRecording.mime_type`, so a wrong value is a lie that reaches
         // whatever decodes the bytes — bounded here, never rewritten.
-        mime_type: string(input['mime_type'], 'audio mime type', 256),
+        mime_type: string(input['mime_type'], 'audio mime type', MAX_AUDIO_MIME_TYPE_LENGTH),
       };
     case 'audio':
       exactKeys(input, ['type', 'pcm_base64', 'sample_rate_hz']);
@@ -219,7 +216,7 @@ function validateAudioResult(value: unknown): AudioResultDto {
       return {
         type,
         kind: enumValue(input['kind'], 'audio error kind', AUDIO_ERROR_KINDS),
-        message: string(input['message'], 'audio error message', MAX_AUDIO_MESSAGE_LENGTH),
+        message: string(input['message'], 'audio error message', MAX_AUDIO_FAILURE_MESSAGE_LENGTH),
       };
     default:
       throw new Error('invalid audio result');

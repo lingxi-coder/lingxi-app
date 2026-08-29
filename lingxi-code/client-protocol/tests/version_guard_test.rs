@@ -951,9 +951,11 @@ fn current_contract_index() -> ContractIndex {
     // ── AudioErrorKindDto (commands.rs) ────────────────────────────────────
     put("AudioErrorKindDto::PermissionDenied", "permission_denied");
     put("AudioErrorKindDto::NoSpeech", "no_speech");
+    put("AudioErrorKindDto::NotRecording", "not_recording");
     put("AudioErrorKindDto::Unavailable", "unavailable");
     put("AudioErrorKindDto::Busy", "busy");
     put("AudioErrorKindDto::Retriable", "retriable");
+    put("AudioErrorKindDto::SynthesisFailed", "synthesis_failed");
     put("AudioErrorKindDto::Other", "other");
 
     // ── AudioResultDto (commands.rs) ───────────────────────────────────────
@@ -2519,9 +2521,11 @@ fn contract_index_covers_every_dto() {
     let _audio_error_kinds: Vec<AudioErrorKindDto> = vec![
         AudioErrorKindDto::PermissionDenied,
         AudioErrorKindDto::NoSpeech,
+        AudioErrorKindDto::NotRecording,
         AudioErrorKindDto::Unavailable,
         AudioErrorKindDto::Busy,
         AudioErrorKindDto::Retriable,
+        AudioErrorKindDto::SynthesisFailed,
         AudioErrorKindDto::Other,
     ];
     let _mcp_scope = McpScopeDto::User;

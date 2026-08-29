@@ -923,17 +923,26 @@ pub enum ListingKindDto {
 /// `SttError::Busy` report the same audio-session contention, and a caller
 /// branching on one should not have to also recognize the other.
 ///
-/// Mapping (pinned total across all three source enums by
-/// `audio_error_kind_mapping_is_total_across_all_three_traits` in
-/// `tests/commands_test.rs`, via an exhaustive `match` with no wildcard arm):
+/// Mapping (pinned by `audio_error_kind_mapping_is_total_across_all_three_traits`
+/// in `tests/commands_test.rs`, via an exhaustive `match` with no wildcard arm):
 /// - `PermissionDenied` <- `SttError::PermissionDenied`, `VoiceError::PermissionDenied`
 /// - `NoSpeech` <- `SttError::NoSpeech`
+/// - `NotRecording` <- `VoiceError::NotRecording`
 /// - `Unavailable` <- `SttError::Unavailable`, `TtsError::Unavailable`
 /// - `Busy` <- `SttError::Busy`, `VoiceError::Busy`
 /// - `Retriable` <- `SttError::Retriable(_)`
-/// - `Other` <- everything else, including `VoiceError::NotRecording` and
-///   `TtsError::SynthesisFailed(_)` — neither was named as a distinction that
-///   must survive the collapse.
+/// - `SynthesisFailed` <- `TtsError::SynthesisFailed(_)`
+/// - `Other` <- `SttError::Other(_)`, `VoiceError::Other(_)`, `TtsError::Other(_)`
+///
+/// Every one of the 13 source variants therefore has a home distinct from every
+/// OTHER variant of its own enum, which is what lets a proxy reconstruct the
+/// original error rather than a generic one. `Busy` and `PermissionDenied` are
+/// the only kinds two source variants share, and those two come from DIFFERENT
+/// enums on purpose (see above). `audio_error_kind_round_trips_every_source_variant`
+/// pins that property directly: forward-map each variant, reverse-map it, and it
+/// must come back as itself. A merely TOTAL forward map does not give this —
+/// `NotRecording -> Other` is total and lossy, and shipped green until the round
+/// trip replaced the totality assertion.
 ///
 /// A bare wire STRING (`"permission_denied"` / `"no_speech"` / …), like
 /// [`crate::computer_access::AccessTierDto`]. `#[non_exhaustive]` so a future
@@ -948,6 +957,10 @@ pub enum AudioErrorKindDto {
     PermissionDenied,
     /// No speech was detected before the listen timeout (`SttError::NoSpeech`).
     NoSpeech,
+    /// `stop_recording` was called with no active session
+    /// (`VoiceError::NotRecording`). Distinct from `Other` so a caller can tell
+    /// "there was nothing to stop" from "the recorder failed".
+    NotRecording,
     /// The device has no usable speech/TTS service
     /// (`SttError`/`TtsError::Unavailable`).
     Unavailable,
@@ -956,6 +969,10 @@ pub enum AudioErrorKindDto {
     Busy,
     /// A transient failure, safe to retry (`SttError::Retriable`).
     Retriable,
+    /// Synthesis failed for the given text/voice
+    /// (`TtsError::SynthesisFailed`). Distinct from `Retriable`: this one names
+    /// a PERMANENT failure of this particular text or voice, not a transient.
+    SynthesisFailed,
     /// Any other failure not covered above.
     Other,
 }

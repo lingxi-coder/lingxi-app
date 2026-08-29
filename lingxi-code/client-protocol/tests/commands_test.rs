@@ -1052,10 +1052,8 @@ fn voice_error_kind(error: &VoiceError) -> AudioErrorKindDto {
     match error {
         VoiceError::PermissionDenied => AudioErrorKindDto::PermissionDenied,
         VoiceError::Busy => AudioErrorKindDto::Busy,
-        // `NotRecording` has no dedicated kind in the frozen `AudioErrorKindDto`
-        // set and maps to `Other` — unlike `Busy`/`PermissionDenied`, it was
-        // not named as a distinction that must survive collapse.
-        VoiceError::NotRecording | VoiceError::Other(_) => AudioErrorKindDto::Other,
+        VoiceError::NotRecording => AudioErrorKindDto::NotRecording,
+        VoiceError::Other(_) => AudioErrorKindDto::Other,
     }
 }
 
@@ -1064,20 +1062,176 @@ fn voice_error_kind(error: &VoiceError) -> AudioErrorKindDto {
 fn tts_error_kind(error: &TtsError) -> AudioErrorKindDto {
     match error {
         TtsError::Unavailable => AudioErrorKindDto::Unavailable,
-        TtsError::SynthesisFailed(_) | TtsError::Other(_) => AudioErrorKindDto::Other,
+        TtsError::SynthesisFailed(_) => AudioErrorKindDto::SynthesisFailed,
+        TtsError::Other(_) => AudioErrorKindDto::Other,
     }
 }
 
-/// Pin the mapping from every variant of all three trait error enums
-/// (`traits::{SttError, VoiceError, TtsError}`) to an `AudioErrorKindDto`.
+/// Reverse of [`stt_error_kind`]: the `SttError` variant a kind must come back
+/// as. Mirrors `bridge_server::audio_bridge::stt_error` — kinds with no home in
+/// `SttError` fall to `Other`. Payloads are irrelevant here; only the variant
+/// is compared.
+fn stt_error_of_kind(kind: AudioErrorKindDto) -> SttError {
+    match kind {
+        AudioErrorKindDto::PermissionDenied => SttError::PermissionDenied,
+        AudioErrorKindDto::NoSpeech => SttError::NoSpeech,
+        AudioErrorKindDto::Unavailable => SttError::Unavailable,
+        AudioErrorKindDto::Busy => SttError::Busy,
+        AudioErrorKindDto::Retriable => SttError::Retriable(String::new()),
+        _ => SttError::Other(String::new()),
+    }
+}
+
+/// Reverse of [`voice_error_kind`]. Mirrors
+/// `bridge_server::audio_bridge::voice_error`.
+fn voice_error_of_kind(kind: AudioErrorKindDto) -> VoiceError {
+    match kind {
+        AudioErrorKindDto::PermissionDenied => VoiceError::PermissionDenied,
+        AudioErrorKindDto::NotRecording => VoiceError::NotRecording,
+        AudioErrorKindDto::Busy => VoiceError::Busy,
+        _ => VoiceError::Other(String::new()),
+    }
+}
+
+/// Reverse of [`tts_error_kind`]. Mirrors
+/// `bridge_server::audio_bridge::tts_error`.
+fn tts_error_of_kind(kind: AudioErrorKindDto) -> TtsError {
+    match kind {
+        AudioErrorKindDto::Unavailable => TtsError::Unavailable,
+        AudioErrorKindDto::SynthesisFailed => TtsError::SynthesisFailed(String::new()),
+        _ => TtsError::Other(String::new()),
+    }
+}
+
+/// Variant name of an `SttError`, so a round-trip failure NAMES the variant
+/// that was collapsed rather than printing a payload comparison.
+fn stt_name(error: &SttError) -> &'static str {
+    match error {
+        SttError::PermissionDenied => "PermissionDenied",
+        SttError::NoSpeech => "NoSpeech",
+        SttError::Unavailable => "Unavailable",
+        SttError::Busy => "Busy",
+        SttError::Retriable(_) => "Retriable",
+        SttError::Other(_) => "Other",
+    }
+}
+
+/// Variant name of a `VoiceError`. See [`stt_name`].
+fn voice_name(error: &VoiceError) -> &'static str {
+    match error {
+        VoiceError::PermissionDenied => "PermissionDenied",
+        VoiceError::NotRecording => "NotRecording",
+        VoiceError::Busy => "Busy",
+        VoiceError::Other(_) => "Other",
+    }
+}
+
+/// Variant name of a `TtsError`. See [`stt_name`].
+fn tts_name(error: &TtsError) -> &'static str {
+    match error {
+        TtsError::Unavailable => "Unavailable",
+        TtsError::SynthesisFailed(_) => "SynthesisFailed",
+        TtsError::Other(_) => "Other",
+    }
+}
+
+/// Every variant of all three trait error enums (`traits::{SttError,
+/// VoiceError, TtsError}`) must survive a round trip through
+/// `AudioErrorKindDto` and come back as the SAME variant.
 ///
-/// Totality is enforced TWO ways: the exhaustive `match` in each `*_kind`
-/// helper above (no wildcard arm — a new upstream variant fails to compile),
-/// and this test pinning the CONCRETE mapping so a silent remap (e.g.
-/// `SttError::Busy` drifting from `Busy` to `Other`) is caught even though it
-/// would still compile. `SttError::Busy` and `VoiceError::Busy` intentionally
-/// map to the SAME kind (`traits::SttError::Busy`'s own doc comment: a caller
-/// branching on one contention should not have to also recognize the other).
+/// This replaces an earlier test that asserted only that the FORWARD map was
+/// TOTAL (an exhaustive `match` with no wildcard arm, plus a pin of each
+/// concrete destination). Totality is not losslessness: `VoiceError::NotRecording
+/// -> Other` satisfies a total match perfectly while destroying the
+/// distinction, and that is exactly the defect the totality test shipped green.
+/// A round-trip identity cannot pass while a distinction is being collapsed,
+/// because two source variants that share a kind cannot both come back.
+///
+/// The forward map is [`stt_error_kind`] / [`voice_error_kind`] /
+/// [`tts_error_kind`]; the reverse map here MIRRORS
+/// `bridge_server::audio_bridge`'s production one. What this test pins is the
+/// CONTRACT — that `AudioErrorKindDto` carries enough distinct kinds for the
+/// round trip to exist at all. The production reverse map itself is pinned by
+/// `audio_error_kind_round_trips_every_source_variant_through_the_real_maps` in
+/// `bridge-server`, which drives the REAL `stt_error`/`voice_error`/`tts_error`
+/// over a real request/response exchange.
+///
+/// The exhaustive `match` in each `*_kind` helper is kept: it catches a newly
+/// ADDED upstream variant (compile error), which a round trip cannot. The round
+/// trip catches a COLLAPSED one, which the exhaustive match cannot.
+#[test]
+fn audio_error_kind_round_trips_every_source_variant() {
+    // Collected rather than asserted per-variant, so ONE run names EVERY
+    // collapsed variant instead of stopping at the first.
+    let mut collapsed: Vec<String> = Vec::new();
+
+    for error in [
+        SttError::PermissionDenied,
+        SttError::NoSpeech,
+        SttError::Unavailable,
+        SttError::Busy,
+        SttError::Retriable("network blip".to_string()),
+        SttError::Other("native crash".to_string()),
+    ] {
+        let kind = stt_error_kind(&error);
+        let back = stt_error_of_kind(kind);
+        if stt_name(&back) != stt_name(&error) {
+            collapsed.push(format!(
+                "SttError::{} -> {kind:?} -> SttError::{}",
+                stt_name(&error),
+                stt_name(&back)
+            ));
+        }
+    }
+
+    for error in [
+        VoiceError::PermissionDenied,
+        VoiceError::NotRecording,
+        VoiceError::Busy,
+        VoiceError::Other("native crash".to_string()),
+    ] {
+        let kind = voice_error_kind(&error);
+        let back = voice_error_of_kind(kind);
+        if voice_name(&back) != voice_name(&error) {
+            collapsed.push(format!(
+                "VoiceError::{} -> {kind:?} -> VoiceError::{}",
+                voice_name(&error),
+                voice_name(&back)
+            ));
+        }
+    }
+
+    for error in [
+        TtsError::Unavailable,
+        TtsError::SynthesisFailed("bad voice id".to_string()),
+        TtsError::Other("native crash".to_string()),
+    ] {
+        let kind = tts_error_kind(&error);
+        let back = tts_error_of_kind(kind);
+        if tts_name(&back) != tts_name(&error) {
+            collapsed.push(format!(
+                "TtsError::{} -> {kind:?} -> TtsError::{}",
+                tts_name(&error),
+                tts_name(&back)
+            ));
+        }
+    }
+
+    assert!(
+        collapsed.is_empty(),
+        "these source variants do not survive the AudioErrorKindDto round trip \
+         (each needs a kind of its own): {collapsed:#?}"
+    );
+}
+
+/// Pin the CONCRETE forward destination of every variant, so a silent remap
+/// (e.g. `SttError::Busy` drifting from `Busy` to `Other`) is caught even
+/// though it would still compile AND still round-trip if the reverse map drifted
+/// with it. `SttError::Busy` and `VoiceError::Busy` intentionally share one kind
+/// (`traits::SttError::Busy`'s own doc comment: a caller branching on one
+/// contention should not have to also recognize the other) — the ONE place two
+/// source variants legitimately meet, and they come from different enums so the
+/// round trip above is unaffected.
 #[test]
 fn audio_error_kind_mapping_is_total_across_all_three_traits() {
     assert_eq!(
@@ -1108,7 +1262,7 @@ fn audio_error_kind_mapping_is_total_across_all_three_traits() {
     );
     assert_eq!(
         voice_error_kind(&VoiceError::NotRecording),
-        AudioErrorKindDto::Other
+        AudioErrorKindDto::NotRecording
     );
     assert_eq!(voice_error_kind(&VoiceError::Busy), AudioErrorKindDto::Busy);
     assert_eq!(
@@ -1122,7 +1276,7 @@ fn audio_error_kind_mapping_is_total_across_all_three_traits() {
     );
     assert_eq!(
         tts_error_kind(&TtsError::SynthesisFailed("bad voice id".to_string())),
-        AudioErrorKindDto::Other
+        AudioErrorKindDto::SynthesisFailed
     );
     assert_eq!(
         tts_error_kind(&TtsError::Other("native crash".to_string())),

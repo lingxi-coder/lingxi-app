@@ -144,11 +144,13 @@ const NO_CLIENT_MESSAGE: &str = "no desktop client is connected to perform the a
 
 /// Raise an [`AudioFailure`] to the speech-recognition trait's own error enum.
 ///
-/// Every currently-defined [`AudioErrorKindDto`] is listed explicitly: `SttError`
-/// happens to have a home for all six, so nothing here falls through. The
-/// wildcard arm exists only because [`AudioErrorKindDto`] is `#[non_exhaustive]`
-/// — it catches a kind added to the contract AFTER this code was written, not a
-/// kind that should have mapped.
+/// Every currently-defined [`AudioErrorKindDto`] is listed explicitly. `SttError`
+/// has a home for the six kinds speech recognition can produce; the two that
+/// belong to the other traits (`NotRecording`, `SynthesisFailed`) fall to
+/// `Other` DELIBERATELY and are named below. The wildcard arm exists only
+/// because [`AudioErrorKindDto`] is `#[non_exhaustive]` — it catches a kind
+/// added to the contract AFTER this code was written, not a kind that should
+/// have mapped.
 //
 // `match_same_arms` is allowed on purpose: several kinds share `Other` as their
 // destination, and collapsing them into one arm is exactly what ruling 1
@@ -170,6 +172,11 @@ fn stt_error(failure: AudioFailure) -> SttError {
             AudioErrorKindDto::Unavailable => SttError::Unavailable,
             AudioErrorKindDto::Busy => SttError::Busy,
             AudioErrorKindDto::Retriable => SttError::Retriable(message),
+            // A recording-session kind: `SttError` has no `NotRecording`, and
+            // `transcribe` never opens a session for one to be missing from.
+            AudioErrorKindDto::NotRecording => SttError::Other(message),
+            // A synthesis kind; recognition has no equivalent.
+            AudioErrorKindDto::SynthesisFailed => SttError::Other(message),
             AudioErrorKindDto::Other => SttError::Other(message),
             // Only reachable for a kind added to the contract after this code
             // was written (`AudioErrorKindDto` is `#[non_exhaustive]`).
@@ -180,13 +187,13 @@ fn stt_error(failure: AudioFailure) -> SttError {
 
 /// Raise an [`AudioFailure`] to the speech-synthesis trait's own error enum.
 ///
-/// `TtsError` has only `Unavailable` / `SynthesisFailed` / `Other`, so four of
-/// the six kinds have no home and fall to `Other` DELIBERATELY — each is listed
-/// by name below with the reason, so a kind that later grows a home cannot be
-/// silently swallowed by a catch-all. `SynthesisFailed` is reserved for a
-/// failure this proxy itself detects (undecodable audio, in
-/// [`TextToSpeech::synthesize`]); nothing on the wire maps to it, because Task
-/// 1 collapses `TtsError::SynthesisFailed` into `AudioErrorKindDto::Other`.
+/// `TtsError` has only `Unavailable` / `SynthesisFailed` / `Other`, so the five
+/// kinds belonging to the other two traits have no home and fall to `Other`
+/// DELIBERATELY — each is listed by name below with the reason, so a kind that
+/// later grows a home cannot be silently swallowed by a catch-all.
+/// `AudioErrorKindDto::SynthesisFailed` round-trips to
+/// `TtsError::SynthesisFailed`; this proxy also raises that variant itself for
+/// audio it cannot base64-decode (in [`TextToSpeech::synthesize`]).
 //
 // `match_same_arms` allowed for the same reason as in [`stt_error`].
 #[allow(clippy::match_same_arms)]
@@ -200,6 +207,7 @@ fn tts_error(failure: AudioFailure) -> TtsError {
         AudioFailure::Mismatched(message) => TtsError::Other(message),
         AudioFailure::Reported { kind, message } => match kind {
             AudioErrorKindDto::Unavailable => TtsError::Unavailable,
+            AudioErrorKindDto::SynthesisFailed => TtsError::SynthesisFailed(message),
             // Synthesis needs no microphone permission; a client reporting it
             // here is describing an audio-session/output failure `TtsError`
             // cannot name.
@@ -207,6 +215,8 @@ fn tts_error(failure: AudioFailure) -> TtsError {
             // "No speech was detected" is a recognition outcome; it is
             // meaningless for synthesis and has no `TtsError` home.
             AudioErrorKindDto::NoSpeech => TtsError::Other(message),
+            // A recording-session kind; synthesis opens no session.
+            AudioErrorKindDto::NotRecording => TtsError::Other(message),
             // `TtsError` has no `Busy` variant.
             AudioErrorKindDto::Busy => TtsError::Other(message),
             // `TtsError` has no retriable variant; `SynthesisFailed` would be a
@@ -222,12 +232,9 @@ fn tts_error(failure: AudioFailure) -> TtsError {
 
 /// Raise an [`AudioFailure`] to the microphone-capture trait's own error enum.
 ///
-/// `VoiceError` has `PermissionDenied` / `NotRecording` / `Busy` / `Other`;
-/// the three kinds with no home fall to `Other` DELIBERATELY and are listed by
-/// name below. `NotRecording` is unreachable from the wire by construction:
-/// Task 1 collapses `VoiceError::NotRecording` into `AudioErrorKindDto::Other`,
-/// so a client reporting "not currently recording" arrives as `Other` with that
-/// message.
+/// `VoiceError` has `PermissionDenied` / `NotRecording` / `Busy` / `Other`; the
+/// four kinds belonging to the other two traits have no home and fall to
+/// `Other` DELIBERATELY, listed by name below.
 //
 // `match_same_arms` allowed for the same reason as in [`stt_error`].
 #[allow(clippy::match_same_arms)]
@@ -241,6 +248,7 @@ fn voice_error(failure: AudioFailure) -> VoiceError {
         }
         AudioFailure::Reported { kind, message } => match kind {
             AudioErrorKindDto::PermissionDenied => VoiceError::PermissionDenied,
+            AudioErrorKindDto::NotRecording => VoiceError::NotRecording,
             AudioErrorKindDto::Busy => VoiceError::Busy,
             // Recording is not recognition: `VoiceError` has no `NoSpeech`.
             AudioErrorKindDto::NoSpeech => VoiceError::Other(message),
@@ -248,6 +256,8 @@ fn voice_error(failure: AudioFailure) -> VoiceError {
             AudioErrorKindDto::Unavailable => VoiceError::Other(message),
             // `VoiceError` has no retriable variant.
             AudioErrorKindDto::Retriable => VoiceError::Other(message),
+            // A synthesis kind; recording produces no synthesized audio.
+            AudioErrorKindDto::SynthesisFailed => VoiceError::Other(message),
             AudioErrorKindDto::Other => VoiceError::Other(message),
             // Only reachable for a kind added to the contract after this code
             // was written.
@@ -672,18 +682,13 @@ mod tests {
             (K::Unavailable, "Unavailable"),
             (K::Busy, "Busy"),
             (K::Retriable, "Retriable"),
+            // The two kinds owned by the other traits have no SttError home.
+            (K::NotRecording, "Other"),
+            (K::SynthesisFailed, "Other"),
             (K::Other, "Other"),
         ] {
             let error = stt_failure(kind).await;
-            let actual = match error {
-                SttError::PermissionDenied => "PermissionDenied",
-                SttError::NoSpeech => "NoSpeech",
-                SttError::Unavailable => "Unavailable",
-                SttError::Busy => "Busy",
-                SttError::Retriable(_) => "Retriable",
-                SttError::Other(_) => "Other",
-            };
-            assert_eq!(actual, expected, "SttError mapping for {kind:?}");
+            assert_eq!(stt_name(&error), expected, "SttError mapping for {kind:?}");
         }
     }
 
@@ -691,22 +696,19 @@ mod tests {
     async fn every_error_kind_maps_to_its_home_variant_in_the_tts_impl() {
         use AudioErrorKindDto as K;
         for (kind, expected) in [
-            // TtsError has no permission/no-speech/busy/retriable variant, so
-            // these four fall to `Other` deliberately (see `tts_error`).
+            // TtsError has no permission/no-speech/not-recording/busy/retriable
+            // variant, so those fall to `Other` deliberately (see `tts_error`).
             (K::PermissionDenied, "Other"),
             (K::NoSpeech, "Other"),
+            (K::NotRecording, "Other"),
             (K::Unavailable, "Unavailable"),
             (K::Busy, "Other"),
             (K::Retriable, "Other"),
+            (K::SynthesisFailed, "SynthesisFailed"),
             (K::Other, "Other"),
         ] {
             let error = tts_failure(kind).await;
-            let actual = match error {
-                TtsError::Unavailable => "Unavailable",
-                TtsError::SynthesisFailed(_) => "SynthesisFailed",
-                TtsError::Other(_) => "Other",
-            };
-            assert_eq!(actual, expected, "TtsError mapping for {kind:?}");
+            assert_eq!(tts_name(&error), expected, "TtsError mapping for {kind:?}");
         }
     }
 
@@ -715,22 +717,164 @@ mod tests {
         use AudioErrorKindDto as K;
         for (kind, expected) in [
             (K::PermissionDenied, "PermissionDenied"),
-            // VoiceError has no no-speech/unavailable/retriable variant.
+            (K::NotRecording, "NotRecording"),
+            // VoiceError has no no-speech/unavailable/retriable variant, and
+            // SynthesisFailed belongs to TTS.
             (K::NoSpeech, "Other"),
             (K::Unavailable, "Other"),
             (K::Busy, "Busy"),
             (K::Retriable, "Other"),
+            (K::SynthesisFailed, "Other"),
             (K::Other, "Other"),
         ] {
             let error = voice_failure(kind).await;
-            let actual = match error {
-                VoiceError::PermissionDenied => "PermissionDenied",
-                VoiceError::NotRecording => "NotRecording",
-                VoiceError::Busy => "Busy",
-                VoiceError::Other(_) => "Other",
-            };
-            assert_eq!(actual, expected, "VoiceError mapping for {kind:?}");
+            assert_eq!(
+                voice_name(&error),
+                expected,
+                "VoiceError mapping for {kind:?}"
+            );
         }
+    }
+
+    /// Variant name of an `SttError`, so a mapping failure NAMES the variant
+    /// rather than printing a payload comparison.
+    fn stt_name(error: &SttError) -> &'static str {
+        match error {
+            SttError::PermissionDenied => "PermissionDenied",
+            SttError::NoSpeech => "NoSpeech",
+            SttError::Unavailable => "Unavailable",
+            SttError::Busy => "Busy",
+            SttError::Retriable(_) => "Retriable",
+            SttError::Other(_) => "Other",
+        }
+    }
+
+    /// Variant name of a `VoiceError`. See [`stt_name`].
+    fn voice_name(error: &VoiceError) -> &'static str {
+        match error {
+            VoiceError::PermissionDenied => "PermissionDenied",
+            VoiceError::NotRecording => "NotRecording",
+            VoiceError::Busy => "Busy",
+            VoiceError::Other(_) => "Other",
+        }
+    }
+
+    /// Variant name of a `TtsError`. See [`stt_name`].
+    fn tts_name(error: &TtsError) -> &'static str {
+        match error {
+            TtsError::Unavailable => "Unavailable",
+            TtsError::SynthesisFailed(_) => "SynthesisFailed",
+            TtsError::Other(_) => "Other",
+        }
+    }
+
+    /// Forward map: the kind a `SttError` variant is lowered to on the wire.
+    /// A COPY of `client-protocol`'s `stt_error_kind` (that one lives in a test
+    /// of another crate and cannot be imported), kept exhaustive with no
+    /// wildcard so a new upstream variant fails THIS compile too.
+    fn stt_kind(error: &SttError) -> AudioErrorKindDto {
+        match error {
+            SttError::PermissionDenied => AudioErrorKindDto::PermissionDenied,
+            SttError::NoSpeech => AudioErrorKindDto::NoSpeech,
+            SttError::Unavailable => AudioErrorKindDto::Unavailable,
+            SttError::Busy => AudioErrorKindDto::Busy,
+            SttError::Retriable(_) => AudioErrorKindDto::Retriable,
+            SttError::Other(_) => AudioErrorKindDto::Other,
+        }
+    }
+
+    /// Forward map for `VoiceError`. See [`stt_kind`].
+    fn voice_kind(error: &VoiceError) -> AudioErrorKindDto {
+        match error {
+            VoiceError::PermissionDenied => AudioErrorKindDto::PermissionDenied,
+            VoiceError::NotRecording => AudioErrorKindDto::NotRecording,
+            VoiceError::Busy => AudioErrorKindDto::Busy,
+            VoiceError::Other(_) => AudioErrorKindDto::Other,
+        }
+    }
+
+    /// Forward map for `TtsError`. See [`stt_kind`].
+    fn tts_kind(error: &TtsError) -> AudioErrorKindDto {
+        match error {
+            TtsError::Unavailable => AudioErrorKindDto::Unavailable,
+            TtsError::SynthesisFailed(_) => AudioErrorKindDto::SynthesisFailed,
+            TtsError::Other(_) => AudioErrorKindDto::Other,
+        }
+    }
+
+    /// Every source variant must survive a full round trip through the wire and
+    /// back through the PRODUCTION reverse maps: lower it to a kind, put that
+    /// kind on a real `AudioResultDto::Failed`, answer a real parked request
+    /// with it, and get the SAME variant out of the trait call.
+    ///
+    /// `client-protocol`'s own round-trip test pins that the CONTRACT carries
+    /// enough distinct kinds; it does so against a reverse map written in that
+    /// test file. This one closes the loop on the map that actually ships —
+    /// a reverse map could satisfy the contract test's twin and still be wrong
+    /// here.
+    #[tokio::test]
+    async fn audio_error_kind_round_trips_every_source_variant_through_the_real_maps() {
+        // Collected rather than asserted per-variant, so ONE run names EVERY
+        // collapsed variant instead of stopping at the first.
+        let mut collapsed: Vec<String> = Vec::new();
+
+        for error in [
+            SttError::PermissionDenied,
+            SttError::NoSpeech,
+            SttError::Unavailable,
+            SttError::Busy,
+            SttError::Retriable("network blip".to_string()),
+            SttError::Other("native crash".to_string()),
+        ] {
+            let kind = stt_kind(&error);
+            let back = stt_failure(kind).await;
+            if stt_name(&back) != stt_name(&error) {
+                collapsed.push(format!(
+                    "SttError::{} -> {kind:?} -> SttError::{}",
+                    stt_name(&error),
+                    stt_name(&back)
+                ));
+            }
+        }
+
+        for error in [
+            VoiceError::PermissionDenied,
+            VoiceError::NotRecording,
+            VoiceError::Busy,
+            VoiceError::Other("native crash".to_string()),
+        ] {
+            let kind = voice_kind(&error);
+            let back = voice_failure(kind).await;
+            if voice_name(&back) != voice_name(&error) {
+                collapsed.push(format!(
+                    "VoiceError::{} -> {kind:?} -> VoiceError::{}",
+                    voice_name(&error),
+                    voice_name(&back)
+                ));
+            }
+        }
+
+        for error in [
+            TtsError::Unavailable,
+            TtsError::SynthesisFailed("bad voice id".to_string()),
+            TtsError::Other("native crash".to_string()),
+        ] {
+            let kind = tts_kind(&error);
+            let back = tts_failure(kind).await;
+            if tts_name(&back) != tts_name(&error) {
+                collapsed.push(format!(
+                    "TtsError::{} -> {kind:?} -> TtsError::{}",
+                    tts_name(&error),
+                    tts_name(&back)
+                ));
+            }
+        }
+
+        assert!(
+            collapsed.is_empty(),
+            "these source variants do not survive the round trip through the \
+             production reverse maps: {collapsed:#?}"
+        );
     }
 
     /// Drive one `transcribe` to a `Failed { kind }` answer and return the error.

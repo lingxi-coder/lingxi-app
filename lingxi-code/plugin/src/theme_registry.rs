@@ -224,9 +224,19 @@ pub fn is_valid_theme_color(value: &str) -> bool {
 
 /// Live table of plugin-declared custom themes, keyed by namespaced slug
 /// (oracle `pluginThemes` state).
+///
+/// **Loading is LAZY.** `load_plugin` records only `(slug, path)` pairs; the
+/// stat + read + parse happens on the first `get` for that slug and the result
+/// is cached. Nothing in the port reads this registry yet (see
+/// `PluginManager::plugin_themes`), so eager loading would spend one
+/// stat+read+parse per declared file per plugin enable — plus `[theme]` parse
+/// warnings — for a feature no user can currently see. Deferring costs nothing
+/// until a reader exists, and a reader gets identical results.
 #[derive(Debug, Default)]
 pub struct PluginThemeRegistry {
     by_slug: RwLock<HashMap<String, PluginThemeEntry>>,
+    /// Declared-but-not-yet-read themes: slug -> absolute `.json` path.
+    pending: RwLock<HashMap<String, std::path::PathBuf>>,
 }
 
 impl PluginThemeRegistry {
@@ -260,24 +270,81 @@ impl PluginThemeRegistry {
             return;
         }
         let mut guard = self.by_slug.write().unwrap_or_else(|e| e.into_inner());
+        let mut pending = self.pending.write().unwrap_or_else(|e| e.into_inner());
         for slug in slugs {
             guard.remove(slug);
+            pending.remove(slug);
+        }
+    }
+
+    /// Record declared themes WITHOUT touching the filesystem. The stat, read
+    /// and parse are deferred to the first [`Self::get`] for each slug.
+    pub fn register_paths(&self, entries: Vec<(String, std::path::PathBuf)>) {
+        if entries.is_empty() {
+            return;
+        }
+        let mut guard = self.pending.write().unwrap_or_else(|e| e.into_inner());
+        for (slug, path) in entries {
+            guard.insert(slug, path);
         }
     }
 
     /// Oracle `Aon`'s plugin-side half: `pluginThemes.getState().find(slug)`.
+    ///
+    /// Materializes a pending entry on first call (size cap, then JSON parse —
+    /// the same gates the eager path applied, in the same order), caching both
+    /// success and failure so a bad file is not re-read on every lookup.
     #[must_use]
     pub fn get(&self, slug: &str) -> Option<PluginThemeEntry> {
-        let guard = self.by_slug.read().unwrap_or_else(|e| e.into_inner());
-        guard.get(slug).cloned()
+        {
+            let guard = self.by_slug.read().unwrap_or_else(|e| e.into_inner());
+            if let Some(entry) = guard.get(slug) {
+                return Some(entry.clone());
+            }
+        }
+        let path = {
+            let mut pending = self.pending.write().unwrap_or_else(|e| e.into_inner());
+            pending.remove(slug)?
+        };
+        let entry = Self::materialize(slug, &path);
+        if let Some(entry) = entry.clone() {
+            let mut guard = self.by_slug.write().unwrap_or_else(|e| e.into_inner());
+            guard.insert(slug.to_string(), entry);
+        }
+        entry
     }
 
-    /// All currently registered slugs, sorted.
+    /// The deferred half of loading: the byte cap and parse the oracle's
+    /// `j(e,t,r)` applies, warning on exactly the two cases it warns on.
+    fn materialize(slug: &str, path: &std::path::Path) -> Option<PluginThemeEntry> {
+        let metadata = std::fs::metadata(path).ok()?;
+        if metadata.len() > MAX_THEME_FILE_BYTES {
+            tracing::warn!(
+                path = %path.display(),
+                "[theme] {} exceeds 256KB; skipping",
+                path.display()
+            );
+            return None;
+        }
+        let raw = std::fs::read_to_string(path).ok()?;
+        match parse_theme_json(slug, &raw) {
+            ThemeParseOutcome::Valid(entry) => Some(entry),
+            ThemeParseOutcome::WrongShape => None,
+            ThemeParseOutcome::InvalidJson => {
+                tracing::warn!(slug = %slug, "[theme] {slug}.json: invalid JSON");
+                None
+            }
+        }
+    }
+
+    /// All registered slugs — loaded and still-pending — sorted.
     #[must_use]
     pub fn slugs(&self) -> Vec<String> {
-        let guard = self.by_slug.read().unwrap_or_else(|e| e.into_inner());
-        let mut slugs: Vec<String> = guard.keys().cloned().collect();
+        let loaded = self.by_slug.read().unwrap_or_else(|e| e.into_inner());
+        let pending = self.pending.read().unwrap_or_else(|e| e.into_inner());
+        let mut slugs: Vec<String> = loaded.keys().chain(pending.keys()).cloned().collect();
         slugs.sort();
+        slugs.dedup();
         slugs
     }
 }
@@ -473,6 +540,48 @@ mod tests {
     }
 
     // ---------- resolve_theme (Aon precedence) ----------
+
+
+    /// Loading must be LAZY: `register_paths` records the path and performs no
+    /// filesystem access, so a file that does not exist at registration time is
+    /// still picked up by the first `get`.
+    ///
+    /// This is the decisive probe. Under the previous eager implementation the
+    /// stat+read+parse happened at registration, so a theme written *after*
+    /// registration was invisible forever. Writing the file only after
+    /// `register_paths` returns therefore fails closed on any regression back
+    /// to eager loading.
+    #[test]
+    fn register_paths_defers_all_io_until_the_first_get() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("midnight.json");
+
+        let registry = PluginThemeRegistry::new();
+        registry.register_paths(vec![("acme:midnight".to_string(), path.clone())]);
+
+        assert!(
+            !path.exists(),
+            "precondition: the theme file must not exist yet"
+        );
+        assert_eq!(
+            registry.slugs(),
+            vec!["acme:midnight".to_string()],
+            "a pending theme must still be listed before it is read"
+        );
+
+        // Only now does the file appear. An eager registry has already given up.
+        std::fs::write(
+            &path,
+            r##"{"name":"Midnight","base":"dark","overrides":{"text":"#ffffff"}}"##,
+        )
+        .unwrap();
+
+        let entry = registry.get("acme:midnight").expect(
+            "register_paths must NOT read the file; the first get must, so a file written \
+             after registration is still resolved",
+        );
+        assert_eq!(entry.slug, "acme:midnight");
+    }
 
     #[test]
     fn user_theme_wins_over_a_same_slug_plugin_theme() {

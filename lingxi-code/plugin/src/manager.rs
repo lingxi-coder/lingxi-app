@@ -18,7 +18,7 @@ use crate::loader::resolve_user_config;
 use crate::manifest::{ComponentPath, PluginManifest, PluginUserConfig};
 use crate::source::PluginSource;
 use crate::strict_policy::StrictPluginOnlyPolicy;
-use crate::theme_registry::{self, PluginThemeRegistry};
+use crate::theme_registry::PluginThemeRegistry;
 use crate::user_config;
 use serde_json::{Map, Value};
 
@@ -989,36 +989,15 @@ impl PluginManager {
         //      going missing between discovery and enable); oversized or
         //      invalid-JSON files ARE warned, matching the oracle's two
         //      warning sites.
-        let mut theme_entries: Vec<theme_registry::PluginThemeEntry> = Vec::new();
+        let mut theme_paths: Vec<(String, std::path::PathBuf)> = Vec::new();
         for tp in &manifest.components.themes {
             let abs = if tp.path.is_absolute() {
                 tp.path.clone()
             } else {
                 install_dir.join(&tp.path)
             };
-            let Ok(metadata) = tokio::fs::metadata(&abs).await else {
-                continue;
-            };
-            if metadata.len() > theme_registry::MAX_THEME_FILE_BYTES {
-                tracing::warn!(
-                    path = %abs.display(),
-                    "[theme] {} exceeds 256KB; skipping",
-                    abs.display()
-                );
-                continue;
-            }
-            let Ok(raw) = tokio::fs::read_to_string(&abs).await else {
-                continue;
-            };
             let stem = abs.file_stem().and_then(|s| s.to_str()).unwrap_or_default();
-            let slug = format!("{plugin_name}:{stem}");
-            match theme_registry::parse_theme_json(&slug, &raw) {
-                theme_registry::ThemeParseOutcome::Valid(entry) => theme_entries.push(entry),
-                theme_registry::ThemeParseOutcome::WrongShape => {}
-                theme_registry::ThemeParseOutcome::InvalidJson => {
-                    tracing::warn!(slug = %slug, "[theme] {slug}.json: invalid JSON");
-                }
-            }
+            theme_paths.push((format!("{plugin_name}:{stem}"), abs));
         }
 
         // (e) MCP servers — scope each `.mcp.json` entry as
@@ -1185,9 +1164,13 @@ impl PluginManager {
         //     the namespaced slugs FIRST so `unload_plugin` can remove
         //     exactly these entries regardless of what else the registry
         //     holds.
-        if !theme_entries.is_empty() {
-            let slugs: Vec<String> = theme_entries.iter().map(|e| e.slug.clone()).collect();
-            self.plugin_themes.register(theme_entries);
+        //     Loading is LAZY: only the (slug, path) pairs are recorded here;
+        //     the stat + read + parse happen on the registry's first `get` for
+        //     a slug. Nothing reads the registry yet, so eager loading would
+        //     spend I/O and emit `[theme]` warnings for an invisible feature.
+        if !theme_paths.is_empty() {
+            let slugs: Vec<String> = theme_paths.iter().map(|(slug, _)| slug.clone()).collect();
+            self.plugin_themes.register_paths(theme_paths);
             self.plugin_theme_slugs
                 .write()
                 .await

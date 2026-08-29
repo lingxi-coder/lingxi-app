@@ -139,6 +139,105 @@ async fn detects_skill_subdirs_mcp_and_lsp_configs() {
     );
 }
 
+/// §14: `keywords`, `license`, `repository`, `metadata`, `author.email`,
+/// `author.url`, and `channels[].displayName` are all parsed at
+/// `discovery.rs` but were previously dropped building `PluginManifest`.
+/// This pins that they now survive onto the manifest, byte-shaped to the
+/// oracle's `plugin.json` schema (`repository` a plain string, `metadata`
+/// preserved unread).
+#[tokio::test]
+async fn preserves_metadata_fields_author_contact_and_channel_display_name() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join("richplugin");
+    fs::create_dir_all(dir.join(".lingxi-plugin")).unwrap();
+    fs::write(
+        dir.join(".lingxi-plugin").join("plugin.json"),
+        r#"{
+            "name": "richplugin",
+            "version": "2.0.0",
+            "description": "a plugin with metadata fields",
+            "author": {"name": "Ada", "email": "ada@example.com", "url": "https://ada.example.com"},
+            "homepage": "https://example.com",
+            "keywords": ["weather", "utility"],
+            "license": "MIT",
+            "repository": "https://github.com/example/richplugin",
+            "metadata": {"catalogId": "abc123", "tier": "gold"},
+            "mcpServers": {"echo": {"command": "echo"}},
+            "channels": [{"server": "echo", "displayName": "Echo Channel"}]
+        }"#,
+    )
+    .unwrap();
+
+    let discovered = plugin::discover_installed_plugins(tmp.path()).await;
+    assert_eq!(discovered.len(), 1);
+    let manifest = &discovered[0].1;
+
+    assert_eq!(
+        manifest.keywords,
+        vec!["weather".to_string(), "utility".to_string()],
+        "keywords parsed and preserved"
+    );
+    assert_eq!(manifest.license.as_deref(), Some("MIT"), "license preserved");
+    assert_eq!(
+        manifest.repository.as_deref(),
+        Some("https://github.com/example/richplugin"),
+        "repository preserved as a plain string"
+    );
+    assert_eq!(manifest.author.as_deref(), Some("Ada"));
+    assert_eq!(
+        manifest.author_email.as_deref(),
+        Some("ada@example.com"),
+        "author.email preserved, not dropped by RawAuthor's reduction to a name"
+    );
+    assert_eq!(
+        manifest.author_url.as_deref(),
+        Some("https://ada.example.com"),
+        "author.url preserved"
+    );
+    assert_eq!(
+        manifest
+            .metadata
+            .as_ref()
+            .and_then(|v| v.get("catalogId"))
+            .and_then(|v| v.as_str()),
+        Some("abc123"),
+        "free-form metadata object preserved unread"
+    );
+
+    assert_eq!(manifest.channels.len(), 1);
+    assert_eq!(
+        manifest.channels[0].display_name.as_deref(),
+        Some("Echo Channel"),
+        "channels[].displayName preserved"
+    );
+}
+
+/// Oracle `metadata` preprocess: `z.preprocess((e)=>isPlainObject(e)?e:void 0,
+/// ...)` silently maps a non-object value to `undefined` rather than failing
+/// the whole manifest parse. A JSON array is not a plain object.
+#[tokio::test]
+async fn non_object_metadata_is_dropped_not_an_error() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join("arrmeta");
+    fs::create_dir_all(dir.join(".lingxi-plugin")).unwrap();
+    fs::write(
+        dir.join(".lingxi-plugin").join("plugin.json"),
+        r#"{"name":"arrmeta","metadata":["not","an","object"]}"#,
+    )
+    .unwrap();
+
+    let discovered = plugin::discover_installed_plugins(tmp.path()).await;
+    assert_eq!(
+        discovered.len(),
+        1,
+        "a non-object metadata value must not sink the whole plugin"
+    );
+    assert!(
+        discovered[0].1.metadata.is_none(),
+        "a non-object metadata value is dropped, not preserved"
+    );
+}
+
 #[tokio::test]
 async fn missing_plugins_dir_yields_no_plugins() {
     let tmp = tempfile::tempdir().unwrap();

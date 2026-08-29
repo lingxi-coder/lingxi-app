@@ -49,8 +49,17 @@ pub struct PluginManifest {
     pub version: String,
     /// Free-form description.
     pub description: String,
-    /// Optional author string.
+    /// Optional author display name (`author.name`, or the bare-string form).
     pub author: Option<String>,
+    /// Optional author contact email (`author.email`). Oracle: "Contact
+    /// email for support or feedback." Parsed but not yet consumed by any
+    /// engine surface.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub author_email: Option<String>,
+    /// Optional author website/profile URL (`author.url`). Oracle: "Website,
+    /// GitHub profile, or organization URL."
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub author_url: Option<String>,
     /// Optional homepage / repo URL.
     pub homepage: Option<String>,
     /// Where the plugin came from.
@@ -71,6 +80,146 @@ pub struct PluginManifest {
     pub channels: Vec<PluginChannel>,
     /// Free-form settings the plugin author wants to ship with the manifest.
     pub settings: HashMap<String, serde_json::Value>,
+    /// Discovery/categorization tags (`keywords` in `plugin.json`). Oracle:
+    /// "Tags for plugin discovery and categorization." Not consumed by any
+    /// engine surface today; carried for marketplace-search parity.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub keywords: Vec<String>,
+    /// SPDX license identifier (`license` in `plugin.json`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub license: Option<String>,
+    /// Source-code repository URL (`repository` in `plugin.json`). Oracle
+    /// schema `Cs`: a plain string ("Source code repository URL"), not the
+    /// npm-style `{type,url,directory}` object.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repository: Option<String>,
+    /// Free-form author-owned metadata (`metadata` in `plugin.json`).
+    /// Oracle: "Free-form metadata for the plugin author's own use (e.g.
+    /// entitlement or catalog fields). Preserved on the parsed manifest but
+    /// not read by Claude Code." Only object-shaped values survive parsing
+    /// (see `discovery::load_plugin_from_path_with_mcp_gate`); anything else
+    /// is `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<serde_json::Value>,
+}
+
+/// One `experimental.syntaxHighlighting.hljsLanguages` entry (oracle `Ks`,
+/// `.strict()`): a
+/// custom highlight.js language grammar the plugin registers, fetched from an
+/// integrity-pinned `npm:`/`github:` source. Parsed + validated only — no
+/// engine surface fetches or registers these grammars yet.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HljsLanguageEntry {
+    /// highlight.js language id. Oracle `As`: `^[a-z][a-z0-9_-]*$`, <=64 chars.
+    pub id: String,
+    /// `npm:<pkg>[@version]` or `github:<owner>/<repo>@<ref>#<path>.js`,
+    /// <=256 chars. Absent when the plugin ships the grammar file itself.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote: Option<String>,
+    /// Subresource-integrity hash gating the fetched grammar: `sha256-`,
+    /// `sha384-`, or `sha512-` followed by base64, <=512 chars.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub integrity: Option<String>,
+}
+
+/// One `binaries` entry (oracle `Gs`): a sha256-pinned file fetched into
+/// `bin/` at install time, keyed by basename (the target triple is encoded in
+/// the name itself, e.g. `mytool-x86_64-apple-darwin`). Parsed + validated
+/// only here — [`crate::discovery`]'s parser enforces the basename charset,
+/// the 64-hex digest shape, and the 64-entry cap (oracle `n1e`/`Jqt`) the same
+/// way the oracle's lenient `.transform()` does (silently dropping an invalid
+/// entry rather than failing the whole manifest); the actual network fetch
+/// into `bin/` is an install-path concern this change does not wire.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BinaryPin {
+    /// Lowercase 64-hex sha256 digest the fetched file must match.
+    pub sha256: String,
+}
+
+/// A `monitors` entry's arm trigger (oracle `$s.when`): `"always"` arms at
+/// session start and on plugin reload; `"on-skill-invoke:<skill>"` arms the
+/// first time that skill is dispatched. Defaults to `Always`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MonitorTrigger {
+    /// Arms at session start and on plugin reload.
+    Always,
+    /// Arms the first time the named skill is dispatched.
+    OnSkillInvoke(String),
+}
+
+impl Default for MonitorTrigger {
+    fn default() -> Self {
+        Self::Always
+    }
+}
+
+impl MonitorTrigger {
+    /// Parse the oracle `when` string: `"always"`, or `"on-skill-invoke:"`
+    /// followed by a non-empty skill name (oracle: `.refine(e=>e.length>16)`
+    /// — the literal prefix itself is 16 chars, so this is exactly "at least
+    /// one char after the colon").
+    ///
+    /// # Errors
+    /// Returns a byte-faithful message when `raw` matches neither shape.
+    pub fn parse(raw: &str) -> Result<Self, String> {
+        if raw == "always" {
+            return Ok(Self::Always);
+        }
+        match raw.strip_prefix("on-skill-invoke:") {
+            Some(skill) if !skill.is_empty() => Ok(Self::OnSkillInvoke(skill.to_string())),
+            Some(_) => Err("on-skill-invoke: must specify a skill name".to_string()),
+            None => Err(format!(
+                "monitor \"when\" must be \"always\" or \"on-skill-invoke:<skill>\", got {raw:?}"
+            )),
+        }
+    }
+
+    /// Render back to the oracle's on-wire string form.
+    #[must_use]
+    pub fn as_str(&self) -> std::borrow::Cow<'_, str> {
+        match self {
+            Self::Always => std::borrow::Cow::Borrowed("always"),
+            Self::OnSkillInvoke(skill) => std::borrow::Cow::Owned(format!("on-skill-invoke:{skill}")),
+        }
+    }
+}
+
+impl Serialize for MonitorTrigger {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(&self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for MonitorTrigger {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let raw = String::deserialize(deserializer)?;
+        Self::parse(&raw).map_err(serde::de::Error::custom)
+    }
+}
+
+/// One `monitors` entry (oracle `$s`, a strict object): a persistent
+/// background watch script the host can arm as a Monitor task ("unsandboxed,
+/// same trust tier as hooks"). Parsed + validated only —
+/// [`crate::discovery`] enforces the strict shape and the unique-`name`
+/// constraint (oracle `kAn`), but arming one is `tasks::handlers::monitor`'s
+/// concern and is not wired by this change.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PluginMonitor {
+    /// Identifier for this monitor, unique within the plugin.
+    pub name: String,
+    /// Shell command to run as a persistent background monitor.
+    pub command: String,
+    /// Short human-readable description of what is being monitored.
+    pub description: String,
+    /// Arm trigger. Defaults to [`MonitorTrigger::Always`].
+    #[serde(default)]
+    pub when: MonitorTrigger,
 }
 
 /// The 7 component slots a plugin can populate.
@@ -87,12 +236,78 @@ pub struct PluginComponents {
     pub skills: Vec<ComponentPath>,
     /// Output-style files.
     pub output_styles: Vec<ComponentPath>,
+    /// Theme definition files (`.json`; `themes` in `plugin.json`). Oracle:
+    /// "Path to a themes directory or file, relative to the plugin root.
+    /// When set, the themes/ directory is not auto-loaded — list its files
+    /// here if you want both." A manifest declaration REPLACES (does not
+    /// merge with) the `themes/` auto-scan, matching [`Self::output_styles`].
+    /// Discovered only — `PluginManager::load_plugin` does not materialize
+    /// themes into any registry yet.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub themes: Vec<ComponentPath>,
+    /// Workflow script files (`.js`; `workflows` in `plugin.json`). Oracle:
+    /// "Path to a workflows directory or .js file, relative to the plugin
+    /// root. When set, the workflows/ directory is not auto-loaded — list
+    /// its files here if you want both." Replaces (does not merge with) the
+    /// `workflows/` auto-scan, matching [`Self::output_styles`].
+    /// Discovered only — `PluginManager::load_plugin` does not materialize
+    /// workflows into any registry yet.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub workflows: Vec<ComponentPath>,
+    /// Custom highlight.js language grammars this plugin registers
+    /// (`experimental.syntaxHighlighting.hljsLanguages` in `plugin.json`,
+    /// oracle `Hs` — accepted ONLY under `experimental`, never at the top
+    /// level). Parsed + validated only — nothing fetches or registers these
+    /// grammars yet.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hljs_languages: Vec<HljsLanguageEntry>,
+    /// sha256-pinned files fetched into `bin/` at install time, keyed by
+    /// basename (`binaries` in `plugin.json`, oracle `qs`). Parsed +
+    /// validated only — the actual fetch is an install-path concern this
+    /// change does not wire.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub binaries: HashMap<String, BinaryPin>,
+    /// Background watch scripts the host can arm as persistent Monitor tasks
+    /// (`monitors` in `plugin.json`, or the `monitors/monitors.json`
+    /// auto-scan when the field is absent; oracle `mt`). Parsed + validated
+    /// only — arming one is `tasks::handlers::monitor`'s concern, not wired
+    /// by this change.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub monitors: Vec<PluginMonitor>,
     /// Inline hook definitions.
     pub hooks: Vec<HookDefinition>,
-    /// MCP servers contributed by this plugin, keyed by logical name.
+    /// MCP servers contributed by this plugin, keyed by logical name. Always
+    /// empty when [`Self::skip_mcp_discovery`] is `true`.
     pub mcp_servers: HashMap<String, McpServerConfig>,
     /// LSP servers contributed by this plugin, keyed by logical name.
     pub lsp_servers: HashMap<String, LspServerConfig>,
+    /// Whether this load suppressed MCP server discovery for this plugin —
+    /// neither the plugin-root `.mcp.json` nor the manifest's declared
+    /// `mcpServers` was read, so [`Self::mcp_servers`] is empty regardless of
+    /// what the plugin actually declares. Every other component slot still
+    /// loads normally.
+    ///
+    /// Set when an SDK host declared this plugin instance with
+    /// `skipMcpDiscovery: true` (it owns the plugin's MCP connections itself
+    /// — oracle `PluginConfigSchema`'s `local` variant, @155779385: *"the
+    /// engine loads skills/hooks/agents/commands from this plugin but does
+    /// NOT read its .mcp.json or manifest mcpServers"*), or when
+    /// `CLAUDE_CODE_SKIP_PLUGIN_MCP_SERVERS` / `LINGXI_SKIP_PLUGIN_MCP_SERVERS`
+    /// suppressed discovery process-wide and this plugin was not exempted via
+    /// the `_EXCEPT` sibling (see `discovery::resolve_skip_mcp_discovery`).
+    ///
+    /// Deliberately lives here rather than on [`PluginManifest`] itself: this
+    /// struct derives `Default` and its one construction site
+    /// (`discovery::detect_components`) is fully owned by the same change, so
+    /// adding a field cannot break another `PluginManifest { .. }` literal
+    /// elsewhere in the crate that lists every field by hand and would
+    /// otherwise need updating too (`plugin/src/loader.rs`'s test fixture,
+    /// notably — outside this change's file ownership). A later telemetry
+    /// batch reads this to derive the oracle's `has_mcp`
+    /// (`!skip_mcp_discovery && !mcp_servers.is_empty()`) and `host_owned_mcp`
+    /// (`skip_mcp_discovery`) fields; this change adds no telemetry itself.
+    #[serde(default)]
+    pub skip_mcp_discovery: bool,
 }
 
 /// On-disk component reference plus arbitrary metadata.
@@ -117,17 +332,25 @@ pub struct UserConfigSchema {
 }
 
 /// One declared user-config field.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+///
+/// Deserialization is hand-written (see the `Deserialize` impl below) rather
+/// than derived: oracle schema `gt` requires `type`/`title`/`description` and
+/// restricts `type` to a fixed enum — see [`UserConfigField::deserialize`].
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct UserConfigField {
-    /// Declared input type (`string`, `number`, `boolean`, `directory`, or
-    /// `file`). Kept as a string so a newer Claude Code field type remains
-    /// forward-compatible instead of making an installed plugin unloadable.
+    /// Declared input type: one of `string`, `number`, `boolean`,
+    /// `directory`, `file` (oracle `gt`'s `type` — a required, fixed enum,
+    /// not an arbitrary string). Kept as `Option<String>` at the type level
+    /// only for [`Default`]/round-trip convenience; a value straight off
+    /// `plugin.json` is always `Some` after [`UserConfigField::deserialize`]
+    /// validates it.
     #[serde(rename = "type", default, skip_serializing_if = "Option::is_none")]
     pub value_type: Option<String>,
-    /// Label shown in the configuration dialog.
+    /// Label shown in the configuration dialog. Oracle: required (no
+    /// `.optional()`); see [`Self::value_type`] on the `Option` wrapper.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
-    /// Help text for the host UI.
+    /// Help text for the host UI. Oracle: required (no `.optional()`).
     #[serde(default)]
     pub description: String,
     /// If `true` the value is fetched through the secret-storage backend.
@@ -150,6 +373,67 @@ pub struct UserConfigField {
     /// Optional numeric upper bound.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max: Option<f64>,
+}
+
+/// The fixed `type` enum oracle schema `gt` accepts for a `userConfig` field.
+/// Any other string (including one merely absent) fails the field the same
+/// way a malformed `commands` entry fails the whole `plugin.json` parse (see
+/// `RawCommandEntry` in `discovery.rs`) — not silently coerced or dropped.
+const USER_CONFIG_FIELD_TYPES: [&str; 5] = ["string", "number", "boolean", "directory", "file"];
+
+impl<'de> Deserialize<'de> for UserConfigField {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct Raw {
+            #[serde(rename = "type", default)]
+            value_type: Option<String>,
+            #[serde(default)]
+            title: Option<String>,
+            #[serde(default)]
+            description: Option<String>,
+            #[serde(default)]
+            sensitive: bool,
+            #[serde(default)]
+            required: bool,
+            #[serde(default)]
+            default: Option<serde_json::Value>,
+            #[serde(default)]
+            multiple: Option<bool>,
+            #[serde(default)]
+            min: Option<f64>,
+            #[serde(default)]
+            max: Option<f64>,
+        }
+        let raw = Raw::deserialize(deserializer)?;
+        let value_type = raw.value_type.ok_or_else(|| {
+            serde::de::Error::custom("userConfig field is missing required \"type\"")
+        })?;
+        if !USER_CONFIG_FIELD_TYPES.contains(&value_type.as_str()) {
+            return Err(serde::de::Error::custom(format!(
+                "userConfig field \"type\" must be one of {USER_CONFIG_FIELD_TYPES:?}, got {value_type:?}"
+            )));
+        }
+        let title = raw.title.ok_or_else(|| {
+            serde::de::Error::custom("userConfig field is missing required \"title\"")
+        })?;
+        let description = raw.description.ok_or_else(|| {
+            serde::de::Error::custom("userConfig field is missing required \"description\"")
+        })?;
+        Ok(UserConfigField {
+            value_type: Some(value_type),
+            title: Some(title),
+            description,
+            sensitive: raw.sensitive,
+            required: raw.required,
+            default: raw.default,
+            multiple: raw.multiple,
+            min: raw.min,
+            max: raw.max,
+        })
+    }
 }
 
 /// A plugin's persisted `userConfig` state at one settings scope: the
@@ -202,6 +486,16 @@ impl PluginUserConfig {
 pub struct PluginChannel {
     /// MCP server name (must match a key in [`PluginComponents::mcp_servers`]).
     pub server: String,
+    /// Human-readable label for the config dialog title. Oracle: "Defaults
+    /// to the server name" when absent — this field only carries an
+    /// explicit override; a consumer wanting the effective label should
+    /// fall back to [`Self::server`] itself when this is `None`.
+    #[serde(
+        rename = "displayName",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub display_name: Option<String>,
     /// Optional channel-scoped user-config schema.
     #[serde(
         rename = "userConfig",

@@ -36,6 +36,26 @@ export const BRIDGE_PROTOCOL_VERSION = '0.2.0';
 /** `client-protocol` DTO contract version this SDK speaks. */
 export const CLIENT_PROTOCOL_VERSION = '9.0.0';
 
+/**
+ * The largest single WebSocket frame the engine will read
+ * (`MAX_INBOUND_FRAME_BYTES` in `bridge/src/mcp_endpoint.rs`).
+ *
+ * This is a HARD ceiling, not a validation bound: a `ClientCommand` is sent as
+ * one unfragmented text frame ({@link BridgeClient} does `ws.send(JSON.stringify(frame))`,
+ * and `ws` does not fragment), and a frame over this limit is not a rejected
+ * command — tungstenite yields `Err(Capacity(MessageTooLong))`, `run_frame_pump`
+ * breaks, and `BridgeConnection::close_connection` aborts the turn and drains
+ * every broker. The user loses the whole session rather than the one operation.
+ *
+ * So every payload bound a client applies has to be derived from THIS number
+ * rather than chosen next to it — `clients/electron/src/shared/audioResponse.ts`
+ * derives its base64 bound here, and `audio-engine-bounds.test.ts` pins this
+ * constant against the engine's own source so the two cannot drift apart
+ * silently. A bound that merely looks generous is how a 24 MiB audio limit came
+ * to sit above a 16 MiB transport.
+ */
+export const MAX_BRIDGE_FRAME_BYTES = 16 * 1024 * 1024;
+
 // ─────────────────────────────────────────────────────────────────────────────
 // commands.rs
 // ─────────────────────────────────────────────────────────────────────────────

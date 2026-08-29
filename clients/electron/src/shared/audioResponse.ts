@@ -1,3 +1,5 @@
+import { MAX_BRIDGE_FRAME_BYTES } from '@lingxi/bridge-client/protocol';
+
 import { isBase64 } from './base64.js';
 
 /**
@@ -23,17 +25,43 @@ import { isBase64 } from './base64.js';
  */
 
 /**
- * Bound on a base64 audio payload. Generous by design: a `stop_recording`
- * answer carries a whole clip, whose length the USER (not this process)
- * chooses by how long they hold the microphone. 24 MiB of base64 is ~18 MiB
- * of Opus — hours of speech — while still bounding an IPC frame.
- *
- * Raising it is not the fix for a clip that exceeds it: the renderer reports
- * an oversize clip as a failure, which the engine surfaces immediately.
- * Genuinely unbounded audio needs a chunked wire format, which is a protocol
- * change rather than a bigger number here.
+ * Room reserved inside one WebSocket frame for everything an `audio_response`
+ * carries BESIDES the payload: the `Frame::Request` envelope, the command tag,
+ * the request id, the JSON punctuation, and the mime type (up to
+ * {@link MAX_AUDIO_MIME_TYPE_LENGTH} code units, so up to ~1 KiB of UTF-8).
+ * Comfortably over the few hundred bytes those actually need — the cost of the
+ * slack is a fraction of a second of recording, and the cost of being short is
+ * the whole session.
  */
-export const MAX_AUDIO_BASE64_LENGTH = 24 * 1024 * 1024;
+const AUDIO_RESPONSE_FRAMING_ALLOWANCE = 64 * 1024;
+
+/**
+ * Bound on a base64 audio payload, DERIVED from the transport's own ceiling
+ * rather than chosen alongside it.
+ *
+ * This bound used to be 24 MiB, picked as "generous, still bounds an IPC
+ * frame". It was above the engine's 16 MiB WebSocket read limit
+ * ({@link MAX_BRIDGE_FRAME_BYTES}), and the gap was reachable by ordinary use —
+ * the USER, not this process, decides how long to hold the microphone, and
+ * ~13 minutes of Opus at Chromium's default bitrate lands in it. A clip in that
+ * range passed the renderer's own guard AND `main/validation.ts`'s gate, and
+ * then killed the connection: an over-length frame is not a rejected command,
+ * it is `Err(Capacity(MessageTooLong))` → `close_connection` → the turn aborted
+ * and every broker drained. The user lost the session, not the recording.
+ *
+ * Deriving it is the part that matters. Two numbers "kept in sync" by a comment
+ * drift; a number computed from the other cannot. `audio-engine-bounds.test.ts`
+ * closes the remaining half by pinning {@link MAX_BRIDGE_FRAME_BYTES} against
+ * the engine's own `MAX_INBOUND_FRAME_BYTES` and by measuring a maximal
+ * `audio_response` frame against it.
+ *
+ * Raising it is not the fix for a clip that exceeds it: the renderer reports an
+ * oversize clip as a failure, which the engine surfaces immediately. Genuinely
+ * unbounded audio needs a chunked wire format, which is a protocol change
+ * rather than a bigger number here — and this one has no room left to grow into
+ * anyway.
+ */
+export const MAX_AUDIO_BASE64_LENGTH = MAX_BRIDGE_FRAME_BYTES - AUDIO_RESPONSE_FRAMING_ALLOWANCE;
 
 /** Bound on `AudioResultDto::Failed`'s message. The renderer trims to fit. */
 export const MAX_AUDIO_FAILURE_MESSAGE_LENGTH = 4096;

@@ -15,10 +15,14 @@
  * two copies — a third copy that silently disagrees is a bug waiting for its
  * first reader, not a harmless duplication.
  *
- * This module is TYPES plus the one version constant, with no imports beyond
- * the standard library, so all three targets can take it without dragging a
+ * This module is TYPES plus the one version constant, with no imports
+ * beyond the standard library and sibling `shared/` modules (never `main/`
+ * or `renderer/`), so all three targets can take it without dragging a
  * process-specific dependency across a boundary.
  */
+
+import type { VoicePreferences } from './voicePreferences.js';
+export type { VoicePreferences } from './voicePreferences.js';
 
 /** Schema version of the persisted device settings file. */
 export const SETTINGS_VERSION = 1 as const;
@@ -64,4 +68,12 @@ export interface PublicSettings {
    * other optional field here.
    */
   bypassPermissionsModeAccepted?: boolean;
+  /**
+   * Voice recognition/synthesis preferences (Task 4: mirrors the VALUE
+   * vocabulary of iOS's `VoicePreferencesSnapshot` and Android's
+   * `VoiceConfig`, normalized by `shared/voicePreferences.ts`). Omitted
+   * (not defaulted) when never written, matching every other optional
+   * field here.
+   */
+  voice?: VoicePreferences;
 }

@@ -4,6 +4,8 @@ import { dirname, isAbsolute, join, normalize, resolve } from 'node:path';
 
 import { SETTINGS_VERSION } from '../shared/settings.js';
 import type { PinnedSessionRecord, PublicSettings, SessionRef } from '../shared/settings.js';
+import { parseVoicePreferences } from '../shared/voicePreferences.js';
+import type { VoicePreferences } from '../shared/voicePreferences.js';
 
 export { SETTINGS_VERSION } from '../shared/settings.js';
 export type {
@@ -12,6 +14,8 @@ export type {
   SessionPinInput,
   SessionRef,
 } from '../shared/settings.js';
+export type { VoicePreferences } from '../shared/voicePreferences.js';
+export { parseVoicePreferences } from '../shared/voicePreferences.js';
 
 export const MAX_PROJECTS = 50;
 export const MAX_PINNED_SESSIONS = 100;
@@ -66,6 +70,9 @@ export interface PersistedSettings {
    * (oracle `bypassPermissionsModeAccepted`). Persisted so the blocking
    * acceptance dialog is shown ONCE, not on every activation. */
   bypassPermissionsModeAccepted?: boolean;
+  /** Voice recognition/synthesis preferences — see `shared/voicePreferences.ts`.
+   * Omitted (not defaulted) until the first `SettingsStore.update({ voice })` call. */
+  voice?: VoicePreferences;
 }
 
 export interface DiagnosticEntry {
@@ -125,6 +132,9 @@ export function parseSettings(value: unknown): PersistedSettings {
   if (value['bypassPermissionsModeAccepted'] === true) {
     settings.bypassPermissionsModeAccepted = true;
   }
+  if (value['voice'] !== undefined) {
+    settings.voice = parseVoicePreferences(value['voice']);
+  }
 
   const legacyActive = boundedString(value['lastWorkspace'], 32_768);
   const persistedProjects = boundedStringArray(value['projects'], MAX_PROJECTS);
@@ -178,7 +188,7 @@ export function parseSettings(value: unknown): PersistedSettings {
 export function publicSettings(settings: PersistedSettings): PublicSettings {
   const {
     version, theme, model, apiBaseUrl, activeProject, activeSession, projects, pinnedSessions,
-    bypassPermissionsModeAccepted,
+    bypassPermissionsModeAccepted, voice,
   } = settings;
   return {
     version,
@@ -190,6 +200,7 @@ export function publicSettings(settings: PersistedSettings): PublicSettings {
     projects: [...projects],
     pinnedSessions: pinnedSessions.map((session) => ({ ...session })),
     ...(bypassPermissionsModeAccepted ? { bypassPermissionsModeAccepted: true } : {}),
+    ...(voice ? { voice: { ...voice } } : {}),
   };
 }
 

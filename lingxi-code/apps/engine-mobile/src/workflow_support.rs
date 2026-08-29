@@ -1334,8 +1334,17 @@ impl tool_workflow::WorkflowLauncher for MobileWorkflowLauncher {
                 cwd.join(path)
             }
         };
-        let script =
-            tool_workflow::resolve_script_at(&cwd, &spec, |p| std::fs::read_to_string(abs(p)))?;
+        // TODO(§14 plugin workflows): pass the shared
+        // `workflow::PluginWorkflowRegistry` once this host wires one into
+        // both `plugin::PluginManager::with_plugin_workflows` and
+        // `tool_workflow::WorkflowTool::with_plugin_workflows` — until then a
+        // plugin's saved workflow is not resolvable by name here.
+        let script = tool_workflow::resolve_script_at(
+            &cwd,
+            &spec,
+            |p| std::fs::read_to_string(abs(p)),
+            None,
+        )?;
         // Reject a malformed `meta` block at the tool boundary; the byte-exact
         // message surfaces to the model as the tool error (desktop parity).
         workflow::validate_meta(&script).map_err(|e| {

@@ -1485,6 +1485,7 @@ async fn top_level_args_global_reaches_the_script() {
             allow_nested: false,
             args: Some(r#"{"a":5}"#.to_string()),
             fs: None,
+            plugin_workflows: None,
         },
         Arc::new(std::sync::atomic::AtomicBool::new(false)),
         Arc::new(AnalyticsBus::new()),
@@ -1529,6 +1530,7 @@ async fn workflow_runs_a_nested_scriptpath_inline_sharing_the_runtime() {
             allow_nested: true,
             args: None,
             fs: Some(fs),
+            plugin_workflows: None,
         },
         Arc::new(std::sync::atomic::AtomicBool::new(false)),
         Arc::new(AnalyticsBus::new()),
@@ -1586,6 +1588,7 @@ async fn workflow_runs_a_nested_name_from_user_workflows_dir() {
             allow_nested: true,
             args: None,
             fs: Some(fs),
+            plugin_workflows: None,
         },
         Arc::new(std::sync::atomic::AtomicBool::new(false)),
         Arc::new(AnalyticsBus::new()),
@@ -1604,6 +1607,72 @@ async fn workflow_runs_a_nested_name_from_user_workflows_dir() {
     assert_eq!(
         outcome.result.as_deref(),
         Some(r#"{"source":"user","n":7}"#)
+    );
+}
+
+/// §14 — a nested `workflow({name})` call resolves a plugin's declared
+/// workflow through the SAME `workflow::PluginWorkflowRegistry` that
+/// `plugin::PluginManager::load_plugin` materializes into, after the
+/// project/user saved-workflow directories have missed (there is
+/// deliberately no `.lingxi/workflows`/user-config-dir file here, isolating
+/// the plugin-registry branch from the project/user branch already covered
+/// by `workflow_runs_a_nested_name_from_user_workflows_dir`).
+#[tokio::test]
+async fn workflow_runs_a_nested_name_from_plugin_workflow_registry() {
+    // Serializes with the CONFIG_DIR_ENV mutators above: this test does not
+    // change the var itself, but `resolve_nested_script`'s project/user probe
+    // (which must miss for this test to isolate the plugin branch) reads it.
+    let _g = ENV_LOCK.lock().unwrap();
+    let script_dir = tempdir().unwrap();
+    let script_path = script_dir.path().join("deploy.js");
+    std::fs::write(
+        &script_path,
+        "return { source: 'plugin', n: args.n };",
+    )
+    .unwrap();
+
+    let registry = Arc::new(workflow::PluginWorkflowRegistry::new());
+    registry.register(vec![workflow::PluginWorkflowEntry {
+        name: "acme:deploy".to_string(),
+        script_path: script_path.clone(),
+    }]);
+
+    let fs: Arc<dyn FileSystem> = Arc::new(InMemoryFs::new());
+    let spawner = Arc::new(EchoSpawner::default());
+    let parent = r#"
+        const r = await workflow({ name: 'acme:deploy' }, { n: 11 });
+        log('source=' + r.source + ' n=' + r.n);
+        return r;
+    "#;
+    let outcome = run_workflow_script(
+        parent,
+        DEFAULT_WORKFLOW_SUBAGENT,
+        spawner.clone(),
+        Arc::new(MockInvoker),
+        Arc::new(MockBudget),
+        None,
+        None,
+        None,
+        None,
+        0,
+        NestedConfig {
+            allow_nested: true,
+            args: None,
+            fs: Some(fs),
+            plugin_workflows: Some(registry),
+        },
+        Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        Arc::new(AnalyticsBus::new()),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(logs(&outcome), vec!["source=plugin n=11".to_string()]);
+    assert_eq!(
+        outcome.result.as_deref(),
+        Some(r#"{"source":"plugin","n":11}"#)
     );
 }
 

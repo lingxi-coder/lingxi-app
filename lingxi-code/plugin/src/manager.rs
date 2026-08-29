@@ -115,6 +115,16 @@ pub struct PluginManager {
     /// into `mcp_registry.connections`, so [`Self::unload_plugin`] can remove
     /// exactly those entries (the registry has no plugin-ownership index).
     plugin_mcp_names: RwLock<HashMap<PluginId, Vec<String>>>,
+    /// Optional live plugin-workflow registry shared with `tool-workflow`'s
+    /// resolver and `tasks::handlers::local_workflow`'s nested `workflow()`
+    /// resolver (see [`workflow::PluginWorkflowRegistry`]). `None` until a
+    /// composition root wires one via [`Self::with_plugin_workflows`] — every
+    /// other component slot still materializes normally either way.
+    plugin_workflows: Option<Arc<workflow::PluginWorkflowRegistry>>,
+    /// Namespaced workflow names (`{plugin}:{name}`) each plugin seeded into
+    /// [`Self::plugin_workflows`], so [`Self::unload_plugin`] can remove
+    /// exactly those entries (mirrors [`Self::plugin_mcp_names`]).
+    plugin_workflow_names: RwLock<HashMap<PluginId, Vec<String>>>,
 }
 
 impl PluginManager {
@@ -157,6 +167,8 @@ impl PluginManager {
             agent_catalog: None,
             plugin_agent_names: RwLock::new(HashMap::new()),
             plugin_mcp_names: RwLock::new(HashMap::new()),
+            plugin_workflows: None,
+            plugin_workflow_names: RwLock::new(HashMap::new()),
         }
     }
 
@@ -164,6 +176,19 @@ impl PluginManager {
     #[must_use]
     pub fn with_agent_catalog(mut self, catalog: Arc<RwLock<Vec<agent::AgentDefinition>>>) -> Self {
         self.agent_catalog = Some(catalog);
+        self
+    }
+
+    /// Share the host's live plugin-workflow registry with the plugin
+    /// lifecycle. The SAME `Arc` must also be handed to
+    /// `tool_workflow::WorkflowTool::with_plugin_workflows` and
+    /// `tasks::handlers::local_workflow::LocalWorkflowHandler::with_plugin_workflows`
+    /// so a plugin's saved workflow, once materialized here, is resolvable by
+    /// name through the SAME `Workflow` tool call and `workflow()` nested-call
+    /// path as a built-in/project/user workflow.
+    #[must_use]
+    pub fn with_plugin_workflows(mut self, registry: Arc<workflow::PluginWorkflowRegistry>) -> Self {
+        self.plugin_workflows = Some(registry);
         self
     }
 
@@ -827,6 +852,45 @@ impl PluginManager {
             }
         }
 
+        // (d2) Workflows — read each declared/auto-scanned `.js` file
+        //      (`manifest.components.workflows`, §14), extract its own
+        //      `meta.name` and namespace `{plugin}:{name}` (oracle plugin-
+        //      workflow loader `v()`: `${pluginName}:${meta.name}` — the SAME
+        //      "parse the component's own declared name" rule (d) applies to
+        //      output styles, here reading the name from the script's
+        //      `export const meta = {…}` block instead of frontmatter).
+        //      Falls back to the file stem when the meta block is missing or
+        //      fails to parse — LingXi resolves every OTHER workflow tier
+        //      (built-in/project/user) by FILENAME, never by parsed script
+        //      metadata (`workflow::meta_string_value` is display/telemetry
+        //      only there), so plugin workflows keep that same rule as the
+        //      fallback rather than becoming the one tier addressable ONLY by
+        //      meta.name. A file that cannot be read is skipped, matching (d).
+        //      Only collected when a registry is actually wired — the common
+        //      case (no composition root has called `with_plugin_workflows`
+        //      yet) does zero extra file I/O.
+        let mut workflow_entries: Vec<workflow::PluginWorkflowEntry> = Vec::new();
+        if self.plugin_workflows.is_some() {
+            for wp in &manifest.components.workflows {
+                let abs = if wp.path.is_absolute() {
+                    wp.path.clone()
+                } else {
+                    install_dir.join(&wp.path)
+                };
+                let Ok(raw) = tokio::fs::read_to_string(&abs).await else {
+                    continue;
+                };
+                let stem = abs.file_stem().and_then(|s| s.to_str()).unwrap_or_default();
+                let base_name = workflow::meta_string_value(&raw, "name")
+                    .filter(|value| !value.is_empty())
+                    .unwrap_or_else(|| stem.to_string());
+                workflow_entries.push(workflow::PluginWorkflowEntry {
+                    name: format!("{plugin_name}:{base_name}"),
+                    script_path: abs,
+                });
+            }
+        }
+
         // (e) MCP servers — scope each `.mcp.json` entry as
         //     `plugin:{plugin}:{server}` so it is keyed identically to a
         //     normal configured server (`addPluginScopeToServers`,
@@ -973,6 +1037,20 @@ impl PluginManager {
             .register_plugin_servers(manifest.id, configs)
             .await;
 
+        // 9. Workflows — join the saved-workflow search path (§14). Remember
+        //    the namespaced names FIRST so `unload_plugin` can remove exactly
+        //    these entries regardless of what else the registry holds.
+        if let Some(registry) = &self.plugin_workflows {
+            if !workflow_entries.is_empty() {
+                let names: Vec<String> = workflow_entries.iter().map(|e| e.name.clone()).collect();
+                registry.register(workflow_entries);
+                self.plugin_workflow_names
+                    .write()
+                    .await
+                    .insert(manifest.id, names);
+            }
+        }
+
         Ok(())
     }
 
@@ -1006,6 +1084,13 @@ impl PluginManager {
             let mut conns = self.mcp_registry.connections.write().await;
             for n in &names {
                 conns.remove(n);
+            }
+        }
+        // Workflow cleanup: remove exactly the namespaced entries this
+        // plugin seeded into the shared registry.
+        if let Some(names) = self.plugin_workflow_names.write().await.remove(id) {
+            if let Some(registry) = &self.plugin_workflows {
+                registry.unregister(&names);
             }
         }
         Ok(())

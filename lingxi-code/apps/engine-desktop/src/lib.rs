@@ -1779,8 +1779,17 @@ impl tool_workflow::WorkflowLauncher for TaskRegistryWorkflowLauncher {
                 cwd.join(path)
             }
         };
-        let script =
-            tool_workflow::resolve_script_at(&cwd, &spec, |p| std::fs::read_to_string(abs(p)))?;
+        // TODO(§14 plugin workflows): pass the shared
+        // `workflow::PluginWorkflowRegistry` once this composition root wires
+        // one into both `plugin::PluginManager::with_plugin_workflows` and
+        // `tool_workflow::WorkflowTool::with_plugin_workflows` — until then a
+        // plugin's saved workflow is not resolvable by name here.
+        let script = tool_workflow::resolve_script_at(
+            &cwd,
+            &spec,
+            |p| std::fs::read_to_string(abs(p)),
+            None,
+        )?;
         // Reject a malformed `meta` block at the tool boundary (claude-code parses
         // + validates `meta` when the Workflow tool accepts a script). The
         // byte-exact message surfaces to the model as the tool error.

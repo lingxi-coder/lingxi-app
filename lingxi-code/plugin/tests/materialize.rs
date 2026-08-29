@@ -551,6 +551,101 @@ async fn enable_materializes_skill_outputstyle_mcp_lsp_into_live_registries() {
     );
 }
 
+/// A manifest declaring `workflows` as a single `.js` file with its own
+/// `export const meta` block.
+fn write_workflow_plugin(root: &Path, dir_name: &str, plugin_name: &str) {
+    let plugin_dir = root.join(dir_name);
+    fs::create_dir_all(plugin_dir.join(".lingxi-plugin")).unwrap();
+    fs::write(
+        plugin_dir.join(".lingxi-plugin").join("plugin.json"),
+        format!(
+            r#"{{"name":"{plugin_name}","version":"1.0.0","workflows":"./scripts/deploy.js"}}"#
+        ),
+    )
+    .unwrap();
+    fs::create_dir_all(plugin_dir.join("scripts")).unwrap();
+    fs::write(
+        plugin_dir.join("scripts").join("deploy.js"),
+        "export const meta = { name: \"deploy-prod\", description: \"Deploy to prod\" };\n",
+    )
+    .unwrap();
+}
+
+/// §14 — a plugin's declared `workflows` file joins the saved-workflow search
+/// path: `PluginManager::enable` materializes it into the shared
+/// `workflow::PluginWorkflowRegistry`, namespaced `{plugin}:{meta.name}`
+/// (falling back to the file stem when the script's own meta block is
+/// missing/unparseable — see the registry's module doc for why LingXi reads
+/// the script's OWN declared name here, the same "parse the component's own
+/// name" rule (c)/(d) apply to skills/output-styles). `disable` removes
+/// exactly the entries this plugin seeded, symmetric with every other
+/// component slot.
+#[tokio::test]
+async fn enable_materializes_declared_workflow_into_plugin_workflow_registry() {
+    let tmp = tempfile::tempdir().unwrap();
+    write_workflow_plugin(tmp.path(), "wf", "wfplugin");
+
+    let command_registry = Arc::new(RwLock::new(CommandRegistry::new()));
+    let hook_registry = Arc::new(RwLock::new(HookRegistry::new()));
+    let skill_registry = Arc::new(RwLock::new(SkillRegistry::new()));
+    let output_style_registry = Arc::new(RwLock::new(OutputStyleRegistry::new()));
+    let tool_registry = Arc::new(RwLock::new(ToolRegistry::new()));
+    let lsp_registry = Arc::new(LspRegistry::new(Arc::new(PosixLspTransport::new())));
+    let mcp_registry = Arc::new(McpRegistry::new(Arc::new(PosixMcpTransport::new())));
+
+    let storage = PlainTextSecureStorage::new(tmp.path().join("secrets"))
+        .await
+        .unwrap();
+    let credentials = Arc::new(CredentialManager::new(
+        Arc::new(storage),
+        Arc::new(PosixClock::new()),
+        Arc::new(PosixHttp::new()),
+    ));
+
+    let plugin_workflows = Arc::new(workflow::PluginWorkflowRegistry::new());
+
+    let manager = PluginManager::new(
+        tmp.path().to_path_buf(),
+        Arc::new(PosixFileSystem::new(tmp.path().to_path_buf())),
+        Arc::new(PosixHttp::new()),
+        Arc::new(PosixRuntime::new()),
+        credentials,
+        Arc::new(PluginBlocklist::new(String::new())),
+        Arc::new(StrictPluginOnlyPolicy::empty()),
+        command_registry,
+        skill_registry,
+        hook_registry,
+        output_style_registry,
+        mcp_registry,
+        lsp_registry,
+        tool_registry,
+    )
+    .with_plugin_workflows(plugin_workflows.clone());
+
+    let discovered = plugin::discover_installed_plugins(tmp.path()).await;
+    assert_eq!(discovered.len(), 1);
+    let (id, manifest, dir) = discovered.into_iter().next().unwrap();
+
+    manager
+        .enable(&id, manifest, dir)
+        .await
+        .expect("enable should materialize the declared workflow");
+
+    let resolved = plugin_workflows
+        .resolve("wfplugin:deploy-prod")
+        .expect("plugin workflow should be namespaced by its own meta.name");
+    assert!(
+        resolved.ends_with("scripts/deploy.js"),
+        "resolved path should point at the declared script, got {resolved:?}"
+    );
+
+    manager.disable(&id).await.expect("disable should unload");
+    assert!(
+        plugin_workflows.resolve("wfplugin:deploy-prod").is_none(),
+        "plugin workflow should be removed from the registry on unload"
+    );
+}
+
 /// Initialise a git repo at `dir` containing a single-plugin tree (manifest +
 /// one command) and commit it, so it can be cloned via `file://`.
 fn init_git_plugin_repo(dir: &Path, plugin_name: &str) {

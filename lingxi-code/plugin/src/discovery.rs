@@ -3250,6 +3250,57 @@ mod tests {
         );
     }
 
+    /// The PLUGIN layer must keep using `parse_plugin_mcp_json_string`, not the
+    /// config-layer `parse_mcp_json_string`.
+    ///
+    /// Oracle has two schema layers wearing the same filename: the config table
+    /// `ZGn` (7 keys, no IDE transports) that `.mcp.json` / settings /
+    /// `--mcp-config` go through, and the 8-arm union `KY` (`vve`:
+    /// `let B=KY().safeParse(U)`) that plugin-declared servers go through — which
+    /// DOES have `sse-ide` and `ws-ide` arms.
+    ///
+    /// This is a MERGE-RESOLUTION pin. The layer split and the MCPB dispatch
+    /// rewrite of `load_declared_mcp_servers` were written in two separate
+    /// branches; integrating them re-introduced the config-layer parser at three
+    /// call sites here. Without this test, swapping them back leaves every other
+    /// test green, so nothing would catch the regression.
+    ///
+    /// Covers all three declared-value shapes that reach a parser:
+    /// bare object, array item object, and a `./path`-loaded file.
+    #[tokio::test]
+    async fn declared_mcp_servers_keep_the_plugin_schema_layer_for_ide_transports() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin = tmp.path();
+        fs::write(
+            plugin.join("ide-mcp.json"),
+            r#"{"from-path":{"type":"sse-ide","url":"http://127.0.0.1:1/sse","ideName":"vscode"}}"#,
+        )
+        .unwrap();
+
+        // 1. bare inline object
+        let bare = serde_json::json!({
+            "from-bare": {"type": "sse-ide", "url": "http://127.0.0.1:1/sse", "ideName": "vscode"}
+        });
+        let servers = load_declared_mcp_servers(plugin, Some(bare), "demo", false).await;
+        assert!(
+            servers.contains_key("from-bare"),
+            "`sse-ide` is an arm of the plugin union `KY`; a bare inline declared entry must be \
+             kept, not dropped by the config-layer table `ZGn`, got {servers:?}"
+        );
+
+        // 2. array: a ./path entry and an inline object entry
+        let mixed = serde_json::json!([
+            "./ide-mcp.json",
+            {"from-array": {"type": "ws-ide", "url": "ws://127.0.0.1:1", "ideName": "vscode"}}
+        ]);
+        let servers = load_declared_mcp_servers(plugin, Some(mixed), "demo", false).await;
+        assert!(
+            servers.contains_key("from-path") && servers.contains_key("from-array"),
+            "both the ./path-loaded `sse-ide` and the inline `ws-ide` array item must survive \
+             the plugin layer, got {servers:?}"
+        );
+    }
+
     #[tokio::test]
     async fn declared_lsp_servers_mixed_array_merges_path_and_inline_entries() {
         let tmp = tempfile::tempdir().unwrap();

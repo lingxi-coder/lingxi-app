@@ -14,6 +14,7 @@ import {
   stringMapFromLayer,
 } from '../src/renderer/components/settings/pages/ToolsAgent';
 import { skillsPageModel } from '../src/renderer/components/settings/pages/Skills';
+import { pluginDependencyCaveat } from '../src/renderer/components/settings/pages/Plugins';
 import { parseJsonObjectInput } from '../src/renderer/components/settings/jsonInput';
 import { hooksPageModel } from '../src/renderer/components/settings/pages/Hooks';
 import { SETTINGS_NAV } from '../src/renderer/components/settings/nav';
@@ -39,9 +40,11 @@ function snap(overrides: Partial<SettingsSnapshot> = {}): SettingsSnapshot {
 
 test('permission rule edits go through the dedicated command, never the generic patch', () => {
   const sent = capturePermissionEdit({ behavior: 'allow', add: ['Bash(ls:*)'] });
-  assert.equal(sent.type, 'update_permission_rules');
-  assert.notEqual(
-    sent.type, 'update_settings',
+  // `assert.equal(sent.type, 'update_permission_rules')` is the whole claim:
+  // a second `assert.notEqual(sent.type, 'update_settings')` used to sit here
+  // and could never fail independently of it.
+  assert.equal(
+    sent.type, 'update_permission_rules',
     'permissions has a dedicated writer; the generic patch refuses the key anyway',
   );
   assert.deepEqual((sent as { add: string[] }).add, ['Bash(ls:*)']);
@@ -227,4 +230,35 @@ test('mcp is the one 编码-group page that is NOT layered — it owns its own s
     const page = SETTINGS_NAV.find((candidate) => candidate.id === id);
     assert.equal(page?.layered, true, `${id} must be layered`);
   }
+});
+
+// ---------------------------------------------------------------------------
+// Plugins: the disclosure, not the resolver. Spec A5.10 asked this page to
+// reuse `cli/src/commands/plugin_settings.rs`, which `bridge-server` cannot
+// depend on, so the page writes `enabledPlugins` through the generic patch
+// and must SAY so instead of implying the toggles are dependency-guarded.
+// ---------------------------------------------------------------------------
+
+test('the plugins page discloses that dependency relationships are NOT enforced here', () => {
+  const caveat = pluginDependencyCaveat();
+  assert.match(caveat, /依赖/, 'must name what is not handled: plugin dependencies');
+  assert.match(
+    caveat, /不会连带启用/,
+    'enabling must be stated NOT to transitively enable dependencies (plugin_settings.rs collect_dependencies does)',
+  );
+  assert.match(
+    caveat, /不会被拦下|不会拦/,
+    'disabling must be stated NOT to be refused when other enabled plugins depend on it',
+  );
+  assert.match(
+    caveat, /plugin enable/,
+    'must point at the CLI command that does enforce it, not just at "the CLI"',
+  );
+  assert.match(caveat, /plugin disable/);
+});
+
+test('the plugins caveat never claims the toggles are safe or checked', () => {
+  const caveat = pluginDependencyCaveat();
+  assert.doesNotMatch(caveat, /会自动(解析|处理|启用)/, 'must not overclaim that this page resolves dependencies');
+  assert.doesNotMatch(caveat, /安全/, 'must not reassure; the point is that a guard is missing here');
 });

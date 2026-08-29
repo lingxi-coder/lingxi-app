@@ -22,6 +22,37 @@ import { ghostButtonStyle, inputStyle } from './ghostButton';
  * desktop user adds to directly — out of scope, noted in the Task 18 report
  * rather than silently added or silently dropped.
  */
+/**
+ * What this page must SAY about what it does not do, rendered next to the
+ * `enabledPlugins` toggles.
+ *
+ * Spec A5.10 asked this page to reuse `cli/src/commands/plugin_settings.rs`.
+ * It cannot: that module lives in `apps/cli`, and `bridge-server` — the only
+ * process that can reach a settings file from here — genuinely cannot depend
+ * on it. So this page writes `enabledPlugins` through the generic
+ * `update_settings`, which does exactly what it is told and nothing more,
+ * while the CLI's `plugin enable` / `plugin disable` do two extra things
+ * (`plugin_settings.rs`: `collect_dependencies` transitively enables a
+ * plugin's dependencies on enable; `enabled_dependents` HARD-REFUSES a
+ * disable with `Plugin "X" is required by enabled plugin(s): …`).
+ *
+ * Concretely: with `child@mkt` depending on `parent@mkt` and both enabled,
+ * toggling `parent@mkt` off here writes `{"parent@mkt": false,
+ * "child@mkt": true}` and reports success, where the CLI would have refused;
+ * and adding `child@mkt` here writes it alone, so it loads without its
+ * dependency. Moving the resolver somewhere both callers can reach it is its
+ * own task, deliberately not done in a fix round. Until then the page says
+ * the true thing rather than implying the toggles are guarded.
+ *
+ * Kept as a pure exported function so a test can assert what this text
+ * claims — the same reason `brokenLayerGuidance` is one in `RawJson.tsx`.
+ */
+export function pluginDependencyCaveat(): string {
+  return '这里的开关只写入 enabledPlugins 本身，不解析插件之间的依赖关系：'
+    + '启用一个插件不会连带启用它依赖的插件，停用一个还被其它已启用插件依赖的插件也不会被拦下。'
+    + '命令行的 plugin enable / plugin disable 会做这两件事——需要依赖检查时请改用它。';
+}
+
 export function Plugins({ bridge, snapshot, editingLayer, onJumpToLayer }: PageContentProps) {
   const t = useT();
   const enabledPlugins = objectFromLayer(snapshot, editingLayer, 'enabledPlugins');
@@ -64,6 +95,13 @@ export function Plugins({ bridge, snapshot, editingLayer, onJumpToLayer }: PageC
     <>
       <Card title="已启用的插件 (enabledPlugins)">
         <FieldProvenanceNotice snapshot={snapshot} fieldKey="enabledPlugins" editingLayer={editingLayer} onJumpToLayer={onJumpToLayer} />
+        <div
+          data-testid="plugin-dependency-caveat"
+          role="note"
+          style={{ padding: '12px 18px', color: t.text3, fontSize: 12, lineHeight: 1.6, borderBottom: `0.5px solid ${t.border}` }}
+        >
+          {pluginDependencyCaveat()}
+        </div>
         {pluginNames.length === 0 && (
           <div style={{ padding: '14px 18px', color: t.text4, fontSize: 12.5 }}>还没有启用任何插件。</div>
         )}

@@ -18,6 +18,7 @@ use crate::loader::resolve_user_config;
 use crate::manifest::{ComponentPath, PluginManifest, PluginUserConfig};
 use crate::source::PluginSource;
 use crate::strict_policy::StrictPluginOnlyPolicy;
+use crate::theme_registry::{self, PluginThemeRegistry};
 use crate::user_config;
 use serde_json::{Map, Value};
 
@@ -115,6 +116,27 @@ pub struct PluginManager {
     /// into `mcp_registry.connections`, so [`Self::unload_plugin`] can remove
     /// exactly those entries (the registry has no plugin-ownership index).
     plugin_mcp_names: RwLock<HashMap<PluginId, Vec<String>>>,
+    /// Optional live plugin-workflow registry shared with `tool-workflow`'s
+    /// resolver and `tasks::handlers::local_workflow`'s nested `workflow()`
+    /// resolver (see [`workflow::PluginWorkflowRegistry`]). `None` until a
+    /// composition root wires one via [`Self::with_plugin_workflows`] — every
+    /// other component slot still materializes normally either way.
+    plugin_workflows: Option<Arc<workflow::PluginWorkflowRegistry>>,
+    /// Namespaced workflow names (`{plugin}:{name}`) each plugin seeded into
+    /// [`Self::plugin_workflows`], so [`Self::unload_plugin`] can remove
+    /// exactly those entries (mirrors [`Self::plugin_mcp_names`]).
+    plugin_workflow_names: RwLock<HashMap<PluginId, Vec<String>>>,
+    /// Live registry of plugin-declared custom themes (§14,
+    /// [`theme_registry::PluginThemeRegistry`]). Unlike `plugin_workflows`,
+    /// this port has no OTHER crate that needs to share the same `Arc` yet
+    /// (no TUI theme-selection surface exists to consume it — see the
+    /// module's deferral note), so `PluginManager` owns it directly rather
+    /// than taking it as an optional externally-constructed dependency.
+    plugin_themes: Arc<PluginThemeRegistry>,
+    /// Namespaced theme slugs (`{plugin}:{name}`) each plugin seeded into
+    /// [`Self::plugin_themes`], so [`Self::unload_plugin`] can remove exactly
+    /// those entries (mirrors [`Self::plugin_workflow_names`]).
+    plugin_theme_slugs: RwLock<HashMap<PluginId, Vec<String>>>,
 }
 
 impl PluginManager {
@@ -157,6 +179,10 @@ impl PluginManager {
             agent_catalog: None,
             plugin_agent_names: RwLock::new(HashMap::new()),
             plugin_mcp_names: RwLock::new(HashMap::new()),
+            plugin_workflows: None,
+            plugin_workflow_names: RwLock::new(HashMap::new()),
+            plugin_themes: Arc::new(PluginThemeRegistry::new()),
+            plugin_theme_slugs: RwLock::new(HashMap::new()),
         }
     }
 
@@ -165,6 +191,44 @@ impl PluginManager {
     pub fn with_agent_catalog(mut self, catalog: Arc<RwLock<Vec<agent::AgentDefinition>>>) -> Self {
         self.agent_catalog = Some(catalog);
         self
+    }
+
+    /// Share the host's live plugin-workflow registry with the plugin
+    /// lifecycle. The SAME `Arc` must also be handed to
+    /// `tool_workflow::WorkflowTool::with_plugin_workflows` and
+    /// `tasks::handlers::local_workflow::LocalWorkflowHandler::with_plugin_workflows`
+    /// so a plugin's saved workflow, once materialized here, is resolvable by
+    /// name through the SAME `Workflow` tool call and `workflow()` nested-call
+    /// path as a built-in/project/user workflow.
+    #[must_use]
+    pub fn with_plugin_workflows(mut self, registry: Arc<workflow::PluginWorkflowRegistry>) -> Self {
+        self.plugin_workflows = Some(registry);
+        self
+    }
+
+    /// The live plugin-theme registry (§14, [`theme_registry::PluginThemeRegistry`]).
+    /// `PluginManager` is the sole owner today (see the field doc), but hands
+    /// out the same `Arc` so a future TUI theme-selection surface can read
+    /// it without `PluginManager` growing an `Option`-wrapped setter the way
+    /// [`Self::with_plugin_workflows`] needed for a registry built OUTSIDE
+    /// this crate.
+    ///
+    /// ⚠️ **This registry has no production reader yet.** Nothing under
+    /// `apps/`, `tui/`, `tui-core/`, or `traits/` calls this accessor or
+    /// `theme_registry::resolve_theme`, and `tui_core::ThemeName::ALL` is a
+    /// closed set of six palettes with no registry hook — so a plugin theme
+    /// is registered and then unreachable. Unlike the workflow registry
+    /// (which `engine-desktop::build` wires into four participants), the
+    /// theme half CANNOT be made reachable by wiring alone: it needs the
+    /// deferred TUI theme-selection feature (a `/theme` picker, a persisted
+    /// choice, the oracle's `custom:` wire encoding `IW`/`Lb`, and a real
+    /// user-theme store for `Aon`'s other half). Until then `load_plugin`'s
+    /// theme block costs one stat + read + parse per declared file per
+    /// enable, and can emit `[theme]` warnings for a feature the user cannot
+    /// yet see.
+    #[must_use]
+    pub fn plugin_themes(&self) -> Arc<PluginThemeRegistry> {
+        Arc::clone(&self.plugin_themes)
     }
 
     /// Seed the persisted `userConfig` state (settings `pluginConfigs`) the
@@ -827,6 +891,136 @@ impl PluginManager {
             }
         }
 
+        // (d2) Workflows — read each declared/auto-scanned `.js` file
+        //      (`manifest.components.workflows`, §14), extract its own
+        //      `meta.name` and namespace `{plugin}:{name}` (oracle plugin-
+        //      workflow loader `v()` @169045500: `${pluginName}:${meta.name}`
+        //      — the SAME "parse the component's own declared name" rule (d)
+        //      applies to output styles, here reading the name from the
+        //      script's `export const meta = {…}` block instead of
+        //      frontmatter).
+        //
+        //      `v()` gates a file THREE ways before it may join the table,
+        //      and every gate DROPS the file rather than falling back:
+        //        `let e = await ZI(c,o,um); if (e===null) return
+        //           warn(`Plugin workflow ${o}: not a regular file or exceeds
+        //           ${um} bytes — skipping`), null;`
+        //        `let r = bf(e,{validateBody:!1}); if ("error" in r) return
+        //           warn(`Plugin workflow ${o} has invalid meta: ${r.error}
+        //           — skipping`), null;`
+        //      There is NO filename fallback on either branch: a shared
+        //      helper module dropped in `workflows/` (no `export const meta`)
+        //      is simply not a workflow. Registering it under its file stem
+        //      would put a name in the `Workflow` tool's `Available:` list
+        //      that then dies at `workflow::validate_meta` inside the
+        //      launcher — an accept-then-fail the oracle never produces —
+        //      so the port applies the same three gates.
+        //      `workflow::validate_meta` is this port's `bf(…,{validateBody:
+        //      !1})`: it parses the `meta` block only (first-statement, pure
+        //      literal, non-empty `name`/`description`) and is the very gate
+        //      the launcher already runs, so nothing can pass here and fail
+        //      there.
+        //
+        //      Only collected when a registry is actually wired — the common
+        //      case (no composition root has called `with_plugin_workflows`
+        //      yet) does zero extra file I/O.
+        let mut workflow_entries: Vec<workflow::PluginWorkflowEntry> = Vec::new();
+        if self.plugin_workflows.is_some() {
+            for wp in &manifest.components.workflows {
+                let abs = if wp.path.is_absolute() {
+                    wp.path.clone()
+                } else {
+                    install_dir.join(&wp.path)
+                };
+                // Oracle `ZI(c,o,um)`: regular file (or a symlink resolving to
+                // one — `tokio::fs::metadata` follows links, matching `_()`'s
+                // `isFile()||isSymbolicLink()` readdir filter) AND at most
+                // `um` = 524288 bytes.
+                let Ok(metadata) = tokio::fs::metadata(&abs).await else {
+                    continue;
+                };
+                if !metadata.is_file() || metadata.len() > workflow::MAX_WORKFLOW_SCRIPT_BYTES {
+                    tracing::warn!(
+                        path = %abs.display(),
+                        "Plugin workflow {}: not a regular file or exceeds {} bytes — skipping",
+                        abs.display(),
+                        workflow::MAX_WORKFLOW_SCRIPT_BYTES
+                    );
+                    continue;
+                }
+                let Ok(raw) = tokio::fs::read_to_string(&abs).await else {
+                    continue;
+                };
+                if let Err(e) = workflow::validate_meta(&raw) {
+                    tracing::warn!(
+                        path = %abs.display(),
+                        "Plugin workflow {} has invalid meta: {e} — skipping",
+                        abs.display()
+                    );
+                    continue;
+                }
+                // `validate_meta` already proved `meta.name` is a non-empty
+                // string literal, so this cannot fall through in practice; a
+                // `None` here would be a parser disagreement, and dropping
+                // the file is the oracle-shaped outcome either way.
+                let Some(base_name) =
+                    workflow::meta_string_value(&raw, "name").filter(|value| !value.is_empty())
+                else {
+                    continue;
+                };
+                workflow_entries.push(workflow::PluginWorkflowEntry {
+                    name: format!("{plugin_name}:{base_name}"),
+                    script_path: abs,
+                });
+            }
+        }
+
+        // (d3) Themes — read each declared/auto-scanned `.json` file
+        //      (`manifest.components.themes`, §14), validate it the way the
+        //      oracle's `j(e,t,r)` does (256KB size cap checked BEFORE the
+        //      read, JSON validity, `base`/`name`/`overrides` shape — see
+        //      `theme_registry`'s module doc for the one place this port's
+        //      validation is thinner than the oracle's), and namespace
+        //      `{plugin}:{basename}` (oracle `w0e`: `H=${P.name}:` + the
+        //      file's basename minus `.json` — the SAME namespacing rule (c)
+        //      applies to skills/output-styles/workflows). A file that
+        //      cannot be stat'd/read is skipped without a warning (the
+        //      common oracle case, a file discovery already verified exists
+        //      going missing between discovery and enable); oversized or
+        //      invalid-JSON files ARE warned, matching the oracle's two
+        //      warning sites.
+        let mut theme_entries: Vec<theme_registry::PluginThemeEntry> = Vec::new();
+        for tp in &manifest.components.themes {
+            let abs = if tp.path.is_absolute() {
+                tp.path.clone()
+            } else {
+                install_dir.join(&tp.path)
+            };
+            let Ok(metadata) = tokio::fs::metadata(&abs).await else {
+                continue;
+            };
+            if metadata.len() > theme_registry::MAX_THEME_FILE_BYTES {
+                tracing::warn!(
+                    path = %abs.display(),
+                    "[theme] {} exceeds 256KB; skipping",
+                    abs.display()
+                );
+                continue;
+            }
+            let Ok(raw) = tokio::fs::read_to_string(&abs).await else {
+                continue;
+            };
+            let stem = abs.file_stem().and_then(|s| s.to_str()).unwrap_or_default();
+            let slug = format!("{plugin_name}:{stem}");
+            match theme_registry::parse_theme_json(&slug, &raw) {
+                theme_registry::ThemeParseOutcome::Valid(entry) => theme_entries.push(entry),
+                theme_registry::ThemeParseOutcome::WrongShape => {}
+                theme_registry::ThemeParseOutcome::InvalidJson => {
+                    tracing::warn!(slug = %slug, "[theme] {slug}.json: invalid JSON");
+                }
+            }
+        }
+
         // (e) MCP servers — scope each `.mcp.json` entry as
         //     `plugin:{plugin}:{server}` so it is keyed identically to a
         //     normal configured server (`addPluginScopeToServers`,
@@ -973,6 +1167,33 @@ impl PluginManager {
             .register_plugin_servers(manifest.id, configs)
             .await;
 
+        // 9. Workflows — join the saved-workflow search path (§14). Remember
+        //    the namespaced names FIRST so `unload_plugin` can remove exactly
+        //    these entries regardless of what else the registry holds.
+        if let Some(registry) = &self.plugin_workflows {
+            if !workflow_entries.is_empty() {
+                let names: Vec<String> = workflow_entries.iter().map(|e| e.name.clone()).collect();
+                registry.register(workflow_entries);
+                self.plugin_workflow_names
+                    .write()
+                    .await
+                    .insert(manifest.id, names);
+            }
+        }
+
+        // 10. Themes — join the live plugin-theme registry (§14). Remember
+        //     the namespaced slugs FIRST so `unload_plugin` can remove
+        //     exactly these entries regardless of what else the registry
+        //     holds.
+        if !theme_entries.is_empty() {
+            let slugs: Vec<String> = theme_entries.iter().map(|e| e.slug.clone()).collect();
+            self.plugin_themes.register(theme_entries);
+            self.plugin_theme_slugs
+                .write()
+                .await
+                .insert(manifest.id, slugs);
+        }
+
         Ok(())
     }
 
@@ -1007,6 +1228,18 @@ impl PluginManager {
             for n in &names {
                 conns.remove(n);
             }
+        }
+        // Workflow cleanup: remove exactly the namespaced entries this
+        // plugin seeded into the shared registry.
+        if let Some(names) = self.plugin_workflow_names.write().await.remove(id) {
+            if let Some(registry) = &self.plugin_workflows {
+                registry.unregister(&names);
+            }
+        }
+        // Theme cleanup: remove exactly the namespaced slugs this plugin
+        // seeded into the plugin-theme registry.
+        if let Some(slugs) = self.plugin_theme_slugs.write().await.remove(id) {
+            self.plugin_themes.unregister(&slugs);
         }
         Ok(())
     }

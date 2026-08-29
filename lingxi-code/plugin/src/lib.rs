@@ -26,6 +26,7 @@ pub mod marketplace;
 mod mcpb;
 pub mod source;
 pub mod strict_policy;
+pub mod theme_registry;
 pub mod trust;
 /// `${user_config.KEY}` substitution + plugin-option env helpers.
 ///
@@ -62,4 +63,5 @@ pub use mcpb::sha256_hex as plugin_source_sha256;
 pub use mcpb::unpack_mcpb as unpack_plugin_archive;
 pub use source::PluginSource;
 pub use strict_policy::{PluginComponent, StrictPluginOnlyPolicy};
+pub use theme_registry::{PluginThemeEntry, PluginThemeRegistry};
 pub use trust::{default_trust_for_source, PluginTrustLevel};

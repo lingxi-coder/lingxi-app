@@ -1334,8 +1334,22 @@ impl tool_workflow::WorkflowLauncher for MobileWorkflowLauncher {
                 cwd.join(path)
             }
         };
-        let script =
-            tool_workflow::resolve_script_at(&cwd, &spec, |p| std::fs::read_to_string(abs(p)))?;
+        // §14 plugin workflows: `None` here is CORRECT, not a stub — mobile
+        // has no plugin subsystem at all (`engine-mobile` does not depend on
+        // the `plugin` crate; every `PluginManager::new` in the workspace is
+        // in `engine-desktop`), so nothing can ever populate a registry on
+        // this host. Every mobile reader is uniformly unwired — the
+        // `WorkflowTool`, this launcher, and the `LocalWorkflowHandler` —
+        // which is what keeps validate and launch agreeing. If mobile ever
+        // gains a `PluginManager`, all three must be wired to ONE shared
+        // `Arc<workflow::PluginWorkflowRegistry>` together, the way
+        // `engine-desktop::build` does it.
+        let script = tool_workflow::resolve_script_at(
+            &cwd,
+            &spec,
+            |p| std::fs::read_to_string(abs(p)),
+            None,
+        )?;
         // Reject a malformed `meta` block at the tool boundary; the byte-exact
         // message surfaces to the model as the tool error (desktop parity).
         workflow::validate_meta(&script).map_err(|e| {
@@ -1551,7 +1565,9 @@ impl tool_workflow::WorkflowLauncher for MobileWorkflowLauncher {
                 .name
                 .as_deref()
                 .filter(|s| !s.is_empty())
-                .and_then(|name| tool_workflow::workflow_source_for_name(&cwd, name));
+                // `None`: mobile has no plugin subsystem — see the
+                // `resolve_script_at` call above.
+                .and_then(|name| tool_workflow::workflow_source_for_name(&cwd, name, None));
             let script_is_verbatim_builtin =
                 is_mobile_local_app_builtin(&spec, &script, trusted_local_app_resume);
             let (invocation_mode, workflow_source) = if has_script_path {

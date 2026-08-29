@@ -212,8 +212,20 @@ fn saved_workflow_candidates(cwd: &Path, name: &str) -> Vec<PathBuf> {
 /// intentionally independent of the resolved script body: a named built-in
 /// with an explicit script override still reports `built-in`, while the
 /// `scriptMatchesDefinition` flag controls telemetry redaction separately.
+///
+/// `plugin_workflows` is the same registry the resolver consults, checked in
+/// the SAME position (last), so `tengu_workflow_launched`'s `workflow_source`
+/// names the tier the launch actually resolved from. The oracle stamps
+/// `source:"plugin"` on every plugin record (`v()` @169045670) and emits it
+/// verbatim (`workflow_source:c(se)` @172565293), so `"plugin"` is a real
+/// emitted value — without this arm a plugin workflow is misreported as
+/// `custom`.
 #[must_use]
-pub fn workflow_source_for_name(cwd: &Path, name: &str) -> Option<&'static str> {
+pub fn workflow_source_for_name(
+    cwd: &Path,
+    name: &str,
+    plugin_workflows: Option<&workflow::PluginWorkflowRegistry>,
+) -> Option<&'static str> {
     if BUILTIN_WORKFLOWS.get(name).is_some() {
         return Some("built-in");
     }
@@ -234,6 +246,9 @@ pub fn workflow_source_for_name(cwd: &Path, name: &str) -> Option<&'static str> 
     }) {
         return Some("userSettings");
     }
+    if plugin_workflows.is_some_and(|registry| registry.resolve(name).is_some()) {
+        return Some("plugin");
+    }
     None
 }
 
@@ -248,12 +263,17 @@ fn path_for_read(path: &Path) -> String {
 /// immutable built-ins, then the project saved-workflow directory
 /// (`.lingxi/workflows/<name>`), then the user config directory
 /// (`$LINGXI_CONFIG_DIR/workflows/<name>` or `~/.lingxi/workflows/<name>`) with
-/// common script extensions. Built-ins win before filesystem lookup so a
-/// project checkout cannot shadow bundled workflow code.
+/// common script extensions, then — when a plugin-workflow registry is
+/// wired (§14) — a plugin's declared/auto-scanned workflow by its namespaced
+/// name. Built-ins win before filesystem lookup so a project checkout cannot
+/// shadow bundled workflow code; the plugin registry is checked LAST so a
+/// project/user file always wins a name collision (oracle precedence
+/// project/user > plugin > built-in — see `workflow::PluginWorkflowRegistry`).
 pub fn resolve_script_at<R>(
     cwd: &Path,
     spec: &WorkflowLaunchSpec,
     read: R,
+    plugin_workflows: Option<&workflow::PluginWorkflowRegistry>,
 ) -> Result<String, WorkflowLaunchError>
 where
     R: Fn(&str) -> std::io::Result<String>,
@@ -272,6 +292,11 @@ where
                 if let Ok(src) = read(&path_for_read(&candidate)) {
                     resolved = Some(src);
                     break;
+                }
+            }
+            if resolved.is_none() {
+                if let Some(path) = plugin_workflows.and_then(|registry| registry.resolve(&name)) {
+                    resolved = read(&path_for_read(&path)).ok();
                 }
             }
             resolved.ok_or_else(|| {
@@ -294,7 +319,7 @@ pub fn resolve_script<R>(spec: &WorkflowLaunchSpec, read: R) -> Result<String, W
 where
     R: Fn(&str) -> std::io::Result<String>,
 {
-    resolve_script_at(Path::new(""), spec, read)
+    resolve_script_at(Path::new(""), spec, read, None)
 }
 
 /// Every workflow that builds a local app and therefore honours the app's
@@ -628,6 +653,15 @@ pub struct WorkflowTool {
     /// Session-scoped dynamic-workflow gate (`pA()`): launch/runtime policy may
     /// leave Workflow installed but unavailable for this session.
     session_enabled: bool,
+    /// Optional live plugin-workflow registry (§14 — `plugin::PluginManager`
+    /// materializes a plugin's declared/auto-scanned `workflows` into this
+    /// SAME shared table). When wired, a plugin's saved workflow becomes
+    /// resolvable by its namespaced name (`{plugin}:{name}`) after the
+    /// built-in/project/user directories have already missed — see
+    /// [`saved_workflow_candidates`]'s call sites. `None` (the default until
+    /// a composition root calls [`Self::with_plugin_workflows`]) means only
+    /// built-in/project/user workflows resolve, exactly today's behavior.
+    plugin_workflows: Option<Arc<workflow::PluginWorkflowRegistry>>,
 }
 
 impl WorkflowTool {
@@ -645,6 +679,7 @@ impl WorkflowTool {
             dynamic_workflows_gate: None,
             size_guideline_state: None,
             session_enabled: true,
+            plugin_workflows: None,
         }
     }
 
@@ -652,6 +687,16 @@ impl WorkflowTool {
     #[must_use]
     pub fn with_current_cwd(mut self, cwd: Arc<std::sync::Mutex<PathBuf>>) -> Self {
         self.current_cwd = Some(cwd);
+        self
+    }
+
+    /// Share the host's live plugin-workflow registry (the SAME `Arc` handed
+    /// to `plugin::PluginManager::with_plugin_workflows`), so a plugin's
+    /// saved workflow becomes resolvable by name alongside built-in/project/
+    /// user workflows.
+    #[must_use]
+    pub fn with_plugin_workflows(mut self, registry: Arc<workflow::PluginWorkflowRegistry>) -> Self {
+        self.plugin_workflows = Some(registry);
         self
     }
 
@@ -805,6 +850,9 @@ impl WorkflowTool {
                 }
                 Some(fname.into_owned())
             }));
+        }
+        if let Some(registry) = &self.plugin_workflows {
+            names.extend(registry.names());
         }
         if !saw_dir && names.is_empty() {
             return None;
@@ -1009,6 +1057,21 @@ impl Tool for WorkflowTool {
                         }
                         Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
                         Err(_) => continue,
+                    }
+                }
+                // §14 — a plugin's declared/auto-scanned workflow joins the
+                // search path LAST: project/user files above already win on a
+                // name collision (oracle precedence project/user > plugin >
+                // built-in; namespacing means a real collision only happens
+                // if a project/user file is itself literally named
+                // `<plugin>:<name>.js`).
+                if found.is_none() {
+                    if let Some(path) = self
+                        .plugin_workflows
+                        .as_ref()
+                        .and_then(|registry| registry.resolve(wf_name))
+                    {
+                        found = std::fs::read_to_string(&path).ok();
                     }
                 }
                 if let Some(src) = found {
@@ -1255,11 +1318,45 @@ mod tests {
     #[test]
     fn named_workflow_source_matches_claude_categories() {
         assert_eq!(
-            workflow_source_for_name(std::path::Path::new("."), "deep-research"),
+            workflow_source_for_name(std::path::Path::new("."), "deep-research", None),
             Some("built-in")
         );
         assert_eq!(
-            workflow_source_for_name(std::path::Path::new("."), "missing"),
+            workflow_source_for_name(std::path::Path::new("."), "missing", None),
+            None
+        );
+    }
+
+    /// `tengu_workflow_launched.workflow_source` must name the tier the launch
+    /// actually resolved from. The oracle stamps `source:"plugin"` on every
+    /// plugin record (`v()` @169045670) and emits it verbatim
+    /// (`se=e.scriptPath?"scriptPath":h??"inline"`,
+    /// `workflow_source:c(se)` @172565293), so `"plugin"` is a real emitted
+    /// value — without the plugin arm a plugin workflow is reported as the
+    /// `custom` fallback `engine-desktop`'s `named_source.unwrap_or("custom")`
+    /// supplies.
+    #[test]
+    fn named_workflow_source_reports_plugin_for_a_registry_hit() {
+        let registry = workflow::PluginWorkflowRegistry::new();
+        registry.register(vec![workflow::PluginWorkflowEntry {
+            name: "acme:deploy".into(),
+            script_path: std::path::PathBuf::from("/plugins/acme/scripts/deploy.js"),
+        }]);
+        assert_eq!(
+            workflow_source_for_name(std::path::Path::new("."), "acme:deploy", Some(&registry)),
+            Some("plugin")
+        );
+        // The registry is consulted LAST — a built-in still wins.
+        assert_eq!(
+            workflow_source_for_name(
+                std::path::Path::new("."),
+                "deep-research",
+                Some(&registry)
+            ),
+            Some("built-in")
+        );
+        assert_eq!(
+            workflow_source_for_name(std::path::Path::new("."), "acme:missing", Some(&registry)),
             None
         );
     }
@@ -1928,6 +2025,139 @@ mod tests {
         let _ = std::fs::remove_file(&wf_path);
         let _ = std::fs::remove_dir_all(&config_dir);
         result.expect("name-resolved workflow must fall back to user workflow dir");
+    }
+
+    /// §14 — a plugin's declared workflow, namespaced `{plugin}:{name}` by
+    /// `plugin::PluginManager::load_plugin`, resolves through the SAME
+    /// `name` input as a built-in/project/user workflow once the shared
+    /// registry is wired via `with_plugin_workflows`.
+    #[tokio::test]
+    async fn validate_name_resolves_via_plugin_workflow_registry() {
+        let dir = unique_temp_path("plugin-registry");
+        std::fs::create_dir_all(&dir).unwrap();
+        let script_path = dir.join("deploy.js");
+        std::fs::write(&script_path, VALID_SCRIPT).unwrap();
+
+        let registry = Arc::new(workflow::PluginWorkflowRegistry::new());
+        registry.register(vec![workflow::PluginWorkflowEntry {
+            name: "acme:deploy".to_string(),
+            script_path: script_path.clone(),
+        }]);
+
+        let t = tool(None).with_plugin_workflows(registry);
+        let ctx = tool_api::test_support::fresh_ctx();
+        let _g = ENV_LOCK.lock().unwrap();
+        std::env::remove_var("LINGXI_DISABLE_WORKFLOWS");
+        let result = t
+            .validate_input(&json!({ "name": "acme:deploy" }), &ctx)
+            .await;
+
+        let _ = std::fs::remove_file(&script_path);
+        let _ = std::fs::remove_dir_all(&dir);
+        result.expect("a plugin-registered workflow should resolve by its namespaced name");
+    }
+
+    /// A wired-but-empty registry does not change the ordinary "not found"
+    /// behaviour — the plugin check is a pure addition to the search path.
+    #[tokio::test]
+    async fn validate_name_absent_from_plugin_registry_reports_not_found() {
+        let t = tool(None).with_plugin_workflows(Arc::new(workflow::PluginWorkflowRegistry::new()));
+        let ctx = tool_api::test_support::fresh_ctx();
+        let _g = ENV_LOCK.lock().unwrap();
+        std::env::remove_var("LINGXI_DISABLE_WORKFLOWS");
+        let err = t
+            .validate_input(&json!({ "name": "no-such-workflow" }), &ctx)
+            .await
+            .unwrap_err();
+        assert!(
+            err.0.starts_with("Workflow \"no-such-workflow\" not found."),
+            "unexpected error: {}",
+            err.0
+        );
+    }
+
+    /// §14 — the LAUNCH path. `Tool::validate_input` and `resolve_script_at`
+    /// are two separate implementations of the same search order, and only
+    /// the former is exercised by
+    /// `validate_name_resolves_via_plugin_workflow_registry`; reverting the
+    /// `resolve_script_at` branch alone leaves that test green. This one
+    /// pins the launcher's half directly, so a partially-wired composition
+    /// root (tool wired, launcher not) cannot ship as "validate accepts,
+    /// launch says not found".
+    ///
+    /// It also pins the ORDER at this seam: project/user files above the
+    /// registry, built-ins above everything (see
+    /// `workflow::PluginWorkflowRegistry`'s module doc for why the
+    /// built-in/plugin half is unobservable in this port).
+    #[test]
+    fn resolve_script_at_falls_back_to_the_plugin_workflow_registry() {
+        let registry = workflow::PluginWorkflowRegistry::new();
+        registry.register(vec![workflow::PluginWorkflowEntry {
+            name: "acme:deploy".to_string(),
+            script_path: std::path::PathBuf::from("/plugins/acme/scripts/deploy.js"),
+        }]);
+        let read = |p: &str| -> std::io::Result<String> {
+            if p == "/plugins/acme/scripts/deploy.js" {
+                Ok(VALID_SCRIPT.to_string())
+            } else {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "no such file",
+                ))
+            }
+        };
+        let named = |name: &str| WorkflowLaunchSpec {
+            name: Some(name.to_string()),
+            ..Default::default()
+        };
+
+        // Wired registry, registered name → the plugin's script.
+        let resolved = resolve_script_at(
+            std::path::Path::new("/proj"),
+            &named("acme:deploy"),
+            read,
+            Some(&registry),
+        )
+        .expect("a registered plugin workflow must resolve on the launch path");
+        assert_eq!(resolved, VALID_SCRIPT);
+
+        // The SAME name with NO registry is the pre-§14 behaviour: not found.
+        // (This is exactly the drift a half-wired composition root produces.)
+        let err = resolve_script_at(
+            std::path::Path::new("/proj"),
+            &named("acme:deploy"),
+            read,
+            None,
+        )
+        .expect_err("without the registry the launch path must not resolve it");
+        assert_eq!(
+            err.0,
+            "Workflow \"acme:deploy\" not found. Available: (none)",
+            "byte-exact launch-path miss message"
+        );
+
+        // A name absent from a wired registry still misses.
+        let err = resolve_script_at(
+            std::path::Path::new("/proj"),
+            &named("acme:absent"),
+            read,
+            Some(&registry),
+        )
+        .expect_err("an unregistered name must still miss");
+        assert!(err.0.starts_with("Workflow \"acme:absent\" not found."));
+
+        // Built-ins are still resolved without touching the registry.
+        let resolved = resolve_script_at(
+            std::path::Path::new("/proj"),
+            &named("deep-research"),
+            read,
+            Some(&registry),
+        )
+        .expect("built-ins resolve regardless of the registry");
+        assert_eq!(
+            resolved,
+            BUILTIN_WORKFLOWS.get("deep-research").unwrap().script
+        );
     }
 
     #[tokio::test]

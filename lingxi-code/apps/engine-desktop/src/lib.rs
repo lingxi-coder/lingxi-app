@@ -1758,6 +1758,15 @@ struct TaskRegistryWorkflowLauncher {
     /// from the composition root's `main_session_uuid` so the transcript dir
     /// anchors on the correct session.
     session_uuid: String,
+    /// The SAME `workflow::PluginWorkflowRegistry` the composition root hands
+    /// to `plugin::PluginManager` and `tool_workflow::WorkflowTool` (§14).
+    ///
+    /// It must be the same one: `WorkflowTool::validate_input` consults the
+    /// registry to decide whether a name resolves, and this launcher resolves
+    /// the script it validated. Wiring only one of the two would make
+    /// `validate_input` accept `acme:deploy` and then fail here with
+    /// `Workflow "acme:deploy" not found. Available: (none)`.
+    plugin_workflows: Arc<workflow::PluginWorkflowRegistry>,
 }
 
 #[async_trait::async_trait]
@@ -1779,8 +1788,14 @@ impl tool_workflow::WorkflowLauncher for TaskRegistryWorkflowLauncher {
                 cwd.join(path)
             }
         };
-        let script =
-            tool_workflow::resolve_script_at(&cwd, &spec, |p| std::fs::read_to_string(abs(p)))?;
+        // §14 — the SAME registry `WorkflowTool::validate_input` checked, so
+        // a name that validated resolves here too.
+        let script = tool_workflow::resolve_script_at(
+            &cwd,
+            &spec,
+            |p| std::fs::read_to_string(abs(p)),
+            Some(self.plugin_workflows.as_ref()),
+        )?;
         // Reject a malformed `meta` block at the tool boundary (claude-code parses
         // + validates `meta` when the Workflow tool accepts a script). The
         // byte-exact message surfaces to the model as the tool error.
@@ -1937,7 +1952,13 @@ impl tool_workflow::WorkflowLauncher for TaskRegistryWorkflowLauncher {
                 .name
                 .as_deref()
                 .filter(|s| !s.is_empty())
-                .and_then(|name| tool_workflow::workflow_source_for_name(&cwd, name));
+                .and_then(|name| {
+                    tool_workflow::workflow_source_for_name(
+                        &cwd,
+                        name,
+                        Some(self.plugin_workflows.as_ref()),
+                    )
+                });
             let named_builtin = spec
                 .name
                 .as_deref()
@@ -8319,6 +8340,22 @@ pub async fn build(
     // "no stuck Running" wiring bash + local_agent already have.
     let local_workflow_status_sink =
         Arc::new(tasks::registry_status_sink::RegistryStatusSink::new());
+    // §14 — THE shared plugin-workflow registry for this session. Constructed
+    // here, before its first consumer, because all FOUR of them must hold the
+    // same `Arc`:
+    //   - `plugin::PluginManager` (below, at the plugin bootstrap) — the sole
+    //     WRITER: `enable`/`disable` seed and remove a plugin's entries.
+    //   - `tasks::handlers::LocalWorkflowHandler` — the nested
+    //     `workflow({name})` resolver.
+    //   - `tool_workflow::WorkflowTool` — `validate_input`'s name resolution
+    //     and its `Available:` listing.
+    //   - `TaskRegistryWorkflowLauncher` — the launch-path `resolve_script_at`
+    //     and the `tengu_workflow_launched` `workflow_source`.
+    // Wiring a strict subset is worse than wiring none: the tool would accept
+    // `acme:deploy` and the launcher would then report it "not found".
+    // The manager fills it at `enable` time, long after the readers are built;
+    // the registry is interior-mutable, so construction order does not matter.
+    let plugin_workflow_registry = Arc::new(workflow::PluginWorkflowRegistry::new());
     let (workflow_event_tx, workflow_event_rx) =
         tokio::sync::mpsc::unbounded_channel::<DesktopWorkflowEvent>();
     let local_workflow_event_sink = Arc::new(DesktopWorkflowEventSink {
@@ -8346,7 +8383,10 @@ pub async fn build(
                 local_workflow_event_sink.clone() as Arc<dyn tasks::handlers::TaskStatusSink>
             )
             .with_workflow_progress_sink(local_workflow_event_sink.clone()
-                as Arc<dyn tasks::handlers::local_workflow::WorkflowProgressSink>),
+                as Arc<dyn tasks::handlers::local_workflow::WorkflowProgressSink>)
+            // §14 — nested `workflow({name})` resolves a plugin workflow after
+            // the project/user directories miss.
+            .with_plugin_workflows(plugin_workflow_registry.clone()),
         ),
     );
 
@@ -9096,6 +9136,7 @@ pub async fn build(
                 current_cwd: current_cwd_cell.clone(),
                 lingxi_home: cfg.lingxi_home.clone(),
                 session_uuid: main_session_uuid.clone(),
+                plugin_workflows: plugin_workflow_registry.clone(),
             });
         // Resolve the workflow-size setting through the canonical settings
         // composition: default → user → project → local → flag → managed.
@@ -9146,7 +9187,10 @@ pub async fn build(
                 )
                 .with_disable_workflows(managed_disable_workflows)
                 .with_dynamic_workflows_gate(dynamic_workflows_gate.clone())
-                .with_session_enabled(workflow_session_enabled),
+                .with_session_enabled(workflow_session_enabled)
+                // §14 — the SAME registry the launcher above holds, so
+                // `validate_input` and `launch` agree on what resolves.
+                .with_plugin_workflows(plugin_workflow_registry.clone()),
         ));
     }
     for (conn_id, mcp_tools) in
@@ -10021,6 +10065,9 @@ pub async fn build(
         //   same path as configured `.mcp.json` servers, and the reconnect loop
         //   covers any that fail their initial dial).
         // - LSP      → `plugin_lsp_registry` (== the `LSPTool`'s registry).
+        // - workflow → `plugin_workflow_registry` (§14; == the registry the
+        //   `WorkflowTool`, its `TaskRegistryWorkflowLauncher`, and the
+        //   `LocalWorkflowHandler` all read). This is its only WRITER.
         // The SKILL and OUTPUT-STYLE registries have no turn-loop consumer yet,
         // so they are local instances here (residual, as at startup).
         // Seed the persisted non-sensitive `userConfig` (settings `pluginConfigs`
@@ -10049,7 +10096,8 @@ pub async fn build(
             )
             .with_agent_catalog(plugin_agent_catalog.clone())
             .with_plugin_configs(plugin_configs)
-            .with_blocked_marketplaces(blocked_marketplaces),
+            .with_blocked_marketplaces(blocked_marketplaces)
+            .with_plugin_workflows(plugin_workflow_registry.clone()),
         );
         for (id, manifest, dir) in discovered {
             let plugin_name = manifest.name.clone();
@@ -10561,6 +10609,65 @@ mod tests {
     use serde_json::Value;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+
+    /// §14 — a WIRING gate, not a behaviour test.
+    ///
+    /// `workflow::PluginWorkflowRegistry` is only reachable if the composition
+    /// root hands the SAME `Arc` to all four participants inside `build()`:
+    /// the `PluginManager` (its only writer), the `WorkflowTool`
+    /// (`validate_input` + the `Available:` listing), the
+    /// `TaskRegistryWorkflowLauncher` (`resolve_script_at` on the launch path
+    /// and `tengu_workflow_launched`'s `workflow_source`), and the
+    /// `LocalWorkflowHandler` (nested `workflow({name})`).
+    ///
+    /// Every one of those pieces is unit-tested in its own crate and every one
+    /// of those tests passes with `build()` wiring NOTHING — which is exactly
+    /// how the feature shipped unreachable the first time. Wiring a strict
+    /// SUBSET is worse than wiring none: the tool accepts `acme:deploy` and
+    /// the launcher then reports it "not found". No runtime test can observe
+    /// this without standing up the whole desktop stack, so the gate reads the
+    /// composition root's own source.
+    ///
+    /// The needles are assembled at runtime from split literals on purpose: a
+    /// gate spelled out verbatim here would match ITSELF in `include_str!` and
+    /// stay green with `build()` gutted.
+    #[test]
+    fn build_wires_one_plugin_workflow_registry_into_every_participant() {
+        const SRC: &str = include_str!("lib.rs");
+        let registry_var = "plugin_workflow_registr".to_string() + "y";
+        let construct =
+            format!("let {registry_var} = Arc::new(workflow::PluginWorkflowRegistry::new());");
+        let builder = format!(".with_plugin_workflows({registry_var}.clone())");
+        let launcher_field = format!("plugin_workflows: {registry_var}.clone()");
+
+        assert_eq!(
+            SRC.matches(&construct).count(),
+            1,
+            "build() must construct exactly ONE shared plugin-workflow registry ({construct})"
+        );
+        assert_eq!(
+            SRC.matches(&builder).count(),
+            3,
+            "`{builder}` must appear 3× in build(): LocalWorkflowHandler, WorkflowTool, PluginManager"
+        );
+        assert_eq!(
+            SRC.matches(&launcher_field).count(),
+            1,
+            "TaskRegistryWorkflowLauncher must be built with the shared registry (`{launcher_field}`)"
+        );
+        // …and the launcher must actually USE the field it holds — once in
+        // `resolve_script_at` (the launch path) and once in
+        // `workflow_source_for_name` (the `tengu_workflow_launched` source).
+        // A positive count, not a "no `None` anywhere" grep: `engine-mobile`
+        // legitimately passes `None` (it has no plugin subsystem at all), and
+        // a zero-match assertion would be green by default here.
+        let uses = format!("Some(self.plugin_workflow{}.as_ref())", "s");
+        assert_eq!(
+            SRC.matches(&uses).count(),
+            2,
+            "the launcher must pass its registry to BOTH resolve_script_at and workflow_source_for_name (`{uses}`)"
+        );
+    }
 
     struct RecordingNetworkPermissionGate {
         calls: AtomicUsize,

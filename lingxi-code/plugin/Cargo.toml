@@ -17,6 +17,12 @@ skill-api = { path = "../skill-api" }
 command-api = { path = "../command-api" }
 outputstyles = { path = "../outputstyles" }
 lsp = { path = "../lsp" }
+# Shared plugin-workflow registry type + `meta.name` extraction for the
+# `workflows` manifest field (§14) — see `workflow::PluginWorkflowRegistry`.
+# `tool-workflow` and `tasks` already depend on `workflow`, so this is the one
+# acyclic crate both the writer (here) and the readers can share without
+# either reader depending on `plugin`.
+workflow = { path = "../workflow" }
 secret = { path = "../secret" }
 serde.workspace = true
 serde_json.workspace = true

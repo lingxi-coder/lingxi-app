@@ -19,6 +19,11 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Arc;
 
+mod plugin_registry;
+pub use plugin_registry::{
+    MAX_WORKFLOW_SCRIPT_BYTES, PluginWorkflowEntry, PluginWorkflowRegistry,
+};
+
 /// JS prelude defining `agent()` (a deferred promise) + the `parallel()` /
 /// `pipeline()` orchestration primitives, injected before the workflow body.
 /// The argument-validation `throw` messages are byte-locked to claude-code's.

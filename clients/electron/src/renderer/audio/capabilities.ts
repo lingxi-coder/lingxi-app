@@ -113,7 +113,6 @@ export interface VoiceCapabilitySnapshot {
   requestedVoice: VoiceOption | null;
   effectiveVoice: VoiceOption | null;
   blockingIssues: VoiceBlockingIssue[];
-  fallbackReason: string | null;
 }
 
 /**
@@ -126,7 +125,22 @@ export interface VoiceCapabilitySnapshot {
  * Structure mirrors Android's `VoiceSettingsCapabilityResolver.resolve`
  * (`clients/android/.../settings/VoiceSettingsCapabilities.kt`): requested
  * and effective are kept separate, and every difference is explained via
- * `blockingIssues` + `fallbackReason` rather than silently applied.
+ * `blockingIssues` rather than silently applied. Unlike Android's resolver,
+ * this snapshot has no free-text `fallbackReason` sibling: an earlier
+ * version did, but its "connect one to enable it" / "connect a different
+ * provider that can transcribe" copy was exactly the forbidden imperative
+ * this branch exists to remove (false for a user who already connected a
+ * provider, and unactionable regardless — nothing in this build calls a
+ * transcription endpoint yet, see `Voice.tsx`'s Ruling 1 doc comment), and
+ * nothing ever read it (`Voice.tsx` renders its OWN
+ * `BLOCKING_ISSUE_MESSAGES`, a `Record<VoiceBlockingIssue, string>` keyed
+ * off `blockingIssues` below, specifically so a future new issue variant
+ * fails typecheck until it earns its own honest, non-imperative sentence).
+ * A free-text field that nothing reads is not a harmless leftover — it is a
+ * landmine for the next person wiring up a fallback message, who would
+ * reach for the obviously-named field and reintroduce the copy. Deleted
+ * instead of "fixed", so there is no second, driftable representation of
+ * facts `blockingIssues` + `BLOCKING_ISSUE_MESSAGES` already own.
  *
  * Desktop has no on-device recognizer at all (no Sherpa bindings, unlike
  * iOS/Android), so `recognitionMode: 'localOnly'` always resolves to
@@ -193,17 +207,6 @@ export function resolveCapabilities(
       ? 'provider'
       : 'unavailable';
 
-  const fallbackReason =
-    prefs.recognitionMode === 'localOnly'
-      ? 'this desktop build ships no offline recognition model (no Sherpa bindings, unlike iOS/Android); on-device mode is unavailable here — switch to automatic to use the microphone'
-      : !platform.providerConfigured
-        ? 'desktop speech recognition runs through a configured provider; connect one to enable it'
-        : !platform.providerTranscriptionCapable
-          ? 'the connected provider has no transcription endpoint; connect a different provider that can transcribe to use the microphone'
-          : requestedVoiceMissing
-            ? 'the requested voice is no longer installed; using the nearest available voice'
-            : null;
-
   return {
     microphonePermission: platform.microphonePermission,
     requestedRecognitionBackend: prefs.recognitionMode,
@@ -213,7 +216,6 @@ export function resolveCapabilities(
     requestedVoice,
     effectiveVoice,
     blockingIssues,
-    fallbackReason,
   };
 }
 

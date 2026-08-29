@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 
 import {
   resolveCapabilities,
@@ -72,15 +73,14 @@ test('no provider credential blocks recognition on desktop specifically', () => 
   );
 });
 
-test('localOnly is honestly unavailable on desktop and explains why', () => {
+test('localOnly is honestly unavailable on desktop and names the exact reason code', () => {
   const snap = resolveCapabilities(prefs({ recognitionMode: 'localOnly' }), platform());
   assert.equal(snap.effectiveRecognitionBackend, 'unavailable');
+  // The human-readable "why" now lives entirely in Voice.tsx's
+  // BLOCKING_ISSUE_MESSAGES (see `fallbackReason`'s removal, below) — this
+  // module's own job is only to name the CODE honestly, never a silent
+  // downgrade with no named issue at all.
   assert.ok(snap.blockingIssues.includes('OnDeviceUnsupportedOnDesktop'));
-  assert.match(
-    snap.fallbackReason ?? '',
-    /offline/i,
-    'the reason must say there is no offline model on desktop, not just fail',
-  );
 });
 
 test('the persisted mobile spelling "onDevice" is not a valid recognitionMode value here', () => {
@@ -98,7 +98,6 @@ test('a fully configured desktop resolves to the provider backend with no issues
     [],
     'if issues were reported here, the tests around it would prove nothing',
   );
-  assert.equal(snap.fallbackReason, null);
 });
 
 test('a requested voice that no longer exists falls back and says so', () => {
@@ -142,11 +141,11 @@ test('a configured provider that cannot transcribe (e.g. Anthropic) is a DIFFERE
     !snap.blockingIssues.includes('ProviderCredentialRequired'),
     'telling a user who already connected a provider to "connect a provider" is unactionable and dishonest',
   );
-  assert.match(
-    snap.fallbackReason ?? '',
-    /connect.*(different|another).*transcri|transcri.*connect/i,
-    'the fallback reason must name the real remedy: connect a DIFFERENT provider that can transcribe',
-  );
+  // No `fallbackReason` assertion here on purpose: that field (and its
+  // "connect a different provider that can transcribe" copy) has been
+  // removed — see capabilities.ts's doc comment and the guard test below.
+  // The human-readable explanation for this exact code now lives only in
+  // Voice.tsx's `BLOCKING_ISSUE_MESSAGES.ProviderCannotTranscribe`.
 });
 
 test('a provider that IS configured and capable reports neither provider issue', () => {
@@ -309,4 +308,65 @@ test('the joined provider facts flow straight into the capability snapshot', () 
     }),
   );
   assert.ok(snap.blockingIssues.includes('ProviderCannotTranscribe'));
+});
+
+// ---------------------------------------------------------------------------
+// Minor fix, Defect 2: `resolveCapabilities` used to return a free-text
+// `fallbackReason` field whose provider-related branches said "connect one
+// to enable it" / "connect a different provider that can transcribe to use
+// the microphone" — the exact forbidden imperative this branch removes: it
+// is false for a user who has already connected a provider, and
+// unactionable regardless, because nothing in this build calls a
+// transcription endpoint yet (see `Voice.tsx`'s Ruling 1 doc comment).
+// Nothing ever read the field (`Voice.tsx` renders its own
+// `BLOCKING_ISSUE_MESSAGES` instead), which is exactly why it was
+// dangerous: the next person wiring up a fallback message would reach for
+// the obviously-named field and reintroduce the copy. The field itself has
+// been deleted rather than reworded — see capabilities.ts's doc comment.
+//
+// This guard is the tripwire against that reintroduction. It reads the
+// module's REAL source text rather than re-testing `resolveCapabilities`'s
+// return value, because the danger is a NEW field or string literal
+// appearing in the module, not a specific field name persisting.
+// ---------------------------------------------------------------------------
+
+const CAPABILITIES_SOURCE_URL = new URL('../src/renderer/audio/capabilities.ts', import.meta.url);
+
+/**
+ * Strips comments before scanning. This module's own doc comments
+ * legitimately QUOTE the forbidden phrase ("connect a provider") as an
+ * example of what NOT to write (see `providerConfigured`'s and
+ * `VoiceBlockingIssue`'s doc comments, and the new doc comment on
+ * `resolveCapabilities` explaining the deletion) — the guard must fire on
+ * the phrase reappearing in real CODE (a string literal a user could
+ * actually see), not on prose discussing why it is forbidden.
+ */
+function capabilitiesCodeWithoutComments(): string {
+  const source = readFileSync(CAPABILITIES_SOURCE_URL, 'utf8');
+  return source
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .replace(/(^|[^:'"])\/\/.*$/gm, '$1');
+}
+
+test('guard sanity: the doc comments really do quote the forbidden phrase, and stripping really does remove them', () => {
+  const raw = readFileSync(CAPABILITIES_SOURCE_URL, 'utf8');
+  assert.ok(
+    raw.includes('connect a provider'),
+    'if this doc-comment wording ever changes, the guard below needs re-checking against a real positive case',
+  );
+  assert.ok(
+    !capabilitiesCodeWithoutComments().includes('connect a provider'),
+    'comment-stripping failed to remove the doc comment — the real guard below would then be testing nothing',
+  );
+});
+
+test('guard: no forbidden "connect ... provider" imperative copy in capabilities.ts source code', () => {
+  const code = capabilitiesCodeWithoutComments();
+  assert.ok(
+    !/connect\s+(one|a)\b/i.test(code),
+    'this desktop build has no code path that calls a transcription endpoint at all — telling a user to '
+    + '"connect one"/"connect a ..." provider is false for anyone who already connected one, and '
+    + "unactionable regardless; a fallback message belongs in Voice.tsx's BLOCKING_ISSUE_MESSAGES, a total "
+    + 'Record<VoiceBlockingIssue, string> that forces an honest, non-imperative sentence per issue',
+  );
 });

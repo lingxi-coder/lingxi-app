@@ -1030,3 +1030,161 @@ test('the audio responder falls through to a live window when the first is destr
     'the request must fall through to a live window, not be dropped into a 5-second stall',
   );
 });
+
+// ---------------------------------------------------------------------------
+// A responder destroyed AFTER dispatch must FAIL the request, not strand it.
+//
+// The two tests above prove a window already destroyed at dispatch time is
+// skipped. The dangerous case is the other one, and a user reaches it in two
+// steps: start a recording, close the window. `main/index.ts` deliberately
+// keeps the app alive on macOS when the last window closes ("the bridge stays
+// available for reopen"), so the engine's parked call simply has no renderer
+// left that can answer it — and nothing fails it. It hangs for the whole
+// 30-second deadline, silently.
+//
+// Broadcasting used to give this accidental cover: permission and
+// computer-access requests reach every window, so a second one could answer.
+// Electing a single audio responder removed that second chance, which makes
+// this case the responsibility of the code that elected.
+// ---------------------------------------------------------------------------
+
+function audioRuntime(sessionId: string) {
+  return new SessionRuntime({
+    launchConfig: { workspace: '/workspace', sessionId, trusted: true },
+    sessionId,
+    projectPath: '/workspace',
+    envelopeEvents: true,
+  } as any);
+}
+
+const START_RECORDING = {
+  type: 'audio_request',
+  request_id: 77,
+  op: { type: 'start_recording', sample_rate_hz: 16000, format: 'webm' },
+};
+
+test('a responder destroyed after dispatch hands its request to another live window', () => {
+  const first: Array<{ channel: string; payload: unknown }> = [];
+  const second: Array<{ channel: string; payload: unknown }> = [];
+  const runtime = audioRuntime('66666666-7777-4888-8999-aaaaaaaaaaaa');
+  const chosen = fakeWebContents(first);
+  const spare = fakeWebContents(second);
+  runtime.registerWindow(chosen as any, 'app://desktop/index.html');
+  runtime.registerWindow(spare as any, 'app://desktop/index.html');
+
+  (runtime as any).broadcastClientEvent(START_RECORDING);
+  assert.equal(eventsFor(first).length, 1, 'the first window was elected');
+  assert.equal(eventsFor(second).length, 0);
+
+  // The elected window goes away while the engine is still waiting.
+  chosen.isDestroyed = () => true;
+  runtime.unregisterWindow(chosen as any);
+
+  const rerouted = eventsFor(second).filter((event: any) => event.type === 'audio_request');
+  assert.equal(rerouted.length, 1, 'the request must move to a window that can still answer it');
+  assert.equal((rerouted[0] as any).request_id, 77, 'rerouted under the same request id the engine is waiting on');
+});
+
+test('a responder destroyed with no window left fails the request instead of stranding it', () => {
+  const sent: Array<{ channel: string; payload: unknown }> = [];
+  const commands: unknown[] = [];
+  const runtime = audioRuntime('77777777-8888-4999-8aaa-bbbbbbbbbbbb');
+  (runtime as any).client = { sendCommand: (command: unknown) => { commands.push(command); } };
+  const only = fakeWebContents(sent);
+  runtime.registerWindow(only as any, 'app://desktop/index.html');
+
+  (runtime as any).broadcastClientEvent(START_RECORDING);
+  assert.equal(eventsFor(sent).length, 1);
+
+  only.isDestroyed = () => true;
+  runtime.unregisterWindow(only as any);
+
+  assert.equal(commands.length, 1, 'the engine must be answered by main when no renderer can answer');
+  assert.deepEqual(commands[0], {
+    type: 'audio_response',
+    request_id: 77,
+    result: {
+      type: 'failed',
+      kind: 'unavailable',
+      message: 'the desktop window that was asked to perform this audio operation closed before it could answer',
+    },
+  });
+});
+
+test('an answered request is forgotten, so a later window close does not fail it twice', async () => {
+  const sent: Array<{ channel: string; payload: unknown }> = [];
+  const commands: unknown[] = [];
+  const runtime = audioRuntime('88888888-9999-4aaa-8bbb-cccccccccccc');
+  (runtime as any).client = { sendCommand: (command: unknown) => { commands.push(command); } };
+  // `dispatchCommand` forwards through `requireClient`, which refuses an
+  // untrusted workspace; this fixture never runs a real launch, so grant the
+  // trust the real flow would have established before any turn could start.
+  (runtime as any).activeWorkspace = '/workspace';
+  (runtime as any).refreshAccessState = () => { (runtime as any).activeWorkspaceTrusted = true; };
+  const only = fakeWebContents(sent);
+  runtime.registerWindow(only as any, 'app://desktop/index.html');
+
+  (runtime as any).broadcastClientEvent(START_RECORDING);
+  await runtime.dispatchCommand({ type: 'audio_response', request_id: 77, result: { type: 'ok' } });
+
+  only.isDestroyed = () => true;
+  runtime.unregisterWindow(only as any);
+
+  assert.deepEqual(
+    commands.map((command: any) => command.result?.type),
+    ['ok'],
+    'only the renderer answer may reach the engine; a second, invented failure would race a real reply',
+  );
+});
+
+test('a turn ending forgets outstanding audio requests', () => {
+  const sent: Array<{ channel: string; payload: unknown }> = [];
+  const commands: unknown[] = [];
+  const runtime = audioRuntime('99999999-aaaa-4bbb-8ccc-dddddddddddd');
+  (runtime as any).client = { sendCommand: (command: unknown) => { commands.push(command); } };
+  const only = fakeWebContents(sent);
+  runtime.registerWindow(only as any, 'app://desktop/index.html');
+
+  (runtime as any).broadcastClientEvent(START_RECORDING);
+  // The engine drains its own pending audio requests when a turn ends, so a
+  // window closing afterwards must not answer a request nobody is waiting on.
+  (runtime as any).clearTurnInteractions();
+
+  only.isDestroyed = () => true;
+  runtime.unregisterWindow(only as any);
+
+  assert.deepEqual(commands, [], 'no answer may be sent for a request the engine has already dropped');
+});
+
+test('a window detached while still alive does not have its own request handed back to it', () => {
+  // `unregisterWindow` is not only reached from the `destroyed` event:
+  // `SessionRuntimeManager.detachWindow` also calls it during `dispose`, and
+  // for a window that navigated away — in both cases `isDestroyed()` is still
+  // false. If the rescue ran before the target was dropped, the election would
+  // hand the request straight back to the window that is leaving, and the
+  // engine would park exactly as before. This is the ordering test; without it
+  // swapping those two lines passes every other assertion in this file.
+  const leaving: Array<{ channel: string; payload: unknown }> = [];
+  const spare: Array<{ channel: string; payload: unknown }> = [];
+  const runtime = audioRuntime('aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee');
+  const departing = fakeWebContents(leaving);
+  runtime.registerWindow(departing as any, 'app://desktop/index.html');
+  runtime.registerWindow(fakeWebContents(spare) as any, 'app://desktop/index.html');
+
+  (runtime as any).broadcastClientEvent(START_RECORDING);
+  assert.equal(eventsFor(leaving).length, 1, 'the departing window was elected first');
+
+  // Still "alive" as far as Electron is concerned — just no longer a target.
+  runtime.unregisterWindow(departing as any);
+
+  assert.equal(
+    eventsFor(leaving).filter((event: any) => event.type === 'audio_request').length,
+    1,
+    'the departing window must not be asked a second time; it is on its way out',
+  );
+  assert.equal(
+    eventsFor(spare).filter((event: any) => event.type === 'audio_request').length,
+    1,
+    'the request must move to the window that is staying',
+  );
+});

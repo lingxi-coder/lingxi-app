@@ -273,6 +273,20 @@ const TRANSCRIPT_REPLAY_BASE_EVENTS = new Set<ClientEvent['type']>([
  */
 const SINGLE_RESPONDER_EVENTS = new Set<ClientEvent['type']>(['audio_request']);
 
+/**
+ * How many single-responder requests may be tracked at once. Real use has one
+ * or two in flight; past this the request is still delivered but no longer
+ * tracked, which is exactly the behaviour before tracking existed - a bound
+ * that degrades rather than one that starts refusing real work.
+ */
+const MAX_OUTSTANDING_RESPONDER_REQUESTS = 32;
+
+/** The correlation id of a single-responder event, or `null` if it carries none. */
+function singleResponderRequestId(event: ClientEvent): number | null {
+  const requestId = (event as { request_id?: unknown }).request_id;
+  return Number.isSafeInteger(requestId) && (requestId as number) >= 0 ? requestId as number : null;
+}
+
 const TRANSCRIPT_REPLAY_EVENTS = new Set<ClientEvent['type']>([
   'turn_started',
   'turn_ended',
@@ -351,6 +365,20 @@ export class SessionRuntime {
   private eventSequence = 0;
   private replayEvents: SequencedRuntimeEventEnvelope<ClientEvent>[] = [];
   private readonly targets = new Map<WebContents, Set<string>>();
+  /**
+   * Single-responder requests the engine is currently parked on, and the
+   * window each was handed to.
+   *
+   * Main has to carry this because electing one responder removed the
+   * accidental redundancy broadcasting used to provide: a permission request
+   * reaches every window, so another can answer it, but an audio request has
+   * exactly one addressee and no second chance. If that window dies while the
+   * engine waits, only main knows enough to reroute or to fail the call - the
+   * dead renderer cannot, and the engine has no idea a window ever existed.
+   * The event itself is kept, not just the id, because rerouting means asking
+   * the same question again.
+   */
+  private readonly outstandingResponderRequests = new Map<number, { event: ClientEvent; responder: WebContents }>();
   private readonly diagnostics: DiagnosticBuffer;
   private startPromise: Promise<void> | null = null;
 
@@ -453,7 +481,15 @@ export class SessionRuntime {
       // SINGLE_RESPONDER_EVENTS. `sendClientEvent` handles both the
       // enveloped and bare wire shapes, so this needs no second branch.
       const responder = this.responderTarget();
-      if (responder) this.sendClientEvent(responder, event, false);
+      if (!responder) return;
+      this.sendClientEvent(responder, event, false);
+      const requestId = singleResponderRequestId(event);
+      if (requestId === null) return;
+      if (this.outstandingResponderRequests.size >= MAX_OUTSTANDING_RESPONDER_REQUESTS) {
+        this.diagnostics.add('warn', 'host', 'too many outstanding audio requests to track');
+        return;
+      }
+      this.outstandingResponderRequests.set(requestId, { event, responder });
       return;
     }
     const envelope = this.eventEnvelope(event, true);
@@ -479,7 +515,55 @@ export class SessionRuntime {
   }
 
   unregisterWindow(webContents: WebContents): void {
+    // Drop the target FIRST, so `responderTarget()` below cannot hand the
+    // request back to the window that is going away.
     this.targets.delete(webContents);
+    this.reassignResponderRequests(webContents);
+  }
+
+  /**
+   * Rescues every request the lost window was going to answer: hands it to
+   * another live window if there is one, and otherwise answers the engine
+   * from here.
+   *
+   * Answering from main is not a nicety. `main/index.ts` keeps the app alive
+   * on macOS when the last window closes, so "start a recording, close the
+   * window" leaves the engine parked with no renderer in existence that could
+   * ever reply. Without this it waits out its whole deadline and fails with
+   * nothing to explain it; with it the failure is immediate and says what
+   * happened.
+   */
+  private reassignResponderRequests(lost: WebContents): void {
+    for (const [requestId, pending] of [...this.outstandingResponderRequests]) {
+      if (pending.responder !== lost) continue;
+      this.outstandingResponderRequests.delete(requestId);
+      const next = this.responderTarget();
+      if (next) {
+        this.outstandingResponderRequests.set(requestId, { event: pending.event, responder: next });
+        this.sendClientEvent(next, pending.event, false);
+        continue;
+      }
+      this.failResponderRequest(
+        requestId,
+        'the desktop window that was asked to perform this audio operation closed before it could answer',
+      );
+    }
+  }
+
+  /** Answers a parked engine request from main, because no renderer can. */
+  private failResponderRequest(requestId: number, message: string): void {
+    const command: ClientCommand = {
+      type: 'audio_response',
+      request_id: requestId,
+      result: { type: 'failed', kind: 'unavailable', message },
+    };
+    try {
+      this.client?.sendCommand(command);
+    } catch (error) {
+      // The transport may already be gone, in which case the engine's own
+      // drain will fail the call. Never let this throw out of window teardown.
+      this.diagnostics.add('warn', 'host', error);
+    }
   }
 
   private clearPendingAskUserQuestion(requestId: number): void {
@@ -490,6 +574,10 @@ export class SessionRuntime {
   private clearTurnInteractions(): void {
     this.pendingPermissionIds.clear();
     this.pendingComputerAccessIds.clear();
+    // The engine drops its own parked audio requests when a turn ends
+    // (`AudioBridge`'s drain), so a window closing later must not answer one
+    // nobody is waiting on any more.
+    this.outstandingResponderRequests.clear();
     for (const requestId of [...this.pendingAskUserQuestionIds]) {
       this.clearPendingAskUserQuestion(requestId);
     }
@@ -1100,6 +1188,12 @@ export class SessionRuntime {
       if (!accepted) {
         throw new Error('Bypass Permissions mode was not accepted');
       }
+    }
+    if (validated.type === 'audio_response') {
+      // The renderer answered; nothing left for a window closure to rescue.
+      // Forgetting BEFORE the forward matters: a failure invented afterwards
+      // would race a real reply the engine has already accepted.
+      this.outstandingResponderRequests.delete(validated.request_id);
     }
     this.requireClient().sendCommand(validated);
   }

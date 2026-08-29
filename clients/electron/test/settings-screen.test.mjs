@@ -191,6 +191,7 @@ test('switching layers re-seeds a dirty draft field instead of leaving stale tex
   const {
     toolsInitial, toolsDirty, toolsAfterSwitch,
     configInitial, configDirty, configAfterSwitch,
+    enabledPluginsToggle,
   } = await runScenario('layer-reseed');
 
   assert.equal(toolsInitial, 'Bash', 'the user layer set enabledTools to ["Bash"]');
@@ -205,6 +206,41 @@ test('switching layers re-seeds a dirty draft field instead of leaving stale tex
   assert.equal(
     configAfterSwitch, JSON.stringify({ from: 'project' }, null, 2),
     'switching from user to project must re-seed the SAME plugin id\'s textarea with project\'s own config, not the dirty text or the stale user-layer value',
+  );
+
+  // Task 18 fix round 2, Critical: the THIRD instance of the same defect —
+  // `PluginToggleRow`'s `useRef` primed on `user`'s truthy config object,
+  // then (without the fix) surviving the switch to `project` where the
+  // same id is `false`. Toggling it ON in `project` must write a fresh
+  // `true`, not `user`'s remembered `{config:"A"}`.
+  assert.ok(enabledPluginsToggle, 'toggling the plugin on in the project layer must dispatch a write');
+  assert.equal(enabledPluginsToggle.destination, 'project', 'the write must target the layer actually being edited');
+  assert.deepEqual(
+    enabledPluginsToggle.patch, { enabledPlugins: { 'a@b': true } },
+    'toggling on in the project layer must write a fresh `true`, not the user layer\'s remembered config object',
+  );
+});
+
+test('switching layers remounts the page component (key={editingLayer}), independent of any one page\'s own re-seed effect', async () => {
+  // Task 18 fix round 2: pins the STRUCTURAL fix directly. Detected via DOM
+  // node identity (an expando property surviving or not), not focus —
+  // clicking the layer tab to cause the switch would itself move focus to
+  // the tab button regardless of remounting.
+  const { markerBeforeSwitch, markerAfterSwitch, markerAfterUnrelatedRerender } = await runScenario('remount-on-layer-switch');
+
+  assert.equal(markerBeforeSwitch, 'sentinel-before-switch', 'sanity check: the marker must attach before any switch');
+  assert.equal(
+    markerAfterSwitch, null,
+    'switching editingLayer must remount the page — the marker must NOT survive on a fresh DOM node',
+  );
+
+  // Negative control: an unrelated re-render (a fresh snapshot, same page,
+  // same layer) must NOT be mistaken for a remount by this same detection
+  // mechanism — otherwise this test would trivially pass for the wrong
+  // reason (a marker that never survives ANY re-render, remount or not).
+  assert.equal(
+    markerAfterUnrelatedRerender, 'sentinel-no-layer-change',
+    'a re-render that does not change editingLayer must NOT remount the page — the marker must survive',
   );
 });
 

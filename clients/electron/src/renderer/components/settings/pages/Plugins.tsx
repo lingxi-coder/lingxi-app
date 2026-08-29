@@ -72,6 +72,7 @@ export function Plugins({ bridge, snapshot, editingLayer, onJumpToLayer }: PageC
             key={id}
             id={id}
             value={enabledPlugins[id]}
+            editingLayer={editingLayer}
             saving={saving === 'enabledPlugins'}
             onChange={(next) => write({ enabledPlugins: { ...enabledPlugins, [id]: next } }, 'enabledPlugins')}
             onRemove={() => {
@@ -154,7 +155,7 @@ export function Plugins({ bridge, snapshot, editingLayer, onJumpToLayer }: PageC
               type="button"
               disabled={saving === 'additionalMarketplaces' || !newMarketplaceName.trim()}
               onClick={() => {
-                const parsed = parseJsonObjectInput(newMarketplaceSource);
+                const parsed = parseJsonObjectInput(newMarketplaceSource, '市场来源');
                 if ('error' in parsed) { setSaveError(parsed.error); return; }
                 write({ additionalMarketplaces: { ...marketplaces, [newMarketplaceName.trim()]: parsed.config } }, 'additionalMarketplaces');
                 setNewMarketplaceName('');
@@ -185,15 +186,32 @@ export function Plugins({ bridge, snapshot, editingLayer, onJumpToLayer }: PageC
  * value when toggled back on, rather than always writing `true`.
  */
 function PluginToggleRow({
-  id, value, saving, onChange, onRemove,
-}: { id: string; value: unknown; saving: boolean; onChange(next: unknown): void; onRemove(): void }) {
+  id, value, editingLayer, saving, onChange, onRemove,
+}: { id: string; value: unknown; editingLayer: EditableLayer; saving: boolean; onChange(next: unknown): void; onRemove(): void }) {
   const t = useT();
   const lastEnabledValue = useRef<unknown>(value !== false ? value : true);
   if (value !== false) lastEnabledValue.current = value;
+  // Task 18 fix round 2: belt-and-suspenders alongside `key={editingLayer}`
+  // on the PAGE component in `SettingsScreen.tsx` — that key already
+  // remounts this row (and everything else on the page) on a layer switch,
+  // which alone would reset this `ref`'s closure. This explicit reset
+  // exists so the row is STILL correct even if a future edit removes that
+  // key without understanding why it's there, the same reasoning
+  // `PluginConfigRow`'s sibling effect below already carries. Without it,
+  // this is exactly the bug round 2 was opened for: the ref primes to a
+  // truthy value in layer A (e.g. a config object), the SAME plugin id is
+  // `false` in layer B, switching layers does not clear a value of `false`
+  // (the render-time sync above only fires `value !== false`), and
+  // toggling on in layer B would write layer A's remembered value into
+  // layer B instead of a fresh `true`.
+  useEffect(() => {
+    lastEnabledValue.current = value !== false ? value : true;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [editingLayer]);
   const enabled = value !== false;
   return (
     <Row align="center" title={<span className="mono" style={{ fontSize: 12.5 }}>{id}</span>} desc="key 格式为 plugin@marketplace">
-      <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+      <div data-testid={`plugin-toggle-${id}`} style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
         <Toggle
           value={enabled}
           onChange={saving ? () => undefined : (next) => onChange(next ? lastEnabledValue.current : false)}
@@ -251,7 +269,7 @@ function PluginConfigRow({
             type="button"
             disabled={saving}
             onClick={() => {
-              const parsed = parseJsonObjectInput(text);
+              const parsed = parseJsonObjectInput(text, '插件配置');
               if ('error' in parsed) { setError(parsed.error); return; }
               setError(null);
               onSave(parsed.config);

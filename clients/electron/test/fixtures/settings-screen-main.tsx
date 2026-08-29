@@ -26,6 +26,7 @@ function Fixture() {
   const [closeCalls, setCloseCalls] = useState(0);
   const [restartShouldFail, setRestartShouldFail] = useState<string | null>(null);
   const [lastPermissionRuleCall, setLastPermissionRuleCall] = useState<unknown>(null);
+  const [lastEngineSettingsPatch, setLastEngineSettingsPatch] = useState<unknown>(null);
 
   // `restartBridge` below must stay referentially stable (see the next
   // comment), so it cannot close over `restartShouldFail` state directly —
@@ -49,6 +50,14 @@ function Fixture() {
   // returns the right thing in isolation.
   const updatePermissionRules = useCallback(async (destination: string, behavior: string, add: string[], remove: string[]) => {
     setLastPermissionRuleCall({ destination, behavior, add, remove });
+  }, []);
+  // Task 18 fix round 2: records its call so a scenario can prove WHICH
+  // layer a write actually targets and WHAT value it carries — the
+  // `PluginToggleRow` ref-across-layer-switch regression this round fixes
+  // is only visible by inspecting the patch's VALUE, not just that a write
+  // happened.
+  const updateEngineSettings = useCallback(async (destination: string, patch: Record<string, unknown>) => {
+    setLastEngineSettingsPatch({ destination, patch });
   }, []);
 
   const bridge = {
@@ -90,7 +99,7 @@ function Fixture() {
     // Write-side commands for Task 18's pages — none of these scenarios
     // click a save/add/remove button on them, but they are here so a future
     // scenario that does doesn't have to rediscover this same crash.
-    updateEngineSettings: noopAsyncVoid,
+    updateEngineSettings,
     updatePermissionRules,
     setDefaultPermissionMode: noopAsyncVoid,
     updateWorkspaceDirectories: noopAsyncVoid,
@@ -153,6 +162,24 @@ function Fixture() {
         field.dispatchEvent(new Event('input', { bubbles: true }));
       },
       getFieldValue: (selector: string) => (document.querySelector(selector) as HTMLInputElement | HTMLTextAreaElement | null)?.value ?? null,
+      // Task 18 fix round 2: proves a REMOUNT happened (the DOM node itself
+      // was destroyed and recreated), as distinct from an ordinary
+      // prop/value update on the SAME node — which is exactly the
+      // distinction `key={editingLayer}` (`SettingsScreen.tsx`) exists to
+      // draw. An expando property survives React patching an existing DOM
+      // node's attributes/value; it does NOT survive React tearing the node
+      // down and creating a fresh one for a changed `key`. Deliberately NOT
+      // focus-based: clicking the layer-switcher tab to change layers would
+      // itself move `document.activeElement` to the tab button regardless
+      // of whether the PAGE remounted, so focus can't discriminate here.
+      markElement: (selector: string, value: string) => {
+        const el = document.querySelector(selector) as (Element & { __lingxiTestMarker?: string }) | null;
+        if (el) el.__lingxiTestMarker = value;
+      },
+      readElementMarker: (selector: string) => {
+        const el = document.querySelector(selector) as (Element & { __lingxiTestMarker?: string }) | null;
+        return el ? (el.__lingxiTestMarker ?? null) : 'element-not-found';
+      },
       setMalformedSnapshot: () => {
         setSettingsSnapshotEvent({
           type: 'settings_snapshot',
@@ -188,10 +215,11 @@ function Fixture() {
         refreshCalls,
         closeCalls,
         lastPermissionRuleCall,
+        lastEngineSettingsPatch,
       }),
     };
     return () => { delete window.__settingsScreenTest; };
-  }, [restartCalls, refreshCalls, closeCalls, lastPermissionRuleCall]);
+  }, [restartCalls, refreshCalls, closeCalls, lastPermissionRuleCall, lastEngineSettingsPatch]);
 
   return (
     <Theme.Provider value={tokens('light')}>
@@ -224,6 +252,8 @@ declare global {
       clickLayerTab(layer: string): void;
       setFieldValue(selector: string, value: string): void;
       getFieldValue(selector: string): string | null;
+      markElement(selector: string, value: string): void;
+      readElementMarker(selector: string): string | null;
       setMalformedSnapshot(): void;
       clickRestart(): void;
       close(): void;
@@ -251,6 +281,7 @@ declare global {
         refreshCalls: number;
         closeCalls: number;
         lastPermissionRuleCall: unknown;
+        lastEngineSettingsPatch: unknown;
       };
     };
   }

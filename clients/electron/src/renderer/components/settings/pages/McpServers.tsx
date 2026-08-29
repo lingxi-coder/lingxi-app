@@ -81,7 +81,7 @@ export function McpServers({ bridge }: PageContentProps) {
   const handleUpsert = () => {
     const trimmedName = name.trim();
     if (!trimmedName) { setFormError('需要一个服务器名称。'); return; }
-    const parsed = parseJsonObjectInput(configText);
+    const parsed = parseJsonObjectInput(configText, '服务器配置');
     if ('error' in parsed) { setFormError(parsed.error); return; }
     setFormError(null);
     setSaving(true);

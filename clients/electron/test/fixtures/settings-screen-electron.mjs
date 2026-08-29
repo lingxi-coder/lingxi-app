@@ -199,7 +199,32 @@ async function runLayerReseedScenario(webContents) {
   await webContents.executeJavaScript('window.__settingsScreenTest.clickLayerTab("project")');
   const configAfterSwitch = await webContents.executeJavaScript('window.__settingsScreenTest.getFieldValue(\'[aria-label="a@b 配置"]\')');
 
-  return { toolsInitial, toolsDirty, toolsAfterSwitch, configInitial, configDirty, configAfterSwitch };
+  // Task 18 fix round 2, Critical: the THIRD instance of the same defect
+  // class — `PluginToggleRow`'s `useRef` remembers the last truthy
+  // `enabledPlugins[id]` it saw and (before this round's fix) was never
+  // reset on a layer switch. Priming the ref on a TRUTHY (config-object)
+  // value in `user`, then switching to `project` where the same id is
+  // `false`, then toggling it ON in `project` must write a fresh `true` —
+  // NOT `user`'s remembered config object — into `project`. Unlike the
+  // `ConcatDedup` case above this doesn't duplicate irrecoverably
+  // (`enabledPlugins` is `DeepMerge`), so the only way to see the bug is to
+  // inspect the VALUE actually written, via the `updateEngineSettings` mock.
+  await webContents.executeJavaScript('window.__settingsScreenTest.clickLayerTab("user")');
+  await webContents.executeJavaScript(
+    'window.__settingsScreenTest.setLayeredSnapshot({ user: { enabledPlugins: { "a@b": { config: "A" } } }, project: { enabledPlugins: { "a@b": false } } })',
+  );
+  await webContents.executeJavaScript('window.__settingsScreenTest.selectPage("plugins")');
+  await webContents.executeJavaScript('window.__settingsScreenTest.clickLayerTab("project")');
+  await webContents.executeJavaScript(
+    'document.querySelector(\'[data-testid="plugin-toggle-a@b"] button\').click()',
+  );
+  const afterToggleOnInProject = await webContents.executeJavaScript('window.__settingsScreenTest.state()');
+  const enabledPluginsToggle = afterToggleOnInProject.lastEngineSettingsPatch;
+
+  return {
+    toolsInitial, toolsDirty, toolsAfterSwitch, configInitial, configDirty, configAfterSwitch,
+    enabledPluginsToggle,
+  };
 }
 
 async function runPermissionRuleDispatchScenario(webContents) {
@@ -220,6 +245,61 @@ async function runPermissionRuleDispatchScenario(webContents) {
   );
   const state = await webContents.executeJavaScript('window.__settingsScreenTest.state()');
   return { lastPermissionRuleCall: state.lastPermissionRuleCall };
+}
+
+async function runRemountOnLayerSwitchScenario(webContents) {
+  // Task 18 fix round 2: pins the STRUCTURAL fix itself
+  // (`key={editingLayer}` on the page component in `SettingsScreen.tsx`)
+  // rather than any one page's local-state symptom. Three different local-
+  // state mechanisms (a `useState` seeded once, a `useRef` that survived a
+  // switch, and whatever the next page invents) have now reproduced the
+  // same cross-layer-fork defect; the fix that makes the CLASS
+  // unrepresentable is remounting the page on a layer change, and this is
+  // the test that fails if that `key` is ever removed, independent of
+  // whether any individual page also happens to carry its own
+  // `useEffect([editingLayer])` belt-and-suspenders fix.
+  //
+  // Detects a remount via DOM NODE IDENTITY (an expando property stashed
+  // directly on the element), not via focus: clicking the layer-switcher
+  // tab to CAUSE the switch would itself move `document.activeElement` to
+  // the tab button regardless of whether the page remounted, so a
+  // focus-based check cannot tell the two apart.
+  await webContents.executeJavaScript('window.__settingsScreenTest.setHasProject(true)');
+  await webContents.executeJavaScript('window.__settingsScreenTest.selectPage("tools-agent")');
+  await webContents.executeJavaScript(
+    'window.__settingsScreenTest.markElement(\'[aria-label="enabledTools"]\', "sentinel-before-switch")',
+  );
+  const markerBeforeSwitch = await webContents.executeJavaScript(
+    'window.__settingsScreenTest.readElementMarker(\'[aria-label="enabledTools"]\')',
+  );
+  await webContents.executeJavaScript('window.__settingsScreenTest.clickLayerTab("project")');
+  const markerAfterSwitch = await webContents.executeJavaScript(
+    'window.__settingsScreenTest.readElementMarker(\'[aria-label="enabledTools"]\')',
+  );
+
+  // Negative control, in the SAME scenario run: an ordinary re-render that
+  // changes PROPS but NEITHER the page NOR `editingLayer` (a fresh settings
+  // snapshot arriving while the user stays put) must NOT be mistaken for a
+  // remount by this same detection mechanism — otherwise this test would
+  // trivially pass for the wrong reason (a marker that never survives ANY
+  // re-render, remount or not). Deliberately NOT "navigate away and back":
+  // `body`'s `<Component>` element has a DIFFERENT `Component` value
+  // (`ToolsAgent` vs `Diagnostics`) at the same JSX position when the PAGE
+  // changes, which React treats as a type change and unmounts regardless
+  // of `key` — that would remount for a reason that has nothing to do with
+  // the fix under test here, producing a false "remounted" result for the
+  // wrong reason.
+  await webContents.executeJavaScript(
+    'window.__settingsScreenTest.markElement(\'[aria-label="enabledTools"]\', "sentinel-no-layer-change")',
+  );
+  await webContents.executeJavaScript(
+    'window.__settingsScreenTest.setLayeredSnapshot({ project: { enabledTools: ["Read"] } })',
+  );
+  const markerAfterUnrelatedRerender = await webContents.executeJavaScript(
+    'window.__settingsScreenTest.readElementMarker(\'[aria-label="enabledTools"]\')',
+  );
+
+  return { markerBeforeSwitch, markerAfterSwitch, markerAfterUnrelatedRerender };
 }
 
 async function runFocusTrapScenario(webContents) {
@@ -271,6 +351,7 @@ async function main() {
       : scenario === 'page-content' ? await runPageContentScenario(webContents)
       : scenario === 'layer-reseed' ? await runLayerReseedScenario(webContents)
       : scenario === 'permission-rule-dispatch' ? await runPermissionRuleDispatchScenario(webContents)
+      : scenario === 'remount-on-layer-switch' ? await runRemountOnLayerSwitchScenario(webContents)
       : await runLayerSwitcherScenario(webContents);
     process.stdout.write(`${JSON.stringify(result)}\n`);
   } finally {

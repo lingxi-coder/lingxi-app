@@ -183,6 +183,25 @@ test('parseJsonObjectInput accepts a JSON object and refuses everything else', (
   assert.ok('error' in scalar);
 });
 
+test('parseJsonObjectInput names what kind of config failed, when a caller says so', () => {
+  // Task 18 fix round 2, "Also": consolidating this parser (round 1) into
+  // one generic function silently dropped `McpServers.tsx`'s original,
+  // more specific "服务器配置必须是一个 JSON 对象" wording in favour of a
+  // bare "配置必须是一个 JSON 对象" that no longer named what it was
+  // validating. Restored via an optional `label`, defaulting to the
+  // generic noun so a caller that does not care still gets a sentence.
+  const generic = parseJsonObjectInput('[1,2,3]');
+  assert.ok('error' in generic);
+  assert.match((generic as { error: string }).error, /^配置必须是一个 JSON 对象/);
+
+  const server = parseJsonObjectInput('[1,2,3]', '服务器配置');
+  assert.ok('error' in server);
+  assert.match((server as { error: string }).error, /^服务器配置必须是一个 JSON 对象/);
+
+  const plugin = parseJsonObjectInput('[1,2,3]', '插件配置');
+  assert.match((plugin as { error: string }).error, /^插件配置必须是一个 JSON 对象/);
+});
+
 // ---------------------------------------------------------------------------
 // Registration: all six pages must be reachable via the nav, and `nav.ts`'s
 // own `layered`/`needsEngine` data properties must match what each page

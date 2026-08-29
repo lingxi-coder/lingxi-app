@@ -491,7 +491,25 @@ export function SettingsScreen({
     const Component = PAGE_CONTENT[activePage.id];
     body = Component
       ? (
+        // `key={editingLayer}` (Task 18 fix round 2): this defect class —
+        // local draft state (form text, a ref, whatever the next page
+        // invents) surviving a layer switch and getting written into the
+        // WRONG layer — has now appeared three times by three different
+        // mechanisms (Task 17's read-`effective`-and-write-it-back;
+        // round 1's `useState` seeded once and never re-seeded; round 1's
+        // OWN fix for that introducing a `useRef` that itself survived a
+        // layer switch). Patching each instance loses — it is always one
+        // component behind. Remounting the whole page component on a layer
+        // change makes the class unrepresentable rather than something to
+        // keep re-discovering: every `useState`/`useRef`/anything a future
+        // page invents is discarded by construction. The individual
+        // `useEffect([editingLayer])` fixes already in `ToolsAgent.tsx` /
+        // `Plugins.tsx`'s `PluginConfigRow` / `PluginToggleRow` stay in
+        // place on purpose — belt AND suspenders, so the page is still
+        // correct even if a future edit removes this `key` without
+        // understanding why it's here.
         <Component
+          key={editingLayer}
           bridge={bridge}
           snapshot={snapshot}
           editingLayer={editingLayer}

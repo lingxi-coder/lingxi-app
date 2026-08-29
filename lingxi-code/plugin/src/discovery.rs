@@ -99,9 +99,14 @@ struct RawManifest {
     /// `skills/` directory. Binary: `skills` in `PluginManifestSchema`.
     #[serde(default)]
     skills: Option<PathDecl>,
-    /// Explicitly declared command directories. Binary: `commands`.
+    /// Explicitly declared command directories, OR (commands-only) an object
+    /// map of command name to `{source|content, description?, argumentHint?,
+    /// model?, allowedTools?}`. Binary: `commands` (`Rs`, `union([path,
+    /// path[], record(string, Ds)])` — the record form is commands-only;
+    /// `skills`/`agents`/`outputStyles` stay `union([path, path[]])`, hence
+    /// the separate [`CommandsDecl`] type instead of widening [`PathDecl`].
     #[serde(default)]
-    commands: Option<PathDecl>,
+    commands: Option<CommandsDecl>,
     /// Explicitly declared agent directories. Binary: `agents`.
     #[serde(default)]
     agents: Option<PathDecl>,
@@ -161,6 +166,92 @@ impl PathDecl {
             Self::One(v) => vec![v],
             Self::Many(v) => v,
         }
+    }
+}
+
+/// The `commands` manifest field only: `union([path, path[], record(string,
+/// Ds)])` (oracle `Rs`). Forked from [`PathDecl`] rather than widening it
+/// because `skills`/`agents`/`outputStyles` stay `union([path, path[]])` —
+/// serde tries an `untagged` enum's variants in declaration order, and `Map`
+/// must come after `One`/`Many` since a JSON array/string can never satisfy
+/// `Map`'s object shape, so this ordering is unambiguous either way.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+enum CommandsDecl {
+    One(String),
+    Many(Vec<String>),
+    Map(BTreeMap<String, RawCommandEntry>),
+}
+
+/// One value of the `commands` object-map form (oracle `Ds`). Exactly one of
+/// `source` (a markdown file path) / `content` (inline markdown) must be
+/// present — enforced in [`RawCommandEntry`]'s `Deserialize` impl below so a
+/// violation fails the surrounding `serde_json::from_str::<RawManifest>` call
+/// the same way any other malformed `plugin.json` does (byte-matching the
+/// oracle's `.refine()`, which fails the WHOLE `PluginManifestSchema.parse`
+/// on one bad command entry — not just that entry).
+#[derive(Debug, Clone)]
+struct RawCommandEntry {
+    source: Option<String>,
+    /// Inline markdown body. Recognized here to accept the oracle-valid
+    /// shape (so it no longer sinks the whole plugin), but not yet
+    /// materialized into a command: `PluginManager::load_plugin`
+    /// (`plugin/src/manager.rs`, not owned by this change) always reads a
+    /// component's markdown off disk via `ComponentPath::path` and has no
+    /// slot for a file-less inline body.
+    #[allow(dead_code)]
+    content: Option<String>,
+    /// Command description override. Not yet threaded to the materialized
+    /// command (same manager.rs limitation as `content`); parsed so a
+    /// declaring plugin still loads instead of vanishing.
+    #[allow(dead_code)]
+    description: Option<String>,
+    #[allow(dead_code)]
+    argument_hint: Option<String>,
+    #[allow(dead_code)]
+    model: Option<String>,
+    #[allow(dead_code)]
+    allowed_tools: Option<Vec<String>>,
+}
+
+impl<'de> Deserialize<'de> for RawCommandEntry {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct Raw {
+            #[serde(default)]
+            source: Option<String>,
+            #[serde(default)]
+            content: Option<String>,
+            #[serde(default)]
+            description: Option<String>,
+            #[serde(rename = "argumentHint", default)]
+            argument_hint: Option<String>,
+            #[serde(default)]
+            model: Option<String>,
+            #[serde(rename = "allowedTools", default)]
+            allowed_tools: Option<Vec<String>>,
+        }
+        let raw = Raw::deserialize(deserializer)?;
+        match (&raw.source, &raw.content) {
+            (Some(_), None) | (None, Some(_)) => {}
+            _ => {
+                return Err(serde::de::Error::custom(
+                    "Command must have either \"source\" (file path) or \"content\" \
+                     (inline markdown), but not both",
+                ))
+            }
+        }
+        Ok(RawCommandEntry {
+            source: raw.source,
+            content: raw.content,
+            description: raw.description,
+            argument_hint: raw.argument_hint,
+            model: raw.model,
+            allowed_tools: raw.allowed_tools,
+        })
     }
 }
 
@@ -766,7 +857,7 @@ async fn detect_components(plugin_dir: &Path, parsed: &RawManifest) -> PluginCom
     let default_lsp_servers = load_lsp_servers(plugin_dir).await;
 
     let commands = match &parsed.commands {
-        Some(paths) => resolve_markdown_declared_paths(plugin_dir, paths.clone()).await,
+        Some(decl) => resolve_commands_declared(plugin_dir, decl.clone()).await,
         None => default_commands,
     };
     let agents = match &parsed.agents {
@@ -861,6 +952,76 @@ async fn resolve_markdown_declared_paths(plugin_dir: &Path, paths: PathDecl) -> 
                 path: abs,
                 metadata: component_root_metadata(&root),
             });
+        }
+    }
+    out.sort_by(|a, b| a.path.cmp(&b.path));
+    dedup_component_paths(&mut out);
+    out
+}
+
+/// Resolve the `commands` field for all three shapes `Rs` permits: a single
+/// path / path array behaves exactly like the other markdown component
+/// fields; the commands-only object-map form is handled by
+/// [`resolve_command_entries`].
+async fn resolve_commands_declared(plugin_dir: &Path, decl: CommandsDecl) -> Vec<ComponentPath> {
+    match decl {
+        CommandsDecl::One(raw) => {
+            resolve_markdown_declared_paths(plugin_dir, PathDecl::One(raw)).await
+        }
+        CommandsDecl::Many(raws) => {
+            resolve_markdown_declared_paths(plugin_dir, PathDecl::Many(raws)).await
+        }
+        CommandsDecl::Map(entries) => resolve_command_entries(plugin_dir, entries).await,
+    }
+}
+
+/// Resolve the object-map form of `commands` (oracle `record(string, Ds)`):
+/// each key names a slash command and its value carries either an on-disk
+/// `source` markdown file or inline `content`.
+///
+/// `source` entries resolve to a real [`ComponentPath`] exactly like an
+/// array entry, so they load correctly (the actual §6 fix — previously ANY
+/// object-form `commands` value made deserialization of the whole
+/// `plugin.json` fail, vanishing the plugin entirely regardless of shape).
+///
+/// `content` entries have no file for `PluginManager::load_plugin`
+/// (`plugin/src/manager.rs`) to read — it always reads `ComponentPath::path`
+/// off disk — so they are skipped with a diagnostic rather than silently
+/// dropped or (worse) faked into an empty file. Wiring inline command bodies
+/// (and honoring the map key as the resulting slash-command name, per the
+/// oracle's `"about" → "/plugin:about"` behavior) requires a change to that
+/// file and is deferred, not fixed here.
+async fn resolve_command_entries(
+    plugin_dir: &Path,
+    entries: BTreeMap<String, RawCommandEntry>,
+) -> Vec<ComponentPath> {
+    let mut out = Vec::new();
+    for (name, entry) in entries {
+        match entry.source {
+            Some(source) => {
+                let Some(abs) = resolve_declared_relative_path(plugin_dir, &source) else {
+                    tracing::warn!(
+                        command = %name,
+                        path = %source,
+                        "skipping invalid plugin manifest command source path"
+                    );
+                    continue;
+                };
+                let root = abs.parent().unwrap_or(plugin_dir).to_path_buf();
+                out.push(ComponentPath {
+                    path: abs,
+                    metadata: component_root_metadata(&root),
+                });
+            }
+            None => {
+                // The source/content refinement guarantees `content` is
+                // `Some` here.
+                tracing::warn!(
+                    command = %name,
+                    "skipping plugin command with inline `content` -- inline \
+                     command bodies are not yet materialized"
+                );
+            }
         }
     }
     out.sort_by(|a, b| a.path.cmp(&b.path));
@@ -1132,10 +1293,20 @@ async fn load_declared_hooks(
         Value::String(path) => {
             out.extend(load_declared_hooks_from_path(plugin_dir, &path).await);
         }
-        Value::Array(items) if items.iter().all(|v| matches!(v, Value::String(_))) => {
+        // Oracle `zs`: `hooks` is `union([path, inlineObject, array(union([path,
+        // inlineObject]))])` — each ARRAY ITEM independently is a path or an
+        // inline hooks object; a mixed array (some string paths, some inline
+        // objects) is valid. Handle every item on its own merits instead of
+        // requiring the whole array to be homogeneous, which previously threw
+        // away ALL entries (both the paths and the inline objects) the moment
+        // one item wasn't a string.
+        Value::Array(items) => {
             for item in items {
-                if let Value::String(path) = item {
-                    out.extend(load_declared_hooks_from_path(plugin_dir, &path).await);
+                match item {
+                    Value::String(path) => {
+                        out.extend(load_declared_hooks_from_path(plugin_dir, &path).await);
+                    }
+                    other => out.extend(parse_hooks_value(&other, plugin_dir)),
                 }
             }
         }
@@ -1206,10 +1377,24 @@ async fn load_declared_json_records<T, E>(
         Value::String(path) => {
             merge_declared_json_records(plugin_dir, &path, &parse, &mut out).await;
         }
-        Value::Array(items) if items.iter().all(|v| matches!(v, Value::String(_))) => {
+        // Oracle `js`/`Ws`: `mcpServers`/`lspServers` accept
+        // `array(union([path, inlineRecord]))` — each item is independently
+        // a path OR an inline `{name: config}` record, so a mixed array (some
+        // paths, some inline servers) is valid. Resolve every item on its own
+        // terms instead of requiring the whole array to be all-string, which
+        // previously dropped EVERY entry (paths included) as soon as one item
+        // was an inline object.
+        Value::Array(items) => {
             for item in items {
-                if let Value::String(path) = item {
-                    merge_declared_json_records(plugin_dir, &path, &parse, &mut out).await;
+                match item {
+                    Value::String(path) => {
+                        merge_declared_json_records(plugin_dir, &path, &parse, &mut out).await;
+                    }
+                    other => {
+                        if let Ok(parsed) = parse(&other.to_string()) {
+                            out.extend(parsed);
+                        }
+                    }
                 }
             }
         }
@@ -1634,6 +1819,180 @@ mod tests {
         assert!(
             servers.contains_key("echo"),
             "BOM-prefixed manifest-declared mcpServers file must still parse, got {servers:?}"
+        );
+    }
+
+    // ---------- §6: object-form `commands` map + mixed path/inline arrays ----------
+    //
+    // Oracle `Rs`: `commands: union([path, path[], record(string, Ds)])`. The
+    // port's `PathDecl` was `untagged {One(String), Many(Vec<String>)}` with no
+    // object-map arm, so ANY object-form `commands` value failed to
+    // deserialize `RawManifest` as a whole and `load_plugin_from_path` silently
+    // dropped the entire plugin, not just its `commands`. The fix forks a
+    // `commands`-only `CommandsDecl` carrying the object-map arm (`Ds`), while
+    // `skills`/`agents`/`outputStyles` keep the narrower `PathDecl` (the oracle
+    // does not offer a record form for those).
+
+    #[tokio::test]
+    async fn commands_object_map_resolves_source_entries_without_dropping_the_plugin() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin = tmp.path();
+        fs::create_dir_all(plugin.join(branding::PLUGIN_MANIFEST_DIR)).unwrap();
+        fs::create_dir_all(plugin.join("cmds")).unwrap();
+        fs::write(
+            plugin
+                .join(branding::PLUGIN_MANIFEST_DIR)
+                .join("plugin.json"),
+            r#"{
+                "name":"demo",
+                "commands":{
+                    "about":{"source":"./cmds/about.md","description":"About this plugin"},
+                    "inline-only":{"content":"Inline body, no file"}
+                }
+            }"#,
+        )
+        .unwrap();
+        fs::write(plugin.join("cmds/about.md"), "About body").unwrap();
+
+        let loaded = load_plugin_from_path(plugin).await;
+        assert!(
+            loaded.is_some(),
+            "an object-form `commands` map with valid Ds entries must not delete the whole plugin (the §6 defect)"
+        );
+        let (_id, manifest) = loaded.unwrap();
+        let commands: Vec<_> = manifest
+            .components
+            .commands
+            .iter()
+            .map(|c| c.path.file_name().unwrap().to_str().unwrap().to_string())
+            .collect();
+        assert_eq!(
+            commands,
+            vec!["about.md"],
+            "the `source`-backed entry must resolve to its markdown file; the \
+             `content`-only entry has no on-disk file to materialize and is \
+             skipped rather than fabricated, got {commands:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn commands_object_map_entry_with_both_source_and_content_drops_whole_plugin() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin = tmp.path();
+        fs::create_dir_all(plugin.join(branding::PLUGIN_MANIFEST_DIR)).unwrap();
+        fs::create_dir_all(plugin.join("cmds")).unwrap();
+        fs::write(
+            plugin
+                .join(branding::PLUGIN_MANIFEST_DIR)
+                .join("plugin.json"),
+            r#"{
+                "name":"demo",
+                "commands":{"bad":{"source":"./cmds/about.md","content":"Also inline"}}
+            }"#,
+        )
+        .unwrap();
+        fs::write(plugin.join("cmds/about.md"), "About body").unwrap();
+
+        let loaded = load_plugin_from_path(plugin).await;
+        assert!(
+            loaded.is_none(),
+            "a command entry with BOTH source and content violates the oracle's \
+             refine (\"Command must have either source or content, but not both\") \
+             and must fail manifest parsing like any other malformed plugin.json"
+        );
+    }
+
+    #[tokio::test]
+    async fn commands_object_map_entry_with_neither_source_nor_content_drops_whole_plugin() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin = tmp.path();
+        fs::create_dir_all(plugin.join(branding::PLUGIN_MANIFEST_DIR)).unwrap();
+        fs::write(
+            plugin
+                .join(branding::PLUGIN_MANIFEST_DIR)
+                .join("plugin.json"),
+            r#"{
+                "name":"demo",
+                "commands":{"bad":{"description":"missing both source and content"}}
+            }"#,
+        )
+        .unwrap();
+
+        let loaded = load_plugin_from_path(plugin).await;
+        assert!(
+            loaded.is_none(),
+            "a command entry with NEITHER source nor content violates the oracle's \
+             refine and must fail manifest parsing, not silently load with an empty command"
+        );
+    }
+
+    #[tokio::test]
+    async fn declared_mcp_servers_mixed_array_merges_path_and_inline_entries() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin = tmp.path();
+        fs::write(
+            plugin.join("extra-mcp.json"),
+            r#"{"file-server":{"type":"stdio","command":"echo"}}"#,
+        )
+        .unwrap();
+
+        let value = serde_json::json!([
+            "./extra-mcp.json",
+            {"inline-server": {"type": "stdio", "command": "echo"}}
+        ]);
+
+        let servers = load_declared_mcp_servers(plugin, Some(value)).await;
+        assert!(
+            servers.contains_key("file-server") && servers.contains_key("inline-server"),
+            "a mixed [path, inlineObject] array (oracle `js`) must merge BOTH the \
+             file-loaded and inline server entries, got {servers:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn declared_lsp_servers_mixed_array_merges_path_and_inline_entries() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin = tmp.path();
+        fs::write(
+            plugin.join("extra-lsp.json"),
+            r#"{"rust":{"name":"rust","command":"rust-analyzer","args":[],"env":{},"trigger_languages":["rust"],"root_dir_markers":["Cargo.toml"],"initialization_options":null,"extension_to_language":{}}}"#,
+        )
+        .unwrap();
+
+        let value = serde_json::json!([
+            "./extra-lsp.json",
+            {"python": {"name": "python", "command": "pyright", "args": [], "env": {}, "trigger_languages": ["python"], "root_dir_markers": ["pyproject.toml"], "initialization_options": null, "extension_to_language": {}}}
+        ]);
+
+        let servers = load_declared_lsp_servers(plugin, Some(value)).await;
+        assert!(
+            servers.contains_key("rust") && servers.contains_key("python"),
+            "a mixed [path, inlineObject] array (oracle `Ws`) must merge BOTH the \
+             file-loaded and inline lsp entries, got {servers:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn declared_hooks_mixed_array_merges_path_and_inline_entries() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin = tmp.path();
+        fs::write(
+            plugin.join("extra-hooks.json"),
+            r#"{"hooks":{"PreToolUse":[{"matcher":"Write","hooks":[{"type":"command","command":"./fmt.sh"}]}]}}"#,
+        )
+        .unwrap();
+
+        let value = serde_json::json!([
+            "./extra-hooks.json",
+            {"PostToolUse": [{"matcher": "Read", "hooks": [{"type": "command", "command": "./log.sh"}]}]}
+        ]);
+
+        let hooks = load_declared_hooks(plugin, Some(value)).await;
+        assert_eq!(
+            hooks.len(),
+            2,
+            "a mixed [path, inlineObject] array (oracle `zs`) must merge BOTH the \
+             file-loaded and inline hook entries, got {hooks:?}"
         );
     }
 }

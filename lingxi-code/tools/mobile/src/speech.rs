@@ -1,9 +1,24 @@
-//! `tool-speech` — the mobile-exclusive `speech` tool (ASR + TTS).
+//! `tool-speech` — the `speech` tool (ASR + TTS).
 //!
 //! Routes to `ctx.stt` (`Arc<dyn SpeechToText>`) and `ctx.tts`
-//! (`Arc<dyn TextToSpeech>`). `None` on desktop; mobile composition roots wire a
-//! native Swift / Kotlin impl via `UniFFI`. Sibling of `tool-voice` (raw mic
-//! capture) — this is recognition (`transcribe`) and synthesis (`speak`).
+//! (`Arc<dyn TextToSpeech>`). Sibling of `tool-voice` (raw mic capture) — this
+//! is recognition (`transcribe`) and synthesis (`speak`).
+//!
+//! ## Who wires those capabilities, and what they are
+//!
+//! - **Mobile** (`engine-mobile`) injects `platform.stt()` / `platform.tts()`:
+//!   native Swift / Kotlin implementations called in-process over `UniFFI`.
+//! - **Desktop** (`engine-desktop`, from `bridge_server::boot::assemble`)
+//!   injects a `bridge_server::audio_bridge::AudioBridge`. There is no native
+//!   desktop implementation — the microphone and speaker belong to the Electron
+//!   renderer — so every trait call becomes one `AudioRequest` event pushed at
+//!   the connected client and parked until that client's `AudioResponse` comes
+//!   back. The desktop's non-bridge roots (CLI / TUI) still wire nothing.
+//!
+//! Either capability may therefore be `None`. `tool_mobile::register_audio`
+//! (the desktop's entry point) will not register this tool in that case; where
+//! it IS registered without one (mobile's unconditional `register_all`), `call`
+//! reports "not available on this platform" for the affected action.
 
 use async_trait::async_trait;
 use once_cell::sync::Lazy;

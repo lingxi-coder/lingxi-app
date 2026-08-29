@@ -384,7 +384,9 @@ pub async fn discover_enabled_plugins(
         let Some(versioned) = resolve_installed_version_dir(&plugin_cache_dir).await else {
             continue;
         };
-        if let Some((id, manifest)) = load_plugin_from_path(&versioned).await {
+        if let Some((id, manifest)) =
+            load_plugin_from_path_with_mcp_gate(&versioned, false, Some(entry_id.as_str())).await
+        {
             out.push((id, manifest, versioned));
         }
     }
@@ -456,7 +458,10 @@ async fn discover_recorded_plugins_identified(
                             if seen.as_ref() == Some(&dir) {
                                 continue; // same cache dir across scopes — load once
                             }
-                            if let Some((id, manifest)) = load_plugin_from_path(&dir).await {
+                            if let Some((id, manifest)) =
+                                load_plugin_from_path_with_mcp_gate(&dir, false, Some(key.as_str()))
+                                    .await
+                            {
                                 out.push((key.clone(), id, manifest, dir.clone()));
                                 seen = Some(dir);
                             }
@@ -474,8 +479,12 @@ async fn discover_recorded_plugins_identified(
                             .join(sanitize_segment(key, false))
                             .join(sanitize_segment(name, false))
                             .join(sanitize_segment(version, true));
-                        if let Some((id, manifest)) = load_plugin_from_path(&dir).await {
-                            out.push((format!("{name}@{key}"), id, manifest, dir));
+                        let identifier = format!("{name}@{key}");
+                        if let Some((id, manifest)) =
+                            load_plugin_from_path_with_mcp_gate(&dir, false, Some(&identifier))
+                                .await
+                        {
+                            out.push((identifier, id, manifest, dir));
                         }
                     }
                 }
@@ -581,6 +590,30 @@ pub async fn discover_installed_plugins(
 pub async fn discover_cli_plugin_dirs(
     paths: &[PathBuf],
 ) -> Vec<(PluginId, PluginManifest, PathBuf)> {
+    discover_cli_plugin_dirs_impl(paths, false).await
+}
+
+/// Sibling of [`discover_cli_plugin_dirs`] for plugin directories whose MCP
+/// connections the CALLER already owns — oracle SDK-host
+/// `extensionsConfig.inlinePluginsNoMcp()` (`M4()`), the `skipMcpDiscovery`
+/// twin of `inlinePlugins()` (`L4()`, i.e. plain `discover_cli_plugin_dirs`).
+/// This crate's stand-in entry point is the parsed-but-unwired
+/// `--plugin-dir-no-mcp` flag (`apps/cli/src/argv.rs`'s
+/// `plugin_dir_no_mcp` / `apps/cli/src/commands/agents.rs`'s twin) — wiring
+/// it from `DesktopConfig` through to this function is a companion change,
+/// out of this file's scope. Every plugin loaded through this path gets
+/// [`PluginComponents::skip_mcp_discovery`] stamped `true`, so its
+/// `.mcp.json` and manifest `mcpServers` are never read.
+pub async fn discover_cli_plugin_dirs_no_mcp(
+    paths: &[PathBuf],
+) -> Vec<(PluginId, PluginManifest, PathBuf)> {
+    discover_cli_plugin_dirs_impl(paths, true).await
+}
+
+async fn discover_cli_plugin_dirs_impl(
+    paths: &[PathBuf],
+    sdk_skip_mcp_discovery: bool,
+) -> Vec<(PluginId, PluginManifest, PathBuf)> {
     let mut out = Vec::new();
     for (i, raw) in paths.iter().enumerate() {
         let path = match tokio::fs::canonicalize(raw).await {
@@ -639,7 +672,8 @@ pub async fn discover_cli_plugin_dirs(
         } else {
             path
         };
-        match load_plugin_from_path(&plugin_root).await {
+        match load_plugin_from_path_with_mcp_gate(&plugin_root, sdk_skip_mcp_discovery, None).await
+        {
             Some((id, manifest)) => {
                 tracing::debug!("Loaded inline plugin from path: {}", manifest.name);
                 out.push((id, manifest, plugin_root));
@@ -720,9 +754,35 @@ fn errno_name(code: i32) -> String {
 /// Read + auto-detect a single plugin directory. Returns `None` when there is
 /// no readable manifest (the directory is not a plugin).
 ///
+/// Thin wrapper over [`load_plugin_from_path_with_mcp_gate`] for the common
+/// case: no SDK-host `skipMcpDiscovery` request and no known
+/// `name@marketplace` install-source identity. Kept so every existing call
+/// site (production and test) is unaffected by the MCP-discovery gate added
+/// for §3/§4.
+pub(crate) async fn load_plugin_from_path(plugin_dir: &Path) -> Option<(PluginId, PluginManifest)> {
+    load_plugin_from_path_with_mcp_gate(plugin_dir, false, None).await
+}
+
+/// Read + auto-detect a single plugin directory. Returns `None` when there is
+/// no readable manifest (the directory is not a plugin).
+///
 /// Mirrors `createPluginFromPath` (`pluginLoader.ts:1348`): Step 1 loads the
 /// manifest, Step 3 auto-detects the optional component directories.
-pub(crate) async fn load_plugin_from_path(plugin_dir: &Path) -> Option<(PluginId, PluginManifest)> {
+///
+/// `sdk_skip_mcp_discovery` is the oracle's per-plugin SDK-host
+/// `skipMcpDiscovery` request (see [`PluginComponents::skip_mcp_discovery`]);
+/// `install_source_id` is this plugin's `name@marketplace` install-source
+/// identity when the caller resolved one (`discover_enabled_plugins` /
+/// `discover_recorded_plugins_identified` always have one; an ad-hoc
+/// directory load — `discover_installed_plugins`, `discover_cli_plugin_dirs`
+/// — never does). Both feed [`resolve_skip_mcp_discovery`], which also
+/// consults the process-wide `CLAUDE_CODE_SKIP_PLUGIN_MCP_SERVERS` /
+/// `_EXCEPT` env pair.
+pub(crate) async fn load_plugin_from_path_with_mcp_gate(
+    plugin_dir: &Path,
+    sdk_skip_mcp_discovery: bool,
+    install_source_id: Option<&str>,
+) -> Option<(PluginId, PluginManifest)> {
     let manifest_path = plugin_dir
         .join(branding::PLUGIN_MANIFEST_DIR)
         .join("plugin.json");
@@ -746,7 +806,9 @@ pub(crate) async fn load_plugin_from_path(plugin_dir: &Path) -> Option<(PluginId
     };
     let trust_level = default_trust_for_source(&source);
 
-    let components = detect_components(plugin_dir, &parsed).await;
+    let skip_mcp_discovery =
+        resolve_skip_mcp_discovery(&parsed.name, sdk_skip_mcp_discovery, install_source_id);
+    let components = detect_components(plugin_dir, &parsed, skip_mcp_discovery).await;
     let settings = load_plugin_settings(plugin_dir, parsed.settings.as_ref()).await;
     let channels = validate_plugin_channels(
         parsed.channels.as_deref().unwrap_or_default(),
@@ -833,7 +895,18 @@ fn validate_plugin_channels(
 /// `hooks/hooks.json` is parsed when present; and MCP / LSP server configs are
 /// read from the plugin-root `.mcp.json` / `.lsp.json` files
 /// (`mcpPluginIntegration.ts:137`, `lspPluginIntegration.ts:64`).
-async fn detect_components(plugin_dir: &Path, parsed: &RawManifest) -> PluginComponents {
+///
+/// `skip_mcp_discovery` mirrors oracle `OL` (`pluginLoader.ts` @160861000):
+/// when set, NEITHER the plugin-root `.mcp.json` NOR the manifest's declared
+/// `mcpServers` is read — every other component slot (commands, agents,
+/// skills, output styles, hooks, LSP servers) still auto-detects/resolves
+/// normally, matching the oracle's "leaves other components enabled". See
+/// [`resolve_skip_mcp_discovery`] for how the caller decides this bit.
+async fn detect_components(
+    plugin_dir: &Path,
+    parsed: &RawManifest,
+    skip_mcp_discovery: bool,
+) -> PluginComponents {
     let default_commands = glob_md(&plugin_dir.join("commands")).await;
     let default_agents = glob_md(&plugin_dir.join("agents")).await;
     let default_skills_dir = plugin_dir.join("skills");
@@ -853,7 +926,11 @@ async fn detect_components(plugin_dir: &Path, parsed: &RawManifest) -> PluginCom
     }
     let default_output_styles = glob_md(&plugin_dir.join("output-styles")).await;
     let default_hooks = load_standard_hooks(plugin_dir).await;
-    let default_mcp_servers = load_mcp_servers(plugin_dir).await;
+    let default_mcp_servers = if skip_mcp_discovery {
+        HashMap::new()
+    } else {
+        load_mcp_servers(plugin_dir).await
+    };
     let default_lsp_servers = load_lsp_servers(plugin_dir).await;
 
     let commands = match &parsed.commands {
@@ -876,7 +953,9 @@ async fn detect_components(plugin_dir: &Path, parsed: &RawManifest) -> PluginCom
     let mut hooks = default_hooks;
     hooks.extend(load_declared_hooks(plugin_dir, parsed.hooks.clone()).await);
     let mut mcp_servers = default_mcp_servers;
-    mcp_servers.extend(load_declared_mcp_servers(plugin_dir, parsed.mcp_servers.clone()).await);
+    if !skip_mcp_discovery {
+        mcp_servers.extend(load_declared_mcp_servers(plugin_dir, parsed.mcp_servers.clone()).await);
+    }
     let mut lsp_servers = default_lsp_servers;
     lsp_servers.extend(load_declared_lsp_servers(plugin_dir, parsed.lsp_servers.clone()).await);
 
@@ -888,6 +967,7 @@ async fn detect_components(plugin_dir: &Path, parsed: &RawManifest) -> PluginCom
         hooks,
         mcp_servers,
         lsp_servers,
+        skip_mcp_discovery,
     }
 }
 
@@ -1098,6 +1178,108 @@ async fn glob_skill_dirs(skills_dir: &Path) -> Vec<ComponentPath> {
     }
     out.sort_by(|a, b| a.path.cmp(&b.path));
     out
+}
+
+// ---------- §3 + §4: plugin MCP-discovery suppression ----------
+//
+// Oracle `OL` (`pluginLoader.ts` @160861000) gates plugin MCP-server
+// discovery in this order (built-ins aside — `if(e.isBuiltin)return` is not
+// modeled here: nothing in this file's discovery paths ever produces a
+// `PluginSource::BuiltIn` plugin, so the check has no reachable call site to
+// guard):
+//
+//   1. an SDK-host per-plugin `skipMcpDiscovery:true` request always wins
+//      (`PluginConfigSchema`'s `local` variant, @155779385) — the SDK host
+//      owns this plugin's MCP connections itself, so the engine must not open
+//      a second copy;
+//   2. otherwise, `CLAUDE_CODE_SKIP_PLUGIN_MCP_SERVERS` (raw JS-string
+//      truthiness: any non-empty value, not `isEnvTruthy`'s enumerated set —
+//      confirmed against the oracle's own `if(a.CLAUDE_CODE_SKIP_PLUGIN_MCP_SERVERS)`
+//      bare property check) suppresses discovery for every non-built-in
+//      plugin;
+//   3. UNLESS `CLAUDE_CODE_SKIP_PLUGIN_MCP_SERVERS_EXCEPT` (oracle `SCn`, same
+//      offset) names this plugin: comma-split, each trimmed entry containing
+//      `@` matches the plugin's `name@marketplace` install-source identity
+//      case-insensitively (oracle `qy`: `e===n||e.toLowerCase()===n.toLowerCase()`);
+//      an entry WITHOUT `@` matches the bare plugin name, but only when this
+//      plugin has a known install-source identity at all (oracle `!pM(e)` —
+//      `pM` gates the same "directory-loaded plugin" confinement checks a few
+//      lines later in `OL`, i.e. a raw `--plugin-dir`/ad-hoc directory load
+//      has no marketplace pedigree to match a bare name against).
+//
+// LINGXI_-prefixed aliases are accepted first, per this crate's env
+// convention (`tools/ui/src/brief.rs`'s `LINGXI_BRIEF`/`CLAUDE_CODE_BRIEF`
+// pair is the precedent this mirrors byte-for-byte on the truthiness rule).
+
+/// Case-insensitive exact match — oracle `qy(e,n)`:
+/// `e===n||e.toLowerCase()===n.toLowerCase()`.
+fn qy_eq(a: &str, b: &str) -> bool {
+    a == b || a.to_lowercase() == b.to_lowercase()
+}
+
+/// Raw JS-string truthiness for an env var: unset or empty is falsy, any
+/// other value (including `"0"`/`"false"`) is truthy. Distinct from
+/// `traits::env::is_env_truthy`'s stricter `1|true|yes|on` allowlist — the
+/// oracle reads `CLAUDE_CODE_SKIP_PLUGIN_MCP_SERVERS` as a bare
+/// `process.env` property, not through `isEnvTruthy`.
+fn env_set_nonempty(name: &str) -> bool {
+    std::env::var(name).is_ok_and(|v| !v.is_empty())
+}
+
+fn env_value_nonempty(name: &str) -> Option<String> {
+    std::env::var(name).ok().filter(|v| !v.is_empty())
+}
+
+/// `CLAUDE_CODE_SKIP_PLUGIN_MCP_SERVERS` (+ `LINGXI_` alias) presence check.
+fn skip_plugin_mcp_servers_env_set() -> bool {
+    env_set_nonempty("LINGXI_SKIP_PLUGIN_MCP_SERVERS")
+        || env_set_nonempty("CLAUDE_CODE_SKIP_PLUGIN_MCP_SERVERS")
+}
+
+/// `CLAUDE_CODE_SKIP_PLUGIN_MCP_SERVERS_EXCEPT` (+ `LINGXI_` alias) value.
+fn skip_plugin_mcp_servers_except() -> Option<String> {
+    env_value_nonempty("LINGXI_SKIP_PLUGIN_MCP_SERVERS_EXCEPT")
+        .or_else(|| env_value_nonempty("CLAUDE_CODE_SKIP_PLUGIN_MCP_SERVERS_EXCEPT"))
+}
+
+/// Oracle `SCn(e)`: does the `_EXCEPT` list re-admit this plugin past an
+/// active `CLAUDE_CODE_SKIP_PLUGIN_MCP_SERVERS` suppression?
+fn except_exempts(name: &str, install_source_id: Option<&str>) -> bool {
+    let Some(except) = skip_plugin_mcp_servers_except() else {
+        return false;
+    };
+    // Oracle `r=!pM(e)`: bare-name matching is only meaningful for a plugin
+    // resolved through a marketplace-qualified install (this crate's stand-in
+    // for "not directory-loaded" — see the module note above).
+    except.split(',').any(|raw| {
+        let entry = raw.trim();
+        if entry.is_empty() {
+            return false;
+        }
+        if entry.contains('@') {
+            install_source_id.is_some_and(|id| qy_eq(entry, id))
+        } else {
+            install_source_id.is_some() && qy_eq(entry, name)
+        }
+    })
+}
+
+/// Resolve whether this plugin's MCP server discovery (`.mcp.json` + manifest
+/// `mcpServers`) should be suppressed for this load. See the module note
+/// above for the full oracle-derived order; `name` is the manifest's declared
+/// `name` (`RawManifest::name`), not a display label.
+fn resolve_skip_mcp_discovery(
+    name: &str,
+    sdk_skip_mcp_discovery: bool,
+    install_source_id: Option<&str>,
+) -> bool {
+    if sdk_skip_mcp_discovery {
+        return true;
+    }
+    if !skip_plugin_mcp_servers_env_set() {
+        return false;
+    }
+    !except_exempts(name, install_source_id)
 }
 
 /// Read the plugin-root `.mcp.json` into `{ server name → McpServerConfig }`.
@@ -1993,6 +2175,185 @@ mod tests {
             2,
             "a mixed [path, inlineObject] array (oracle `zs`) must merge BOTH the \
              file-loaded and inline hook entries, got {hooks:?}"
+        );
+    }
+
+    // ---------- §3 + §4: plugin MCP-discovery suppression ----------
+
+    /// A plugin whose `.mcp.json`, manifest `mcpServers`, and a default
+    /// `commands/` dir are all present, so a test can assert the MCP slot was
+    /// suppressed while every other component slot still loaded.
+    fn write_plugin_with_mcp_and_command(plugin: &Path, name: &str) {
+        fs::create_dir_all(plugin.join(branding::PLUGIN_MANIFEST_DIR)).unwrap();
+        fs::create_dir_all(plugin.join("commands")).unwrap();
+        fs::write(
+            plugin
+                .join(branding::PLUGIN_MANIFEST_DIR)
+                .join("plugin.json"),
+            format!(
+                r#"{{
+                    "name":"{name}",
+                    "mcpServers":{{"declared":{{"type":"stdio","command":"echo"}}}}
+                }}"#
+            ),
+        )
+        .unwrap();
+        fs::write(plugin.join("commands/hello.md"), "hello").unwrap();
+        fs::write(
+            plugin.join(".mcp.json"),
+            r#"{"root":{"type":"stdio","command":"echo"}}"#,
+        )
+        .unwrap();
+    }
+
+    /// Serializes the `_env`-mutating tests in this block and resets the four
+    /// env vars ([`resolve_skip_mcp_discovery`]'s two names, each with its
+    /// `LINGXI_`/`CLAUDE_CODE_` alias) to "unset" at entry. Mirrors
+    /// `tools/ui/src/brief.rs`'s `brief_guard` / `push_notification.rs`'s
+    /// `guard`.
+    fn skip_mcp_env_guard() -> std::sync::MutexGuard<'static, ()> {
+        static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let g = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var("LINGXI_SKIP_PLUGIN_MCP_SERVERS");
+        std::env::remove_var("CLAUDE_CODE_SKIP_PLUGIN_MCP_SERVERS");
+        std::env::remove_var("LINGXI_SKIP_PLUGIN_MCP_SERVERS_EXCEPT");
+        std::env::remove_var("CLAUDE_CODE_SKIP_PLUGIN_MCP_SERVERS_EXCEPT");
+        g
+    }
+
+    #[tokio::test]
+    async fn sdk_skip_mcp_discovery_suppresses_mcp_but_not_other_components() {
+        let _g = skip_mcp_env_guard();
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin = tmp.path();
+        write_plugin_with_mcp_and_command(plugin, "demo");
+
+        // No env suppression active — the SDK-host `skipMcpDiscovery:true`
+        // request alone must suppress BOTH `.mcp.json` and manifest
+        // `mcpServers`, while `commands/` still auto-detects (oracle: "leaves
+        // other components enabled").
+        let (_id, manifest) = load_plugin_from_path_with_mcp_gate(plugin, true, None)
+            .await
+            .unwrap();
+        assert!(
+            manifest.components.mcp_servers.is_empty(),
+            "skipMcpDiscovery must drop both .mcp.json and declared mcpServers, got {:?}",
+            manifest.components.mcp_servers
+        );
+        assert!(manifest.components.skip_mcp_discovery);
+        assert_eq!(
+            manifest.components.commands.len(),
+            1,
+            "non-MCP components must still load when only MCP discovery is skipped"
+        );
+
+        // REVERT proof: the same fixture with `sdk_skip_mcp_discovery: false`
+        // (the plain wrapper every pre-existing call site uses) must load
+        // BOTH servers — showing the assertions above are actually exercising
+        // the gate, not tautologically true for this fixture.
+        let (_id2, unskipped) = load_plugin_from_path(plugin).await.unwrap();
+        assert_eq!(unskipped.components.mcp_servers.len(), 2);
+        assert!(!unskipped.components.skip_mcp_discovery);
+    }
+
+    #[tokio::test]
+    async fn skip_plugin_mcp_servers_env_suppresses_discovery_for_every_plugin() {
+        let _g = skip_mcp_env_guard();
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin = tmp.path();
+        write_plugin_with_mcp_and_command(plugin, "demo");
+
+        // Baseline: no env set, no install-source id — normal discovery.
+        let (_id, baseline) = load_plugin_from_path(plugin).await.unwrap();
+        assert_eq!(baseline.components.mcp_servers.len(), 2);
+
+        // `CLAUDE_CODE_SKIP_PLUGIN_MCP_SERVERS` set to ANY non-empty value
+        // (raw JS truthiness, not `isEnvTruthy`'s enumerated set) suppresses
+        // MCP discovery even though nothing requested `skipMcpDiscovery` and
+        // no `_EXCEPT` was given.
+        std::env::set_var("CLAUDE_CODE_SKIP_PLUGIN_MCP_SERVERS", "0");
+        let (_id, suppressed) = load_plugin_from_path(plugin).await.unwrap();
+        assert!(
+            suppressed.components.mcp_servers.is_empty(),
+            "CLAUDE_CODE_SKIP_PLUGIN_MCP_SERVERS=\"0\" is a non-empty string and must \
+             still suppress discovery (plain process.env truthiness)"
+        );
+        assert!(suppressed.components.skip_mcp_discovery);
+
+        // Unsetting restores discovery — the env var, not something else
+        // about the fixture, is what suppressed it above.
+        std::env::remove_var("CLAUDE_CODE_SKIP_PLUGIN_MCP_SERVERS");
+        let (_id, restored) = load_plugin_from_path(plugin).await.unwrap();
+        assert_eq!(restored.components.mcp_servers.len(), 2);
+
+        // The `LINGXI_` alias is honored too.
+        std::env::set_var("LINGXI_SKIP_PLUGIN_MCP_SERVERS", "1");
+        let (_id, suppressed_alias) = load_plugin_from_path(plugin).await.unwrap();
+        assert!(suppressed_alias.components.mcp_servers.is_empty());
+    }
+
+    #[tokio::test]
+    async fn except_with_at_sign_matches_install_source_id_directory_loaded_or_not() {
+        let _g = skip_mcp_env_guard();
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin = tmp.path();
+        write_plugin_with_mcp_and_command(plugin, "demo");
+        std::env::set_var("CLAUDE_CODE_SKIP_PLUGIN_MCP_SERVERS", "1");
+        std::env::set_var(
+            "CLAUDE_CODE_SKIP_PLUGIN_MCP_SERVERS_EXCEPT",
+            "other@mkt, demo@marketplace-x",
+        );
+
+        // An "@"-containing entry matches the plugin's `name@marketplace`
+        // install-source identity and re-admits it past the suppression.
+        let (_id, exempted) =
+            load_plugin_from_path_with_mcp_gate(plugin, false, Some("demo@marketplace-x"))
+                .await
+                .unwrap();
+        assert_eq!(
+            exempted.components.mcp_servers.len(),
+            2,
+            "an _EXCEPT entry naming this plugin's install-source id must re-admit it"
+        );
+        assert!(!exempted.components.skip_mcp_discovery);
+
+        // A non-matching install-source id stays suppressed.
+        let (_id, still_suppressed) =
+            load_plugin_from_path_with_mcp_gate(plugin, false, Some("demo@some-other-marketplace"))
+                .await
+                .unwrap();
+        assert!(still_suppressed.components.mcp_servers.is_empty());
+    }
+
+    #[tokio::test]
+    async fn except_bare_name_only_exempts_non_directory_loaded_plugins() {
+        let _g = skip_mcp_env_guard();
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin = tmp.path();
+        write_plugin_with_mcp_and_command(plugin, "demo");
+        std::env::set_var("CLAUDE_CODE_SKIP_PLUGIN_MCP_SERVERS", "1");
+        std::env::set_var("CLAUDE_CODE_SKIP_PLUGIN_MCP_SERVERS_EXCEPT", "demo");
+
+        // Known install-source id (this crate's "not directory-loaded") — a
+        // bare-name `_EXCEPT` entry matches `manifest.name` and re-admits it.
+        let (_id, exempted) =
+            load_plugin_from_path_with_mcp_gate(plugin, false, Some("demo@marketplace-x"))
+                .await
+                .unwrap();
+        assert_eq!(exempted.components.mcp_servers.len(), 2);
+
+        // No install-source id (an ad-hoc directory load, e.g. `--plugin-dir`)
+        // — the oracle restricts bare-name matching to non-directory-loaded
+        // plugins, so the same name must NOT re-admit it here even though
+        // `manifest.name == "demo"` matches the `_EXCEPT` entry exactly.
+        let (_id, still_suppressed) = load_plugin_from_path_with_mcp_gate(plugin, false, None)
+            .await
+            .unwrap();
+        assert!(
+            still_suppressed.components.mcp_servers.is_empty(),
+            "a bare-name _EXCEPT entry must not exempt a directory-loaded plugin \
+             (oracle `r=!pM(e)`), got {:?}",
+            still_suppressed.components.mcp_servers
         );
     }
 }

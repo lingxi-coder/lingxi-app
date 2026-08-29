@@ -89,10 +89,38 @@ pub struct PluginComponents {
     pub output_styles: Vec<ComponentPath>,
     /// Inline hook definitions.
     pub hooks: Vec<HookDefinition>,
-    /// MCP servers contributed by this plugin, keyed by logical name.
+    /// MCP servers contributed by this plugin, keyed by logical name. Always
+    /// empty when [`Self::skip_mcp_discovery`] is `true`.
     pub mcp_servers: HashMap<String, McpServerConfig>,
     /// LSP servers contributed by this plugin, keyed by logical name.
     pub lsp_servers: HashMap<String, LspServerConfig>,
+    /// Whether this load suppressed MCP server discovery for this plugin —
+    /// neither the plugin-root `.mcp.json` nor the manifest's declared
+    /// `mcpServers` was read, so [`Self::mcp_servers`] is empty regardless of
+    /// what the plugin actually declares. Every other component slot still
+    /// loads normally.
+    ///
+    /// Set when an SDK host declared this plugin instance with
+    /// `skipMcpDiscovery: true` (it owns the plugin's MCP connections itself
+    /// — oracle `PluginConfigSchema`'s `local` variant, @155779385: *"the
+    /// engine loads skills/hooks/agents/commands from this plugin but does
+    /// NOT read its .mcp.json or manifest mcpServers"*), or when
+    /// `CLAUDE_CODE_SKIP_PLUGIN_MCP_SERVERS` / `LINGXI_SKIP_PLUGIN_MCP_SERVERS`
+    /// suppressed discovery process-wide and this plugin was not exempted via
+    /// the `_EXCEPT` sibling (see `discovery::resolve_skip_mcp_discovery`).
+    ///
+    /// Deliberately lives here rather than on [`PluginManifest`] itself: this
+    /// struct derives `Default` and its one construction site
+    /// (`discovery::detect_components`) is fully owned by the same change, so
+    /// adding a field cannot break another `PluginManifest { .. }` literal
+    /// elsewhere in the crate that lists every field by hand and would
+    /// otherwise need updating too (`plugin/src/loader.rs`'s test fixture,
+    /// notably — outside this change's file ownership). A later telemetry
+    /// batch reads this to derive the oracle's `has_mcp`
+    /// (`!skip_mcp_discovery && !mcp_servers.is_empty()`) and `host_owned_mcp`
+    /// (`skip_mcp_discovery`) fields; this change adds no telemetry itself.
+    #[serde(default)]
+    pub skip_mcp_discovery: bool,
 }
 
 /// On-disk component reference plus arbitrary metadata.

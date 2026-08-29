@@ -10,6 +10,7 @@ import type {
 } from '@lingxi/bridge-client';
 import type { AllowedClientCommand } from '../../shared/clientCommands.js';
 import type { PinnedSessionRecord, PublicSettings, SessionRef } from '../../shared/settings.js';
+import type { MicrophonePermissionStatus } from '../../shared/microphoneAccess.js';
 
 export type { AllowedClientCommand } from '../../shared/clientCommands.js';
 export type {
@@ -113,6 +114,8 @@ export interface LingxiApi {
   answerAskUserQuestion(sessionId: string, requestId: number, answers: Record<string, string>): Promise<void>;
   cancelAskUserQuestion(sessionId: string, requestId: number): Promise<void>;
   openSystemSettings(pane: SystemSettingsPane): Promise<void>;
+  /** The OS microphone grant, read in the main process — see `shared/microphoneAccess.ts` for why the renderer cannot read it itself. */
+  microphoneAccess(): Promise<MicrophonePermissionStatus>;
   cancel(sessionId: string, turnId?: number): Promise<void>;
   command(sessionId: string, command: AllowedClientCommand): Promise<void>;
   connectionState(sessionId: string): Promise<ConnectionState>;

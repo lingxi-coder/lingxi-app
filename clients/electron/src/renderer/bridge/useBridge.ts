@@ -17,6 +17,7 @@ import type {
 import { browserMicrophoneCaptureDeps, MicrophoneCapture } from '../audio/capture';
 import { handleAudioRequestEvent, type AudioRequestDeps } from '../audio/requests';
 import { browserSynthesisDeps, synthesize } from '../audio/synthesis';
+import { hostMicrophonePermissionReader, type VoicePermissionStatus } from '../audio/capabilities';
 import { defaultVoicePreferences, type VoicePreferences } from '../../shared/voicePreferences';
 import {
   appendPendingUserPrompt,
@@ -92,6 +93,19 @@ export interface UseBridge {
   answerAskUserQuestion(requestId: number, answers: Record<string, string>): Promise<void>;
   cancelAskUserQuestion(requestId: number): Promise<void>;
   openSystemSettings(pane: SystemSettingsPane): Promise<void>;
+  /**
+   * The OS microphone grant, read by the MAIN process
+   * (`systemPreferences.getMediaAccessStatus`). The renderer has no honest
+   * equivalent — `navigator.permissions.query({name:'microphone'})` reports
+   * the page permission this app grants itself — so the voice settings page
+   * asks through here. Never rejects: an unreachable host, a failed IPC call
+   * or an answer this renderer cannot interpret are all `'unavailable'`
+   * ("cannot determine"), which the 麦克风权限 row renders as 无法确定. It is
+   * deliberately NOT routed through `capture`: a permission probe that the
+   * page already renders as an honest state has nothing to say in the
+   * shell's global error banner.
+   */
+  microphonePermission(): Promise<VoicePermissionStatus>;
   addProject(): Promise<WorkspaceMetadata | null>;
   activateProject(path: string): Promise<WorkspaceMetadata | null>;
   removeProject(path: string): Promise<void>;
@@ -1091,6 +1105,10 @@ export function useBridge(): UseBridge {
     try { await host.openSystemSettings(pane); } catch (cause) { capture(cause); }
   }, [capture, host]);
 
+  const microphonePermission = useCallback(async (): Promise<VoicePermissionStatus> => {
+    try { return await hostMicrophonePermissionReader(host)(); } catch { return 'unavailable'; }
+  }, [host]);
+
   const addProject = useCallback(async () => {
     if (!host) return null;
     const operationId = beginNavigationOperation();
@@ -1406,6 +1424,7 @@ export function useBridge(): UseBridge {
     answerAskUserQuestion,
     cancelAskUserQuestion,
     openSystemSettings,
+    microphonePermission,
     addProject,
     activateProject,
     removeProject,

@@ -8,6 +8,7 @@ import {
   browserProbeDeps,
   probePlatform,
   resolveCapabilities,
+  subscribeMicrophoneGrantChanges,
   type VoiceBlockingIssue,
   type VoiceOption,
   type VoicePermissionStatus,
@@ -222,16 +223,39 @@ export function Voice({ bridge }: PageContentProps) {
   credentialsRef.current = credentials;
 
   const [platform, setPlatform] = useState<VoicePlatformSnapshot | null>(null);
+  // Bumped whenever the OS microphone grant may have changed while this page
+  // is open — see the subscription effect below. Re-probing everything rather
+  // than patching one field keeps a single code path for what the page shows:
+  // `readSystemVoices` returns its already-populated list immediately, so the
+  // extra work is one IPC round trip.
+  const [grantGeneration, setGrantGeneration] = useState(0);
+  const readMicrophonePermission = bridge.microphonePermission;
   useEffect(() => {
     let cancelled = false;
     // `probePlatform` never rejects (permission/voice-list failures are
     // caught internally and reported as honest states, not exceptions —
     // see its own doc), so no `.catch` is needed here.
-    void probePlatform(browserProbeDeps(activeProviderId, credentialsRef.current)).then((snapshot) => {
+    void probePlatform(browserProbeDeps(
+      activeProviderId,
+      credentialsRef.current,
+      readMicrophonePermission,
+    )).then((snapshot) => {
       if (!cancelled) setPlatform(snapshot);
     });
     return () => { cancelled = true; };
-  }, [activeProviderId, activeProviderConfigured]);
+  }, [activeProviderId, activeProviderConfigured, grantGeneration, readMicrophonePermission]);
+
+  // The microphone grant lives in System Settings, not in this app, and the
+  // user can change it while this page is open — most often by acting on the
+  // 「打开系统设置」 button this very page renders. macOS emits no event for
+  // that, so the trigger is the user coming back to the window.
+  useEffect(
+    () => subscribeMicrophoneGrantChanges(
+      () => setGrantGeneration((generation) => generation + 1),
+      { window, document },
+    ),
+    [],
+  );
 
   // `speechSynthesis.getVoices()` is frequently empty on the very first
   // call until `voiceschanged` fires (`capabilities.ts`'s `readSystemVoices`

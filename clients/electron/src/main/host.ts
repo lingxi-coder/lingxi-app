@@ -23,6 +23,7 @@ import {
   type PublicSettings,
 } from './host-utils.js';
 import { validateClipboardText } from './validation.js';
+import { readMicrophoneAccess, type MediaAccessReader } from './microphoneAccess.js';
 import { PROVIDER_IDS, providerById } from '../shared/providers.js';
 import type { SettingsStore } from './settings.js';
 
@@ -54,6 +55,7 @@ export const CH_DIAGNOSTICS_COPY = 'lingxi:diagnostics:copy';
 export const CH_DIAGNOSTICS_EXPORT = 'lingxi:diagnostics:export';
 export const CH_CLIPBOARD_WRITE_TEXT = 'lingxi:clipboard:writeText';
 export const CH_OPEN_SYSTEM_SETTINGS = 'lingxi:openSystemSettings';
+export const CH_MICROPHONE_ACCESS_GET = 'lingxi:microphone-access:get';
 export const CH_PROJECT_SESSIONS_LIST = 'lingxi:project-sessions:list';
 export const CH_SESSION_NEW = 'lingxi:session:new';
 export const CH_SESSION_OPEN = 'lingxi:session:open';
@@ -157,6 +159,13 @@ export class HostController {
     private readonly diagnostics: DiagnosticBuffer,
     sessionCatalog?: ProjectSessionCatalog,
     private readonly ipc: Pick<typeof ipcMain, 'handle' | 'removeHandler'> = ipcMain,
+    /**
+     * Overrides the OS microphone-grant source. `undefined` means "the real
+     * one" — `readMicrophoneAccess`'s own default is Electron's
+     * `systemPreferences`, so a test can drive every OS answer without this
+     * class ever holding a second, drift-prone copy of that wiring.
+     */
+    private readonly mediaAccess?: MediaAccessReader,
   ) {
     this.sessionCatalog = sessionCatalog ?? new ProjectSessionCatalog();
   }
@@ -350,6 +359,16 @@ export class HostController {
         throw new Error('unsupported System Settings pane');
       }
       await shell.openExternal(SYSTEM_SETTINGS_PANES[pane as SystemSettingsPane]);
+    });
+    // The renderer cannot read this itself: `navigator.permissions.query`
+    // answers `main/index.ts`'s own `setPermissionCheckHandler`, which grants
+    // the app's renderer `media` unconditionally and never consults the OS —
+    // so the voice page's 麦克风权限 row used to say 已授权 while every
+    // recording failed. `systemPreferences.getMediaAccessStatus` is the real
+    // grant, and it lives here.
+    this.ipc.handle(CH_MICROPHONE_ACCESS_GET, (event: IpcMainInvokeEvent) => {
+      this.assertSender(event);
+      return readMicrophoneAccess(this.mediaAccess);
     });
   }
 

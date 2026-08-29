@@ -7,8 +7,9 @@
  * doc for why `recognitionMode: 'localOnly'` is honestly unsupported here).
  * That means "can the microphone actually be used to talk to LingXi" depends
  * on facts from three different places: the OS's microphone-permission
- * grant, the browser's synthesis-voice list, and which provider (if any) is
- * configured — AND whether that specific provider exposes a transcription
+ * grant (read in the MAIN process — see `shared/microphoneAccess.ts` for why
+ * the renderer cannot read it itself), the browser's synthesis-voice list,
+ * and which provider (if any) is configured — AND whether that specific provider exposes a transcription
  * endpoint at all. A configured Anthropic key, for example, is a fully
  * configured provider that still cannot transcribe anything, because
  * Anthropic's API has no transcription endpoint (see
@@ -31,15 +32,21 @@
  */
 
 /**
- * `'unavailable'` means the probe could not determine the permission state
- * at all (the Permissions API is unsupported for `'microphone'`, or the
- * query threw) — distinct from `'prompt'`, which means the browser CAN
- * answer and the answer is "the user hasn't been asked yet".
+ * `'unavailable'` means the probe could not determine the permission state at
+ * all (no host bridge to ask, an IPC failure, a platform with no media-access
+ * API) — distinct from `'prompt'`, which means the OS CAN answer and the
+ * answer is "the user hasn't been asked yet".
  */
 import { providerById } from '../../shared/providers';
+import { isMicrophonePermissionStatus, type MicrophonePermissionStatus } from '../../shared/microphoneAccess';
 import { DEFAULT_VOICE_SELECTION, LANGUAGE_AUTO, type VoicePreferences } from './preferences';
 
-export type VoicePermissionStatus = 'granted' | 'denied' | 'prompt' | 'unavailable';
+/**
+ * The one microphone-permission vocabulary, declared once in `shared/` because
+ * only the MAIN process can read the fact and only the renderer displays it —
+ * see `shared/microphoneAccess.ts`.
+ */
+export type VoicePermissionStatus = MicrophonePermissionStatus;
 
 export interface VoiceOption {
   id: string;
@@ -277,11 +284,12 @@ export interface ProbeDeps {
   /** Speech-synthesis voice source; see `readSystemVoices`. */
   synth: SpeechSynthesisLike;
   /**
-   * Reads the current microphone permission state. May reject (e.g. the
-   * Permissions API throws for an unsupported name in some browsers) —
-   * `probePlatform` treats a rejection as `'unavailable'` rather than
-   * letting it propagate, since "this browser cannot answer" is a real,
-   * distinct, non-exceptional state.
+   * Reads the current microphone permission state — in production, the OS
+   * grant, fetched from the main process (`hostMicrophonePermissionReader`).
+   * May reject (the host bridge is IPC, and IPC can fail) — `probePlatform`
+   * treats a rejection as `'unavailable'` rather than letting it propagate,
+   * since "cannot answer right now" is a real, distinct, non-exceptional
+   * state that the row can honestly render as 无法确定.
    */
   queryMicrophonePermission: () => Promise<VoicePermissionStatus>;
   /** BCP-47 system locale tag, e.g. `navigator.language`. */
@@ -390,17 +398,93 @@ export function resolveActiveProviderVoiceCapability(
   return { providerConfigured, providerTranscriptionCapable };
 }
 
+/** The one method of the preload bridge this module needs — `useBridge`'s `microphonePermission` is built on it. */
+export interface MicrophoneAccessHost {
+  microphoneAccess(): Promise<unknown>;
+}
+
+/**
+ * The renderer's only honest source of the microphone grant: ask the main
+ * process, which reads `systemPreferences.getMediaAccessStatus('microphone')`.
+ *
+ * There is deliberately NO browser fallback. The obvious one —
+ * `navigator.permissions.query({name:'microphone'})` — is what this branch
+ * removed: it reports the PAGE permission, which `main/index.ts`'s
+ * `setPermissionCheckHandler` grants this app's own renderer unconditionally,
+ * so it said `granted` on a machine where macOS had never granted anything
+ * (measured; see `shared/microphoneAccess.ts`). Falling back to it when the
+ * host is missing would restore exactly that lie in exactly the situation
+ * where we know least. With no host (a plain browser dev run) the honest
+ * answer is `'unavailable'` — the row then says 无法确定.
+ *
+ * An answer that is not one of the four known states is `'unavailable'` too:
+ * a value this renderer cannot interpret is not evidence of a grant.
+ */
+export function hostMicrophonePermissionReader(
+  host: MicrophoneAccessHost | undefined,
+): () => Promise<VoicePermissionStatus> {
+  return async () => {
+    if (typeof host?.microphoneAccess !== 'function') return 'unavailable';
+    const answer = await host.microphoneAccess();
+    return isMicrophonePermissionStatus(answer) ? answer : 'unavailable';
+  };
+}
+
+/** Structural subset of an `EventTarget` this module subscribes to; the real `window`/`document` satisfy it. */
+export interface GrantChangeTarget {
+  addEventListener(type: string, listener: () => void): void;
+  removeEventListener(type: string, listener: () => void): void;
+}
+
+/**
+ * Subscribes to the moments the OS microphone grant can have changed under a
+ * running app, and calls `onChange` for each.
+ *
+ * The grant is not a value the app owns: the user can flip it in System
+ * Settings → Privacy & Security → Microphone at any time, including from the
+ * very button this page renders. A row that reads it once at mount is wrong
+ * from that moment on — and wrong in the direction that matters, since the
+ * user changing it is usually the user acting on this page's own advice.
+ *
+ * macOS emits no event for a TCC change, so the trigger is the user coming
+ * BACK: a window `focus`, or the document becoming visible again. Both are
+ * needed — switching apps and returning fires `focus`; a window revealed
+ * without taking focus fires only `visibilitychange`. `hidden` is ignored so
+ * leaving does not spend an IPC round trip.
+ */
+export function subscribeMicrophoneGrantChanges(
+  onChange: () => void,
+  targets: { window: GrantChangeTarget; document: GrantChangeTarget & { visibilityState?: string } },
+): () => void {
+  const onFocus = () => onChange();
+  const onVisibilityChange = () => { if (targets.document.visibilityState !== 'hidden') onChange(); };
+  targets.window.addEventListener('focus', onFocus);
+  targets.document.addEventListener('visibilitychange', onVisibilityChange);
+  return () => {
+    targets.window.removeEventListener('focus', onFocus);
+    targets.document.removeEventListener('visibilitychange', onVisibilityChange);
+  };
+}
+
 /**
  * Builds `ProbeDeps` from the real browser globals, for production use.
+ *
  * The two provider facts are not derivable from any browser API, so they
  * are computed here via `resolveActiveProviderVoiceCapability` from
  * whichever provider the caller currently treats as active and the
  * desktop's known credential list — see that function's doc comment for
  * why this join lives in code, not in a comment.
+ *
+ * The microphone grant is not derivable from a browser API either — not
+ * honestly — so it is a required PARAMETER rather than something read here:
+ * the caller supplies `useBridge`'s `microphonePermission`, which asks the
+ * main process. Requiring it means no call site can silently fall back to
+ * the Permissions API answer that made the 麦克风权限 row lie.
  */
 export function browserProbeDeps(
   activeProviderId: string | null,
   credentials: readonly ProviderConfiguredFact[],
+  queryMicrophonePermission: () => Promise<VoicePermissionStatus>,
 ): ProbeDeps {
   const { providerConfigured, providerTranscriptionCapable } = resolveActiveProviderVoiceCapability(
     activeProviderId,
@@ -408,15 +492,9 @@ export function browserProbeDeps(
   );
   return {
     synth: window.speechSynthesis,
-    queryMicrophonePermission: queryBrowserMicrophonePermission,
+    queryMicrophonePermission,
     localeTag: navigator.language,
     providerConfigured,
     providerTranscriptionCapable,
   };
-}
-
-async function queryBrowserMicrophonePermission(): Promise<VoicePermissionStatus> {
-  if (!navigator.permissions?.query) return 'unavailable';
-  const status = await navigator.permissions.query({ name: 'microphone' });
-  return status.state;
 }

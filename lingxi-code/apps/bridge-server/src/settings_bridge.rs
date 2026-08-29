@@ -16,6 +16,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use client_protocol::commands::SettingsDestinationDto;
+use engine::settings::merger::merge_raw_layer;
 use migrations::settings_update::{read_settings_map, settings_path, SettingsSource};
 use serde_json::Value;
 
@@ -61,8 +62,13 @@ pub struct SettingsFile {
 pub struct SettingsSnapshot {
     /// The on-disk state of every file layer this module reads.
     pub files: Vec<SettingsFile>,
-    /// The merged values: for each key, the value from its highest-priority
-    /// contributing layer.
+    /// The merged values, resolved the way the running engine resolves them:
+    /// every layer folded through [`merge_raw_layer`], which reads the
+    /// engine's own per-field strategy table. For most keys that IS "the
+    /// value from its highest-priority contributing layer", but for a key the
+    /// engine deep-merges (`hooks`, `permissions`, `providers`, …) or
+    /// concat-dedups (`trustedDirectories`, …) it is a UNION across layers —
+    /// see [`SettingsSnapshot::merged_keys`], which names exactly those keys.
     pub effective: BTreeMap<String, Value>,
     /// The values this session actually had loaded at session start: the
     /// three file layers PLUS the managed (policy) overlay — but NOT `cli`
@@ -79,12 +85,35 @@ pub struct SettingsSnapshot {
     /// session load at boot" — the baseline a pending-changes diff is taken
     /// against — and managed settings are part of that answer.
     pub active: BTreeMap<String, Value>,
-    /// For each key in `effective`, which layer it came from.
+    /// For each key in `effective`, the highest-priority layer that defines
+    /// it. For a key in [`SettingsSnapshot::merged_keys`] this is NOT where
+    /// the effective value came from — the value came from several layers at
+    /// once — so a UI must consult `merged_keys` before it renders a
+    /// single-layer badge from this map.
     pub provenance: BTreeMap<String, SettingsLayer>,
+    /// The keys whose effective value is a CROSS-LAYER union rather than one
+    /// layer's value: the engine deep-merges or concat-dedups them (its
+    /// `schema::MERGE_STRATEGIES` table), and more than one layer contributed.
+    ///
+    /// Naming a single layer for these in `provenance` would be false, which
+    /// is why they are called out separately rather than folded into it: a
+    /// value assembled from `user` + `project` did not come from either one.
+    /// A key is listed only when the merge actually produced something no
+    /// single layer holds — a deep-merge key whose entries the winning layer
+    /// entirely redefines is NOT listed, because for that key the winning
+    /// layer's badge is honest (see [`merge_raw_layer`]'s own doc).
+    pub merged_keys: Vec<String>,
     /// Keys an administrator pinned through the managed-settings layer —
     /// exactly the keys of the `managed` overlay `build_snapshot` was given,
-    /// so every one of them also appears in `effective` with the managed
-    /// value and a `Managed` provenance.
+    /// so every one of them also appears in `effective` with a `Managed`
+    /// provenance.
+    ///
+    /// "Pinned" is about who controls the key, not about the whole value
+    /// being the policy's: the engine folds the managed layer in through the
+    /// SAME merger as every other layer, so a pinned key the engine
+    /// deep-merges (`permissions`, say) resolves to the policy's entries
+    /// UNIONED with the file layers' — such a key appears here AND in
+    /// [`SettingsSnapshot::merged_keys`].
     pub locked: Vec<String>,
     /// Each FILE layer's OWN raw map, unmerged: `{"user": {...}, "project":
     /// {...}, "local": {...}}`, keyed by [`SettingsLayer::wire_name`]. This
@@ -139,6 +168,7 @@ pub fn build_snapshot(
 ) -> SettingsSnapshot {
     let mut effective: BTreeMap<String, Value> = BTreeMap::new();
     let mut provenance: BTreeMap<String, SettingsLayer> = BTreeMap::new();
+    let mut merged_keys: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     let mut files: Vec<SettingsFile> = Vec::new();
     let mut layers: BTreeMap<&'static str, serde_json::Map<String, Value>> = BTreeMap::new();
 
@@ -149,10 +179,18 @@ pub fn build_snapshot(
             Ok(m) => (m, None),
             Err(e) => (serde_json::Map::new(), Some(e)),
         };
-        for (key, value) in &map {
-            effective.insert(key.clone(), value.clone());
+        for key in map.keys() {
             provenance.insert(key.clone(), layer);
+            // Reset before this layer's own report goes in. A key an earlier
+            // pair of layers unioned can be fully REDEFINED here — user
+            // `{A}` + project `{B}` unions to `{A,B}`, and a local layer
+            // defining both `A` and `B` shadows it back to exactly local's
+            // own value. Accumulating across layers without this would keep
+            // calling that merged and suppress a badge that is now honest;
+            // the layers that follow always have the last word.
+            merged_keys.remove(key);
         }
+        merged_keys.extend(fold_layer(&mut effective, &map));
         files.push(SettingsFile {
             layer,
             path,
@@ -168,20 +206,49 @@ pub fn build_snapshot(
     // The managed overlay goes on LAST so it wins, and its keys are the locked
     // set: locked is derived from the same map that supplied the values, so the
     // two can never disagree about which keys an administrator pinned.
+    //
+    // It goes through the SAME merge as the file layers, because the engine
+    // does: `Settings::load` folds managed in with `merger::merge(acc,
+    // managed)`, not with an overwrite. Applying it flat here would make a
+    // policy-pinned key the engine deep-merges (`permissions`, `hooks`)
+    // report a value the engine never resolves — the very defect this
+    // function's file-layer loop was fixed for, kept alive one layer higher.
     let locked: Vec<String> = managed.keys().cloned().collect();
-    for (key, value) in managed {
-        effective.insert(key.clone(), value);
-        provenance.insert(key, SettingsLayer::Managed);
+    for key in managed.keys() {
+        provenance.insert(key.clone(), SettingsLayer::Managed);
+        // Same reset as the file-layer loop above, for the same reason.
+        merged_keys.remove(key);
     }
+    merged_keys.extend(merge_raw_layer(&mut effective, managed));
 
     SettingsSnapshot {
         files,
         effective,
         active,
         provenance,
+        merged_keys: merged_keys.into_iter().collect(),
         locked,
         layers,
     }
+}
+
+/// Fold one file layer's raw map into `effective` through the engine's merge,
+/// returning the keys that became a cross-layer union.
+///
+/// A thin adapter, not a second merge: `read_settings_map` hands back a
+/// `serde_json::Map` while [`merge_raw_layer`] takes the `BTreeMap` shape the
+/// snapshot carries, and the caller still owns `map` afterwards (it becomes
+/// that layer's entry in [`SettingsSnapshot::layers`]). Every merge decision
+/// is made inside `merge_raw_layer`, in the engine.
+fn fold_layer(
+    effective: &mut BTreeMap<String, Value>,
+    map: &serde_json::Map<String, Value>,
+) -> Vec<String> {
+    let owned: BTreeMap<String, Value> = map
+        .iter()
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect();
+    merge_raw_layer(effective, owned)
 }
 
 /// The `SettingsContext.active` a connection captures ONCE at boot: the three
@@ -478,6 +545,10 @@ pub struct LoweredSettings {
     pub active_json: String,
     /// Administrator-locked keys, passed through unchanged.
     pub locked: Vec<String>,
+    /// Keys whose effective value is a cross-layer union, passed through
+    /// unchanged. See [`SettingsSnapshot::merged_keys`] — a client must not
+    /// render a single-layer provenance badge for one of these.
+    pub merged_keys: Vec<String>,
     /// `{layer: {key: value}}` — each file layer's own raw map, unmerged.
     /// See [`SettingsSnapshot::layers`] for why a layered editor needs this
     /// instead of `effective_json` before writing back to one layer.
@@ -534,6 +605,7 @@ pub fn lower_snapshot(snapshot: &SettingsSnapshot) -> LoweredSettings {
         }),
         active_json: to_json_or_empty_object("active", &snapshot.active),
         locked: snapshot.locked.clone(),
+        merged_keys: snapshot.merged_keys.clone(),
         layers_json: to_json_or_empty_object("layers", &snapshot.layers),
     }
 }
@@ -662,15 +734,34 @@ mod tests {
         };
         let snap = build_snapshot(&paths, BTreeMap::new(), BTreeMap::new());
 
-        // Sanity check on the premise: `effective` really is the flat,
-        // last-layer-wins merge, so it shows ONLY local's providers — proving
-        // the assertions below cannot pass by accident if `layers` secretly
-        // reused `effective`.
+        // Sanity check on the premise: `effective` is the engine's merge, and
+        // `providers` is one of the keys the engine DEEP-MERGES, so
+        // `effective` shows all three layers' profiles at once and matches no
+        // single layer's own map. That is what makes the assertions below
+        // meaningful — if `layers` secretly reused `effective`, every layer
+        // would report all three profiles. (Before Task 17b this premise read
+        // the other way round: the snapshot's merge was flat, so `effective`
+        // was local's own value. Either way the premise is "effective differs
+        // from each layer's own map"; the union is the stronger version, and
+        // it is the one the running engine actually resolves.)
         let effective_providers = snap.effective.get("providers").unwrap();
         assert!(
-            effective_providers.get("localProvider").is_some()
-                && effective_providers.get("userProvider").is_none(),
-            "premise check: effective must be local's own value, not a union — got {effective_providers}"
+            effective_providers.get("userProvider").is_some()
+                && effective_providers.get("projectProvider").is_some()
+                && effective_providers.get("localProvider").is_some(),
+            "premise check: effective must be the cross-layer union — got {effective_providers}"
+        );
+        assert!(
+            snap.merged_keys.contains(&"providers".to_string()),
+            "a union must be reported as merged, or the UI badges it as one layer's — got {:?}",
+            snap.merged_keys
+        );
+        // `routing` is set by ONE layer only, so nothing was unioned for it —
+        // its `project` badge is honest and must not be suppressed.
+        assert!(
+            !snap.merged_keys.contains(&"routing".to_string()),
+            "a key only one layer defines is not a union, got {:?}",
+            snap.merged_keys
         );
 
         let user_providers = snap.layers.get("user").unwrap().get("providers").unwrap();
@@ -741,6 +832,215 @@ mod tests {
         assert!(
             layers_wire["project"]["routing"]["retry"]["maxAttempts"] == 3,
             "wire layers_json must carry the project layer's own routing value, got {layers_wire}"
+        );
+    }
+
+    /// The engine does NOT resolve `hooks` (or any other key in
+    /// `engine::settings::schema::MERGE_STRATEGIES`) by letting the
+    /// highest-priority layer's whole value win: `merger::merge` deep-merges
+    /// it, so a hook defined only in `user` survives alongside a hook defined
+    /// only in `project`. A snapshot that overwrites the key top-level shows
+    /// a settings UI a value the running engine never resolves.
+    ///
+    /// Written to fail against the flat, last-layer-wins merge: with it,
+    /// `effective["hooks"]` is exactly the project layer's object, so
+    /// `PreToolUse` (user-only) is absent.
+    #[test]
+    fn effective_unions_a_deep_merged_key_across_layers_the_way_the_engine_does() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        let project = dir.path().join("repo");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(project.join(branding::DOT_DIR)).unwrap();
+
+        std::fs::write(
+            home.join("settings.json"),
+            r#"{"hooks":{"PreToolUse":{"Bash":"from-user"}},"outputStyle":"from-user"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            project.join(branding::DOT_DIR).join("settings.json"),
+            r#"{"hooks":{"PostToolUse":{"Read":"from-project"}},"outputStyle":"from-project"}"#,
+        )
+        .unwrap();
+
+        let paths = SettingsPaths {
+            lingxi_home: home,
+            project_dir: project,
+        };
+        let snap = build_snapshot(&paths, BTreeMap::new(), BTreeMap::new());
+
+        let hooks = snap
+            .effective
+            .get("hooks")
+            .expect("both layers define `hooks`");
+        assert_eq!(
+            hooks.pointer("/PreToolUse/Bash").and_then(|v| v.as_str()),
+            Some("from-user"),
+            "the user layer's hook must survive the merge with the project layer, got {hooks}"
+        );
+        assert_eq!(
+            hooks.pointer("/PostToolUse/Read").and_then(|v| v.as_str()),
+            Some("from-project"),
+            "the project layer's hook must be present too, got {hooks}"
+        );
+
+        // A scalar key set in both layers is NOT a union — the engine's
+        // default strategy is Override, so the higher layer simply wins.
+        assert_eq!(
+            snap.effective.get("outputStyle").and_then(|v| v.as_str()),
+            Some("from-project"),
+            "a scalar key must still be last-layer-wins"
+        );
+
+        // `merged_keys` must name the unioned key so the UI can drop the
+        // single-layer badge for it...
+        assert!(
+            snap.merged_keys.contains(&"hooks".to_string()),
+            "`hooks` resolved from two layers at once and must be reported as merged, got {:?}",
+            snap.merged_keys
+        );
+        // ...and must NOT name the scalar key, which really does come from
+        // one layer. A `merged_keys` that listed every key both layers
+        // mention would satisfy the assertion above while telling the UI
+        // nothing, so this half is what makes the field worth having.
+        assert!(
+            !snap.merged_keys.contains(&"outputStyle".to_string()),
+            "`outputStyle` is scalar-override — its effective value IS the project layer's, so \
+             suppressing that layer's badge would be the same lie inverted, got {:?}",
+            snap.merged_keys
+        );
+
+        // The provenance entry for a merged key names only the highest
+        // CONTRIBUTOR, which is exactly why `merged_keys` has to exist: on
+        // its own this entry would have the UI say the value came from
+        // `project` when half of it came from `user`.
+        assert_eq!(
+            snap.provenance.get("hooks"),
+            Some(&SettingsLayer::Project),
+            "provenance still names the top contributing layer"
+        );
+
+        // The wire carries it, or none of the above reaches the UI.
+        let lowered = lower_snapshot(&snap);
+        assert!(
+            lowered.merged_keys.contains(&"hooks".to_string()),
+            "the lowered payload must carry the merged keys, got {:?}",
+            lowered.merged_keys
+        );
+        let effective_wire: Value = serde_json::from_str(&lowered.effective_json).unwrap();
+        assert_eq!(
+            effective_wire
+                .pointer("/hooks/PreToolUse/Bash")
+                .and_then(|v| v.as_str()),
+            Some("from-user"),
+            "the union must survive the wire lowering, got {effective_wire}"
+        );
+    }
+
+    /// A key an earlier pair of layers unioned, which a later layer then
+    /// redefines ENTIRELY, is no longer a union: the effective value is
+    /// exactly that later layer's own value, so its badge is honest and must
+    /// come back. `merged_keys` reports the state after the LAST layer to
+    /// touch the key, not "some pair of layers once merged this".
+    ///
+    /// Fails against an accumulate-only `merged_keys`: `hooks` would stay in
+    /// the list forever after the user/project fold unioned it, and the UI
+    /// would suppress a true `local` badge.
+    #[test]
+    fn a_union_a_later_layer_fully_redefines_stops_being_reported_as_merged() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        let project = dir.path().join("repo");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(project.join(branding::DOT_DIR)).unwrap();
+
+        std::fs::write(home.join("settings.json"), r#"{"hooks":{"A":"user"}}"#).unwrap();
+        std::fs::write(
+            project.join(branding::DOT_DIR).join("settings.json"),
+            r#"{"hooks":{"B":"project"}}"#,
+        )
+        .unwrap();
+        // Defines BOTH entries, so nothing of the lower layers survives.
+        std::fs::write(
+            project.join(branding::DOT_DIR).join("settings.local.json"),
+            r#"{"hooks":{"A":"local","B":"local"}}"#,
+        )
+        .unwrap();
+
+        let paths = SettingsPaths {
+            lingxi_home: home,
+            project_dir: project,
+        };
+        let snap = build_snapshot(&paths, BTreeMap::new(), BTreeMap::new());
+
+        assert_eq!(
+            snap.effective.get("hooks"),
+            Some(&serde_json::json!({"A": "local", "B": "local"})),
+            "the local layer redefines every entry, so the merge lands on its own value"
+        );
+        assert_eq!(snap.provenance.get("hooks"), Some(&SettingsLayer::Local));
+        assert!(
+            !snap.merged_keys.contains(&"hooks".to_string()),
+            "the effective value IS the local layer's own, so its badge is honest and must not \
+             be suppressed, got {:?}",
+            snap.merged_keys
+        );
+    }
+
+    /// The managed (policy) overlay is not exempt from the merge: the engine
+    /// folds it in with `merger::merge(acc, managed)` like every other layer,
+    /// so a pinned key it deep-merges resolves to the policy's entries UNIONED
+    /// with the file layers'. Applying the overlay as a flat overwrite here —
+    /// which is what this function used to do — would report a value the
+    /// engine never resolves for exactly the keys the UI draws a padlock next
+    /// to, and would claim the whole value is the administrator's.
+    ///
+    /// Fails against a flat overlay: `allow` (file-only) disappears.
+    #[test]
+    fn the_managed_overlay_deep_merges_the_way_the_engine_folds_it_in() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        let project = dir.path().join("repo");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(project.join(branding::DOT_DIR)).unwrap();
+        std::fs::write(
+            home.join("settings.json"),
+            r#"{"permissions":{"allow":["Bash(ls)"]}}"#,
+        )
+        .unwrap();
+
+        let paths = SettingsPaths {
+            lingxi_home: home,
+            project_dir: project,
+        };
+        let mut managed = BTreeMap::new();
+        managed.insert(
+            "permissions".to_string(),
+            serde_json::json!({"deny": ["Bash(rm -rf /)"]}),
+        );
+        let snap = build_snapshot(&paths, BTreeMap::new(), managed);
+
+        let permissions = snap.effective.get("permissions").unwrap();
+        assert_eq!(
+            permissions.pointer("/deny/0").and_then(|v| v.as_str()),
+            Some("Bash(rm -rf /)"),
+            "the administrator's deny rule must be there, got {permissions}"
+        );
+        assert_eq!(
+            permissions.pointer("/allow/0").and_then(|v| v.as_str()),
+            Some("Bash(ls)"),
+            "the file layer's allow rule must survive the managed overlay, got {permissions}"
+        );
+        assert!(
+            snap.merged_keys.contains(&"permissions".to_string()),
+            "the value is a union of policy and file, got {:?}",
+            snap.merged_keys
+        );
+        assert_eq!(
+            snap.locked,
+            vec!["permissions".to_string()],
+            "the key is still administrator-pinned"
         );
     }
 

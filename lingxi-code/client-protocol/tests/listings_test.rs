@@ -540,6 +540,7 @@ fn settings_snapshot_round_trips() {
         active_json: None,
         locked: None,
         layers_json: None,
+        merged_keys: None,
     };
     let json = serde_json::to_value(&ev).expect("serialize SettingsSnapshot");
     assert_eq!(json["type"], "settings_snapshot");
@@ -552,7 +553,7 @@ fn settings_snapshot_round_trips() {
         json["provenance_json"].is_string(),
         "provenance_json must be a String"
     );
-    // The four ADDED optional fields stay OFF the wire when unset, which is
+    // The five ADDED optional fields stay OFF the wire when unset, which is
     // what makes the addition additive: a client that predates them decodes
     // the identical two-field payload.
     let json = serde_json::to_value(&ev).expect("serialize SettingsSnapshot");
@@ -560,6 +561,7 @@ fn settings_snapshot_round_trips() {
     assert!(json.get("active_json").is_none());
     assert!(json.get("locked").is_none());
     assert!(json.get("layers_json").is_none());
+    assert!(json.get("merged_keys").is_none());
     let back: ClientEvent = serde_json::from_value(json).expect("deserialize SettingsSnapshot");
     assert_eq!(back, ev);
 }
@@ -580,6 +582,7 @@ fn settings_snapshot_optional_fields_round_trip() {
         active_json: Some(r#"{"model":"claude-opus-4-7"}"#.to_string()),
         locked: Some(vec!["telemetryEnabled".to_string()]),
         layers_json: Some(r#"{"project":{"model":"claude-opus-4-7"}}"#.to_string()),
+        merged_keys: Some(vec!["hooks".to_string()]),
     };
     let json = serde_json::to_value(&ev).expect("serialize SettingsSnapshot");
     assert!(
@@ -587,6 +590,10 @@ fn settings_snapshot_optional_fields_round_trip() {
         "the added structured payloads must be JSON Strings, not nested objects"
     );
     assert!(json["locked"].is_array());
+    // `merged_keys` is a plain string list too — the keys whose effective
+    // value is a cross-layer union, so a client knows not to draw a
+    // single-layer provenance badge for them.
+    assert!(json["merged_keys"].is_array());
     let back: ClientEvent = serde_json::from_value(json).expect("deserialize SettingsSnapshot");
     assert_eq!(back, ev);
 }
@@ -610,6 +617,7 @@ fn settings_snapshot_decodes_a_payload_without_the_added_fields() {
             active_json: None,
             locked: None,
             layers_json: None,
+            merged_keys: None,
         }
     );
 }

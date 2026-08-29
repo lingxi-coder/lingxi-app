@@ -554,6 +554,7 @@
   "ClientEvent::SettingsSnapshot.files_json": "Option<String>",
   "ClientEvent::SettingsSnapshot.layers_json": "Option<String>",
   "ClientEvent::SettingsSnapshot.locked": "Option<Vec<String>>",
+  "ClientEvent::SettingsSnapshot.merged_keys": "Option<Vec<String>>",
   "ClientEvent::SettingsSnapshot.provenance_json": "String",
   "ClientEvent::Skills": "skills",
   "ClientEvent::Skills.skills": "Vec<SkillDto>",

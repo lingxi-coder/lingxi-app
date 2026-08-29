@@ -1583,6 +1583,22 @@ export type ClientEvent =
        * other layer's data into whichever layer gets saved.
        */
       layers_json?: string;
+      /**
+       * The keys in `effective_json` whose value is a CROSS-LAYER union
+       * rather than any one layer's value. The engine deep-merges or
+       * concat-dedups a specific set of keys (`hooks`, `permissions`,
+       * `providers`, `enabledPlugins`, `trustedDirectories`, … — its
+       * `settings::schema::MERGE_STRATEGIES` table), so once more than one
+       * layer contributes, the effective value belongs to no single layer and
+       * `provenance_json` names only the highest-priority CONTRIBUTOR. The UI
+       * must therefore not draw a single-layer provenance badge for a key
+       * listed here — it says the value is merged across layers instead.
+       *
+       * Only keys the merge actually unioned appear: a deep-merge key whose
+       * entries the winning layer entirely redefines is absent, because there
+       * the winning layer's badge is honest.
+       */
+      merged_keys?: string[];
     }
   | { type: 'auth_state'; state: AuthStateDto }
   | { type: 'doctor_report'; report: DoctorReportDto }

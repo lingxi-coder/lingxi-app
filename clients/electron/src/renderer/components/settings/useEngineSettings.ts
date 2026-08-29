@@ -43,6 +43,20 @@ export interface SettingsSnapshot {
    * 默认为 `{}`，而不是让每一层都读到 undefined。
    */
   layers: Record<string, Record<string, unknown>>;
+  /**
+   * 生效值是「跨层合并」而非任何单独一层的键。引擎对一组特定的键做深合并
+   * 或数组并集去重（`hooks`、`permissions`、`providers`、`enabledPlugins`、
+   * `trustedDirectories`… —— 见引擎的 `settings::schema::MERGE_STRATEGIES`），
+   * 这类键一旦有多层同时贡献，生效值就不属于任何一层，`provenance` 里那一层
+   * 只是「优先级最高的贡献者」。所以对这些键必须停止渲染单层来源徽标，改说
+   * 「多层合并」—— 否则徽标本身就是假话。
+   *
+   * 只列出真正被合并的键：高优先层把下层条目全覆盖掉的深合并键不在其中，
+   * 因为那种情况下生效值确实就是那一层的值，指名它是诚实的。旧生产者省略
+   * 这个字段时默认为 `[]`（「我们不知道有任何合并」），与 `layers` 的缺省
+   * 理由相同。
+   */
+  mergedKeys: string[];
 }
 
 /**
@@ -53,6 +67,9 @@ export interface SettingsSnapshot {
  * - `overridden`：正在编辑的层写了值，但更高的层赢了 —— 常态，不是边缘情况。
  * - `inherited`：正在编辑的层比当前赢家层级更高，但自己还没有写值。
  * - `locked`：managed 层钉住了这个键，不可编辑。
+ * - `merged`：生效值是多层合并出来的，不属于任何一层。`locked` 一并带出来，
+ *   因为一个被策略钉住的键也可能同时是合并值（引擎把 managed 层和文件层
+ *   走的是同一个 merger），这时既不能画单层徽标、又必须禁用控件。
  * - `layer-broken`：正在编辑的层的文件解析失败。
  *
  * `device` 层（Electron store 里的设备级设置）从不流经这个函数 —— 它们不参与
@@ -64,6 +81,7 @@ export type RowState =
   | { kind: 'overridden'; by: Provenance }
   | { kind: 'inherited'; from: Provenance }
   | { kind: 'locked' }
+  | { kind: 'merged'; locked: boolean }
   | { kind: 'layer-broken'; error: string };
 
 export function rowState(
@@ -71,6 +89,14 @@ export function rowState(
 ): RowState {
   const file = snapshot.files.find((f) => f.layer === editingLayer);
   if (file?.parse_error) return { kind: 'layer-broken', error: file.parse_error };
+
+  // 合并判定排在 `locked` 之前，是刻意的：`locked` 渲染的是 managed 单层
+  // 徽标，而一个既被策略钉住、又跨层合并的键，它的生效值并不全是策略的 ——
+  // 画那个徽标就是把 Task 17b 要消除的谎话换个字段说一遍。`merged` 自己带
+  // `locked` 标志，所以「不可编辑」这个事实一点没丢。
+  if (snapshot.mergedKeys.includes(key)) {
+    return { kind: 'merged', locked: snapshot.locked.includes(key) };
+  }
   if (snapshot.locked.includes(key)) return { kind: 'locked' };
 
   const winner = snapshot.provenance[key];

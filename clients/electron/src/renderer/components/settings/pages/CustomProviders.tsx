@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Card, OverriddenNotice, Row, type Provenance } from '../rows';
+import { Card, MergedBadge, MergedNotice, OverriddenNotice, Row, type Provenance } from '../rows';
 import { useT } from '../../../theme/ThemeContext';
 import type { EditableLayer, PageContentProps } from '../SettingsScreen';
 import { rowState, type SettingsSnapshot } from '../useEngineSettings';
@@ -269,6 +269,11 @@ export function CustomProviders({ bridge, snapshot, editingLayer, onJumpToLayer 
   return (
     <>
       <Card title="自定义 Provider">
+        {providersRowState?.kind === 'merged' && (
+          <Row title="生效层" badge={<MergedBadge />} align="center">
+            <MergedNotice editingLayer={editingLayer} />
+          </Row>
+        )}
         {providersRowState?.kind === 'overridden' && (
           <Row title="生效层" align="center">
             <OverriddenNotice
@@ -318,6 +323,11 @@ export function CustomProviders({ bridge, snapshot, editingLayer, onJumpToLayer 
       </Card>
 
       <Card title="路由 (routing)">
+        {routingRowState?.kind === 'merged' && (
+          <Row title="生效层" badge={<MergedBadge />} align="center">
+            <MergedNotice editingLayer={editingLayer} />
+          </Row>
+        )}
         {routingRowState?.kind === 'overridden' && (
           <Row title="生效层" align="center">
             <OverriddenNotice

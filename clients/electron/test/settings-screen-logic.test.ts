@@ -82,6 +82,7 @@ test('parseSettingsSnapshot defaults a missing active_json to effective, not to 
     active: { model: 'opus' },
     locked: [],
     layers: {},
+    mergedKeys: [],
   });
 });
 
@@ -126,6 +127,7 @@ test('parseSettingsSnapshot decodes the optional fields when present', () => {
     active_json: JSON.stringify({ model: 'sonnet' }),
     locked: ['model'],
     layers_json: JSON.stringify({ user: { model: 'opus' } }),
+    merged_keys: ['hooks'],
   }));
   assert.equal(error, null);
   assert.deepEqual(snapshot, {
@@ -135,7 +137,19 @@ test('parseSettingsSnapshot decodes the optional fields when present', () => {
     active: { model: 'sonnet' },
     locked: ['model'],
     layers: { user: { model: 'opus' } },
+    mergedKeys: ['hooks'],
   });
+});
+
+// Task 17b: `merged_keys` is additive (§0.10) like the other optional
+// fields. An absent one must decode to `[]` — "we don't know of any merged
+// key" — and NOT to undefined, which would make `rowState`'s
+// `mergedKeys.includes` throw on every row a producer that predates the
+// field feeds it.
+test('parseSettingsSnapshot defaults a missing merged_keys to an empty list, not undefined', () => {
+  const { snapshot, error } = parseSettingsSnapshot(rawSnapshot());
+  assert.equal(error, null);
+  assert.deepEqual(snapshot?.mergedKeys, []);
 });
 
 test('parseSettingsSnapshot surfaces malformed JSON as an error, not a throw', () => {

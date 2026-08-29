@@ -96,7 +96,8 @@ export function groupedNav(query: string): Array<{ group: NavPage['group']; page
  * Turns the wire event's JSON-string fields into the structured shape
  * `useEngineSettings.ts` works with. `ClientEvent::SettingsSnapshot` carries
  * `effective_json` / `provenance_json` as required strings and
- * `files_json` / `active_json` / `locked` / `layers_json` as optional ones —
+ * `files_json` / `active_json` / `locked` / `layers_json` / `merged_keys` as
+ * optional ones —
  * the contract crate excludes `serde_json::Value` (not UniFFI-representable),
  * so this parse has to happen somewhere on the TypeScript side, and it
  * happens here rather than inside `useEngineSettings.ts` so that module's
@@ -126,7 +127,16 @@ export function parseSettingsSnapshot(
     // layer looking empty rather than throwing — the same "we don't know"
     // default `active`'s own fallback comment argues for, not a crash.
     const layers = raw.layers_json ? (JSON.parse(raw.layers_json) as Record<string, Record<string, unknown>>) : {};
-    return { snapshot: { effective, provenance, files, active, locked, layers }, error: null };
+    // A producer that predates `merged_keys` (additive, §0.10) reports no
+    // merged keys rather than all of them: "we don't know of any" is the
+    // honest reading of an absent field, the same default `layers` takes,
+    // and it leaves such a client exactly where it was before this field
+    // existed instead of suppressing every provenance badge it can draw.
+    const mergedKeys = raw.merged_keys ?? [];
+    return {
+      snapshot: { effective, provenance, files, active, locked, layers, mergedKeys },
+      error: null,
+    };
   } catch (cause) {
     return {
       snapshot: null,

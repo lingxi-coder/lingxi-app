@@ -587,6 +587,7 @@ fn event_goldens() -> Vec<(&'static str, ClientEvent)> {
                 active_json: None,
                 locked: None,
                 layers_json: None,
+                merged_keys: None,
             },
         ),
         (

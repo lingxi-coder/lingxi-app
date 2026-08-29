@@ -90,6 +90,47 @@ export function LockedBadge() {
 }
 
 /**
+ * For a key whose effective value the engine merged across layers, there is
+ * no single layer to name — `hooks` written in `user` and in `project`
+ * resolves to both at once. `ProvenanceBadge` would have to pick one, and
+ * picking one is false, so this badge says what actually happened instead.
+ *
+ * It is deliberately NOT a `Provenance` value: `merged` is not one more
+ * layer, it is the absence of a single one. An expandable per-layer
+ * breakdown would be a nicer answer; a badge that does not lie is the bar.
+ */
+export function MergedBadge() {
+  const t = useT();
+  return (
+    <span
+      title="这个值由多个设置层合并而成，不属于任何单独一层"
+      style={{
+        fontSize: 10.5, padding: '2px 7px', borderRadius: 5,
+        background: t.surfaceHover, color: t.text3, fontWeight: 600,
+      }}
+    >
+      多层合并
+    </span>
+  );
+}
+
+/**
+ * The row-level counterpart to [`MergedBadge`], for the same reason
+ * `OverriddenNotice` exists: on a merged key, "你写在 X 层的值被 Y 层盖掉了"
+ * is not what happened — nothing was overridden, the layers were combined —
+ * so that notice must not render, and this says the true thing in its place.
+ */
+export function MergedNotice({ editingLayer }: { editingLayer: Provenance }) {
+  const t = useT();
+  return (
+    <div style={{ marginTop: 6, fontSize: 12, color: t.text3 }}>
+      当前生效值由多个设置层合并而成，不属于任何单独一层；
+      在{provenanceLabel(editingLayer)}层的编辑只改动这一层自己的条目。
+    </div>
+  );
+}
+
+/**
  * The user layer is the lowest of the file layers, so "I set this here but
  * a higher layer's value wins" is the common case, not an edge case. This
  * reads as an explanation with a way to act, not as an error.

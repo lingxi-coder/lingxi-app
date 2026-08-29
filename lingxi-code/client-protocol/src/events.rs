@@ -313,6 +313,25 @@ pub enum ClientEvent {
         /// Additive under decision §0.10 — no major bump.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         layers_json: Option<String>,
+        /// The keys in `effective_json` whose value is a CROSS-LAYER union
+        /// rather than one layer's value. The engine deep-merges or
+        /// concat-dedups a specific set of keys (`hooks`, `permissions`,
+        /// `providers`, `enabledPlugins`, `trustedDirectories`, … — its
+        /// `settings::schema::MERGE_STRATEGIES` table), so when more than one
+        /// layer contributes, the effective value belongs to no single layer
+        /// and `provenance_json`'s entry for that key names only the
+        /// highest-priority CONTRIBUTOR. A client must therefore not render a
+        /// single-layer provenance badge for a key listed here; it says the
+        /// value is merged across layers instead.
+        ///
+        /// Only keys the merge actually unioned are listed: a deep-merge key
+        /// whose entries the winning layer entirely redefines is absent,
+        /// because for that key the winning layer's badge is honest. A list
+        /// of every key both layers mention would be useless.
+        ///
+        /// Additive under decision §0.10 — no major bump.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        merged_keys: Option<Vec<String>>,
     },
 
     AuthState {

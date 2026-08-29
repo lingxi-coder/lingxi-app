@@ -120,6 +120,40 @@ export type PermissionBehaviorDto = 'allow' | 'deny' | 'ask';
 export type McpScopeDto = 'user' | 'local' | 'project';
 
 /**
+ * Coarse, branchable failure class for {@link AudioResultDto}'s `failed`
+ * variant — the union of `SttError`/`VoiceError`/`TtsError`'s failure modes,
+ * collapsed to a shared tag so a caller can branch on the same kind whichever
+ * trait produced it (commands.rs `AudioErrorKindDto`). A bare wire string.
+ * `#[non_exhaustive]` on the Rust side ⇒ a future kind is additive.
+ */
+export type AudioErrorKindDto =
+  | 'permission_denied'
+  | 'no_speech'
+  | 'not_recording'
+  | 'unavailable'
+  | 'busy'
+  | 'retriable'
+  | 'synthesis_failed'
+  | 'other';
+
+/**
+ * A finished microphone/speaker operation, or a typed failure — the wire
+ * lowering of `VoiceRecording`/`SttTranscript`/`TtsAudio` plus the unioned
+ * failure kind from `SttError`/`VoiceError`/`TtsError` (commands.rs
+ * `AudioResultDto`). Carried by {@link ClientCommand} `audio_response`.
+ * Internally tagged on `type`, `snake_case`. Binary payloads travel as
+ * base64 strings, the same convention as {@link ImageRefDto}.
+ * `#[non_exhaustive]` on the Rust side ⇒ a future outcome is additive.
+ */
+export type AudioResultDto =
+  | { type: 'ok' }
+  | { type: 'recording_state'; recording: boolean }
+  | { type: 'recording'; audio_base64: string; mime_type: string }
+  | { type: 'transcript'; text: string; language?: string; confidence?: number }
+  | { type: 'audio'; pcm_base64: string; sample_rate_hz: number }
+  | { type: 'failed'; kind: AudioErrorKindDto; message: string };
+
+/**
  * The inbound command envelope a client sends to the engine
  * (commands.rs `ClientCommand`). Internally tagged on `type`, `snake_case`.
  *
@@ -268,7 +302,15 @@ export type ClientCommand =
     }
   // ── MCP servers (persisted) ──────────────────────────────────────────────────
   | { type: 'upsert_mcp_server'; scope: McpScopeDto; name: string; config_json: string }
-  | { type: 'remove_mcp_server'; scope: McpScopeDto; name: string };
+  | { type: 'remove_mcp_server'; scope: McpScopeDto; name: string }
+  // ── Audio (engine -> client mic/speaker requests) ─────────────────────────────
+  /**
+   * Answer to an engine `audio_request`, correlated by `request_id`. Mirrors
+   * the {@link ComputerAccessRequestDto} engine->client request/response
+   * shape, but as a single typed reply rather than an approve/deny split
+   * (commands.rs `ClientCommand::AudioResponse`).
+   */
+  | { type: 'audio_response'; request_id: number; result: AudioResultDto };
 
 // ─────────────────────────────────────────────────────────────────────────────
 // tool_display.rs — the pre-derived render model for one tool call
@@ -1453,6 +1495,19 @@ export interface CostDto {
 }
 
 /**
+ * One audio operation the engine asks a client to perform on its device
+ * microphone/speaker (events.rs `AudioOpDto`). Carried by {@link ClientEvent}
+ * `audio_request`. Internally tagged on `type`, `snake_case`.
+ * `#[non_exhaustive]` on the Rust side ⇒ a future op is additive.
+ */
+export type AudioOpDto =
+  | { type: 'start_recording'; sample_rate_hz: number; format: string }
+  | { type: 'stop_recording' }
+  | { type: 'is_recording' }
+  | { type: 'transcribe'; language?: string }
+  | { type: 'synthesize'; text: string; voice?: string };
+
+/**
  * Outbound events the engine streams to a client (events.rs `ClientEvent`).
  * Internally tagged on `type`, `snake_case`.
  *
@@ -1671,7 +1726,16 @@ export type ClientEvent =
       attempt: number;
       max_retries: number;
       delay_ms: number;
-    };
+    }
+  // ── Audio (engine -> client mic/speaker requests) ─────────────────────────────
+  /**
+   * Ask a client to perform one microphone/speaker operation. Mirrors the
+   * {@link ComputerAccessRequestDto} engine->client request/response shape:
+   * correlated by `request_id`, and the client's outcome round-trips back as
+   * an {@link AudioResultDto} on {@link ClientCommand} `audio_response`
+   * (events.rs `ClientEvent::AudioRequest`).
+   */
+  | { type: 'audio_request'; request_id: number; op: AudioOpDto };
 
 // ─────────────────────────────────────────────────────────────────────────────
 // error.rs

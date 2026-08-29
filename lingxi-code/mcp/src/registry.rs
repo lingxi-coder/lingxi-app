@@ -898,6 +898,18 @@ impl McpRegistry {
         // Returns `(augmented_spec, server_key)` so a 401 can drive a refresh +
         // retry. Static-token servers (and any server when `oauth` is unwired)
         // resolve to the spec unchanged with no server key.
+        //
+        // §19: a static `headers.Authorization` (`has_user_auth_header`) or a
+        // headers-helper-minted one (`helper_minted_authorization`) is
+        // AUTHORITATIVE over OAuth — oracle `hasUserAuthHeader` /
+        // `helperMintsAuthHeader`, checked (in that order) BEFORE any OAuth
+        // provider is constructed, so its Bearer can never be injected at
+        // all, let alone overwrite the value. `classify_auth_failure` reports
+        // a subsequent auth-type failure with the oracle's exact
+        // `AUTH_HEADER_REJECTED` / `HEADERS_HELPER_AUTH_REJECTED` copy instead
+        // of the raw transport error; it is a no-op pass-through whenever
+        // neither flag applies, so it is safe to wrap every exit below.
+        let has_user_auth_header = crate::negotiation::spec_has_authorization(&config.spec);
         let helper_enabled = crate::headers_helper::has_headers_helper(&config.spec);
         let mut resolved_config = config.clone();
         let plugin_root = self
@@ -906,13 +918,19 @@ impl McpRegistry {
             .await
             .get(&config.name)
             .cloned();
-        resolved_config.spec = crate::headers_helper::resolve_headers_helper_in(
-            &config,
-            &self.headers_helper_cwd,
-            plugin_root.as_deref(),
-        )
-        .await?;
-        let (connect_spec, oauth_key) = self.resolve_oauth_spec(&resolved_config).await?;
+        let (helper_spec, mut helper_minted_authorization) =
+            crate::headers_helper::resolve_headers_helper_in(
+                &config,
+                &self.headers_helper_cwd,
+                plugin_root.as_deref(),
+            )
+            .await?;
+        resolved_config.spec = helper_spec;
+        let (connect_spec, oauth_key) = if has_user_auth_header || helper_minted_authorization {
+            (resolved_config.spec.clone(), None)
+        } else {
+            self.resolve_oauth_spec(&resolved_config).await?
+        };
 
         let attempt =
             |spec: McpTransportSpec| self.connect_attempt(spec, connect_timeout, &config.name);
@@ -926,33 +944,70 @@ impl McpRegistry {
             // and retry ONCE. Mirrors auth.ts `wrapFetchWithStepUpDetection`
             // (1354-1374) + `markStepUpPending`/`cachedStepUpScope` persistence.
             // Checked BEFORE the 401 branch so a 403 never falls into refresh.
+            //
+            // Unreachable when `has_user_auth_header || helper_minted_authorization`:
+            // `oauth_key` is `None` in that case (OAuth was never constructed
+            // above), so `classify_auth_failure` in this arm is always a
+            // pass-through.
             Err(e) if oauth_key.is_some() => {
                 if let Some(scope) = error_is_403_insufficient_scope(&e) {
                     let stepped = self.step_up_oauth_spec(&resolved_config, &scope).await?;
-                    attempt(stepped).await?
+                    attempt(stepped).await.map_err(|e| {
+                        crate::negotiation::classify_auth_failure(
+                            e,
+                            has_user_auth_header,
+                            helper_minted_authorization,
+                        )
+                    })?
                 } else if error_is_401(&e) {
                     // 401 → the access token is stale: force a refresh (or a
                     // fresh interactive flow), re-inject the Bearer, retry ONCE.
                     // Faithful-core 401 detection: the transport flattens errors
                     // to strings (structured status is a noted residual).
                     let refreshed = self.reauth_oauth_spec(&resolved_config).await?;
-                    attempt(refreshed).await?
+                    attempt(refreshed).await.map_err(|e| {
+                        crate::negotiation::classify_auth_failure(
+                            e,
+                            has_user_auth_header,
+                            helper_minted_authorization,
+                        )
+                    })?
                 } else {
-                    return Err(e);
+                    return Err(crate::negotiation::classify_auth_failure(
+                        e,
+                        has_user_auth_header,
+                        helper_minted_authorization,
+                    ));
                 }
             }
             Err(e) if helper_enabled && error_is_auth_response(&e) => {
                 // A helper may emit short-lived credentials. Re-run it for one
                 // auth failure and reconnect once; never loop indefinitely.
-                let refreshed = crate::headers_helper::resolve_headers_helper_in(
+                // Re-derive `helper_minted_authorization` from THIS rerun (it
+                // can legitimately change run to run) so a still-failing retry
+                // classifies against what the helper minted this time.
+                let (refreshed, minted) = crate::headers_helper::resolve_headers_helper_in(
                     &config,
                     &self.headers_helper_cwd,
                     plugin_root.as_deref(),
                 )
                 .await?;
-                attempt(refreshed).await?
+                helper_minted_authorization = minted;
+                attempt(refreshed).await.map_err(|e| {
+                    crate::negotiation::classify_auth_failure(
+                        e,
+                        has_user_auth_header,
+                        helper_minted_authorization,
+                    )
+                })?
             }
-            Err(e) => return Err(e),
+            Err(e) => {
+                return Err(crate::negotiation::classify_auth_failure(
+                    e,
+                    has_user_auth_header,
+                    helper_minted_authorization,
+                ))
+            }
         };
         let catalog = async {
             let tools = if caps.tools {
@@ -2453,7 +2508,7 @@ fn error_is_401(e: &McpError) -> bool {
         )
 }
 
-fn error_is_auth_response(error: &McpError) -> bool {
+pub(crate) fn error_is_auth_response(error: &McpError) -> bool {
     error_is_401(error)
         || matches!(error, McpError::HttpResponse { status: 403, .. })
         || matches!(

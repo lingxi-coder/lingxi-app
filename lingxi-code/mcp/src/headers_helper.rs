@@ -22,9 +22,14 @@ pub fn has_headers_helper(spec: &McpTransportSpec) -> bool {
 /// static headers, so a short-lived credential can replace a configured value.
 /// Project/local helpers are rejected until the workspace trust record exists;
 /// this check happens before the subprocess is created.
+///
+/// The returned `bool` is the oracle's `helperMintsAuthHeader` (§19): whether
+/// the helper's dynamic output itself contained an `Authorization` key — NOT
+/// merely whether a helper is configured. `false` when no helper is
+/// configured for this transport at all.
 pub async fn resolve_headers_helper(
     config: &McpServerConfig,
-) -> Result<McpTransportSpec, McpError> {
+) -> Result<(McpTransportSpec, bool), McpError> {
     let cwd = std::env::current_dir().map_err(|error| {
         McpError::Connection(format!(
             "headersHelper for MCP server \"{}\" could not resolve cwd: {error}",
@@ -36,13 +41,15 @@ pub async fn resolve_headers_helper(
 
 /// Resolve `headersHelper` with the session and optional plugin execution
 /// context selected by the runtime composition root.
+///
+/// See [`resolve_headers_helper`] for the meaning of the returned `bool`.
 pub async fn resolve_headers_helper_in(
     config: &McpServerConfig,
     cwd: &Path,
     plugin_root: Option<&Path>,
-) -> Result<McpTransportSpec, McpError> {
+) -> Result<(McpTransportSpec, bool), McpError> {
     let Some((url, command)) = headers_helper_parts(&config.spec) else {
-        return Ok(config.spec.clone());
+        return Ok((config.spec.clone(), false));
     };
     ensure_helper_source_trusted(config.scope, cwd)?;
 
@@ -252,24 +259,43 @@ fn parse_helper_output(bytes: &[u8], server_name: &str) -> Result<McpHeaders, Mc
         .collect()
 }
 
-fn merge_dynamic_headers(spec: &McpTransportSpec, dynamic: McpHeaders) -> McpTransportSpec {
+/// Merge a headers helper's dynamic output over `spec`'s static headers.
+///
+/// Returns the resolved spec plus the oracle's `helperMintsAuthHeader` (§19):
+/// whether `dynamic` itself carried an `Authorization` key — computed here,
+/// at the one place that sees the helper's raw output, rather than re-derived
+/// from a "helper is configured" predicate that can't tell which header a
+/// helper actually mints.
+fn merge_dynamic_headers(spec: &McpTransportSpec, dynamic: McpHeaders) -> (McpTransportSpec, bool) {
+    let minted_authorization = dynamic.contains_key("Authorization");
     let mut resolved = spec.clone();
     let headers = match &mut resolved {
         McpTransportSpec::Sse { headers, .. }
         | McpTransportSpec::Http { headers, .. }
         | McpTransportSpec::WebSocket { headers, .. } => headers,
-        _ => return resolved,
+        _ => return (resolved, false),
     };
     for (name, value) in dynamic {
         headers.insert(name, value);
     }
-    resolved
+    (resolved, minted_authorization)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    // §19 review note: this test's core claim — a helper's freshly-run
+    // dynamic output overrides a stale STATIC value for the same header key
+    // — is deliberately KEPT, not reverted. It documents a real, intentional,
+    // orthogonal behaviour (the doc comment above `resolve_headers_helper`:
+    // "a short-lived credential can replace a configured value") that the
+    // §19 audit never flagged: the bug §19 identifies is OAuth silently
+    // overwriting a static/helper-minted `Authorization` *after* this merge
+    // has already run, not this merge itself. What changed here is only the
+    // return shape (now also reports `helperMintsAuthHeader`, asserted below
+    // as `true` since the dynamic map in this test DOES carry an
+    // `Authorization` key).
     #[test]
     fn dynamic_headers_replace_static_values() {
         let spec = McpTransportSpec::Http {
@@ -281,15 +307,35 @@ mod tests {
             headers_helper: Some("helper".into()),
             oauth: None,
         };
-        let merged = merge_dynamic_headers(
+        let (merged, minted_authorization) = merge_dynamic_headers(
             &spec,
             McpHeaders::from_iter([("Authorization".into(), "new".into())]),
         );
+        assert!(minted_authorization, "dynamic output carried Authorization");
         let McpTransportSpec::Http { headers, .. } = merged else {
             panic!("expected http")
         };
         assert_eq!(headers["Authorization"], "new");
         assert_eq!(headers["X-Static"], "yes");
+    }
+
+    #[test]
+    fn merge_dynamic_headers_reports_no_authorization_minted() {
+        // A helper that mints an unrelated header must NOT be reported as
+        // having minted `Authorization` — the predicate this fixes (§19 gap
+        // 2) is "did the dynamic output carry this exact key", not "is a
+        // helper configured at all".
+        let spec = McpTransportSpec::Http {
+            url: "https://mcp.example".into(),
+            headers: McpHeaders::new(),
+            headers_helper: Some("helper".into()),
+            oauth: None,
+        };
+        let (_, minted_authorization) = merge_dynamic_headers(
+            &spec,
+            McpHeaders::from_iter([("X-Api-Key".into(), "k".into())]),
+        );
+        assert!(!minted_authorization);
     }
 
     #[test]
@@ -319,9 +365,11 @@ mod tests {
             always_load: false,
             config_error: None,
         };
-        let resolved = resolve_headers_helper_in(&config, session.path(), Some(plugin.path()))
-            .await
-            .unwrap();
+        let (resolved, minted_authorization) =
+            resolve_headers_helper_in(&config, session.path(), Some(plugin.path()))
+                .await
+                .unwrap();
+        assert!(!minted_authorization, "helper minted no Authorization here");
         let McpTransportSpec::Http { headers, .. } = resolved else {
             panic!("expected http transport");
         };

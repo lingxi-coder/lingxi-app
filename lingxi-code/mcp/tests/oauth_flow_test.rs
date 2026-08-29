@@ -708,6 +708,302 @@ async fn connect_401_triggers_refresh_and_retry() {
 }
 
 // ---------------------------------------------------------------------------
+// §19: static/helper-minted Authorization is authoritative over OAuth.
+// ---------------------------------------------------------------------------
+
+/// Seed a valid (unexpired) OAuth token so that, if the §19 gate is broken,
+/// `resolve_oauth_spec` takes its synchronous "stored, unexpired" branch
+/// (no interactive flow, no network) — the bug is then observable purely as
+/// a WRONG header value, never as a hang.
+async fn seed_unexpired_oauth_token(storage: &Arc<MemStorage>, key: &str) {
+    let stored = oauth::StoredTokens {
+        access_token: "oauth-bearer-should-not-win".into(),
+        refresh_token: Some("refresh-x".into()),
+        expires_at_unix: 99_999,
+        client_id: Some("client-x".into()),
+        client_secret: None,
+        step_up_scope: None,
+    };
+    let bytes = serde_json::to_vec(&stored).unwrap();
+    let data = SecureStorageData::new(
+        bytes,
+        SecureStorageMetadata {
+            created_at: SystemTime::UNIX_EPOCH,
+            last_accessed: None,
+            kind: SecretKindDto("mcp_oauth_tokens".into()),
+        },
+    );
+    storage
+        .store(oauth::MCP_OAUTH_SERVICE, key, data)
+        .await
+        .unwrap();
+}
+
+/// Gap 1: a static `headers.Authorization` on a server that ALSO has an
+/// `oauth` block must never be overwritten by the OAuth Bearer, even when a
+/// valid stored token is available.
+#[tokio::test]
+async fn static_authorization_header_survives_oauth_bearer() {
+    let mock_as = MockAs::new("{}", "{}");
+    let transport = RecordingTransport::new(0);
+    let storage = MemStorage::new();
+    let clock = TestClock::new(1_000);
+    let (on_url, _rx) = url_capture();
+
+    let mut headers = traits::McpHeaders::new();
+    headers.insert("Authorization".to_string(), "Bearer configured-static".into());
+    let config = McpServerConfig {
+        name: "static-with-oauth".into(),
+        spec: McpTransportSpec::Http {
+            url: "https://mcp.example.com/v1".into(),
+            headers,
+            headers_helper: None,
+            oauth: Some(oauth_block(Some("client-x"))),
+        },
+        scope: ConfigScope::Project,
+        disabled: false,
+        timeout_ms: None,
+        always_load: false,
+        config_error: None,
+    };
+    let key = oauth::server_key("static-with-oauth", &config.spec);
+    seed_unexpired_oauth_token(&storage, &key).await;
+
+    let registry =
+        McpRegistry::new(transport.clone() as Arc<dyn McpTransport>).with_oauth(OAuthDeps {
+            http: mock_as.clone() as Arc<dyn HttpTransport>,
+            clock: clock as Arc<dyn Clock>,
+            storage: storage as Arc<dyn SecureStorage>,
+            on_authorization_url: on_url,
+            xaa_config: None,
+        });
+
+    registry.connect(config).await.expect("connect ok");
+
+    assert_eq!(
+        spec_auth_header(&transport.last_spec()).as_deref(),
+        Some("Bearer configured-static"),
+        "OAuth must never overwrite a static Authorization header"
+    );
+    assert!(
+        mock_as.requests().is_empty(),
+        "OAuth must never even be attempted once a static Authorization header is set"
+    );
+}
+
+/// Gap 1 (classification): a static `headers.Authorization` server (no
+/// `oauth` block) that is rejected with a 401 must surface the oracle's exact
+/// `AUTH_HEADER_REJECTED` copy, not the raw transport error — and must not be
+/// retried (no OAuth, no headersHelper to refresh).
+#[tokio::test]
+async fn static_authorization_header_rejection_is_classified() {
+    let transport = RecordingTransport::new(usize::MAX);
+    let mut headers = traits::McpHeaders::new();
+    headers.insert("Authorization".to_string(), "Bearer configured-static".into());
+    let config = McpServerConfig {
+        name: "static-rejected".into(),
+        spec: McpTransportSpec::Http {
+            url: "https://mcp.example.com/v1".into(),
+            headers,
+            headers_helper: None,
+            oauth: None,
+        },
+        scope: ConfigScope::Project,
+        disabled: false,
+        timeout_ms: None,
+        always_load: false,
+        config_error: None,
+    };
+
+    let registry = McpRegistry::new(transport.clone() as Arc<dyn McpTransport>);
+    let err = registry.connect(config).await.expect_err("must be rejected");
+
+    assert_eq!(
+        err.to_string(),
+        "connection failed: Server rejected the configured Authorization header (HTTP 401). \
+Check that the token is valid for this MCP endpoint — OAuth fallback is disabled when \
+headers.Authorization is set."
+    );
+    assert_eq!(transport.connect_count(), 1, "no retry for a static header");
+}
+
+/// Gap 2/3: a `headersHelper` that mints `Authorization` on a server that
+/// ALSO has an `oauth` block must never be overwritten by the OAuth Bearer.
+#[cfg(unix)]
+#[tokio::test]
+async fn headers_helper_minted_authorization_survives_oauth_bearer() {
+    let mock_as = MockAs::new("{}", "{}");
+    let transport = RecordingTransport::new(0);
+    let storage = MemStorage::new();
+    let clock = TestClock::new(1_000);
+    let (on_url, _rx) = url_capture();
+
+    let config = McpServerConfig {
+        name: "helper-with-oauth".into(),
+        spec: McpTransportSpec::Http {
+            url: "https://mcp.example.com/v1".into(),
+            headers: traits::McpHeaders::new(),
+            headers_helper: Some(
+                r#"printf '{"Authorization":"Bearer helper-minted"}'"#.into(),
+            ),
+            oauth: Some(oauth_block(Some("client-x"))),
+        },
+        // User scope so the headersHelper trust-dialog check is skipped.
+        scope: ConfigScope::User,
+        disabled: false,
+        timeout_ms: None,
+        always_load: false,
+        config_error: None,
+    };
+    // `oauth::server_key` hashes `{type, url, headers}`, so a stored-token
+    // lookup keys on the spec's headers too. Seed under the key the
+    // POST-helper-merge spec would hash to (the raw config's `headers` is
+    // empty; the helper mints `Authorization` into it) — the same key
+    // `resolve_oauth_spec` would look up if it (wrongly) ran here at all.
+    // This is what keeps this test deterministic instead of hanging on a
+    // never-driven interactive OAuth flow when the §19 gate is missing.
+    let post_helper_spec = McpTransportSpec::Http {
+        url: "https://mcp.example.com/v1".into(),
+        headers: traits::McpHeaders::from_iter([(
+            "Authorization".to_string(),
+            "Bearer helper-minted".to_string(),
+        )]),
+        headers_helper: Some(r#"printf '{"Authorization":"Bearer helper-minted"}'"#.into()),
+        oauth: Some(oauth_block(Some("client-x"))),
+    };
+    let key = oauth::server_key("helper-with-oauth", &post_helper_spec);
+    seed_unexpired_oauth_token(&storage, &key).await;
+
+    let registry =
+        McpRegistry::new(transport.clone() as Arc<dyn McpTransport>).with_oauth(OAuthDeps {
+            http: mock_as.clone() as Arc<dyn HttpTransport>,
+            clock: clock as Arc<dyn Clock>,
+            storage: storage as Arc<dyn SecureStorage>,
+            on_authorization_url: on_url,
+            xaa_config: None,
+        });
+
+    registry.connect(config).await.expect("connect ok");
+
+    assert_eq!(
+        spec_auth_header(&transport.last_spec()).as_deref(),
+        Some("Bearer helper-minted"),
+        "OAuth must never overwrite a headersHelper-minted Authorization header"
+    );
+    assert!(
+        mock_as.requests().is_empty(),
+        "OAuth must never even be attempted once the helper mints Authorization"
+    );
+}
+
+/// Gap 2 (classification): a `headersHelper` that mints `Authorization` (no
+/// `oauth` block) rejected with a 401 must surface the oracle's exact
+/// `HEADERS_HELPER_AUTH_REJECTED` copy — even after the existing
+/// rerun-helper-once-on-auth-failure retry (proving the retried failure is
+/// ALSO reclassified, not just the first one).
+#[cfg(unix)]
+#[tokio::test]
+async fn headers_helper_minted_authorization_rejection_is_classified() {
+    let transport = RecordingTransport::new(usize::MAX);
+    let config = McpServerConfig {
+        name: "helper-rejected".into(),
+        spec: McpTransportSpec::Http {
+            url: "https://mcp.example.com/v1".into(),
+            headers: traits::McpHeaders::new(),
+            headers_helper: Some(
+                r#"printf '{"Authorization":"Bearer helper-minted"}'"#.into(),
+            ),
+            oauth: None,
+        },
+        scope: ConfigScope::User,
+        disabled: false,
+        timeout_ms: None,
+        always_load: false,
+        config_error: None,
+    };
+
+    let registry = McpRegistry::new(transport.clone() as Arc<dyn McpTransport>);
+    let err = registry.connect(config).await.expect_err("must be rejected");
+
+    assert_eq!(
+        err.to_string(),
+        "connection failed: Server rejected the Authorization header minted by the configured \
+headersHelper (HTTP 401). Check that the helper command returns a valid credential for this \
+MCP endpoint — OAuth fallback is disabled when the helper supplies Authorization."
+    );
+    // Initial attempt + the pre-existing "helper may emit short-lived
+    // credentials, retry once" rerun — both fail, and the SECOND failure is
+    // the one classified above.
+    assert_eq!(transport.connect_count(), 2);
+}
+
+/// Gap 2 (predicate): a configured `headersHelper` that mints some OTHER
+/// header (not `Authorization`) must NOT suppress OAuth — `helperMintsAuthHeader`
+/// is "did the helper's output carry this exact key", not "is a helper
+/// configured at all". OAuth's Bearer must still be injected and must
+/// coexist with the helper's own header.
+#[cfg(unix)]
+#[tokio::test]
+async fn headers_helper_minting_other_header_does_not_suppress_oauth() {
+    let mock_as = MockAs::new("{}", "{}");
+    let transport = RecordingTransport::new(0);
+    let storage = MemStorage::new();
+    let clock = TestClock::new(1_000);
+    let (on_url, _rx) = url_capture();
+
+    let config = McpServerConfig {
+        name: "helper-other-header".into(),
+        spec: McpTransportSpec::Http {
+            url: "https://mcp.example.com/v1".into(),
+            headers: traits::McpHeaders::new(),
+            headers_helper: Some(r#"printf '{"X-Api-Key":"helper-key"}'"#.into()),
+            oauth: Some(oauth_block(Some("client-x"))),
+        },
+        scope: ConfigScope::User,
+        disabled: false,
+        timeout_ms: None,
+        always_load: false,
+        config_error: None,
+    };
+    // The helper mints only `X-Api-Key`, so the post-helper spec's headers
+    // are `{X-Api-Key: "helper-key"}` when `resolve_oauth_spec` hashes it.
+    let post_helper_spec = McpTransportSpec::Http {
+        url: "https://mcp.example.com/v1".into(),
+        headers: traits::McpHeaders::from_iter([(
+            "X-Api-Key".to_string(),
+            "helper-key".to_string(),
+        )]),
+        headers_helper: Some(r#"printf '{"X-Api-Key":"helper-key"}'"#.into()),
+        oauth: Some(oauth_block(Some("client-x"))),
+    };
+    let key = oauth::server_key("helper-other-header", &post_helper_spec);
+    seed_unexpired_oauth_token(&storage, &key).await;
+
+    let registry =
+        McpRegistry::new(transport.clone() as Arc<dyn McpTransport>).with_oauth(OAuthDeps {
+            http: mock_as.clone() as Arc<dyn HttpTransport>,
+            clock: clock as Arc<dyn Clock>,
+            storage: storage as Arc<dyn SecureStorage>,
+            on_authorization_url: on_url,
+            xaa_config: None,
+        });
+
+    registry.connect(config).await.expect("connect ok");
+
+    let seen = transport.last_spec();
+    assert_eq!(
+        spec_auth_header(&seen).as_deref(),
+        Some("Bearer oauth-bearer-should-not-win"),
+        "OAuth must still inject its Bearer when the helper mints a DIFFERENT header"
+    );
+    if let McpTransportSpec::Http { headers, .. } = seen {
+        assert_eq!(headers.get("X-Api-Key").map(String::as_str), Some("helper-key"));
+    } else {
+        panic!("expected Http spec");
+    }
+}
+
+// ---------------------------------------------------------------------------
 // RESIDUAL 3 (A): token revocation (RFC 7009) on disconnect.
 // ---------------------------------------------------------------------------
 

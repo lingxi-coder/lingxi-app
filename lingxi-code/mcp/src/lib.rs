@@ -25,6 +25,7 @@ pub mod inbound;
 pub mod initialize_params;
 pub mod json_config;
 pub mod mcp_output_storage;
+pub mod negotiation;
 pub mod normalization;
 pub mod oauth;
 pub mod raw_conn;

@@ -170,6 +170,21 @@ export type ClientCommand =
       turn_id?: number;
     }
   | { type: 'cancel'; turn_id?: number }
+  /**
+   * Reattach a mobile client to a durable turn on the connection's active
+   * session; the engine emits the current recovery snapshot and replays
+   * events whose sequence is greater than `after_sequence`
+   * (commands.rs `ClientCommand::AttachTurn`).
+   */
+  | { type: 'attach_turn'; turn_id: number; after_sequence?: number }
+  /** Resume a checkpointed durable turn when its recovery policy allows it (commands.rs `ClientCommand::ResumeTurn`). */
+  | { type: 'resume_turn'; turn_id: number }
+  /**
+   * Persist a platform-lease expiration without converting it to cancel.
+   * `reason` is a machine-readable platform reason such as
+   * `background_time_expired` (commands.rs `ClientCommand::PauseTurn`).
+   */
+  | { type: 'pause_turn'; turn_id: number; reason: string }
   // ── Permission resolution ───────────────────────────────────────────────────
   | { type: 'approve_permission'; request_id: number; response: PermissionResponseDto }
   | { type: 'deny_permission'; request_id: number }
@@ -1484,6 +1499,36 @@ export type TurnOutcomeDto =
   | { type: 'max_turns' }
   | { type: 'cancelled' };
 
+/**
+ * Durable execution state for a mobile turn. Backgrounding itself never
+ * changes this state; only execution, a recovery gate, or an explicit cancel
+ * does (events.rs `TurnRecoveryStateDto`). Internally tagged on `type`,
+ * `snake_case`. `#[non_exhaustive]` on the Rust side ⇒ a future state is
+ * additive.
+ */
+export type TurnRecoveryStateDto =
+  | { type: 'running' }
+  | { type: 'waiting_for_user' }
+  | { type: 'paused_recoverable' }
+  | { type: 'completed' }
+  | { type: 'failed' }
+  | { type: 'cancelled' };
+
+/**
+ * Snapshot clients use to decide whether a durable turn can be reattached or
+ * needs explicit user intervention (events.rs `TurnRecoverySnapshotDto`).
+ * Carried by {@link ClientEvent} `turn_recovery_state`.
+ */
+export interface TurnRecoverySnapshotDto {
+  session_id: string;
+  turn_id: number;
+  state: TurnRecoveryStateDto;
+  first_sequence: number;
+  last_sequence: number;
+  safe_to_resume: boolean;
+  reason?: string;
+}
+
 /** Cumulative cost snapshot carried by `turn_ended` (events.rs `CostDto`). */
 export interface CostDto {
   total_usd: number;
@@ -1546,6 +1591,19 @@ export type ClientEvent =
   | { type: 'message_complete'; stop_reason?: string; message?: MessageDto }
   | { type: 'turn_started'; turn_id?: number }
   | { type: 'turn_ended'; outcome: TurnOutcomeDto; stop_reason?: string; cost: CostDto }
+  /**
+   * Authoritative durable state for one mobile turn. Emitted on attach,
+   * resume, recovery gating, and every terminal transition
+   * (events.rs `ClientEvent::TurnRecoveryState`).
+   */
+  | { type: 'turn_recovery_state'; snapshot: TurnRecoverySnapshotDto }
+  /**
+   * Sequenced retained copy of a turn event, emitted beside live delivery and
+   * replayed after `attach_turn`. `event_json` is the original serialized
+   * {@link ClientEvent}, kept as a string to avoid a recursive shape
+   * (events.rs `ClientEvent::TurnEventReplay`).
+   */
+  | { type: 'turn_event_replay'; session_id: string; turn_id: number; sequence: number; event_json: string }
   | {
       type: 'cost_update';
       total_usd: number;

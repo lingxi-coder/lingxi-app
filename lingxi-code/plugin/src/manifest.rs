@@ -222,7 +222,7 @@ pub struct PluginMonitor {
     pub when: MonitorTrigger,
 }
 
-/// The 7 component slots a plugin can populate.
+/// The component slots a plugin can populate.
 ///
 /// Each slot is materialized into its matching engine registry by
 /// [`crate::manager::PluginManager::load_plugin`].
@@ -241,17 +241,31 @@ pub struct PluginComponents {
     /// When set, the themes/ directory is not auto-loaded — list its files
     /// here if you want both." A manifest declaration REPLACES (does not
     /// merge with) the `themes/` auto-scan, matching [`Self::output_styles`].
-    /// Discovered only — `PluginManager::load_plugin` does not materialize
-    /// themes into any registry yet.
+    /// ⚠️ `experimental.themes` is the HIGHER-precedence spelling
+    /// (`A.experimental?.themes ?? A.themes`) — see `discovery::RawExperimental`.
+    ///
+    /// `PluginManager::load_plugin` validates each file and materializes it
+    /// into [`crate::theme_registry::PluginThemeRegistry`] as
+    /// `{plugin}:{basename}`. That registry has NO reader outside the
+    /// manager yet: the TUI theme-selection surface (`/theme`, a persisted
+    /// choice, the `custom:` wire encoding) is a separate deferred feature,
+    /// so a plugin theme is registered but not yet selectable.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub themes: Vec<ComponentPath>,
     /// Workflow script files (`.js`; `workflows` in `plugin.json`). Oracle:
     /// "Path to a workflows directory or .js file, relative to the plugin
     /// root. When set, the workflows/ directory is not auto-loaded — list
     /// its files here if you want both." Replaces (does not merge with) the
-    /// `workflows/` auto-scan, matching [`Self::output_styles`].
-    /// Discovered only — `PluginManager::load_plugin` does not materialize
-    /// workflows into any registry yet.
+    /// `workflows/` auto-scan, matching [`Self::output_styles`]. Unlike
+    /// [`Self::themes`], there is NO `experimental.workflows` alias in the
+    /// oracle's record builder.
+    ///
+    /// `PluginManager::load_plugin` materializes each file into the shared
+    /// `workflow::PluginWorkflowRegistry` as `{plugin}:{meta.name}` (dropping
+    /// any file that is not a regular file, exceeds
+    /// `workflow::MAX_WORKFLOW_SCRIPT_BYTES`, or whose `meta` block does not
+    /// parse), where the `Workflow` tool, its launcher, and nested
+    /// `workflow({name})` all resolve it.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub workflows: Vec<ComponentPath>,
     /// Custom highlight.js language grammars this plugin registers

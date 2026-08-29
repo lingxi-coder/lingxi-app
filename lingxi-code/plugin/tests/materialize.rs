@@ -573,13 +573,12 @@ fn write_workflow_plugin(root: &Path, dir_name: &str, plugin_name: &str) {
 
 /// §14 — a plugin's declared `workflows` file joins the saved-workflow search
 /// path: `PluginManager::enable` materializes it into the shared
-/// `workflow::PluginWorkflowRegistry`, namespaced `{plugin}:{meta.name}`
-/// (falling back to the file stem when the script's own meta block is
-/// missing/unparseable — see the registry's module doc for why LingXi reads
-/// the script's OWN declared name here, the same "parse the component's own
-/// name" rule (c)/(d) apply to skills/output-styles). `disable` removes
-/// exactly the entries this plugin seeded, symmetric with every other
-/// component slot.
+/// `workflow::PluginWorkflowRegistry`, namespaced `{plugin}:{meta.name}` —
+/// the script's OWN declared name, with NO filename fallback, exactly as the
+/// oracle's `v()` does (see the registry's module doc; the same "parse the
+/// component's own name" rule (c)/(d) apply to skills/output-styles).
+/// `disable` removes exactly the entries this plugin seeded, symmetric with
+/// every other component slot.
 #[tokio::test]
 async fn enable_materializes_declared_workflow_into_plugin_workflow_registry() {
     let tmp = tempfile::tempdir().unwrap();
@@ -644,6 +643,122 @@ async fn enable_materializes_declared_workflow_into_plugin_workflow_registry() {
         plugin_workflows.resolve("wfplugin:deploy-prod").is_none(),
         "plugin workflow should be removed from the registry on unload"
     );
+}
+
+/// §14 — the oracle's `v()` (@169045500) gates every candidate `.js` and
+/// DROPS the ones that fail, with no filename fallback:
+///
+/// ```text
+/// let e = await ZI(c,o,um);
+/// if (e===null) return n(`Plugin workflow ${o}: not a regular file or exceeds ${um} bytes — skipping`,{level:"warn"}), null;
+/// let r = bf(e,{validateBody:!1});
+/// if ("error" in r) return n(`Plugin workflow ${o} has invalid meta: ${r.error} — skipping`,{level:"warn"}), null;
+/// let l = `${s}:${r.meta.name}`;
+/// ```
+///
+/// A shared helper module in `workflows/` is therefore NOT a workflow, and
+/// neither is a script over `um` = 524288 bytes. Registering either under its
+/// file stem would seed a name into the `Workflow` tool's `Available:` list
+/// that passes `validate_input`'s name-resolution branch and then dies at
+/// `workflow::validate_meta` in the launcher — an accept-then-fail the oracle
+/// never produces.
+#[tokio::test]
+async fn enable_skips_workflow_scripts_with_no_meta_block_or_over_the_size_cap() {
+    let tmp = tempfile::tempdir().unwrap();
+    let plugin_dir = tmp.path().join("wf");
+    fs::create_dir_all(plugin_dir.join(".lingxi-plugin")).unwrap();
+    fs::write(
+        plugin_dir.join(".lingxi-plugin").join("plugin.json"),
+        r#"{"name":"acme","version":"1.0.0","workflows":"./scripts"}"#,
+    )
+    .unwrap();
+    fs::create_dir_all(plugin_dir.join("scripts")).unwrap();
+    // (1) A real workflow — registers under its own `meta.name`.
+    fs::write(
+        plugin_dir.join("scripts").join("deploy.js"),
+        "export const meta = { name: \"deploy-prod\", description: \"Deploy to prod\" };\n",
+    )
+    .unwrap();
+    // (2) A shared helper with NO `export const meta` block — `bf` errors.
+    fs::write(
+        plugin_dir.join("scripts").join("_helpers.js"),
+        "export function slugify(s) { return s.toLowerCase(); }\n",
+    )
+    .unwrap();
+    // (3) A `meta` block that is not the FIRST statement — `bf` errors too.
+    fs::write(
+        plugin_dir.join("scripts").join("late.js"),
+        "const x = 1;\nexport const meta = { name: \"late\", description: \"d\" };\n",
+    )
+    .unwrap();
+    // (4) A perfectly valid workflow that is one byte over `um`.
+    let mut oversize =
+        String::from("export const meta = { name: \"huge\", description: \"Huge\" };\n");
+    let pad = usize::try_from(workflow::MAX_WORKFLOW_SCRIPT_BYTES).unwrap() + 1 - oversize.len();
+    oversize.push_str(&"/".repeat(pad));
+    assert!(oversize.len() as u64 > workflow::MAX_WORKFLOW_SCRIPT_BYTES);
+    fs::write(plugin_dir.join("scripts").join("huge.js"), &oversize).unwrap();
+
+    let command_registry = Arc::new(RwLock::new(CommandRegistry::new()));
+    let hook_registry = Arc::new(RwLock::new(HookRegistry::new()));
+    let skill_registry = Arc::new(RwLock::new(SkillRegistry::new()));
+    let output_style_registry = Arc::new(RwLock::new(OutputStyleRegistry::new()));
+    let tool_registry = Arc::new(RwLock::new(ToolRegistry::new()));
+    let lsp_registry = Arc::new(LspRegistry::new(Arc::new(PosixLspTransport::new())));
+    let mcp_registry = Arc::new(McpRegistry::new(Arc::new(PosixMcpTransport::new())));
+    let storage = PlainTextSecureStorage::new(tmp.path().join("secrets"))
+        .await
+        .unwrap();
+    let credentials = Arc::new(CredentialManager::new(
+        Arc::new(storage),
+        Arc::new(PosixClock::new()),
+        Arc::new(PosixHttp::new()),
+    ));
+    let plugin_workflows = Arc::new(workflow::PluginWorkflowRegistry::new());
+    let manager = PluginManager::new(
+        tmp.path().to_path_buf(),
+        Arc::new(PosixFileSystem::new(tmp.path().to_path_buf())),
+        Arc::new(PosixHttp::new()),
+        Arc::new(PosixRuntime::new()),
+        credentials,
+        Arc::new(PluginBlocklist::new(String::new())),
+        Arc::new(StrictPluginOnlyPolicy::empty()),
+        command_registry,
+        skill_registry,
+        hook_registry,
+        output_style_registry,
+        mcp_registry,
+        lsp_registry,
+        tool_registry,
+    )
+    .with_plugin_workflows(plugin_workflows.clone());
+
+    let discovered = plugin::discover_installed_plugins(tmp.path()).await;
+    assert_eq!(discovered.len(), 1);
+    let (id, manifest, dir) = discovered.into_iter().next().unwrap();
+    assert_eq!(
+        manifest.components.workflows.len(),
+        4,
+        "discovery must offer all four .js files; the FILTERING is the manager's job"
+    );
+    manager.enable(&id, manifest, dir).await.expect("enable");
+
+    assert!(
+        plugin_workflows.resolve("acme:deploy-prod").is_some(),
+        "the one valid workflow must register under its own meta.name"
+    );
+    for dropped in [
+        "acme:_helpers",
+        "acme:late",
+        "acme:huge",
+        // …and never under a file stem, for any of them.
+        "acme:deploy",
+    ] {
+        assert!(
+            plugin_workflows.resolve(dropped).is_none(),
+            "{dropped} must NOT be registered — the oracle's v() drops it"
+        );
+    }
 }
 
 /// A manifest declaring `themes` as a single `.json` file with a `base`,

@@ -9,23 +9,45 @@
 //! Oracle (`2.1.251`, the plugin-workflow loader `v()`/`P()` in the bundled
 //! JS): every plugin workflow is namespaced `${pluginName}:${meta.name}` —
 //! `meta.name` parsed from the script's own `export const meta = {…}` block
-//! — and joins the SAME lookup table as built-in / project / user
-//! workflows, with precedence **project/user > plugin > built-in** (a
-//! project/user file can shadow a plugin workflow or even a built-in; a
-//! plugin cannot shadow a built-in or a project/user file). Namespacing
-//! means a real collision only happens if a project/user workflow file is
-//! itself literally named `<plugin>:<name>.js`.
+//! — and joins the SAME lookup table as built-in / project / user workflows.
+//!
+//! The oracle's precedence is **project/user > plugin > built-in**, and the
+//! plugin/built-in half is a REAL shadow, not a no-op. `j()` (@169051841)
+//! seeds the map from the built-ins and then overwrites:
+//! `let c=wWe(), e=new Map(c.map(k=>[k.name,k])), r=O(m,e); for(let k of r)
+//! e.set(k.name,k)`, and the final array is
+//! `[...c.filter(k=>!d.has(k.name)), ...u, ...l]` — unshadowed built-ins,
+//! then plugins not shadowed by project/user, then project/user. The only
+//! thing that stops a plugin record from displacing a same-named built-in is
+//! its own script failing to parse (`W(o,s){if(!s||BBn(o.script))return!0;…}`,
+//! `O(o,s){return o.filter(t=>W(t,s.get(t.name)))}` @169052203).
+//!
+//! The port's resolvers short-circuit on the built-in table BEFORE consulting
+//! this registry, which inverts that half of the order on paper. It is
+//! unobservable today and deliberately left alone rather than "tidied": every
+//! key in this registry contains a `:` (namespacing is unconditional in
+//! `plugin::manager`) and no built-in name does (`tools/workflow`'s
+//! `BUILTIN_WORKFLOWS`: `deep-research`, `local-app-build`,
+//! `local-canvas-build`), so the two orders cannot disagree on any reachable
+//! input. ⚠️ The day a built-in gains a namespaced name, this becomes a live
+//! divergence and the resolvers must check the registry first.
+//!
+//! Namespacing likewise means a project/user collision only happens if such a
+//! file is itself literally named `<plugin>:<name>.js`.
 //!
 //! LingXi's built-in/project/user tiers are all addressed by FILENAME, not
 //! by parsed script metadata (`workflow::meta_string_value` is used only for
 //! display/telemetry, never for lookup) — a wider, pre-existing divergence
-//! from the oracle that this module does not attempt to fix. To keep one
-//! consistent addressing rule across every tier, a plugin workflow's `name`
-//! here is its own `meta.name` when the script's meta block parses,
-//! falling back to the file stem — the SAME "parse the component's own
-//! declared name" rule `plugin::manager` already applies to output styles
-//! and skills, applied to the one component whose metadata happens to be
-//! embedded in a script comment rather than a frontmatter block.
+//! from the oracle that this module does not attempt to fix. A PLUGIN
+//! workflow, though, is addressed exactly as the oracle addresses it: by its
+//! own `meta.name`, with no filename fallback. `v()` (@169045500) drops any
+//! file whose meta does not parse (`if("error"in r) return warn(`Plugin
+//! workflow ${o} has invalid meta: ${r.error} — skipping`), null`) or which
+//! is not a regular file of at most [`MAX_WORKFLOW_SCRIPT_BYTES`], so a
+//! shared helper module sitting in `workflows/` never becomes a workflow
+//! name. Falling back to the file stem there would put a name in the
+//! `Workflow` tool's `Available:` list that then fails `validate_meta` inside
+//! the launcher — an accept-then-fail the oracle cannot produce.
 //!
 //! This type lives in `workflow` (not `plugin`) because `plugin` is not — and
 //! must not become — a dependency of `tool-workflow` or `tasks` (the
@@ -42,6 +64,14 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::RwLock;
+
+/// Largest `.js` a plugin workflow may be before the loader drops it.
+///
+/// Oracle `um = 524288` (@156964916), applied by `v()` through
+/// `ZI(c,o,um)` — a file over the cap is never read into a workflow record,
+/// so an oversized script cannot reach the registry (and the resolver
+/// therefore never needs its own cap).
+pub const MAX_WORKFLOW_SCRIPT_BYTES: u64 = 524_288;
 
 /// One plugin-declared workflow script, keyed by its already-namespaced name.
 #[derive(Debug, Clone)]

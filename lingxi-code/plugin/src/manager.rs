@@ -212,6 +212,20 @@ impl PluginManager {
     /// it without `PluginManager` growing an `Option`-wrapped setter the way
     /// [`Self::with_plugin_workflows`] needed for a registry built OUTSIDE
     /// this crate.
+    ///
+    /// ⚠️ **This registry has no production reader yet.** Nothing under
+    /// `apps/`, `tui/`, `tui-core/`, or `traits/` calls this accessor or
+    /// `theme_registry::resolve_theme`, and `tui_core::ThemeName::ALL` is a
+    /// closed set of six palettes with no registry hook — so a plugin theme
+    /// is registered and then unreachable. Unlike the workflow registry
+    /// (which `engine-desktop::build` wires into four participants), the
+    /// theme half CANNOT be made reachable by wiring alone: it needs the
+    /// deferred TUI theme-selection feature (a `/theme` picker, a persisted
+    /// choice, the oracle's `custom:` wire encoding `IW`/`Lb`, and a real
+    /// user-theme store for `Aon`'s other half). Until then `load_plugin`'s
+    /// theme block costs one stat + read + parse per declared file per
+    /// enable, and can emit `[theme]` warnings for a feature the user cannot
+    /// yet see.
     #[must_use]
     pub fn plugin_themes(&self) -> Arc<PluginThemeRegistry> {
         Arc::clone(&self.plugin_themes)
@@ -880,17 +894,33 @@ impl PluginManager {
         // (d2) Workflows — read each declared/auto-scanned `.js` file
         //      (`manifest.components.workflows`, §14), extract its own
         //      `meta.name` and namespace `{plugin}:{name}` (oracle plugin-
-        //      workflow loader `v()`: `${pluginName}:${meta.name}` — the SAME
-        //      "parse the component's own declared name" rule (d) applies to
-        //      output styles, here reading the name from the script's
-        //      `export const meta = {…}` block instead of frontmatter).
-        //      Falls back to the file stem when the meta block is missing or
-        //      fails to parse — LingXi resolves every OTHER workflow tier
-        //      (built-in/project/user) by FILENAME, never by parsed script
-        //      metadata (`workflow::meta_string_value` is display/telemetry
-        //      only there), so plugin workflows keep that same rule as the
-        //      fallback rather than becoming the one tier addressable ONLY by
-        //      meta.name. A file that cannot be read is skipped, matching (d).
+        //      workflow loader `v()` @169045500: `${pluginName}:${meta.name}`
+        //      — the SAME "parse the component's own declared name" rule (d)
+        //      applies to output styles, here reading the name from the
+        //      script's `export const meta = {…}` block instead of
+        //      frontmatter).
+        //
+        //      `v()` gates a file THREE ways before it may join the table,
+        //      and every gate DROPS the file rather than falling back:
+        //        `let e = await ZI(c,o,um); if (e===null) return
+        //           warn(`Plugin workflow ${o}: not a regular file or exceeds
+        //           ${um} bytes — skipping`), null;`
+        //        `let r = bf(e,{validateBody:!1}); if ("error" in r) return
+        //           warn(`Plugin workflow ${o} has invalid meta: ${r.error}
+        //           — skipping`), null;`
+        //      There is NO filename fallback on either branch: a shared
+        //      helper module dropped in `workflows/` (no `export const meta`)
+        //      is simply not a workflow. Registering it under its file stem
+        //      would put a name in the `Workflow` tool's `Available:` list
+        //      that then dies at `workflow::validate_meta` inside the
+        //      launcher — an accept-then-fail the oracle never produces —
+        //      so the port applies the same three gates.
+        //      `workflow::validate_meta` is this port's `bf(…,{validateBody:
+        //      !1})`: it parses the `meta` block only (first-statement, pure
+        //      literal, non-empty `name`/`description`) and is the very gate
+        //      the launcher already runs, so nothing can pass here and fail
+        //      there.
+        //
         //      Only collected when a registry is actually wired — the common
         //      case (no composition root has called `with_plugin_workflows`
         //      yet) does zero extra file I/O.
@@ -902,13 +932,42 @@ impl PluginManager {
                 } else {
                     install_dir.join(&wp.path)
                 };
+                // Oracle `ZI(c,o,um)`: regular file (or a symlink resolving to
+                // one — `tokio::fs::metadata` follows links, matching `_()`'s
+                // `isFile()||isSymbolicLink()` readdir filter) AND at most
+                // `um` = 524288 bytes.
+                let Ok(metadata) = tokio::fs::metadata(&abs).await else {
+                    continue;
+                };
+                if !metadata.is_file() || metadata.len() > workflow::MAX_WORKFLOW_SCRIPT_BYTES {
+                    tracing::warn!(
+                        path = %abs.display(),
+                        "Plugin workflow {}: not a regular file or exceeds {} bytes — skipping",
+                        abs.display(),
+                        workflow::MAX_WORKFLOW_SCRIPT_BYTES
+                    );
+                    continue;
+                }
                 let Ok(raw) = tokio::fs::read_to_string(&abs).await else {
                     continue;
                 };
-                let stem = abs.file_stem().and_then(|s| s.to_str()).unwrap_or_default();
-                let base_name = workflow::meta_string_value(&raw, "name")
-                    .filter(|value| !value.is_empty())
-                    .unwrap_or_else(|| stem.to_string());
+                if let Err(e) = workflow::validate_meta(&raw) {
+                    tracing::warn!(
+                        path = %abs.display(),
+                        "Plugin workflow {} has invalid meta: {e} — skipping",
+                        abs.display()
+                    );
+                    continue;
+                }
+                // `validate_meta` already proved `meta.name` is a non-empty
+                // string literal, so this cannot fall through in practice; a
+                // `None` here would be a parser disagreement, and dropping
+                // the file is the oracle-shaped outcome either way.
+                let Some(base_name) =
+                    workflow::meta_string_value(&raw, "name").filter(|value| !value.is_empty())
+                else {
+                    continue;
+                };
                 workflow_entries.push(workflow::PluginWorkflowEntry {
                     name: format!("{plugin_name}:{base_name}"),
                     script_path: abs,

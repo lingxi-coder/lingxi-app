@@ -398,12 +398,29 @@ struct RawPluginChannel {
 /// rejected. `claude plugin validate` says as much: "Unknown field
 /// 'syntaxHighlighting'. Claude Code ignores it at load time."
 ///
-/// Only `syntaxHighlighting` is read out of `experimental` here;
-/// `experimental`'s other declared keys (`themes`, `monitors`, `hooks`,
-/// `evals`) are not wired to anything in this port yet.
+/// `themes` and `syntaxHighlighting` are read out of `experimental` here.
+/// `experimental.themes` is NOT a second spelling of a key this port already
+/// reads elsewhere — it is the HIGHER-precedence one: the oracle's manifest
+/// record builder resolves the theme declaration as
+/// `A.experimental?.themes ?? A.themes` (@162826143) and suppresses the
+/// `themes/` auto-scan on the same coalesced value
+/// (`Ie=!(A.experimental?.themes??A.themes)&&me`, @162824976), so a plugin
+/// that declares `experimental.themes` must be read from THERE and its
+/// `themes/` folder ignored. Both layers exist because `pt`
+/// (`f({themes: union([path, path[]])})`) is spread into BOTH `jpe` (the
+/// top-level manifest) and `Vs`'s inner `experimental` object — the same
+/// schema shape at two layers, with the experimental one winning.
+///
+/// `experimental`'s remaining declared keys (`monitors`, `hooks`, `evals`)
+/// are not wired to anything in this port yet. ⚠️ `monitors` has the SAME
+/// two-layer precedence as `themes`
+/// (`(A.experimental?.monitors??A.monitors)`, @162824976) and would need the
+/// same treatment the day `components.monitors` becomes load-bearing.
 #[derive(Debug, Clone, Default)]
 struct RawExperimental {
     syntax_highlighting: Option<RawSyntaxHighlighting>,
+    /// `experimental.themes` — wins over the top-level `themes` key.
+    themes: Option<PathDecl>,
 }
 
 impl<'de> Deserialize<'de> for RawExperimental {
@@ -412,13 +429,25 @@ impl<'de> Deserialize<'de> for RawExperimental {
         D: serde::Deserializer<'de>,
     {
         let value = Value::deserialize(deserializer)?;
-        let Some(raw) = value.as_object().and_then(|o| o.get("syntaxHighlighting")) else {
+        let Some(map) = value.as_object() else {
             return Ok(RawExperimental::default());
         };
-        let syntax_highlighting =
-            RawSyntaxHighlighting::deserialize(raw).map_err(serde::de::Error::custom)?;
+        // Both keys are DECLARED members of the inner object schema, so a
+        // present-but-malformed value fails the whole `plugin.json` even
+        // though the object is `.passthrough()` for keys it does not declare.
+        let syntax_highlighting = match map.get("syntaxHighlighting") {
+            Some(raw) => {
+                Some(RawSyntaxHighlighting::deserialize(raw).map_err(serde::de::Error::custom)?)
+            }
+            None => None,
+        };
+        let themes = match map.get("themes") {
+            Some(raw) => Some(PathDecl::deserialize(raw).map_err(serde::de::Error::custom)?),
+            None => None,
+        };
         Ok(RawExperimental {
-            syntax_highlighting: Some(syntax_highlighting),
+            syntax_highlighting,
+            themes,
         })
     }
 }
@@ -1398,7 +1427,17 @@ async fn detect_components(
         Some(paths) => resolve_markdown_declared_paths(plugin_dir, paths.clone()).await,
         None => default_output_styles,
     };
-    let themes = match &parsed.themes {
+    // Oracle: `let nt = A.experimental?.themes ?? A.themes` (@162826143), with
+    // the auto-scan suppressed on the SAME coalesced value
+    // (`Ie=!(A.experimental?.themes??A.themes)&&me`, @162824976) — so
+    // `experimental.themes` both wins over the top-level key AND hides the
+    // `themes/` folder.
+    let declared_themes = parsed
+        .experimental
+        .as_ref()
+        .and_then(|e| e.themes.as_ref())
+        .or(parsed.themes.as_ref());
+    let themes = match declared_themes {
         Some(paths) => resolve_ext_declared_paths(plugin_dir, paths.clone(), "json").await,
         None => default_themes,
     };
@@ -2674,6 +2713,110 @@ mod tests {
         );
     }
 
+    /// `themes` is declared at TWO layers — `pt` is spread into both the
+    /// top-level manifest schema `jpe` and `Vs`'s inner `experimental` object
+    /// — and the oracle's record builder PREFERS the experimental one:
+    /// `let nt = A.experimental?.themes ?? A.themes` (@162826143). The
+    /// `themes/` auto-scan is suppressed on the same coalesced value
+    /// (`Ie=!(A.experimental?.themes??A.themes)&&me`, @162824976).
+    ///
+    /// So all three arms below are one oracle fact: `experimental.themes`
+    /// wins over the top-level key, and hides the `themes/` folder even when
+    /// the top-level key is absent.
+    ///
+    /// ⚠️ Workflows are DIFFERENT: `Be=!A.workflows&&fe` /
+    /// `if(A.workflows){…}` (@162826334) read the top-level key alone, with
+    /// no `experimental` alias — the last arm pins that asymmetry so a
+    /// "make it symmetric" tidy-up cannot land silently.
+    #[tokio::test]
+    async fn experimental_themes_outrank_the_top_level_themes_key() {
+        let themes_of = |manifest: &PluginManifest| -> Vec<String> {
+            manifest
+                .components
+                .themes
+                .iter()
+                .map(|c| c.path.file_name().unwrap().to_str().unwrap().to_string())
+                .collect()
+        };
+        let seed = |plugin: &std::path::Path| {
+            fs::create_dir_all(plugin.join("themes")).unwrap();
+            fs::create_dir_all(plugin.join("palettes")).unwrap();
+            fs::create_dir_all(plugin.join("custom-themes")).unwrap();
+            fs::create_dir_all(plugin.join("workflows")).unwrap();
+            fs::write(plugin.join("themes/legacy.json"), "{}").unwrap();
+            fs::write(plugin.join("palettes/purple.json"), "{}").unwrap();
+            fs::write(plugin.join("custom-themes/custom.json"), "{}").unwrap();
+            fs::write(plugin.join("workflows/auto.js"), "// auto").unwrap();
+        };
+
+        // (1) `experimental.themes` alone — beats the `themes/` auto-scan.
+        let tmp = tempfile::tempdir().unwrap();
+        seed(tmp.path());
+        write_manifest(
+            tmp.path(),
+            &serde_json::json!({
+                "name": "acme",
+                "experimental": {"themes": "./palettes/purple.json"}
+            }),
+        );
+        let (_id, manifest) = load_plugin_from_path(tmp.path()).await.unwrap();
+        assert_eq!(
+            themes_of(&manifest),
+            vec!["purple.json"],
+            "experimental.themes must suppress the themes/ auto-scan"
+        );
+
+        // (2) BOTH layers present — `??` takes the experimental one.
+        let tmp = tempfile::tempdir().unwrap();
+        seed(tmp.path());
+        write_manifest(
+            tmp.path(),
+            &serde_json::json!({
+                "name": "acme",
+                "themes": ["./custom-themes"],
+                "experimental": {"themes": ["./palettes"]}
+            }),
+        );
+        let (_id, manifest) = load_plugin_from_path(tmp.path()).await.unwrap();
+        assert_eq!(
+            themes_of(&manifest),
+            vec!["purple.json"],
+            "experimental.themes must outrank the top-level themes key"
+        );
+
+        // (3) `experimental` present but WITHOUT `themes` — the top-level key
+        //     still resolves (`??` only coalesces on nullish).
+        let tmp = tempfile::tempdir().unwrap();
+        seed(tmp.path());
+        write_manifest(
+            tmp.path(),
+            &serde_json::json!({
+                "name": "acme",
+                "themes": ["./custom-themes"],
+                "experimental": {"workflows": "./palettes"}
+            }),
+        );
+        let (_id, manifest) = load_plugin_from_path(tmp.path()).await.unwrap();
+        assert_eq!(
+            themes_of(&manifest),
+            vec!["custom.json"],
+            "an experimental block with no themes key must not shadow the top-level one"
+        );
+        // …and `experimental.workflows` is NOT read (no oracle alias): the
+        // `workflows/` auto-scan still wins.
+        let workflows: Vec<_> = manifest
+            .components
+            .workflows
+            .iter()
+            .map(|c| c.path.file_name().unwrap().to_str().unwrap().to_string())
+            .collect();
+        assert_eq!(
+            workflows,
+            vec!["auto.js"],
+            "workflows has no experimental alias in the oracle"
+        );
+    }
+
     /// Oracle `gt`: `type`, `title`, and `description` are all required (no
     /// `.optional()`) on a `userConfig` field. A field missing any of the
     /// three fails the WHOLE `plugin.json` parse — the same "one bad entry
@@ -3701,7 +3844,10 @@ mod tests {
     }
 
     /// `Vs` = `f({experimental: Sa(…, f({…pt, …Hs, …mt, …ct, evals}).passthrough()…)})`:
-    /// `experimental.syntaxHighlighting` is the ONLY layer the oracle reads.
+    /// `syntaxHighlighting` is read ONLY out of `experimental` (`Hs` is not in
+    /// `jpe`). ⚠️ That is NOT true of every key inside `experimental` — see
+    /// [`experimental_themes_outrank_the_top_level_themes_key`] for `themes`,
+    /// which the oracle reads from BOTH layers with `experimental` winning.
     #[tokio::test]
     async fn experimental_syntax_highlighting_valid_entry_is_parsed() {
         let tmp = tempfile::tempdir().unwrap();

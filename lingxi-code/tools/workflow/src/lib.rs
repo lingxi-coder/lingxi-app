@@ -212,8 +212,20 @@ fn saved_workflow_candidates(cwd: &Path, name: &str) -> Vec<PathBuf> {
 /// intentionally independent of the resolved script body: a named built-in
 /// with an explicit script override still reports `built-in`, while the
 /// `scriptMatchesDefinition` flag controls telemetry redaction separately.
+///
+/// `plugin_workflows` is the same registry the resolver consults, checked in
+/// the SAME position (last), so `tengu_workflow_launched`'s `workflow_source`
+/// names the tier the launch actually resolved from. The oracle stamps
+/// `source:"plugin"` on every plugin record (`v()` @169045670) and emits it
+/// verbatim (`workflow_source:c(se)` @172565293), so `"plugin"` is a real
+/// emitted value — without this arm a plugin workflow is misreported as
+/// `custom`.
 #[must_use]
-pub fn workflow_source_for_name(cwd: &Path, name: &str) -> Option<&'static str> {
+pub fn workflow_source_for_name(
+    cwd: &Path,
+    name: &str,
+    plugin_workflows: Option<&workflow::PluginWorkflowRegistry>,
+) -> Option<&'static str> {
     if BUILTIN_WORKFLOWS.get(name).is_some() {
         return Some("built-in");
     }
@@ -233,6 +245,9 @@ pub fn workflow_source_for_name(cwd: &Path, name: &str) -> Option<&'static str> 
             .any(|ext| dir.join(format!("{name}{ext}")).is_file())
     }) {
         return Some("userSettings");
+    }
+    if plugin_workflows.is_some_and(|registry| registry.resolve(name).is_some()) {
+        return Some("plugin");
     }
     None
 }
@@ -1303,11 +1318,45 @@ mod tests {
     #[test]
     fn named_workflow_source_matches_claude_categories() {
         assert_eq!(
-            workflow_source_for_name(std::path::Path::new("."), "deep-research"),
+            workflow_source_for_name(std::path::Path::new("."), "deep-research", None),
             Some("built-in")
         );
         assert_eq!(
-            workflow_source_for_name(std::path::Path::new("."), "missing"),
+            workflow_source_for_name(std::path::Path::new("."), "missing", None),
+            None
+        );
+    }
+
+    /// `tengu_workflow_launched.workflow_source` must name the tier the launch
+    /// actually resolved from. The oracle stamps `source:"plugin"` on every
+    /// plugin record (`v()` @169045670) and emits it verbatim
+    /// (`se=e.scriptPath?"scriptPath":h??"inline"`,
+    /// `workflow_source:c(se)` @172565293), so `"plugin"` is a real emitted
+    /// value — without the plugin arm a plugin workflow is reported as the
+    /// `custom` fallback `engine-desktop`'s `named_source.unwrap_or("custom")`
+    /// supplies.
+    #[test]
+    fn named_workflow_source_reports_plugin_for_a_registry_hit() {
+        let registry = workflow::PluginWorkflowRegistry::new();
+        registry.register(vec![workflow::PluginWorkflowEntry {
+            name: "acme:deploy".into(),
+            script_path: std::path::PathBuf::from("/plugins/acme/scripts/deploy.js"),
+        }]);
+        assert_eq!(
+            workflow_source_for_name(std::path::Path::new("."), "acme:deploy", Some(&registry)),
+            Some("plugin")
+        );
+        // The registry is consulted LAST — a built-in still wins.
+        assert_eq!(
+            workflow_source_for_name(
+                std::path::Path::new("."),
+                "deep-research",
+                Some(&registry)
+            ),
+            Some("built-in")
+        );
+        assert_eq!(
+            workflow_source_for_name(std::path::Path::new("."), "acme:missing", Some(&registry)),
             None
         );
     }
@@ -2024,6 +2073,90 @@ mod tests {
             err.0.starts_with("Workflow \"no-such-workflow\" not found."),
             "unexpected error: {}",
             err.0
+        );
+    }
+
+    /// §14 — the LAUNCH path. `Tool::validate_input` and `resolve_script_at`
+    /// are two separate implementations of the same search order, and only
+    /// the former is exercised by
+    /// `validate_name_resolves_via_plugin_workflow_registry`; reverting the
+    /// `resolve_script_at` branch alone leaves that test green. This one
+    /// pins the launcher's half directly, so a partially-wired composition
+    /// root (tool wired, launcher not) cannot ship as "validate accepts,
+    /// launch says not found".
+    ///
+    /// It also pins the ORDER at this seam: project/user files above the
+    /// registry, built-ins above everything (see
+    /// `workflow::PluginWorkflowRegistry`'s module doc for why the
+    /// built-in/plugin half is unobservable in this port).
+    #[test]
+    fn resolve_script_at_falls_back_to_the_plugin_workflow_registry() {
+        let registry = workflow::PluginWorkflowRegistry::new();
+        registry.register(vec![workflow::PluginWorkflowEntry {
+            name: "acme:deploy".to_string(),
+            script_path: std::path::PathBuf::from("/plugins/acme/scripts/deploy.js"),
+        }]);
+        let read = |p: &str| -> std::io::Result<String> {
+            if p == "/plugins/acme/scripts/deploy.js" {
+                Ok(VALID_SCRIPT.to_string())
+            } else {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "no such file",
+                ))
+            }
+        };
+        let named = |name: &str| WorkflowLaunchSpec {
+            name: Some(name.to_string()),
+            ..Default::default()
+        };
+
+        // Wired registry, registered name → the plugin's script.
+        let resolved = resolve_script_at(
+            std::path::Path::new("/proj"),
+            &named("acme:deploy"),
+            read,
+            Some(&registry),
+        )
+        .expect("a registered plugin workflow must resolve on the launch path");
+        assert_eq!(resolved, VALID_SCRIPT);
+
+        // The SAME name with NO registry is the pre-§14 behaviour: not found.
+        // (This is exactly the drift a half-wired composition root produces.)
+        let err = resolve_script_at(
+            std::path::Path::new("/proj"),
+            &named("acme:deploy"),
+            read,
+            None,
+        )
+        .expect_err("without the registry the launch path must not resolve it");
+        assert_eq!(
+            err.0,
+            "Workflow \"acme:deploy\" not found. Available: (none)",
+            "byte-exact launch-path miss message"
+        );
+
+        // A name absent from a wired registry still misses.
+        let err = resolve_script_at(
+            std::path::Path::new("/proj"),
+            &named("acme:absent"),
+            read,
+            Some(&registry),
+        )
+        .expect_err("an unregistered name must still miss");
+        assert!(err.0.starts_with("Workflow \"acme:absent\" not found."));
+
+        // Built-ins are still resolved without touching the registry.
+        let resolved = resolve_script_at(
+            std::path::Path::new("/proj"),
+            &named("deep-research"),
+            read,
+            Some(&registry),
+        )
+        .expect("built-ins resolve regardless of the registry");
+        assert_eq!(
+            resolved,
+            BUILTIN_WORKFLOWS.get("deep-research").unwrap().script
         );
     }
 

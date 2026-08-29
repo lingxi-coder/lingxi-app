@@ -511,6 +511,10 @@ pub fn resolve_desktop_config(args: &BridgeArgs) -> DesktopConfig {
         // session still boots in Default and changes mode only after an
         // authenticated renderer command crosses the bridge IPC boundary.
         allow_dangerously_skip_permissions: trusted,
+        // Device audio is CONNECTION-scoped, not argv-scoped: the bridge it
+        // proxies through cannot exist until `assemble` has a connection to
+        // build it over, so it is filled there and never here.
+        audio: None,
     }
 }
 
@@ -1475,6 +1479,7 @@ mod tests {
             bg_session_forker: None,
             worktree_launch: None,
             tmux_launch: None,
+            audio: None,
         };
         let bound = assemble(cfg).await.expect("assemble must succeed");
         // The gate handle is reachable only when bind() ran with a real gate.

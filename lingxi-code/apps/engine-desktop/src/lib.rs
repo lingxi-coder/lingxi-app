@@ -2177,6 +2177,28 @@ pub fn register_desktop_tools(
         }
         None => tool_computer_use::register_all(reg, ctx.clone()),
     }
+    // The two audio tools (`voice` + `speech`) from `tool-mobile`. Registered
+    // ONLY where the capability behind them exists — i.e. where the host filled
+    // `DesktopConfig::audio`, which today means a `bridge-server` connection
+    // whose `AudioBridge` proxies to the Electron client. Two consequences worth
+    // being explicit about:
+    //
+    // * With no audio wired (CLI, TUI, every offline factory) this call
+    //   registers NOTHING, so the desktop tool list — and its locked snapshot —
+    //   is byte-identical to what it was before audio existed.
+    // * Only these two. `tool_mobile::register_all` would also add camera /
+    //   notification / clipboard / share, device capabilities the desktop does
+    //   not have; advertising a tool that can only ever fail is worse than not
+    //   having it, since the model spends a turn learning something false.
+    //
+    // NOTE the gate is on the capability being INJECTED, not on the client
+    // having proven it can serve it: the desktop cannot know in advance whether
+    // the connected renderer implements audio. That is handled honestly at call
+    // time instead — `AudioBridge` fails with "no desktop client is connected"
+    // when nobody answers — and deliberately NOT with a protocol capability
+    // handshake, which would be a negotiation invented for a client that may
+    // simply be an older build.
+    tool_mobile::register_audio(reg, &ctx);
     // `RemoteTrigger` gets the credential-store auth provider on desktop so it
     // can drive the claude.ai CCR API in-process. `register_all_with_auth`
     // registers `ScheduleCron` + `RemoteTrigger` (the latter with `cron_auth`)
@@ -2275,6 +2297,56 @@ pub fn desktop_skill_registry() -> SkillRegistry {
     let mut reg = SkillRegistry::new();
     skill_api::register_desktop(&mut reg);
     reg
+}
+
+/// The three device-audio capabilities a desktop host can inject, together.
+///
+/// One struct rather than three independent `Option`s because the desktop's
+/// only implementation — `bridge_server::audio_bridge::AudioBridge` — is a
+/// SINGLE object implementing all three traits over one client connection.
+/// Splitting them here would invite half-wired states that cannot occur and
+/// that nothing downstream knows how to mean.
+///
+/// `None` on every host that has no client to proxy to (CLI, TUI, the offline
+/// factories); `Some` only on the bridge path, filled by
+/// `bridge_server::boot::assemble` from the connection it is assembling.
+#[derive(Clone)]
+pub struct DesktopAudio {
+    /// Raw microphone capture — the `voice` tool routes here.
+    pub voice: Arc<dyn traits::voice::VoiceRecorder>,
+    /// Speech recognition — the `speech` tool's `transcribe` routes here.
+    pub stt: Arc<dyn traits::stt::SpeechToText>,
+    /// Speech synthesis — the `speech` tool's `speak` routes here.
+    pub tts: Arc<dyn traits::tts::TextToSpeech>,
+}
+
+impl DesktopAudio {
+    /// Build from one object that implements all three traits.
+    ///
+    /// The desktop case: `AudioBridge` is `SpeechToText + TextToSpeech +
+    /// VoiceRecorder` over a single connection, so all three handles are the
+    /// SAME allocation and share its pending-request table. A host with three
+    /// separate implementations constructs the struct directly instead.
+    #[must_use]
+    pub fn from_single<T>(implementation: Arc<T>) -> Self
+    where
+        T: traits::voice::VoiceRecorder
+            + traits::stt::SpeechToText
+            + traits::tts::TextToSpeech
+            + 'static,
+    {
+        Self {
+            voice: implementation.clone(),
+            stt: implementation.clone(),
+            tts: implementation,
+        }
+    }
+}
+
+impl std::fmt::Debug for DesktopAudio {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("DesktopAudio(<configured>)")
+    }
 }
 
 /// Deterministic, env/argv-free recipe for building a desktop runtime.
@@ -2379,6 +2451,9 @@ pub fn desktop_skill_registry() -> SkillRegistry {
 ///     ask_user_question_tx: None,
 ///     // `None` ⟶ `request_access` uses the fail-closed DenyAllResolver.
 ///     computer_access_tx: None,
+///     // `None` ⟶ no device audio: the `voice`/`speech` tools are not
+///     // registered at all (see `register_desktop_tools`).
+///     audio: None,
 /// };
 ///
 /// assert_eq!(cfg.cwd, PathBuf::from("/tmp/project"));
@@ -2768,6 +2843,16 @@ pub struct DesktopConfig {
     /// `request_access` on the fail-closed `DenyAllResolver` default.
     pub computer_access_tx:
         Option<tokio::sync::mpsc::Sender<tui_core::computer_access_bridge::ComputerAccessExchange>>,
+    /// Optional device-audio capability (microphone / recognizer / synthesizer).
+    ///
+    /// `Some` only on the bridge path: `bridge_server::boot::assemble` builds an
+    /// `AudioBridge` over the connection it is assembling and fills this, so the
+    /// engine's audio trait calls become `AudioRequest` events at the Electron
+    /// client. Every other desktop host (CLI, TUI, the offline factories) leaves
+    /// it `None`, which keeps `ctx.voice`/`ctx.stt`/`ctx.tts` `None` AND leaves
+    /// the `voice` / `speech` tools unregistered — the tool surface is
+    /// byte-identical to what it was before this field existed.
+    pub audio: Option<DesktopAudio>,
 }
 
 /// Desktop session composition, independent from the permission-gate transport.
@@ -3021,6 +3106,7 @@ impl std::fmt::Debug for DesktopConfig {
                 "computer_access_tx",
                 &self.computer_access_tx.as_ref().map(|_| "<configured>"),
             )
+            .field("audio", &self.audio.as_ref().map(|_| "<configured>"))
             .field("add_dir", &self.add_dir)
             .field("cli_mcp_server_count", &self.cli_mcp_servers.len())
             .field("strict_mcp_config", &self.strict_mcp_config)
@@ -3124,6 +3210,9 @@ impl Default for DesktopConfig {
             bg_session_forker: None,
             ask_user_question_tx: None,
             computer_access_tx: None,
+            // Default: no device audio ⟶ the `voice`/`speech` tools are not
+            // registered (only the bridge composition root wires an AudioBridge).
+            audio: None,
         }
     }
 }
@@ -3810,6 +3899,19 @@ pub struct DesktopRuntime {
     /// effect calls `add_root(...)` + `notify_roots_list_changed_all()` on it so
     /// every connected server's `roots/list` reflects the new working directory.
     pub mcp_registry: Arc<mcp::McpRegistry>,
+    /// The assembled tool registry — the SAME `Arc` the orchestrator dispatches
+    /// through. Surfaced read-only so a composition root (or its tests) can ask
+    /// what this build actually registered, which is the only honest way to
+    /// check a capability-gated tool made it all the way from a `DesktopConfig`
+    /// field to the model's tool list.
+    pub tools: Arc<ToolRegistry>,
+    /// The device-audio capability this runtime was built with — the very
+    /// `Arc`s placed in the tool context, not a second read of the config.
+    /// `None` unless the host filled [`DesktopConfig::audio`]. The bridge
+    /// composition root holds the same `AudioBridge` on its side of the
+    /// connection; surfacing it here lets a test drive the exact object the
+    /// engine's audio tools would call.
+    pub audio: Option<DesktopAudio>,
 }
 
 /// Push-only workflow updates emitted by the desktop composition root.
@@ -8737,6 +8839,11 @@ pub async fn build(
     // (and the staleness / `/files` consumers).
     let read_state_map = tool_api::read_file_state::new_read_file_state_map();
     let ask_user_question_timeout = load_ask_user_question_timeout(&cfg).await;
+    // The device-audio capability, read ONCE here so the tool context below and
+    // the `DesktopRuntime` returned at the end carry the very same `Arc`s (the
+    // bridge's one `AudioBridge`), not two independent reads of `cfg` that a
+    // later edit could let drift apart.
+    let desktop_audio = cfg.audio.clone();
     let tool_ctx = BuiltinToolContext {
         // The live session, so tools that persist oversized output can write to
         // claude-code's session-scoped `<projects>/<session-id>/tool-results/`
@@ -8860,9 +8967,15 @@ pub async fn build(
         mcp_registry: Some(mcp_registry.clone()),
         lsp_registry: Some(plugin_lsp_registry.clone()),
         camera: None,
-        voice: None,
-        stt: None,
-        tts: None,
+        // Device audio. `None` on every host that has no client to proxy to
+        // (CLI, TUI, the offline factories); on the bridge path all three are
+        // the SAME `AudioBridge`, which turns each trait call into an
+        // `AudioRequest` event for the connected Electron client. Whether the
+        // two audio TOOLS are registered follows from these three being `Some`
+        // — see `register_desktop_tools`.
+        voice: desktop_audio.as_ref().map(|audio| audio.voice.clone()),
+        stt: desktop_audio.as_ref().map(|audio| audio.stt.clone()),
+        tts: desktop_audio.as_ref().map(|audio| audio.tts.clone()),
         share: None,
         notifications: None,
         clipboard: None,
@@ -9236,6 +9349,9 @@ pub async fn build(
     tools_inner.refresh_tool_search_view();
 
     let tools = Arc::new(tools_inner);
+    // The SAME registry the orchestrator dispatches through, kept for
+    // `DesktopRuntime::tools` (the orchestrator takes ownership below).
+    let runtime_tools = tools.clone();
 
     // MCP servers can mutate their tool/prompt/resource catalogs while the
     // session is running. Refresh the registry snapshot on every generation-
@@ -10582,6 +10698,8 @@ pub async fn build(
         session_cwd: runtime_session_cwd,
         mcp_registry: runtime_mcp_registry,
         workflow_events: Some(workflow_event_rx),
+        tools: runtime_tools,
+        audio: desktop_audio,
     })
 }
 
@@ -11888,6 +12006,7 @@ mod tests {
             // questionnaire surface.
             ask_user_question_tx: None,
             computer_access_tx: None,
+            audio: None,
         };
         (tmp, cfg)
     }

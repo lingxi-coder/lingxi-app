@@ -1845,6 +1845,7 @@ dependencies = [
  "tool-lsp",
  "tool-mcp",
  "tool-meta",
+ "tool-mobile",
  "tool-plan",
  "tool-shell",
  "tool-skill",

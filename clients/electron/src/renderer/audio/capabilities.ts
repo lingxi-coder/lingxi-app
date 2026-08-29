@@ -36,6 +36,9 @@
  * query threw) — distinct from `'prompt'`, which means the browser CAN
  * answer and the answer is "the user hasn't been asked yet".
  */
+import { providerById } from '../../shared/providers';
+import { DEFAULT_VOICE_SELECTION, LANGUAGE_AUTO, type VoicePreferences } from './preferences';
+
 export type VoicePermissionStatus = 'granted' | 'denied' | 'prompt' | 'unavailable';
 
 export interface VoiceOption {
@@ -80,6 +83,138 @@ export interface VoicePlatformSnapshot {
    * real voice; see `probePlatform`'s doc comment on this exact point.
    */
   defaultSystemVoiceId: string;
+}
+
+/**
+ * A recognition/playback issue that keeps the running behaviour from
+ * matching what the user asked for, named specifically enough that the UI
+ * can render an honest, actionable explanation instead of a generic
+ * failure. `ProviderCredentialRequired` and `ProviderCannotTranscribe` are
+ * DIFFERENT issues, deliberately: the first means "nothing is connected",
+ * the second means "something is connected but it cannot transcribe" — see
+ * `resolveCapabilities`'s doc comment. Collapsing them would tell a user
+ * who already connected a provider to "connect a provider", which is both
+ * wrong and unactionable.
+ */
+export type VoiceBlockingIssue =
+  | 'MicrophonePermissionRequired'
+  | 'OnDeviceUnsupportedOnDesktop'
+  | 'ProviderCredentialRequired'
+  | 'ProviderCannotTranscribe'
+  | 'RequestedVoiceUnavailable'
+  | 'PlaybackVoiceUnavailable';
+
+export interface VoiceCapabilitySnapshot {
+  microphonePermission: VoicePermissionStatus;
+  requestedRecognitionBackend: VoicePreferences['recognitionMode'];
+  effectiveRecognitionBackend: 'provider' | 'unavailable';
+  effectiveLanguage: string;
+  voiceOptions: VoiceOption[];
+  requestedVoice: VoiceOption | null;
+  effectiveVoice: VoiceOption | null;
+  blockingIssues: VoiceBlockingIssue[];
+  fallbackReason: string | null;
+}
+
+/**
+ * Resolves a user's voice preferences against a measured platform snapshot
+ * into an honest capability report: what will actually run
+ * (`effectiveRecognitionBackend`/`effectiveVoice`), and — whenever that
+ * differs from what was requested — exactly which named issue is
+ * responsible, never a silent downgrade.
+ *
+ * Structure mirrors Android's `VoiceSettingsCapabilityResolver.resolve`
+ * (`clients/android/.../settings/VoiceSettingsCapabilities.kt`): requested
+ * and effective are kept separate, and every difference is explained via
+ * `blockingIssues` + `fallbackReason` rather than silently applied.
+ *
+ * Desktop has no on-device recognizer at all (no Sherpa bindings, unlike
+ * iOS/Android), so `recognitionMode: 'localOnly'` always resolves to
+ * `'unavailable'` with `OnDeviceUnsupportedOnDesktop` — never a silent
+ * fallback to the provider backend the user did not ask for. Desktop speech
+ * recognition otherwise runs entirely through a configured provider's
+ * transcription endpoint, which is why "no credential" and "credential
+ * present but the provider can't transcribe" are reported as two distinct,
+ * separately-actionable issues instead of one collapsed boolean.
+ *
+ * `blockingIssues` order is a deliberate precedence, not incidental
+ * `if`-order (see the tests in `voice-capability-snapshot.test.ts` pinning
+ * it under several simultaneous issues):
+ *   1. `MicrophonePermissionRequired` — recognition cannot work at all
+ *      without this, independent of every other setting, and it is the
+ *      most immediately actionable (a single OS permission grant).
+ *   2. `OnDeviceUnsupportedOnDesktop` — mutually exclusive with 3/4: when
+ *      `localOnly` is requested, the reason recognition is unavailable is
+ *      the requested MODE itself, so provider facts would be irrelevant
+ *      noise and are not also reported.
+ *   3. `ProviderCredentialRequired` / 4. `ProviderCannotTranscribe` —
+ *      mutually exclusive with each other, only evaluated when
+ *      `recognitionMode` is `'automatic'`.
+ *   5. `RequestedVoiceUnavailable` / 6. `PlaybackVoiceUnavailable` —
+ *      playback-voice problems never block recognition, so they always
+ *      sort last.
+ */
+export function resolveCapabilities(
+  prefs: VoicePreferences,
+  platform: VoicePlatformSnapshot,
+): VoiceCapabilitySnapshot {
+  const effectiveLanguage = prefs.language === LANGUAGE_AUTO ? platform.localeTag : prefs.language;
+  const micGranted = platform.microphonePermission === 'granted';
+
+  const voiceOptions = platform.systemVoices;
+  const requestedVoice = voiceOptions.find((voice) => voice.id === prefs.voiceSelection) ?? null;
+  const effectiveVoice =
+    requestedVoice
+    ?? voiceOptions.find((voice) => voice.id === platform.defaultSystemVoiceId)
+    ?? voiceOptions[0]
+    ?? null;
+  const requestedVoiceMissing =
+    prefs.voiceSelection !== DEFAULT_VOICE_SELECTION && !requestedVoice && effectiveVoice != null;
+
+  const blockingIssues: VoiceBlockingIssue[] = [];
+  if (!micGranted) blockingIssues.push('MicrophonePermissionRequired');
+
+  if (prefs.recognitionMode === 'localOnly') {
+    blockingIssues.push('OnDeviceUnsupportedOnDesktop');
+  } else if (!platform.providerConfigured) {
+    blockingIssues.push('ProviderCredentialRequired');
+  } else if (!platform.providerTranscriptionCapable) {
+    blockingIssues.push('ProviderCannotTranscribe');
+  }
+
+  if (requestedVoiceMissing) blockingIssues.push('RequestedVoiceUnavailable');
+  if (!effectiveVoice) blockingIssues.push('PlaybackVoiceUnavailable');
+
+  const effectiveRecognitionBackend: 'provider' | 'unavailable' =
+    micGranted
+    && prefs.recognitionMode === 'automatic'
+    && platform.providerConfigured
+    && platform.providerTranscriptionCapable
+      ? 'provider'
+      : 'unavailable';
+
+  const fallbackReason =
+    prefs.recognitionMode === 'localOnly'
+      ? 'this desktop build ships no offline recognition model (no Sherpa bindings, unlike iOS/Android); on-device mode is unavailable here — switch to automatic to use the microphone'
+      : !platform.providerConfigured
+        ? 'desktop speech recognition runs through a configured provider; connect one to enable it'
+        : !platform.providerTranscriptionCapable
+          ? 'the connected provider has no transcription endpoint; connect a different provider that can transcribe to use the microphone'
+          : requestedVoiceMissing
+            ? 'the requested voice is no longer installed; using the nearest available voice'
+            : null;
+
+  return {
+    microphonePermission: platform.microphonePermission,
+    requestedRecognitionBackend: prefs.recognitionMode,
+    effectiveRecognitionBackend,
+    effectiveLanguage,
+    voiceOptions,
+    requestedVoice,
+    effectiveVoice,
+    blockingIssues,
+    fallbackReason,
+  };
 }
 
 /**
@@ -152,13 +287,15 @@ export interface ProbeDeps {
   /** Whether the currently active provider has a credential configured. */
   providerConfigured: boolean;
   /**
-   * Whether that configured provider supports transcription. Callers
-   * should compute this as
+   * Whether that configured provider supports transcription. Production
+   * callers get this from `browserProbeDeps`, which computes it via
+   * `resolveActiveProviderVoiceCapability` (below) —
    * `providerById(activeProviderId)?.transcriptionCapable ?? false`
-   * (see `shared/providers.ts`). `probePlatform` additionally clamps this
-   * to `false` whenever `providerConfigured` is `false`, as a defensive
-   * floor — "capable but not configured" must never reach the snapshot,
-   * even if a caller's join logic gets that wrong.
+   * (see `shared/providers.ts`). Tests may still supply this raw.
+   * `probePlatform` additionally clamps this to `false` whenever
+   * `providerConfigured` is `false`, as a defensive floor — "capable but
+   * not configured" must never reach the snapshot, even if a caller's join
+   * logic gets that wrong.
    */
   providerTranscriptionCapable: boolean;
   /** Overrides `readSystemVoices`'s wait bound; tests use a short value. */
@@ -210,21 +347,69 @@ async function resolveMicrophonePermission(
 }
 
 /**
- * Builds `ProbeDeps` from the real browser globals, for production use.
- * The two provider facts are not derivable from any browser API, so the
- * caller (whoever knows which provider is currently active) supplies them
- * — see `ProbeDeps.providerConfigured`/`.providerTranscriptionCapable`.
+ * A minimal structural fact about one provider's credential state — the
+ * same shape `bridge/modelCatalog.ts`'s `resolveModelSelection` already
+ * accepts (`{ providerId, configured }`), kept local here instead of
+ * importing the IPC bridge's `ProviderCredentialMetadata` so this probe
+ * module stays decoupled from it.
  */
-export function browserProbeDeps(provider: {
-  configured: boolean;
-  transcriptionCapable: boolean;
-}): ProbeDeps {
+export interface ProviderConfiguredFact {
+  readonly providerId: string;
+  readonly configured: boolean;
+}
+
+/**
+ * The join from "which provider is currently active" to
+ * `providerById(...).transcriptionCapable` (`shared/providers.ts`).
+ *
+ * This used to be a contract stated only in a doc comment on
+ * `ProbeDeps.providerTranscriptionCapable`, asking a future caller to
+ * compute `providerById(activeProviderId)?.transcriptionCapable ?? false`
+ * by hand. Implemented here once instead, so no call site can silently
+ * skip the lookup (e.g. by assuming "configured" implies "capable" —
+ * exactly wrong for a configured Anthropic key, which has no transcription
+ * endpoint at all).
+ *
+ * `providerConfigured` is derived from `credentials` rather than trusted
+ * as a caller-supplied boolean, so "capable" can never be claimed for a
+ * provider that in fact has no credential on file — the same defensive
+ * posture `probePlatform` already enforces on its own inputs.
+ */
+export function resolveActiveProviderVoiceCapability(
+  activeProviderId: string | null,
+  credentials: readonly ProviderConfiguredFact[],
+): { providerConfigured: boolean; providerTranscriptionCapable: boolean } {
+  const providerConfigured =
+    activeProviderId != null
+    && credentials.some((entry) => entry.providerId === activeProviderId && entry.configured);
+  const providerTranscriptionCapable =
+    providerConfigured
+    && (providerById(activeProviderId as string)?.transcriptionCapable ?? false);
+  return { providerConfigured, providerTranscriptionCapable };
+}
+
+/**
+ * Builds `ProbeDeps` from the real browser globals, for production use.
+ * The two provider facts are not derivable from any browser API, so they
+ * are computed here via `resolveActiveProviderVoiceCapability` from
+ * whichever provider the caller currently treats as active and the
+ * desktop's known credential list — see that function's doc comment for
+ * why this join lives in code, not in a comment.
+ */
+export function browserProbeDeps(
+  activeProviderId: string | null,
+  credentials: readonly ProviderConfiguredFact[],
+): ProbeDeps {
+  const { providerConfigured, providerTranscriptionCapable } = resolveActiveProviderVoiceCapability(
+    activeProviderId,
+    credentials,
+  );
   return {
     synth: window.speechSynthesis,
     queryMicrophonePermission: queryBrowserMicrophonePermission,
     localeTag: navigator.language,
-    providerConfigured: provider.configured,
-    providerTranscriptionCapable: provider.transcriptionCapable,
+    providerConfigured,
+    providerTranscriptionCapable,
   };
 }
 

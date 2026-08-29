@@ -35,14 +35,11 @@ import { ghostButtonStyle, inputStyle } from './ghostButton';
  * capable provider configured) while recognition still does not work,
  * because nothing in this build actually calls that provider's transcription
  * endpoint. Showing the itemized facts ONLY, with no issues present, would
- * read as "this should work" — exactly backwards. Recording and speech
- * OUTPUT (synthesis) are unaffected and both really work; the copy says so
- * to avoid overclaiming in the other direction.
+ * read as "this should work" — exactly backwards.
  */
-export const RECOGNITION_UNAVAILABLE_NOTICE =
+const RECOGNITION_UNAVAILABLE_BASE =
   '语音识别在当前桌面版本中尚不可用：这个客户端没有内置的语音识别引擎，也还没有能调用转写服务的通道——'
-  + '即使已经连接了 Provider 也是如此，因为 Provider 凭据只保存在引擎一侧，桌面渲染进程本身拿不到它去调用转写接口。'
-  + '录音与语音朗读功能不受影响，可以正常使用。';
+  + '即使已经连接了 Provider 也是如此，因为 Provider 凭据只保存在引擎一侧，桌面渲染进程本身拿不到它去调用转写接口。';
 
 const MIC_PERMISSION_LABELS: Record<VoicePermissionStatus, string> = {
   granted: '已授权',
@@ -75,6 +72,33 @@ const BLOCKING_ISSUE_MESSAGES: Record<VoiceBlockingIssue, string> = {
   RequestedVoiceUnavailable: '之前选择的朗读音色已经不存在，目前使用的是其他可用音色。',
   PlaybackVoiceUnavailable: '这台设备上没有可用于朗读的系统音色。',
 };
+
+/**
+ * The recognition-unavailable notice's second half — the claim about
+ * RECORDING — genuinely depends on `microphonePermission`, unlike the
+ * recognition claim above it: `capture.ts` classifies a `getUserMedia`
+ * `NotAllowedError` as `permission_denied`, and `requests.ts`'s
+ * `failureFrom` turns that into an outright `failed` response, so recording
+ * really does not work whenever permission is not `'granted'`. Speech
+ * OUTPUT (synthesis) never touches the microphone, so ITS claim stays true
+ * and present unconditionally — collapsing the two back into one sentence
+ * (the bug this function fixes) would either overclaim recording works when
+ * it does not, or, if written the other way, wrongly imply playback is
+ * broken too.
+ *
+ * Uses the exact same `microphonePermission === 'granted'` predicate as
+ * `resolveCapabilities`'s `MicrophonePermissionRequired` check (and reuses
+ * that issue's own message text for the "blocked" branch) so this banner
+ * can never end up disagreeing with the Status card rendered below it in
+ * the same page — see `settings-voice-page.test.ts`'s
+ * "does not contradict the Status card" tests.
+ */
+function recognitionUnavailableNotice(microphonePermission: VoicePermissionStatus): string {
+  const recordingClaim = microphonePermission === 'granted'
+    ? '录音与语音朗读功能不受影响，可以正常使用。'
+    : `${BLOCKING_ISSUE_MESSAGES.MicrophonePermissionRequired}语音朗读不需要使用麦克风，不受影响，可以正常使用。`;
+  return `${RECOGNITION_UNAVAILABLE_BASE}${recordingClaim}`;
+}
 
 export interface VoiceRecognitionOption {
   id: VoicePreferences['recognitionMode'];
@@ -149,7 +173,7 @@ export function voicePageModel(prefs: VoicePreferences, platform: VoicePlatformS
   return {
     recognitionOptions,
     recognitionMode: prefs.recognitionMode,
-    recognitionUnavailableNotice: RECOGNITION_UNAVAILABLE_NOTICE,
+    recognitionUnavailableNotice: recognitionUnavailableNotice(platform.microphonePermission),
     language: prefs.language,
     effectiveLanguage: capability.effectiveLanguage,
     microphonePermission: platform.microphonePermission,

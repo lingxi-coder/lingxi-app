@@ -140,6 +140,57 @@ test('the recognition-unavailable notice never tells the user to connect a provi
   assert.match(model.recognitionUnavailableNotice, /即使.*连接.*Provider/);
 });
 
+// --- Defect 1: the recording claim must depend on the REAL permission
+// state, not be flattened together with the (genuinely unconditional)
+// recognition claim. `capture.ts` classifies a `getUserMedia`
+// `NotAllowedError` as `permission_denied`, and `requests.ts`'s
+// `failureFrom` turns that into an outright `failed` response — so
+// recording does not "work normally" whenever `platform.microphonePermission`
+// is not `'granted'`. Every test below that predates this one used the
+// default `platform()` fixture (`microphonePermission: 'granted'`), which is
+// exactly why none of them caught the unconditional claim being wrong for
+// every OTHER permission state.
+
+const RECORDING_UNAFFECTED_CLAUSE = '录音与语音朗读功能不受影响，可以正常使用。';
+
+test('when microphone permission is granted, the notice says recording is genuinely unaffected', () => {
+  const model = voicePageModel(prefs(), platform({ microphonePermission: 'granted' }));
+  assert.ok(
+    model.recognitionUnavailableNotice.includes(RECORDING_UNAFFECTED_CLAUSE),
+    'this is the one state where the claim is actually true',
+  );
+});
+
+for (const status of ['denied', 'prompt', 'unavailable'] as const) {
+  test(`when microphone permission is '${status}', the notice must not claim recording works normally`, () => {
+    const model = voicePageModel(prefs(), platform({ microphonePermission: status }));
+    assert.ok(
+      !model.recognitionUnavailableNotice.includes(RECORDING_UNAFFECTED_CLAUSE),
+      `a user with microphonePermission '${status}' who presses the composer mic button gets an immediate `
+      + 'permission_denied failure — the banner must not have just told them recording is unaffected',
+    );
+    // Speech OUTPUT never touches the microphone — that half of the claim
+    // is genuinely independent of permission state and must survive.
+    assert.match(
+      model.recognitionUnavailableNotice,
+      /语音朗读.*(不受影响|正常使用)/,
+      'speech synthesis really is unaffected in every state — only the recording half of the old sentence was wrong',
+    );
+  });
+
+  test(`when microphone permission is '${status}', the notice does not contradict the Status card's own honest message`, () => {
+    const model = voicePageModel(prefs(), platform({ microphonePermission: status }));
+    assert.ok(
+      model.notices.some((n) => n.includes('尚未获得麦克风权限，录音功能无法使用')),
+      'sanity check: the Status card below is expected to report recording as blocked in this same render',
+    );
+    assert.ok(
+      !model.recognitionUnavailableNotice.includes(RECORDING_UNAFFECTED_CLAUSE),
+      'the top-of-page notice must not say the opposite of what the Status card says three rows below, in the same render',
+    );
+  });
+}
+
 test('a provider-related blocking issue is described as a fact, never as an instruction to connect', () => {
   const noProvider = voicePageModel(prefs(), platform({ providerConfigured: false }));
   assert.ok(noProvider.notices.some((n) => /没有连接任何 Provider/.test(n)));

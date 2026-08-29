@@ -298,6 +298,46 @@ fn map_call_err(e: &ConnectionError) -> McpError {
     McpError::Internal(e.to_string())
 }
 
+/// Recover structured HTTP status / `WWW-Authenticate` metadata from a failed
+/// `initialize` call, instead of flattening it to a `Handshake(String)`.
+///
+/// The Streamable HTTP writer task has no synchronous way to fail the
+/// `initialize` POST directly (it runs the request/response cycle inside a
+/// detached `tokio::spawn`, decoupled from the caller's `.call()` future), so
+/// a non-2xx response is turned into a *synthetic* JSON-RPC error response
+/// (`mcp_http.rs::http_error_message`) carrying `data: {httpStatus,
+/// wwwAuthenticate}` — the same structured pair `McpError::HttpResponse`
+/// already carries for a genuine transport-level failure (SSE's pre-flight
+/// GET). Unwrap that `data` shape here so callers (401/403 auth
+/// classification in `mcp::registry`) can match on `McpError::HttpResponse`
+/// uniformly regardless of which transport produced it.
+///
+/// A real MCP protocol failure (bad params, method not found, a plain
+/// `RouterError` with no `data`) has no `httpStatus` in `data` and falls
+/// back to the prior `Handshake(e.to_string())` behavior unchanged.
+fn handshake_error(e: &ConnectionError) -> McpError {
+    if let ConnectionError::Router(RouterError::Remote(re)) = e {
+        if let Some(status) = re
+            .data
+            .as_ref()
+            .and_then(|data| data.get("httpStatus"))
+            .and_then(Value::as_u64)
+        {
+            let www_authenticate = re
+                .data
+                .as_ref()
+                .and_then(|data| data.get("wwwAuthenticate"))
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            return McpError::HttpResponse {
+                status: status as u16,
+                www_authenticate,
+            };
+        }
+    }
+    McpError::Handshake(e.to_string())
+}
+
 /// True when `e` is a remote JSON-RPC error carrying the
 /// `METHOD_NOT_FOUND` (-32601) code — the MCP convention for "unknown tool".
 fn is_method_not_found(e: &ConnectionError) -> bool {
@@ -414,8 +454,16 @@ impl McpTransport for PosixMcpTransport {
         let result: Value = connection
             .call("initialize", initialize_params())
             .await
-            // A failed initialize is a handshake failure, not a generic error.
-            .map_err(|e| McpError::Handshake(e.to_string()))?;
+            // A failed initialize is a handshake failure — UNLESS the
+            // Streamable HTTP writer task (`mcp_http.rs::http_error_message`)
+            // turned a non-2xx POST response into a synthetic JSON-RPC error
+            // carrying `data: {httpStatus, wwwAuthenticate}`; surface that
+            // structurally as `McpError::HttpResponse` (see `handshake_error`)
+            // so 401/403 classification never has to substring-match a
+            // stringified error. SSE's connect() arm already returns this
+            // structurally via `SseConnectError::HttpResponse` for the
+            // pre-flight GET; this closes the matching gap for `Http`.
+            .map_err(|e| handshake_error(&e))?;
 
         // The server's declared capabilities live under `result.capabilities`
         // as a presence map (e.g. `{ "tools": {} }`). Map by presence.
@@ -1029,8 +1077,9 @@ mod initialize_params_tests {
 
 #[cfg(test)]
 mod error_mapping_tests {
-    use super::{is_method_not_found, map_call_err};
+    use super::{handshake_error, is_method_not_found, map_call_err};
     use jsonrpc::{ConnectionError, JsonRpcError, RouterError};
+    use serde_json::json;
     use std::time::Duration;
     use traits::McpError;
 
@@ -1071,6 +1120,81 @@ mod error_mapping_tests {
         match map_call_err(&e) {
             McpError::Internal(s) => assert_eq!(s, e.to_string()),
             other => panic!("expected McpError::Internal, got {other:?}"),
+        }
+    }
+
+    /// `handshake_error` unwraps the synthetic `{httpStatus, wwwAuthenticate}`
+    /// `data` shape the Streamable HTTP writer task attaches to a non-2xx
+    /// `initialize` POST (`mcp_http.rs::http_error_message`) into a
+    /// structural `McpError::HttpResponse`, carrying BOTH the exact status
+    /// and the full `WWW-Authenticate` value through — the pair §19's
+    /// AUTH_HEADER_REJECTED/HEADERS_HELPER_AUTH_REJECTED classification and
+    /// §24c's `resource_metadata` extraction both need.
+    #[test]
+    fn handshake_error_unwraps_structured_http_data() {
+        let e = ConnectionError::Router(RouterError::Remote(JsonRpcError {
+            code: -32001,
+            message: "MCP_HTTP_STATUS=403;WWW_AUTHENTICATE=Bearer error=\"insufficient_scope\", \
+                      scope=\"mcp:elevated\", resource_metadata=\"https://mock/.well-known/x\""
+                .into(),
+            data: Some(json!({
+                "httpStatus": 403,
+                "wwwAuthenticate": "Bearer error=\"insufficient_scope\", scope=\"mcp:elevated\", \
+                                     resource_metadata=\"https://mock/.well-known/x\""
+            })),
+        }));
+        match handshake_error(&e) {
+            McpError::HttpResponse {
+                status,
+                www_authenticate,
+            } => {
+                assert_eq!(status, 403);
+                let waa = www_authenticate.expect("wwwAuthenticate must survive unwrapping");
+                assert!(waa.contains("insufficient_scope"));
+                assert!(waa.contains("resource_metadata="));
+            }
+            other => panic!("expected McpError::HttpResponse, got {other:?}"),
+        }
+    }
+
+    /// A 401 with no `WWW-Authenticate` header still structures as
+    /// `HttpResponse { status: 401, www_authenticate: None }` — the header is
+    /// optional, the status is not.
+    #[test]
+    fn handshake_error_unwraps_structured_http_data_without_www_authenticate() {
+        let e = ConnectionError::Router(RouterError::Remote(JsonRpcError {
+            code: -32001,
+            message: "MCP_HTTP_STATUS=401;WWW_AUTHENTICATE=".into(),
+            data: Some(json!({ "httpStatus": 401, "wwwAuthenticate": null })),
+        }));
+        assert!(matches!(
+            handshake_error(&e),
+            McpError::HttpResponse {
+                status: 401,
+                www_authenticate: None,
+            }
+        ));
+    }
+
+    /// A genuine MCP protocol failure (unrelated remote error, no `data`)
+    /// must NOT be misclassified as an `HttpResponse` — it falls back to the
+    /// prior stringified `Handshake` behavior unchanged.
+    #[test]
+    fn handshake_error_falls_back_to_handshake_for_non_http_errors() {
+        let remote = ConnectionError::Router(RouterError::Remote(JsonRpcError {
+            code: -32602,
+            message: "invalid params".into(),
+            data: None,
+        }));
+        match handshake_error(&remote) {
+            McpError::Handshake(s) => assert_eq!(s, remote.to_string()),
+            other => panic!("expected McpError::Handshake, got {other:?}"),
+        }
+
+        let writer_closed = ConnectionError::Router(RouterError::WriterClosed);
+        match handshake_error(&writer_closed) {
+            McpError::Handshake(s) => assert_eq!(s, writer_closed.to_string()),
+            other => panic!("expected McpError::Handshake, got {other:?}"),
         }
     }
 

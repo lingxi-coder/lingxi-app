@@ -1023,6 +1023,43 @@ fn step_up_scope_extraction() {
     );
 }
 
+/// Unit: the 403 detector's PRIMARY match is the structural
+/// `McpError::HttpResponse` carrier (SSE's pre-flight GET returns it
+/// directly; Streamable HTTP's `initialize` unwraps it from the synthetic
+/// JSON-RPC error's `data` field via `handshake_error`,
+/// `platforms/posix/src/mcp.rs`) — no string flattening or substring
+/// matching involved. The prior test covers the string-fallback arms; this
+/// covers the structured arms the fallback exists alongside.
+#[test]
+fn step_up_scope_extraction_from_structured_http_response() {
+    use mcp::registry::test_support::error_is_403_insufficient_scope as detect;
+    assert_eq!(
+        detect(&McpError::HttpResponse {
+            status: 403,
+            www_authenticate: Some(
+                "Bearer error=\"insufficient_scope\", scope=\"mcp:elevated\"".into()
+            ),
+        }),
+        Some("mcp:elevated".to_string())
+    );
+    // 403 without insufficient_scope → not step-up, even structurally.
+    assert_eq!(
+        detect(&McpError::HttpResponse {
+            status: 403,
+            www_authenticate: Some("Bearer realm=\"mcp\"".into()),
+        }),
+        None
+    );
+    // 401 structurally → not step-up (that's `error_is_401`'s job).
+    assert_eq!(
+        detect(&McpError::HttpResponse {
+            status: 401,
+            www_authenticate: Some("Bearer error=\"insufficient_scope\", scope=\"x\"".into()),
+        }),
+        None
+    );
+}
+
 // ---------------------------------------------------------------------------
 // RESIDUAL 3 (C): XAA gate + registry-driven cross-app-access.
 // ---------------------------------------------------------------------------

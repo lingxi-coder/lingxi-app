@@ -2434,9 +2434,17 @@ fn inject_bearer(spec: &McpTransportSpec, access_token: &str) -> McpTransportSpe
     }
 }
 
-/// Faithful-core 401 detection: the transport flattens HTTP failures to a
-/// `Connection` / `Handshake` error string, so we substring-match `"401"`.
-/// Structured-status detection is a noted residual.
+/// Faithful-core 401 detection. The error reaching here is always the result
+/// of `connect_attempt` (transport `connect` + `initialize`): SSE's pre-flight
+/// GET returns `McpError::HttpResponse` directly on a non-2xx status
+/// (`platforms/common/src/mcp_sse.rs`), and Streamable HTTP's `initialize`
+/// unwraps the same shape from a synthetic JSON-RPC error's structured
+/// `data: {httpStatus, wwwAuthenticate}` (`handshake_error`,
+/// `platforms/posix/src/mcp.rs` — mirrored on any platform that wires a real
+/// HTTP transport). The substring match on `"401"` remains as a fallback for
+/// any OTHER path that still flattens to a string (e.g. a raw connection
+/// failure whose message happens to mention a status code) — it is not
+/// expected to be the primary match for a real 401 any more.
 fn error_is_401(e: &McpError) -> bool {
     matches!(e, McpError::HttpResponse { status: 401, .. })
         || matches!(
@@ -2456,16 +2464,25 @@ fn error_is_auth_response(error: &McpError) -> bool {
 }
 
 /// Faithful-core 403 `insufficient_scope` step-up detection (auth.ts
-/// `wrapFetchWithStepUpDetection`, 1354-1374). The transport flattens HTTP
-/// failures to a `Connection`/`Handshake` error string carrying the status and
-/// the `WWW-Authenticate` text, so we substring-match `"403"` +
-/// `"insufficient_scope"` and extract the required scope from a
-/// `scope="…"`/`scope=…` token (RFC 6750 §3 — the same shape as the SDK's
-/// `extractFieldFromWwwAuth`). Returns the elevated scope when present.
+/// `wrapFetchWithStepUpDetection`, 1354-1374). The primary path is now
+/// structural: `connect_attempt`'s error carries a genuine `www_authenticate`
+/// header value in `McpError::HttpResponse` (see `error_is_401`'s note — SSE's
+/// pre-flight GET, and Streamable HTTP's `initialize` via `handshake_error`),
+/// so `www_authenticate.contains("insufficient_scope")` and
+/// `extract_scope_from_www_auth` run against the real header text. The
+/// `Connection`/`Handshake` string arms remain as a substring-matched
+/// fallback (`"403"` + `"insufficient_scope"`, extracting a `scope="…"`/
+/// `scope=…` token per RFC 6750 §3 — the same shape as the SDK's
+/// `extractFieldFromWwwAuth`) for any error shape that still flattens to a
+/// string. Returns the elevated scope when present.
 ///
-/// A structured 403-with-headers path (the WWW-Authenticate header reaching the
-/// registry on a tool-call 403) is a noted residual, parallel to the 401 note —
-/// the live HTTP writer currently swallows non-2xx tool-call responses.
+/// A tool-call-time 403 (post-connect, i.e. `McpClient::call_tool_with_progress`
+/// rather than `connect_attempt`) is a SEPARATE path: `mcp/src/client.rs`'s
+/// `mcp_client_error_from_rpc` already reconstructs a structured
+/// `McpClientError::HttpResponse` from the same
+/// `MCP_HTTP_STATUS=…;WWW_AUTHENTICATE=…` marker, consumed by
+/// `call_tool_with_auth_retry`'s `is_auth_response()` check — this function
+/// is never called on that path, so it is out of scope here.
 fn error_is_403_insufficient_scope(e: &McpError) -> Option<String> {
     if let McpError::HttpResponse {
         status: 403,

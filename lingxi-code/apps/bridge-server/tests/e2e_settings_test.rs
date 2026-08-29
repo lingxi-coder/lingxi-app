@@ -39,6 +39,27 @@ use serde_json::Value;
 use tokio_tungstenite::tungstenite::handshake::client::generate_key;
 use tokio_tungstenite::tungstenite::Message;
 
+/// `boot::assemble` → `initialize_live_session` writes to PROCESS-GLOBAL
+/// statics (`PROCESS_DIR` / `PROCESS_SESSION` / `PROCESS_NAME` in
+/// `traits::live_sessions`) shared by every test in this binary. Rust's
+/// default harness runs a file's `#[tokio::test]` fns CONCURRENTLY, so
+/// without this these five tests race each other on that global state — this
+/// file's own version of the guard `boot.rs`'s `LOOP_KA_TEST_SERIAL` documents
+/// ("keep the entire guard lifetime serialized so another test cannot ...
+/// overwrite its globals"). `bridge_server::driver::LOOP_KA_TEST_SERIAL` is
+/// `pub(crate)` and unreachable from this external test crate, hence a
+/// file-local mutex rather than reusing it. Held for the WHOLE test body (the
+/// guard binding lives to the end of the function), not just around
+/// `boot::assemble`, because the served connection keeps touching the live
+/// session for the test's duration.
+static PROCESS_GLOBALS_SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn serialize_process_globals() -> std::sync::MutexGuard<'static, ()> {
+    PROCESS_GLOBALS_SERIAL
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 const TEST_TOKEN: &str = "settings-e2e-token-32chars000000000";
 
 /// A deterministic, env-free `DesktopConfig` with `lingxi_home` and `cwd`
@@ -199,6 +220,10 @@ fn submit(command: &ClientCommand) -> Frame {
 /// value (not the merged view), and `files_json` lists the real on-disk paths.
 #[tokio::test]
 async fn settings_listing_returns_a_real_merged_snapshot() {
+    // Serialized: `boot::assemble` writes process-global live-session
+    // statics every test in this file shares (see
+    // `PROCESS_GLOBALS_SERIAL`'s doc above).
+    let _serial = serialize_process_globals();
     let (_tmp, cfg) = sandbox_config();
     let home = cfg.lingxi_home.clone();
     let project = cfg.cwd.clone();
@@ -309,6 +334,10 @@ async fn settings_listing_returns_a_real_merged_snapshot() {
 /// checklist's "quit the app and `cat` the file" step.
 #[tokio::test]
 async fn update_settings_write_lands_in_the_real_file_and_preserves_siblings() {
+    // Serialized: `boot::assemble` writes process-global live-session
+    // statics every test in this file shares (see
+    // `PROCESS_GLOBALS_SERIAL`'s doc above).
+    let _serial = serialize_process_globals();
     let (_tmp, cfg) = sandbox_config();
     let home = cfg.lingxi_home.clone();
     let user_settings_path = home.join("settings.json");
@@ -358,6 +387,10 @@ async fn update_settings_write_lands_in_the_real_file_and_preserves_siblings() {
 /// rest of the file — an unrelated top-level key — is untouched.
 #[tokio::test]
 async fn update_permission_rules_lands_in_the_real_project_file() {
+    // Serialized: `boot::assemble` writes process-global live-session
+    // statics every test in this file shares (see
+    // `PROCESS_GLOBALS_SERIAL`'s doc above).
+    let _serial = serialize_process_globals();
     let (_tmp, cfg) = sandbox_config();
     let project = cfg.cwd.clone();
     let project_dot = project.join(branding::DOT_DIR);
@@ -408,6 +441,10 @@ async fn update_permission_rules_lands_in_the_real_project_file() {
 /// copy now depends on being true.
 #[tokio::test]
 async fn update_settings_refuses_to_clobber_a_broken_layer_file() {
+    // Serialized: `boot::assemble` writes process-global live-session
+    // statics every test in this file shares (see
+    // `PROCESS_GLOBALS_SERIAL`'s doc above).
+    let _serial = serialize_process_globals();
     let (_tmp, cfg) = sandbox_config();
     let project = cfg.cwd.clone();
     let project_dot = project.join(branding::DOT_DIR);
@@ -461,6 +498,10 @@ async fn update_settings_refuses_to_clobber_a_broken_layer_file() {
 /// in `effective_json`, and the key must be named in `merged_keys`.
 #[tokio::test]
 async fn merged_keys_reflects_a_real_cross_layer_union() {
+    // Serialized: `boot::assemble` writes process-global live-session
+    // statics every test in this file shares (see
+    // `PROCESS_GLOBALS_SERIAL`'s doc above).
+    let _serial = serialize_process_globals();
     let (_tmp, cfg) = sandbox_config();
     let home = cfg.lingxi_home.clone();
     std::fs::write(

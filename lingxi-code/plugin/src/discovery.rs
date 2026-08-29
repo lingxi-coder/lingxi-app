@@ -54,6 +54,13 @@ use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 
+/// A leading UTF-8 byte-order mark, as some editors on Windows write it.
+/// `serde_json` does not treat U+FEFF as whitespace, so every manifest/config
+/// JSON string read in this file must have it stripped before parsing (same
+/// convention as `command-api::markdown_loader::UTF8_BOM`,
+/// `skill-api::frontmatter`, `agent::catalog`).
+const UTF8_BOM: char = '\u{feff}';
+
 /// Raw shape of `.lingxi-plugin/plugin.json`.
 ///
 /// Mirrors claude-code's `PluginManifestSchema` (the full union of
@@ -629,7 +636,8 @@ pub(crate) async fn load_plugin_from_path(plugin_dir: &Path) -> Option<(PluginId
         .join(branding::PLUGIN_MANIFEST_DIR)
         .join("plugin.json");
     let raw = tokio::fs::read_to_string(&manifest_path).await.ok()?;
-    let parsed: RawManifest = match serde_json::from_str(&raw) {
+    let raw = raw.strip_prefix(UTF8_BOM).unwrap_or(raw.as_str());
+    let parsed: RawManifest = match serde_json::from_str(raw) {
         Ok(m) => m,
         Err(e) => {
             tracing::warn!(
@@ -947,9 +955,10 @@ async fn load_mcp_servers(plugin_dir: &Path) -> HashMap<String, mcp::McpServerCo
     let Ok(raw) = tokio::fs::read_to_string(&path).await else {
         return HashMap::new();
     };
+    let raw = raw.strip_prefix(UTF8_BOM).unwrap_or(raw.as_str());
     // Plugin MCP servers are dynamic-scoped (`addPluginScopeToServers` uses
     // `scope: 'dynamic'`, `mcpPluginIntegration.ts:353`).
-    match mcp::parse_mcp_json_string(&raw, mcp::ConfigScope::Dynamic) {
+    match mcp::parse_mcp_json_string(raw, mcp::ConfigScope::Dynamic) {
         Ok(configs) => configs.into_iter().map(|c| (c.name.clone(), c)).collect(),
         Err(e) => {
             tracing::warn!(error = %e, path = %path.display(), "skipping malformed plugin .mcp.json");
@@ -971,7 +980,8 @@ async fn load_lsp_servers(plugin_dir: &Path) -> HashMap<String, traits::LspServe
     let Ok(raw) = tokio::fs::read_to_string(&path).await else {
         return HashMap::new();
     };
-    let parsed: HashMap<String, traits::LspServerConfig> = match serde_json::from_str(&raw) {
+    let raw = raw.strip_prefix(UTF8_BOM).unwrap_or(raw.as_str());
+    let parsed: HashMap<String, traits::LspServerConfig> = match serde_json::from_str(raw) {
         Ok(m) => m,
         Err(e) => {
             tracing::warn!(error = %e, path = %path.display(), "skipping malformed plugin .lsp.json");
@@ -1086,7 +1096,8 @@ async fn load_standard_hooks(plugin_dir: &Path) -> Vec<hooks::HookDefinition> {
     let Ok(raw) = tokio::fs::read_to_string(&path).await else {
         return Vec::new();
     };
-    let wrapper: serde_json::Value = match serde_json::from_str(&raw) {
+    let raw = raw.strip_prefix(UTF8_BOM).unwrap_or(raw.as_str());
+    let wrapper: serde_json::Value = match serde_json::from_str(raw) {
         Ok(v) => v,
         Err(e) => {
             tracing::warn!(error = %e, path = %path.display(), "skipping malformed hooks.json");
@@ -1141,7 +1152,8 @@ async fn load_declared_hooks_from_path(plugin_dir: &Path, raw: &str) -> Vec<hook
     let Ok(raw_json) = tokio::fs::read_to_string(&path).await else {
         return Vec::new();
     };
-    let Ok(value) = serde_json::from_str::<Value>(&raw_json) else {
+    let raw_json = raw_json.strip_prefix(UTF8_BOM).unwrap_or(raw_json.as_str());
+    let Ok(value) = serde_json::from_str::<Value>(raw_json) else {
         return Vec::new();
     };
     parse_hooks_value(&value, &path)
@@ -1223,7 +1235,8 @@ async fn merge_declared_json_records<T, E>(
     let Ok(raw) = tokio::fs::read_to_string(&path).await else {
         return;
     };
-    if let Ok(parsed) = parse(&raw) {
+    let raw = raw.strip_prefix(UTF8_BOM).unwrap_or(raw.as_str());
+    if let Ok(parsed) = parse(raw) {
         out.extend(parsed);
     }
 }
@@ -1501,5 +1514,126 @@ mod tests {
         let (_id, manifest) = load_plugin_from_path(plugin).await.unwrap();
         assert_eq!(manifest.channels.len(), 1);
         assert_eq!(manifest.channels[0].server, "telegram");
+    }
+
+    // ---------- UTF-8 BOM tolerance (§5, 2.1.246 upstream fix) ----------
+    //
+    // serde_json does not treat U+FEFF as whitespace, so a BOM-prefixed
+    // manifest/config file previously failed to deserialize and the whole
+    // plugin (or the individual component file) was silently dropped. Each
+    // test below prefixes the exact fixture used by an existing non-BOM test
+    // above with `\u{feff}` and asserts the same successful outcome.
+
+    #[tokio::test]
+    async fn plugin_json_with_utf8_bom_still_loads() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin = tmp.path();
+        fs::create_dir_all(plugin.join(branding::PLUGIN_MANIFEST_DIR)).unwrap();
+        fs::write(
+            plugin
+                .join(branding::PLUGIN_MANIFEST_DIR)
+                .join("plugin.json"),
+            "\u{feff}{\"name\":\"demo\"}",
+        )
+        .unwrap();
+
+        let loaded = load_plugin_from_path(plugin).await;
+        assert!(
+            loaded.is_some(),
+            "BOM-prefixed plugin.json must still deserialize instead of being skipped as malformed"
+        );
+        assert_eq!(loaded.unwrap().1.name, "demo");
+    }
+
+    #[tokio::test]
+    async fn root_mcp_json_with_utf8_bom_still_loads() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin = tmp.path();
+        fs::write(
+            plugin.join(".mcp.json"),
+            "\u{feff}{\"echo\":{\"type\":\"stdio\",\"command\":\"echo\"}}",
+        )
+        .unwrap();
+
+        let servers = load_mcp_servers(plugin).await;
+        assert!(
+            servers.contains_key("echo"),
+            "BOM-prefixed root .mcp.json must still parse its server map, got {servers:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn root_lsp_json_with_utf8_bom_still_loads() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin = tmp.path();
+        fs::write(
+            plugin.join(".lsp.json"),
+            "\u{feff}{\"rust\":{\"name\":\"rust\",\"command\":\"rust-analyzer\",\"args\":[],\"env\":{},\"trigger_languages\":[\"rust\"],\"root_dir_markers\":[\"Cargo.toml\"],\"initialization_options\":null,\"extension_to_language\":{}}}",
+        )
+        .unwrap();
+
+        let servers = load_lsp_servers(plugin).await;
+        assert!(
+            servers.contains_key("rust"),
+            "BOM-prefixed root .lsp.json must still parse its server map, got {servers:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn standard_hooks_json_with_utf8_bom_still_loads() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin = tmp.path();
+        fs::create_dir_all(plugin.join("hooks")).unwrap();
+        fs::write(
+            plugin.join("hooks").join("hooks.json"),
+            "\u{feff}{\"hooks\":{\"PreToolUse\":[{\"matcher\":\"Write\",\"hooks\":[{\"type\":\"command\",\"command\":\"./fmt.sh\"}]}]}}",
+        )
+        .unwrap();
+
+        let hooks = load_standard_hooks(plugin).await;
+        assert_eq!(
+            hooks.len(),
+            1,
+            "BOM-prefixed hooks/hooks.json must still parse instead of yielding zero hooks"
+        );
+    }
+
+    #[tokio::test]
+    async fn declared_hooks_path_with_utf8_bom_still_loads() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin = tmp.path();
+        fs::write(
+            plugin.join("custom-hooks.json"),
+            "\u{feff}{\"hooks\":{\"PreToolUse\":[{\"matcher\":\"Write\",\"hooks\":[{\"type\":\"command\",\"command\":\"./fmt.sh\"}]}]}}",
+        )
+        .unwrap();
+
+        let hooks = load_declared_hooks_from_path(plugin, "./custom-hooks.json").await;
+        assert_eq!(
+            hooks.len(),
+            1,
+            "BOM-prefixed manifest-declared hooks file must still parse instead of yielding zero hooks"
+        );
+    }
+
+    #[tokio::test]
+    async fn declared_mcp_servers_path_with_utf8_bom_still_loads() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin = tmp.path();
+        fs::write(
+            plugin.join("custom-mcp.json"),
+            "\u{feff}{\"echo\":{\"type\":\"stdio\",\"command\":\"echo\"}}",
+        )
+        .unwrap();
+
+        let servers = load_declared_mcp_servers(
+            plugin,
+            Some(Value::String("./custom-mcp.json".to_string())),
+        )
+        .await;
+        assert!(
+            servers.contains_key("echo"),
+            "BOM-prefixed manifest-declared mcpServers file must still parse, got {servers:?}"
+        );
     }
 }

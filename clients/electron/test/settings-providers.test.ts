@@ -14,6 +14,29 @@ import {
   credentialStatusKind,
   initialProviderSelection,
 } from '../src/renderer/components/settings/pages/ProviderCredentials';
+import { rowState, type SettingsSnapshot } from '../src/renderer/components/settings/useEngineSettings';
+
+/**
+ * A fully-typed `SettingsSnapshot`, the same helper every other new settings
+ * test file in this branch uses. The fixtures here used to be bare object
+ * literals, and they had already drifted: all six were missing `mergedKeys`,
+ * which `providersFromLayer`/`routingFromLayer` never read — but `rowState`,
+ * handed the same fixture, throws on `snapshot.mergedKeys.includes(key)`.
+ * `clients/electron/test/` is not part of `npm run typecheck`, so nothing
+ * said so.
+ */
+function snap(overrides: Partial<SettingsSnapshot> = {}): SettingsSnapshot {
+  return {
+    files: [],
+    effective: {},
+    active: {},
+    provenance: {},
+    locked: [],
+    layers: {},
+    mergedKeys: [],
+    ...overrides,
+  };
+}
 
 // ---------------------------------------------------------------------------
 // CustomProviders: the write-time gate this task exists for.
@@ -62,16 +85,15 @@ test('models input parses comma- and newline-separated ids, dropping blanks', ()
 test('providersFromLayer reads the SELECTED LAYER\'s own map, and is never a throw', () => {
   assert.deepEqual(providersFromLayer(null, 'user'), {});
   assert.deepEqual(
-    providersFromLayer({ effective: {}, active: {}, provenance: {}, files: [], locked: [], layers: {} }, 'user'),
+    providersFromLayer(snap(), 'user'),
     {},
   );
-  const snapshot = {
-    effective: {}, active: {}, provenance: {}, files: [], locked: [],
+  const snapshot = snap({
     layers: {
       user: { providers: { userOnly: { type: 'openai', models: [{ id: 'm-user' }] } } },
       local: { providers: { localOnly: { type: 'openai', models: [{ id: 'm-local' }] } } },
     },
-  };
+  });
   assert.deepEqual(providersFromLayer(snapshot, 'user'), { userOnly: { type: 'openai', models: [{ id: 'm-user' }] } });
   assert.deepEqual(providersFromLayer(snapshot, 'local'), { localOnly: { type: 'openai', models: [{ id: 'm-local' }] } });
 });
@@ -83,15 +105,15 @@ test('providersFromLayer reads the SELECTED LAYER\'s own map, and is never a thr
 // `providersFromLayer` must give `project` NONE of `local`'s entries even
 // though `local` would win an `effective` merge.
 test('providersFromLayer never leaks another layer\'s entries into the selected layer (fix round 1 regression)', () => {
-  const snapshot = {
+  const snapshot = snap({
     effective: { providers: { localOnly: { type: 'openai', models: [{ id: 'm-local' }] } } },
-    active: {}, provenance: { providers: 'local' }, files: [], locked: [],
+    provenance: { providers: 'local' },
     layers: {
       user: { providers: { userOnly: { type: 'openai', models: [{ id: 'm-user' }] } } },
       project: {},
       local: { providers: { localOnly: { type: 'openai', models: [{ id: 'm-local' }] } } },
     },
-  };
+  });
   assert.deepEqual(
     providersFromLayer(snapshot, 'project'),
     {},
@@ -106,12 +128,11 @@ test('providersFromLayer never leaks another layer\'s entries into the selected 
 
 test('routingFromLayer reads the SELECTED LAYER\'s own map, and is never a throw', () => {
   assert.deepEqual(routingFromLayer(null, 'project'), {});
-  const snapshot = {
-    effective: {}, active: {}, provenance: {}, files: [], locked: [],
+  const snapshot = snap({
     layers: {
       project: { routing: { retry: { maxAttempts: 3, backoffMs: 500 } } },
     },
-  };
+  });
   assert.deepEqual(routingFromLayer(snapshot, 'project'), { retry: { maxAttempts: 3, backoffMs: 500 } });
   assert.deepEqual(routingFromLayer(snapshot, 'user'), {}, 'user never set `routing`, so it must read empty');
 });
@@ -172,4 +193,19 @@ test('apiBaseUrlPatch clears the override on blank input rather than persisting 
   assert.equal(apiBaseUrlPatch('  '), null);
   assert.equal(apiBaseUrlPatch(''), null);
   assert.equal(apiBaseUrlPatch('  https://example.test  '), 'https://example.test');
+});
+
+// The runtime half of the same finding: `clients/electron/test/` is not part
+// of `npm run typecheck`, so a fixture that is not really a
+// `SettingsSnapshot` only shows up when something reads the field it is
+// missing. `rowState` is that something — it is the reader every other
+// settings page hands a snapshot to, and it throws outright on
+// `snapshot.mergedKeys.includes(key)`.
+
+test('the fixtures in this file are real SettingsSnapshots — rowState can read one', () => {
+  assert.deepEqual(
+    rowState(snap({ provenance: { providers: 'user' } }), 'providers', 'user'),
+    { kind: 'set-here' },
+    'an untyped fixture missing mergedKeys throws here rather than failing an assertion',
+  );
 });

@@ -1,0 +1,1126 @@
+//! `AudioBridge` — the engine-side proxies for the three device-audio traits.
+//!
+//! On mobile, Swift/Kotlin inject real `Arc<dyn SpeechToText>` /
+//! `Arc<dyn TextToSpeech>` / `Arc<dyn VoiceRecorder>` implementations through
+//! `UniFFI`. The desktop has no native implementation: the microphone and
+//! speaker belong to the Electron client. This module turns each trait call
+//! into one [`ClientEvent::AudioRequest`] pushed at the connected client and
+//! parks the caller until the matching
+//! [`ClientCommand::AudioResponse`](client_protocol::commands::ClientCommand::AudioResponse)
+//! comes back.
+//!
+//! ## Shape (mirrors [`client_adapter::BridgeComputerAccessBroker`])
+//!
+//! Same inverted handshake as the `computer` tool's `request_access` prompt:
+//!
+//! 1. A trait method reserves a fresh `request_id` (`AtomicU64`), parks a
+//!    `oneshot::Sender<AudioResultDto>` in the id-keyed map, and pushes the
+//!    request out through the connection's [`AudioRequestSink`].
+//! 2. [`AudioResponder::resolve`] is called by the transport from a DIFFERENT
+//!    task on an inbound `AudioResponse`: it looks up the id, removes the parked
+//!    sender, and sends the result — which resolves the ORIGINAL trait call
+//!    awaiting on the engine's tool-dispatch task.
+//!
+//! The one structural difference from the computer-access broker is that there
+//! is no `mpsc` receive loop to drive: the trait methods ARE the request
+//! source, so [`AudioBridge`] is called directly rather than draining a channel.
+//!
+//! ## Every path terminates
+//!
+//! The engine may call these traits at any time and the desktop client may be
+//! disconnected mid-turn, so a parked request must never be able to hang a turn
+//! forever. Three exits, in order of how early they fire:
+//!
+//! - **Nobody is listening.** [`AudioRequestSink::emit_request`] returns
+//!   `false` when there is no connected client to push to. The request is
+//!   un-parked immediately and fails with
+//!   [`AudioFailure::NoClient`] — the caller does not wait out a deadline for an
+//!   answer that cannot come.
+//! - **The client went away after being asked.** [`AudioResponder::drain`],
+//!   called on transport teardown (the same place the permission gate and the
+//!   computer-access broker are drained), drops every parked sender; each
+//!   dropped sender resolves its receiver to `Err`, which becomes
+//!   [`AudioFailure::NoAnswer`].
+//! - **The client is connected but never answers.** Each request carries a
+//!   deadline (see [`STATE_QUERY_DEADLINE`], [`DEVICE_CONTROL_DEADLINE`],
+//!   [`CAPTURE_DEADLINE`]); when it expires the request is un-parked and fails
+//!   with [`AudioFailure::NoAnswer`]. This is the only exit for a client that
+//!   holds the socket open and drops the request on the floor.
+//!
+//! Which error each of those becomes, per trait, is documented on
+//! [`stt_error`], [`tts_error`] and [`voice_error`].
+
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+use std::time::Duration;
+
+use async_trait::async_trait;
+use base64::Engine as _;
+use client_protocol::commands::{AudioErrorKindDto, AudioResultDto};
+use client_protocol::events::{AudioOpDto, ClientEvent};
+use tokio::sync::{oneshot, Mutex};
+use traits::stt::{SpeechToText, SttError, SttOpts, SttTranscript};
+use traits::tts::{TextToSpeech, TtsAudio, TtsError, TtsOpts};
+use traits::voice::{VoiceError, VoiceRecorder, VoiceRecording, VoiceRecordingOpts};
+
+/// Deadline for a pure state read (`IsRecording`).
+///
+/// A healthy client answers this from memory, well inside one frame. The
+/// ceiling is deliberately the shortest of the three because `is_recording`
+/// has no error channel and may be polled to paint a button: a hung client
+/// must not stall that caller for longer than a person would tolerate before
+/// the answer degrades to `false`.
+const STATE_QUERY_DEADLINE: Duration = Duration::from_secs(5);
+
+/// Deadline for a device-control op with no human in the loop
+/// (`StartRecording` / `StopRecording`).
+///
+/// These do real I/O — acquiring the audio session, then finalizing and
+/// encoding the captured file — but nothing in them waits on a person, so tens
+/// of seconds is already far outside normal. Sized to be generous for a slow
+/// machine while still failing inside one user's patience.
+const DEVICE_CONTROL_DEADLINE: Duration = Duration::from_secs(30);
+
+/// Deadline for an op that legitimately waits on a person or a network
+/// (`Transcribe` / `Synthesize`).
+///
+/// `Transcribe` holds the microphone open for a whole utterance and may then
+/// round-trip to a network recognizer; `Synthesize` may send a long text to a
+/// network voice. Minutes, not seconds, is the honest ceiling here — a shorter
+/// one would abort work that was going to succeed, which is worse than the
+/// hang it is meant to prevent. It exists only to bound a client that never
+/// answers at all.
+const CAPTURE_DEADLINE: Duration = Duration::from_secs(180);
+
+/// Transport-supplied destination for an outbound [`ClientEvent::AudioRequest`].
+///
+/// Object-safe, mirroring [`client_adapter::ComputerAccessRequestSink`]: the
+/// transport wraps each push into a `Frame::Event`. It differs in returning
+/// whether the request actually reached a client, which the computer-access
+/// sink does not need (that one fails closed through the broker's own `deny`).
+/// Here the caller is awaiting a VALUE, so "nobody is listening" has to be
+/// distinguishable from "asked, but no answer came" — see the module doc.
+#[async_trait]
+pub trait AudioRequestSink: Send + Sync {
+    /// Forward one [`ClientEvent::AudioRequest`] to the underlying transport.
+    /// Returns `false` when there is no connected client to forward it to.
+    /// Implementations should be cheap / non-blocking.
+    async fn emit_request(&self, request: ClientEvent) -> bool;
+}
+
+/// Parked audio requests' reply channels, keyed by `request_id`.
+type Pending = Arc<Mutex<HashMap<u64, oneshot::Sender<AudioResultDto>>>>;
+
+/// Why a round trip produced no usable [`AudioResultDto`].
+///
+/// Kept as one internal enum rather than three so the "which error does each
+/// trait report" decision lives in exactly one place per trait
+/// ([`stt_error`] / [`tts_error`] / [`voice_error`]) instead of being spread
+/// across five call sites.
+#[derive(Debug, Clone)]
+enum AudioFailure {
+    /// No client is connected to perform the operation. The request was never
+    /// delivered, so retrying now cannot help — something has to reconnect.
+    NoClient,
+    /// The request was delivered but no answer came back: the client hit its
+    /// deadline, or it disconnected while the request was parked. Transient by
+    /// nature — the same request against a healthy client would work.
+    NoAnswer(String),
+    /// The client answered with a typed failure of its own.
+    Reported {
+        /// Coarse, branchable failure class.
+        kind: AudioErrorKindDto,
+        /// The client's human-readable detail.
+        message: String,
+    },
+    /// The client answered, but with a result variant that does not answer the
+    /// operation that was asked (e.g. a recording-state flag for a transcribe).
+    Mismatched(String),
+}
+
+/// The message a [`AudioFailure::NoClient`] carries into every trait's error.
+const NO_CLIENT_MESSAGE: &str = "no desktop client is connected to perform the audio operation";
+
+/// Raise an [`AudioFailure`] to the speech-recognition trait's own error enum.
+///
+/// Every currently-defined [`AudioErrorKindDto`] is listed explicitly: `SttError`
+/// happens to have a home for all six, so nothing here falls through. The
+/// wildcard arm exists only because [`AudioErrorKindDto`] is `#[non_exhaustive]`
+/// — it catches a kind added to the contract AFTER this code was written, not a
+/// kind that should have mapped.
+//
+// `match_same_arms` is allowed on purpose: several kinds share `Other` as their
+// destination, and collapsing them into one arm is exactly what ruling 1
+// forbids — a merged arm cannot say WHY each kind has no home, and would
+// silently swallow a kind that later grows one.
+#[allow(clippy::match_same_arms)]
+fn stt_error(failure: AudioFailure) -> SttError {
+    match failure {
+        // Nobody is listening: from the engine's point of view the device has
+        // no speech-recognition service at all right now.
+        AudioFailure::NoClient => SttError::Unavailable,
+        // Asked, but no answer came. `Retriable` is the honest class: the
+        // recognizer may well answer the next time it is asked.
+        AudioFailure::NoAnswer(message) => SttError::Retriable(message),
+        AudioFailure::Mismatched(message) => SttError::Other(message),
+        AudioFailure::Reported { kind, message } => match kind {
+            AudioErrorKindDto::PermissionDenied => SttError::PermissionDenied,
+            AudioErrorKindDto::NoSpeech => SttError::NoSpeech,
+            AudioErrorKindDto::Unavailable => SttError::Unavailable,
+            AudioErrorKindDto::Busy => SttError::Busy,
+            AudioErrorKindDto::Retriable => SttError::Retriable(message),
+            AudioErrorKindDto::Other => SttError::Other(message),
+            // Only reachable for a kind added to the contract after this code
+            // was written (`AudioErrorKindDto` is `#[non_exhaustive]`).
+            _ => SttError::Other(message),
+        },
+    }
+}
+
+/// Raise an [`AudioFailure`] to the speech-synthesis trait's own error enum.
+///
+/// `TtsError` has only `Unavailable` / `SynthesisFailed` / `Other`, so four of
+/// the six kinds have no home and fall to `Other` DELIBERATELY — each is listed
+/// by name below with the reason, so a kind that later grows a home cannot be
+/// silently swallowed by a catch-all. `SynthesisFailed` is reserved for a
+/// failure this proxy itself detects (undecodable audio, in
+/// [`TextToSpeech::synthesize`]); nothing on the wire maps to it, because Task
+/// 1 collapses `TtsError::SynthesisFailed` into `AudioErrorKindDto::Other`.
+//
+// `match_same_arms` allowed for the same reason as in [`stt_error`].
+#[allow(clippy::match_same_arms)]
+fn tts_error(failure: AudioFailure) -> TtsError {
+    match failure {
+        // Nobody is listening: no usable TTS engine is reachable.
+        AudioFailure::NoClient => TtsError::Unavailable,
+        // Asked, but no answer came. `TtsError` has no retriable class, so this
+        // is `Other` and the message carries the distinction.
+        AudioFailure::NoAnswer(message) => TtsError::Other(message),
+        AudioFailure::Mismatched(message) => TtsError::Other(message),
+        AudioFailure::Reported { kind, message } => match kind {
+            AudioErrorKindDto::Unavailable => TtsError::Unavailable,
+            // Synthesis needs no microphone permission; a client reporting it
+            // here is describing an audio-session/output failure `TtsError`
+            // cannot name.
+            AudioErrorKindDto::PermissionDenied => TtsError::Other(message),
+            // "No speech was detected" is a recognition outcome; it is
+            // meaningless for synthesis and has no `TtsError` home.
+            AudioErrorKindDto::NoSpeech => TtsError::Other(message),
+            // `TtsError` has no `Busy` variant.
+            AudioErrorKindDto::Busy => TtsError::Other(message),
+            // `TtsError` has no retriable variant; `SynthesisFailed` would be a
+            // LIE here — it names a permanent failure of this text/voice.
+            AudioErrorKindDto::Retriable => TtsError::Other(message),
+            AudioErrorKindDto::Other => TtsError::Other(message),
+            // Only reachable for a kind added to the contract after this code
+            // was written.
+            _ => TtsError::Other(message),
+        },
+    }
+}
+
+/// Raise an [`AudioFailure`] to the microphone-capture trait's own error enum.
+///
+/// `VoiceError` has `PermissionDenied` / `NotRecording` / `Busy` / `Other`;
+/// the three kinds with no home fall to `Other` DELIBERATELY and are listed by
+/// name below. `NotRecording` is unreachable from the wire by construction:
+/// Task 1 collapses `VoiceError::NotRecording` into `AudioErrorKindDto::Other`,
+/// so a client reporting "not currently recording" arrives as `Other` with that
+/// message.
+//
+// `match_same_arms` allowed for the same reason as in [`stt_error`].
+#[allow(clippy::match_same_arms)]
+fn voice_error(failure: AudioFailure) -> VoiceError {
+    match failure {
+        // Nobody is listening. `VoiceError` has no `Unavailable` variant, so
+        // this is `Other` and the message names the missing client.
+        AudioFailure::NoClient => VoiceError::Other(NO_CLIENT_MESSAGE.to_string()),
+        AudioFailure::NoAnswer(message) | AudioFailure::Mismatched(message) => {
+            VoiceError::Other(message)
+        }
+        AudioFailure::Reported { kind, message } => match kind {
+            AudioErrorKindDto::PermissionDenied => VoiceError::PermissionDenied,
+            AudioErrorKindDto::Busy => VoiceError::Busy,
+            // Recording is not recognition: `VoiceError` has no `NoSpeech`.
+            AudioErrorKindDto::NoSpeech => VoiceError::Other(message),
+            // `VoiceError` has no `Unavailable` variant.
+            AudioErrorKindDto::Unavailable => VoiceError::Other(message),
+            // `VoiceError` has no retriable variant.
+            AudioErrorKindDto::Retriable => VoiceError::Other(message),
+            AudioErrorKindDto::Other => VoiceError::Other(message),
+            // Only reachable for a kind added to the contract after this code
+            // was written.
+            _ => VoiceError::Other(message),
+        },
+    }
+}
+
+/// The message a result that does not answer the requested op produces.
+fn mismatched(op: &str, result: &AudioResultDto) -> AudioFailure {
+    AudioFailure::Mismatched(format!(
+        "the client did not answer the requested operation ({op}): {result:?}"
+    ))
+}
+
+/// The engine-side proxy implementing [`SpeechToText`], [`TextToSpeech`] and
+/// [`VoiceRecorder`] over one connected client. See the module doc for the full
+/// shape.
+pub struct AudioBridge {
+    /// Where outbound requests go (the transport).
+    sink: Arc<dyn AudioRequestSink>,
+    /// Monotonic `request_id` source. Connection-scoped, mirroring
+    /// [`client_adapter::BridgeComputerAccessBroker`]'s id counter.
+    next_id: AtomicU64,
+    /// Parked requests' reply channels, keyed by `request_id`.
+    pending: Pending,
+}
+
+/// The response side of the bridge, handed to the transport so an inbound
+/// `AudioResponse` can resolve the parked request.
+///
+/// Cloneable and independent of [`AudioBridge`] so the connection can hold it
+/// without owning the trait objects the engine was given.
+#[derive(Clone)]
+pub struct AudioResponder {
+    /// The SAME map [`AudioBridge`] parks into.
+    pending: Pending,
+}
+
+impl AudioResponder {
+    /// Resolve a parked request with the client's outcome (an inbound
+    /// `AudioResponse`). Returns `true` if a matching request was found and
+    /// resolved, `false` if the id was unknown / already resolved / already
+    /// timed out (a safe no-op, mirroring
+    /// [`client_adapter::BridgeComputerAccessBroker::resolve`]).
+    pub async fn resolve(&self, request_id: u64, result: AudioResultDto) -> bool {
+        let Some(sender) = self.pending.lock().await.remove(&request_id) else {
+            return false;
+        };
+        // If the receiver vanished (a drain or a deadline raced this resolve),
+        // the send simply fails; that path already produced a failure for the
+        // caller, so it is safe to ignore.
+        sender.send(result).is_ok()
+    }
+
+    /// Drop every parked sender so all in-flight trait calls fail instead of
+    /// waiting out their deadline. Call on transport teardown, alongside
+    /// `AdapterPermissionGate::drain` and
+    /// `BridgeComputerAccessBroker::drain`. Returns the number of requests
+    /// drained.
+    ///
+    /// A dropped `oneshot::Sender` resolves its receiver to `Err`, which
+    /// [`AudioBridge::request`] reports as [`AudioFailure::NoAnswer`].
+    pub async fn drain(&self) -> usize {
+        let mut pending = self.pending.lock().await;
+        let n = pending.len();
+        pending.clear();
+        n
+    }
+
+    /// Number of requests currently parked (test/inspection helper).
+    pub async fn pending_count(&self) -> usize {
+        self.pending.lock().await.len()
+    }
+}
+
+/// Build the bridge and its responder over one connection's request sink.
+///
+/// The two halves share the pending-request table: the [`AudioBridge`] is what
+/// the engine is injected with (as `Arc<dyn SpeechToText>` etc.), the
+/// [`AudioResponder`] is what the transport calls when the client answers.
+#[must_use]
+pub fn new_audio_bridge(sink: Arc<dyn AudioRequestSink>) -> (Arc<AudioBridge>, AudioResponder) {
+    let pending: Pending = Arc::new(Mutex::new(HashMap::new()));
+    let bridge = Arc::new(AudioBridge {
+        sink,
+        next_id: AtomicU64::new(1),
+        pending: pending.clone(),
+    });
+    (bridge, AudioResponder { pending })
+}
+
+impl AudioBridge {
+    /// One request/response round trip: park, push, await, un-park.
+    ///
+    /// `deadline` bounds the "connected but silent client" case; see the
+    /// module doc for why all three exits exist and the deadline constants for
+    /// why each is the length it is.
+    async fn request(
+        &self,
+        op: AudioOpDto,
+        deadline: Duration,
+    ) -> Result<AudioResultDto, AudioFailure> {
+        let request_id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let (tx, rx) = oneshot::channel();
+        self.pending.lock().await.insert(request_id, tx);
+
+        if !self
+            .sink
+            .emit_request(ClientEvent::AudioRequest { request_id, op })
+            .await
+        {
+            // Nobody is listening: un-park now rather than making the caller
+            // wait out `deadline` for an answer that can never arrive.
+            self.pending.lock().await.remove(&request_id);
+            return Err(AudioFailure::NoClient);
+        }
+
+        match tokio::time::timeout(deadline, rx).await {
+            Ok(Ok(result)) => Ok(result),
+            // The parked sender was dropped — `AudioResponder::drain` on
+            // transport teardown, or the responder itself going away.
+            Ok(Err(_)) => Err(AudioFailure::NoAnswer(
+                "the desktop client disconnected and did not answer the audio request".to_string(),
+            )),
+            Err(_) => {
+                self.pending.lock().await.remove(&request_id);
+                Err(AudioFailure::NoAnswer(format!(
+                    "the desktop client did not answer the audio request within {}s",
+                    deadline.as_secs()
+                )))
+            }
+        }
+    }
+}
+
+#[async_trait]
+impl SpeechToText for AudioBridge {
+    async fn transcribe(&self, opts: SttOpts) -> Result<SttTranscript, SttError> {
+        let result = self
+            .request(
+                AudioOpDto::Transcribe {
+                    language: opts.language,
+                },
+                CAPTURE_DEADLINE,
+            )
+            .await
+            .map_err(stt_error)?;
+        match result {
+            AudioResultDto::Transcript {
+                text,
+                language,
+                confidence,
+            } => Ok(SttTranscript {
+                text,
+                language,
+                confidence,
+            }),
+            AudioResultDto::Failed { kind, message } => {
+                Err(stt_error(AudioFailure::Reported { kind, message }))
+            }
+            other => Err(stt_error(mismatched("transcribe", &other))),
+        }
+    }
+}
+
+#[async_trait]
+impl TextToSpeech for AudioBridge {
+    async fn synthesize(&self, opts: TtsOpts) -> Result<TtsAudio, TtsError> {
+        let result = self
+            .request(
+                AudioOpDto::Synthesize {
+                    text: opts.text,
+                    voice: opts.voice,
+                },
+                CAPTURE_DEADLINE,
+            )
+            .await
+            .map_err(tts_error)?;
+        match result {
+            AudioResultDto::Audio {
+                pcm_base64,
+                sample_rate_hz,
+            } => {
+                let pcm = base64::engine::general_purpose::STANDARD
+                    .decode(pcm_base64)
+                    .map_err(|error| {
+                        TtsError::SynthesisFailed(format!(
+                            "the client returned undecodable synthesized audio: {error}"
+                        ))
+                    })?;
+                Ok(TtsAudio {
+                    pcm,
+                    sample_rate_hz,
+                })
+            }
+            AudioResultDto::Failed { kind, message } => {
+                Err(tts_error(AudioFailure::Reported { kind, message }))
+            }
+            other => Err(tts_error(mismatched("synthesize", &other))),
+        }
+    }
+}
+
+#[async_trait]
+impl VoiceRecorder for AudioBridge {
+    async fn start_recording(&self, opts: VoiceRecordingOpts) -> Result<(), VoiceError> {
+        let result = self
+            .request(
+                AudioOpDto::StartRecording {
+                    sample_rate_hz: opts.sample_rate_hz,
+                    format: opts.format,
+                },
+                DEVICE_CONTROL_DEADLINE,
+            )
+            .await
+            .map_err(voice_error)?;
+        match result {
+            AudioResultDto::Ok => Ok(()),
+            AudioResultDto::Failed { kind, message } => {
+                Err(voice_error(AudioFailure::Reported { kind, message }))
+            }
+            other => Err(voice_error(mismatched("start_recording", &other))),
+        }
+    }
+
+    async fn stop_recording(&self) -> Result<VoiceRecording, VoiceError> {
+        let result = self
+            .request(AudioOpDto::StopRecording, DEVICE_CONTROL_DEADLINE)
+            .await
+            .map_err(voice_error)?;
+        match result {
+            AudioResultDto::Recording {
+                audio_base64,
+                mime_type,
+            } => {
+                let audio_bytes = base64::engine::general_purpose::STANDARD
+                    .decode(audio_base64)
+                    .map_err(|error| {
+                        VoiceError::Other(format!(
+                            "the client returned an undecodable recording: {error}"
+                        ))
+                    })?;
+                Ok(VoiceRecording {
+                    audio_bytes,
+                    mime_type,
+                })
+            }
+            AudioResultDto::Failed { kind, message } => {
+                Err(voice_error(AudioFailure::Reported { kind, message }))
+            }
+            other => Err(voice_error(mismatched("stop_recording", &other))),
+        }
+    }
+
+    async fn is_recording(&self) -> bool {
+        // `VoiceRecorder::is_recording` returns a BARE `bool` — the trait gives
+        // this proxy no error channel, so a failed round trip (no client, no
+        // answer, or an answer that does not fit the op) has to pick a value.
+        //
+        // `false` is the safe direction. Claiming "not recording" when the
+        // client is unreachable degrades to a stuck-off button: the user can
+        // still press record, and the next call re-asks. Claiming "recording"
+        // would strand the UI in a state the user cannot exit — a stop that
+        // cannot be delivered, on a session that may not exist. Neither answer
+        // is knowable, so we take the one whose failure mode the user can
+        // recover from.
+        match self
+            .request(AudioOpDto::IsRecording, STATE_QUERY_DEADLINE)
+            .await
+        {
+            Ok(AudioResultDto::RecordingState { recording }) => recording,
+            Ok(_) | Err(_) => false,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    use async_trait::async_trait;
+    use client_protocol::commands::{AudioErrorKindDto, AudioResultDto};
+    use client_protocol::events::{AudioOpDto, ClientEvent};
+    use tokio::sync::mpsc;
+    use traits::stt::{SpeechToText, SttError, SttOpts};
+    use traits::tts::{TextToSpeech, TtsError, TtsOpts};
+    use traits::voice::{VoiceError, VoiceRecorder, VoiceRecordingOpts};
+
+    use super::{new_audio_bridge, AudioBridge, AudioRequestSink, AudioResponder};
+
+    /// An [`AudioRequestSink`] that captures every emitted request so a test can
+    /// read back the assigned `request_id`, and that can be switched to
+    /// "no client connected" to exercise the undeliverable path.
+    struct MockSink {
+        emitted: mpsc::UnboundedSender<ClientEvent>,
+        connected: AtomicBool,
+    }
+
+    #[async_trait]
+    impl AudioRequestSink for MockSink {
+        async fn emit_request(&self, request: ClientEvent) -> bool {
+            if !self.connected.load(Ordering::SeqCst) {
+                return false;
+            }
+            let _ = self.emitted.send(request);
+            true
+        }
+    }
+
+    /// A bridge whose sink is connected: requests are delivered and park.
+    fn test_bridge() -> (
+        Arc<AudioBridge>,
+        AudioResponder,
+        mpsc::UnboundedReceiver<ClientEvent>,
+    ) {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let sink = Arc::new(MockSink {
+            emitted: tx,
+            connected: AtomicBool::new(true),
+        });
+        let (bridge, responder) = new_audio_bridge(sink);
+        (bridge, responder, rx)
+    }
+
+    /// A bridge whose sink reports that nobody is listening. The receiver is
+    /// returned (not dropped) so a failure here can only come from the "no
+    /// client" path, never from a closed channel.
+    fn disconnected_bridge() -> (Arc<AudioBridge>, mpsc::UnboundedReceiver<ClientEvent>) {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let sink = Arc::new(MockSink {
+            emitted: tx,
+            connected: AtomicBool::new(false),
+        });
+        let (bridge, _responder) = new_audio_bridge(sink);
+        (bridge, rx)
+    }
+
+    /// Pull the next emitted request, asserting it is an `AudioRequest`.
+    async fn next_request(emitted: &mut mpsc::UnboundedReceiver<ClientEvent>) -> (u64, AudioOpDto) {
+        match emitted.recv().await.expect("an AudioRequest was emitted") {
+            ClientEvent::AudioRequest { request_id, op } => (request_id, op),
+            other => panic!("expected AudioRequest, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn transcribe_emits_a_request_and_resolves_on_the_client_response() {
+        let (bridge, responder, mut emitted) = test_bridge();
+
+        let task = tokio::spawn({
+            let bridge = bridge.clone();
+            async move {
+                bridge
+                    .transcribe(SttOpts {
+                        language: Some("zh-CN".to_string()),
+                    })
+                    .await
+            }
+        });
+
+        let (request_id, op) = next_request(&mut emitted).await;
+        assert_eq!(
+            op,
+            AudioOpDto::Transcribe {
+                language: Some("zh-CN".to_string())
+            }
+        );
+
+        assert!(
+            responder
+                .resolve(
+                    request_id,
+                    AudioResultDto::Transcript {
+                        text: "你好".to_string(),
+                        language: Some("zh-CN".to_string()),
+                        confidence: None,
+                    },
+                )
+                .await
+        );
+
+        let transcript = task.await.unwrap().unwrap();
+        assert_eq!(transcript.text, "你好");
+        assert_eq!(transcript.language, Some("zh-CN".to_string()));
+    }
+
+    #[tokio::test]
+    async fn a_failed_response_becomes_an_stt_error_not_an_empty_transcript() {
+        let (bridge, responder, mut emitted) = test_bridge();
+        let task = tokio::spawn({
+            let bridge = bridge.clone();
+            async move { bridge.transcribe(SttOpts::default()).await }
+        });
+        let (request_id, _) = next_request(&mut emitted).await;
+        responder
+            .resolve(
+                request_id,
+                AudioResultDto::Failed {
+                    kind: AudioErrorKindDto::Other,
+                    message: "the recognizer exploded".to_string(),
+                },
+            )
+            .await;
+        let error = task.await.unwrap().unwrap_err();
+        assert!(
+            format!("{error}").contains("the recognizer exploded"),
+            "a client-side failure must surface as an error carrying its reason, got: {error}"
+        );
+    }
+
+    /// Ruling 1: every wire kind lands on the RIGHT variant of each trait's own
+    /// error enum, and the kinds with no home in a given enum fall to `Other`
+    /// deliberately. Task 1 pinned the forward direction; this pins the reverse.
+    #[tokio::test]
+    async fn every_error_kind_maps_to_its_home_variant_in_the_stt_impl() {
+        use AudioErrorKindDto as K;
+        for (kind, expected) in [
+            (K::PermissionDenied, "PermissionDenied"),
+            (K::NoSpeech, "NoSpeech"),
+            (K::Unavailable, "Unavailable"),
+            (K::Busy, "Busy"),
+            (K::Retriable, "Retriable"),
+            (K::Other, "Other"),
+        ] {
+            let error = stt_failure(kind).await;
+            let actual = match error {
+                SttError::PermissionDenied => "PermissionDenied",
+                SttError::NoSpeech => "NoSpeech",
+                SttError::Unavailable => "Unavailable",
+                SttError::Busy => "Busy",
+                SttError::Retriable(_) => "Retriable",
+                SttError::Other(_) => "Other",
+            };
+            assert_eq!(actual, expected, "SttError mapping for {kind:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn every_error_kind_maps_to_its_home_variant_in_the_tts_impl() {
+        use AudioErrorKindDto as K;
+        for (kind, expected) in [
+            // TtsError has no permission/no-speech/busy/retriable variant, so
+            // these four fall to `Other` deliberately (see `tts_error`).
+            (K::PermissionDenied, "Other"),
+            (K::NoSpeech, "Other"),
+            (K::Unavailable, "Unavailable"),
+            (K::Busy, "Other"),
+            (K::Retriable, "Other"),
+            (K::Other, "Other"),
+        ] {
+            let error = tts_failure(kind).await;
+            let actual = match error {
+                TtsError::Unavailable => "Unavailable",
+                TtsError::SynthesisFailed(_) => "SynthesisFailed",
+                TtsError::Other(_) => "Other",
+            };
+            assert_eq!(actual, expected, "TtsError mapping for {kind:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn every_error_kind_maps_to_its_home_variant_in_the_voice_impl() {
+        use AudioErrorKindDto as K;
+        for (kind, expected) in [
+            (K::PermissionDenied, "PermissionDenied"),
+            // VoiceError has no no-speech/unavailable/retriable variant.
+            (K::NoSpeech, "Other"),
+            (K::Unavailable, "Other"),
+            (K::Busy, "Busy"),
+            (K::Retriable, "Other"),
+            (K::Other, "Other"),
+        ] {
+            let error = voice_failure(kind).await;
+            let actual = match error {
+                VoiceError::PermissionDenied => "PermissionDenied",
+                VoiceError::NotRecording => "NotRecording",
+                VoiceError::Busy => "Busy",
+                VoiceError::Other(_) => "Other",
+            };
+            assert_eq!(actual, expected, "VoiceError mapping for {kind:?}");
+        }
+    }
+
+    /// Drive one `transcribe` to a `Failed { kind }` answer and return the error.
+    async fn stt_failure(kind: AudioErrorKindDto) -> SttError {
+        let (bridge, responder, mut emitted) = test_bridge();
+        let task = tokio::spawn({
+            let bridge = bridge.clone();
+            async move { bridge.transcribe(SttOpts::default()).await }
+        });
+        let (request_id, _) = next_request(&mut emitted).await;
+        responder
+            .resolve(
+                request_id,
+                AudioResultDto::Failed {
+                    kind,
+                    message: "client said no".to_string(),
+                },
+            )
+            .await;
+        task.await.unwrap().unwrap_err()
+    }
+
+    /// Drive one `synthesize` to a `Failed { kind }` answer and return the error.
+    async fn tts_failure(kind: AudioErrorKindDto) -> TtsError {
+        let (bridge, responder, mut emitted) = test_bridge();
+        let task = tokio::spawn({
+            let bridge = bridge.clone();
+            async move {
+                bridge
+                    .synthesize(TtsOpts {
+                        text: "hi".to_string(),
+                        voice: None,
+                    })
+                    .await
+            }
+        });
+        let (request_id, _) = next_request(&mut emitted).await;
+        responder
+            .resolve(
+                request_id,
+                AudioResultDto::Failed {
+                    kind,
+                    message: "client said no".to_string(),
+                },
+            )
+            .await;
+        task.await.unwrap().unwrap_err()
+    }
+
+    /// Drive one `stop_recording` to a `Failed { kind }` answer.
+    async fn voice_failure(kind: AudioErrorKindDto) -> VoiceError {
+        let (bridge, responder, mut emitted) = test_bridge();
+        let task = tokio::spawn({
+            let bridge = bridge.clone();
+            async move { bridge.stop_recording().await }
+        });
+        let (request_id, _) = next_request(&mut emitted).await;
+        responder
+            .resolve(
+                request_id,
+                AudioResultDto::Failed {
+                    kind,
+                    message: "client said no".to_string(),
+                },
+            )
+            .await;
+        task.await.unwrap().unwrap_err()
+    }
+
+    #[tokio::test]
+    async fn synthesize_decodes_the_base64_payload() {
+        let (bridge, responder, mut emitted) = test_bridge();
+        let task = tokio::spawn({
+            let bridge = bridge.clone();
+            async move {
+                bridge
+                    .synthesize(TtsOpts {
+                        text: "hi".to_string(),
+                        voice: Some("alloy".to_string()),
+                    })
+                    .await
+            }
+        });
+        let (request_id, op) = next_request(&mut emitted).await;
+        assert_eq!(
+            op,
+            AudioOpDto::Synthesize {
+                text: "hi".to_string(),
+                voice: Some("alloy".to_string()),
+            }
+        );
+        responder
+            .resolve(
+                request_id,
+                AudioResultDto::Audio {
+                    // base64 of the four bytes 0x01 0x02 0x03 0x04.
+                    pcm_base64: "AQIDBA==".to_string(),
+                    sample_rate_hz: 24_000,
+                },
+            )
+            .await;
+        let audio = task.await.unwrap().unwrap();
+        assert_eq!(audio.pcm, vec![1, 2, 3, 4]);
+        assert_eq!(audio.sample_rate_hz, 24_000);
+    }
+
+    #[tokio::test]
+    async fn undecodable_synthesized_audio_is_a_synthesis_failure() {
+        let (bridge, responder, mut emitted) = test_bridge();
+        let task = tokio::spawn({
+            let bridge = bridge.clone();
+            async move {
+                bridge
+                    .synthesize(TtsOpts {
+                        text: "hi".to_string(),
+                        voice: None,
+                    })
+                    .await
+            }
+        });
+        let (request_id, _) = next_request(&mut emitted).await;
+        responder
+            .resolve(
+                request_id,
+                AudioResultDto::Audio {
+                    pcm_base64: "not base64!!".to_string(),
+                    sample_rate_hz: 24_000,
+                },
+            )
+            .await;
+        let error = task.await.unwrap().unwrap_err();
+        assert!(
+            matches!(error, TtsError::SynthesisFailed(_)),
+            "undecodable audio is a synthesis failure, got {error:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn stop_recording_decodes_the_base64_payload() {
+        let (bridge, responder, mut emitted) = test_bridge();
+        let task = tokio::spawn({
+            let bridge = bridge.clone();
+            async move { bridge.stop_recording().await }
+        });
+        let (request_id, op) = next_request(&mut emitted).await;
+        assert_eq!(op, AudioOpDto::StopRecording);
+        responder
+            .resolve(
+                request_id,
+                AudioResultDto::Recording {
+                    audio_base64: "AQIDBA==".to_string(),
+                    mime_type: "audio/m4a".to_string(),
+                },
+            )
+            .await;
+        let recording = task.await.unwrap().unwrap();
+        assert_eq!(recording.audio_bytes, vec![1, 2, 3, 4]);
+        assert_eq!(recording.mime_type, "audio/m4a");
+    }
+
+    #[tokio::test]
+    async fn start_recording_lowers_its_options_and_succeeds_on_ok() {
+        let (bridge, responder, mut emitted) = test_bridge();
+        let task = tokio::spawn({
+            let bridge = bridge.clone();
+            async move {
+                bridge
+                    .start_recording(VoiceRecordingOpts {
+                        sample_rate_hz: 16_000,
+                        format: "m4a".to_string(),
+                    })
+                    .await
+            }
+        });
+        let (request_id, op) = next_request(&mut emitted).await;
+        assert_eq!(
+            op,
+            AudioOpDto::StartRecording {
+                sample_rate_hz: 16_000,
+                format: "m4a".to_string(),
+            }
+        );
+        responder.resolve(request_id, AudioResultDto::Ok).await;
+        task.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn is_recording_reports_the_client_state() {
+        for reported in [true, false] {
+            let (bridge, responder, mut emitted) = test_bridge();
+            let task = tokio::spawn({
+                let bridge = bridge.clone();
+                async move { bridge.is_recording().await }
+            });
+            let (request_id, op) = next_request(&mut emitted).await;
+            assert_eq!(op, AudioOpDto::IsRecording);
+            responder
+                .resolve(
+                    request_id,
+                    AudioResultDto::RecordingState {
+                        recording: reported,
+                    },
+                )
+                .await;
+            assert_eq!(task.await.unwrap(), reported);
+        }
+    }
+
+    /// Ruling 2: `is_recording` has no error channel, so a failed round trip
+    /// must pick a value — `false`, in both failure shapes.
+    #[tokio::test]
+    async fn is_recording_is_false_when_no_client_is_connected() {
+        let (bridge, _emitted) = disconnected_bridge();
+        assert!(!bridge.is_recording().await);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn is_recording_is_false_when_the_client_never_answers() {
+        let (bridge, _responder, _emitted) = test_bridge();
+        assert!(!bridge.is_recording().await);
+    }
+
+    /// Ruling 3, half one: nobody is listening.
+    #[tokio::test]
+    async fn every_trait_reports_its_documented_error_when_no_client_is_connected() {
+        let (bridge, _emitted) = disconnected_bridge();
+
+        let stt = bridge.transcribe(SttOpts::default()).await.unwrap_err();
+        assert!(
+            matches!(stt, SttError::Unavailable),
+            "STT reports Unavailable when nobody is listening, got {stt:?}"
+        );
+
+        let tts = bridge
+            .synthesize(TtsOpts {
+                text: "hi".to_string(),
+                voice: None,
+            })
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(tts, TtsError::Unavailable),
+            "TTS reports Unavailable when nobody is listening, got {tts:?}"
+        );
+
+        let voice = bridge.stop_recording().await.unwrap_err();
+        match &voice {
+            VoiceError::Other(message) => assert!(
+                message.contains("no desktop client"),
+                "the voice error must name the missing client, got {message}"
+            ),
+            other => panic!("voice reports Other when nobody is listening, got {other:?}"),
+        }
+    }
+
+    /// Ruling 3, half two: asked, but no answer came.
+    #[tokio::test(start_paused = true)]
+    async fn every_trait_reports_its_documented_error_when_the_client_never_answers() {
+        let (bridge, _responder, _emitted) = test_bridge();
+
+        let stt = bridge.transcribe(SttOpts::default()).await.unwrap_err();
+        match &stt {
+            SttError::Retriable(message) => assert!(
+                message.contains("did not answer"),
+                "the STT error must say no answer came, got {message}"
+            ),
+            other => panic!("STT reports Retriable on a silent client, got {other:?}"),
+        }
+
+        let tts = bridge
+            .synthesize(TtsOpts {
+                text: "hi".to_string(),
+                voice: None,
+            })
+            .await
+            .unwrap_err();
+        match &tts {
+            TtsError::Other(message) => assert!(
+                message.contains("did not answer"),
+                "the TTS error must say no answer came, got {message}"
+            ),
+            other => panic!("TTS reports Other on a silent client, got {other:?}"),
+        }
+
+        let voice = bridge.stop_recording().await.unwrap_err();
+        match &voice {
+            VoiceError::Other(message) => assert!(
+                message.contains("did not answer"),
+                "the voice error must say no answer came, got {message}"
+            ),
+            other => panic!("voice reports Other on a silent client, got {other:?}"),
+        }
+    }
+
+    /// A disconnect drains every parked request instead of leaving the caller
+    /// to wait out the deadline.
+    #[tokio::test]
+    async fn drain_fails_every_parked_request_immediately() {
+        let (bridge, responder, mut emitted) = test_bridge();
+        let task = tokio::spawn({
+            let bridge = bridge.clone();
+            async move { bridge.transcribe(SttOpts::default()).await }
+        });
+        let (_request_id, _) = next_request(&mut emitted).await;
+        assert_eq!(responder.drain().await, 1);
+
+        let error = task.await.unwrap().unwrap_err();
+        match &error {
+            SttError::Retriable(message) => assert!(
+                message.contains("disconnected"),
+                "a drained request must name the disconnect, got {message}"
+            ),
+            other => panic!("a drained request is Retriable, got {other:?}"),
+        }
+    }
+
+    /// Resolving an unknown / already-resolved id is a safe no-op, mirroring
+    /// `BridgeComputerAccessBroker::resolve`.
+    #[tokio::test]
+    async fn resolving_an_unknown_id_is_a_noop() {
+        let (_bridge, responder, _emitted) = test_bridge();
+        assert!(
+            !responder
+                .resolve(9_999, AudioResultDto::RecordingState { recording: true })
+                .await
+        );
+    }
+
+    #[tokio::test]
+    async fn concurrent_requests_get_distinct_ids_and_resolve_independently() {
+        let (bridge, responder, mut emitted) = test_bridge();
+        let first = tokio::spawn({
+            let bridge = bridge.clone();
+            async move { bridge.stop_recording().await }
+        });
+        let (first_id, _) = next_request(&mut emitted).await;
+        let second = tokio::spawn({
+            let bridge = bridge.clone();
+            async move { bridge.transcribe(SttOpts::default()).await }
+        });
+        let (second_id, _) = next_request(&mut emitted).await;
+        assert_ne!(first_id, second_id);
+
+        responder
+            .resolve(
+                second_id,
+                AudioResultDto::Transcript {
+                    text: "second".to_string(),
+                    language: None,
+                    confidence: None,
+                },
+            )
+            .await;
+        assert_eq!(second.await.unwrap().unwrap().text, "second");
+
+        responder
+            .resolve(
+                first_id,
+                AudioResultDto::Recording {
+                    audio_base64: String::new(),
+                    mime_type: "audio/wav".to_string(),
+                },
+            )
+            .await;
+        assert!(first.await.unwrap().unwrap().audio_bytes.is_empty());
+    }
+
+    /// A client answering with a result that does not fit the op is an error,
+    /// never a silently-defaulted success.
+    #[tokio::test]
+    async fn a_mismatched_result_variant_is_an_error() {
+        let (bridge, responder, mut emitted) = test_bridge();
+        let task = tokio::spawn({
+            let bridge = bridge.clone();
+            async move { bridge.transcribe(SttOpts::default()).await }
+        });
+        let (request_id, _) = next_request(&mut emitted).await;
+        responder
+            .resolve(
+                request_id,
+                AudioResultDto::RecordingState { recording: true },
+            )
+            .await;
+        let error = task.await.unwrap().unwrap_err();
+        match &error {
+            SttError::Other(message) => assert!(
+                message.contains("did not answer the requested operation"),
+                "a mismatched answer must say so, got {message}"
+            ),
+            other => panic!("a mismatched answer is Other, got {other:?}"),
+        }
+    }
+}

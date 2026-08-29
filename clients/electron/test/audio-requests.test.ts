@@ -835,11 +835,27 @@ test('the production microphone and speech bindings are the ones actually used',
   // `start_recording`/`stop_recording` pair of separate engine requests, so a
   // fresh `MicrophoneCapture` each time would answer `not_recording` to every
   // stop and never release the microphone (leaving the OS recording indicator
-  // lit — `capture.ts`'s hazard 2). Structurally, that means the construction
-  // sits behind the once-only guard rather than in the request path.
-  const guard = source.indexOf('if (!audioBindings.current)');
+  // lit — `capture.ts`'s hazard 2).
+  //
+  // Retained PER SESSION, though, not per hook: `SessionRuntimeManager` runs
+  // concurrent runtimes that each register the `voice` tool, and one shared
+  // recorder hands one session's clip to another session's model. Structurally
+  // that means the construction sits inside the factory `sessionAudioBindings`
+  // only calls on a cache miss for that session id — never in the request path,
+  // and never at hook scope.
+  const cache = source.indexOf('sessionAudioBindings(audioBindings.current, sessionId,');
   const construction = source.indexOf('new MicrophoneCapture(');
-  assert.notEqual(guard, -1, 'the audio bindings are no longer built once and cached');
+  assert.notEqual(cache, -1, 'the audio bindings are no longer cached per session');
   assert.equal(source.indexOf('new MicrophoneCapture(', construction + 1), -1, 'the recorder is constructed in more than one place');
-  assert.ok(guard < construction, 'the recorder must be constructed inside the once-only guard, not per request');
+  assert.ok(cache < construction, 'the recorder must be constructed inside the per-session factory, not per request');
+  assert.match(
+    source,
+    /const audioBindings = useRef\(new Map<string, AudioRequestDeps>\(\)\)/,
+    'the bindings must be keyed by session id, not held as one value for the whole hook',
+  );
+  assert.match(
+    source,
+    /handleAudioRequestEvent\(\s*sessionId,\s*event,\s*\(\) => audioRequestDeps\(sessionId\),/,
+    'the dispatch must resolve the bindings for the session that was asked',
+  );
 });

@@ -329,6 +329,66 @@ export function removeRuntimeFromMaps(sessionId: string, ...maps: SessionRuntime
   for (const map of maps) map.delete(sessionId);
 }
 
+/**
+ * The audio bindings for ONE session, built on first use and then kept for
+ * that session's lifetime.
+ *
+ * Per session, not per hook. A capture spans a `start_recording` /
+ * `stop_recording` PAIR of engine requests, so the recorder has to outlive a
+ * single request — but `SessionRuntimeManager` runs a Map of concurrent
+ * runtimes, each with its own engine and its own `AudioBridge`, and each
+ * registering the `voice` tool. One shared `MicrophoneCapture` across all of
+ * them means session B's `is_recording` answers `true` for a capture session A
+ * started, B's `stop_recording` finalizes A's clip into B's transcript, and A's
+ * own stop then answers `not_recording` having lost its recording entirely.
+ * Keying by session is what makes each answer describe the session that asked.
+ *
+ * `build` is a factory rather than a value because it touches
+ * `navigator.mediaDevices` and `window.speechSynthesis`, which a
+ * server-rendered probe of this hook has neither of — nothing is constructed
+ * until an `audio_request` actually arrives for that session.
+ */
+export function sessionAudioBindings(
+  bindings: Map<string, AudioRequestDeps>,
+  sessionId: string,
+  build: () => AudioRequestDeps,
+): AudioRequestDeps {
+  const existing = bindings.get(sessionId);
+  if (existing) return existing;
+  const built = build();
+  bindings.set(sessionId, built);
+  return built;
+}
+
+/**
+ * Drops one session's audio bindings, stopping a capture that is still running.
+ *
+ * Nothing else holds that `MicrophoneCapture`: dropping the entry while it is
+ * recording would leave the OS microphone (and its indicator) on for the life
+ * of the app, with no object left that could release it.
+ */
+export function discardAudioBindings(bindings: Map<string, AudioRequestDeps>, sessionId: string): void {
+  const deps = bindings.get(sessionId);
+  if (!deps) return;
+  bindings.delete(sessionId);
+  try {
+    if (deps.recorder.isRecording()) void deps.recorder.stop().catch(() => undefined);
+  } catch {
+    // Releasing a device on teardown must never take the caller down with it.
+  }
+}
+
+/** `pruneRuntimeMaps` for the audio bindings, which need the release above. */
+export function pruneAudioBindings(
+  bindings: Map<string, AudioRequestDeps>,
+  runtimeIds: Iterable<string>,
+): void {
+  const authoritativeIds = new Set(runtimeIds);
+  for (const sessionId of [...bindings.keys()]) {
+    if (!authoritativeIds.has(sessionId)) discardAudioBindings(bindings, sessionId);
+  }
+}
+
 export function shouldApplyBootstrapSnapshot(
   latestRevision: number | null,
   snapshotRevision: number,
@@ -495,19 +555,17 @@ export function useBridge(): UseBridge {
 
   /**
    * The microphone/speaker bindings the engine's `audio_request` events are
-   * serviced with, built on first use and then kept for the life of the
-   * hook. One `MicrophoneCapture` instance, not one per request: a capture
-   * spans a `start_recording`/`stop_recording` PAIR of engine requests, so a
-   * fresh recorder per request would report "not recording" for every stop
-   * and never release the microphone. Built lazily because it touches
-   * `navigator.mediaDevices` and `window.speechSynthesis`, which a
-   * server-rendered probe of this hook has neither of.
+   * serviced with, keyed by session — see {@link sessionAudioBindings} for why
+   * one instance per SESSION rather than one per hook or one per request.
+   * Built lazily because it touches `navigator.mediaDevices` and
+   * `window.speechSynthesis`, which a server-rendered probe of this hook has
+   * neither of.
    */
-  const audioBindings = useRef<AudioRequestDeps | null>(null);
-  const audioRequestDeps = useCallback((): AudioRequestDeps => {
-    if (!audioBindings.current) {
+  const audioBindings = useRef(new Map<string, AudioRequestDeps>());
+  const audioRequestDeps = useCallback((sessionId: string): AudioRequestDeps => (
+    sessionAudioBindings(audioBindings.current, sessionId, () => {
       const synthesisDeps = browserSynthesisDeps();
-      audioBindings.current = {
+      return {
         recorder: new MicrophoneCapture(browserMicrophoneCaptureDeps()),
         synthesize: (text, voiceId, rate) => synthesize(text, voiceId, rate, synthesisDeps),
         // `AudioOpDto::Synthesize` carries the text and sometimes a voice,
@@ -519,9 +577,8 @@ export function useBridge(): UseBridge {
           return { voiceSelection: preferences.voiceSelection, rate: preferences.rate };
         },
       };
-    }
-    return audioBindings.current;
-  }, []);
+    })
+  ), []);
 
   const runtime = activeSessionId ? runtimeStates.get(activeSessionId) : undefined;
   const connection: ConnectionState = sessionLoading
@@ -595,6 +652,9 @@ export function useBridge(): UseBridge {
       // reconciled once it arrives and must not accumulate across sessions.
       removedRuntimeIds.current.clear();
       pruneRuntimeMaps(runtimeIds, next, turnActiveRefs.current, cancellingRefs.current, cancellationTasks.current);
+      // Not `pruneRuntimeMaps`: a discarded session may still hold the
+      // microphone, and nothing else can release it.
+      pruneAudioBindings(audioBindings.current, runtimeIds);
       for (const summary of summaries) {
         const current = next.get(summary.sessionId) ?? emptyRuntimeState(summary.connection);
         const nextState: RuntimeState = {
@@ -782,7 +842,7 @@ export function useBridge(): UseBridge {
         void handleAudioRequestEvent(
           sessionId,
           event,
-          audioRequestDeps,
+          () => audioRequestDeps(sessionId),
           (target, command) => host.command(target, command),
           // Deliberately NOT `capture`: that helper rethrows, which would
           // strand the parked engine call. A failure to answer at all is
@@ -820,6 +880,7 @@ export function useBridge(): UseBridge {
           return next.size === previous.size ? previous : next;
         });
         removeRuntimeFromMaps(sessionId, turnActiveRefs.current, cancellingRefs.current, cancellationTasks.current);
+        discardAudioBindings(audioBindings.current, sessionId);
         return;
       }
       if (removedRuntimeIds.current.has(sessionId)) return;

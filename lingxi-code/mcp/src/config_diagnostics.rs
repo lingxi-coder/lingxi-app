@@ -496,6 +496,27 @@ fn validation_issues(entry: &Value, ty: &str) -> Vec<String> {
                 json_type_name(value)
             )),
         },
+        // Oracle `NAn` @154585377:
+        // `f({type:N("claudeai-proxy"),url:i(),id:i(),displayName:i().optional(),
+        // iconUrl:i().optional(), ...})` — `url` AND `id` are both REQUIRED
+        // `i()` (no `.min(1)`, so an EMPTY string satisfies either), in
+        // pointed contrast to `displayName`/`iconUrl` and the rest of the
+        // schema's tail. `id` has no analogue in any other union member, so
+        // this is the one arm that needs both checks. See
+        // [`crate::json_config::build_server_from_json_entry`].
+        "claudeai-proxy" => {
+            let require_present_string = |key: &str, issues: &mut Vec<String>| match object.get(key)
+            {
+                Some(Value::String(_)) => {}
+                None => issues.push(format!("{key}: expected string, received undefined")),
+                Some(value) => issues.push(format!(
+                    "{key}: expected string, received {}",
+                    json_type_name(value)
+                )),
+            };
+            require_present_string("url", &mut issues);
+            require_present_string("id", &mut issues);
+        }
         _ => match object.get("url") {
             Some(Value::String(_)) => {}
             None => issues.push("url: expected string, received undefined".to_string()),
@@ -862,6 +883,45 @@ mod tests {
         );
         // `i()` carries no `.min(1)`, so an EMPTY name is schema-valid.
         assert!(only(&json!({"mcpServers":{"x":{"type":"sdk","name":""}}})).is_empty());
+    }
+
+    /// Oracle `NAn` @154585377 declares `url:i(),id:i()` both required, with
+    /// NO `.min(1)` on either — the mirror of the sdk `name` case above, but
+    /// for the ONE union member that needs two required checks. Before this
+    /// fix `validation_issues` fell through to the `_` arm, which checks
+    /// `url` only, so an idless claudeai-proxy entry loaded (per the sibling
+    /// loader fix) in total diagnostic silence.
+    #[test]
+    fn claudeai_proxy_entry_without_id_is_flagged_invalid() {
+        let w = only(
+            &json!({"mcpServers":{"x":{"type":"claudeai-proxy","url":"https://x.test"}}}),
+        );
+        assert_eq!(w.len(), 1, "an idless claudeai-proxy entry must warn: {w:?}");
+        assert_eq!(
+            w[0].message,
+            "Skipped \u{2014} invalid MCP server config for \"x\": id: expected string, received undefined"
+        );
+        // A non-string `id` is the same schema failure, different received.
+        let w = only(
+            &json!({"mcpServers":{"x":{"type":"claudeai-proxy","url":"https://x.test","id":7}}}),
+        );
+        assert_eq!(
+            w[0].message,
+            "Skipped \u{2014} invalid MCP server config for \"x\": id: expected string, received number"
+        );
+        // `i()` carries no `.min(1)`, so an EMPTY id is schema-valid.
+        assert!(only(
+            &json!({"mcpServers":{"x":{"type":"claudeai-proxy","url":"https://x.test","id":""}}})
+        )
+        .is_empty());
+        // Both required fields missing report both, in `url`-then-`id` order.
+        let w = only(&json!({"mcpServers":{"x":{"type":"claudeai-proxy"}}}));
+        assert_eq!(
+            w[0].message,
+            "Skipped \u{2014} invalid MCP server config for \"x\": \
+             url: expected string, received undefined; \
+             id: expected string, received undefined"
+        );
     }
 
     #[test]

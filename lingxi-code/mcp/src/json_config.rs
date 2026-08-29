@@ -139,6 +139,22 @@ struct McpJsonEntry {
     /// `alwaysLoad: E.boolean().optional()`.
     #[serde(default, rename = "alwaysLoad")]
     always_load: Option<bool>,
+    /// `claudeai-proxy`-only: the claude.ai-issued connector identifier.
+    /// Oracle `NAn` (2.1.251 Mach-O @154585377) is
+    /// `f({type:N("claudeai-proxy"),url:i(),id:i(),displayName:i().optional(),
+    /// iconUrl:i().optional(),timeout:o().optional(),alwaysLoad:q().optional(),
+    /// toolPermissions:...,stateless:...,cachedInitResponse:...,...})` — `id`
+    /// is a REQUIRED `i()` (no `.optional()`, in pointed contrast to
+    /// `displayName`/`iconUrl` and the rest of the schema's tail), so a
+    /// `claudeai-proxy` entry with no `id` fails `safeParse` and the whole
+    /// entry is skipped — the same shape as `sdk`'s required `name`. `i()`
+    /// has no `.min(1)`, so an EMPTY string is schema-valid; only presence is
+    /// checked. No other union member declares `id`, so zod strips it
+    /// everywhere else (mirrored here: only the claudeai-proxy branch reads
+    /// it). The claude.ai connector surface is out of scope, so the value
+    /// itself is validated for presence and otherwise unused.
+    #[serde(default)]
+    id: Option<String>,
 }
 
 /// Coerce a JSON value to a positive-integer millisecond count, mirroring the
@@ -370,7 +386,10 @@ fn entry_satisfies_schema(entry: &McpJsonEntry, ide_transports_allowed: bool) ->
         // `MAn`: `name: i()` REQUIRED (no `.min(1)`, so `""` is valid); no
         // `command`, no `url`.
         Some("sdk") => entry.name.is_some(),
-        // Every remote member declares a required `url: i()`.
+        // `NAn` @154585377: `url:i(),id:i()` — BOTH required, `id` with no
+        // `.optional()` sibling in common with the rest of the union.
+        Some("claudeai-proxy") => entry.url.is_some() && entry.id.is_some(),
+        // Every remaining remote member declares a required `url: i()`.
         Some(t) if CONFIG_REMOTE_TYPES.contains(&t) => entry.url.is_some(),
         Some(t) if ide_transports_allowed && IDE_ONLY_TYPES.contains(&t) => entry.url.is_some(),
         // A `type` outside the layer's union rejects the whole entry.
@@ -621,12 +640,28 @@ fn build_entry(
                 // via the `type` tag when it serializes the spec. Out of
                 // scope (claude.ai connector surface): the oracle's `NAn`
                 // schema has no `oauth` field at all, left unvalidated here.
-                Some("claudeai-proxy") => McpTransportSpec::Http {
-                    url,
-                    headers,
-                    headers_helper,
-                    oauth: entry.oauth,
-                },
+                Some("claudeai-proxy") => {
+                    // `NAn` @154585377 declares `id: i()` with NO
+                    // `.optional()` — in pointed contrast to `displayName`/
+                    // `iconUrl` and the rest of the schema's tail — so an
+                    // entry with no `id` fails `safeParse` and must be
+                    // skipped, the same way a nameless `sdk` entry is
+                    // skipped above. The port has no use for the value
+                    // itself (out of scope); only presence is checked.
+                    if entry.id.is_none() {
+                        tracing::warn!(
+                            server = %name,
+                            "mcp.json: claudeai-proxy server is missing the required \"id\"; skipping entry"
+                        );
+                        return None;
+                    }
+                    McpTransportSpec::Http {
+                        url,
+                        headers,
+                        headers_helper,
+                        oauth: entry.oauth,
+                    }
+                }
                 // Reachable ONLY on the plugin `.mcp.json` layer
                 // (`ide_transports_allowed`), which validates against `KY`.
                 // §10 (unmodelled `ideName`/`authToken`, and the unused
@@ -680,14 +715,19 @@ fn build_entry(
         // if present), so the alias is honoured for the sse/http-family
         // transports only.
         //
-        // KNOWN RESIDUAL (reported, NOT fixed here — the claude.ai connector
-        // surface is out of scope by instruction): `McpTransportSpec::Http`
-        // also carries `claudeai-proxy`, whose schema `NAn` (@154585377)
-        // declares neither `request_timeout_ms` nor `.transform(iGt)`, so the
-        // oracle strips the alias for it. The sse-ide/ws-ide half of that
-        // residual is now confined to the plugin layer.
+        // `McpTransportSpec::Http` also carries `claudeai-proxy` (and,
+        // separately, the plugin-layer-only sse-ide/ws-ide), whose schema
+        // `NAn` (@154585377) declares neither `request_timeout_ms` nor
+        // `.transform(iGt)` — the oracle strips the alias for it entirely.
+        // Gate the fold on `ty` (not just the `Http` variant) so a
+        // `claudeai-proxy` entry never gets it, matching real `http`/
+        // `streamable-http`/`sse` byte for byte. The sse-ide/ws-ide half of
+        // the residual is a separate, unassigned finding (§10) and is left
+        // exactly as before.
         let timeout_ms = match &spec {
-            McpTransportSpec::Sse { .. } | McpTransportSpec::Http { .. } => {
+            McpTransportSpec::Sse { .. } | McpTransportSpec::Http { .. }
+                if ty != Some("claudeai-proxy") =>
+            {
                 entry.timeout.or_else(|| {
                     as_positive_int_ms(entry.request_timeout_ms.as_ref()).map(|e| e.min(300_000))
                 })
@@ -1134,7 +1174,8 @@ mod tests {
             "bogus",
         ] {
             let entry = serde_json::json!({
-                "type": ty, "url": "https://x.test/mcp", "command": "c", "name": "n"
+                "type": ty, "url": "https://x.test/mcp", "command": "c", "name": "n",
+                "id": "conn-1"
             });
             let loader_kept =
                 build_server_from_json_entry("srv", &entry, ConfigScope::Project).is_some();
@@ -1203,6 +1244,16 @@ mod tests {
             (serde_json::json!({"type": "ws", "url": "wss://x.test"}), true),
             (serde_json::json!({"type": "sdk"}), false),
             (serde_json::json!({"type": "sdk", "name": "n"}), true),
+            (
+                serde_json::json!({"type": "claudeai-proxy", "url": "https://x.test/mcp"}),
+                false,
+            ),
+            (
+                serde_json::json!({
+                    "type": "claudeai-proxy", "url": "https://x.test/mcp", "id": "conn-1"
+                }),
+                true,
+            ),
             (serde_json::json!({"timeout": 0, "command": "c"}), false),
         ];
         // Collect ALL mismatches rather than aborting on the first, so a
@@ -1360,6 +1411,45 @@ mod tests {
             cfgs[0].timeout_ms, None,
             "ws must not fold request_timeout_ms (oracle schema strips it)"
         );
+    }
+
+    /// Oracle `NAn` @154585377 declares `timeout:o().optional()` but NO
+    /// `request_timeout_ms` field and no `.transform(iGt)` — unlike
+    /// `sse`/`http`'s `sGt`/`OAn` (which DO fold the alias via `RAn`),
+    /// `claudeai-proxy` must never receive it, even though it is parsed onto
+    /// the same `McpTransportSpec::Http` Rust variant those two use.
+    #[test]
+    fn claudeai_proxy_ignores_request_timeout_ms() {
+        let raw = r#"{"mcpServers":{"r":{"type":"claudeai-proxy","url":"https://x.test","id":"conn-1","request_timeout_ms":45000}}}"#;
+        let cfgs = parse_mcp_json_string(raw, ConfigScope::User).unwrap();
+        assert_eq!(cfgs.len(), 1);
+        assert_eq!(
+            cfgs[0].timeout_ms, None,
+            "claudeai-proxy must not fold request_timeout_ms (oracle schema NAn has no such field)"
+        );
+        // An explicit `timeout` is still honoured — only the alias is stripped.
+        let raw = r#"{"mcpServers":{"r":{"type":"claudeai-proxy","url":"https://x.test","id":"conn-1","timeout":9000,"request_timeout_ms":45000}}}"#;
+        let cfgs = parse_mcp_json_string(raw, ConfigScope::User).unwrap();
+        assert_eq!(cfgs[0].timeout_ms, Some(9000));
+    }
+
+    /// Oracle `NAn` @154585377 declares `id: i()` with NO `.optional()` — in
+    /// pointed contrast to `displayName`/`iconUrl` and the rest of the
+    /// schema's tail — so a `claudeai-proxy` entry with no `id` fails
+    /// `safeParse` and must be skipped, the same way a nameless `sdk` entry
+    /// is skipped (see `sdk_entry_without_name_is_rejected`).
+    #[test]
+    fn claudeai_proxy_entry_without_id_is_rejected() {
+        let raw = r#"{"mcpServers":{"x":{"type":"claudeai-proxy","url":"https://x.test"}}}"#;
+        let cfgs = parse_mcp_json_string(raw, ConfigScope::User).unwrap();
+        assert!(
+            cfgs.is_empty(),
+            "`NAn.id` is required; an idless claudeai-proxy entry must be skipped"
+        );
+        // `i()` has no `.min(1)`, so an EMPTY id still satisfies the schema.
+        let raw = r#"{"mcpServers":{"x":{"type":"claudeai-proxy","url":"https://x.test","id":""}}}"#;
+        let cfgs = parse_mcp_json_string(raw, ConfigScope::User).unwrap();
+        assert_eq!(cfgs.len(), 1, "an empty `id` still satisfies `i()`");
     }
 
     #[test]

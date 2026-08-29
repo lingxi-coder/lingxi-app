@@ -950,8 +950,22 @@ impl McpRegistry {
             // above), so `classify_auth_failure` in this arm is always a
             // pass-through.
             Err(e) if oauth_key.is_some() => {
+                // §24c: a live `WWW-Authenticate` challenge on THIS failure may
+                // name where the server's RFC 9728 Protected Resource Metadata
+                // actually lives (`resource_metadata`); when present it is
+                // threaded into the re-auth's discovery instead of the
+                // well-known guess (oracle `Be`/`Hxt`). `None` for any error
+                // shape that doesn't carry a structured `WWW-Authenticate`
+                // (the string-flattened fallback path).
+                let resource_metadata_url = error_resource_metadata_url(&e);
                 if let Some(scope) = error_is_403_insufficient_scope(&e) {
-                    let stepped = self.step_up_oauth_spec(&resolved_config, &scope).await?;
+                    let stepped = self
+                        .step_up_oauth_spec(
+                            &resolved_config,
+                            &scope,
+                            resource_metadata_url.as_deref(),
+                        )
+                        .await?;
                     attempt(stepped).await.map_err(|e| {
                         crate::negotiation::classify_auth_failure(
                             e,
@@ -964,7 +978,9 @@ impl McpRegistry {
                     // fresh interactive flow), re-inject the Bearer, retry ONCE.
                     // Faithful-core 401 detection: the transport flattens errors
                     // to strings (structured status is a noted residual).
-                    let refreshed = self.reauth_oauth_spec(&resolved_config).await?;
+                    let refreshed = self
+                        .reauth_oauth_spec(&resolved_config, resource_metadata_url.as_deref())
+                        .await?;
                     attempt(refreshed).await.map_err(|e| {
                         crate::negotiation::classify_auth_failure(
                             e,
@@ -1222,10 +1238,13 @@ impl McpRegistry {
             Some(stored) => {
                 match stored.refresh_token.clone() {
                     Some(refresh) => {
+                        // Proactive (pre-connect) refresh: no live challenge
+                        // exists yet, so discovery uses the well-known guess.
                         let meta = oauth::discover_auth_server_metadata(
                             &deps.http,
                             spec_url(&config.spec),
                             oauth_cfg.auth_server_metadata_url.as_deref(),
+                            None,
                         )
                         .await?;
                         // Prefer the client_id the stored tokens were minted
@@ -1249,13 +1268,13 @@ impl McpRegistry {
                         refreshed
                     }
                     None => {
-                        self.run_interactive_oauth(config, oauth_cfg, &key, deps, None)
+                        self.run_interactive_oauth(config, oauth_cfg, &key, deps, None, None)
                             .await?
                     }
                 }
             }
             None => {
-                self.run_interactive_oauth(config, oauth_cfg, &key, deps, None)
+                self.run_interactive_oauth(config, oauth_cfg, &key, deps, None, None)
                     .await?
             }
         };
@@ -1268,9 +1287,14 @@ impl McpRegistry {
 
     /// Re-authenticate after a 401: refresh if a refresh token is stored, else
     /// run a fresh interactive flow, then return the spec with the new Bearer.
+    /// `resource_metadata_url` (§24c) is the `resource_metadata` param parsed
+    /// from the triggering 401's `WWW-Authenticate` challenge, when it carried
+    /// a structured one — threaded into discovery in place of the well-known
+    /// guess.
     async fn reauth_oauth_spec(
         &self,
         config: &McpServerConfig,
+        resource_metadata_url: Option<&str>,
     ) -> Result<McpTransportSpec, McpError> {
         let deps = self
             .oauth
@@ -1287,6 +1311,7 @@ impl McpRegistry {
                     &deps.http,
                     spec_url(&config.spec),
                     oauth_cfg.auth_server_metadata_url.as_deref(),
+                    resource_metadata_url,
                 )
                 .await?;
                 // Prefer the persisted (DCR-issued or configured) client_id so
@@ -1305,15 +1330,29 @@ impl McpRegistry {
                     }
                     // Refresh token rejected → fall back to a fresh flow.
                     Err(oauth::OAuthError::RefreshRejected(_)) => {
-                        self.run_interactive_oauth(config, oauth_cfg, &key, deps, None)
-                            .await?
+                        self.run_interactive_oauth(
+                            config,
+                            oauth_cfg,
+                            &key,
+                            deps,
+                            None,
+                            resource_metadata_url,
+                        )
+                        .await?
                     }
                     Err(e) => return Err(e.into()),
                 }
             }
             None => {
-                self.run_interactive_oauth(config, oauth_cfg, &key, deps, None)
-                    .await?
+                self.run_interactive_oauth(
+                    config,
+                    oauth_cfg,
+                    &key,
+                    deps,
+                    None,
+                    resource_metadata_url,
+                )
+                .await?
             }
         };
 
@@ -1327,11 +1366,16 @@ impl McpRegistry {
     /// `scope` onto the stored entry (auth.ts `markStepUpPending`/`stepUpScope`,
     /// 1896), then run a fresh interactive flow requesting that elevated scope
     /// and return the spec with the new Bearer. A refresh CANNOT elevate scope
-    /// (RFC 6749 §6), so this always drives the PKCE flow.
+    /// (RFC 6749 §6), so this always drives the PKCE flow. `resource_metadata_url`
+    /// (§24c) is the `resource_metadata` param parsed from the SAME 403
+    /// challenge that carried the elevated `scope`, when present (oracle
+    /// `_stepUpAuthorize`: `if(e.resourceMetadataUrl)this._resourceMetadataUrl=
+    /// e.resourceMetadataUrl`).
     async fn step_up_oauth_spec(
         &self,
         config: &McpServerConfig,
         scope: &str,
+        resource_metadata_url: Option<&str>,
     ) -> Result<McpTransportSpec, McpError> {
         let deps = self
             .oauth
@@ -1350,7 +1394,14 @@ impl McpRegistry {
         }
 
         let token = self
-            .run_interactive_oauth(config, oauth_cfg, &key, deps, Some(scope))
+            .run_interactive_oauth(
+                config,
+                oauth_cfg,
+                &key,
+                deps,
+                Some(scope),
+                resource_metadata_url,
+            )
             .await?;
         Ok(inject_bearer(
             &config.spec,
@@ -1472,6 +1523,10 @@ impl McpRegistry {
     /// `insufficient_scope` step-up (auth.ts `cachedStepUpScope`); when set the
     /// authorize URL requests it instead of the advertised scope. On a
     /// successful grant the persisted `step_up_scope` is cleared (auth.ts:1705).
+    /// `resource_metadata_url` (§24c) carries a `resource_metadata` challenge
+    /// param from the live 401/403 that triggered this flow (`None` for the
+    /// proactive, no-challenge callers — a fresh server with no stored token,
+    /// or a stale-token silent refresh that hasn't hit the wire yet).
     async fn run_interactive_oauth(
         &self,
         config: &McpServerConfig,
@@ -1479,6 +1534,7 @@ impl McpRegistry {
         key: &str,
         deps: &OAuthDeps,
         scope_override: Option<&str>,
+        resource_metadata_url: Option<&str>,
     ) -> Result<oauth::Tokens, McpError> {
         // Effective elevated scope: an explicit override (the 403 step-up path)
         // wins; otherwise honor any `step_up_scope` cached on the stored entry
@@ -1510,7 +1566,7 @@ impl McpRegistry {
                 callback_port,
             },
         );
-        let tokens = oauth::perform_oauth_flow(
+        let tokens = oauth::perform_oauth_flow_for_reauth(
             &deps.http,
             &deps.clock,
             oauth_cfg,
@@ -1518,6 +1574,7 @@ impl McpRegistry {
             spec_url(&config.spec),
             &deps.on_authorization_url,
             cached_scope.as_deref(),
+            resource_metadata_url,
         )
         .await?;
         // A fresh grant clears any pending step-up scope (auth.ts:1705): the new
@@ -2556,6 +2613,28 @@ fn error_is_403_insufficient_scope(e: &McpError) -> Option<String> {
         return None;
     }
     extract_scope_from_www_auth(msg)
+}
+
+/// Extract a `resource_metadata` challenge param (RFC 9728) from a connect
+/// failure's `WWW-Authenticate` header, for both the 401-reauth and 403
+/// step-up call sites (§24c: oracle `Be`/`H0e`, threaded into `discover_
+/// auth_server_metadata` so a server that publishes its Protected Resource
+/// Metadata somewhere other than the well-known guess still resolves).
+/// Structural only: `McpError::HttpResponse` (the shape `connect_attempt`'s
+/// error now carries — see `error_is_401`'s note) is the sole source; the
+/// string-flattened `Connection`/`Handshake` fallback shapes elsewhere in this
+/// file don't carry a real header to reparse, so they yield `None` here and
+/// discovery falls back to its well-known guess, exactly as before this
+/// finding.
+fn error_resource_metadata_url(e: &McpError) -> Option<String> {
+    let McpError::HttpResponse {
+        www_authenticate: Some(value),
+        ..
+    } = e
+    else {
+        return None;
+    };
+    oauth::parse_www_authenticate_challenge(value).resource_metadata_url
 }
 
 /// Hand-rolled equivalent of `wwwAuth.match(/scope=(?:"([^"]+)"|([^\s,]+))/)`

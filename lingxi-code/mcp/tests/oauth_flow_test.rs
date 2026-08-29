@@ -231,6 +231,11 @@ struct RecordingTransport {
     /// carrying the configured required scope (step-up path).
     fail_403_first: AtomicUsize,
     fail_403_scope: Mutex<String>,
+    /// §24c: when set, a 401 failure is a STRUCTURED `McpError::HttpResponse`
+    /// carrying this exact `WWW-Authenticate` value (the shape task 1's port
+    /// threads through from a real handshake) instead of the flattened
+    /// `Connection("HTTP 401 Unauthorized")` string every other 401 test uses.
+    structured_401_challenge: Mutex<Option<String>>,
 }
 impl RecordingTransport {
     fn new(fail_401_first: usize) -> Arc<Self> {
@@ -239,6 +244,7 @@ impl RecordingTransport {
             fail_401_first: AtomicUsize::new(fail_401_first),
             fail_403_first: AtomicUsize::new(0),
             fail_403_scope: Mutex::new(String::new()),
+            structured_401_challenge: Mutex::new(None),
         })
     }
     /// Build a transport whose first connect returns a 403 `insufficient_scope`
@@ -249,7 +255,14 @@ impl RecordingTransport {
             fail_401_first: AtomicUsize::new(0),
             fail_403_first: AtomicUsize::new(1),
             fail_403_scope: Mutex::new(scope.into()),
+            structured_401_challenge: Mutex::new(None),
         })
+    }
+    /// Make the next `fail_401_first` 401(s) carry `challenge` as a structured
+    /// `WWW-Authenticate` value rather than the default flattened string.
+    fn with_401_challenge(self: Arc<Self>, challenge: &str) -> Arc<Self> {
+        *self.structured_401_challenge.lock().unwrap() = Some(challenge.to_string());
+        self
     }
     fn last_spec(&self) -> McpTransportSpec {
         self.seen_specs.lock().unwrap().last().cloned().unwrap()
@@ -283,6 +296,12 @@ impl McpTransport for RecordingTransport {
         }
         if self.fail_401_first.load(Ordering::SeqCst) > 0 {
             self.fail_401_first.fetch_sub(1, Ordering::SeqCst);
+            if let Some(challenge) = self.structured_401_challenge.lock().unwrap().clone() {
+                return Err(McpError::HttpResponse {
+                    status: 401,
+                    www_authenticate: Some(challenge),
+                });
+            }
             return Err(McpError::Connection("HTTP 401 Unauthorized".into()));
         }
         Ok(McpRawConnection {
@@ -705,6 +724,145 @@ async fn connect_401_triggers_refresh_and_retry() {
                 })
                 .unwrap_or(false)
     }));
+}
+
+// ---------------------------------------------------------------------------
+// §24c: a live 401's `WWW-Authenticate` `resource_metadata` challenge drives
+// discovery to the URL the server names, instead of the well-known guess.
+// ---------------------------------------------------------------------------
+
+/// HTTP mock for the §24c wiring test: the Protected Resource Metadata is
+/// reachable ONLY at the challenge-named URL (the well-known guess 404s), and
+/// the discovered issuer's AS metadata/token endpoint use a HOST distinct from
+/// any well-known-guess fallback host, so a passing test proves the CHALLENGE
+/// URL was actually used end to end (not merely that discovery succeeded via
+/// some other path).
+struct ChallengeAwareAs {
+    requests: Mutex<Vec<HttpRequest>>,
+    refresh_body: String,
+}
+impl ChallengeAwareAs {
+    fn new(refresh_body: &str) -> Arc<Self> {
+        Arc::new(Self {
+            requests: Mutex::new(Vec::new()),
+            refresh_body: refresh_body.into(),
+        })
+    }
+    fn requests(&self) -> Vec<HttpRequest> {
+        self.requests.lock().unwrap().clone()
+    }
+}
+#[async_trait]
+impl HttpTransport for ChallengeAwareAs {
+    async fn request(&self, req: HttpRequest) -> Result<HttpResponse, HttpError> {
+        self.requests.lock().unwrap().push(req.clone());
+        let (status, body) = if req.url == "https://mcp.example.com/custom-prm-location" {
+            (
+                200,
+                r#"{"authorization_servers":["https://as-from-challenge.example.com"]}"#
+                    .to_string(),
+            )
+        } else if req.url.contains("oauth-protected-resource") {
+            // The well-known guess must never be reached once the challenge
+            // names a URL — 404 it so a wrongly-used guess fails loudly
+            // instead of silently degrading to some other working path.
+            (404, String::new())
+        } else if req.url == "https://as-from-challenge.example.com/.well-known/oauth-authorization-server" {
+            (
+                200,
+                r#"{"authorization_endpoint":"https://as-from-challenge.example.com/authorize","token_endpoint":"https://as-from-challenge.example.com/token"}"#.to_string(),
+            )
+        } else if req.url == "https://as-from-challenge.example.com/token" {
+            (200, self.refresh_body.clone())
+        } else {
+            (404, String::new())
+        };
+        Ok(HttpResponse {
+            status,
+            headers: vec![],
+            body,
+            body_bytes: Vec::new(),
+        })
+    }
+    async fn stream_sse(&self, _req: HttpRequest) -> Result<SseStream, HttpError> {
+        Err(HttpError::InvalidRequest("unused".into()))
+    }
+}
+
+#[tokio::test]
+async fn connect_401_challenge_resource_metadata_url_drives_prm_fetch() {
+    let refresh = r#"{"access_token":"access-challenge","refresh_token":"refresh-challenge","expires_in":3600}"#;
+    let mock_as = ChallengeAwareAs::new(refresh);
+    let challenge =
+        r#"Bearer resource_metadata="https://mcp.example.com/custom-prm-location""#.to_string();
+    // First connect attempt 401s carrying the challenge; the retry succeeds.
+    let transport = RecordingTransport::new(1).with_401_challenge(&challenge);
+    let storage = MemStorage::new();
+    let clock = TestClock::new(1_000);
+    let (on_url, _rx) = url_capture();
+
+    let config = http_cfg("challenge-srv", Some(oauth_block(Some("preset-client"))));
+    let key = oauth::server_key("challenge-srv", &config.spec);
+
+    // Seed an UNEXPIRED token (so the first connect uses it and 401s) + a
+    // refresh token, so the retry goes through `reauth_oauth_spec`'s discovery
+    // call rather than a fresh interactive flow.
+    let stored = oauth::StoredTokens {
+        access_token: "access-old".into(),
+        refresh_token: Some("refresh-1".into()),
+        expires_at_unix: 99_999,
+        client_id: Some("dcr-issued-7".into()),
+        client_secret: None,
+        step_up_scope: None,
+    };
+    let bytes = serde_json::to_vec(&stored).unwrap();
+    let data = SecureStorageData::new(
+        bytes,
+        SecureStorageMetadata {
+            created_at: SystemTime::UNIX_EPOCH,
+            last_accessed: None,
+            kind: SecretKindDto("mcp_oauth_tokens".into()),
+        },
+    );
+    storage
+        .store(oauth::MCP_OAUTH_SERVICE, &key, data)
+        .await
+        .unwrap();
+
+    let registry =
+        McpRegistry::new(transport.clone() as Arc<dyn McpTransport>).with_oauth(OAuthDeps {
+            http: mock_as.clone() as Arc<dyn HttpTransport>,
+            clock: clock as Arc<dyn Clock>,
+            storage: storage as Arc<dyn SecureStorage>,
+            on_authorization_url: on_url,
+            xaa_config: None,
+        });
+
+    registry
+        .connect(config)
+        .await
+        .expect("connect ok after challenge-driven reauth");
+
+    assert_eq!(transport.connect_count(), 2);
+    assert_eq!(
+        spec_auth_header(&transport.last_spec()).as_deref(),
+        Some("Bearer access-challenge")
+    );
+    let requested: Vec<String> = mock_as.requests().into_iter().map(|r| r.url).collect();
+    assert!(
+        requested.contains(&"https://mcp.example.com/custom-prm-location".to_string()),
+        "the challenge-named resource_metadata URL must be fetched; got {requested:?}"
+    );
+    assert!(
+        !requested
+            .iter()
+            .any(|u| u.contains("/.well-known/oauth-protected-resource/v1")),
+        "the well-known guess must NOT be tried once the challenge names a URL; got {requested:?}"
+    );
+    assert!(
+        requested.contains(&"https://as-from-challenge.example.com/token".to_string()),
+        "token exchange must hit the AS discovered via the challenge's issuer; got {requested:?}"
+    );
 }
 
 // ---------------------------------------------------------------------------

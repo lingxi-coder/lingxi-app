@@ -229,7 +229,13 @@ export function Voice({ bridge }: PageContentProps) {
   // `readSystemVoices` returns its already-populated list immediately, so the
   // extra work is one IPC round trip.
   const [grantGeneration, setGrantGeneration] = useState(0);
-  const readMicrophonePermission = bridge.microphonePermission;
+  // Same "ref for latest value, narrow effect deps" idiom as `credentialsRef`
+  // above, and for a sharper reason: `useBridge` returns a stable
+  // `microphonePermission`, but a caller that rebuilt it per render would
+  // otherwise make this effect re-run on the very state update it causes —
+  // an endless probe loop rather than a wrong value.
+  const readMicrophonePermissionRef = useRef(bridge.microphonePermission);
+  readMicrophonePermissionRef.current = bridge.microphonePermission;
   useEffect(() => {
     let cancelled = false;
     // `probePlatform` never rejects (permission/voice-list failures are
@@ -238,12 +244,12 @@ export function Voice({ bridge }: PageContentProps) {
     void probePlatform(browserProbeDeps(
       activeProviderId,
       credentialsRef.current,
-      readMicrophonePermission,
+      () => readMicrophonePermissionRef.current(),
     )).then((snapshot) => {
       if (!cancelled) setPlatform(snapshot);
     });
     return () => { cancelled = true; };
-  }, [activeProviderId, configuredProviderIds, grantGeneration, readMicrophonePermission]);
+  }, [activeProviderId, configuredProviderIds, grantGeneration]);
 
   // The microphone grant lives in System Settings, not in this app, and the
   // user can change it while this page is open — most often by acting on the

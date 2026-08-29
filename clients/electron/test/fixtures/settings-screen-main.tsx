@@ -103,6 +103,12 @@ function Fixture() {
     // they need to exist or selecting "voice" throws through the render.
     openSystemSettings: noopAsyncVoid,
     setVoicePreferences: noopAsyncVoid,
+    // The voice page's microphone row now asks the MAIN process for the OS
+    // grant (there is no honest renderer-side source — see
+    // `shared/microphoneAccess.ts`). This stub has no main process behind it,
+    // so it answers the same thing production answers when the host is
+    // unreachable: "cannot determine".
+    microphonePermission: async () => 'unavailable' as const,
     sessionRuntimeStatus: () => undefined,
     // Write-side commands for Task 18's pages — none of these scenarios
     // click a save/add/remove button on them, but they are here so a future

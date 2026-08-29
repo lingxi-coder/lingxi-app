@@ -79,6 +79,16 @@ export interface PublicSettings {
   activeSession?: SessionRef;
   projects: string[];
   pinnedSessions: PinnedSessionRecord[];
+  /**
+   * Read-only surface of `PersistedSettings.bypassPermissionsModeAccepted`
+   * (Task 18: the Permissions settings page renders this as a fixed `设备`
+   * row so a person can see whether the one-time Bypass Permissions
+   * acceptance has already happened, without exposing a way to SET it from
+   * here — the only writer stays the blocking acceptance dialog
+   * (`src/main/index.ts`). Omitted (not `false`) when unset, matching every
+   * other optional field here.
+   */
+  bypassPermissionsModeAccepted?: boolean;
 }
 
 export interface DiagnosticEntry {
@@ -189,7 +199,10 @@ export function parseSettings(value: unknown): PersistedSettings {
 }
 
 export function publicSettings(settings: PersistedSettings): PublicSettings {
-  const { version, theme, model, apiBaseUrl, activeProject, activeSession, projects, pinnedSessions } = settings;
+  const {
+    version, theme, model, apiBaseUrl, activeProject, activeSession, projects, pinnedSessions,
+    bypassPermissionsModeAccepted,
+  } = settings;
   return {
     version,
     theme,
@@ -199,6 +212,7 @@ export function publicSettings(settings: PersistedSettings): PublicSettings {
     activeSession: activeSession ? { ...activeSession } : undefined,
     projects: [...projects],
     pinnedSessions: pinnedSessions.map((session) => ({ ...session })),
+    ...(bypassPermissionsModeAccepted ? { bypassPermissionsModeAccepted: true } : {}),
   };
 }
 

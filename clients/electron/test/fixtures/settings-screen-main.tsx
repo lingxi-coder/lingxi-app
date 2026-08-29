@@ -61,6 +61,14 @@ function Fixture() {
     sessionLoading,
     running,
     settingsSnapshotEvent,
+    // Task 18 pages: `McpServers`/`Skills` call these on MOUNT (not just on
+    // a button click), so — unlike the write-side commands below, which
+    // only fire on an explicit click these scenarios never make — they must
+    // exist here or selecting either page throws through the render.
+    mcpServersEvent: null,
+    skillsEvent: null,
+    refreshMcpServers: noopAsyncVoid,
+    refreshSkills: noopAsyncVoid,
     restartBridge,
     refreshSettingsSnapshot,
     refreshDiagnostics: noopAsyncArray,
@@ -71,6 +79,16 @@ function Fixture() {
     activateProject: noopAsyncNull,
     setThemePreference: noopAsyncVoid,
     sessionRuntimeStatus: () => undefined,
+    // Write-side commands for Task 18's pages — none of these scenarios
+    // click a save/add/remove button on them, but they are here so a future
+    // scenario that does doesn't have to rediscover this same crash.
+    updateEngineSettings: noopAsyncVoid,
+    updatePermissionRules: noopAsyncVoid,
+    setDefaultPermissionMode: noopAsyncVoid,
+    updateWorkspaceDirectories: noopAsyncVoid,
+    upsertMcpServer: noopAsyncVoid,
+    removeMcpServer: noopAsyncVoid,
+    runSlashCommand: noopAsyncVoid,
   };
 
   useEffect(() => {

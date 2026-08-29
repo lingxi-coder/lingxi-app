@@ -69,9 +69,11 @@ async function runPlaceholderScenario(webContents) {
   await webContents.executeJavaScript('window.__settingsScreenTest.selectPage("voice")');
   const voice = await webContents.executeJavaScript('window.__settingsScreenTest.state()');
   // `diagnostics` used to be the "implemented but not wired" example here,
-  // but Task 16 registers it — `permissions` (implemented:true, registered
-  // only in a later task) is the still-honest example now.
-  await webContents.executeJavaScript('window.__settingsScreenTest.selectPage("permissions")');
+  // then `permissions` (Task 16 registered diagnostics; Task 18 registers
+  // permissions along with the rest of the 编码 group) — `raw-json`
+  // (implemented:true, registered only in Task 19) is the still-honest
+  // example now.
+  await webContents.executeJavaScript('window.__settingsScreenTest.selectPage("raw-json")');
   const notWired = await webContents.executeJavaScript('window.__settingsScreenTest.state()');
   return { voice, notWired };
 }

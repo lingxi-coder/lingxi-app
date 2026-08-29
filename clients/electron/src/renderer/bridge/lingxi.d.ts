@@ -30,6 +30,8 @@ export interface PublicSettings {
   activeSession?: SessionRef;
   projects: string[];
   pinnedSessions: PinnedSessionRecord[];
+  /** Device-owned (Electron store), never an engine settings layer — see `host-utils.ts`'s `PublicSettings`. */
+  bypassPermissionsModeAccepted?: boolean;
 }
 export interface SessionRef {
   projectPath: string;

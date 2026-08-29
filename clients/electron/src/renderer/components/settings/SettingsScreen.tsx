@@ -10,8 +10,14 @@ import { Appearance } from './pages/Appearance';
 import { CustomProviders } from './pages/CustomProviders';
 import { Diagnostics } from './pages/Diagnostics';
 import { General } from './pages/General';
+import { Hooks } from './pages/Hooks';
+import { McpServers } from './pages/McpServers';
+import { Permissions } from './pages/Permissions';
+import { Plugins } from './pages/Plugins';
 import { Projects } from './pages/Projects';
 import { ProviderCredentials } from './pages/ProviderCredentials';
+import { Skills } from './pages/Skills';
+import { ToolsAgent } from './pages/ToolsAgent';
 import { provenanceLabel, type Provenance } from './rows';
 import { pendingKeys, type SettingsSnapshot } from './useEngineSettings';
 
@@ -163,6 +169,16 @@ function messageFrom(cause: unknown): string {
  * `custom-providers` (edits `settings.providers` / `settings.routing`,
  * genuinely layered despite sitting outside the 编码 group — see `nav.ts`'s
  * own exception comment).
+ *
+ * Task 18 adds the six 编码 pages: `permissions` (the three dedicated
+ * permission commands, never the generic patch), `tools-agent`
+ * (`enabledTools`/`disable*`/`outputStyle`/`modelOverrides`/thinking &
+ * vision toggles via the generic patch), `skills` (directory-discovered
+ * listing + the one layered row, `syncClaudeAiSkills`), `mcp` (its own
+ * three-scope selector, NOT the shell's layer switcher — `nav.ts` marks it
+ * `layered: false`), `hooks` (read-only listing + a jump to `raw-json`),
+ * and `plugins` (`enabledPlugins`/`pluginConfigs`/`additionalMarketplaces`
+ * via the generic patch).
  */
 const PAGE_CONTENT: Partial<Record<string, ComponentType<PageContentProps>>> = {
   general: General,
@@ -172,6 +188,12 @@ const PAGE_CONTENT: Partial<Record<string, ComponentType<PageContentProps>>> = {
   about: About,
   'provider-credentials': ProviderCredentials,
   'custom-providers': CustomProviders,
+  permissions: Permissions,
+  'tools-agent': ToolsAgent,
+  skills: Skills,
+  mcp: McpServers,
+  hooks: Hooks,
+  plugins: Plugins,
 };
 
 export interface PageContentProps {

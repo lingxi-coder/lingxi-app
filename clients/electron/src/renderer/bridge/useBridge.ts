@@ -5,10 +5,13 @@ import type {
   ComputerAccessRequestDto,
   ComputerAccessResponseDto,
   ImageRefDto,
+  McpScopeDto,
+  PermissionBehaviorDto,
   PermissionModeId,
   PermissionRequest,
   PermissionResponseDto,
   ReasoningSelectionDto,
+  SettingsDestinationDto,
 } from '@lingxi/bridge-client';
 
 import {
@@ -48,11 +51,19 @@ import type {
  */
 export type SettingsSnapshotEvent = Extract<ClientEvent, { type: 'settings_snapshot' }>;
 
+/** The wire shape of the MCP server listing (`ClientEvent::McpServers`), unparsed — same "latest one wins, one per app not per session" treatment as {@link SettingsSnapshotEvent}. */
+export type McpServersEvent = Extract<ClientEvent, { type: 'mcp_servers' }>;
+
+/** The wire shape of the discovered-skills listing (`ClientEvent::Skills`), unparsed. */
+export type SkillsEvent = Extract<ClientEvent, { type: 'skills' }>;
+
 export interface UseBridge {
   readonly hosted: boolean;
   readonly loading: boolean;
   readonly bootstrap: BootstrapState | null;
   readonly settingsSnapshotEvent: SettingsSnapshotEvent | null;
+  readonly mcpServersEvent: McpServersEvent | null;
+  readonly skillsEvent: SkillsEvent | null;
   readonly activeSession: SessionRef | undefined;
   readonly sessionLoading: boolean;
   readonly connection: ConnectionState;
@@ -101,6 +112,40 @@ export interface UseBridge {
    * prop reflects the write without a separate caller-side refresh call.
    */
   updateEngineSettings(destination: 'user' | 'project' | 'local', patch: Record<string, unknown>): Promise<void>;
+  /**
+   * `update_permission_rules` — the ONLY write path for `permissions.{allow,deny,ask}`.
+   * `apply_patch` refuses the `permissions` key outright, so there is no
+   * generic-patch alternative to fall back to. `add`/`remove` are rule
+   * strings; parsing is infallible on the engine side
+   * (`PermissionRuleValue::from_rule_string` degrades malformed input to a
+   * bare tool name, matching claude-code) — this wrapper does not validate
+   * or reject anything either. Refetches the snapshot afterward so the
+   * page renders the ACTUALLY persisted (possibly normalised) rule text,
+   * never an optimistic echo of the raw input.
+   */
+  updatePermissionRules(
+    destination: SettingsDestinationDto, behavior: PermissionBehaviorDto, add: string[], remove: string[],
+  ): Promise<void>;
+  /**
+   * `set_default_permission_mode` — persists `permissions.defaultMode`.
+   * The engine deliberately refuses `"bypassPermissions"` here (returns
+   * `Ok(false)` and emits a `Rejected` error event) as a security property,
+   * not a bug — see `permission::persist_permission_mode`. This wrapper
+   * does not special-case that mode; it always refetches the snapshot
+   * afterward so a caller can tell a refusal apart from a success by
+   * comparing the requested mode against what the snapshot actually shows.
+   */
+  setDefaultPermissionMode(destination: SettingsDestinationDto, mode: string): Promise<void>;
+  /** `update_workspace_directories` — the dedicated writer for `permissions.additionalDirectories`, same add/remove-delta shape as {@link updatePermissionRules}. */
+  updateWorkspaceDirectories(destination: SettingsDestinationDto, add: string[], remove: string[]): Promise<void>;
+  /** Re-pulls the MCP server listing (`refresh_listings{mcp}` → `ClientEvent::McpServers`). This is a RUNNING/merged view (name, status, transport) with no per-scope provenance — see `McpServers.tsx`'s own doc comment for why the page cannot decompose it by scope. */
+  refreshMcpServers(): Promise<void>;
+  /** Re-pulls the discovered-skills listing (`refresh_listings{skills}` → `ClientEvent::Skills`). Directory-discovered, NOT layered — `Skills.tsx` reads this the same way regardless of `editingLayer`. */
+  refreshSkills(): Promise<void>;
+  /** `upsert_mcp_server` — writes one server definition into exactly the named scope's own storage location (`~/.lingxi.json` for User/Local, `<project>/.mcp.json` for Project). Refetches the MCP listing afterward. `config` is a plain JS object; this wrapper owns the `JSON.stringify` the wire's `config_json: String` field requires. */
+  upsertMcpServer(scope: McpScopeDto, name: string, config: Record<string, unknown>): Promise<void>;
+  /** `remove_mcp_server` — idempotent removal from exactly the named scope. Refetches the MCP listing afterward. */
+  removeMcpServer(scope: McpScopeDto, name: string): Promise<void>;
   restartBridge(sessionId?: string): Promise<void>;
   refreshDiagnostics(): Promise<DiagnosticEntry[]>;
   copyDiagnostics(): Promise<void>;
@@ -389,6 +434,11 @@ export function useBridge(): UseBridge {
   // Settings are file-layer state, not per-conversation state, so this is
   // one value for the whole app rather than something keyed into `runtimeStates`.
   const [settingsSnapshotEvent, setSettingsSnapshotEvent] = useState<SettingsSnapshotEvent | null>(null);
+  // Same "one value for the whole app" treatment as `settingsSnapshotEvent`
+  // above: MCP server definitions and discovered skills are not per-session
+  // state either.
+  const [mcpServersEvent, setMcpServersEvent] = useState<McpServersEvent | null>(null);
+  const [skillsEvent, setSkillsEvent] = useState<SkillsEvent | null>(null);
   const turnActiveRefs = useRef(new Map<string, boolean>());
   const cancellingRefs = useRef(new Map<string, { current: boolean }>());
   const cancellationTasks = useRef(new Map<string, { current: Promise<void> | null }>());
@@ -669,6 +719,8 @@ export function useBridge(): UseBridge {
       });
       if (event.type === 'session_started' || event.type === 'turn_ended') scheduleProjectCatalogRefresh(sessionId);
       if (event.type === 'settings_snapshot' && activeSessionIdRef.current === sessionId) setSettingsSnapshotEvent(event);
+      if (event.type === 'mcp_servers' && activeSessionIdRef.current === sessionId) setMcpServersEvent(event);
+      if (event.type === 'skills' && activeSessionIdRef.current === sessionId) setSkillsEvent(event);
       if (event.type === 'error') {
         updateRuntime(sessionId, (state) => ({ ...state, error: event.message }));
         if (activeSessionIdRef.current === sessionId) setError(event.message);
@@ -1144,12 +1196,57 @@ export function useBridge(): UseBridge {
     },
     [command, refreshSettingsSnapshot],
   );
+  const updatePermissionRules = useCallback(
+    async (destination: SettingsDestinationDto, behavior: PermissionBehaviorDto, add: string[], remove: string[]) => {
+      await command({ type: 'update_permission_rules', destination, behavior, add, remove });
+      await refreshSettingsSnapshot();
+    },
+    [command, refreshSettingsSnapshot],
+  );
+  const setDefaultPermissionMode = useCallback(
+    async (destination: SettingsDestinationDto, mode: string) => {
+      await command({ type: 'set_default_permission_mode', destination, mode });
+      await refreshSettingsSnapshot();
+    },
+    [command, refreshSettingsSnapshot],
+  );
+  const updateWorkspaceDirectories = useCallback(
+    async (destination: SettingsDestinationDto, add: string[], remove: string[]) => {
+      await command({ type: 'update_workspace_directories', destination, add, remove });
+      await refreshSettingsSnapshot();
+    },
+    [command, refreshSettingsSnapshot],
+  );
+  const refreshMcpServers = useCallback(
+    () => command({ type: 'refresh_listings', which: [{ type: 'mcp' }] }),
+    [command],
+  );
+  const refreshSkills = useCallback(
+    () => command({ type: 'refresh_listings', which: [{ type: 'skills' }] }),
+    [command],
+  );
+  const upsertMcpServer = useCallback(
+    async (scope: McpScopeDto, name: string, config: Record<string, unknown>) => {
+      await command({ type: 'upsert_mcp_server', scope, name, config_json: JSON.stringify(config) });
+      await refreshMcpServers();
+    },
+    [command, refreshMcpServers],
+  );
+  const removeMcpServer = useCallback(
+    async (scope: McpScopeDto, name: string) => {
+      await command({ type: 'remove_mcp_server', scope, name });
+      await refreshMcpServers();
+    },
+    [command, refreshMcpServers],
+  );
 
   return {
     hosted,
     loading,
     bootstrap,
     settingsSnapshotEvent,
+    mcpServersEvent,
+    skillsEvent,
     activeSession,
     sessionLoading,
     connection,
@@ -1187,6 +1284,13 @@ export function useBridge(): UseBridge {
     setThemePreference,
     setApiBaseUrl,
     updateEngineSettings,
+    updatePermissionRules,
+    setDefaultPermissionMode,
+    updateWorkspaceDirectories,
+    refreshMcpServers,
+    refreshSkills,
+    upsertMcpServer,
+    removeMcpServer,
     restartBridge,
     refreshDiagnostics,
     copyDiagnostics,

@@ -113,6 +113,16 @@ struct RawManifest {
     /// Explicitly declared output-style directories. Binary: `outputStyles`.
     #[serde(rename = "outputStyles", default)]
     output_styles: Option<PathDecl>,
+    /// Explicitly declared theme directories/files. Presence suppresses the
+    /// `themes/` auto-scan (replaces, does not merge — same rule as
+    /// `outputStyles`). Binary `pt`: `themes: union([path, path[]])`.
+    #[serde(default)]
+    themes: Option<PathDecl>,
+    /// Explicitly declared workflow directories/`.js` files. Presence
+    /// suppresses the `workflows/` auto-scan. Binary `Ls`: `workflows:
+    /// union([path, path[]]).optional()`.
+    #[serde(default)]
+    workflows: Option<PathDecl>,
     /// Explicitly declared MCP server configs (manifest-declared MCP servers).
     /// Binary: `mcpServers` in `PluginManifestSchema`.
     #[serde(rename = "mcpServers", default)]
@@ -126,9 +136,14 @@ struct RawManifest {
     /// User-configurable field declarations (`userConfig` in
     /// `PluginManifestSchema`) — each key maps to a `{description, sensitive,
     /// required, default, type}` object. Sensitive fields route through secure
-    /// storage; non-sensitive fields through settings `pluginConfigs`.
+    /// storage; non-sensitive fields through settings `pluginConfigs`. Binary
+    /// `Fs`: `record(i().regex(/^[A-Za-z_]\w*$/, ...), gt())` — unlike the
+    /// per-channel `userConfig` (`RawPluginChannel::user_config`, a bare
+    /// `record(i(), gt())` with NO key-shape constraint), the TOP-LEVEL map's
+    /// keys must be identifiers, hence the dedicated [`RawUserConfigMap`]
+    /// wrapper instead of a bare `HashMap`.
     #[serde(rename = "userConfig", default)]
-    user_config: Option<HashMap<String, UserConfigField>>,
+    user_config: Option<RawUserConfigMap>,
     /// Plugin settings shipped in the manifest.
     #[serde(default)]
     settings: Option<HashMap<String, serde_json::Value>>,
@@ -265,6 +280,49 @@ impl<'de> Deserialize<'de> for RawCommandEntry {
             allowed_tools: raw.allowed_tools,
         })
     }
+}
+
+/// The top-level `userConfig` map only (oracle `Fs`): `record(i().regex(
+/// /^[A-Za-z_]\w*$/, "Option keys must be valid identifiers (letters, digits,
+/// underscore; no leading digit) — they become CLAUDE_PLUGIN_OPTION_<KEY> env
+/// vars in hooks"), gt())`. A bare `HashMap<String, UserConfigField>` would
+/// accept any JSON-object key; this wrapper validates each key during
+/// deserialization so a non-identifier key fails the WHOLE `plugin.json`
+/// parse (matching zod's `.parse()` failing atomically), the same convention
+/// [`RawCommandEntry`] establishes for a malformed `commands` entry. The
+/// per-channel `userConfig` (`RawPluginChannel::user_config`) uses the oracle's
+/// bare-string-key variant instead and stays a plain `HashMap`.
+#[derive(Debug, Clone)]
+struct RawUserConfigMap(HashMap<String, UserConfigField>);
+
+impl<'de> Deserialize<'de> for RawUserConfigMap {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let raw = HashMap::<String, UserConfigField>::deserialize(deserializer)?;
+        for key in raw.keys() {
+            if !is_valid_user_config_key(key) {
+                return Err(serde::de::Error::custom(format!(
+                    "userConfig option key {key:?} must be a valid identifier \
+                     (letters, digits, underscore; no leading digit)"
+                )));
+            }
+        }
+        Ok(RawUserConfigMap(raw))
+    }
+}
+
+/// `^[A-Za-z_]\w*$`: an ASCII identifier — first character a letter or
+/// underscore, the rest letters/digits/underscore. No unicode-identifier
+/// leniency: the oracle regex's `\w` is ASCII-only (no `u` flag).
+fn is_valid_user_config_key(key: &str) -> bool {
+    let mut chars = key.chars();
+    match chars.next() {
+        Some(c) if c.is_ascii_alphabetic() || c == '_' => {}
+        _ => return false,
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
 /// `author` may be a string or an object (`{ name, email, url }`). Binary
@@ -878,7 +936,9 @@ pub(crate) async fn load_plugin_from_path_with_mcp_gate(
         trust_level,
         depends_on: Vec::new(),
         dependencies,
-        user_config: parsed.user_config.map(|fields| UserConfigSchema { fields }),
+        user_config: parsed
+            .user_config
+            .map(|fields| UserConfigSchema { fields: fields.0 }),
         channels,
         settings,
         keywords: parsed.keywords.unwrap_or_default(),
@@ -967,6 +1027,12 @@ async fn detect_components(
         }
     }
     let default_output_styles = glob_md(&plugin_dir.join("output-styles")).await;
+    // Themes (`.json`) and workflows (`.js`) auto-scan a SINGLE directory
+    // level — unlike `glob_md`'s recursive DFS for commands/agents/output-
+    // styles, the oracle's theme/workflow directory readers are flat
+    // `readdir()` calls with no subdirectory recursion.
+    let default_themes = glob_ext_flat(&plugin_dir.join("themes"), "json").await;
+    let default_workflows = glob_ext_flat(&plugin_dir.join("workflows"), "js").await;
     let default_hooks = load_standard_hooks(plugin_dir).await;
     let default_mcp_servers = if skip_mcp_discovery {
         HashMap::new()
@@ -992,6 +1058,14 @@ async fn detect_components(
         Some(paths) => resolve_markdown_declared_paths(plugin_dir, paths.clone()).await,
         None => default_output_styles,
     };
+    let themes = match &parsed.themes {
+        Some(paths) => resolve_ext_declared_paths(plugin_dir, paths.clone(), "json").await,
+        None => default_themes,
+    };
+    let workflows = match &parsed.workflows {
+        Some(paths) => resolve_ext_declared_paths(plugin_dir, paths.clone(), "js").await,
+        None => default_workflows,
+    };
     let mut hooks = default_hooks;
     hooks.extend(load_declared_hooks(plugin_dir, parsed.hooks.clone()).await);
     let mut mcp_servers = default_mcp_servers;
@@ -1006,6 +1080,8 @@ async fn detect_components(
         agents,
         skills,
         output_styles,
+        themes,
+        workflows,
         hooks,
         mcp_servers,
         lsp_servers,
@@ -1068,6 +1144,50 @@ async fn resolve_markdown_declared_paths(plugin_dir: &Path, paths: PathDecl) -> 
             .extension()
             .and_then(|s| s.to_str())
             .is_some_and(|ext| ext.eq_ignore_ascii_case("md"))
+        {
+            let root = abs.parent().unwrap_or(plugin_dir).to_path_buf();
+            out.push(ComponentPath {
+                path: abs,
+                metadata: component_root_metadata(&root),
+            });
+        }
+    }
+    out.sort_by(|a, b| a.path.cmp(&b.path));
+    dedup_component_paths(&mut out);
+    out
+}
+
+/// Resolve a `themes`/`workflows`-shaped declaration (oracle `union([path,
+/// path[]])`): a directory entry is FLAT-scanned (one level, no recursion —
+/// see [`glob_ext_flat`]) for files matching `ext`; a file entry is kept only
+/// when its own extension matches `ext`. Mirrors
+/// [`resolve_markdown_declared_paths`] but for a non-`.md` extension and a
+/// non-recursive directory scan (the oracle's theme/workflow directory
+/// readers are single-level `readdir()` calls, unlike the recursive
+/// `.md` walk `glob_md` models for commands/agents/output-styles).
+async fn resolve_ext_declared_paths(
+    plugin_dir: &Path,
+    paths: PathDecl,
+    ext: &str,
+) -> Vec<ComponentPath> {
+    let mut out = Vec::new();
+    for raw in paths.into_vec() {
+        let Some(abs) = resolve_declared_relative_path(plugin_dir, &raw) else {
+            tracing::warn!(path = %raw, ext, "skipping invalid plugin manifest path");
+            continue;
+        };
+        let Ok(meta) = tokio::fs::metadata(&abs).await else {
+            tracing::warn!(path = %abs.display(), "skipping missing plugin manifest path");
+            continue;
+        };
+        if meta.is_dir() {
+            let mut found = glob_ext_flat(&abs, ext).await;
+            stamp_component_root(&mut found, &abs);
+            out.extend(found);
+        } else if abs
+            .extension()
+            .and_then(|s| s.to_str())
+            .is_some_and(|e| e.eq_ignore_ascii_case(ext))
         {
             let root = abs.parent().unwrap_or(plugin_dir).to_path_buf();
             out.push(ComponentPath {
@@ -1426,6 +1546,37 @@ async fn glob_md(dir: &Path) -> Vec<ComponentPath> {
     out
 }
 
+/// Collect every file directly under `dir` whose extension matches `ext`
+/// (case-insensitive), sorted by path. Unlike [`glob_md`], this does NOT
+/// recurse into subdirectories — a bare, single-level `readdir()`, matching
+/// the oracle's theme (`.json`) and workflow (`.js`) directory readers (both
+/// a plain `fs.readdir(dir)` over just that directory's direct entries, with
+/// no subdirectory walk). Returns an empty vec when `dir` does not exist.
+async fn glob_ext_flat(dir: &Path, ext: &str) -> Vec<ComponentPath> {
+    let mut out = Vec::new();
+    let Ok(mut entries) = tokio::fs::read_dir(dir).await else {
+        return out;
+    };
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        let is_dir = entry.file_type().await.map(|t| t.is_dir()).unwrap_or(false);
+        if is_dir {
+            continue;
+        }
+        let p = entry.path();
+        if p.extension()
+            .and_then(|s| s.to_str())
+            .is_some_and(|e| e.eq_ignore_ascii_case(ext))
+        {
+            out.push(ComponentPath {
+                path: p,
+                metadata: component_root_metadata(dir),
+            });
+        }
+    }
+    out.sort_by(|a, b| a.path.cmp(&b.path));
+    out
+}
+
 /// Load the plugin settings understood by Claude Code's plugin runtime. A
 /// valid plugin-root `settings.json` takes precedence over manifest `settings`;
 /// an absent or malformed file falls back to the manifest. Unknown keys are
@@ -1706,6 +1857,208 @@ mod tests {
             })
             .collect();
         assert_eq!(skills, vec!["base", "extra"]);
+    }
+
+    /// Themes (`.json`) and workflows (`.js`) auto-scan when the manifest
+    /// declares neither — and the scan is FLAT (one level): a file nested one
+    /// directory deeper than the component root is not picked up, matching
+    /// the oracle's plain (non-recursive) `readdir()` reader for both
+    /// component kinds (unlike the recursive `.md` walk `commands`/`agents`/
+    /// `output-styles` use).
+    #[tokio::test]
+    async fn themes_and_workflows_auto_scan_flat_when_undeclared() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin = tmp.path();
+        fs::create_dir_all(plugin.join(branding::PLUGIN_MANIFEST_DIR)).unwrap();
+        fs::create_dir_all(plugin.join("themes/nested")).unwrap();
+        fs::create_dir_all(plugin.join("workflows/nested")).unwrap();
+        fs::write(
+            plugin
+                .join(branding::PLUGIN_MANIFEST_DIR)
+                .join("plugin.json"),
+            r#"{"name":"demo"}"#,
+        )
+        .unwrap();
+        fs::write(plugin.join("themes/dark.json"), "{}").unwrap();
+        fs::write(plugin.join("themes/nested/deep.json"), "{}").unwrap();
+        fs::write(plugin.join("workflows/deploy.js"), "// workflow").unwrap();
+        fs::write(plugin.join("workflows/nested/deep.js"), "// workflow").unwrap();
+
+        let (_id, manifest) = load_plugin_from_path(plugin).await.unwrap();
+        let themes: Vec<_> = manifest
+            .components
+            .themes
+            .iter()
+            .map(|c| c.path.file_name().unwrap().to_str().unwrap().to_string())
+            .collect();
+        assert_eq!(themes, vec!["dark.json"], "flat scan only, no nested/");
+
+        let workflows: Vec<_> = manifest
+            .components
+            .workflows
+            .iter()
+            .map(|c| c.path.file_name().unwrap().to_str().unwrap().to_string())
+            .collect();
+        assert_eq!(workflows, vec!["deploy.js"], "flat scan only, no nested/");
+    }
+
+    /// A manifest-declared `themes`/`workflows` path REPLACES (does not merge
+    /// with) the directory auto-scan — same rule as `outputStyles`/`agents`.
+    /// Also exercises the `union([path, path[]])` array form and the
+    /// single-file-path form.
+    #[tokio::test]
+    async fn declared_themes_and_workflows_replace_the_auto_scan() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin = tmp.path();
+        fs::create_dir_all(plugin.join(branding::PLUGIN_MANIFEST_DIR)).unwrap();
+        fs::create_dir_all(plugin.join("themes")).unwrap();
+        fs::create_dir_all(plugin.join("custom-themes")).unwrap();
+        fs::create_dir_all(plugin.join("workflows")).unwrap();
+        fs::write(
+            plugin
+                .join(branding::PLUGIN_MANIFEST_DIR)
+                .join("plugin.json"),
+            r#"{
+                "name":"demo",
+                "themes":["./custom-themes"],
+                "workflows":"./workflows/solo.js"
+            }"#,
+        )
+        .unwrap();
+        fs::write(plugin.join("themes/auto.json"), "{}").unwrap();
+        fs::write(plugin.join("custom-themes/custom.json"), "{}").unwrap();
+        fs::write(plugin.join("workflows/solo.js"), "// solo").unwrap();
+        fs::write(plugin.join("workflows/ignored.js"), "// ignored").unwrap();
+
+        let (_id, manifest) = load_plugin_from_path(plugin).await.unwrap();
+        let themes: Vec<_> = manifest
+            .components
+            .themes
+            .iter()
+            .map(|c| c.path.file_name().unwrap().to_str().unwrap().to_string())
+            .collect();
+        assert_eq!(themes, vec!["custom.json"], "auto-scan suppressed");
+
+        let workflows: Vec<_> = manifest
+            .components
+            .workflows
+            .iter()
+            .map(|c| c.path.file_name().unwrap().to_str().unwrap().to_string())
+            .collect();
+        assert_eq!(
+            workflows,
+            vec!["solo.js"],
+            "single declared .js file, not the whole directory"
+        );
+    }
+
+    /// Oracle `gt`: `type`, `title`, and `description` are all required (no
+    /// `.optional()`) on a `userConfig` field. A field missing any of the
+    /// three fails the WHOLE `plugin.json` parse — the same "one bad entry
+    /// sinks the manifest" convention `RawCommandEntry` already establishes —
+    /// rather than silently defaulting to `None`/empty string.
+    #[tokio::test]
+    async fn user_config_field_missing_type_title_or_description_fails_the_whole_manifest() {
+        for missing in ["type", "title", "description"] {
+            let mut field = serde_json::json!({
+                "type": "string",
+                "title": "API token",
+                "description": "token",
+            });
+            field.as_object_mut().unwrap().remove(missing);
+            let manifest_json = serde_json::json!({
+                "name": "demo",
+                "userConfig": { "API_TOKEN": field },
+            });
+
+            let tmp = tempfile::tempdir().unwrap();
+            let plugin = tmp.path();
+            fs::create_dir_all(plugin.join(branding::PLUGIN_MANIFEST_DIR)).unwrap();
+            fs::write(
+                plugin
+                    .join(branding::PLUGIN_MANIFEST_DIR)
+                    .join("plugin.json"),
+                manifest_json.to_string(),
+            )
+            .unwrap();
+
+            assert!(
+                load_plugin_from_path(plugin).await.is_none(),
+                "missing {missing:?} must sink the whole manifest, not just the field"
+            );
+        }
+    }
+
+    /// Oracle `gt`'s `type` is a fixed enum (`string`/`number`/`boolean`/
+    /// `directory`/`file`), not an arbitrary string.
+    #[tokio::test]
+    async fn user_config_field_type_outside_the_fixed_enum_fails_the_whole_manifest() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin = tmp.path();
+        fs::create_dir_all(plugin.join(branding::PLUGIN_MANIFEST_DIR)).unwrap();
+        fs::write(
+            plugin
+                .join(branding::PLUGIN_MANIFEST_DIR)
+                .join("plugin.json"),
+            r#"{
+                "name":"demo",
+                "userConfig":{"API_TOKEN":{"type":"enum","title":"t","description":"d"}}
+            }"#,
+        )
+        .unwrap();
+
+        assert!(
+            load_plugin_from_path(plugin).await.is_none(),
+            "\"enum\" is not one of the fixed userConfig field types"
+        );
+    }
+
+    /// Oracle `Fs`: the TOP-LEVEL `userConfig` map's keys must be identifiers
+    /// (`^[A-Za-z_]\w*$`); a channel's `userConfig` keys carry no such
+    /// constraint (bare `record(i(), gt())`) — a real asymmetry in the
+    /// oracle schema, not a port shortcut.
+    #[tokio::test]
+    async fn top_level_user_config_keys_must_be_identifiers_but_channel_keys_are_unconstrained() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin = tmp.path();
+        fs::create_dir_all(plugin.join(branding::PLUGIN_MANIFEST_DIR)).unwrap();
+        fs::write(
+            plugin
+                .join(branding::PLUGIN_MANIFEST_DIR)
+                .join("plugin.json"),
+            r#"{
+                "name":"demo",
+                "userConfig":{"my-token":{"type":"string","title":"t","description":"d"}}
+            }"#,
+        )
+        .unwrap();
+        assert!(
+            load_plugin_from_path(plugin).await.is_none(),
+            "a hyphenated top-level userConfig key is not a valid identifier"
+        );
+
+        // Channel-level `userConfig` (oracle `Bs`) carries no key-shape
+        // constraint (bare `record(i(), gt())`). Parse `RawPluginChannel`
+        // directly rather than round-tripping through the full
+        // `load_plugin_from_path` -> `validate_plugin_channels` path: that
+        // path ALSO requires the channel's `server` to resolve against this
+        // plugin's discovered `mcpServers`, which — elsewhere in this same
+        // test module (`skip_plugin_mcp_servers_env_suppresses_discovery_for_every_plugin`
+        // and neighbors) — is gated by process-global
+        // `CLAUDE_CODE_SKIP_PLUGIN_MCP_SERVERS`/`LINGXI_SKIP_PLUGIN_MCP_SERVERS`
+        // env vars those tests mutate without serialization; racing a plugin
+        // load with a declared `mcpServers` map against one of them turns an
+        // unrelated concurrent test into a spurious failure here. Testing at
+        // the `RawPluginChannel` grain exercises exactly the mechanism under
+        // test (the key-shape difference) without that hazard.
+        let channel: RawPluginChannel = serde_json::from_str(
+            r#"{"server":"telegram","userConfig":{"my-token":{"type":"string","title":"t","description":"d"}}}"#,
+        )
+        .expect(
+            "a hyphenated CHANNEL userConfig key is fine — the oracle applies no key-shape \
+             constraint there",
+        );
+        assert!(channel.user_config.unwrap().contains_key("my-token"));
     }
 
     #[tokio::test]

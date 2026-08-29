@@ -1060,7 +1060,7 @@ fn write_userconfig_mcp_plugin(root: &Path, dir_name: &str, plugin_name: &str) {
     fs::write(
         plugin_dir.join(".lingxi-plugin").join("plugin.json"),
         format!(
-            r#"{{"name":"{plugin_name}","version":"1.0.0","userConfig":{{"API_TOKEN":{{"description":"token","sensitive":true,"required":true}},"REGION":{{"description":"region","sensitive":false,"required":false,"default":"us-east"}}}}}}"#
+            r#"{{"name":"{plugin_name}","version":"1.0.0","userConfig":{{"API_TOKEN":{{"type":"string","title":"API token","description":"token","sensitive":true,"required":true}},"REGION":{{"type":"string","title":"Region","description":"region","sensitive":false,"required":false,"default":"us-east"}}}}}}"#
         ),
     )
     .unwrap();

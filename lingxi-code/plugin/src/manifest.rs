@@ -117,6 +117,20 @@ pub struct PluginComponents {
     pub skills: Vec<ComponentPath>,
     /// Output-style files.
     pub output_styles: Vec<ComponentPath>,
+    /// Theme definition files (`.json`; `themes` in `plugin.json`). Oracle:
+    /// "Path to a themes directory or file, relative to the plugin root.
+    /// When set, the themes/ directory is not auto-loaded — list its files
+    /// here if you want both." A manifest declaration REPLACES (does not
+    /// merge with) the `themes/` auto-scan, matching [`Self::output_styles`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub themes: Vec<ComponentPath>,
+    /// Workflow script files (`.js`; `workflows` in `plugin.json`). Oracle:
+    /// "Path to a workflows directory or .js file, relative to the plugin
+    /// root. When set, the workflows/ directory is not auto-loaded — list
+    /// its files here if you want both." Replaces (does not merge with) the
+    /// `workflows/` auto-scan, matching [`Self::output_styles`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub workflows: Vec<ComponentPath>,
     /// Inline hook definitions.
     pub hooks: Vec<HookDefinition>,
     /// MCP servers contributed by this plugin, keyed by logical name. Always
@@ -175,17 +189,25 @@ pub struct UserConfigSchema {
 }
 
 /// One declared user-config field.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+///
+/// Deserialization is hand-written (see the `Deserialize` impl below) rather
+/// than derived: oracle schema `gt` requires `type`/`title`/`description` and
+/// restricts `type` to a fixed enum — see [`UserConfigField::deserialize`].
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct UserConfigField {
-    /// Declared input type (`string`, `number`, `boolean`, `directory`, or
-    /// `file`). Kept as a string so a newer Claude Code field type remains
-    /// forward-compatible instead of making an installed plugin unloadable.
+    /// Declared input type: one of `string`, `number`, `boolean`,
+    /// `directory`, `file` (oracle `gt`'s `type` — a required, fixed enum,
+    /// not an arbitrary string). Kept as `Option<String>` at the type level
+    /// only for [`Default`]/round-trip convenience; a value straight off
+    /// `plugin.json` is always `Some` after [`UserConfigField::deserialize`]
+    /// validates it.
     #[serde(rename = "type", default, skip_serializing_if = "Option::is_none")]
     pub value_type: Option<String>,
-    /// Label shown in the configuration dialog.
+    /// Label shown in the configuration dialog. Oracle: required (no
+    /// `.optional()`); see [`Self::value_type`] on the `Option` wrapper.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
-    /// Help text for the host UI.
+    /// Help text for the host UI. Oracle: required (no `.optional()`).
     #[serde(default)]
     pub description: String,
     /// If `true` the value is fetched through the secret-storage backend.
@@ -208,6 +230,67 @@ pub struct UserConfigField {
     /// Optional numeric upper bound.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max: Option<f64>,
+}
+
+/// The fixed `type` enum oracle schema `gt` accepts for a `userConfig` field.
+/// Any other string (including one merely absent) fails the field the same
+/// way a malformed `commands` entry fails the whole `plugin.json` parse (see
+/// `RawCommandEntry` in `discovery.rs`) — not silently coerced or dropped.
+const USER_CONFIG_FIELD_TYPES: [&str; 5] = ["string", "number", "boolean", "directory", "file"];
+
+impl<'de> Deserialize<'de> for UserConfigField {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct Raw {
+            #[serde(rename = "type", default)]
+            value_type: Option<String>,
+            #[serde(default)]
+            title: Option<String>,
+            #[serde(default)]
+            description: Option<String>,
+            #[serde(default)]
+            sensitive: bool,
+            #[serde(default)]
+            required: bool,
+            #[serde(default)]
+            default: Option<serde_json::Value>,
+            #[serde(default)]
+            multiple: Option<bool>,
+            #[serde(default)]
+            min: Option<f64>,
+            #[serde(default)]
+            max: Option<f64>,
+        }
+        let raw = Raw::deserialize(deserializer)?;
+        let value_type = raw.value_type.ok_or_else(|| {
+            serde::de::Error::custom("userConfig field is missing required \"type\"")
+        })?;
+        if !USER_CONFIG_FIELD_TYPES.contains(&value_type.as_str()) {
+            return Err(serde::de::Error::custom(format!(
+                "userConfig field \"type\" must be one of {USER_CONFIG_FIELD_TYPES:?}, got {value_type:?}"
+            )));
+        }
+        let title = raw.title.ok_or_else(|| {
+            serde::de::Error::custom("userConfig field is missing required \"title\"")
+        })?;
+        let description = raw.description.ok_or_else(|| {
+            serde::de::Error::custom("userConfig field is missing required \"description\"")
+        })?;
+        Ok(UserConfigField {
+            value_type: Some(value_type),
+            title: Some(title),
+            description,
+            sensitive: raw.sensitive,
+            required: raw.required,
+            default: raw.default,
+            multiple: raw.multiple,
+            min: raw.min,
+            max: raw.max,
+        })
+    }
 }
 
 /// A plugin's persisted `userConfig` state at one settings scope: the

@@ -16,3 +16,16 @@ export function ghostButtonStyle(t: ReturnType<typeof useT>, disabled = false, d
     fontSize: 12, fontWeight: 500, display: 'inline-flex', alignItems: 'center', gap: 5,
   } as const;
 }
+
+/**
+ * Shared inline text-field/select chrome, same "page-local styling, not a
+ * layout primitive" reasoning as `ghostButtonStyle` above — pulled out once
+ * four Task 18 pages (`Permissions`/`ToolsAgent`/`McpServers`/`Plugins`) had
+ * each grown their own byte-identical copy (Task 18 fix round 1, Minor).
+ */
+export function inputStyle(t: ReturnType<typeof useT>) {
+  return {
+    padding: '6px 10px', borderRadius: 7, border: `0.5px solid ${t.border}`,
+    background: t.surface, color: t.text, fontSize: 12.5, fontFamily: 'inherit',
+  } as const;
+}

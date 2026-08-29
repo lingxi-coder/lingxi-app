@@ -163,3 +163,57 @@ test('a malformed settings snapshot surfaces as an error banner instead of throw
   const { state } = await runScenario('malformed-snapshot');
   assert.equal(state.hasSnapshotError, true);
 });
+
+test('all six Task 18 pages are actually registered in PAGE_CONTENT, not just declared in nav.ts', async () => {
+  // Task 18 fix round 1, Important: the older registration test only
+  // checked `nav.ts`'s `implemented` flag — true before Task 18's diff too,
+  // since `nav.ts` was untouched. This checks the thing Task 18 actually
+  // added: selecting each page renders real content (`placeholderKind ===
+  // null`), not the "not wired yet" placeholder a forgotten `PAGE_CONTENT`
+  // entry would silently fall back to.
+  const { placeholderKinds, afterHooksEscapeHatch } = await runScenario('page-content');
+  for (const id of ['permissions', 'tools-agent', 'skills', 'mcp', 'hooks', 'plugins']) {
+    assert.equal(placeholderKinds[id], null, `${id} must render real content, not a placeholder`);
+  }
+  // hooksPageModel().escapeHatch actually drives the button's navigation
+  // target: clicking it must land on `raw-json`'s own "not wired yet"
+  // placeholder (Task 19 hasn't registered it), not a no-op.
+  assert.equal(afterHooksEscapeHatch.placeholderKind, 'not-wired', 'the escape-hatch button must navigate to raw-json');
+});
+
+test('switching layers re-seeds a dirty draft field instead of leaving stale text next to a different layer\'s data', async () => {
+  // Task 18 fix round 1, Critical: `ToolsAgent`'s `enabledTools` input and
+  // `Plugins`' per-plugin config textarea are both seeded via `useState`'s
+  // one-time initializer with no re-seed on `editingLayer` change and no
+  // remount `key` from the shell — so a save after switching layers could
+  // write one layer's stale text into a different layer entirely
+  // (`enabledTools` is `ConcatDedup`, so that duplicates permanently).
+  const {
+    toolsInitial, toolsDirty, toolsAfterSwitch,
+    configInitial, configDirty, configAfterSwitch,
+  } = await runScenario('layer-reseed');
+
+  assert.equal(toolsInitial, 'Bash', 'the user layer set enabledTools to ["Bash"]');
+  assert.equal(toolsDirty, 'Dirty,Value', 'the field must reflect what was typed before any layer switch');
+  assert.equal(
+    toolsAfterSwitch, '',
+    'switching to the project layer (which set nothing) must re-seed the field to empty, not leave the dirty text or the old user-layer value sitting there',
+  );
+
+  assert.equal(configInitial, JSON.stringify({ from: 'user' }, null, 2));
+  assert.equal(configDirty, 'not even json', 'the textarea must reflect what was typed before any layer switch');
+  assert.equal(
+    configAfterSwitch, JSON.stringify({ from: 'project' }, null, 2),
+    'switching from user to project must re-seed the SAME plugin id\'s textarea with project\'s own config, not the dirty text or the stale user-layer value',
+  );
+});
+
+test('adding an allow rule dispatches exactly what capturePermissionEdit would produce, not an inline shape that happens to agree with it today', async () => {
+  const { lastPermissionRuleCall } = await runScenario('permission-rule-dispatch');
+  assert.deepEqual(lastPermissionRuleCall, {
+    destination: 'user',
+    behavior: 'allow',
+    add: ['Bash(ls:*)'],
+    remove: [],
+  });
+});

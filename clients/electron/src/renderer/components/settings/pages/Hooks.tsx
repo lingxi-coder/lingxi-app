@@ -1,8 +1,6 @@
-import { Card, MergedBadge, MergedNotice, OverriddenNotice, Row } from '../rows';
+import { Card, FieldProvenanceNotice, Row } from '../rows';
 import { useT } from '../../../theme/ThemeContext';
 import type { PageContentProps } from '../SettingsScreen';
-import { isEditableLayer } from './CustomProviders';
-import { rowState } from '../useEngineSettings';
 import { ghostButtonStyle } from './ghostButton';
 
 export interface HookEventSummary {
@@ -24,7 +22,11 @@ export interface HooksPageModel {
  * substantial task). `editable`/`escapeHatch` are literal types, not
  * booleans/strings computed from input, so a future edit that tries to make
  * this page writable has to change the TYPE, which a test can catch —
- * pinned per the brief's own test text.
+ * pinned per the brief's own test text. The render below drives its "开在
+ * JSON 里编辑" button's navigation target FROM `model.escapeHatch` (Task 18
+ * fix round 1, Important) rather than a hardcoded `'raw-json'` literal at
+ * the call site, so this field is something the page actually consults
+ * instead of a value the test checks in isolation.
  */
 export function hooksPageModel(effective: Record<string, unknown>): HooksPageModel {
   const hooks = effective['hooks'];
@@ -51,25 +53,13 @@ export function hooksPageModel(effective: Record<string, unknown>): HooksPageMod
 export function Hooks({ snapshot, editingLayer, onNavigate, onJumpToLayer }: PageContentProps) {
   const t = useT();
   const model = hooksPageModel(snapshot?.effective ?? {});
-  const hooksRowState = snapshot ? rowState(snapshot, 'hooks', editingLayer) : null;
 
   return (
     <Card title="Hooks（只读）">
       <div style={{ padding: '10px 18px 0', fontSize: 12, color: t.text3, lineHeight: 1.6 }}>
         Hooks 是嵌套 JSON，这个页面只做罗列，不提供编辑；需要修改时请跳转到原始 JSON 页面。
       </div>
-      {hooksRowState?.kind === 'merged' && (
-        <Row title="生效值" badge={<MergedBadge />} align="center"><MergedNotice editingLayer={editingLayer} /></Row>
-      )}
-      {hooksRowState?.kind === 'overridden' && (
-        <Row title="生效值" align="center">
-          <OverriddenNotice
-            editingLayer={editingLayer}
-            effectiveLayer={hooksRowState.by}
-            onJump={() => { if (isEditableLayer(hooksRowState.by)) onJumpToLayer(hooksRowState.by); }}
-          />
-        </Row>
-      )}
+      <FieldProvenanceNotice snapshot={snapshot} fieldKey="hooks" editingLayer={editingLayer} onJumpToLayer={onJumpToLayer} label="生效值" />
       {model.events.length === 0 && (
         <div style={{ padding: '14px 18px', color: t.text4, fontSize: 12.5 }}>没有配置任何 hook。</div>
       )}
@@ -77,7 +67,7 @@ export function Hooks({ snapshot, editingLayer, onNavigate, onJumpToLayer }: Pag
         <Row key={entry.event} align="center" title={entry.event} desc={`${entry.count} 条匹配规则`}>{null}</Row>
       ))}
       <Row title="在 JSON 中编辑" desc="跳转到当前层的原始 JSON 页面。" align="center">
-        <button type="button" onClick={() => onNavigate('raw-json')} style={ghostButtonStyle(t)}>打开原始 JSON</button>
+        <button type="button" data-testid="hooks-open-raw-json" onClick={() => onNavigate(model.escapeHatch)} style={ghostButtonStyle(t)}>打开原始 JSON</button>
       </Row>
     </Card>
   );

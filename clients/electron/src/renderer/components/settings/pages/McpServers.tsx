@@ -3,31 +3,21 @@ import type { McpScopeDto } from '@lingxi/bridge-client';
 import { Card, ProvenanceBadge, Row } from '../rows';
 import { useT } from '../../../theme/ThemeContext';
 import type { PageContentProps } from '../SettingsScreen';
-import { ghostButtonStyle } from './ghostButton';
+import { parseJsonObjectInput } from '../jsonInput';
+import { ghostButtonStyle, inputStyle } from './ghostButton';
+
+// Re-exported so callers that used to import this FROM this file (including
+// `settings-coding-pages.test.ts`) keep working now that the canonical
+// definition lives in `../jsonInput` (Task 18 fix round 1, Minor — a
+// generic JSON-object parser should not create a page-to-page dependency,
+// which is what `Plugins.tsx` importing it from here did).
+export { parseJsonObjectInput };
 
 const SCOPES: { id: McpScopeDto; label: string }[] = [
   { id: 'user', label: '用户 (~/.lingxi.json)' },
   { id: 'local', label: '本地 (~/.lingxi.json projects[…])' },
   { id: 'project', label: '项目 (<project>/.mcp.json)' },
 ];
-
-export function parseJsonObjectInput(text: string): { config: Record<string, unknown> } | { error: string } {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(text);
-  } catch (cause) {
-    return { error: cause instanceof Error ? `不是合法的 JSON：${cause.message}` : '不是合法的 JSON。' };
-  }
-  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-    return { error: '服务器配置必须是一个 JSON 对象，例如 {"command":"npx","args":["-y","pkg"]}。' };
-  }
-  return { config: parsed as Record<string, unknown> };
-}
-
-const inputStyle = (t: ReturnType<typeof useT>) => ({
-  padding: '6px 10px', borderRadius: 7, border: `0.5px solid ${t.border}`,
-  background: t.surface, color: t.text, fontSize: 12.5, fontFamily: 'inherit',
-} as const);
 
 /**
  * MCP is NOT layered (`nav.ts` marks it `layered: false`) — it owns three
@@ -59,6 +49,19 @@ const inputStyle = (t: ReturnType<typeof useT>) => ({
  *   add/remove act on a name the user types, and `remove_mcp_server` is
  *   idempotent server-side, so removing a name that never existed in that
  *   scope is a safe no-op rather than an error.
+ *
+ * **Task 18 fix round 1, Important**: the gap above is worse than the first
+ * cut of this page said. A project-scope server held at
+ * `McpServerBlockReason::ProjectPendingApproval` (`mcp/src/server_gate.rs`)
+ * still enters the registry with `McpServerConfig.disabled = true`
+ * (`mcp/src/connection.rs`) and is seeded as `Disconnected` — which renders
+ * in the "运行状态" list below as `stdio · disconnected`, byte-identical to
+ * a server that connected once and shut down cleanly, or one that was never
+ * reachable. The prose warning inside the "添加 / 更新服务器" card only
+ * shows up when someone actually selects Project scope there; a person who
+ * never touches that selector would see an ambiguous row and nothing else.
+ * The disclosure in the "运行状态" card header below is UNCONDITIONAL for
+ * exactly that reason.
  */
 export function McpServers({ bridge }: PageContentProps) {
   const t = useT();
@@ -105,6 +108,11 @@ export function McpServers({ bridge }: PageContentProps) {
       <Card title="运行状态">
         <div style={{ padding: '10px 18px 0', fontSize: 12, color: t.text3, lineHeight: 1.6 }}>
           这份列表反映当前实际连接的服务器（跨三个可写域，加上只读的 Dynamic / Enterprise 来源合并展示），引擎没有上报每一项具体来自哪个存储位置——所以这里不能按域拆分，也无法把插件（Dynamic）或托管策略（Enterprise）提供的只读条目单独标出。下方的新增/移除操作是对着你选的域「盲写」，不是对这份列表里某一行的编辑。
+        </div>
+        <div style={{ padding: '8px 18px 0', fontSize: 12, color: t.warn, lineHeight: 1.6 }}>
+          一个卡在「待审批」状态的项目域服务器，在这份列表里显示为 <code className="mono">disconnected</code>
+          ——与一个正常连接后又断开、或从未连接过的服务器完全相同，本页无法把这两种情况区分开，不要把
+          「disconnected」直接读成「这个服务器干净地停止了」。
         </div>
         {servers.length === 0 && (
           <div style={{ padding: '14px 18px', color: t.text4, fontSize: 12.5 }}>没有已连接的 MCP 服务器，或引擎尚未上报。</div>

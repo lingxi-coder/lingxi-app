@@ -1,49 +1,11 @@
-import { useState } from 'react';
-import { Card, MergedBadge, MergedNotice, OverriddenNotice, Row } from '../rows';
+import { useEffect, useRef, useState } from 'react';
+import { Card, FieldProvenanceNotice, Row } from '../rows';
 import { useT } from '../../../theme/ThemeContext';
 import { Toggle } from '../primitives';
-import type { PageContentProps } from '../SettingsScreen';
-import { isEditableLayer } from './CustomProviders';
-import { rowState, type SettingsSnapshot } from '../useEngineSettings';
-import { ghostButtonStyle } from './ghostButton';
-import { parseJsonObjectInput } from './McpServers';
-
-/**
- * `enabledPlugins` / `pluginConfigs` / `additionalMarketplaces` as
- * `editingLayer`'s OWN raw object — never `snapshot.effective`. All three
- * are `DeepMerge` keys (`engine/src/settings/schema.rs`'s
- * `MERGE_STRATEGIES`), same reasoning as `CustomProviders.providersFromLayer`.
- */
-function objectFromLayer(snapshot: SettingsSnapshot | null, layer: string, key: string): Record<string, unknown> {
-  const value = snapshot?.layers?.[layer]?.[key];
-  return value && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
-}
-
-function ProvenanceNotice({
-  snapshot, keyName, editingLayer, onJumpToLayer,
-}: { snapshot: SettingsSnapshot | null; keyName: string; editingLayer: PageContentProps['editingLayer']; onJumpToLayer: PageContentProps['onJumpToLayer'] }) {
-  const state = snapshot ? rowState(snapshot, keyName, editingLayer) : null;
-  if (state?.kind === 'merged') {
-    return <Row title="生效层" badge={<MergedBadge />} align="center"><MergedNotice editingLayer={editingLayer} /></Row>;
-  }
-  if (state?.kind === 'overridden') {
-    return (
-      <Row title="生效层" align="center">
-        <OverriddenNotice
-          editingLayer={editingLayer}
-          effectiveLayer={state.by}
-          onJump={() => { if (isEditableLayer(state.by)) onJumpToLayer(state.by); }}
-        />
-      </Row>
-    );
-  }
-  return null;
-}
-
-const inputStyle = (t: ReturnType<typeof useT>) => ({
-  padding: '6px 10px', borderRadius: 7, border: `0.5px solid ${t.border}`,
-  background: t.surface, color: t.text, fontSize: 12.5, fontFamily: 'inherit',
-} as const);
+import type { EditableLayer, PageContentProps } from '../SettingsScreen';
+import { objectFromLayer } from '../layerFields';
+import { parseJsonObjectInput } from '../jsonInput';
+import { ghostButtonStyle, inputStyle } from './ghostButton';
 
 /**
  * Edits `enabledPlugins` (keyed by `plugin@marketplace` → truthy/config
@@ -72,6 +34,21 @@ export function Plugins({ bridge, snapshot, editingLayer, onJumpToLayer }: PageC
   const [saving, setSaving] = useState<string | null>(null);
   const [saveError, setSaveError] = useState<string | null>(null);
 
+  // Hygiene, not a correctness fix like `PluginConfigRow`'s own effect below:
+  // these three are always-blank drafts (never seeded FROM a layer's data —
+  // there is no "load an existing marketplace/plugin id into this field to
+  // edit it" affordance on this page), so a stale value here cannot fork
+  // data across layers the way a SEEDED field could. Clearing them on layer
+  // switch just avoids "I typed this for `user`, forgot, switched to
+  // `project`, and it's still sitting there."
+  useEffect(() => {
+    setNewPluginId('');
+    setNewMarketplaceName('');
+    setNewMarketplaceSource('{\n  "source": "https://example.test/marketplace.json"\n}');
+    setSaveError(null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [editingLayer]);
+
   const write = (patch: Record<string, unknown>, key: string) => {
     setSaving(key);
     setSaveError(null);
@@ -86,31 +63,23 @@ export function Plugins({ bridge, snapshot, editingLayer, onJumpToLayer }: PageC
   return (
     <>
       <Card title="已启用的插件 (enabledPlugins)">
-        <ProvenanceNotice snapshot={snapshot} keyName="enabledPlugins" editingLayer={editingLayer} onJumpToLayer={onJumpToLayer} />
+        <FieldProvenanceNotice snapshot={snapshot} fieldKey="enabledPlugins" editingLayer={editingLayer} onJumpToLayer={onJumpToLayer} />
         {pluginNames.length === 0 && (
           <div style={{ padding: '14px 18px', color: t.text4, fontSize: 12.5 }}>还没有启用任何插件。</div>
         )}
         {pluginNames.map((id) => (
-          <Row key={id} align="center" title={<span className="mono" style={{ fontSize: 12.5 }}>{id}</span>} desc="key 格式为 plugin@marketplace">
-            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-              <Toggle
-                value={enabledPlugins[id] !== false}
-                onChange={saving === 'enabledPlugins' ? () => undefined : (v) => write({ enabledPlugins: { ...enabledPlugins, [id]: v } }, 'enabledPlugins')}
-              />
-              <button
-                type="button"
-                disabled={saving === 'enabledPlugins'}
-                onClick={() => {
-                  const next = { ...enabledPlugins };
-                  delete next[id];
-                  write({ enabledPlugins: next }, 'enabledPlugins');
-                }}
-                style={ghostButtonStyle(t, saving === 'enabledPlugins', true)}
-              >
-                移除
-              </button>
-            </div>
-          </Row>
+          <PluginToggleRow
+            key={id}
+            id={id}
+            value={enabledPlugins[id]}
+            saving={saving === 'enabledPlugins'}
+            onChange={(next) => write({ enabledPlugins: { ...enabledPlugins, [id]: next } }, 'enabledPlugins')}
+            onRemove={() => {
+              const next = { ...enabledPlugins };
+              delete next[id];
+              write({ enabledPlugins: next }, 'enabledPlugins');
+            }}
+          />
         ))}
         <Row title="新增插件" desc="plugin@marketplace" align="center">
           <div style={{ display: 'flex', gap: 7 }}>
@@ -128,7 +97,7 @@ export function Plugins({ bridge, snapshot, editingLayer, onJumpToLayer }: PageC
       </Card>
 
       <Card title="插件配置 (pluginConfigs)">
-        <ProvenanceNotice snapshot={snapshot} keyName="pluginConfigs" editingLayer={editingLayer} onJumpToLayer={onJumpToLayer} />
+        <FieldProvenanceNotice snapshot={snapshot} fieldKey="pluginConfigs" editingLayer={editingLayer} onJumpToLayer={onJumpToLayer} />
         {Object.keys(pluginConfigs).length === 0 && (
           <div style={{ padding: '14px 18px', color: t.text4, fontSize: 12.5 }}>还没有插件配置。</div>
         )}
@@ -137,6 +106,7 @@ export function Plugins({ bridge, snapshot, editingLayer, onJumpToLayer }: PageC
             key={id}
             id={id}
             config={config}
+            editingLayer={editingLayer}
             saving={saving === 'pluginConfigs'}
             onSave={(next) => write({ pluginConfigs: { ...pluginConfigs, [id]: next } }, 'pluginConfigs')}
             onRemove={() => {
@@ -149,7 +119,7 @@ export function Plugins({ bridge, snapshot, editingLayer, onJumpToLayer }: PageC
       </Card>
 
       <Card title="市场 (additionalMarketplaces)">
-        <ProvenanceNotice snapshot={snapshot} keyName="additionalMarketplaces" editingLayer={editingLayer} onJumpToLayer={onJumpToLayer} />
+        <FieldProvenanceNotice snapshot={snapshot} fieldKey="additionalMarketplaces" editingLayer={editingLayer} onJumpToLayer={onJumpToLayer} />
         {marketplaceNames.length === 0 && (
           <div style={{ padding: '14px 18px', color: t.text4, fontSize: 12.5 }}>还没有额外的市场。</div>
         )}
@@ -202,12 +172,68 @@ export function Plugins({ bridge, snapshot, editingLayer, onJumpToLayer }: PageC
   );
 }
 
+/**
+ * Task 18 fix round 1, Minor: `enabledPlugins[id]` is not always a plain
+ * boolean — it can be a config-carrying object. The old inline toggle
+ * (`enabledPlugins[id] !== false` for "on", writing a hardcoded `true` for
+ * "on" and `false` for "off") treated any truthy value as indistinguishable
+ * from `true`, so switching a config-object entry off and back on replaced
+ * the object with the literal `true`, discarding it. This component
+ * remembers the last truthy value it saw (a `ref`, not `state` — the
+ * remembered value must survive the "off" render, where `value` itself is
+ * `false` and so cannot be read back from props) and restores exactly that
+ * value when toggled back on, rather than always writing `true`.
+ */
+function PluginToggleRow({
+  id, value, saving, onChange, onRemove,
+}: { id: string; value: unknown; saving: boolean; onChange(next: unknown): void; onRemove(): void }) {
+  const t = useT();
+  const lastEnabledValue = useRef<unknown>(value !== false ? value : true);
+  if (value !== false) lastEnabledValue.current = value;
+  const enabled = value !== false;
+  return (
+    <Row align="center" title={<span className="mono" style={{ fontSize: 12.5 }}>{id}</span>} desc="key 格式为 plugin@marketplace">
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+        <Toggle
+          value={enabled}
+          onChange={saving ? () => undefined : (next) => onChange(next ? lastEnabledValue.current : false)}
+        />
+        <button type="button" disabled={saving} onClick={onRemove} style={ghostButtonStyle(t, saving, true)}>
+          移除
+        </button>
+      </div>
+    </Row>
+  );
+}
+
 function PluginConfigRow({
-  id, config, saving, onSave, onRemove,
-}: { id: string; config: unknown; saving: boolean; onSave(next: Record<string, unknown>): void; onRemove(): void }) {
+  id, config, editingLayer, saving, onSave, onRemove,
+}: {
+  id: string; config: unknown; editingLayer: EditableLayer; saving: boolean;
+  onSave(next: Record<string, unknown>): void; onRemove(): void;
+}) {
   const t = useT();
   const [text, setText] = useState(JSON.stringify(config, null, 2));
   const [error, setError] = useState<string | null>(null);
+
+  // Task 18 fix round 1, Critical: this row is keyed by PLUGIN ID
+  // (`Plugins`' `.map` above), not by layer, and `useState`'s initializer
+  // only runs on first mount — so switching `editingLayer` while a row for
+  // the SAME id exists in both layers reused the existing component
+  // instance with the PREVIOUS layer's text still in the textarea, even
+  // though `config` (the prop) had already changed to the new layer's
+  // value. Saving from there would write the stale layer's config into the
+  // newly selected layer — the identical bug `ToolsAgent.tsx` carries a fix
+  // and a comment for, here triggered by two layers happening to share a
+  // plugin id instead of by `enabledTools`. Re-seeding on `editingLayer`
+  // change (not on every `config` change, which also fires right after
+  // THIS row's own successful save) closes it the same way.
+  useEffect(() => {
+    setText(JSON.stringify(config, null, 2));
+    setError(null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [editingLayer]);
+
   return (
     <Row title={<span className="mono" style={{ fontSize: 12.5 }}>{id}</span>} align="start">
       <div style={{ display: 'grid', gap: 7 }}>
@@ -217,10 +243,7 @@ function PluginConfigRow({
           aria-label={`${id} 配置`}
           rows={4}
           className="mono"
-          style={{
-            padding: '6px 10px', borderRadius: 7, border: `0.5px solid ${t.border}`,
-            background: t.surface, color: t.text, fontSize: 12, fontFamily: 'inherit', width: 320, resize: 'vertical',
-          }}
+          style={{ ...inputStyle(t), width: 320, resize: 'vertical' }}
         />
         {error && <span role="alert" style={{ color: t.danger, fontSize: 12 }}>{error}</span>}
         <div style={{ display: 'flex', gap: 7 }}>

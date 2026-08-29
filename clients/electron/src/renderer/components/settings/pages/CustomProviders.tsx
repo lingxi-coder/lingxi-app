@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
-import { Card, MergedBadge, MergedNotice, OverriddenNotice, Row, type Provenance } from '../rows';
+import { Card, isEditableLayer, MergedBadge, MergedNotice, OverriddenNotice, Row } from '../rows';
 import { useT } from '../../../theme/ThemeContext';
-import type { EditableLayer, PageContentProps } from '../SettingsScreen';
+import type { PageContentProps } from '../SettingsScreen';
 import { rowState, type SettingsSnapshot } from '../useEngineSettings';
 import { ghostButtonStyle } from './ghostButton';
 
@@ -12,6 +12,11 @@ import { ghostButtonStyle } from './ghostButton';
  * retyped from memory — and kept in the engine's own declaration order.
  * `lingxi-code/` itself is never edited from this side.
  */
+// Re-exported for existing import sites (including `settings-providers.test.ts`)
+// now that the canonical definition lives in `../rows` (Task 18 fix round 1,
+// Minor — every page needing this predicate now shares one copy).
+export { isEditableLayer };
+
 export const SUPPORTED_PROVIDER_TYPES = [
   'openai', 'openai-responses', 'anthropic', 'gemini', 'azure-openai',
   'bedrock-claude', 'vertex-claude', 'vertex-gemini', 'foundry-claude',
@@ -87,11 +92,6 @@ export interface RoutingDraft {
 export function routingFromLayer(snapshot: SettingsSnapshot | null, layer: string): RoutingDraft {
   const value = snapshot?.layers?.[layer]?.['routing'];
   return value && typeof value === 'object' && !Array.isArray(value) ? (value as RoutingDraft) : {};
-}
-
-/** Whether `layer` is one of the three tabs the layer switcher can actually jump to — `OverriddenNotice.onJump` must not offer to jump to `cli`/`managed`/`env`/`defaults`, which this shell has no tab for. */
-export function isEditableLayer(layer: Provenance): layer is EditableLayer {
-  return layer === 'user' || layer === 'project' || layer === 'local';
 }
 
 /** `"gpt-x, gpt-y"` / one-per-line → `[{id:'gpt-x'},{id:'gpt-y'}]`, blank entries dropped. Pure so the parsing itself is testable independent of any form state. */

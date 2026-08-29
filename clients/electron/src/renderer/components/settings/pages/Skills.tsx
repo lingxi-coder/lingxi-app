@@ -1,11 +1,10 @@
 import { useEffect, useState } from 'react';
 import type { SkillDto } from '@lingxi/bridge-client';
-import { Card, MergedBadge, MergedNotice, OverriddenNotice, Row } from '../rows';
+import { Card, FieldProvenanceNotice, Row } from '../rows';
 import { useT } from '../../../theme/ThemeContext';
 import { Toggle } from '../primitives';
 import type { EditableLayer, PageContentProps } from '../SettingsScreen';
-import { isEditableLayer } from './CustomProviders';
-import { rowState, type SettingsSnapshot } from '../useEngineSettings';
+import { boolFromLayer } from '../layerFields';
 import { ghostButtonStyle } from './ghostButton';
 
 export interface SkillsPageModel {
@@ -32,10 +31,6 @@ export function skillsPageModel(input: { layer: EditableLayer; skills?: SkillDto
   return { skills: input.skills ?? [], layerAffects: 'syncClaudeAiSkills only' };
 }
 
-function boolFromLayer(snapshot: SettingsSnapshot | null, layer: string, key: string): boolean {
-  return snapshot?.layers?.[layer]?.[key] === true;
-}
-
 /**
  * Skills is `layered` per `nav.ts`, but the layer switcher affects exactly
  * ONE row on this page (`syncClaudeAiSkills`) — the skills list itself is a
@@ -49,7 +44,6 @@ export function Skills({ bridge, snapshot, editingLayer, onJumpToLayer }: PageCo
   const t = useT();
   const model = skillsPageModel({ layer: editingLayer, skills: bridge.skillsEvent?.skills });
   const syncEnabled = boolFromLayer(snapshot, editingLayer, 'syncClaudeAiSkills');
-  const syncRowState = snapshot ? rowState(snapshot, 'syncClaudeAiSkills', editingLayer) : null;
 
   const [syncSaving, setSyncSaving] = useState(false);
   const [syncError, setSyncError] = useState<string | null>(null);
@@ -94,18 +88,7 @@ export function Skills({ bridge, snapshot, editingLayer, onJumpToLayer }: PageCo
       </Card>
 
       <Card title="Claude.ai 同步">
-        {syncRowState?.kind === 'merged' && (
-          <Row title="生效层" badge={<MergedBadge />} align="center"><MergedNotice editingLayer={editingLayer} /></Row>
-        )}
-        {syncRowState?.kind === 'overridden' && (
-          <Row title="生效层" align="center">
-            <OverriddenNotice
-              editingLayer={editingLayer}
-              effectiveLayer={syncRowState.by}
-              onJump={() => { if (isEditableLayer(syncRowState.by)) onJumpToLayer(syncRowState.by); }}
-            />
-          </Row>
-        )}
+        <FieldProvenanceNotice snapshot={snapshot} fieldKey="syncClaudeAiSkills" editingLayer={editingLayer} onJumpToLayer={onJumpToLayer} />
         <Row title="syncClaudeAiSkills" desc="是否同步 Claude.ai 上的 skills。这是本页唯一按层写入的设置。" align="center">
           <Toggle value={syncEnabled} onChange={syncSaving ? () => undefined : handleToggleSync} />
         </Row>

@@ -1,79 +1,21 @@
-import { useState } from 'react';
-import { Card, MergedBadge, MergedNotice, OverriddenNotice, Row } from '../rows';
+import { useEffect, useState } from 'react';
+import { Card, FieldProvenanceNotice, Row } from '../rows';
 import { useT } from '../../../theme/ThemeContext';
 import { Toggle } from '../primitives';
 import type { PageContentProps } from '../SettingsScreen';
-import { isEditableLayer } from './CustomProviders';
-import { rowState, type SettingsSnapshot } from '../useEngineSettings';
-import { ghostButtonStyle } from './ghostButton';
-
-/**
- * One key's raw value in `editingLayer`'s OWN settings map — never
- * `snapshot.effective` (the cross-layer merge). Same reasoning as
- * `CustomProviders.providersFromLayer`: `update_settings` replaces a key
- * WHOLESALE in one layer's file, so basing a write on the merged view would
- * fork other layers' contributions into whichever layer this page saves.
- * Generic over every field on this page rather than one function per field,
- * since none of them need bespoke parsing beyond a type guard.
- */
-function layerValue(snapshot: SettingsSnapshot | null, layer: string, key: string): unknown {
-  return snapshot?.layers?.[layer]?.[key];
-}
-
-export function boolFromLayer(snapshot: SettingsSnapshot | null, layer: string, key: string): boolean {
-  return layerValue(snapshot, layer, key) === true;
-}
-
-export function stringFromLayer(snapshot: SettingsSnapshot | null, layer: string, key: string): string {
-  const value = layerValue(snapshot, layer, key);
-  return typeof value === 'string' ? value : '';
-}
-
-export function stringArrayFromLayer(snapshot: SettingsSnapshot | null, layer: string, key: string): string[] {
-  const value = layerValue(snapshot, layer, key);
-  return Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === 'string') : [];
-}
-
-export function stringMapFromLayer(snapshot: SettingsSnapshot | null, layer: string, key: string): Record<string, string> {
-  const value = layerValue(snapshot, layer, key);
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
-  const out: Record<string, string> = {};
-  for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
-    if (typeof v === 'string') out[k] = v;
-  }
-  return out;
-}
+import { boolFromLayer, stringArrayFromLayer, stringFromLayer, stringMapFromLayer } from '../layerFields';
+import { ghostButtonStyle, inputStyle } from './ghostButton';
 
 /** `"a, b\nc"` → `['a','b','c']`, blank entries dropped — same shape as `CustomProviders.parseModelsInput`. */
 export function parseToolList(text: string): string[] {
   return text.split(/[,\n]/).map((entry) => entry.trim()).filter((entry) => entry.length > 0);
 }
 
-const inputStyle = (t: ReturnType<typeof useT>) => ({
-  padding: '6px 10px', borderRadius: 7, border: `0.5px solid ${t.border}`,
-  background: t.surface, color: t.text, fontSize: 12.5, fontFamily: 'inherit',
-} as const);
-
-function ProvenanceNotice({
-  snapshot, keyName, editingLayer, onJumpToLayer,
-}: { snapshot: SettingsSnapshot | null; keyName: string; editingLayer: PageContentProps['editingLayer']; onJumpToLayer: PageContentProps['onJumpToLayer'] }) {
-  const state = snapshot ? rowState(snapshot, keyName, editingLayer) : null;
-  if (state?.kind === 'merged') {
-    return <Row title="生效层" badge={<MergedBadge />} align="center"><MergedNotice editingLayer={editingLayer} /></Row>;
-  }
-  if (state?.kind === 'overridden') {
-    return (
-      <Row title="生效层" align="center">
-        <OverriddenNotice
-          editingLayer={editingLayer}
-          effectiveLayer={state.by}
-          onJump={() => { if (isEditableLayer(state.by)) onJumpToLayer(state.by); }}
-        />
-      </Row>
-    );
-  }
-  return null;
-}
+// Re-exported so callers (and `settings-coding-pages.test.ts`) that used to
+// import these FROM this file keep working now that the canonical
+// definitions live in `../layerFields` (Task 18 fix round 1, Minor — five
+// pages had grown their own copy of this exact gate).
+export { boolFromLayer, stringArrayFromLayer, stringFromLayer, stringMapFromLayer };
 
 function BoolRow({
   title, desc, value, saving, onChange,
@@ -93,7 +35,22 @@ function BoolRow({
  * `update_settings` command (`bridge.updateEngineSettings`) — none of these
  * keys have a dedicated command the way `permissions` does. Every read
  * comes from `snapshot.layers[editingLayer]`, never `snapshot.effective`,
- * for the same reason `CustomProviders` does — see `layerValue` above.
+ * for the same reason `CustomProviders` does — see `../layerFields`.
+ *
+ * **Task 18 fix round 1, Critical**: `toolsText`/`outputStyleText` are
+ * text-editor state SEEDED from the editing layer's value — exactly the
+ * shape `CustomProviders.tsx` already carries a fix and a comment for
+ * (Task 17 fix round 1), except there `useState` only ever reads its
+ * initializer ONCE. Switching `editingLayer` re-runs this component with a
+ * new `enabledTools`/`outputStyle` (correctly re-derived from the new
+ * layer), but a re-render does NOT re-run `useState`'s initializer, and
+ * `SettingsScreen.tsx` mounts this component with no `key` — so the OLD
+ * layer's text just sits there while the card now claims to be editing a
+ * DIFFERENT layer. Saving then writes the stale text into the new layer:
+ * for `enabledTools` (`ConcatDedup`) that's a value now duplicated across
+ * two layers with no single delete that removes it. The effect below
+ * re-seeds both fields whenever `editingLayer` changes, mirroring
+ * `CustomProviders`' own `useEffect([editingLayer])` exactly.
  */
 export function ToolsAgent({ bridge, snapshot, editingLayer, onJumpToLayer }: PageContentProps) {
   const t = useT();
@@ -115,6 +72,22 @@ export function ToolsAgent({ bridge, snapshot, editingLayer, onJumpToLayer }: Pa
   const [saving, setSaving] = useState<string | null>(null);
   const [saveError, setSaveError] = useState<string | null>(null);
 
+  // The Critical fix: re-seed every draft from the NEWLY selected layer's
+  // own value whenever `editingLayer` changes, so a save can never carry a
+  // previous layer's text into the one now selected. Deliberately NOT
+  // depending on `enabledTools`/`outputStyle` themselves — those are
+  // recomputed on every snapshot refresh (including right after THIS page's
+  // own save), and resetting the draft then would fight typing/clobber an
+  // in-flight edit on the layer the user is actually still on.
+  useEffect(() => {
+    setToolsText(enabledTools.join(', '));
+    setOutputStyleText(outputStyle);
+    setOverrideFrom('');
+    setOverrideTo('');
+    setSaveError(null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [editingLayer]);
+
   const write = (patch: Record<string, unknown>, key: string) => {
     setSaving(key);
     setSaveError(null);
@@ -126,7 +99,7 @@ export function ToolsAgent({ bridge, snapshot, editingLayer, onJumpToLayer }: Pa
   return (
     <>
       <Card title="启用的工具 (enabledTools)">
-        <ProvenanceNotice snapshot={snapshot} keyName="enabledTools" editingLayer={editingLayer} onJumpToLayer={onJumpToLayer} />
+        <FieldProvenanceNotice snapshot={snapshot} fieldKey="enabledTools" editingLayer={editingLayer} onJumpToLayer={onJumpToLayer} />
         <Row title="enabledTools" desc="留空表示不限制；按名称列出工具会把可用工具限制在这个列表内。此键跨层做并集去重，不是覆盖。" align="start">
           <div style={{ display: 'grid', gap: 7 }}>
             <input
@@ -171,7 +144,7 @@ export function ToolsAgent({ bridge, snapshot, editingLayer, onJumpToLayer }: Pa
       </Card>
 
       <Card title="模型覆盖 (modelOverrides)">
-        <ProvenanceNotice snapshot={snapshot} keyName="modelOverrides" editingLayer={editingLayer} onJumpToLayer={onJumpToLayer} />
+        <FieldProvenanceNotice snapshot={snapshot} fieldKey="modelOverrides" editingLayer={editingLayer} onJumpToLayer={onJumpToLayer} />
         {Object.keys(modelOverrides).length === 0 && (
           <div style={{ padding: '14px 18px', color: t.text4, fontSize: 12.5 }}>还没有模型覆盖。</div>
         )}

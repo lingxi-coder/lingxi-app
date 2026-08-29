@@ -25,6 +25,7 @@ function Fixture() {
   const [refreshCalls, setRefreshCalls] = useState(0);
   const [closeCalls, setCloseCalls] = useState(0);
   const [restartShouldFail, setRestartShouldFail] = useState<string | null>(null);
+  const [lastPermissionRuleCall, setLastPermissionRuleCall] = useState<unknown>(null);
 
   // `restartBridge` below must stay referentially stable (see the next
   // comment), so it cannot close over `restartShouldFail` state directly —
@@ -42,6 +43,13 @@ function Fixture() {
     if (restartShouldFailRef.current) throw new Error(restartShouldFailRef.current);
   }, []);
   const refreshSettingsSnapshot = useCallback(async () => { setRefreshCalls((n) => n + 1); }, []);
+  // Task 18 fix round 1, Important: records its call so a scenario can
+  // prove `Permissions.tsx` dispatches through `capturePermissionEdit`'s
+  // exact shape end-to-end, not just that the pure function itself
+  // returns the right thing in isolation.
+  const updatePermissionRules = useCallback(async (destination: string, behavior: string, add: string[], remove: string[]) => {
+    setLastPermissionRuleCall({ destination, behavior, add, remove });
+  }, []);
 
   const bridge = {
     activeSession: { projectPath: '/test/project', sessionId: 'session-a' },
@@ -83,7 +91,7 @@ function Fixture() {
     // click a save/add/remove button on them, but they are here so a future
     // scenario that does doesn't have to rediscover this same crash.
     updateEngineSettings: noopAsyncVoid,
-    updatePermissionRules: noopAsyncVoid,
+    updatePermissionRules,
     setDefaultPermissionMode: noopAsyncVoid,
     updateWorkspaceDirectories: noopAsyncVoid,
     upsertMcpServer: noopAsyncVoid,
@@ -109,6 +117,42 @@ function Fixture() {
           active_json: JSON.stringify(active),
         } as SettingsSnapshotEvent);
       },
+      // Task 18 fix round 1 (Critical regression test): each layer's OWN
+      // raw map, keyed exactly like the wire's `layers_json` — lets a
+      // scenario put a DIFFERENT value under the same settings key in two
+      // layers, the precondition for reproducing "switching layers doesn't
+      // re-seed a page's own draft state" (`ToolsAgent`/`Plugins` both had
+      // this bug). `effective` is a naive last-object-wins shallow merge
+      // across the given layers — good enough for these scenarios, which
+      // only ever care about one key at a time.
+      setLayeredSnapshot: (layers: Record<string, Record<string, unknown>>) => {
+        const effective: Record<string, unknown> = {};
+        for (const layerValues of Object.values(layers)) Object.assign(effective, layerValues);
+        setSettingsSnapshotEvent({
+          type: 'settings_snapshot',
+          effective_json: JSON.stringify(effective),
+          provenance_json: JSON.stringify(Object.fromEntries(Object.keys(effective).map((key) => [key, 'user']))),
+          active_json: JSON.stringify(effective),
+          layers_json: JSON.stringify(layers),
+        } as SettingsSnapshotEvent);
+      },
+      clickLayerTab: (layer: string) => {
+        (document.querySelector(`[data-layer="${layer}"]`) as HTMLButtonElement | null)?.click();
+      },
+      // React 16+ tracks whether an input's `value` was set through its own
+      // patched setter to decide whether to fire its synthetic `onChange` —
+      // a plain `el.value = x` followed by a raw `dispatchEvent` is silently
+      // ignored. Going through the underlying native setter first is the
+      // standard workaround.
+      setFieldValue: (selector: string, value: string) => {
+        const field = document.querySelector(selector) as HTMLInputElement | HTMLTextAreaElement | null;
+        if (!field) return;
+        const proto = field.tagName === 'TEXTAREA' ? window.HTMLTextAreaElement.prototype : window.HTMLInputElement.prototype;
+        const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
+        setter?.call(field, value);
+        field.dispatchEvent(new Event('input', { bubbles: true }));
+      },
+      getFieldValue: (selector: string) => (document.querySelector(selector) as HTMLInputElement | HTMLTextAreaElement | null)?.value ?? null,
       setMalformedSnapshot: () => {
         setSettingsSnapshotEvent({
           type: 'settings_snapshot',
@@ -143,10 +187,11 @@ function Fixture() {
         restartCalls,
         refreshCalls,
         closeCalls,
+        lastPermissionRuleCall,
       }),
     };
     return () => { delete window.__settingsScreenTest; };
-  }, [restartCalls, refreshCalls, closeCalls]);
+  }, [restartCalls, refreshCalls, closeCalls, lastPermissionRuleCall]);
 
   return (
     <Theme.Provider value={tokens('light')}>
@@ -175,6 +220,10 @@ declare global {
       setSessionLoading(value: boolean): void;
       setRestartShouldFail(message: string | null): void;
       setSnapshot(effective: Record<string, unknown>, active: Record<string, unknown>): void;
+      setLayeredSnapshot(layers: Record<string, Record<string, unknown>>): void;
+      clickLayerTab(layer: string): void;
+      setFieldValue(selector: string, value: string): void;
+      getFieldValue(selector: string): string | null;
       setMalformedSnapshot(): void;
       clickRestart(): void;
       close(): void;
@@ -201,6 +250,7 @@ declare global {
         restartCalls: number;
         refreshCalls: number;
         closeCalls: number;
+        lastPermissionRuleCall: unknown;
       };
     };
   }

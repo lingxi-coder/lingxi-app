@@ -128,6 +128,100 @@ async function runRestartErrorScenario(webContents) {
   return { afterFailure, afterSuccess };
 }
 
+async function runPageContentScenario(webContents) {
+  // Task 18 fix round 1, Important: the registration test in
+  // `settings-coding-pages.test.ts` only asserted `nav.ts` says
+  // `implemented: true` — true before this task's diff too, since `nav.ts`
+  // was untouched. Nothing anywhere asserted `PAGE_CONTENT` (SettingsScreen.tsx),
+  // which is what actually determines whether selecting one of these six
+  // pages renders real content or the "not wired yet" placeholder. This
+  // scenario selects each and reports `placeholderKind`, which is `null`
+  // only when a real component is mounted.
+  const ids = ['permissions', 'tools-agent', 'skills', 'mcp', 'hooks', 'plugins'];
+  const placeholderKinds = {};
+  for (const id of ids) {
+    await webContents.executeJavaScript(`window.__settingsScreenTest.selectPage(${JSON.stringify(id)})`);
+    const state = await webContents.executeJavaScript('window.__settingsScreenTest.state()');
+    placeholderKinds[id] = state.placeholderKind;
+  }
+
+  // Task 18 fix round 1, Important: `hooksPageModel().escapeHatch` must be
+  // what actually drives the "在 JSON 中编辑" button, not a hardcoded
+  // `'raw-json'` literal at the call site that happens to agree with it.
+  // Proven here by actually clicking the button and checking the shell
+  // navigated to `raw-json` (observable as its own "not wired yet"
+  // placeholder, since Task 19 hasn't registered it) rather than by reading
+  // the model's field in isolation.
+  await webContents.executeJavaScript('window.__settingsScreenTest.selectPage("hooks")');
+  await webContents.executeJavaScript('document.querySelector(\'[data-testid="hooks-open-raw-json"]\')?.click()');
+  const afterHooksEscapeHatch = await webContents.executeJavaScript('window.__settingsScreenTest.state()');
+
+  return { placeholderKinds, afterHooksEscapeHatch };
+}
+
+async function runLayerReseedScenario(webContents) {
+  // Task 18 fix round 1, Critical: `ToolsAgent`'s `enabledTools`/`outputStyle`
+  // text fields and `Plugins`' per-plugin `pluginConfigs` textarea are both
+  // SEEDED from the editing layer's value via `useState`'s one-time
+  // initializer, and `SettingsScreen.tsx` mounts a page with no `key` — so
+  // switching layers used to leave stale text sitting in the field while the
+  // card claimed to be editing a different layer. This reproduces that
+  // exact sequence against the real rendered page (not just the pure
+  // `*FromLayer` reader functions, which were already correct in isolation)
+  // and asserts the field re-seeds.
+  await webContents.executeJavaScript('window.__settingsScreenTest.setHasProject(true)');
+  await webContents.executeJavaScript(
+    "window.__settingsScreenTest.setLayeredSnapshot({ user: { enabledTools: ['Bash'] }, project: {} })",
+  );
+  await webContents.executeJavaScript('window.__settingsScreenTest.selectPage("tools-agent")');
+  const toolsInitial = await webContents.executeJavaScript('window.__settingsScreenTest.getFieldValue(\'[aria-label="enabledTools"]\')');
+  // Dirty the field with text that belongs to NEITHER layer, so a stale
+  // read-back cannot be confused with either layer's real value.
+  await webContents.executeJavaScript('window.__settingsScreenTest.setFieldValue(\'[aria-label="enabledTools"]\', "Dirty,Value")');
+  const toolsDirty = await webContents.executeJavaScript('window.__settingsScreenTest.getFieldValue(\'[aria-label="enabledTools"]\')');
+  await webContents.executeJavaScript('window.__settingsScreenTest.clickLayerTab("project")');
+  const toolsAfterSwitch = await webContents.executeJavaScript('window.__settingsScreenTest.getFieldValue(\'[aria-label="enabledTools"]\')');
+
+  // Same reproduction for `Plugins.tsx`'s `PluginConfigRow`, keyed by
+  // PLUGIN id rather than by layer — the identical bug via a different
+  // seam (React reuses the row's component instance across the layer
+  // switch because the `id` key matches in both layers). Explicitly reset
+  // to the `user` tab first — the tools-agent half above left the shell's
+  // (page-independent) `editingLayer` state on `project`.
+  await webContents.executeJavaScript('window.__settingsScreenTest.clickLayerTab("user")');
+  await webContents.executeJavaScript(
+    'window.__settingsScreenTest.setLayeredSnapshot({ user: { pluginConfigs: { "a@b": { from: "user" } } }, project: { pluginConfigs: { "a@b": { from: "project" } } } })',
+  );
+  await webContents.executeJavaScript('window.__settingsScreenTest.selectPage("plugins")');
+  const configInitial = await webContents.executeJavaScript('window.__settingsScreenTest.getFieldValue(\'[aria-label="a@b 配置"]\')');
+  await webContents.executeJavaScript('window.__settingsScreenTest.setFieldValue(\'[aria-label="a@b 配置"]\', "not even json")');
+  const configDirty = await webContents.executeJavaScript('window.__settingsScreenTest.getFieldValue(\'[aria-label="a@b 配置"]\')');
+  await webContents.executeJavaScript('window.__settingsScreenTest.clickLayerTab("project")');
+  const configAfterSwitch = await webContents.executeJavaScript('window.__settingsScreenTest.getFieldValue(\'[aria-label="a@b 配置"]\')');
+
+  return { toolsInitial, toolsDirty, toolsAfterSwitch, configInitial, configDirty, configAfterSwitch };
+}
+
+async function runPermissionRuleDispatchScenario(webContents) {
+  // Task 18 fix round 1, Important: `capturePermissionEdit` existed only
+  // for the pure-function test to call — `Permissions.tsx`'s handlers built
+  // their `update_permission_rules` call inline, so a regression that
+  // routed a rule edit through `updateEngineSettings` instead would have
+  // left that test green. This drives the REAL "add an allow rule" button
+  // and asserts the mock `bridge.updatePermissionRules` received exactly
+  // what `capturePermissionEdit` would have produced — proving the pin is
+  // load-bearing, not merely self-referential.
+  await webContents.executeJavaScript('window.__settingsScreenTest.selectPage("permissions")');
+  await webContents.executeJavaScript(
+    'window.__settingsScreenTest.setFieldValue(\'[aria-label="新增允许 (allow)规则"]\', "Bash(ls:*)")',
+  );
+  await webContents.executeJavaScript(
+    'document.querySelector(\'[aria-label="新增允许 (allow)规则"]\').nextElementSibling.click()',
+  );
+  const state = await webContents.executeJavaScript('window.__settingsScreenTest.state()');
+  return { lastPermissionRuleCall: state.lastPermissionRuleCall };
+}
+
 async function runFocusTrapScenario(webContents) {
   // Start from a controlled mount: close the default-open dialog, focus the
   // element that will stand in for "whatever opened Settings", then reopen.
@@ -174,6 +268,9 @@ async function main() {
       : scenario === 'session-loading-guard' ? await runSessionLoadingGuardScenario(webContents)
       : scenario === 'restart-error' ? await runRestartErrorScenario(webContents)
       : scenario === 'focus-trap' ? await runFocusTrapScenario(webContents)
+      : scenario === 'page-content' ? await runPageContentScenario(webContents)
+      : scenario === 'layer-reseed' ? await runLayerReseedScenario(webContents)
+      : scenario === 'permission-rule-dispatch' ? await runPermissionRuleDispatchScenario(webContents)
       : await runLayerSwitcherScenario(webContents);
     process.stdout.write(`${JSON.stringify(result)}\n`);
   } finally {

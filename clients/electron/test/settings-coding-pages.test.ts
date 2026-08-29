@@ -14,7 +14,7 @@ import {
   stringMapFromLayer,
 } from '../src/renderer/components/settings/pages/ToolsAgent';
 import { skillsPageModel } from '../src/renderer/components/settings/pages/Skills';
-import { parseJsonObjectInput } from '../src/renderer/components/settings/pages/McpServers';
+import { parseJsonObjectInput } from '../src/renderer/components/settings/jsonInput';
 import { hooksPageModel } from '../src/renderer/components/settings/pages/Hooks';
 import { SETTINGS_NAV } from '../src/renderer/components/settings/nav';
 import type { SettingsSnapshot } from '../src/renderer/components/settings/useEngineSettings';

@@ -1,11 +1,10 @@
 import { useEffect, useState } from 'react';
 import type { ClientCommand, PermissionBehaviorDto, SettingsDestinationDto } from '@lingxi/bridge-client';
-import { Card, MergedBadge, MergedNotice, OverriddenNotice, ProvenanceBadge, Row, type Provenance } from '../rows';
+import { Card, FieldProvenanceNotice, ProvenanceBadge, Row, type Provenance } from '../rows';
 import { useT } from '../../../theme/ThemeContext';
 import type { PageContentProps } from '../SettingsScreen';
-import { isEditableLayer } from './CustomProviders';
 import { rowState, type SettingsSnapshot } from '../useEngineSettings';
-import { ghostButtonStyle } from './ghostButton';
+import { ghostButtonStyle, inputStyle } from './ghostButton';
 
 /**
  * `permissions.{allow,deny,ask,defaultMode,additionalDirectories}` as
@@ -52,6 +51,9 @@ export interface PermissionRuleEdit {
   remove?: string[];
 }
 
+/** The exact wire shape `capturePermissionEdit` returns — narrowed (not the full `ClientCommand` union) so the component can destructure `destination`/`behavior`/`add`/`remove` off it without a cast. */
+export type PermissionRuleCommand = Extract<ClientCommand, { type: 'update_permission_rules' }>;
+
 /**
  * The routing decision this task exists to pin (Task 18 brief's Step 1
  * test, verbatim shape). A permission-rule edit is ALWAYS an
@@ -63,8 +65,16 @@ export interface PermissionRuleEdit {
  * (`PermissionRuleValue::from_rule_string` degrades malformed input to a
  * bare tool name, matching claude-code) — this function does not validate
  * or reject the rule string either; it only shapes the command.
+ *
+ * **Task 18 fix round 1, Important**: `handleAddRule`/`handleRemoveRule`
+ * below now build their command through THIS function instead of calling
+ * `bridge.updatePermissionRules` with inline arguments — before this fix
+ * the function existed only for the test to call, so a regression that
+ * routed a rule edit through `updateEngineSettings` instead would have left
+ * `settings-coding-pages.test.ts` green. Routing the real write path
+ * through it makes the pin load-bearing.
  */
-export function capturePermissionEdit(edit: PermissionRuleEdit): ClientCommand {
+export function capturePermissionEdit(edit: PermissionRuleEdit): PermissionRuleCommand {
   return {
     type: 'update_permission_rules',
     destination: edit.destination ?? 'user',
@@ -80,17 +90,27 @@ export function capturePermissionEdit(edit: PermissionRuleEdit): ClientCommand {
  * file — it never flows through `snapshot.layers`/`rowState`. Pinned as its
  * own function (rather than inlined at the call site) so a future edit that
  * tries to make the bypass row follow `editingLayer` breaks a test instead
- * of shipping quietly, the same reasoning `isEditableLayer` exists for.
+ * of shipping quietly.
  */
 export function bypassRowProvenance(): Provenance {
   return 'device';
 }
 
+/**
+ * `persist_permission_mode` (`permission/src/persist.rs`) accepts exactly
+ * `"default" | "acceptEdits" | "plan" | "dontAsk" | "auto"` and always
+ * refuses `"bypassPermissions"` (`Ok(false)`, a deliberate security
+ * property — see `bypassRefused` below). `auto` was missing from this list
+ * in the first cut of this page (Task 18 fix round 1, Minor) — a user with
+ * `auto` already in their file saw a blank `<select>`, and had no way to
+ * pick it from here either.
+ */
 const DEFAULT_MODE_OPTIONS: { id: string; label: string; danger?: boolean }[] = [
   { id: 'default', label: '默认（每次询问）' },
   { id: 'plan', label: 'Plan（只读探索）' },
   { id: 'acceptEdits', label: '自动接受编辑' },
   { id: 'dontAsk', label: "Don't Ask（拒绝未显式允许的操作）" },
+  { id: 'auto', label: 'Auto（分类器驱动的自动批准，遇到风险时询问）' },
   { id: 'bypassPermissions', label: 'Bypass Permissions（完全放行）', danger: true },
 ];
 
@@ -99,11 +119,6 @@ const BEHAVIOR_SECTIONS: { key: 'allow' | 'deny' | 'ask'; title: string; desc: s
   { key: 'deny', title: '拒绝 (deny)', desc: '匹配的工具调用直接拒绝，不会询问。' },
   { key: 'ask', title: '询问 (ask)', desc: '匹配的工具调用总是询问，即使默认模式会自动放行。' },
 ];
-
-const inputStyle = (t: ReturnType<typeof useT>) => ({
-  padding: '6px 10px', borderRadius: 7, border: `0.5px solid ${t.border}`,
-  background: t.surface, color: t.text, fontSize: 12.5, fontFamily: 'inherit',
-} as const);
 
 function RuleSection({
   title, desc, rules, saving, onAdd, onRemove,
@@ -179,17 +194,19 @@ export function Permissions({ bridge, snapshot, editingLayer, onJumpToLayer }: P
   useEffect(() => { setAttemptedMode(null); }, [editingLayer]);
 
   const handleAddRule = (behavior: PermissionBehaviorDto, rule: string) => {
+    const command = capturePermissionEdit({ destination: editingLayer, behavior, add: [rule] });
     setRuleSaving(true);
     setRuleError(null);
-    void bridge.updatePermissionRules(editingLayer, behavior, [rule], [])
+    void bridge.updatePermissionRules(command.destination, command.behavior, command.add, command.remove)
       .catch((cause) => setRuleError(cause instanceof Error ? cause.message : '无法保存权限规则。'))
       .finally(() => setRuleSaving(false));
   };
 
   const handleRemoveRule = (behavior: PermissionBehaviorDto, rule: string) => {
+    const command = capturePermissionEdit({ destination: editingLayer, behavior, remove: [rule] });
     setRuleSaving(true);
     setRuleError(null);
-    void bridge.updatePermissionRules(editingLayer, behavior, [], [rule])
+    void bridge.updatePermissionRules(command.destination, command.behavior, command.add, command.remove)
       .catch((cause) => setRuleError(cause instanceof Error ? cause.message : '无法移除权限规则。'))
       .finally(() => setRuleSaving(false));
   };
@@ -235,20 +252,7 @@ export function Permissions({ bridge, snapshot, editingLayer, onJumpToLayer }: P
     <>
       {(permissionsRowState?.kind === 'merged' || permissionsRowState?.kind === 'overridden') && (
         <Card title="生效层">
-          {permissionsRowState.kind === 'merged' && (
-            <Row title="permissions" badge={<MergedBadge />} align="center">
-              <MergedNotice editingLayer={editingLayer} />
-            </Row>
-          )}
-          {permissionsRowState.kind === 'overridden' && (
-            <Row title="permissions" align="center">
-              <OverriddenNotice
-                editingLayer={editingLayer}
-                effectiveLayer={permissionsRowState.by}
-                onJump={() => { if (isEditableLayer(permissionsRowState.by)) onJumpToLayer(permissionsRowState.by); }}
-              />
-            </Row>
-          )}
+          <FieldProvenanceNotice snapshot={snapshot} fieldKey="permissions" editingLayer={editingLayer} onJumpToLayer={onJumpToLayer} label="permissions" />
         </Card>
       )}
 

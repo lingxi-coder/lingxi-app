@@ -1,5 +1,12 @@
 import type { ReactNode } from 'react';
 import { useT } from '../../theme/ThemeContext';
+import { rowState, type SettingsSnapshot } from './useEngineSettings';
+// Type-only: `EditableLayer` is a subtype of `Provenance` computed in
+// `SettingsScreen.tsx`. `import type` is fully erased at compile time, so
+// this does NOT create a runtime edge back to `SettingsScreen.tsx` (which
+// imports page components that import THIS module at runtime) — only a
+// real (non-type) import here would risk that cycle.
+import type { EditableLayer } from './SettingsScreen';
 
 /**
  * Where a setting's effective value lives. This is presentation vocabulary
@@ -154,4 +161,52 @@ export function OverriddenNotice({
       </button>
     </div>
   );
+}
+
+/**
+ * Whether `layer` is one of the three tabs the layer switcher can actually
+ * jump to — `OverriddenNotice.onJump`/`FieldProvenanceNotice` must not offer
+ * to jump to `cli`/`managed`/`env`/`defaults`, which the shell has no tab
+ * for. Moved here from `CustomProviders.tsx` (Task 18 fix round 1, Minor)
+ * so every page that needs it — not just the one that happened to define it
+ * first — imports one copy; `CustomProviders.tsx` re-exports it so its own
+ * existing import sites (including the test file) keep working.
+ */
+export function isEditableLayer(layer: Provenance): layer is EditableLayer {
+  return layer === 'user' || layer === 'project' || layer === 'local';
+}
+
+/**
+ * The "does a write to `editingLayer` actually take effect" banner, factored
+ * out of five near-identical copies (`CustomProviders`, `ToolsAgent`,
+ * `Plugins`, `Hooks`, `Permissions` — Task 18 fix round 1, Minor). Renders
+ * nothing for `unset`/`set-here`/`inherited`/`locked` — only `merged` and
+ * `overridden` have anything to say here; `locked` is surfaced by the
+ * caller disabling its own control, not by this notice.
+ */
+export function FieldProvenanceNotice({
+  snapshot, fieldKey, editingLayer, onJumpToLayer, label = '生效层',
+}: {
+  snapshot: SettingsSnapshot | null;
+  fieldKey: string;
+  editingLayer: Provenance;
+  onJumpToLayer(layer: EditableLayer): void;
+  label?: string;
+}) {
+  const state = snapshot ? rowState(snapshot, fieldKey, editingLayer) : null;
+  if (state?.kind === 'merged') {
+    return <Row title={label} badge={<MergedBadge />} align="center"><MergedNotice editingLayer={editingLayer} /></Row>;
+  }
+  if (state?.kind === 'overridden') {
+    return (
+      <Row title={label} align="center">
+        <OverriddenNotice
+          editingLayer={editingLayer}
+          effectiveLayer={state.by}
+          onJump={() => { if (isEditableLayer(state.by)) onJumpToLayer(state.by); }}
+        />
+      </Row>
+    );
+  }
+  return null;
 }

@@ -426,6 +426,29 @@ impl SpeechToText for AudioBridge {
 
 #[async_trait]
 impl TextToSpeech for AudioBridge {
+    /// ## The empty-PCM "played in place" convention
+    ///
+    /// The desktop client's synthesizer is `window.speechSynthesis`
+    /// (`clients/electron/src/renderer/audio/synthesis.ts`), which PLAYS
+    /// audio through the OS directly and hands the page no samples at all.
+    /// That client therefore answers a `Synthesize` request with
+    /// `AudioResultDto::Audio { pcm_base64: "", sample_rate_hz: 0 }` on a
+    /// SUCCESSFUL synthesis — `""`/`0` here means "already played in place,"
+    /// not a failure and not an omission. `base64::decode("")` is `Ok(vec![])`,
+    /// so this falls straight through the `Ok` arm below to `TtsAudio { pcm:
+    /// vec![], sample_rate_hz: 0 }` without hitting the decode-error branch.
+    ///
+    /// Do NOT "fix" this into treating an empty `pcm` as a failure — that
+    /// would silently break desktop TTS the moment someone tightens this up
+    /// on the strength of `TtsAudio { pcm: [] }` looking like a bug. See
+    /// `synthesize_treats_empty_pcm_as_played_in_place_not_a_failure` below,
+    /// which pins this by mutation: rejecting on empty `pcm` turns that test
+    /// red while every other test in this module stays green.
+    ///
+    /// This convention is honest end to end: `tools/mobile/src/speech.rs`
+    /// never forwards `TtsAudio.pcm` to the model — it reports `{"spoken":
+    /// true, "sample_rate_hz": …, "pcm_bytes_len": …}`, which on desktop
+    /// reads "spoke, produced 0 bytes." Accurate, not false.
     async fn synthesize(&self, opts: TtsOpts) -> Result<TtsAudio, TtsError> {
         let result = self
             .request(
@@ -1010,6 +1033,42 @@ mod tests {
             matches!(error, TtsError::SynthesisFailed(_)),
             "undecodable audio is a synthesis failure, got {error:?}"
         );
+    }
+
+    /// Pins Ruling B-12's "played in place" convention (see the doc comment
+    /// on `TextToSpeech::synthesize` above): the desktop client answers a
+    /// successful synthesis with EMPTY pcm/rate because `speechSynthesis`
+    /// already played the audio and has no samples to hand back. That must
+    /// decode to a successful, empty `TtsAudio` — never a `TtsError`.
+    #[tokio::test]
+    async fn synthesize_treats_empty_pcm_as_played_in_place_not_a_failure() {
+        let (bridge, responder, mut emitted) = test_bridge();
+        let task = tokio::spawn({
+            let bridge = bridge.clone();
+            async move {
+                bridge
+                    .synthesize(TtsOpts {
+                        text: "hi".to_string(),
+                        voice: None,
+                    })
+                    .await
+            }
+        });
+        let (request_id, _) = next_request(&mut emitted).await;
+        responder
+            .resolve(
+                request_id,
+                AudioResultDto::Audio {
+                    pcm_base64: String::new(),
+                    sample_rate_hz: 0,
+                },
+            )
+            .await;
+        let audio = task.await.unwrap().unwrap_or_else(|error| {
+            panic!("empty pcm must be a success meaning \"played in place\", got an error instead: {error:?}")
+        });
+        assert_eq!(audio.pcm, Vec::<u8>::new());
+        assert_eq!(audio.sample_rate_hz, 0);
     }
 
     #[tokio::test]

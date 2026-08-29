@@ -940,7 +940,10 @@ fn audio_response_transcript_round_trips_on_the_wire() {
     };
     let round: ClientCommand =
         serde_json::from_value(serde_json::to_value(&response).unwrap()).unwrap();
-    assert_eq!(round, response, "the response must survive a wire round trip");
+    assert_eq!(
+        round, response,
+        "the response must survive a wire round trip"
+    );
 }
 
 /// Enumerate every `AudioResultDto` variant and assert the `snake_case` wire

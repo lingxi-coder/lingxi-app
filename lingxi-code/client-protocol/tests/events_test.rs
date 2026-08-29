@@ -904,10 +904,7 @@ fn audio_op_variants_round_trip_with_expected_tags() {
         ),
         (AudioOpDto::StopRecording, "stop_recording"),
         (AudioOpDto::IsRecording, "is_recording"),
-        (
-            AudioOpDto::Transcribe { language: None },
-            "transcribe",
-        ),
+        (AudioOpDto::Transcribe { language: None }, "transcribe"),
         (
             AudioOpDto::Synthesize {
                 text: "hello".to_string(),

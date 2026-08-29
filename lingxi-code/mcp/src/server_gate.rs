@@ -606,5 +606,11 @@ mod tests {
             policy.decide(&make(ConfigScope::Agent)),
             McpServerDecision::Allow
         );
+        // §27a: `--mcp-config` entries are `Dynamic`, not `Project` — the
+        // `.mcp.json` project-approval gate above must never see them.
+        assert_eq!(
+            policy.decide(&make(ConfigScope::Dynamic)),
+            McpServerDecision::Allow
+        );
     }
 }

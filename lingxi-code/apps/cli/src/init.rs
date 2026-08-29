@@ -392,10 +392,13 @@ pub(crate) fn parse_cli_mcp_servers(entries: Option<&Vec<String>>) -> Vec<mcp::M
         if content.trim().is_empty() {
             continue;
         }
-        // CLI-provided servers carry Project scope (the approval policy's
-        // middle tier); precedence over discovered servers is enforced by the
-        // name-merge in `engine_desktop::build`, not the scope.
-        match mcp::json_config::parse_mcp_json_string(&content, mcp::ConfigScope::Project) {
+        // CLI-provided servers carry Dynamic scope, matching the oracle's
+        // `--mcp-config` handler, which stamps `{...ws, scope:"dynamic"}` on
+        // every entry: they are never `.mcp.json` project-approval-gated
+        // (`mcp::server_gate` only gates `ConfigScope::Project`). Precedence
+        // over discovered servers is enforced by the name-merge in
+        // `engine_desktop::build`, not the scope.
+        match mcp::json_config::parse_mcp_json_string(&content, mcp::ConfigScope::Dynamic) {
             Ok(cfgs) => out.extend(cfgs),
             Err(e) => eprintln!("lingxi-cli: invalid --mcp-config entry: {e}"),
         }
@@ -1259,6 +1262,30 @@ mod tests {
         // Unknown / empty ⟶ neither file layer (env + defaults still apply).
         assert_eq!(setting_source_flags(Some("bogus")), (false, false));
         assert_eq!(setting_source_flags(Some("")), (false, false));
+    }
+
+    /// §27a: the oracle's `--mcp-config` handler (`Tl = {...ws, scope:"dynamic"}`)
+    /// stamps every explicit entry `dynamic`, never `project` — so an
+    /// unapproved `--mcp-config` server in a fresh project (no
+    /// `enabledMcpjsonServers` record at all) must connect on the first
+    /// launch, not sit `ProjectPendingApproval`. Before the fix this parsed at
+    /// `ConfigScope::Project` and `McpPolicyContext::decide` blocked it.
+    #[test]
+    fn parse_cli_mcp_servers_are_never_project_approval_gated() {
+        let raw = r#"{"mcpServers":{"docs":{"command":"docs-server"}}}"#.to_string();
+        let cfgs = parse_cli_mcp_servers(Some(&vec![raw]));
+        assert_eq!(cfgs.len(), 1);
+        assert_eq!(cfgs[0].scope, mcp::ConfigScope::Dynamic);
+
+        // A brand-new project's policy snapshot: no approval record for
+        // "docs" at all (not approved, not rejected, `enableAll` unset).
+        let policy = mcp::McpPolicyContext::default();
+        assert_eq!(
+            policy.decide(&cfgs[0]),
+            mcp::McpServerDecision::Allow,
+            "a --mcp-config server must never wait on the .mcp.json project \
+             approval gate, which owns Project scope only"
+        );
     }
 
     #[tokio::test]

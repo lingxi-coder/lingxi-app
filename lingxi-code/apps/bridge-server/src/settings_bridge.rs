@@ -106,7 +106,9 @@ pub struct SettingsSnapshot {
     /// Keys an administrator pinned through the managed-settings layer —
     /// exactly the keys of the `managed` overlay `build_snapshot` was given,
     /// so every one of them also appears in `effective` with a `Managed`
-    /// provenance.
+    /// provenance. (The one exception is an overlay entry whose value is JSON
+    /// `null`, which the engine reads as unset and which therefore reaches
+    /// neither `effective` nor `provenance` — see [`merge_raw_layer`].)
     ///
     /// "Pinned" is about who controls the key, not about the whole value
     /// being the policy's: the engine folds the managed layer in through the
@@ -179,7 +181,15 @@ pub fn build_snapshot(
             Ok(m) => (m, None),
             Err(e) => (serde_json::Map::new(), Some(e)),
         };
-        for key in map.keys() {
+        for (key, value) in &map {
+            if value.is_null() {
+                // `"key": null` is UNSET to the engine — every `SettingsJson`
+                // field is an `Option`, so it parses to `None` and never
+                // reaches `effective` (see `merge_raw_layer`'s doc). Claiming
+                // this layer as the provenance of a key it does not set would
+                // put a name in the map with no value behind it.
+                continue;
+            }
             provenance.insert(key.clone(), layer);
             // Reset before this layer's own report goes in. A key an earlier
             // pair of layers unioned can be fully REDEFINED here — user
@@ -214,9 +224,12 @@ pub fn build_snapshot(
     // report a value the engine never resolves — the very defect this
     // function's file-layer loop was fixed for, kept alive one layer higher.
     let locked: Vec<String> = managed.keys().cloned().collect();
-    for key in managed.keys() {
+    for (key, value) in &managed {
+        // Same null rule and same reset as the file-layer loop above.
+        if value.is_null() {
+            continue;
+        }
         provenance.insert(key.clone(), SettingsLayer::Managed);
-        // Same reset as the file-layer loop above, for the same reason.
         merged_keys.remove(key);
     }
     merged_keys.extend(merge_raw_layer(&mut effective, managed));
@@ -985,6 +998,69 @@ mod tests {
             "the effective value IS the local layer's own, so its badge is honest and must not \
              be suppressed, got {:?}",
             snap.merged_keys
+        );
+    }
+
+    /// A layer that writes `"key": null` has not set that key: every
+    /// `SettingsJson` field is an `Option`, so the engine parses it to `None`
+    /// and the lower layer stands. The snapshot must agree — in `effective`
+    /// AND in `provenance`, which would otherwise name a layer as the source
+    /// of a value that layer does not supply.
+    ///
+    /// Fails against a raw merge that writes nulls through: `outputStyle`
+    /// would read `null` with provenance `Local`, and `model` would exist as
+    /// a null-valued key the engine never resolves.
+    #[test]
+    fn a_null_in_a_layer_is_unset_and_never_becomes_that_layers_provenance() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        let project = dir.path().join("repo");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(project.join(branding::DOT_DIR)).unwrap();
+
+        std::fs::write(home.join("settings.json"), r#"{"outputStyle":"from-user"}"#).unwrap();
+        // `outputStyle` null does not erase the user layer; `model` null is
+        // set by no other layer, so it stays absent entirely.
+        std::fs::write(
+            project.join(branding::DOT_DIR).join("settings.local.json"),
+            r#"{"outputStyle":null,"model":null}"#,
+        )
+        .unwrap();
+
+        let paths = SettingsPaths {
+            lingxi_home: home,
+            project_dir: project,
+        };
+        let snap = build_snapshot(&paths, BTreeMap::new(), BTreeMap::new());
+
+        assert_eq!(
+            snap.effective.get("outputStyle").and_then(|v| v.as_str()),
+            Some("from-user"),
+            "a null in the local layer must not erase the user layer's value"
+        );
+        assert_eq!(
+            snap.provenance.get("outputStyle"),
+            Some(&SettingsLayer::User),
+            "provenance must name the layer that actually supplies the value"
+        );
+        assert_eq!(
+            snap.effective.get("model"),
+            None,
+            "a key only ever written as null is unset, not present-and-null, got {:?}",
+            snap.effective.get("model")
+        );
+        assert_eq!(
+            snap.provenance.get("model"),
+            None,
+            "no layer sets `model`, so no layer may be named as its source"
+        );
+        // The raw per-layer view is untouched: it reports what the FILE says,
+        // nulls included, because that is the thing a layered editor writes
+        // back against.
+        assert_eq!(
+            snap.layers.get("local").unwrap().get("model"),
+            Some(&Value::Null),
+            "`layers` must still show the file's own contents verbatim"
         );
     }
 

@@ -85,10 +85,13 @@ pub const MERGE_STRATEGIES: &[(&str, MergeStrategy)] = &[
     // `merge_string_map` for this field (a one-level record has no nested
     // structure, so a per-key union with `next` winning IS the deep merge).
     // It was MISSING here while `merge` deep-merged it: the table and the
-    // merger disagreed, and any consumer reading the table for the merge
-    // semantics (`merger::merge_raw_layer`, and `tracer`'s field provenance)
-    // got Override for a field the engine actually unions. Pinned by
-    // `merger::tests::raw_layer_merge_agrees_with_the_typed_merge`.
+    // merger disagreed, so `merger::merge_raw_layer` — and through it the
+    // desktop settings snapshot — took Override for a field the engine
+    // actually unions. (`tracer` was unaffected: it treats `DeepMerge` and
+    // `Override` identically, so only a `ConcatDedup` gap would reach it.)
+    // Pinned in both directions by
+    // `merger::tests::raw_layer_merge_agrees_with_the_typed_merge` and
+    // `merger::tests::every_field_merge_combines_is_registered_and_fixtured`.
     ("vimInsertModeRemaps", MergeStrategy::DeepMerge),
     // HTTP-hook security allowlists (H-BIN-12). Both are arrays, and CC's
     // `settingsMergeCustomizer` (`ipe`) concat-dedups EVERY array except

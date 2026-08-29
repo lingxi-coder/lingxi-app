@@ -850,6 +850,75 @@ function validateAttachment(v: unknown): void {
   }
 }
 
+// ── Audio (events.rs `AudioOpDto`, commands.rs `AudioResultDto`/`AudioErrorKindDto`) ──
+
+function validateAudioOp(v: unknown): void {
+  const o = rec(v);
+  switch (o['type']) {
+    case 'start_recording':
+      assert.ok(isNumber(o['sample_rate_hz']) && isString(o['format']));
+      break;
+    case 'stop_recording':
+    case 'is_recording':
+      break;
+    case 'transcribe':
+      if ('language' in o) assert.ok(isString(o['language']));
+      break;
+    case 'synthesize':
+      assert.ok(isString(o['text']));
+      if ('voice' in o) assert.ok(isString(o['voice']));
+      break;
+    default:
+      assert.fail(`unknown AudioOpDto type: ${String(o['type'])}`);
+  }
+}
+
+// The 8 kinds exist specifically so `SttError`/`VoiceError`/`TtsError` round-trip
+// without losing distinctions (client-protocol/src/commands.rs `AudioErrorKindDto`).
+function validateAudioErrorKind(v: unknown): void {
+  assert.ok(
+    [
+      'permission_denied',
+      'no_speech',
+      'not_recording',
+      'unavailable',
+      'busy',
+      'retriable',
+      'synthesis_failed',
+      'other',
+    ].includes(v as string),
+    `unknown AudioErrorKindDto "${String(v)}"`,
+  );
+}
+
+function validateAudioResult(v: unknown): void {
+  const o = rec(v);
+  switch (o['type']) {
+    case 'ok':
+      break;
+    case 'recording_state':
+      assert.ok(isBool(o['recording']));
+      break;
+    case 'recording':
+      assert.ok(isString(o['audio_base64']) && isString(o['mime_type']));
+      break;
+    case 'transcript':
+      assert.ok(isString(o['text']));
+      if ('language' in o) assert.ok(isString(o['language']));
+      if ('confidence' in o) assert.ok(isNumber(o['confidence']));
+      break;
+    case 'audio':
+      assert.ok(isString(o['pcm_base64']) && isNumber(o['sample_rate_hz']));
+      break;
+    case 'failed':
+      validateAudioErrorKind(o['kind']);
+      assert.ok(isString(o['message']));
+      break;
+    default:
+      assert.fail(`unknown AudioResultDto type: ${String(o['type'])}`);
+  }
+}
+
 // ── ClientCommand ─────────────────────────────────────────────────────────────
 
 function validateCommand(name: string, v: unknown): void {
@@ -1068,6 +1137,10 @@ function validateCommand(name: string, v: unknown): void {
     case 'remove_mcp_server':
       validateMcpScope(o['scope']);
       assert.ok(isString(o['name']));
+      break;
+    case 'audio_response':
+      assert.ok(isNumber(o['request_id']));
+      validateAudioResult(o['result']);
       break;
     default:
       assert.fail(`snapshot ${name}: unknown ClientCommand type "${String(o['type'])}"`);
@@ -1454,6 +1527,10 @@ function validateEvent(name: string, v: unknown): void {
           isNumber(o['delay_ms']),
       );
       break;
+    case 'audio_request':
+      assert.ok(isNumber(o['request_id']));
+      validateAudioOp(o['op']);
+      break;
     default:
       assert.fail(`snapshot ${name}: unknown ClientEvent type "${String(o['type'])}"`);
   }
@@ -1517,7 +1594,7 @@ function validateError(v: unknown): void {
 
 test('every command snapshot parses as ClientCommand', () => {
   const files = listSnapshots('command');
-  assert.equal(files.length, 59, `expected 59 command snapshots, found ${files.length}`);
+  assert.equal(files.length, 60, `expected 60 command snapshots, found ${files.length}`);
   for (const file of files) {
     validateCommand(file, loadSnapshot('command', file));
   }
@@ -1555,10 +1632,233 @@ test('workflow model metadata and paused task status pass the wire guards', () =
 
 test('every event snapshot parses as ClientEvent', () => {
   const files = listSnapshots('event');
-  assert.equal(files.length, 68, `expected 68 event snapshots, found ${files.length}`);
+  assert.equal(files.length, 69, `expected 69 event snapshots, found ${files.length}`);
   for (const file of files) {
     validateEvent(file, loadSnapshot('event', file));
   }
+});
+
+// The on-disk goldens only exercise `AudioOpDto::Transcribe` and
+// `AudioResultDto::Transcript` — every other op/result shape (including all
+// 8 `AudioErrorKindDto` kinds, which exist specifically so `SttError`/
+// `VoiceError`/`TtsError` round-trip without losing distinctions) has no
+// golden, so without this test those branches are dead code that always
+// "passes".
+test('audio_request covers every AudioOpDto variant', () => {
+  validateEvent('audio_request(start_recording)', {
+    type: 'audio_request',
+    request_id: 1,
+    op: { type: 'start_recording', sample_rate_hz: 16_000, format: 'wav' },
+  });
+  validateEvent('audio_request(stop_recording)', {
+    type: 'audio_request',
+    request_id: 2,
+    op: { type: 'stop_recording' },
+  });
+  validateEvent('audio_request(is_recording)', {
+    type: 'audio_request',
+    request_id: 3,
+    op: { type: 'is_recording' },
+  });
+  validateEvent('audio_request(transcribe-no-language)', {
+    type: 'audio_request',
+    request_id: 4,
+    op: { type: 'transcribe' },
+  });
+  validateEvent('audio_request(synthesize)', {
+    type: 'audio_request',
+    request_id: 5,
+    op: { type: 'synthesize', text: 'hello', voice: 'default' },
+  });
+  validateEvent('audio_request(synthesize-no-voice)', {
+    type: 'audio_request',
+    request_id: 6,
+    op: { type: 'synthesize', text: 'hello' },
+  });
+
+  // `request_id`/`op` are required on the envelope itself.
+  assert.throws(
+    () => validateEvent('audio_request(missing-request_id)', { type: 'audio_request', op: { type: 'is_recording' } }),
+    'a missing `request_id` must be rejected',
+  );
+  assert.throws(
+    () => validateEvent('audio_request(missing-op)', { type: 'audio_request', request_id: 1 }),
+    'a missing `op` must be rejected',
+  );
+
+  // `start_recording` requires both `sample_rate_hz` and `format`.
+  assert.throws(
+    () =>
+      validateEvent('audio_request(start_recording-no-rate)', {
+        type: 'audio_request',
+        request_id: 1,
+        op: { type: 'start_recording', format: 'wav' },
+      }),
+    'a `start_recording` missing `sample_rate_hz` must be rejected',
+  );
+  assert.throws(
+    () =>
+      validateEvent('audio_request(start_recording-no-format)', {
+        type: 'audio_request',
+        request_id: 1,
+        op: { type: 'start_recording', sample_rate_hz: 16_000 },
+      }),
+    'a `start_recording` missing `format` must be rejected',
+  );
+
+  // `synthesize` requires `text` (`voice` is optional).
+  assert.throws(
+    () =>
+      validateEvent('audio_request(synthesize-no-text)', {
+        type: 'audio_request',
+        request_id: 1,
+        op: { type: 'synthesize', voice: 'default' },
+      }),
+    'a `synthesize` missing `text` must be rejected',
+  );
+});
+
+test('audio_response covers every AudioResultDto variant, including all 8 AudioErrorKindDto kinds', () => {
+  validateCommand('audio_response(ok)', { type: 'audio_response', request_id: 1, result: { type: 'ok' } });
+  validateCommand('audio_response(recording_state)', {
+    type: 'audio_response',
+    request_id: 2,
+    result: { type: 'recording_state', recording: true },
+  });
+  validateCommand('audio_response(recording)', {
+    type: 'audio_response',
+    request_id: 3,
+    result: { type: 'recording', audio_base64: 'YWJj', mime_type: 'audio/m4a' },
+  });
+  validateCommand('audio_response(audio)', {
+    type: 'audio_response',
+    request_id: 4,
+    result: { type: 'audio', pcm_base64: 'YWJj', sample_rate_hz: 22_050 },
+  });
+
+  const AUDIO_ERROR_KINDS = [
+    'permission_denied',
+    'no_speech',
+    'not_recording',
+    'unavailable',
+    'busy',
+    'retriable',
+    'synthesis_failed',
+    'other',
+  ];
+  assert.equal(AUDIO_ERROR_KINDS.length, 8);
+  for (const kind of AUDIO_ERROR_KINDS) {
+    validateCommand(`audio_response(failed-${kind})`, {
+      type: 'audio_response',
+      request_id: 5,
+      result: { type: 'failed', kind, message: `${kind} happened` },
+    });
+  }
+  assert.throws(
+    () =>
+      validateCommand('audio_response(failed-unknown-kind)', {
+        type: 'audio_response',
+        request_id: 5,
+        result: { type: 'failed', kind: 'bogus_kind', message: 'nope' },
+      }),
+    'an unknown AudioErrorKindDto must be rejected',
+  );
+
+  // `request_id`/`result` are required on the envelope itself.
+  assert.throws(
+    () =>
+      validateCommand('audio_response(missing-request_id)', {
+        type: 'audio_response',
+        result: { type: 'ok' },
+      }),
+    'a missing `request_id` must be rejected',
+  );
+  assert.throws(
+    () => validateCommand('audio_response(missing-result)', { type: 'audio_response', request_id: 1 }),
+    'a missing `result` must be rejected',
+  );
+
+  // `recording_state` requires `recording`.
+  assert.throws(
+    () =>
+      validateCommand('audio_response(recording_state-no-flag)', {
+        type: 'audio_response',
+        request_id: 1,
+        result: { type: 'recording_state' },
+      }),
+    'a `recording_state` missing `recording` must be rejected',
+  );
+
+  // `recording` requires both `audio_base64` and `mime_type`.
+  assert.throws(
+    () =>
+      validateCommand('audio_response(recording-no-audio)', {
+        type: 'audio_response',
+        request_id: 1,
+        result: { type: 'recording', mime_type: 'audio/m4a' },
+      }),
+    'a `recording` missing `audio_base64` must be rejected',
+  );
+  assert.throws(
+    () =>
+      validateCommand('audio_response(recording-no-mime)', {
+        type: 'audio_response',
+        request_id: 1,
+        result: { type: 'recording', audio_base64: 'YWJj' },
+      }),
+    'a `recording` missing `mime_type` must be rejected',
+  );
+
+  // `audio` requires both `pcm_base64` and `sample_rate_hz`.
+  assert.throws(
+    () =>
+      validateCommand('audio_response(audio-no-pcm)', {
+        type: 'audio_response',
+        request_id: 1,
+        result: { type: 'audio', sample_rate_hz: 22_050 },
+      }),
+    'an `audio` missing `pcm_base64` must be rejected',
+  );
+  assert.throws(
+    () =>
+      validateCommand('audio_response(audio-no-rate)', {
+        type: 'audio_response',
+        request_id: 1,
+        result: { type: 'audio', pcm_base64: 'YWJj' },
+      }),
+    'an `audio` missing `sample_rate_hz` must be rejected',
+  );
+
+  // `transcript` requires `text` (`language`/`confidence` are optional).
+  assert.throws(
+    () =>
+      validateCommand('audio_response(transcript-no-text)', {
+        type: 'audio_response',
+        request_id: 1,
+        result: { type: 'transcript', language: 'en-US' },
+      }),
+    'a `transcript` missing `text` must be rejected',
+  );
+
+  // `failed` requires both `kind` and `message`.
+  assert.throws(
+    () =>
+      validateCommand('audio_response(failed-no-kind)', {
+        type: 'audio_response',
+        request_id: 1,
+        result: { type: 'failed', message: 'nope' },
+      }),
+    'a `failed` missing `kind` must be rejected',
+  );
+  assert.throws(
+    () =>
+      validateCommand('audio_response(failed-no-message)', {
+        type: 'audio_response',
+        request_id: 1,
+        result: { type: 'failed', kind: 'other' },
+      }),
+    'a `failed` missing `message` must be rejected',
+  );
 });
 
 // `settings_snapshot`'s four widened fields (files_json/active_json/locked/

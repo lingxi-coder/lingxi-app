@@ -120,6 +120,42 @@ iOS 把占位符放在 **key** 里、Android 放在**值**里，所以每个带�
 反应,而它会把每个二进制拆进独立进程,于是上面那把进程内的锁保护的每一个 race
 都会静默回来。⛔ 不要在本项目里引入 nextest。
 
+### ⚠️ 线索（未确认）：`confirm_runtime_profile` 找不到生产调用方
+
+由 batch 4 的内容 grounding 发现，我自己顺着证据链复核过一遍。**这不是已确认的缺陷，
+是一条值得上机验证的线索**——我一度差点把它报成「scaffold 在生产上不可能成功」，
+那个结论是**错的**，记在这里以免下次再走一遍。
+
+已经**核实**的部分：
+
+- `LocalAppScaffold` 硬要求 `runtime_profile_receipt`，缺了就拒绝，错误文案是
+  `"native runtime-profile confirmation must happen before scaffold"`
+  （`local_apps_host.rs:5254-5262`）；同时**拒绝**调用方自带 `runtime_profile`/`surface`。
+- 生产上唯一签发 receipt 的地方是 `issue_runtime_profile_receipt` 的
+  `local_apps_host.rs:4054` 调用点，它在 `confirm_runtime_profile_value`（`:3964`）里面。
+  其余 9 个调用点全部 ≥ 10029，而 `#[cfg(test)]` 从 **8874** 开始 —— 都是测试。
+- `confirm_runtime_profile_value` 的调用方只有两个：`:6395`（trait impl）和 `:10418`（测试）。
+- `:6395` 只能从 `local_apps_mcp.rs:1606` 的 dispatch 分支到达，而那个分支只能由
+  `call_host_operation(self.operation, …)` 进入；`call_host_operation` 全仓库只有一个
+  调用方（`local_apps_tools.rs:409`），`self.operation` 取自 `LOCAL_APP_TOOLS` 那张
+  **24 个操作**的表 —— 表里**没有** `confirm_runtime_profile`。
+- Swift / Kotlin / 模板 JS / 其余 Rust 里对 `confirm_runtime_profile` 零引用。
+
+**我差点报错的地方。** 上面这串证据看起来像「receipt 在生产上铸不出来 ⇒ scaffold 永远失败」。
+不对。原生回路**是通的**，只是走另一条路：
+`ClientCommand::ResolveAppRuntimeProfileSelection` → `host.rs:7083` →
+`resolve_runtime_profile_selection(request_id, selected_family)`，它**唤醒
+`confirm_runtime_profile_value` 内部挂起的那个 await**，然后 `:4054` 才签发 receipt。
+iOS 客户端确实实现了 `RuntimeProfileSelection`（`clients/ios/Sources/LocalApps/` 三个文件）。
+
+所以缺的不是「客户端没接」，而是**发起那一侧**：谁在生产上第一次调用
+`confirm_runtime_profile_value` 把选择请求推给客户端。我没找到。
+
+⚠️ **判据只能是真机**：跑一次「创建空 workspace → scaffold」。这条链上每一层的单测都是绿的
+（`:10418` 直接调用那个函数，绕过了整张工具表），所以**任何测试都不会发现这个问题**——
+如果它真的是问题的话。参考 [[local-app-phase-1a-ui-contract-2026-08-24]]：那批 UI 契约
+15 个提交全绿且过评审，一行都没上过真机。
+
 ### 其他量出来的事实
 
 | 事实 | 值 |

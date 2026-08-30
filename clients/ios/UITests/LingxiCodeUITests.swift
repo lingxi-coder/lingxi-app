@@ -762,11 +762,50 @@ final class LingxiCodeUITests: XCTestCase {
         primaryAction.tap()
         XCTAssertTrue(app.staticTexts["给你的灵犀起个名字"].waitForExistence(timeout: 3))
         primaryAction.tap()
-        XCTAssertTrue(app.staticTexts["我该怎么称呼你？"].waitForExistence(timeout: 3))
-        let nameField = app.textFields["你的名字"]
-        XCTAssertTrue(nameField.waitForExistence(timeout: 3), app.debugDescription)
-        nameField.tap()
-        nameField.typeText("测试用户")
+        XCTAssertTrue(
+            app.descendants(matching: .any)["onboarding.model.step"].waitForExistence(timeout: 3),
+            app.debugDescription
+        )
+        XCTAssertFalse(app.staticTexts["我该怎么称呼你？"].exists, app.debugDescription)
+        let modelScreenshot = XCTAttachment(screenshot: app.screenshot())
+        modelScreenshot.name = "引导-模型设置"
+        modelScreenshot.lifetime = .keepAlways
+        add(modelScreenshot)
+
+        let apiKeyPreset = app.buttons["onboarding.model.preset.anthropic"]
+        XCTAssertTrue(apiKeyPreset.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(scrollUntilHittable(apiKeyPreset, in: content), app.debugDescription)
+        apiKeyPreset.tap()
+        let apiKeyField = app.secureTextFields["provider.api-key"]
+        XCTAssertTrue(apiKeyField.waitForExistence(timeout: 5), app.debugDescription)
+        let apiKeyScreenshot = XCTAttachment(screenshot: app.screenshot())
+        apiKeyScreenshot.name = "引导-API密钥设置"
+        apiKeyScreenshot.lifetime = .keepAlways
+        add(apiKeyScreenshot)
+        app.buttons["provider.cancel"].tap()
+        XCTAssertTrue(waitUntilGone(apiKeyField, timeout: 5), app.debugDescription)
+
+        let oauthPreset = app.buttons["onboarding.model.preset.openai-chatgpt"]
+        XCTAssertTrue(scrollUntilHittable(oauthPreset, in: content), app.debugDescription)
+        oauthPreset.tap()
+        XCTAssertTrue(app.buttons["provider.oauth.login"].waitForExistence(timeout: 5), app.debugDescription)
+        let oauthScreenshot = XCTAttachment(screenshot: app.screenshot())
+        oauthScreenshot.name = "引导-OAuth设置"
+        oauthScreenshot.lifetime = .keepAlways
+        add(oauthScreenshot)
+        app.buttons["provider.cancel"].tap()
+        primaryAction.tap()
+
+        XCTAssertTrue(
+            app.descendants(matching: .any)["onboarding.web.step"].waitForExistence(timeout: 3),
+            app.debugDescription
+        )
+        XCTAssertTrue(app.buttons["onboarding.web.search"].exists, app.debugDescription)
+        XCTAssertTrue(app.buttons["onboarding.web.fetch"].exists, app.debugDescription)
+        let webScreenshot = XCTAttachment(screenshot: app.screenshot())
+        webScreenshot.name = "引导-Web设置"
+        webScreenshot.lifetime = .keepAlways
+        add(webScreenshot)
         primaryAction.tap()
 
         let voiceTitle = app.staticTexts["配置语音能力"]

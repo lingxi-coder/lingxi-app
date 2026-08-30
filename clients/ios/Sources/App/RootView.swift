@@ -272,7 +272,10 @@ struct RootView: View {
             // Onboarding owns the whole window, sidebar and navigation bars
             // included, so it sits outside the split view rather than in a column.
             if !app.setupDone {
-                SetupWizardView(convo: source.model, onSetModel: { source.setModel($0) })
+                SetupWizardView(
+                    store: settingsStore,
+                    onOpenSettings: { navigation.showSettings($0) }
+                )
                     .zIndex(100)
                     .transition(.opacity)
             }

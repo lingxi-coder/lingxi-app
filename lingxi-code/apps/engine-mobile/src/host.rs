@@ -425,6 +425,26 @@ pub struct MobileRuntime {
     /// must not maintain a second slash-command table beside the live engine
     /// registry.
     pub slash_registry: Arc<RwLock<command_api::CommandRegistry>>,
+    /// D1 (P-1.5 review): the VERY handle `build_mobile` passed to
+    /// `.with_skill_listing(...)`, retained so a test can interrogate the
+    /// per-turn skill listing the orchestrator actually reads.
+    ///
+    /// A test that rebuilds its own provider from [`Self::slash_registry`]
+    /// proves only that a provider over that registry works — it never
+    /// observes which registry the WIRED provider was handed, so a refactor
+    /// that gives the listing provider a registry of its own leaves the
+    /// model's per-turn skill listing permanently empty on device with the
+    /// whole suite still green. Test-only: nothing in production reads it, and
+    /// retaining it in shipping builds would only keep an `Arc` alive.
+    #[cfg(test)]
+    pub(crate) wired_skill_listing_provider:
+        Arc<dyn orchestrator::prompt::skill_listing::SkillListingProvider>,
+    /// D1 (P-1.5 review): the VERY `SkillLoader` `build_mobile` handed to the
+    /// mobile tool registry, retained for the same reason as
+    /// [`Self::wired_skill_listing_provider`] — the Skill tool's view of the
+    /// registry must be observable, not re-derived by the test.
+    #[cfg(test)]
+    pub(crate) wired_skill_loader: Arc<dyn tool_skill::skill::SkillLoader>,
     /// Auth handle for `/login` and `/logout`.
     pub auth: Arc<dyn AuthHandle>,
     /// Native mobile OAuth coordinator. It owns the provider-specific handles
@@ -3824,6 +3844,18 @@ async fn build_mobile_inner_with_ask(
     let skill_loader: Arc<dyn tool_skill::skill::SkillLoader> = Arc::new(
         crate::skill_loader::MobileDiskSkillLoader::new(shared_command_registry.clone()),
     );
+    // D1 (P-1.5 review): bind the per-turn skill-listing provider HERE, in the
+    // same breath as the Skill loader above, and retain both handles on the
+    // returned `MobileRuntime`. There is then exactly ONE construction site per
+    // surface, and `mobile_listing_dispatcher_and_skill_tool_share_one_live_registry`
+    // asserts against these objects rather than against replacements it builds
+    // itself — so handing either surface a registry other than
+    // `shared_command_registry` fails that test instead of silently emptying
+    // the model's skill listing on device.
+    let wired_skill_listing_provider =
+        mobile_skill_listing_provider(shared_command_registry.clone());
+    #[cfg(test)]
+    let wired_skill_loader = skill_loader.clone();
     // (#3 shell-expansion) Build the shared prompt shell-expansion provider from
     // `tool_ctx` (carrying the base `permission_policy` + process/sandbox seams)
     // BEFORE `tool_ctx` is moved into the tool registry below, then chain it onto
@@ -4135,9 +4167,7 @@ async fn build_mobile_inner_with_ask(
     // SKILLLIST.1: enumerate model-invocable skills each turn so the model
     // can discover bundled and user skills. Reads the shared registry lazily;
     // the registry is populated after the orchestrator handle is available.
-    .with_skill_listing(mobile_skill_listing_provider(
-        shared_command_registry.clone(),
-    ))
+    .with_skill_listing(wired_skill_listing_provider.clone())
     // P1-06: share the ONE `readFileState` map with the file tools (created
     // above) so post-compact file restore + staleness consumers see a tool's
     // `readFileState.set` — mirror of desktop.
@@ -4392,6 +4422,10 @@ async fn build_mobile_inner_with_ask(
         orchestrator: orch,
         dispatcher,
         slash_registry: shared_command_registry,
+        #[cfg(test)]
+        wired_skill_listing_provider,
+        #[cfg(test)]
+        wired_skill_loader,
         auth,
         oauth,
         permission_gate: adapter_gate,
@@ -9912,7 +9946,7 @@ mod tests {
     use async_trait::async_trait;
     use client_adapter::{ClientEventListener, ListenerSink, PermissionRequestSink};
     use client_protocol::events::ClientEvent;
-    use tool_skill::skill::{SkillCommandType, SkillLoader as _};
+    use tool_skill::skill::SkillCommandType;
     use traits::subagent_spawn::{SubagentObservation, SubagentSpawnObserver};
     use traits::{OrchestratorHandle as _, SlashCommandDispatcher as _, SlashDispatchResult};
 
@@ -10737,8 +10771,16 @@ mod tests {
             .await
             .expect("build_mobile failed");
 
-        let provider = mobile_skill_listing_provider(rt.slash_registry.clone());
-        let loader = crate::skill_loader::MobileDiskSkillLoader::new(rt.slash_registry.clone());
+        // D1: interrogate the handles `build_mobile` ACTUALLY wired — the
+        // provider the orchestrator reads for its per-turn skill listing and
+        // the loader the Skill tool calls — instead of building fresh ones over
+        // `rt.slash_registry`. Rebuilt handles would only prove that a provider
+        // over the shared registry works; they would stay green if the
+        // composition root handed either surface a registry of its own, leaving
+        // the model's skill listing permanently empty on device while slash
+        // invocation kept working.
+        let provider = rt.wired_skill_listing_provider.clone();
+        let loader = rt.wired_skill_loader.clone();
 
         let listed = provider.skill_entries().await;
         let listed_names: std::collections::BTreeSet<_> =

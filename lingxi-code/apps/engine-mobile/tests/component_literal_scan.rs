@@ -103,10 +103,17 @@
 //!
 //! Phase -1 deliberately KEEPS the two pre-existing Local App workflow
 //! registrations (`tools/workflow/src/builtins.rs` plus the three `.js`
-//! files it `include_str!`s), and the skill-name mirror in
-//! `register_mobile_skill_commands` (`lib.rs:437`) that duplicates the
-//! registry into the slash-command catalog. So this scanner CANNOT be green
-//! at zero occurrences today, by design. The allowlist is therefore:
+//! files it `include_str!`s). So this scanner CANNOT be green at zero
+//! occurrences today, by design.
+//!
+//! This paragraph used to give a SECOND reason — the skill-name mirror in
+//! `register_mobile_skill_commands`, which carried its own hardcoded copy of
+//! the ten bundled mobile skill names. P-1.5 deleted that copy: the mirror now
+//! iterates `mobile_skill_registry()` itself and names no skill, so it
+//! contributes no allowlisted literal and is no longer part of why this
+//! scanner's baseline is non-zero.
+//!
+//! The allowlist is therefore:
 //!
 //! - EXPLICIT: one entry per `path:literal` pair, matched by EXACT equality on
 //!   both — no globs, no directory entries, no prefix matching;
@@ -144,7 +151,7 @@ const PLUGIN_NAMESPACE: &str = "lingxi-local-app";
 /// exit code — is the thing that actually gates a regression. Phase 9 is
 /// expected to drive this to zero; any change to this constant must be
 /// accompanied by an equal change in the allowlist file, in the same diff.
-const ALLOWLIST_BASELINE_COUNT: usize = 38;
+const ALLOWLIST_BASELINE_COUNT: usize = 28;
 
 /// Scan roots, relative to the workspace root. Deny-by-default directory
 /// enumeration: every source file under each of these is scanned unless it is

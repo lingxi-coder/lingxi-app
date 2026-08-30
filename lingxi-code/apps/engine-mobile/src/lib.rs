@@ -432,27 +432,29 @@ pub(crate) fn register_mobile_bundled_prompt_commands(reg: &mut CommandRegistry)
 
 /// Mirror the compiled-in mobile Skill registry into the slash-command
 /// catalog. The Skill tool remains the canonical invocation path, but a
-/// settings screen and `/` palette must see the same shipped mobile skills — a
-/// second hard-coded client list would drift again. The prompt body is the
-/// exact bundled content, and both invocation paths use the standard argument
-/// expansion semantics so they receive identical guidance.
+/// settings screen and `/` palette must see the same shipped mobile skills —
+/// so this iterates `skills` itself rather than carrying a second, independent
+/// name list that could drift out of sync with it (and, before this, could
+/// silently skip a name the list still mentioned but the registry had dropped,
+/// or simply never mention a name the registry had gained). The prompt body is
+/// the exact bundled content, and both invocation paths use the standard
+/// argument expansion semantics so they receive identical guidance.
 pub(crate) fn register_mobile_skill_commands(reg: &mut CommandRegistry) {
-    let skills = mobile_skill_registry();
-    for name in [
-        "create-local-app",
-        "frontend-design",
-        "frontend-qa",
-        "accessibility",
-        "react-best-practices",
-        "ionic-react-local-app",
-        "canvas-2d-local-app",
-        "threejs-local-app",
-        "phaser-2d-local-app",
-        "babylon-3d-local-app",
-    ] {
-        let Some(skill) = skills.get(name) else {
-            continue;
-        };
+    register_mobile_skill_commands_from(reg, &mobile_skill_registry());
+}
+
+/// The derivation itself, parameterised on the registry it mirrors so tests
+/// can grow or shrink it independently of the compiled-in mobile skill set —
+/// see `mobile_skill_list_is_derived_from_the_live_registry` below.
+/// `skills.get(name)` can never miss here: `name` always comes from
+/// `skills.names()` on the very same registry, so a skill present in `skills`
+/// but absent from the mirrored command set is now a structural
+/// impossibility rather than a silent `continue`.
+fn register_mobile_skill_commands_from(reg: &mut CommandRegistry, skills: &SkillRegistry) {
+    for name in skills.names() {
+        let skill = skills
+            .get(name)
+            .expect("name was just read from this registry's own names()");
         reg.register_command(SlashCommand {
             name: skill.name.clone(),
             description: skill.description.clone(),
@@ -514,6 +516,21 @@ mod mobile_skill_command_tests {
         );
 
         let skills = mobile_skill_registry();
+        // D2 value-level companion to
+        // `mobile_skill_command_wrapper_stays_an_unfiltered_delegation` below:
+        // the mirrored command set must equal the LIVE registry's name set,
+        // computed here rather than typed out. The hardcoded vector above pins
+        // WHICH ten skills ship today; this pins that the mirror is TOTAL over
+        // whatever the registry actually holds, so the day an eleventh bundled
+        // skill lands, a filter anywhere on the production path that silently
+        // drops it fails here by value.
+        let mut live_names = skills.names();
+        live_names.sort_unstable();
+        assert_eq!(
+            names, live_names,
+            "the slash mirror must cover exactly the live mobile skill registry, \
+             no more and no less"
+        );
         let test_cases = [
             ("ionic-react-local-app", ""),
             ("canvas-2d-local-app", "focus"),
@@ -568,6 +585,158 @@ mod mobile_skill_command_tests {
                 );
             }
         }
+    }
+
+    /// P-1.5 — `register_mobile_skill_commands` must derive its slash-command
+    /// set from `mobile_skill_registry()` itself, never from a second,
+    /// independent name list.
+    ///
+    /// A value-only comparison against the current ten names cannot catch a
+    /// reintroduced hardcoded list: a regression would almost certainly carry
+    /// exactly those ten names back (they are exactly what this task removes),
+    /// so the output would look identical either way. The only place the two
+    /// shapes actually diverge is a skill the list was never told about: a
+    /// hardcoded array skips it via the `continue` this task removed; deriving
+    /// from `skills.names()` cannot. So this test GROWS the registry with an
+    /// eleventh skill the original ten-name array never mentioned, and
+    /// requires it to gain a slash command anyway.
+    #[test]
+    fn mobile_skill_list_is_derived_from_the_live_registry() {
+        let planted_name = "planted-eleventh-mobile-skill";
+        let mut grown = mobile_skill_registry();
+        assert!(
+            grown.get(planted_name).is_none(),
+            "fixture name must not already collide with a real bundled skill"
+        );
+        grown.register(skill_api::Skill {
+            name: planted_name.to_string(),
+            description: "planted for mobile_skill_list_is_derived_from_the_live_registry"
+                .to_string(),
+            frontmatter: skill_api::SkillFrontmatter {
+                name: planted_name.to_string(),
+                description: "planted".to_string(),
+                ..Default::default()
+            },
+            content: "planted content".to_string(),
+            source: skill_api::SkillSource::Bundled,
+            loaded_from: skill_api::LoadedFrom::Bundled,
+            plugin_id: None,
+            file_path: "<planted-for-test>".into(),
+        });
+
+        let mut commands = CommandRegistry::new();
+        register_mobile_skill_commands_from(&mut commands, &grown);
+
+        assert!(
+            commands.resolve(planted_name).is_some(),
+            "a skill registered into the live registry after the ten-name array \
+             was removed must automatically gain a slash command — if this \
+             fails, something is once again filtering the mirror through a \
+             name list independent of `skills`, which would silently skip any \
+             skill that list does not mention"
+        );
+
+        // The original ten must still be present alongside the planted one —
+        // growing the registry must ADD to the mirrored set, not replace it.
+        let names: std::collections::BTreeSet<&str> = commands
+            .list_all()
+            .into_iter()
+            .map(|command| command.name.as_str())
+            .collect();
+        for original in [
+            "create-local-app",
+            "frontend-design",
+            "frontend-qa",
+            "accessibility",
+            "react-best-practices",
+            "ionic-react-local-app",
+            "canvas-2d-local-app",
+            "threejs-local-app",
+            "phaser-2d-local-app",
+            "babylon-3d-local-app",
+        ] {
+            assert!(
+                names.contains(original),
+                "{original} must still be mirrored alongside the planted skill"
+            );
+        }
+        assert_eq!(
+            names.len(),
+            11,
+            "expected the original ten plus the planted skill"
+        );
+    }
+
+    /// D2 — the production WRAPPER frame, not just the derivation it delegates
+    /// to.
+    ///
+    /// `mobile_skill_list_is_derived_from_the_live_registry` above exercises
+    /// `register_mobile_skill_commands_from`, so it proves the DERIVATION is
+    /// total over the registry it is handed. It cannot see a filter one frame
+    /// up, inside `register_mobile_skill_commands` itself — and today no
+    /// value-level test can: the bundled registry holds exactly ten skills, so
+    /// a literal-free filter that keeps at least ten
+    /// (`mobile_skill_registry().names().into_iter().take(10)`, or a
+    /// `filter` on a running count) is the identity function right now. It
+    /// starts dropping skills only once an eleventh bundled skill lands —
+    /// which is precisely the defect P-1.5 removed, silently reintroduced,
+    /// invisible to every value assertion in this file and to the
+    /// component-literal scanner too, because such a filter names no skill.
+    ///
+    /// What CAN be pinned today is the shape of that frame: the wrapper must
+    /// stay one unconditional delegation of the WHOLE live registry, with
+    /// nothing sitting between `mobile_skill_registry()` and the derivation.
+    /// Any filter, truncation, `if`, or second name list introduced there
+    /// changes this body and fails here, whether or not it mentions a skill
+    /// name. (The one frame further up, `register_mobile_bundled_prompt_commands`,
+    /// hands the wrapper nothing but `reg`, so it has no registry to filter.)
+    #[test]
+    fn mobile_skill_command_wrapper_stays_an_unfiltered_delegation() {
+        const SOURCE: &str = include_str!("lib.rs");
+        // Assembled from fragments so this needle cannot match its own literal
+        // in the scanned source — the count assertion below then means the
+        // wrapper is defined exactly once and we are reading THAT definition.
+        let needle = concat!(
+            "pub(crate) fn ",
+            "register_mobile_skill_commands",
+            "(reg: &mut CommandRegistry) {"
+        );
+        assert_eq!(
+            SOURCE.matches(needle).count(),
+            1,
+            "expected exactly one definition of the mobile skill-command wrapper"
+        );
+        let start = SOURCE.find(needle).expect("wrapper definition") + needle.len();
+        let mut depth = 1usize;
+        let mut end = None;
+        for (offset, ch) in SOURCE[start..].char_indices() {
+            match ch {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = Some(start + offset);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let end = end.expect("unbalanced braces while reading the wrapper body");
+        let body = SOURCE[start..end]
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert_eq!(
+            body, "register_mobile_skill_commands_from(reg, &mobile_skill_registry());",
+            "`register_mobile_skill_commands` must remain a single unconditional \
+             delegation that hands the derivation the ENTIRE live registry. \
+             Anything else in this frame — a `take`/`filter`/`if`, a second name \
+             list, a rebuilt registry — can drop a bundled skill from the slash \
+             palette while every value assertion in this file still passes, \
+             because the registry currently holds exactly ten skills and a \
+             filter that keeps ten is today indistinguishable from no filter"
+        );
     }
 }
 

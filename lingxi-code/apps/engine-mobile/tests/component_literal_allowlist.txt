@@ -61,20 +61,12 @@
 
 # --- apps/engine-mobile/src ------------------------------------------------
 
-# lib.rs — register_mobile_skill_commands mirrors the live skill registry into
-# the mobile slash-command catalog by name (composition binding: it derives the
-# slash palette from the SAME registry this scanner reads its needles from; it
-# does not invent a second source of truth).
-apps/engine-mobile/src/lib.rs:create-local-app:1
-apps/engine-mobile/src/lib.rs:frontend-design:1
-apps/engine-mobile/src/lib.rs:frontend-qa:1
-apps/engine-mobile/src/lib.rs:accessibility:1
-apps/engine-mobile/src/lib.rs:react-best-practices:1
-apps/engine-mobile/src/lib.rs:ionic-react-local-app:1
-apps/engine-mobile/src/lib.rs:canvas-2d-local-app:1
-apps/engine-mobile/src/lib.rs:threejs-local-app:1
-apps/engine-mobile/src/lib.rs:phaser-2d-local-app:1
-apps/engine-mobile/src/lib.rs:babylon-3d-local-app:1
+# lib.rs — P-1.5 removed the second hardcoded ten-name array
+# `register_mobile_skill_commands` used to loop over. It now iterates
+# `skills.names()` on the live `mobile_skill_registry()` directly
+# (`register_mobile_skill_commands_from`), so none of the ten skill names
+# appear as source literals in this file any more; this file has no entries
+# here.
 
 # local_apps_host.rs — P-1.4 removed the Host's two prose sentences naming
 # which build workflow the app's surface requires (§19.3: the Host contract

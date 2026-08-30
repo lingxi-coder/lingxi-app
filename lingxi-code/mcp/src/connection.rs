@@ -7,7 +7,10 @@
 use protocol::McpConnectionId;
 use serde::{Deserialize, Serialize};
 use std::time::SystemTime;
-use traits::{McpPromptDto, McpResourceDto, McpToolDto, McpTransportSpec, ServerCapabilitiesDto};
+use traits::{
+    McpPromptDto, McpResourceDto, McpResourceTemplateDto, McpToolDto, McpTransportSpec,
+    ServerCapabilitiesDto,
+};
 
 /// Static configuration for one MCP server.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -207,6 +210,9 @@ pub enum McpConnectionState {
         tools: Vec<McpToolDto>,
         /// Resources advertised by the server.
         resources: Vec<McpResourceDto>,
+        /// Parameterized resource templates advertised by the server
+        /// (`resources/templates/list`, §26a).
+        resource_templates: Vec<McpResourceTemplateDto>,
         /// Prompts advertised by the server.
         prompts: Vec<McpPromptDto>,
         /// When the connection became `Connected`.

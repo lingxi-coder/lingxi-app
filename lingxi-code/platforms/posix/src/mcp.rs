@@ -27,8 +27,9 @@ use tokio::io::AsyncReadExt;
 use tokio::sync::Mutex as AsyncMutex;
 use traits::{
     ElicitRequestDto, ElicitResultDto, McpError, McpNotificationDto, McpNotificationStream,
-    McpPromptDto, McpRawConnection, McpResourceContentDto, McpResourceDto, McpToolDto,
-    McpToolResultDto, McpTransport, McpTransportKind, McpTransportSpec, ServerCapabilitiesDto,
+    McpPromptDto, McpRawConnection, McpResourceContentDto, McpResourceDto,
+    McpResourceTemplateDto, McpToolDto, McpToolResultDto, McpTransport, McpTransportKind,
+    McpTransportSpec, ServerCapabilitiesDto,
 };
 
 /// MCP protocol version this transport advertises in `initialize`.
@@ -288,6 +289,27 @@ struct RawResource {
     uri: String,
     #[serde(default)]
     name: String,
+    #[serde(rename = "mimeType")]
+    mime_type: Option<String>,
+}
+
+/// Wire response for `resources/templates/list` (§26a). Oracle
+/// `MYe = yEt.extend({resourceTemplates:H(GGt)})` (2.1.251 Mach-O
+/// @167622755) — same envelope shape as `ResourcesListResult` but keyed
+/// `resourceTemplates` and carrying `uriTemplate` instead of a concrete `uri`.
+#[derive(Deserialize)]
+struct ResourceTemplatesListResult {
+    #[serde(default, rename = "resourceTemplates")]
+    resource_templates: Vec<RawResourceTemplate>,
+}
+
+#[derive(Deserialize)]
+struct RawResourceTemplate {
+    #[serde(rename = "uriTemplate")]
+    uri_template: String,
+    #[serde(default)]
+    name: String,
+    description: Option<String>,
     #[serde(rename = "mimeType")]
     mime_type: Option<String>,
 }
@@ -566,6 +588,29 @@ impl McpTransport for PosixMcpTransport {
                 uri: r.uri,
                 name: r.name,
                 mime_type: r.mime_type,
+            })
+            .collect())
+    }
+
+    async fn list_resource_templates(
+        &self,
+        conn: &McpRawConnection,
+    ) -> Result<Vec<McpResourceTemplateDto>, McpError> {
+        let connection = self.connection_for_result(conn.connection_id)?;
+        let raw: Value = connection
+            .call("resources/templates/list", json!({}))
+            .await
+            .map_err(|e| map_call_err(&e))?;
+        let parsed: ResourceTemplatesListResult =
+            serde_json::from_value(raw).map_err(|e| McpError::Internal(e.to_string()))?;
+        Ok(parsed
+            .resource_templates
+            .into_iter()
+            .map(|t| McpResourceTemplateDto {
+                uri_template: t.uri_template,
+                name: t.name,
+                description: t.description,
+                mime_type: t.mime_type,
             })
             .collect())
     }

@@ -289,6 +289,34 @@ pub struct McpResourceDto {
     pub mime_type: Option<String>,
 }
 
+/// One parameterized resource template advertised by an MCP server
+/// (`resources/templates/list`).
+///
+/// Distinct from [`McpResourceDto`], which carries a concrete `uri`: a
+/// template's `uri_template` is an RFC 6570 URI Template with `{variable}`
+/// placeholders a client fills in before issuing `resources/read` against the
+/// resolved URI (MCP spec `ListResourceTemplatesResult` /
+/// `ResourceTemplate`). Oracle `GGt = f({...DYe.shape,...dEt.shape,
+/// uriTemplate:i(),description:qT(i()),mimeType:qT(i()),
+/// annotations:LYe.optional(),_meta:qT(un({}))})` (2.1.251 Mach-O
+/// @167622755); the response envelope is `{resourceTemplates:[...]}` (oracle
+/// `MYe = yEt.extend({resourceTemplates:H(GGt)})`, same offset). `annotations`
+/// / `_meta` are not yet surfaced here — no consumer needs them.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct McpResourceTemplateDto {
+    /// RFC 6570 URI template, e.g. `"file:///{path}"`.
+    #[serde(rename = "uriTemplate")]
+    pub uri_template: String,
+    /// Human-readable name.
+    pub name: String,
+    /// Optional human-readable description.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// Optional content type.
+    #[serde(rename = "mimeType", default, skip_serializing_if = "Option::is_none")]
+    pub mime_type: Option<String>,
+}
+
 /// One prompt advertised by an MCP server.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct McpPromptDto {
@@ -434,6 +462,21 @@ pub trait McpTransport: Send + Sync {
         &self,
         conn: &McpRawConnection,
     ) -> Result<Vec<McpResourceDto>, McpError>;
+
+    /// Enumerate parameterized resource templates exposed by the server
+    /// (`resources/templates/list` — see [`McpResourceTemplateDto`]).
+    ///
+    /// Additive method: the DEFAULT body returns an empty list so every
+    /// existing implementation compiles unchanged, exactly like
+    /// [`Self::read_resource_rich`]'s default below. Production transports
+    /// (POSIX) override it to issue the real wire call; a server (or a stub
+    /// transport) that never declares templates is unaffected.
+    async fn list_resource_templates(
+        &self,
+        _conn: &McpRawConnection,
+    ) -> Result<Vec<McpResourceTemplateDto>, McpError> {
+        Ok(Vec::new())
+    }
 
     /// Enumerate all prompts exposed by the server.
     async fn list_prompts(&self, conn: &McpRawConnection) -> Result<Vec<McpPromptDto>, McpError>;

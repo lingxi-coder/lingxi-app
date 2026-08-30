@@ -5,9 +5,10 @@
 //! Unlike `mcp_stdio_test.rs` (which calls the low-level `spawn_stdio` helper
 //! directly), this file exercises the public `McpTransport` API exactly as the
 //! engine would: `connect` -> `initialize` -> `list_tools` / `call_tool` /
-//! `list_resources` / `read_resource` / `list_prompts` -> `ping` ->
-//! `disconnect`. The mock fixture answers all of these with deterministic
-//! fixtures (one `echo` tool, one resource, one `greet` prompt).
+//! `list_resources` / `list_resource_templates` / `read_resource` /
+//! `list_prompts` -> `ping` -> `disconnect`. The mock fixture answers all of
+//! these with deterministic fixtures (one `echo` tool, one resource, one
+//! resource template, one `greet` prompt).
 
 use futures::StreamExt;
 use platform_posix::mcp::PosixMcpTransport;
@@ -155,6 +156,27 @@ async fn full_mcp_surface_roundtrips_over_stdio() {
     assert_eq!(resources[0].uri, "mock://readme");
     assert_eq!(resources[0].name, "README");
     assert_eq!(resources[0].mime_type.as_deref(), Some("text/plain"));
+
+    // --- resources/templates/list (§26a) --------------------------------
+    let templates = tokio::time::timeout(
+        Duration::from_secs(5),
+        transport.list_resource_templates(&conn),
+    )
+    .await
+    .expect("list_resource_templates timed out")
+    .expect("list_resource_templates failed");
+    assert_eq!(
+        templates.len(),
+        1,
+        "fixture exposes one resource template"
+    );
+    assert_eq!(templates[0].uri_template, "mock://files/{path}");
+    assert_eq!(templates[0].name, "file-template");
+    assert_eq!(
+        templates[0].description.as_deref(),
+        Some("A file under mock://files")
+    );
+    assert_eq!(templates[0].mime_type.as_deref(), Some("text/plain"));
 
     // --- resources/read ------------------------------------------------
     let content = tokio::time::timeout(

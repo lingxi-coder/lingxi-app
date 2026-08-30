@@ -1090,15 +1090,25 @@ impl McpRegistry {
             } else {
                 Vec::new()
             };
+            // §26a — `resources/templates/list` is gated on the SAME
+            // `resources` capability as `resources/list` / `resources/read`
+            // (oracle: `case"resources/list":case"resources/templates/list":
+            // case"resources/read":if(!this._capabilities.resources)throw…`,
+            // @167690139), not a separate capability bit.
+            let resource_templates = if caps.resources {
+                self.transport.list_resource_templates(&conn).await?
+            } else {
+                Vec::new()
+            };
             let prompts = if caps.prompts {
                 self.transport.list_prompts(&conn).await?
             } else {
                 Vec::new()
             };
-            Ok::<_, McpError>((tools, resources, prompts))
+            Ok::<_, McpError>((tools, resources, resource_templates, prompts))
         }
         .await;
-        let (mut tools, resources, prompts) = match catalog {
+        let (mut tools, resources, resource_templates, prompts) = match catalog {
             Ok(catalog) => catalog,
             Err(error) => {
                 // `initialize` succeeded, so the transport is live. A catalog
@@ -1197,6 +1207,7 @@ impl McpRegistry {
                 capabilities: caps,
                 tools,
                 resources,
+                resource_templates,
                 prompts,
                 connected_at: SystemTime::now(),
             },
@@ -3193,6 +3204,11 @@ mod tests {
     /// transport emits, so the registry's rewrite is exercised).
     struct BridgeMock {
         tools: Vec<McpToolDto>,
+        // §26a — canned `resources/templates/list` rows and the capability
+        // presence bit that gates whether `connect` fetches them at all
+        // (`initialize` reports `resources: true` only when this is set).
+        resource_templates: Vec<traits::McpResourceTemplateDto>,
+        resources_capability: AtomicBool,
         conns: TestMutex<HashMap<ConnId, Arc<Connection>>>,
         list_tools_fails: AtomicBool,
         disconnect_fails: AtomicBool,
@@ -3220,12 +3236,25 @@ mod tests {
                 .collect();
             Self {
                 tools,
+                resource_templates: Vec::new(),
+                resources_capability: AtomicBool::new(false),
                 conns: TestMutex::new(HashMap::new()),
                 list_tools_fails: AtomicBool::new(false),
                 disconnect_fails: AtomicBool::new(false),
                 block_disconnect: AtomicBool::new(false),
                 disconnect_started: Notify::new(),
                 disconnect_release: Notify::new(),
+            }
+        }
+
+        /// A mock whose server advertises the `resources` capability and
+        /// answers `resources/templates/list` with `templates` (§26a).
+        fn with_resource_templates(templates: Vec<traits::McpResourceTemplateDto>) -> Self {
+            let mock = Self::new(&[]);
+            mock.resources_capability.store(true, Ordering::SeqCst);
+            Self {
+                resource_templates: templates,
+                ..mock
             }
         }
 
@@ -3263,11 +3292,17 @@ mod tests {
         ) -> Result<ServerCapabilitiesDto, McpError> {
             Ok(ServerCapabilitiesDto {
                 tools: true,
-                resources: false,
+                resources: self.resources_capability.load(Ordering::SeqCst),
                 prompts: false,
                 logging: false,
                 experimental: HashMap::new(),
             })
+        }
+        async fn list_resource_templates(
+            &self,
+            _c: &McpRawConnection,
+        ) -> Result<Vec<traits::McpResourceTemplateDto>, McpError> {
+            Ok(self.resource_templates.clone())
         }
         async fn list_tools(&self, _c: &McpRawConnection) -> Result<Vec<McpToolDto>, McpError> {
             if self.list_tools_fails.load(Ordering::SeqCst) {
@@ -3936,6 +3971,7 @@ mod tests {
                 },
                 tools: BridgeMock::new(&["old"]).tools,
                 resources: Vec::new(),
+                resource_templates: Vec::new(),
                 prompts: Vec::new(),
                 connected_at: SystemTime::now(),
             },
@@ -4010,6 +4046,7 @@ mod tests {
                 },
                 tools: Vec::new(),
                 resources: Vec::new(),
+                resource_templates: Vec::new(),
                 prompts: vec![McpPromptDto {
                     name: "draft".into(),
                     description: None,
@@ -4050,6 +4087,7 @@ mod tests {
                 },
                 tools: Vec::new(),
                 resources: Vec::new(),
+                resource_templates: Vec::new(),
                 prompts: vec![McpPromptDto {
                     name: "draft".into(),
                     description: None,
@@ -4133,6 +4171,85 @@ mod tests {
         // A model-supplied normalized `<server>` token resolves the raw key.
         assert!(registry.get_client("my_server").await.is_some());
         assert!(registry.get_config("my_server").await.is_some());
+    }
+
+    /// §26a — a server whose `initialize` declares the `resources` capability
+    /// has its `resources/templates/list` fetched at connect time and stashed
+    /// on the `Connected` state, exactly like `resources`/`tools`/`prompts`.
+    /// Oracle gates `resources/templates/list` on the SAME capability as
+    /// `resources/list` (@167690139), not a separate template bit — this is
+    /// the connect-time "catalog fetch" the audit found entirely absent
+    /// (registry.rs's fetch was `list_tools`/`list_resources`/`list_prompts`
+    /// only).
+    #[tokio::test]
+    async fn connect_fetches_resource_templates_when_resources_capability_is_present() {
+        let mock = Arc::new(BridgeMock::with_resource_templates(vec![
+            traits::McpResourceTemplateDto {
+                uri_template: "file:///{path}".into(),
+                name: "file-template".into(),
+                description: Some("A file on disk".into()),
+                mime_type: Some("text/plain".into()),
+            },
+        ]));
+        let registry = McpRegistry::with_raw_conn(
+            mock.clone() as Arc<dyn McpTransport>,
+            mock as Arc<dyn RawConnectionProvider>,
+        );
+        registry.connect(cfg("srv")).await.unwrap();
+
+        let conns = registry.connections.read().await;
+        let McpConnectionState::Connected {
+            resource_templates, ..
+        } = conns.get("srv").unwrap()
+        else {
+            panic!("expected Connected state");
+        };
+        assert_eq!(
+            resource_templates.len(),
+            1,
+            "connect must fetch resources/templates/list when resources capability is present"
+        );
+        assert_eq!(resource_templates[0].uri_template, "file:///{path}");
+        assert_eq!(resource_templates[0].name, "file-template");
+        assert_eq!(
+            resource_templates[0].description.as_deref(),
+            Some("A file on disk")
+        );
+        assert_eq!(resource_templates[0].mime_type.as_deref(), Some("text/plain"));
+    }
+
+    /// The capability gate: without the `resources` capability the fetch must
+    /// be SKIPPED entirely (mirrors the existing `resources`/`prompts` gates
+    /// just above it), not merely returning empty because the mock had none.
+    #[tokio::test]
+    async fn connect_skips_resource_templates_fetch_without_resources_capability() {
+        // `BridgeMock::new` reports `resources: false` from `initialize`, so
+        // even a mock stocked with templates must yield none on connect.
+        let mut mock = BridgeMock::new(&[]);
+        mock.resource_templates = vec![traits::McpResourceTemplateDto {
+            uri_template: "file:///{path}".into(),
+            name: "unreachable".into(),
+            description: None,
+            mime_type: None,
+        }];
+        let mock = Arc::new(mock);
+        let registry = McpRegistry::with_raw_conn(
+            mock.clone() as Arc<dyn McpTransport>,
+            mock as Arc<dyn RawConnectionProvider>,
+        );
+        registry.connect(cfg("srv")).await.unwrap();
+
+        let conns = registry.connections.read().await;
+        let McpConnectionState::Connected {
+            resource_templates, ..
+        } = conns.get("srv").unwrap()
+        else {
+            panic!("expected Connected state");
+        };
+        assert!(
+            resource_templates.is_empty(),
+            "resources capability absent -> templates fetch must be skipped, got {resource_templates:?}"
+        );
     }
 
     /// §20a runs on the CONNECT path, not just on `McpClient::list_tools`.

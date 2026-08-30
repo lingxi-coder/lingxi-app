@@ -403,6 +403,20 @@ pub struct MCPTool {
     /// allow" grant must never be offered — see
     /// `Tool::requires_user_interaction` below.
     requires_user_interaction: bool,
+    /// §24b — explicit dispatch target for a per-SUBAGENT inline `mcpServers`
+    /// entry. `None` (every existing construction site) preserves today's
+    /// behaviour exactly: the server is derived from `full_name`'s parsed
+    /// segment, which is also the `McpRegistry` table key. `Some(key)` means
+    /// this instance was built over an agent-scoped connection registered
+    /// under `key` ([`mcp::registry::McpRegistry::connect_agent_scoped`]) —
+    /// dispatch (registry lookups) uses `key`, while `full_name` STAYS
+    /// `mcp__<server>__<tool>` with the PLAIN server name, so the model sees
+    /// the same tool name the oracle emits, `mcp__<server>__*` permission
+    /// rules still match, and `oauth::server_key` (which hashes
+    /// `config.name`) is untouched. Set only via
+    /// [`Self::with_bound_server_key`] so every OTHER construction site's
+    /// argument list is unaffected by this addition.
+    bound_server_key: Option<String>,
 }
 
 /// Inspect a configured MCP server's auth/transport surface.
@@ -435,6 +449,7 @@ impl MCPTool {
             search_hint: None,
             always_load: true,
             requires_user_interaction: false,
+            bound_server_key: None,
         }
     }
 
@@ -469,7 +484,21 @@ impl MCPTool {
             search_hint,
             always_load,
             requires_user_interaction,
+            bound_server_key: None,
         }
+    }
+
+    /// §24b: bind this per-tool wire entry's DISPATCH target to `key` — the
+    /// [`mcp::registry::McpRegistry`] table key an agent-scoped connect
+    /// registered the underlying connection under. `full_name` (the wire
+    /// `name()`, already stamped by [`Self::new_for_tool`]) is left
+    /// untouched, so the model-facing FQN and permission-rule matching stay
+    /// on the plain server name; only registry lookups inside [`Self::call`]
+    /// use `key`.
+    #[must_use]
+    pub fn with_bound_server_key(mut self, key: String) -> Self {
+        self.bound_server_key = Some(key);
+        self
     }
 
     fn mcp_registry(&self) -> Option<&Arc<McpRegistry>> {
@@ -966,6 +995,16 @@ impl Tool for MCPTool {
         let (server, tool) = parse_full_name(&full_name)?;
         let server = server.to_string();
         let tool = tool.to_string();
+        // §24b: the registry table key to dispatch against. `full_name`
+        // above stays the PLAIN `mcp__<server>__<tool>` the model addressed
+        // (permission rules / telemetry / progress events below all keep
+        // using `server`); only registry LOOKUPS use `dispatch_key`, which
+        // is `server` itself unless this instance is bound to an
+        // agent-scoped connection (`with_bound_server_key`).
+        let dispatch_key: String = self
+            .bound_server_key
+            .clone()
+            .unwrap_or_else(|| server.clone());
 
         // STARTED.
         emit(
@@ -996,7 +1035,7 @@ impl Tool for MCPTool {
             }
         };
 
-        if !registry.has_callable_server(&server).await {
+        if !registry.has_callable_server(&dispatch_key).await {
             emit(
                 self.bus(),
                 MCP_FAILED,
@@ -1030,7 +1069,7 @@ impl Tool for MCPTool {
         // raw and normalized forms are identical, so this is a no-op except for
         // tool names containing characters outside `[a-zA-Z0-9_-]`.
         let tool = registry
-            .resolve_wire_tool_name(&server, &full_name)
+            .resolve_wire_tool_name(&server, &full_name, self.bound_server_key.as_deref())
             .await
             .unwrap_or(tool);
         // Reconstruct the raw-tool FQN so the client's `mcp__<server>__` prefix
@@ -1081,7 +1120,7 @@ impl Tool for MCPTool {
         // lingxi has no `"sse-ide"`/`"ws-ide"` IDE variants, so that IDE
         // exclusion is inert here but PRESERVED inside the helper. A missing
         // config falls back to an empty kind (never IDE) — the default gate.
-        let transport_kind = match registry.get_config(&server).await {
+        let transport_kind = match registry.get_config(&dispatch_key).await {
             Some(cfg) => auth_kind_from_spec(&cfg.spec).0.to_string(),
             None => String::new(),
         };
@@ -1109,7 +1148,7 @@ impl Tool for MCPTool {
         let Some(task_registry) = bg_registry else {
             let res = registry
                 .call_tool_with_auth_retry(
-                    &server,
+                    &dispatch_key,
                     &dispatch_full_name,
                     arguments,
                     tool_use_id_str.as_deref(),
@@ -1158,7 +1197,7 @@ impl Tool for MCPTool {
             let token_counter = token_counter.clone();
             let default_model = default_model.clone();
             let server = server.clone();
-            let call_server = server.clone();
+            let call_server = dispatch_key.clone();
             let tool = tool.clone();
             let tool_use_id = tool_use_id.clone();
             let progress = progress.clone();
@@ -2797,7 +2836,18 @@ mod auto_background_race_tests {
 
     // Drive the peer: read the client's `tools/call` request frame and answer it
     // with a canned text result so the awaiting call resolves.
-    fn spawn_responder(mut peer_rx: mpsc::Receiver<Bytes>, peer_tx: mpsc::Sender<Bytes>) {
+    fn spawn_responder(peer_rx: mpsc::Receiver<Bytes>, peer_tx: mpsc::Sender<Bytes>) {
+        spawn_tagged_responder(peer_rx, peer_tx, "ok");
+    }
+
+    /// Like [`spawn_responder`], but the canned `tools/call` result text is
+    /// caller-supplied — lets a test with TWO live peers tell which one
+    /// actually answered a given dispatch.
+    fn spawn_tagged_responder(
+        mut peer_rx: mpsc::Receiver<Bytes>,
+        peer_tx: mpsc::Sender<Bytes>,
+        text: &'static str,
+    ) {
         tokio::spawn(async move {
             let frame = peer_rx.recv().await.expect("client sent a request frame");
             let req: Value = serde_json::from_slice(&frame).expect("json request");
@@ -2805,7 +2855,7 @@ mod auto_background_race_tests {
             let resp = json!({
                 "jsonrpc": "2.0",
                 "id": id,
-                "result": { "content": [{ "type": "text", "text": "ok" }], "isError": false },
+                "result": { "content": [{ "type": "text", "text": text }], "isError": false },
             });
             let mut bytes = serde_json::to_vec(&resp).unwrap();
             bytes.push(b'\n');
@@ -2901,6 +2951,96 @@ mod auto_background_race_tests {
             recorder.registered.lock().unwrap().is_empty(),
             "auto_bg_ms == 0 never backgrounds"
         );
+    }
+
+    // §24b: `bound_server_key` must be the ONLY thing that decides which live
+    // connection a per-tool wire entry dispatches to — `full_name` (the
+    // model-facing FQN) stays the plain `mcp__docs__search` either way.
+    #[tokio::test]
+    async fn bound_server_key_dispatches_to_the_scoped_connection_not_the_plain_name() {
+        // Two DIFFERENT live clients both registered under names that would
+        // satisfy a naive "parse the server out of full_name" lookup for
+        // "docs" — one under the PLAIN key (simulating an unrelated
+        // shared/session "docs" server), one under an agent-scoped key
+        // (simulating `McpRegistry::connect_agent_scoped`'s table key).
+        let (plain_conn, plain_peer_tx, plain_peer_rx) = paired();
+        let plain_client = Arc::new(
+            mcp::McpClient::new("docs", std::path::PathBuf::from("/tmp"), plain_conn).await,
+        );
+        let (scoped_conn, scoped_peer_tx, scoped_peer_rx) = paired();
+        let scoped_client = Arc::new(
+            mcp::McpClient::new("docs", std::path::PathBuf::from("/tmp"), scoped_conn).await,
+        );
+
+        let registry = Arc::new(McpRegistry::new(Arc::new(StubTransport)));
+        registry.register_client("docs", plain_client).await;
+        let scoped_key = "__lingxi_agent_scope__deadbeef__docs";
+        registry.register_client(scoped_key, scoped_client).await;
+
+        // Each peer answers with a DISTINCT text, so the result proves WHICH
+        // client actually received the call.
+        spawn_tagged_responder(plain_peer_rx, plain_peer_tx, "plain-answered");
+        spawn_tagged_responder(scoped_peer_rx, scoped_peer_tx, "scoped-answered");
+
+        let ctx = ctx_with(registry, None);
+        let tool = MCPTool::new_for_tool(
+            ctx,
+            "mcp__docs__search".to_string(),
+            "search docs".to_string(),
+            json!({"type": "object"}),
+            None,
+            false,
+            false,
+        )
+        .with_bound_server_key(scoped_key.to_string());
+
+        let mut use_ctx = tool_api::test_support::fresh_ctx();
+        use_ctx.tool_use_id = Some(protocol::ToolUseId::from("tu-scoped"));
+
+        let result = tool
+            .call(json!({}), use_ctx, tool_api::test_support::fresh_tx())
+            .await
+            .expect("scoped dispatch succeeds");
+        assert_eq!(
+            result.model_content.as_deref(),
+            Some("scoped-answered"),
+            "bound_server_key must route dispatch to the SCOPED client, not a same-named plain one"
+        );
+    }
+
+    // A per-tool entry with NO `bound_server_key` (every construction site
+    // before §24b, and the shared/session per-tool entries built by
+    // `build_registered_mcp_tools`) must keep dispatching by the plain name
+    // parsed from `full_name` — byte-identical to legacy.
+    #[tokio::test]
+    async fn unbound_per_tool_entry_dispatches_by_the_plain_parsed_name() {
+        let (conn, peer_tx, peer_rx) = paired();
+        let client =
+            Arc::new(mcp::McpClient::new("docs", std::path::PathBuf::from("/tmp"), conn).await);
+        let registry = Arc::new(McpRegistry::new(Arc::new(StubTransport)));
+        registry.register_client("docs", client).await;
+        spawn_tagged_responder(peer_rx, peer_tx, "plain-answered");
+
+        let ctx = ctx_with(registry, None);
+        let tool = MCPTool::new_for_tool(
+            ctx,
+            "mcp__docs__search".to_string(),
+            "search docs".to_string(),
+            json!({"type": "object"}),
+            None,
+            false,
+            false,
+        );
+        // No `.with_bound_server_key(..)` — legacy path.
+
+        let mut use_ctx = tool_api::test_support::fresh_ctx();
+        use_ctx.tool_use_id = Some(protocol::ToolUseId::from("tu-plain"));
+
+        let result = tool
+            .call(json!({}), use_ctx, tool_api::test_support::fresh_tx())
+            .await
+            .expect("unbound dispatch succeeds");
+        assert_eq!(result.model_content.as_deref(), Some("plain-answered"));
     }
 
     // Threshold enabled but NO task registry wired on the context → the seam is

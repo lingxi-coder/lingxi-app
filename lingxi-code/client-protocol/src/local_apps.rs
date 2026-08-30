@@ -1009,6 +1009,119 @@ pub enum AppAuthorizationDecisionDto {
     AllowAlways,
 }
 
+// ── Builtin plugin enable/disable/status (§17.1, §19.2) ────────────────────
+//
+// The bare-key three-way (`enabledPlugins["lingxi-local-app"]` explicit
+// `true` / explicit `false` / key absent) is RESOLVED host-side, in the
+// `lingxi-code/plugin` crate. That crate is not a `client-protocol`
+// dependency (decision: this crate is pure wire DTOs, the engine lowers
+// core ⇄ DTO at the dispatch boundary — see the module doc at the top of
+// this file), so the resolution ALGORITHM and its persistence across a
+// restart are out of scope here. What belongs in this crate is only the WIRE
+// SHAPE the resolved outcome travels over, and that shape is designed so it
+// CANNOT collapse "explicitly disabled" into "absent": [`PluginStatusDto`]
+// is never optional on the wire and its `state` field has exactly two
+// values, neither of which can be left unstated.
+//
+// ⚠️ HOST GAP — verified 2026-08-30, NOT closable from this crate.
+// `PluginActivationStateDto::Disabled` currently has no producer for the
+// cold-start case, because the host does not yet keep an explicitly-disabled
+// plugin in its registry:
+//
+//   * `plugin::discovery::discover_effective_plugins`
+//     (`plugin/src/discovery.rs:481`) resolves the three-way correctly
+//     — `enabled.get(&identifier).copied().unwrap_or(manifest.default_enabled)`
+//     — but then only PUSHES the entry when `active` is true. An explicitly
+//     disabled plugin is dropped from the returned vec entirely.
+//   * The boot path (`engine-desktop::discover_plugin_set`,
+//     `apps/engine-desktop/src/lib.rs:4854`) feeds exactly that vec to
+//     `PluginManager::enable`, so a plugin resolved to `false` is never
+//     inserted into the manager's map at all.
+//   * `PluginState::Disabled` is constructed at exactly ONE site,
+//     `PluginManager::disable` (`plugin/src/manager.rs:606`), which requires
+//     the plugin to be `Loaded` FIRST and otherwise returns
+//     `PluginManagerError::NotFound`.
+//
+// Net effect, which is precisely the confusion §19.2 exists to forbid: after
+// a restart with `enabledPlugins["lingxi-local-app"] = false` on disk, the
+// plugin is ABSENT from the registry rather than present-and-`Disabled`. A
+// later "is it installed?" answers no, and a native toggle back to `true`
+// has no registry entry to flip — `disable()`/`enable()` keyed on the
+// existing id both fail with `NotFound`. Closing this needs a change in
+// `plugin/src/discovery.rs` + the boot path (return the inactive entries and
+// register them as `Disabled`), neither of which is a file this task owns.
+// The DTOs below are deliberately shaped so that, once the host is fixed, no
+// wire change is needed to express the correct answer.
+
+/// Effective activation state of one builtin plugin, after the host has
+/// resolved the bare-key three-way (§19.2). Deliberately two variants, not
+/// three: an absent `enabledPlugins` key is resolved to one of these before
+/// the wire is touched, so a client never reasons about "missing" itself.
+/// `#[non_exhaustive]` in case a future lifecycle state becomes client-visible.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum PluginActivationStateDto {
+    /// Loaded — components are live in the engine registries.
+    Loaded,
+    /// Explicitly disabled, or never enabled — PRESENT in the registry, not
+    /// dropped. A registry that drops a disabled plugin is indistinguishable
+    /// from one that never found it; this variant is why that never happens
+    /// on the wire.
+    Disabled,
+}
+
+/// Resolved status of one builtin plugin. Always present for a known
+/// builtin: the engine-compiled-in door (§19.1) means the host always knows
+/// `lingxi-local-app`, so there is no "not found" wire state to confuse with
+/// [`PluginActivationStateDto::Disabled`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct PluginStatusDto {
+    /// Bare `enabledPlugins` key (e.g. `"lingxi-local-app"`) — no
+    /// `@marketplace` suffix. The same identifier
+    /// [`PluginCommandDto::SetEnabled`] writes back: there is only ONE name
+    /// for this plugin on the wire, read or write.
+    pub plugin_id: String,
+    /// The resolved three-way outcome.
+    pub state: PluginActivationStateDto,
+    /// The manifest's `defaultEnabled` value, surfaced so a client can
+    /// distinguish "using the default" from an explicit override without a
+    /// second round trip.
+    pub manifest_default_enabled: bool,
+}
+
+/// Enable/disable/status operations for one builtin plugin. Nested under
+/// [`crate::commands::ClientCommand::PluginCommand`] instead of flat
+/// top-level `ClientCommand` variants: `uniffi_macros::create_metadata_items`
+/// bills a nested enum's variants to ITS OWN 16 KiB metadata buffer, not
+/// `ClientCommand`'s (see `CLIENT_COMMAND_METADATA_BUDGET` in `commands.rs`).
+/// Future §17.1 additions (builtin inventory, template catalog, MCP proposal
+/// diff, …) extend this enum, not `ClientCommand` again.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
+#[serde(tag = "type", rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum PluginCommandDto {
+    /// Write `enabledPlugins[plugin_id] = enabled`. This is the ONLY way a
+    /// client turns a plugin on or off — there is no second "override" or
+    /// "use default" flag alongside it. Confirmed by a
+    /// `PluginStatusChanged` event carrying the new resolved status.
+    SetEnabled {
+        /// Bare `enabledPlugins` key.
+        plugin_id: String,
+        /// The value written back verbatim.
+        enabled: bool,
+    },
+    /// Request the resolved status for one plugin. Replied with
+    /// [`AppEventDto::PluginStatusChanged`].
+    GetStatus {
+        /// Bare `enabledPlugins` key.
+        plugin_id: String,
+    },
+}
+
 /// Extensible local-app event payload carried by the single top-level
 /// `ClientEvent::AppEvent` envelope to keep `UniFFI` enum metadata bounded.
 // Boxing variants would change the generated mobile binding API; this is
@@ -1117,6 +1230,13 @@ pub enum AppEventDto {
     AppDependencyChangeConfirmationRequested {
         request: AppDependencyChangeConfirmationRequestDto,
     },
+    /// Resolved status for one builtin plugin, in reply to
+    /// `PluginCommandDto::GetStatus` and confirming a `SetEnabled` write-back.
+    ///
+    /// Appended at the END to preserve UniFFI enum ordinals for older clients.
+    PluginStatusChanged {
+        status: PluginStatusDto,
+    },
 }
 
 #[cfg(test)]
@@ -1138,5 +1258,223 @@ mod tests {
         assert_eq!(value["streamId"], "stream-1");
         assert_eq!(value["dataJson"], "{}");
         assert!(value.get("app_id").is_none());
+    }
+
+    // ── Plugin enable/disable/status wire contract (§17.1, §19.2) ──────────
+    //
+    // `client-protocol` has no dependency on the `plugin` crate and no
+    // persistence layer of its own, so two of P1.9's five required test
+    // names are NOT reachable from this file and are deliberately NOT
+    // reproduced here under those names:
+    //
+    // - `missing_key_uses_the_manifest_default` — this is the bare-key
+    //   THREE-WAY RESOLUTION ALGORITHM's behavior on an absent
+    //   `enabledPlugins` entry. That algorithm is
+    //   `plugin::discovery::discover_effective_plugins`
+    //   (`enabled.get(id).copied().unwrap_or(manifest.default_enabled)`,
+    //   `lingxi-code/plugin/src/discovery.rs`) — a crate this one does not
+    //   depend on. `PluginStatusDto` has no "missing" wire state to begin
+    //   with (by design: the host resolves before the wire is touched), so
+    //   there is nothing about "missing key" for a DTO-only test to assert.
+    // - `state_survives_restart` — persistence-across-restart is
+    //   `plugin::manager::PluginManager` + `installed_plugins.json`
+    //   durability, entirely outside a wire-DTO crate with no disk I/O.
+    //
+    // Note also that `explicit_false_is_disabled_not_absent`'s BEHAVIOURAL
+    // claim is currently FALSE at the host on a cold start — see the
+    // "HOST GAP" block above `PluginActivationStateDto`. Naming a passing
+    // wire-shape test after it would read as evidence that the behaviour
+    // holds, which is exactly backwards.
+    //
+    // Reproducing either under its exact required name here, with content
+    // that could only ever assert something about THIS crate's own trivial
+    // plumbing, would be the reviewed-against "weaker thing under the
+    // stronger name" — so instead: the WIRE-SHAPE properties that ARE this
+    // crate's job are pinned below under their own honest names, and
+    // `native_toggle_writes_back_the_same_bare_key` (fully reachable here)
+    // keeps its required name.
+    use super::{AppEventDto, PluginActivationStateDto, PluginCommandDto, PluginStatusDto};
+
+    /// The wire-shape half of "explicit `false` is Disabled, not absent"
+    /// (§19.2): a Disabled status serializes to a concrete, present JSON
+    /// object with its own distinct `state` tag — never `null`, never an
+    /// omitted field, never the same value `Loaded` serializes to. Whether
+    /// an explicit `false` setting actually RESOLVES to `Disabled` is
+    /// `plugin::discovery`'s job, not this crate's.
+    #[test]
+    fn plugin_status_disabled_state_is_present_and_distinct_from_loaded() {
+        let disabled = serde_json::to_value(PluginStatusDto {
+            plugin_id: "lingxi-local-app".into(),
+            state: PluginActivationStateDto::Disabled,
+            manifest_default_enabled: true,
+        })
+        .expect("serialize disabled status");
+        assert_eq!(disabled["state"], "disabled");
+        assert_eq!(disabled["plugin_id"], "lingxi-local-app");
+
+        let loaded = serde_json::to_value(PluginStatusDto {
+            plugin_id: "lingxi-local-app".into(),
+            state: PluginActivationStateDto::Loaded,
+            manifest_default_enabled: true,
+        })
+        .expect("serialize loaded status");
+        assert_ne!(
+            disabled["state"], loaded["state"],
+            "Disabled must not serialize the same as Loaded"
+        );
+
+        // The load-bearing half. "Disabled, not absent" is a claim about what
+        // the wire CANNOT say, so it is asserted as UN-REPRESENTABILITY: no
+        // payload may name a plugin while leaving its activation unstated.
+        //
+        // An `assert!(json.is_object())` does NOT test this. Every
+        // `derive(Serialize)` struct serializes to an object, so that
+        // assertion is vacuously true here — and it stays true for a
+        // `#[serde(default)] state: Option<_>` field, i.e. for exactly the
+        // design this test exists to forbid. It was removed for that reason.
+        //
+        // POSITIVE CONTROL first, so a rejection below cannot be credited to
+        // an unrelated malformed input rather than to the missing `state`.
+        let complete = serde_json::json!({
+            "plugin_id": "lingxi-local-app",
+            "state": "disabled",
+            "manifest_default_enabled": true,
+        });
+        let control: PluginStatusDto = serde_json::from_value(complete.clone())
+            .expect("positive control: a complete status payload must parse");
+        assert_eq!(
+            control.state,
+            PluginActivationStateDto::Disabled,
+            "positive control must actually reach the Disabled state"
+        );
+
+        for (label, tampered) in [
+            ("an omitted", {
+                let mut v = complete.clone();
+                v.as_object_mut().expect("object").remove("state");
+                v
+            }),
+            ("a null", {
+                let mut v = complete.clone();
+                v["state"] = serde_json::Value::Null;
+                v
+            }),
+        ] {
+            let parsed = serde_json::from_value::<PluginStatusDto>(tampered);
+            assert!(
+                parsed.is_err(),
+                "a status with {label} `state` must be REJECTED, got {parsed:?}: \
+                 if unstated activation were representable, \"explicitly \
+                 disabled\" and \"not found\" would collapse into one payload \
+                 again — the exact confusion PluginActivationStateDto exists \
+                 to prevent"
+            );
+        }
+    }
+
+    /// The wire-shape half of "explicit `true` overrides a `false` manifest
+    /// default": the two fields ride independently, so `Loaded` alongside
+    /// `manifest_default_enabled: false` is representable and round-trips
+    /// without either field being silently derived from the other. Whether
+    /// an explicit `true` actually RESOLVES to `Loaded` when the manifest
+    /// defaults to `false` is `plugin::discovery`'s job, not this crate's.
+    #[test]
+    fn plugin_status_can_represent_loaded_alongside_a_false_manifest_default() {
+        let status = PluginStatusDto {
+            plugin_id: "lingxi-local-app".into(),
+            state: PluginActivationStateDto::Loaded,
+            manifest_default_enabled: false,
+        };
+        let json = serde_json::to_value(&status).expect("serialize");
+        assert_eq!(json["state"], "loaded");
+        assert_eq!(json["manifest_default_enabled"], false);
+
+        let back: PluginStatusDto = serde_json::from_value(json).expect("deserialize back");
+        assert_eq!(back, status, "round trip must preserve both fields exactly");
+    }
+
+    /// The `PluginStatusChanged` event round-trips under its own wire tag.
+    ///
+    /// This variant is otherwise COMPLETELY uncovered:
+    /// `snapshot_test::every_variant_has_a_golden` enumerates the tags
+    /// declared by `ClientCommand` and `ClientEvent` only — it never looks at
+    /// `AppEventDto`, so a new payload variant carries no golden and nothing
+    /// in the repo complains. Without this test the only reply channel the
+    /// enable/disable protocol has would ship unexercised.
+    #[test]
+    fn plugin_status_changed_event_round_trips_under_its_wire_tag() {
+        let status = PluginStatusDto {
+            plugin_id: "lingxi-local-app".into(),
+            state: PluginActivationStateDto::Disabled,
+            manifest_default_enabled: false,
+        };
+        let event = AppEventDto::PluginStatusChanged {
+            status: status.clone(),
+        };
+        let json = serde_json::to_value(&event).expect("serialize event");
+        assert_eq!(json["type"], "plugin_status_changed");
+        assert_eq!(json["status"]["plugin_id"], "lingxi-local-app");
+        assert_eq!(json["status"]["state"], "disabled");
+        assert_eq!(json["status"]["manifest_default_enabled"], false);
+
+        let back: AppEventDto = serde_json::from_value(json).expect("deserialize event");
+        assert_eq!(
+            back, event,
+            "the reply envelope must carry the resolved status through unchanged"
+        );
+    }
+
+    /// `PluginActivationStateDto`'s two wire tags, pinned so a future rename
+    /// (or a third variant reusing one of these strings) is a visible diff.
+    #[test]
+    fn plugin_activation_state_wire_values_are_stable() {
+        assert_eq!(
+            serde_json::to_value(PluginActivationStateDto::Loaded).unwrap(),
+            "loaded"
+        );
+        assert_eq!(
+            serde_json::to_value(PluginActivationStateDto::Disabled).unwrap(),
+            "disabled"
+        );
+    }
+
+    /// A native toggle writes back the SAME bare key it reads — there is no
+    /// second enable flag (§19.2). `SetEnabled`'s JSON carries exactly
+    /// `{type, plugin_id, enabled}`: nothing else could silently diverge
+    /// from `enabled`, and `plugin_id` is spelled identically to
+    /// `GetStatus`/`PluginStatusDto` — this is the regression guard against
+    /// a future accidental rename on just one side of the read/write pair.
+    #[test]
+    fn native_toggle_writes_back_the_same_bare_key() {
+        let set = serde_json::to_value(PluginCommandDto::SetEnabled {
+            plugin_id: "lingxi-local-app".into(),
+            enabled: false,
+        })
+        .expect("serialize SetEnabled");
+        let mut keys: Vec<&str> = set
+            .as_object()
+            .expect("SetEnabled must serialize to a JSON object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            vec!["enabled", "plugin_id", "type"],
+            "SetEnabled must carry exactly one enable-controlling field \
+             alongside its tag and the bare key — no second override flag"
+        );
+        assert_eq!(set["type"], "set_enabled");
+        assert_eq!(set["plugin_id"], "lingxi-local-app");
+        assert_eq!(set["enabled"], false);
+
+        let status = serde_json::to_value(PluginCommandDto::GetStatus {
+            plugin_id: "lingxi-local-app".into(),
+        })
+        .expect("serialize GetStatus");
+        assert_eq!(
+            status["plugin_id"], set["plugin_id"],
+            "GetStatus and SetEnabled must name the plugin with the SAME bare key"
+        );
     }
 }

@@ -1875,6 +1875,880 @@ fn allowlist_entry_count_matches_the_committed_baseline() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// P1.7 (§19.3) — `register_verified_builtin` has exactly one call site.
+//
+// `plugin::PluginManager::register_verified_builtin` (`plugin/src/
+// manager.rs`) is the one door into the plugin registry that bypasses
+// `install`'s validation path — P0a.6 added it deliberately for the single
+// compiled-in mobile plugin, whose `(id, manifest, install_dir)` triple never
+// passed through untrusted input. Its whole safety argument rests on there
+// being exactly one, auditable caller, in the composition module
+// (`apps/engine-mobile/src/lib.rs`'s `register_mobile_builtin_plugin`). A
+// second call site anywhere is an unaudited second door, and nothing before
+// this gate would have noticed one.
+//
+// This is a COUNTING gate of the same shape as the literal scanner above —
+// deny-by-default directory enumeration, `#[cfg(test)]` regions and
+// out-of-line test modules excluded, `code_view`'s comment/string blanking
+// reused so a match inside a doc comment or a string literal can never reach
+// the matcher — but it counts CALL SITES of one specific symbol, not
+// occurrences of a set of string literals, so it needs one more thing the
+// literal scanner does not: telling a CALL apart from a MENTION.
+//
+// `register_verified_builtin` appears five times as plain PROSE on this
+// gate's scan surface for `lib.rs` — four in genuinely production code (one
+// `//` line comment, three `///` doc comments) plus one in a comment inside
+// `#[cfg(all(test, feature = "uniffi"))] mod mobile_plugin_composition_tests`,
+// which `test_skip_ranges` does not treat as a test region because it matches
+// only the exact attribute `#[cfg(test)]`.
+// `verify_mention_shapes_in_lib_rs_are_what_this_gate_assumes` below pins
+// every one of those shapes and counts, so this paragraph cannot rot into
+// fiction and so the mention-rejection rule cannot quietly stop being
+// exercised on the real tree. A rule that counted every appearance of the
+// word would therefore report SIX where there is truly one call — worse than
+// reporting zero, because it would never be able to go green again without
+// deleting the documentation that explains why the one real call site is
+// safe. The distinguishing rule
+// this file uses: scan the SAME blanked view [`code_view`] already lexes
+// (comments and string/char literal content replaced with spaces, so a doc
+// comment or an error-message string never reaches the matcher at all), then
+// require a whole-word occurrence of the symbol to be followed — after only
+// whitespace, possibly across a line break — by `(`. A doc mention is never
+// followed by `(` in the source text itself (its "call-like" reading only
+// exists in the reader's head), so it is excluded twice over: once by the
+// comment blanking, and again by the trailing-`(` requirement even for the
+// (impossible in Rust) case of a bare mention sitting in live code.
+//
+// The scan root is deliberately narrower than [`SCAN_ROOTS`]: the
+// requirement is stated over `engine-mobile` specifically ("`register_
+// verified_builtin` is called exactly once in `engine-mobile`, from the
+// composition module") — not over `tasks/src` or `tools/workflow/src`,
+// neither of which depends on the `plugin` crate at all. Scanning only
+// `apps/engine-mobile/src` also means the function's own DEFINITION
+// (`plugin/src/manager.rs`, `pub async fn register_verified_builtin(`) can
+// never enter this scan, so `0`-vs-`1` here can never be explained by having
+// walked into the definition instead of a caller. The `fn`-keyword guard in
+// [`find_call_sites`] is kept anyway, as defense in depth against a
+// same-named wrapper `fn` ever being added inside this root — untested by a
+// dedicated fixture (nothing in this root has ever needed it), but cheap
+// enough to keep rather than assume the shape of tomorrow's code from here.
+// ---------------------------------------------------------------------------
+
+/// The one function this gate audits a single call site for.
+const REGISTER_VERIFIED_BUILTIN_SYMBOL: &str = "register_verified_builtin";
+
+/// Scan root for the call-site gate, relative to the workspace root. See the
+/// section doc comment above for why this is narrower than [`SCAN_ROOTS`].
+const REGISTER_VERIFIED_BUILTIN_SCAN_ROOT: &str = "apps/engine-mobile/src";
+
+/// One call site of [`REGISTER_VERIFIED_BUILTIN_SYMBOL`] found in production
+/// source — as opposed to a doc-comment or string-literal MENTION of the same
+/// name, which [`find_call_sites`] must not (and, by construction, cannot)
+/// count.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct CallSite {
+    /// Path relative to the workspace root (or to the fixture root, for a
+    /// planted-tree test), forward-slash separated.
+    rel_path: String,
+    /// 1-based source line the call's SYMBOL starts on.
+    line: usize,
+}
+
+impl std::fmt::Display for CallSite {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}:{}", self.rel_path, self.line)
+    }
+}
+
+/// True for an ASCII Rust identifier character (`[A-Za-z0-9_]`). Used for
+/// word-boundary checks so a match against [`REGISTER_VERIFIED_BUILTIN_SYMBOL`]
+/// cannot be fooled by being a strict substring of a longer identifier —
+/// concretely, `apps/engine-mobile/src/lib.rs`'s own doc comment names
+/// `plugin::manager::register_verified_builtin_tests`, the module in
+/// `plugin/src/manager.rs` that holds that function's OWN tests, which
+/// contains this symbol as a prefix followed immediately by `_tests`. Without
+/// this check that occurrence would be a candidate match at all (it is still
+/// excluded twice over here, since it also sits inside a doc comment and is
+/// not followed by `(`).
+fn is_ident_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || c == '_'
+}
+
+/// The whole-file [`code_view`] blanking (comments and string/char literal
+/// content replaced with spaces — the exact same lexer the literal scanner
+/// above runs, not a second copy of it) rejoined into ONE string, plus — for
+/// every character emitted — the 1-based source LINE it came from.
+///
+/// Line numbers, not byte offsets: blanking replaces some multi-byte source
+/// characters (this very file's Chinese-language doc comments and design-doc
+/// quotes, in particular) with a single-byte `' '`, which would desynchronize
+/// a byte offset from `src`'s own byte offsets on any line mixing ASCII and
+/// non-ASCII text. [`find_call_sites`] only ever needs to report a LINE
+/// number, never a column, so tracking line number directly here sidesteps
+/// that mismatch entirely rather than working around it.
+fn blanked_with_line_map(src: &str) -> (String, Vec<usize>) {
+    let lines = code_view(src);
+    let mut text = String::new();
+    let mut map = Vec::new();
+    for (idx, line) in lines.iter().enumerate() {
+        for ch in line.chars() {
+            text.push(ch);
+            map.push(idx + 1);
+        }
+        text.push('\n');
+        map.push(idx + 1);
+    }
+    (text, map)
+}
+
+/// Every CALL SITE of `symbol` in `src`: a whole-word occurrence that
+/// survives [`blanked_with_line_map`] (so comment and string/char-literal
+/// content has already become spaces and can never reach the matcher) and
+/// falls outside a `#[cfg(test)]` region ([`test_skip_ranges`]), EXCEPT the
+/// symbol's own definition — a match immediately preceded, past whitespace,
+/// by the keyword `fn`.
+///
+/// There is deliberately NO "must be followed by `(`" requirement, though an
+/// earlier draft of this file had one. Two reasons, in order of weight:
+///
+/// 1. It would not be load-bearing. Mutating `is_call` to a constant `true`
+///    left all 36 tests in this file green, because every non-call mention
+///    that exists — on the real tree and in the fixtures below — lives in a
+///    comment or a string literal and has therefore already been blanked
+///    away before the matcher runs. A condition that is vacuously true in
+///    every state the suite reaches is not a tested condition; it is
+///    decoration that reads like a safeguard.
+/// 2. It would be WRONG for this symbol. `register_verified_builtin` is an
+///    inherent `async fn` on `PluginManager`, so in live code its name can
+///    only be its definition or a USE of it — and a use spelled without
+///    parentheses is still a door: `let door =
+///    plugin::PluginManager::register_verified_builtin;` yields a callable
+///    function item, and `door(&manager, id, manifest, dir).await` opens the
+///    registry just as wide as the method-call spelling. A paren rule would
+///    have made that second-door spelling invisible to the very gate whose
+///    job is to find second doors. Inherent methods also cannot be `use`d,
+///    so there is no import spelling that would need excusing.
+///
+/// The call-versus-mention distinction the requirement asks for therefore
+/// rests entirely on the comment/string blanking plus the whole-word check,
+/// both of which `call_site_detector_counts_calls_not_mentions_of_register_verified_builtin`
+/// exercises with mentions written in CALL SHAPE precisely so that neither
+/// can be deleted while the suite stays green.
+fn find_call_sites(rel_path: &str, src: &str, symbol: &str) -> Vec<CallSite> {
+    let skip_ranges = if is_rust_source(Path::new(rel_path)) {
+        test_skip_ranges(src)
+    } else {
+        Vec::new()
+    };
+    let (text, line_map) = blanked_with_line_map(src);
+    let chars: Vec<char> = text.chars().collect();
+    let symbol_chars: Vec<char> = symbol.chars().collect();
+    let n = chars.len();
+    let m = symbol_chars.len();
+    let mut sites = Vec::new();
+    if m == 0 || m > n {
+        return sites;
+    }
+    let mut i = 0;
+    while i + m <= n {
+        if chars[i..i + m] != symbol_chars[..] {
+            i += 1;
+            continue;
+        }
+        let boundary_before = i == 0 || !is_ident_char(chars[i - 1]);
+        let boundary_after = i + m == n || !is_ident_char(chars[i + m]);
+        if !boundary_before || !boundary_after {
+            i += 1;
+            continue;
+        }
+
+        // Look behind past whitespace for a `fn` keyword: a DEFINITION, not a
+        // call. See this function's doc comment.
+        let mut k = i;
+        while k > 0 && chars[k - 1].is_whitespace() {
+            k -= 1;
+        }
+        let is_definition = k >= 2
+            && chars[k - 2] == 'f'
+            && chars[k - 1] == 'n'
+            && (k == 2 || !is_ident_char(chars[k - 3]));
+
+        if !is_definition {
+            let line = line_map.get(i).copied().unwrap_or(1);
+            if !line_is_skipped(line, &skip_ranges) {
+                sites.push(CallSite {
+                    rel_path: rel_path.to_string(),
+                    line,
+                });
+            }
+        }
+        i += 1;
+    }
+    sites.sort();
+    sites
+}
+
+/// Scan every RUST source file under `root` for call sites of `symbol`,
+/// skipping `#[cfg(test)]` regions and out-of-line test modules exactly like
+/// [`scan_tree`]. Reported paths are relative to `rel_base`.
+///
+/// Restricted to `.rs` files (unlike [`scan_tree`], which deliberately scans
+/// every file type by default): a call site is a Rust-syntax concept, and a
+/// non-Rust file under this scan root cannot invoke a Rust `async fn` at all,
+/// so widening the walk to other extensions here could only ever manufacture
+/// false matches, never catch a real one.
+fn scan_call_sites(root: &Path, rel_base: &Path, symbol: &str) -> Vec<CallSite> {
+    assert!(
+        root.is_dir(),
+        "scan root {} does not exist — refusing to scan nothing",
+        root.display()
+    );
+    let mut files = Vec::new();
+    collect_source_files(root, &mut files);
+    let excluded = cfg_test_only_module_files(&files);
+    let mut sites = Vec::new();
+    for file in files {
+        if excluded.contains(&file) || !is_rust_source(&file) {
+            continue;
+        }
+        let src = fs::read_to_string(&file)
+            .unwrap_or_else(|e| panic!("read {} failed: {e}", file.display()));
+        let rel_path = file
+            .strip_prefix(rel_base)
+            .unwrap_or(&file)
+            .to_string_lossy()
+            .replace('\\', "/");
+        sites.extend(find_call_sites(&rel_path, &src, symbol));
+    }
+    sites.sort();
+    sites
+}
+
+/// The absolute, asserted-to-exist scan root for the call-site gate.
+fn register_verified_builtin_scan_root() -> PathBuf {
+    let path = workspace_root().join(REGISTER_VERIFIED_BUILTIN_SCAN_ROOT);
+    assert!(
+        path.is_dir(),
+        "scan root `{REGISTER_VERIFIED_BUILTIN_SCAN_ROOT}` does not exist at {} \
+         — a missing root scans NOTHING and would make this gate green for the \
+         wrong reason. If the directory moved, update \
+         REGISTER_VERIFIED_BUILTIN_SCAN_ROOT in this file.",
+        path.display()
+    );
+    path
+}
+
+/// The real production scan: every call site of `register_verified_builtin`
+/// under [`REGISTER_VERIFIED_BUILTIN_SCAN_ROOT`], paths relative to the
+/// workspace root.
+fn production_register_verified_builtin_call_sites() -> Vec<CallSite> {
+    let base = workspace_root();
+    scan_call_sites(
+        &register_verified_builtin_scan_root(),
+        &base,
+        REGISTER_VERIFIED_BUILTIN_SYMBOL,
+    )
+}
+
+/// The assertion the required gate test makes, factored out so
+/// `a_second_call_site_in_a_non_composition_module_makes_the_gate_red_with_file_and_line`
+/// below can prove — by actually invoking this same function and catching the
+/// panic — that a second call site makes it fail, printing every site's file
+/// and line, rather than asserting a count by hand in two places that could
+/// silently drift apart from what the real gate test checks.
+fn assert_exactly_one_register_verified_builtin_call_site(sites: &[CallSite]) {
+    assert_eq!(
+        sites.len(),
+        1,
+        "expected exactly ONE call site of `{REGISTER_VERIFIED_BUILTIN_SYMBOL}` \
+         (plugin/src/manager.rs's verified-builtin door, whose whole safety \
+         argument rests on having a single auditable caller), found {}:\n{}",
+        sites.len(),
+        sites
+            .iter()
+            .map(|s| format!("  {s}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+}
+
+/// P1.7 §19.3 — the required gate. `register_verified_builtin` must be
+/// called exactly once inside `engine-mobile`, and that one call must be in
+/// the composition module.
+///
+/// Strict equality, not `<= 1`: the module doc comment above explains why a
+/// zero count (an empty file list, a scanner that reads nothing, or a rule
+/// that matches only occurrences it can't find) must be exactly as much of a
+/// failure as a count above one — `assert_eq!(_, 1)` fails on either side,
+/// where `<= 1` would not.
+#[test]
+fn register_verified_builtin_has_exactly_one_call_site() {
+    let sites = production_register_verified_builtin_call_sites();
+    assert_exactly_one_register_verified_builtin_call_site(&sites);
+    assert_eq!(
+        sites[0].rel_path, "apps/engine-mobile/src/lib.rs",
+        "the one call site of `register_verified_builtin` must be in the \
+         composition module (lib.rs's `register_mobile_builtin_plugin`), got \
+         {sites:?} — a call from anywhere else is an unaudited second door \
+         into the plugin registry"
+    );
+}
+
+/// The house-defect check for the test above: prove the detector can actually
+/// SEE a call, not merely that today's real tree happens to contain one. A
+/// tempdir with the SAME shape as the real composition call
+/// (`.register_verified_builtin(..).await` reached through a `manager`
+/// receiver) alongside a file containing ONLY prose mentions — a `//!` module
+/// doc, a `///` doc comment, and a string literal, mirroring the three forms
+/// `lib.rs` actually carries today — must report exactly the one real call,
+/// naming the file that holds it, and nothing from the prose-only file.
+///
+/// This is the test the brief asks for containing both a real call and a doc
+/// mention in one place: the composition fixture below carries BOTH (a doc
+/// comment directly above its real call), so a rule that regressed to
+/// counting mentions would trip on that single file already.
+#[test]
+fn call_site_detector_counts_calls_not_mentions_of_register_verified_builtin() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    fs::write(
+        tmp.path().join("composition.rs"),
+        "/// Composition calls register_verified_builtin(id, manifest, dir) once.\n\
+         async fn compose(manager: &Manager) {\n\
+         \x20   manager\n\
+         \x20       .register_verified_builtin(id, manifest, dir)\n\
+         \x20       .await;\n\
+         }\n",
+    )
+    .expect("write composition fixture");
+    fs::write(
+        tmp.path().join("prose_only.rs"),
+        "//! See register_verified_builtin(id, manifest, dir) for trusted boot.\n\
+         /* register_verified_builtin(a, b, c) in a block comment, too. */\n\
+         /// Docs also say register_verified_builtin(x) is careful about source.\n\
+         pub const NOTE: &str = \"call register_verified_builtin(id, dir) yourself\";\n\
+         pub const TRAILING: u8 = 1; // register_verified_builtin(y) after code\n",
+    )
+    .expect("write prose-only fixture");
+
+    let sites = scan_call_sites(tmp.path(), tmp.path(), REGISTER_VERIFIED_BUILTIN_SYMBOL);
+    assert_eq!(
+        sites,
+        vec![CallSite {
+            rel_path: "composition.rs".to_string(),
+            line: 4,
+        }],
+        "got {sites:?}. EVERY mention in this fixture is deliberately \
+         CALL-SHAPED — `register_verified_builtin(..)`, parentheses and all — \
+         in a `//!` module doc, a `/* */` block comment, a `///` doc comment, \
+         a string literal, and a trailing `//` comment after live code, plus \
+         one more in composition.rs's own doc comment directly above the real \
+         call. That is the whole point: if the mentions were written WITHOUT \
+         parentheses, the trailing-`(` rule alone would reject them and \
+         `code_view`'s comment/string blanking — the other half of the rule — \
+         could be deleted with every test still green. Written this way, the \
+         blanking is the ONLY thing standing between six occurrences and one \
+         reported call site."
+    );
+}
+
+/// The evidence P1.7 asks for directly: a SECOND real call site, planted in a
+/// file that is not the composition module, must make the gate's own
+/// assertion helper panic — not merely change a number nothing reads — and
+/// the panic message must name BOTH sites by file and line.
+#[test]
+fn a_second_call_site_in_a_non_composition_module_makes_the_gate_red_with_file_and_line() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    fs::write(
+        tmp.path().join("composition.rs"),
+        "async fn compose(manager: &Manager) {\n\
+         \x20   manager\n\
+         \x20       .register_verified_builtin(id, manifest, dir)\n\
+         \x20       .await;\n\
+         }\n",
+    )
+    .expect("write composition fixture");
+    fs::write(
+        tmp.path().join("rogue_second_door.rs"),
+        "async fn sneak_in(manager: &Manager) {\n\
+         \x20   manager.register_verified_builtin(id2, manifest2, dir2).await;\n\
+         }\n",
+    )
+    .expect("write rogue fixture");
+
+    let sites = scan_call_sites(tmp.path(), tmp.path(), REGISTER_VERIFIED_BUILTIN_SYMBOL);
+    assert_eq!(
+        sites.len(),
+        2,
+        "fixture sanity: both the composition call and the rogue call must be \
+         found before checking that the gate assertion reacts to them, got \
+         {sites:?}"
+    );
+
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        assert_exactly_one_register_verified_builtin_call_site(&sites);
+    }));
+    let panic_payload = result.expect_err(
+        "a second call site must make assert_exactly_one_register_verified_builtin_call_site \
+         PANIC — the exact assertion register_verified_builtin_has_exactly_one_call_site \
+         runs in production — not merely leave `sites.len()` at 2 for something \
+         else to notice",
+    );
+    let message = panic_payload
+        .downcast_ref::<String>()
+        .cloned()
+        .or_else(|| panic_payload.downcast_ref::<&str>().map(|s| s.to_string()))
+        .unwrap_or_default();
+    assert!(
+        message.contains("composition.rs:3"),
+        "failure message must name the first (legitimate) call site's file \
+         and line, got: {message}"
+    );
+    assert!(
+        message.contains("rogue_second_door.rs:2"),
+        "failure message must name the SECOND (unaudited) call site's file \
+         and line, got: {message}"
+    );
+}
+
+/// Whole-word occurrences of `symbol` in one RAW source line — comments and
+/// string literals included, unlike [`find_call_sites`], which is the point:
+/// this is how [`verify_mention_shapes_in_lib_rs_are_what_this_gate_assumes`]
+/// sees the mentions the gate must reject.
+fn whole_word_occurrences(line: &str, symbol: &str) -> usize {
+    let chars: Vec<char> = line.chars().collect();
+    let sym: Vec<char> = symbol.chars().collect();
+    let (n, m) = (chars.len(), sym.len());
+    let mut count = 0;
+    let mut i = 0;
+    while m > 0 && i + m <= n {
+        if chars[i..i + m] == sym[..]
+            && (i == 0 || !is_ident_char(chars[i - 1]))
+            && (i + m == n || !is_ident_char(chars[i + m]))
+        {
+            count += 1;
+        }
+        i += 1;
+    }
+    count
+}
+
+/// The POSITIVE CONTROL for the mention-rejection half of this gate.
+///
+/// `register_verified_builtin_has_exactly_one_call_site` reports `1` for two
+/// very different reasons that it cannot tell apart on its own: because the
+/// detector correctly rejected four prose mentions and kept one real call, or
+/// because there was never anything to reject in the first place. Today the
+/// first is true — but nothing pinned it, so deleting lib.rs's documentation
+/// (or moving it into the `#[cfg(test)]` module) would silently retire the
+/// only place on the REAL tree where call-versus-mention is exercised, and
+/// every test here would stay green.
+///
+/// So: assert the mentions are still there, in the shapes the section doc
+/// above claims, and that exactly one of the six whole-word occurrences the
+/// scan surface sees is the call.
+///
+/// The count is FIVE mentions, not the four that live in genuinely
+/// production code, and the fifth one is worth stating plainly because it is
+/// a property of [`test_skip_ranges`] rather than of this gate:
+/// `test_skip_ranges` recognizes only the exact attribute `#[cfg(test)]`, so
+/// lib.rs's `#[cfg(all(test, feature = "uniffi"))] mod
+/// mobile_plugin_composition_tests` is NOT a skip region, and its line-523
+/// comment is scanned as production. For a "no unaudited second door" gate
+/// that direction of error is the safe one — a real call inside that module
+/// would be COUNTED, making the gate louder rather than blinder — but it is
+/// not what the phrase "`#[cfg(test)]` regions excluded" would lead a reader
+/// to expect, so it is pinned here rather than left to be rediscovered.
+/// Teaching `test_skip_ranges` the `cfg(all(test, ..))` form is deliberately
+/// NOT done from this task: that helper also feeds the component-literal
+/// scanner above, whose committed allowlist and `ALLOWLIST_BASELINE_COUNT`
+/// were measured against today's surface.
+#[test]
+fn verify_mention_shapes_in_lib_rs_are_what_this_gate_assumes() {
+    let rel = "apps/engine-mobile/src/lib.rs";
+    let path = workspace_root().join(rel);
+    let src =
+        fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {} failed: {e}", path.display()));
+    let skip = test_skip_ranges(&src);
+
+    let mut occurrences: Vec<(usize, String)> = Vec::new();
+    for (idx, line) in src.lines().enumerate() {
+        let line_no = idx + 1;
+        if line_is_skipped(line_no, &skip) {
+            continue;
+        }
+        for _ in 0..whole_word_occurrences(line, REGISTER_VERIFIED_BUILTIN_SYMBOL) {
+            occurrences.push((line_no, line.trim_start().to_string()));
+        }
+    }
+
+    let calls = find_call_sites(rel, &src, REGISTER_VERIFIED_BUILTIN_SYMBOL);
+    assert_eq!(
+        calls.len(),
+        1,
+        "lib.rs must hold exactly one CALL; got {calls:?}"
+    );
+    let call_line = calls[0].line;
+
+    let mentions: Vec<&(usize, String)> = occurrences
+        .iter()
+        .filter(|(line_no, _)| *line_no != call_line)
+        .collect();
+    assert_eq!(
+        mentions.len(),
+        5,
+        "`register_verified_builtin` must still appear as PROSE on the scan \
+         surface of lib.rs — four times in genuinely production code plus \
+         once inside `#[cfg(all(test, feature = \"uniffi\"))] mod \
+         mobile_plugin_composition_tests`, which `test_skip_ranges` does not \
+         recognize as a test region (see this test's doc comment). This \
+         gate's `1` only proves that mentions are EXCLUDED for as long as \
+         there are mentions to exclude. Found {} instead: {mentions:?}. If \
+         the documentation legitimately changed, update the section doc above \
+         AND this count together — do not just relax the number, or the \
+         mention-rejection rule stops being exercised on the real tree at \
+         all.",
+        mentions.len()
+    );
+
+    let doc_comments = mentions
+        .iter()
+        .filter(|(_, text)| text.starts_with("///"))
+        .count();
+    let line_comments = mentions
+        .iter()
+        .filter(|(_, text)| text.starts_with("//") && !text.starts_with("///"))
+        .count();
+    assert_eq!(
+        (line_comments, doc_comments),
+        (2, 3),
+        "expected two `//` line comments and three `///` doc comments, got \
+         ({line_comments}, {doc_comments}) from {mentions:?} — every prose \
+         mention must sit at the START of a comment line, because a mention \
+         sharing a line with live code is a shape this gate has never been \
+         tested against"
+    );
+}
+
+/// The word-boundary half of the matcher, made load-bearing.
+///
+/// Nothing on the real tree exercises it: the longer identifiers that contain
+/// `register_verified_builtin` as a strict prefix — `plugin/src/manager.rs`'s
+/// `mod register_verified_builtin_tests`, and lib.rs's doc reference to it —
+/// are respectively inside a `#[cfg(test)]` skip region and inside a `///`
+/// comment, so both are already gone before the boundary check runs.
+/// Mutating `boundary_after` to a constant `true` therefore left all 37 tests
+/// green, which is exactly the shape of untested condition this file is
+/// supposed to be allergic to. This fixture puts both boundary directions in
+/// LIVE code, where nothing else can excuse them.
+///
+/// Branch A: a `mod register_verified_builtin_tests` item, a
+/// `register_verified_builtin_v2` call and a `pre_register_verified_builtin`
+/// call — all live code, none of them this symbol — must yield ZERO. Branch
+/// B: the same file plus one genuine call must yield exactly ONE, so branch A
+/// cannot be passing because the scan silently read nothing.
+#[test]
+fn find_call_sites_requires_a_whole_word_match_not_a_substring_of_a_longer_name() {
+    let neighbours = "mod register_verified_builtin_tests {\n\
+         \x20   fn helper() {}\n\
+         }\n\
+         async fn other(manager: &Manager) {\n\
+         \x20   manager.register_verified_builtin_v2(id, manifest).await;\n\
+         \x20   manager.pre_register_verified_builtin(id, manifest).await;\n\
+         }\n";
+    let sites_a = find_call_sites(
+        "neighbours.rs",
+        neighbours,
+        REGISTER_VERIFIED_BUILTIN_SYMBOL,
+    );
+    assert!(
+        sites_a.is_empty(),
+        "`register_verified_builtin_tests` (trailing `_tests`), \
+         `register_verified_builtin_v2` (trailing `_v2`) and \
+         `pre_register_verified_builtin` (leading `pre_`) are three different \
+         identifiers that merely CONTAIN this symbol, all written in live \
+         code where no comment or string blanking can excuse them. None is a \
+         call site of `register_verified_builtin`; got {sites_a:?}"
+    );
+
+    let with_call = format!(
+        "{neighbours}\nasync fn real(manager: &Manager) {{\n\
+             \x20   manager.register_verified_builtin(id, manifest, dir).await;\n\
+             }}\n"
+    );
+    let sites_b = find_call_sites(
+        "neighbours.rs",
+        &with_call,
+        REGISTER_VERIFIED_BUILTIN_SYMBOL,
+    );
+    assert_eq!(
+        sites_b,
+        vec![CallSite {
+            rel_path: "neighbours.rs".to_string(),
+            line: 10,
+        }],
+        "the same three near-miss identifiers plus ONE real call must report \
+         exactly that call — otherwise branch A's empty result would be \
+         consistent with a matcher that finds nothing at all; got {sites_b:?}"
+    );
+}
+
+/// A second door does not have to be spelled with parentheses.
+/// `plugin::PluginManager::register_verified_builtin` used as a VALUE is a
+/// function item; binding it and calling the binding later opens the registry
+/// exactly as wide as `manager.register_verified_builtin(..)` does, and a
+/// detector that required a following `(` would have reported zero extra call
+/// sites for it. This test pins that this spelling counts.
+///
+/// It is also the branch that keeps the paren-free rule honest in the other
+/// direction: the same fixture's comment and string mentions — identical text
+/// — must still NOT count, so "we stopped requiring `(`" cannot quietly have
+/// become "we count every occurrence".
+#[test]
+fn a_parenless_function_value_reference_is_counted_as_a_second_door() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    fs::write(
+        tmp.path().join("composition.rs"),
+        "async fn compose(manager: &Manager) {\n\
+         \x20   manager.register_verified_builtin(id, manifest, dir).await;\n\
+         }\n",
+    )
+    .expect("write composition fixture");
+    fs::write(
+        tmp.path().join("sneaky.rs"),
+        "// Only a comment about register_verified_builtin, not a door.\n\
+         const DOC: &str = \"register_verified_builtin\";\n\
+         async fn sneak(manager: &PluginManager) {\n\
+         \x20   let door = plugin::PluginManager::register_verified_builtin;\n\
+         \x20   door(manager, id, manifest, dir).await;\n\
+         }\n",
+    )
+    .expect("write sneaky fixture");
+
+    let sites = scan_call_sites(tmp.path(), tmp.path(), REGISTER_VERIFIED_BUILTIN_SYMBOL);
+    assert_eq!(
+        sites,
+        vec![
+            CallSite {
+                rel_path: "composition.rs".to_string(),
+                line: 2,
+            },
+            CallSite {
+                rel_path: "sneaky.rs".to_string(),
+                line: 4,
+            },
+        ],
+        "the paren-free function-VALUE reference on sneaky.rs line 4 must be \
+         reported as a second door, while the comment on line 1 and the string \
+         literal on line 2 — the same identifier, in non-code positions — must \
+         not be; got {sites:?}"
+    );
+}
+
+/// The A/B pair that makes ZERO and ONE an OBSERVED distinction rather than
+/// an arithmetic property of `assert_eq!(_, 1)`, and the only test that
+/// exercises [`find_call_sites`]'s `fn`-keyword guard directly.
+///
+/// The definition `pub async fn register_verified_builtin(` IS followed by
+/// `(`, so the trailing-paren rule alone would count it as a call — only the
+/// `fn` lookback rejects it. Branch A (definition alone) must yield zero;
+/// branch B (the same text plus one real call) must yield exactly one, at the
+/// CALL's line, not the definition's. Deleting the `fn` guard turns A into 1
+/// and B into 2, so neither branch can survive that deletion.
+#[test]
+fn find_call_sites_rejects_a_definition_and_still_counts_a_call_in_the_same_file() {
+    let definition_only = "pub async fn register_verified_builtin(\n\
+         \x20   &self,\n\
+         \x20   id: &PluginId,\n\
+         ) -> Result<(), PluginManagerError> {\n\
+         \x20   Ok(())\n\
+         }\n";
+    let sites_a = find_call_sites(
+        "plugin/src/manager.rs",
+        definition_only,
+        REGISTER_VERIFIED_BUILTIN_SYMBOL,
+    );
+    assert!(
+        sites_a.is_empty(),
+        "a function DEFINITION is not a call site — it is followed by `(` \
+         exactly like a call, and only the `fn` lookback separates them, so \
+         this is the branch that proves that lookback runs: got {sites_a:?}"
+    );
+
+    let with_call = format!(
+        "{definition_only}\nasync fn caller(manager: &PluginManager) {{\n\
+         \x20   manager.register_verified_builtin(id, manifest, dir).await;\n\
+         }}\n"
+    );
+    let sites_b = find_call_sites(
+        "plugin/src/manager.rs",
+        &with_call,
+        REGISTER_VERIFIED_BUILTIN_SYMBOL,
+    );
+    assert_eq!(
+        sites_b,
+        vec![CallSite {
+            rel_path: "plugin/src/manager.rs".to_string(),
+            line: 9,
+        }],
+        "the same text plus ONE real call must report exactly that call, at \
+         the call's line (9) and not the definition's (1) — zero and one must \
+         be distinguishable outcomes of the detector, not just two different \
+         numbers on the left of an `assert_eq!`"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The same gate, widened from `engine-mobile` to the WHOLE workspace.
+//
+// §19.3 is stated over `engine-mobile`, and
+// `register_verified_builtin_has_exactly_one_call_site` above enforces
+// exactly that. But the SAFETY argument the requirement rests on is not
+// scoped to one crate: `PluginManager::register_verified_builtin` is `pub`,
+// so any crate in this workspace can open a second door, and the
+// engine-mobile-scoped gate would stay green while it did.
+// `apps/engine-desktop/src/lib.rs` already NAMES the symbol in a doc comment
+// today, which is how close the neighbouring crate already is to it.
+//
+// Two things this wider walk buys beyond coverage, both of which the narrow
+// gate cannot have: it is the only test where [`find_call_sites`]'s
+// `fn`-keyword guard has to reject a REAL definition (`plugin/src/manager.rs`
+// line ~580) and where [`test_skip_ranges`] has to exclude REAL in-tree calls
+// (that file's `#[cfg(test)] mod register_verified_builtin_tests`, which
+// calls the function twice). Under the narrow root neither guard ever fires
+// on production source, so neither is load-bearing there.
+// ---------------------------------------------------------------------------
+
+/// Directory names the crate-root walk never descends into. `target` alone is
+/// tens of thousands of files; the rest are build/tool output that contains
+/// no first-party Rust source. Any directory whose name starts with `.` is
+/// skipped too (`.git`, `.worktrees`, editor state).
+const WORKSPACE_WALK_SKIP_DIRS: &[&str] = &[
+    "target",
+    "node_modules",
+    "codegraph-out",
+    "graphify-out",
+    "dist",
+    "build",
+];
+
+/// Every directory named `src` under the workspace root — i.e. every crate's
+/// source root, found by enumeration rather than from a hand-maintained list,
+/// so a crate added tomorrow is inside this gate without anyone remembering
+/// to add it.
+fn collect_crate_src_dirs(dir: &Path, out: &mut Vec<PathBuf>) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    let mut paths: Vec<PathBuf> = entries.filter_map(|e| e.ok()).map(|e| e.path()).collect();
+    paths.sort();
+    for path in paths {
+        if !path.is_dir() {
+            continue;
+        }
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        if name.starts_with('.') || WORKSPACE_WALK_SKIP_DIRS.contains(&name) {
+            continue;
+        }
+        if name == "src" {
+            out.push(path);
+        } else {
+            collect_crate_src_dirs(&path, out);
+        }
+    }
+}
+
+/// §19.3's safety argument, enforced over every crate in the workspace rather
+/// than only `engine-mobile`: `register_verified_builtin` has ONE production
+/// caller anywhere, and it is the mobile composition module.
+#[test]
+fn register_verified_builtin_has_exactly_one_call_site_in_the_whole_workspace() {
+    let base = workspace_root();
+    let mut roots = Vec::new();
+    collect_crate_src_dirs(&base, &mut roots);
+    roots.sort();
+    assert!(
+        roots.len() > 40,
+        "expected the crate-root walk to find every crate's `src` in {}, found \
+         only {} ({roots:?}) — a walk that finds nothing scans nothing and is \
+         green forever",
+        base.display(),
+        roots.len()
+    );
+
+    let mut files = Vec::new();
+    for root in &roots {
+        collect_source_files(root, &mut files);
+    }
+    let excluded = cfg_test_only_module_files(&files);
+
+    // Prefilter on the raw bytes: a file that does not contain the symbol at
+    // all cannot contain a call site, and lexing 1400 files to learn that is
+    // pure cost. A BROKEN prefilter shows up as an empty candidate set, which
+    // the assertion below rejects by name.
+    let mut candidates: Vec<(PathBuf, String)> = Vec::new();
+    for file in &files {
+        if excluded.contains(file) || !is_rust_source(file) {
+            continue;
+        }
+        let src = fs::read_to_string(file)
+            .unwrap_or_else(|e| panic!("read {} failed: {e}", file.display()));
+        if src.contains(REGISTER_VERIFIED_BUILTIN_SYMBOL) {
+            candidates.push((file.clone(), src));
+        }
+    }
+    let candidate_rels: BTreeSet<String> = candidates
+        .iter()
+        .map(|(file, _)| {
+            file.strip_prefix(&base)
+                .unwrap_or(file)
+                .to_string_lossy()
+                .replace('\\', "/")
+        })
+        .collect();
+
+    // The load-bearing control: the walk must actually have REACHED the two
+    // files whose exclusion this gate's `1` depends on. Without this, a walk
+    // that only ever saw `engine-mobile` would produce the identical `1` and
+    // this test would be a slower copy of the narrow one.
+    for required in [
+        "plugin/src/manager.rs",
+        "apps/engine-desktop/src/lib.rs",
+        "apps/engine-mobile/src/lib.rs",
+    ] {
+        assert!(
+            candidate_rels.contains(required),
+            "the workspace walk must reach `{required}` — it names \
+             `register_verified_builtin` (as the DEFINITION plus two \
+             `#[cfg(test)]` calls, as a doc mention in a NEIGHBOURING crate, \
+             and as the one real call, respectively), and this gate's answer \
+             is only meaningful if those files were actually examined and \
+             excluded on their merits. Reached: {candidate_rels:?}"
+        );
+    }
+
+    let mut sites = Vec::new();
+    for (file, src) in &candidates {
+        let rel = file
+            .strip_prefix(&base)
+            .unwrap_or(file)
+            .to_string_lossy()
+            .replace('\\', "/");
+        sites.extend(find_call_sites(&rel, src, REGISTER_VERIFIED_BUILTIN_SYMBOL));
+    }
+    sites.sort();
+
+    assert_exactly_one_register_verified_builtin_call_site(&sites);
+    assert_eq!(
+        sites[0].rel_path, "apps/engine-mobile/src/lib.rs",
+        "the workspace's only production call site of \
+         `register_verified_builtin` must be the mobile composition module, \
+         got {sites:?}"
+    );
+}
+
 #[cfg(test)]
 mod scan_mechanics_tests {
     use super::*;

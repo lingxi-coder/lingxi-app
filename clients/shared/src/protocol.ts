@@ -224,6 +224,13 @@ export type ClientCommand =
   | { type: 'list_app_checkpoints'; app_id: string }
   | { type: 'restore_app_checkpoint'; app_id: string; checkpoint_id: string }
   | { type: 'delete_app'; app_id: string }
+  // ── Plugins (§17.1, §19.2) ──────────────────────────────────────────────────
+  //
+  // A nested OBJECT under `command`, NOT flattened onto this envelope: the
+  // Rust side keeps §17.1's operations off `ClientCommand`'s 16 KiB UniFFI
+  // metadata budget, and future plugin operations extend `PluginCommandDto`
+  // rather than this union again.
+  | { type: 'plugin_command'; command: PluginCommandDto }
   // ── Lifecycle ───────────────────────────────────────────────────────────────
   | { type: 'request_exit' };
 
@@ -1335,6 +1342,46 @@ export type AppAuthorizationDecisionDto =
   | 'allow_always';
 
 /**
+ * Effective activation state of one builtin plugin, after the host resolved
+ * the bare-`enabledPlugins`-key three-way (local_apps.rs
+ * `PluginActivationStateDto`). Deliberately TWO values, not three: an absent
+ * key is resolved to one of these before the wire is touched, so a client
+ * never reasons about "missing" itself, and `disabled` never collapses into
+ * "not found".
+ *
+ * A bare wire STRING.
+ */
+export type PluginActivationStateDto = 'loaded' | 'disabled';
+
+/**
+ * Resolved status of one builtin plugin (local_apps.rs `PluginStatusDto`).
+ *
+ * `state` and `manifest_default_enabled` ride INDEPENDENTLY — neither is
+ * derived from the other; an explicit override beats the manifest default,
+ * and both are on the wire so a client can tell "using the default" from
+ * "explicitly set" without a second round trip.
+ */
+export interface PluginStatusDto {
+  /** Bare `enabledPlugins` key (e.g. `lingxi-local-app`) — no `@marketplace` suffix. */
+  plugin_id: string;
+  state: PluginActivationStateDto;
+  manifest_default_enabled: boolean;
+}
+
+/**
+ * Enable/disable/status operations for one builtin plugin (local_apps.rs
+ * `PluginCommandDto`), nested under the {@link ClientCommand}
+ * `plugin_command` envelope rather than flattened into top-level variants:
+ * flattening would bill these operations to `ClientCommand`'s 16 KiB UniFFI
+ * metadata budget. Internally tagged on `type`, `snake_case`.
+ */
+export type PluginCommandDto =
+  /** Write `enabledPlugins[plugin_id] = enabled`; confirmed by `plugin_status_changed`. */
+  | { type: 'set_enabled'; plugin_id: string; enabled: boolean }
+  /** Pure read; answered with `plugin_status_changed`. */
+  | { type: 'get_status'; plugin_id: string };
+
+/**
  * The local-app payload carried by the single {@link ClientEvent} `app_event`
  * envelope (local_apps.rs `AppEventDto`) — one envelope keeps the generated
  * mobile enum metadata bounded. Internally tagged on `type`, `snake_case`.
@@ -1363,7 +1410,14 @@ export type AppEventDto =
       error?: string;
       retryable: boolean;
     }
-  | { type: 'app_bridge_stream_frame'; frame: AppBridgeStreamFrameDto; frameJson: string };
+  | { type: 'app_bridge_stream_frame'; frame: AppBridgeStreamFrameDto; frameJson: string }
+  /**
+   * Resolved status for one builtin plugin — the READ half of the plugin
+   * enable/disable protocol. Answers a `plugin_command` / `get_status` and
+   * confirms a `set_enabled` write-back. Last in the union because it is last
+   * in the Rust enum, whose UniFFI ordinals are positional.
+   */
+  | { type: 'plugin_status_changed'; status: PluginStatusDto };
 
 // ─────────────────────────────────────────────────────────────────────────────
 // events.rs

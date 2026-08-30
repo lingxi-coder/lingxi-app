@@ -795,6 +795,16 @@ function validateAppEvent(v: unknown): void {
       if ('result_json' in o) assert.ok(isString(o['result_json']));
       if ('error' in o) assert.ok(isString(o['error']));
       break;
+    case 'plugin_status_changed': {
+      const st = o['status'];
+      const status = rec(st);
+      const keys = Object.keys(status).sort().join(',');
+      assert.equal(keys, 'manifest_default_enabled,plugin_id,state',
+        `plugin status must carry exactly {plugin_id, state, manifest_default_enabled}, got {${keys}}`);
+      assert.ok(isString(status['plugin_id']) && isString(status['state'])
+        && isBool(status['manifest_default_enabled']));
+      break;
+    }
     default:
       assert.fail(`unknown AppEventDto type: ${String(o['type'])}`);
   }
@@ -1014,6 +1024,36 @@ function validateCommand(name: string, v: unknown): void {
     case 'restore_app_checkpoint':
       assert.ok(isString(o['app_id']) && isString(o['checkpoint_id']));
       break;
+    case 'plugin_command': {
+      // Exact key sets. The Rust goldens contract "carries exactly
+      // {plugin_id, enabled}" / "{plugin_id}" — a fourth key is a contract
+      // change, not a detail, so assert the SET rather than the presence of
+      // the fields we happen to expect.
+      const c = o['command'];
+      const cmd = rec(c);
+      const keys = Object.keys(cmd).sort().join(',');
+      switch (cmd['type']) {
+        case 'set_enabled':
+          assert.equal(
+            keys,
+            'enabled,plugin_id,type',
+            `snapshot ${name}: set_enabled must carry exactly {plugin_id, enabled}, got {${keys}}`,
+          );
+          assert.ok(isString(cmd['plugin_id']) && isBool(cmd['enabled']));
+          break;
+        case 'get_status':
+          assert.equal(
+            keys,
+            'plugin_id,type',
+            `snapshot ${name}: get_status must carry exactly {plugin_id}, got {${keys}}`,
+          );
+          assert.ok(isString(cmd['plugin_id']));
+          break;
+        default:
+          assert.fail(`snapshot ${name}: unknown PluginCommandDto type "${String(cmd['type'])}"`);
+      }
+      break;
+    }
     default:
       assert.fail(`snapshot ${name}: unknown ClientCommand type "${String(o['type'])}"`);
   }
@@ -1431,7 +1471,7 @@ function validateError(v: unknown): void {
 
 test('every command snapshot parses as ClientCommand', () => {
   const files = listSnapshots('command');
-  assert.equal(files.length, 50, `expected 50 command snapshots, found ${files.length}`);
+  assert.equal(files.length, 52, `expected 52 command snapshots, found ${files.length}`);
   for (const file of files) {
     validateCommand(file, loadSnapshot('command', file));
   }
@@ -1469,7 +1509,7 @@ test('workflow model metadata and paused task status pass the wire guards', () =
 
 test('every event snapshot parses as ClientEvent', () => {
   const files = listSnapshots('event');
-  assert.equal(files.length, 65, `expected 65 event snapshots, found ${files.length}`);
+  assert.equal(files.length, 66, `expected 66 event snapshots, found ${files.length}`);
   for (const file of files) {
     validateEvent(file, loadSnapshot('event', file));
   }

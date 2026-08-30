@@ -71,7 +71,8 @@ use client_protocol::local_apps::{
     AppRuntimeProfileOptionDto, AppRuntimeProfilePackageDto, AppRuntimeProfileSelectionRequestDto,
     AppRuntimeRecoveryStateDto, AppRuntimeStateDto, AppRuntimeSuspensionReasonDto,
     AppSessionKindDto, AppSessionRowDto, AppSurfaceDto, AppUiActionKindDto, AppUiRequestDto,
-    AppWorkflowStateDto, DeviceContextDto,
+    AppWorkflowStateDto, DeviceContextDto, PluginActivationStateDto, PluginCommandDto,
+    PluginStatusDto,
 };
 use client_protocol::message::{MessageBlockDto, MessageDto};
 use client_protocol::permission::{
@@ -808,6 +809,46 @@ fn event_goldens() -> Vec<(&'static str, ClientEvent)> {
                 },
             },
         ),
+        // ── PluginStatusChanged (§17.1 / §19.2) ───────────────────────────
+        //
+        // The READ half of the plugin enable/disable protocol, goldened one
+        // row per NESTED `AppEventDto` variant like every `app_event` row
+        // above — `every_variant_has_a_golden` compares TOP-LEVEL
+        // `ClientEvent` tags only, and `app_event` is already covered, so
+        // nothing in the repo would ask for this file. It is here because the
+        // convention requires it, not because a gate demanded it.
+        //
+        // What the canonical instance is contracted to hold:
+        //
+        // 1. The payload is nested under the single `app_event` envelope, so
+        //    `AppEventDto`'s variants stay off `ClientEvent`'s UniFFI enum
+        //    metadata budget — the same structural reason the write half is
+        //    nested under `ClientCommand::PluginCommand`.
+        // 2. `plugin_id` is the BARE `enabledPlugins` key, spelled identically
+        //    to the `command/plugin_command_*.json` pair. One name on the
+        //    wire, read or write.
+        // 3. `state` is a PRESENT, distinctly-tagged value — never `null`,
+        //    never omitted. "Explicitly disabled" and "not found" must not
+        //    collapse into the same payload (§19.2), which is why `disabled`
+        //    is the value pinned here rather than the cheerier `loaded`.
+        // 4. `state: "disabled"` is paired with `manifest_default_enabled:
+        //    true` ON PURPOSE — the two fields DISAGREE. A golden where they
+        //    agreed would still pass if an implementation derived one from
+        //    the other; this pair can only be produced by carrying both
+        //    across the wire independently, which is the actual contract
+        //    (an explicit override beats the manifest default).
+        (
+            "event/plugin_status_changed.json",
+            ClientEvent::AppEvent {
+                event: AppEventDto::PluginStatusChanged {
+                    status: PluginStatusDto {
+                        plugin_id: "lingxi-local-app".to_string(),
+                        state: PluginActivationStateDto::Disabled,
+                        manifest_default_enabled: true,
+                    },
+                },
+            },
+        ),
         (
             "event/app_operation_failed.json",
             ClientEvent::AppOperationFailed {
@@ -1210,6 +1251,54 @@ fn command_goldens() -> Vec<(&'static str, ClientCommand)> {
             ClientCommand::CancelAskUserQuestion { request_id: 9 },
         ),
         ("command/request_exit.json", ClientCommand::RequestExit),
+        // ── PluginCommand (§17.1 / §19.2) ─────────────────────────────────
+        //
+        // TWO rows for ONE `ClientCommand` variant, on purpose.
+        //
+        // `every_variant_has_a_golden` compares TOP-LEVEL tags only, so a
+        // single `plugin_command` row satisfies it while leaving the nested
+        // `PluginCommandDto` — where every field of this feature actually
+        // lives — entirely unpinned. That is the same blind spot the
+        // `AppEventDto` rows above already work around: they are goldened one
+        // row per NESTED variant (`event/app_details_changed.json`, …), never
+        // one row for the `app_event` envelope. These follow that convention.
+        //
+        // What the pair is contracted to hold, beyond "whatever serde emits":
+        //
+        // 1. The operation is a nested OBJECT under `command`, never
+        //    `#[serde(flatten)]`ed onto the envelope. Flattening would move
+        //    §17.1's operations onto `ClientCommand`'s 16 KiB UniFFI metadata
+        //    budget (see `CLIENT_COMMAND_METADATA_BUDGET`), which detonates at
+        //    const-eval on both mobile builds. The `command` sub-object in
+        //    both goldens is what makes that structural choice byte-visible.
+        // 2. `plugin_id` is the BARE `enabledPlugins` key — no `@marketplace`
+        //    suffix — and it is spelled identically on the write path
+        //    (`set_enabled`) and the read path (`get_status`). One name on the
+        //    wire, read or write (`PluginStatusDto::plugin_id`).
+        // 3. `set_enabled` carries exactly `{plugin_id, enabled}`. There is no
+        //    companion "override" / "use default" flag: writing `enabled` IS
+        //    the only way to toggle, and `manifest_default_enabled` is
+        //    reported back on the event, never sent up. A third key appearing
+        //    here is a contract change, not a detail.
+        // 4. `get_status` carries exactly `{plugin_id}` — a pure read with no
+        //    payload; its answer arrives as `AppEventDto::PluginStatusChanged`.
+        (
+            "command/plugin_command_set_enabled.json",
+            ClientCommand::PluginCommand {
+                command: PluginCommandDto::SetEnabled {
+                    plugin_id: "lingxi-local-app".to_string(),
+                    enabled: true,
+                },
+            },
+        ),
+        (
+            "command/plugin_command_get_status.json",
+            ClientCommand::PluginCommand {
+                command: PluginCommandDto::GetStatus {
+                    plugin_id: "lingxi-local-app".to_string(),
+                },
+            },
+        ),
     ]
 }
 

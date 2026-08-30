@@ -36,7 +36,7 @@ use crate::controls::ReasoningSelectionDto;
 use crate::listings::TaskStatusDto;
 use crate::local_apps::{
     AppAuthorizationDecisionDto, AppBridgeRequestDto, AppCreateOriginDto, AppRuntimeProfileDto,
-    AppSurfaceDto,
+    AppSurfaceDto, PluginCommandDto,
 };
 use crate::permission::PermissionResponseDto;
 use serde::{Deserialize, Serialize};
@@ -575,6 +575,15 @@ pub enum ClientCommand {
         /// Whether the user approved the exact package diff shown by native UI.
         approved: bool,
     },
+
+    // ── Plugins (§17.1, §19.2) ────────────────────────────────────────────
+    /// Enable/disable/status for one builtin plugin. Nested in
+    /// [`PluginCommandDto`] rather than flat variants here — see
+    /// `CLIENT_COMMAND_METADATA_BUDGET` below.
+    PluginCommand {
+        /// The requested operation.
+        command: PluginCommandDto,
+    },
 }
 
 /// Prompt-input mode for [`ClientCommand::SendPrompt`]. Internally tagged on
@@ -703,7 +712,9 @@ mod metadata_budget_tests {
     #[test]
     fn client_command_metadata_headroom() {
         let used = UNIFFI_META_CONST_CLIENT_PROTOCOL_ENUM_CLIENTCOMMAND.size;
-        let hard_limit = UNIFFI_META_CONST_CLIENT_PROTOCOL_ENUM_CLIENTCOMMAND.bytes.len();
+        let hard_limit = UNIFFI_META_CONST_CLIENT_PROTOCOL_ENUM_CLIENTCOMMAND
+            .bytes
+            .len();
         println!(
             "ClientCommand UniFFI metadata: {used} / {hard_limit} bytes ({:.1}% used), \
              {} free to the hard limit, {} free to the gate at {CLIENT_COMMAND_METADATA_BUDGET}",
@@ -715,6 +726,68 @@ mod metadata_budget_tests {
             used < CLIENT_COMMAND_METADATA_BUDGET,
             "ClientCommand metadata is {used} bytes, over the {CLIENT_COMMAND_METADATA_BUDGET} \
              byte gate ({hard_limit} is the hard limit at which both mobile builds break)"
+        );
+    }
+}
+
+#[cfg(test)]
+mod plugin_command_wire_tests {
+    use super::ClientCommand;
+    use crate::local_apps::PluginCommandDto;
+
+    /// The plugin operations ride NESTED under one `ClientCommand` variant
+    /// rather than flattened into it.
+    ///
+    /// This makes the byte-budget decision load-bearing.
+    /// `uniffi_macros::create_metadata_items` bills a nested enum's variants
+    /// to that enum's OWN 16 KiB buffer, so nesting is what keeps §17.1's
+    /// operations off `ClientCommand`'s budget. A later `#[serde(flatten)]`
+    /// (or a re-flattening into top-level variants) would be INVISIBLE to
+    /// `client_command_metadata_headroom` for as long as the bytes still fit,
+    /// then detonate at const-eval — breaking BOTH mobile builds while
+    /// `cargo build --workspace` and the rest of the suite stay green. This
+    /// test sees it on the first commit instead.
+    #[test]
+    fn plugin_operations_ride_nested_under_one_command_variant() {
+        let json = serde_json::to_value(ClientCommand::PluginCommand {
+            command: PluginCommandDto::SetEnabled {
+                plugin_id: "lingxi-local-app".into(),
+                enabled: true,
+            },
+        })
+        .expect("serialize PluginCommand");
+
+        assert_eq!(json["type"], "plugin_command");
+
+        // Nested: the operation is its own object behind `command`. Under a
+        // `#[serde(flatten)]` this key is absent and indexes to `Null`, so
+        // this observable genuinely differs between the two designs.
+        assert!(
+            json["command"].is_object(),
+            "the operation must be a nested object under `command`, got {}",
+            json["command"]
+        );
+        assert_eq!(json["command"]["type"], "set_enabled");
+        assert_eq!(json["command"]["plugin_id"], "lingxi-local-app");
+        assert_eq!(json["command"]["enabled"], true);
+
+        // ... and the complementary half: the operation's fields must NOT
+        // have surfaced on the command itself.
+        assert!(
+            json.get("plugin_id").is_none() && json.get("enabled").is_none(),
+            "operation fields leaked to the top level — the operation was \
+             flattened back onto ClientCommand's metadata budget: {json}"
+        );
+
+        let back: ClientCommand = serde_json::from_value(json).expect("round trip");
+        assert!(
+            matches!(
+                back,
+                ClientCommand::PluginCommand {
+                    command: PluginCommandDto::SetEnabled { enabled: true, .. }
+                }
+            ),
+            "PluginCommand must round-trip back to the same operation"
         );
     }
 }

@@ -84,7 +84,8 @@ impl McpServerConfig {
             McpTransportSpec::Sse { url, .. }
             | McpTransportSpec::Http { url, .. }
             | McpTransportSpec::WebSocket { url, .. }
-            | McpTransportSpec::SseIde { url, .. } => url,
+            | McpTransportSpec::SseIde { url, .. }
+            | McpTransportSpec::WsIde { url, .. } => url,
             McpTransportSpec::Stdio { .. }
             | McpTransportSpec::InProcess { .. }
             | McpTransportSpec::SdkControl { .. } => return false,
@@ -123,7 +124,8 @@ impl McpServerConfig {
             McpTransportSpec::Sse { url, .. }
             | McpTransportSpec::Http { url, .. }
             | McpTransportSpec::WebSocket { url, .. }
-            | McpTransportSpec::SseIde { url, .. } => url,
+            | McpTransportSpec::SseIde { url, .. }
+            | McpTransportSpec::WsIde { url, .. } => url,
             McpTransportSpec::Stdio { .. }
             | McpTransportSpec::InProcess { .. }
             | McpTransportSpec::SdkControl { .. } => return None,

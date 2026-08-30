@@ -228,6 +228,7 @@ pub(crate) fn auth_kind_from_spec(spec: &McpTransportSpec) -> (&'static str, &'s
         McpTransportSpec::WebSocket { .. } => ("websocket", "none"),
         McpTransportSpec::InProcess { .. } => ("inProcess", "none"),
         McpTransportSpec::SseIde { .. } => ("sseIde", "none"),
+        McpTransportSpec::WsIde { .. } => ("wsIde", "none"),
         McpTransportSpec::SdkControl { .. } => ("sdkControl", "none"),
     }
 }

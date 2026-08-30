@@ -201,6 +201,8 @@ fn transport_label(kind: McpTransportKind) -> &'static str {
         McpTransportKind::Sse => "sse",
         McpTransportKind::WebSocket => "ws",
         McpTransportKind::SseIde => "ide",
+        // Oracle `Wr`: `sse-ide`/`ws-ide` both map to the `"ide"` label.
+        McpTransportKind::WsIde => "ide",
         McpTransportKind::SdkControl => "sdk-control",
         McpTransportKind::Stdio => "stdio",
     }
@@ -213,7 +215,8 @@ fn spec_url(spec: &McpTransportSpec) -> Option<&str> {
         McpTransportSpec::Sse { url, .. }
         | McpTransportSpec::Http { url, .. }
         | McpTransportSpec::WebSocket { url, .. }
-        | McpTransportSpec::SseIde { url, .. } => Some(url.as_str()),
+        | McpTransportSpec::SseIde { url, .. }
+        | McpTransportSpec::WsIde { url, .. } => Some(url.as_str()),
         McpTransportSpec::Stdio { .. }
         | McpTransportSpec::InProcess { .. }
         | McpTransportSpec::SdkControl { .. } => None,
@@ -455,6 +458,7 @@ mod tests {
         assert_eq!(transport_label(McpTransportKind::WebSocket), "ws");
         assert_eq!(transport_label(McpTransportKind::InProcess), "in-process");
         assert_eq!(transport_label(McpTransportKind::SseIde), "ide");
+        assert_eq!(transport_label(McpTransportKind::WsIde), "ide");
         assert_eq!(transport_label(McpTransportKind::SdkControl), "sdk-control");
     }
 

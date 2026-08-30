@@ -169,6 +169,22 @@ struct McpJsonEntry {
     /// `Value::String` there — mirroring `NAn`'s required `i()`.
     #[serde(default)]
     id: Option<serde_json::Value>,
+    /// `sse-ide`/`ws-ide`-only: the human-readable IDE name. Oracle `l`/`d`
+    /// (2.1.251 Mach-O @154584571/@154584715) both declare `ideName:i()`
+    /// REQUIRED (no `.optional()`, in the same pointed contrast as `sdk`'s
+    /// `name` / `claudeai-proxy`'s `id`) — a missing `ideName` fails
+    /// `safeParse` and the whole entry is skipped. `i()` has no `.min(1)`, so
+    /// an empty string is schema-valid; only presence is checked.
+    #[serde(default, rename = "ideName")]
+    ide_name: Option<String>,
+    /// `ws-ide`-only: an optional bearer token presented at the WebSocket
+    /// handshake. Oracle `d` @154584715: `authToken:i().optional()`.
+    #[serde(default, rename = "authToken")]
+    auth_token: Option<String>,
+    /// `sse-ide`/`ws-ide`-only: true when the IDE is hosted on Windows
+    /// (affects path normalization). Oracle: `ideRunningInWindows:q().optional()`.
+    #[serde(default, rename = "ideRunningInWindows")]
+    ide_running_in_windows: Option<bool>,
 }
 
 /// The keys oracle `NAn` (@154585377) declares, plus the LingXi-original
@@ -482,7 +498,12 @@ fn entry_satisfies_schema(entry: &McpJsonEntry, ide_transports_allowed: bool) ->
         }
         // Every remaining remote member declares a required `url: i()`.
         Some(t) if CONFIG_REMOTE_TYPES.contains(&t) => entry.url.is_some(),
-        Some(t) if ide_transports_allowed && IDE_ONLY_TYPES.contains(&t) => entry.url.is_some(),
+        // `l`/`d` (sse-ide/ws-ide) additionally require `ideName: i()` — no
+        // `.optional()` sibling, so a missing `ideName` fails `safeParse`
+        // exactly like a nameless `sdk` or id-less `claudeai-proxy` entry.
+        Some(t) if ide_transports_allowed && IDE_ONLY_TYPES.contains(&t) => {
+            entry.url.is_some() && entry.ide_name.is_some()
+        }
         // A `type` outside the layer's union rejects the whole entry.
         _ => false,
     }
@@ -686,17 +707,17 @@ fn build_entry(
                 return None;
             };
             // Oracle `fAn` (@160896200) — the expander — switches on the
-            // PARSED entry's `type` and passes `claudeai-proxy` straight
-            // through: `case"claudeai-proxy":u=e;break`. No `${VAR}` is
-            // expanded, no missing-var name is collected, and `r`
-            // (`urlExpandedToEmpty`) stays `false`, so the `url_invalid`
-            // `configError` below can never be stamped for this transport
-            // either. (`sse-ide`/`ws-ide` and `sdk` are passed through by the
-            // same switch — a separate, unassigned §10 finding, left as-is.)
-            // `config_diagnostics::collect_missing_env_vars` already routes
-            // `claudeai-proxy` to its expands-nothing arm, so this also
-            // restores loader↔diagnostics agreement.
-            let expands_env_vars = ty != Some("claudeai-proxy");
+            // PARSED entry's `type`: `case"sse":case"http":case"ws":` expand
+            // `url`/`headers`; `case"sse-ide":case"ws-ide":u=e;break` and
+            // `case"claudeai-proxy":u=e;break` pass the entry straight
+            // through UNCHANGED — no `${VAR}` expanded, no missing-var name
+            // collected, and `r` (`urlExpandedToEmpty`) stays `false`, so the
+            // `url_invalid` `configError` below can never be stamped for
+            // either transport. `config_diagnostics::collect_missing_env_vars`
+            // already routes `claudeai-proxy` (and, separately, sse-ide/ws-ide)
+            // to their expands-nothing arm, so this also restores
+            // loader↔diagnostics agreement.
+            let expands_env_vars = !matches!(ty, Some("claudeai-proxy" | "sse-ide" | "ws-ide"));
             let url = if expands_env_vars {
                 expand_field(&raw_url, &mut missing)
             } else {
@@ -784,16 +805,48 @@ fn build_entry(
                 }
                 // Reachable ONLY on the plugin `.mcp.json` layer
                 // (`ide_transports_allowed`), which validates against `KY`.
-                // §10 (unmodelled `ideName`/`authToken`, and the unused
-                // `McpTransportSpec::SseIde` variant) is a DIFFERENT,
-                // unassigned finding — these keep dialling as Http exactly as
-                // before rather than being newly rejected on that layer.
-                Some("sse-ide" | "ws-ide") => McpTransportSpec::Http {
-                    url,
-                    headers,
-                    headers_helper,
-                    oauth: entry.oauth,
-                },
+                // `l` @154584571: `f({type:N("sse-ide"),url:i(),ideName:i(),
+                // ideRunningInWindows:q().optional(),timeout:o().optional(),
+                // alwaysLoad:q().optional(),role:t()})` — no `headers`, no
+                // `headersHelper`, no `oauth`. `ideName` is a REQUIRED `i()`
+                // (no `.optional()` sibling, the same pointed contrast as
+                // `sdk`'s `name` / `claudeai-proxy`'s `id` above), so a
+                // missing `ideName` fails `safeParse` and the whole entry is
+                // skipped, keeping valid siblings.
+                Some("sse-ide") => {
+                    let Some(ide_name) = entry.ide_name.clone() else {
+                        tracing::warn!(
+                            server = %name,
+                            "mcp.json: sse-ide server is missing the required \"ideName\"; skipping entry"
+                        );
+                        return None;
+                    };
+                    McpTransportSpec::SseIde {
+                        url,
+                        ide_name,
+                        ide_running_in_windows: entry.ide_running_in_windows.unwrap_or(false),
+                    }
+                }
+                // `d` @154584715: `f({type:N("ws-ide"),url:i(),ideName:i(),
+                // authToken:i().optional(),ideRunningInWindows:q().optional(),
+                // timeout:o().optional(),alwaysLoad:q().optional(),role:t()})`
+                // — same shape as `sse-ide` plus an optional `authToken`, and
+                // the same required-`ideName` skip rule.
+                Some("ws-ide") => {
+                    let Some(ide_name) = entry.ide_name.clone() else {
+                        tracing::warn!(
+                            server = %name,
+                            "mcp.json: ws-ide server is missing the required \"ideName\"; skipping entry"
+                        );
+                        return None;
+                    };
+                    McpTransportSpec::WsIde {
+                        url,
+                        ide_name,
+                        auth_token: entry.auth_token.clone(),
+                        ide_running_in_windows: entry.ide_running_in_windows.unwrap_or(false),
+                    }
+                }
                 Some("ws") => McpTransportSpec::WebSocket {
                     url,
                     headers,
@@ -835,15 +888,15 @@ fn build_entry(
         // if present), so the alias is honoured for the sse/http-family
         // transports only.
         //
-        // `McpTransportSpec::Http` also carries `claudeai-proxy` (and,
-        // separately, the plugin-layer-only sse-ide/ws-ide), whose schema
+        // `McpTransportSpec::Http` also carries `claudeai-proxy`, whose schema
         // `NAn` (@154585377) declares neither `request_timeout_ms` nor
         // `.transform(iGt)` — the oracle strips the alias for it entirely.
         // Gate the fold on `ty` (not just the `Http` variant) so a
         // `claudeai-proxy` entry never gets it, matching real `http`/
-        // `streamable-http`/`sse` byte for byte. The sse-ide/ws-ide half of
-        // the residual is a separate, unassigned finding (§10) and is left
-        // exactly as before.
+        // `streamable-http`/`sse` byte for byte. The plugin-layer-only
+        // `sse-ide`/`ws-ide` arms now build a `SseIde`/`WsIde` spec (§10), so
+        // they fall into the `_` arm below and never see the fold either —
+        // matching `l`/`d`, which also declare no `request_timeout_ms`.
         let timeout_ms = match &spec {
             McpTransportSpec::Sse { .. } | McpTransportSpec::Http { .. }
                 if ty != Some("claudeai-proxy") =>
@@ -1321,10 +1374,11 @@ mod tests {
         }
     }
 
-    /// The plugin layer is `KY`, so the two IDE arms survive there (they are
-    /// still dialled as Http — §10, unmodelled `ideName`/`authToken`, is a
-    /// separate finding). This is what keeps the config-layer tightening from
-    /// silently amputating plugin-declared IDE servers.
+    /// The plugin layer is `KY`, so the two IDE arms survive there, and (§10)
+    /// are now built as their own typed [`McpTransportSpec::SseIde`] /
+    /// [`McpTransportSpec::WsIde`] — no longer dialled as plain `Http`. This
+    /// is what keeps the config-layer tightening from silently amputating
+    /// plugin-declared IDE servers.
     #[test]
     fn plugin_layer_still_accepts_the_ide_only_types() {
         for ty in ["sse-ide", "ws-ide"] {
@@ -1339,6 +1393,167 @@ mod tests {
         assert!(parse_plugin_mcp_json_string(raw, ConfigScope::Dynamic)
             .unwrap()
             .is_empty());
+    }
+
+    // ── §10: sse-ide/ws-ide build typed specs, not plain Http ───────────
+
+    /// The core §10 regression: before this fix, `Some("sse-ide" | "ws-ide")`
+    /// built a plain `McpTransportSpec::Http`, erasing `ideName`/`authToken`
+    /// and (via `oauth::server_key`'s catch-all `other` arm returning the
+    /// SAME `kind()` either way) never actually breaking a stored OAuth key —
+    /// but the transport was unmodelled and undialable as an IDE connection.
+    #[test]
+    fn sse_ide_builds_a_typed_spec_with_ide_name() {
+        let raw = r#"{"mcpServers":{"ide":{
+            "type":"sse-ide","url":"http://127.0.0.1:9999/sse","ideName":"VS Code",
+            "ideRunningInWindows":true
+        }}}"#;
+        let cfgs = parse_plugin_mcp_json_string(raw, ConfigScope::Dynamic).unwrap();
+        assert_eq!(cfgs.len(), 1);
+        match &cfgs[0].spec {
+            McpTransportSpec::SseIde {
+                url,
+                ide_name,
+                ide_running_in_windows,
+            } => {
+                assert_eq!(url, "http://127.0.0.1:9999/sse");
+                assert_eq!(ide_name, "VS Code");
+                assert!(ide_running_in_windows);
+            }
+            other => panic!("expected SseIde, got {other:?}"),
+        }
+    }
+
+    /// `ws-ide` additionally carries an optional `authToken`.
+    #[test]
+    fn ws_ide_builds_a_typed_spec_with_ide_name_and_auth_token() {
+        let raw = r#"{"mcpServers":{"ide":{
+            "type":"ws-ide","url":"ws://127.0.0.1:9999/ws","ideName":"Cursor",
+            "authToken":"secret-token"
+        }}}"#;
+        let cfgs = parse_plugin_mcp_json_string(raw, ConfigScope::Dynamic).unwrap();
+        assert_eq!(cfgs.len(), 1);
+        match &cfgs[0].spec {
+            McpTransportSpec::WsIde {
+                url,
+                ide_name,
+                auth_token,
+                ide_running_in_windows,
+            } => {
+                assert_eq!(url, "ws://127.0.0.1:9999/ws");
+                assert_eq!(ide_name, "Cursor");
+                assert_eq!(auth_token.as_deref(), Some("secret-token"));
+                assert!(!ide_running_in_windows);
+            }
+            other => panic!("expected WsIde, got {other:?}"),
+        }
+    }
+
+    /// `ws-ide` with no `authToken` at all still builds (it is `.optional()`).
+    #[test]
+    fn ws_ide_auth_token_is_optional() {
+        let raw = r#"{"mcpServers":{"ide":{
+            "type":"ws-ide","url":"ws://x/ws","ideName":"VS Code"
+        }}}"#;
+        let cfgs = parse_plugin_mcp_json_string(raw, ConfigScope::Dynamic).unwrap();
+        assert_eq!(cfgs.len(), 1);
+        match &cfgs[0].spec {
+            McpTransportSpec::WsIde { auth_token, .. } => assert!(auth_token.is_none()),
+            other => panic!("expected WsIde, got {other:?}"),
+        }
+    }
+
+    /// Oracle `l`/`d` declare `ideName: i()` REQUIRED (no `.optional()`
+    /// sibling) — a missing `ideName` fails `safeParse` and the entry is
+    /// SKIPPED, not defaulted or dialled anyway.
+    #[test]
+    fn sse_ide_and_ws_ide_without_ide_name_are_skipped() {
+        for ty in ["sse-ide", "ws-ide"] {
+            let raw = format!(
+                r#"{{"mcpServers":{{"ide":{{"type":"{ty}","url":"http://x/sse"}}}}}}"#
+            );
+            let cfgs = parse_plugin_mcp_json_string(&raw, ConfigScope::Dynamic).unwrap();
+            assert!(
+                cfgs.is_empty(),
+                "{ty} with no ideName must fail safeParse and be skipped, not dialled anyway"
+            );
+        }
+        // The schema-shape validator (used by the JSON-agent path) must agree.
+        for ty in ["sse-ide", "ws-ide"] {
+            let entry = serde_json::json!({"type": ty, "url": "http://x/sse"});
+            assert!(
+                !server_entry_shape_is_valid(&entry),
+                "{ty} with no ideName must fail the shape validator too"
+            );
+        }
+    }
+
+    /// `${VAR}` references in an ide transport's `url` are left LITERAL —
+    /// oracle `fAn`'s `case"sse-ide":case"ws-ide":u=e;break` passes the entry
+    /// through unchanged, unlike `sse`/`http`/`ws` which expand `url`.
+    #[test]
+    fn sse_ide_url_is_not_env_expanded() {
+        std::env::remove_var("SSE_IDE_TEST_VAR_10");
+        let raw = r#"{"mcpServers":{"ide":{
+            "type":"sse-ide","url":"http://${SSE_IDE_TEST_VAR_10}/sse","ideName":"VS Code"
+        }}}"#;
+        let cfgs = parse_plugin_mcp_json_string(raw, ConfigScope::Dynamic).unwrap();
+        assert_eq!(cfgs.len(), 1);
+        match &cfgs[0].spec {
+            McpTransportSpec::SseIde { url, .. } => {
+                assert_eq!(url, "http://${SSE_IDE_TEST_VAR_10}/sse");
+            }
+            other => panic!("expected SseIde, got {other:?}"),
+        }
+        // No config_error is stamped either — the oracle's r (urlExpandedToEmpty)
+        // stays false because the url is never run through the expander.
+        assert!(cfgs[0].config_error.is_none());
+    }
+
+    /// `oauth::server_key`'s `{sse, http}` match arms are the ONLY ones with
+    /// a hand-picked hash label — every other spec (including the two new
+    /// [`McpTransportSpec::SseIde`]/[`McpTransportSpec::WsIde`] variants this
+    /// task adds) falls into its `other => (other.kind(), "", &empty)`
+    /// catch-all. This test is NOT the frozen byte-pin (that is
+    /// `mcp/tests/server_key_pin_test.rs`, untouched by this change) — it
+    /// only proves the new `WsIde` variant reaches that catch-all rather than
+    /// accidentally matching the `sse`/`http` arms (which would hash a
+    /// `ws-ide`-typed spec under the wrong `type` label and could collide
+    /// with an unrelated server).
+    #[test]
+    fn ws_ide_hashes_as_its_own_kind_not_sse_or_http() {
+        let ws_ide = McpTransportSpec::WsIde {
+            url: "ws://x/ws".to_string(),
+            ide_name: "VS Code".to_string(),
+            auth_token: None,
+            ide_running_in_windows: false,
+        };
+        let key = crate::oauth::server_key("srv", &ws_ide);
+        // `server_key` hashes `{type: kind(), url: "", headers: {}}` for any
+        // non-sse/http spec — url is NOT the transport's real url (a remote
+        // spec's own url is folded in only for `sse`/`http`).
+        let sse_with_same_name_and_url = McpTransportSpec::Sse {
+            url: "ws://x/ws".to_string(),
+            headers: McpHeaders::default(),
+            headers_helper: None,
+            oauth: None,
+        };
+        assert_ne!(
+            key,
+            crate::oauth::server_key("srv", &sse_with_same_name_and_url),
+            "ws-ide must not hash identically to an sse spec sharing the same url"
+        );
+        let http_with_same_name = McpTransportSpec::Http {
+            url: String::new(),
+            headers: McpHeaders::default(),
+            headers_helper: None,
+            oauth: None,
+        };
+        assert_ne!(
+            key,
+            crate::oauth::server_key("srv", &http_with_same_name),
+            "ws-ide must not hash identically to an http spec"
+        );
     }
 
     /// [`server_entry_shape_is_valid`] documents itself as mirroring the zod

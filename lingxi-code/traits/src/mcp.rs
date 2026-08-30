@@ -29,7 +29,9 @@ pub type McpHeaders = indexmap::IndexMap<String, String>;
 
 /// Concrete transport configuration for one MCP server.
 ///
-/// Mirrors the 7 transport variants described in spec §7.1. Platform
+/// Mirrors the 8 transport variants described in spec §7.1 (the two
+/// developer-IDE transports, `SseIde`/`WsIde`, added for oracle parity — see
+/// mcp §10 in the byte-alignment doc). Platform
 /// implementations decide which variants they support via
 /// [`McpTransport::supported_transports`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -95,6 +97,24 @@ pub enum McpTransportSpec {
         /// True when the IDE is hosted on Windows (affects path normalization).
         ide_running_in_windows: bool,
     },
+    /// WebSocket endpoint exposed by a developer IDE.
+    ///
+    /// Oracle `d` (2.1.251 Mach-O @154584715): `f({type:N("ws-ide"),url:i(),
+    /// ideName:i(),authToken:i().optional(),ideRunningInWindows:q().optional(),
+    /// timeout:o().optional(),alwaysLoad:q().optional(),role:t()})` — the same
+    /// shape as [`Self::SseIde`] plus an optional `authToken` used at the
+    /// WebSocket handshake.
+    WsIde {
+        /// Endpoint URL (`ws://` or `wss://`).
+        url: String,
+        /// Human-readable IDE name (for logs and approval UI).
+        ide_name: String,
+        /// Optional bearer token presented at the WebSocket handshake.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        auth_token: Option<String>,
+        /// True when the IDE is hosted on Windows (affects path normalization).
+        ide_running_in_windows: bool,
+    },
     /// Logical channel controlled by a host SDK / embedder.
     SdkControl {
         /// Identifier for the host-provided control channel.
@@ -115,13 +135,14 @@ pub enum McpTransportKind {
     WebSocket,
     InProcess,
     SseIde,
+    WsIde,
     SdkControl,
 }
 
 impl McpTransportSpec {
     /// Short transport-kind label for display (`"stdio"`, `"sse"`, `"http"`,
-    /// `"websocket"`, `"inprocess"`, `"sse-ide"`, `"sdk-control"`). Used by
-    /// `OrchestratorHandle::list_mcp_servers` (M6-07) to populate
+    /// `"websocket"`, `"inprocess"`, `"sse-ide"`, `"ws-ide"`, `"sdk-control"`).
+    /// Used by `OrchestratorHandle::list_mcp_servers` (M6-07) to populate
     /// `McpServerInfo::transport`.
     #[must_use]
     pub fn kind(&self) -> &'static str {
@@ -132,6 +153,7 @@ impl McpTransportSpec {
             Self::WebSocket { .. } => "websocket",
             Self::InProcess { .. } => "inprocess",
             Self::SseIde { .. } => "sse-ide",
+            Self::WsIde { .. } => "ws-ide",
             Self::SdkControl { .. } => "sdk-control",
         }
     }
@@ -148,6 +170,7 @@ impl McpTransportSpec {
             Self::WebSocket { .. } => McpTransportKind::WebSocket,
             Self::InProcess { .. } => McpTransportKind::InProcess,
             Self::SseIde { .. } => McpTransportKind::SseIde,
+            Self::WsIde { .. } => McpTransportKind::WsIde,
             Self::SdkControl { .. } => McpTransportKind::SdkControl,
         }
     }

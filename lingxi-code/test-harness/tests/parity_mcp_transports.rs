@@ -5,15 +5,18 @@
 //! `McpServerConfigSchema`). claude-code exposes four user-facing transport
 //! types in settings JSON: `stdio`, `sse`, `http`, `ws`. `InProcess` and
 //! `SdkControl` are internal-only and never round-trip through
-//! user/project/managed settings.
+//! user/project/managed settings; `SseIde`/`WsIde` are members of the PLUGIN
+//! `mcpServers` union (`KY`) but are absent from the settings/`.mcp.json`
+//! config table (`ZGn`, mcp §10), so they never round-trip through
+//! user/project/managed settings either.
 //!
 //! The production [`platform_posix::PosixMcpTransport`] mirrors
 //! that split by:
 //!
 //! - claiming `Stdio | Sse | Http` in `supported_transports()`,
 //! - successfully dispatching `connect()` for `Stdio | Sse | Http`,
-//! - returning [`McpError::UnsupportedTransport`] for `InProcess` and
-//!   `SdkControl`.
+//! - returning [`McpError::UnsupportedTransport`] for `InProcess`,
+//!   `SdkControl`, `SseIde` and `WsIde`.
 //!
 //! `WebSocket` is wired through the dedicated `connect_ws` helper rather
 //! than the trait method in v0.3.0; the driver verifies the trait-level
@@ -39,6 +42,7 @@ fn parse_kind(s: &str) -> McpTransportKind {
         "WebSocket" => McpTransportKind::WebSocket,
         "InProcess" => McpTransportKind::InProcess,
         "SseIde" => McpTransportKind::SseIde,
+        "WsIde" => McpTransportKind::WsIde,
         "SdkControl" => McpTransportKind::SdkControl,
         other => panic!("unknown kind {other:?}"),
     }
@@ -74,6 +78,12 @@ fn sample_spec(kind: McpTransportKind) -> McpTransportSpec {
         McpTransportKind::SseIde => McpTransportSpec::SseIde {
             url: "http://127.0.0.1:0/ide".into(),
             ide_name: "parity-ide".into(),
+            ide_running_in_windows: false,
+        },
+        McpTransportKind::WsIde => McpTransportSpec::WsIde {
+            url: "ws://127.0.0.1:0/ide".into(),
+            ide_name: "parity-ide".into(),
+            auth_token: None,
             ide_running_in_windows: false,
         },
         McpTransportKind::SdkControl => McpTransportSpec::SdkControl {

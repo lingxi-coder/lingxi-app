@@ -1052,8 +1052,8 @@ fn component_root(component: &ComponentPath, fallback: PathBuf) -> PathBuf {
 /// transport spec, in place. Covers the substitutable string surfaces: the
 /// Stdio `command` / `args` / `env` values, and remote (`Sse` / `Http` /
 /// `WebSocket`) `url` + `headers` values. Non-substitutable specs (`InProcess`,
-/// `SseIde`, `SdkControl`) carry no userConfig-derived string and are left
-/// untouched. A no-op when the substitution context is empty (the common
+/// `SseIde`, `WsIde`, `SdkControl`) carry no userConfig-derived string and are
+/// left untouched. A no-op when the substitution context is empty (the common
 /// no-userConfig case), so a plugin without userConfig is byte-unchanged.
 fn substitute_mcp_config(cfg: &mut McpServerConfig, ctx: &Map<String, Value>) {
     use traits::McpTransportSpec;
@@ -1088,6 +1088,7 @@ fn substitute_mcp_config(cfg: &mut McpServerConfig, ctx: &Map<String, Value>) {
         }
         McpTransportSpec::InProcess { .. }
         | McpTransportSpec::SseIde { .. }
+        | McpTransportSpec::WsIde { .. }
         | McpTransportSpec::SdkControl { .. } => {}
     }
 }

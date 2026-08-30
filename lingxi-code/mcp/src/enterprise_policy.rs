@@ -1454,7 +1454,9 @@ fn spec_matcher_view(spec: &McpTransportSpec) -> Value {
             "command": command,
             "args": args,
         }),
-        McpTransportSpec::Sse { url, .. } | McpTransportSpec::SseIde { url, .. } => {
+        McpTransportSpec::Sse { url, .. }
+        | McpTransportSpec::SseIde { url, .. }
+        | McpTransportSpec::WsIde { url, .. } => {
             serde_json::json!({ "type": "sse", "url": url })
         }
         McpTransportSpec::Http { url, .. } => serde_json::json!({ "type": "http", "url": url }),

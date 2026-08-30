@@ -1066,4 +1066,31 @@ async fn list_tools_keeps_a_meta_invalid_schema_with_warning_by_default() {
     let tools = client.list_tools().await.expect("list");
     assert_eq!(tools.len(), 1, "kept-with-warning, not dropped: {tools:?}");
     assert_eq!(tools[0].input_schema, json!({ "type": 5 }));
+
+    // "Kept" alone is what the PRE-§20a code already did, so the assertions
+    // above cannot tell warn-and-keep apart from silent forwarding. Pin the
+    // decision this schema produced: a `warning` (not a `drop_reason`) is the
+    // half of §20a that the list length can never show.
+    let decision = mcp::tool_schema::decide_tool_schema(None, &json!({ "type": 5 }));
+    assert!(
+        decision.drop_reason.is_none(),
+        "drop gate is off by default: {decision:?}"
+    );
+    let warning = decision
+        .warning
+        .expect("a meta-invalid schema must be KEPT WITH A WARNING, not silently forwarded");
+    assert!(
+        warning.starts_with("input schema would be rejected by the Anthropic API (")
+            && warning.ends_with("); requests that include it may fail"),
+        "oracle warn copy, got: {warning}"
+    );
 }
+
+// COVERAGE NOTE: the two tests above drive `McpClient::list_tools`, which
+// production reaches only through `McpRegistry::refresh_catalog` (a
+// server-sent `notifications/tools/list_changed`). The CONNECT path — the one
+// that fills `McpConnectionState::Connected { tools }` for
+// `build_registered_mcp_tools` — goes through `McpTransport::list_tools`
+// instead, and is covered by
+// `registry::tests::connect_applies_the_tool_schema_decision_to_the_model_facing_list`
+// and `registry::tests::connect_resolves_the_schema_gate_from_the_servers_own_hostname`.

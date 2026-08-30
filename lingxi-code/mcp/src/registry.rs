@@ -1113,14 +1113,57 @@ impl McpRegistry {
         // the normalized form equals the raw one, so the FQN is byte-unchanged
         // except for names with characters outside `[a-zA-Z0-9_-]`.
         let normalized_server = normalize_name_for_mcp(&config.name);
-        for dto in &mut tools {
-            dto.server_name.clone_from(&config.name);
+        // §20a — normalize or drop each tool's `inputSchema` before it reaches
+        // the model (oracle `Wrt`/`qrt`, see [`crate::tool_schema`]). This is
+        // the CONNECT path: `McpClient::list_tools` runs the same decision but
+        // is reached only by `refresh_catalog`, so without this the transform
+        // never applied to the tool list `build_registered_mcp_tools` actually
+        // hands the model. The per-server gate reads the SAME resolved URL the
+        // client is given below via `with_server_url`.
+        let gate_url = {
+            let u = spec_url(&config.spec);
+            (!u.is_empty()).then(|| u.to_string())
+        };
+        let server_display = config.name.clone();
+        tools.retain_mut(|dto| {
+            let decision = crate::tool_schema::decide_tool_schema(
+                gate_url.as_deref(),
+                &dto.input_schema,
+            );
+            if let Some(reason) = decision.drop_reason {
+                tracing::warn!(
+                    server = %server_display,
+                    tool = %dto.tool_name,
+                    "Skipping tool \"{}\": {reason}. Other tools from this server remain available.",
+                    dto.tool_name
+                );
+                return false;
+            }
+            if let Some(warning) = &decision.warning {
+                tracing::debug!(
+                    server = %server_display,
+                    tool = %dto.tool_name,
+                    "Tool \"{}\" {warning}",
+                    dto.tool_name
+                );
+            }
+            if let Some(note) = decision.description_note {
+                // oracle: `E.description ? `${note}\n\n${description}` : note`.
+                dto.description = if dto.description.is_empty() {
+                    note
+                } else {
+                    format!("{note}\n\n{}", dto.description)
+                };
+            }
+            dto.input_schema = decision.schema;
+            dto.server_name.clone_from(&server_display);
             dto.full_name = format!(
                 "mcp__{}__{}",
                 normalized_server,
                 normalize_name_for_mcp(&dto.tool_name)
             );
-        }
+            true
+        });
 
         let connection_id = conn.connection_id;
         let server_name = config.name.clone();
@@ -1132,6 +1175,9 @@ impl McpRegistry {
         // Transport kind feeds the `GLd` idle-timeout default (stdio 30 min /
         // remote 5 min / in-process none) on the built `McpClient`.
         let config_transport_kind = config.spec.transport_kind();
+        // Resolved endpoint URL (`None` for stdio/url-less transports) — feeds
+        // the §20a per-server gate on the `McpClient` refresh path.
+        let config_server_url = gate_url.clone();
         self.connections.write().await.insert(
             server_name.clone(),
             McpConnectionState::Connected {
@@ -1186,7 +1232,13 @@ impl McpRegistry {
                     .with_config_options(config_timeout_ms, config_always_load)
                     // Transport kind → `GLd` idle-timeout default (parity 2.1.207
                     // P2-01 remainder).
-                    .with_transport_kind(config_transport_kind),
+                    .with_transport_kind(config_transport_kind)
+                    // §20a — the connected server's URL feeds the per-server
+                    // schema-normalization gate on `refresh_catalog`'s
+                    // `list_tools`, exactly as `gate_url` above feeds the
+                    // connect path. Without it the gate can only ever match a
+                    // bare `"*"` entry.
+                    .with_server_url(config_server_url),
                 );
                 self.register_connected_client(&server_name, connection_id, client)
                     .await;
@@ -3165,6 +3217,26 @@ mod tests {
                 disconnect_release: Notify::new(),
             }
         }
+
+        /// Same as [`Self::new`], but each tool carries a caller-supplied
+        /// `inputSchema` so the §20a connect-path decision can be driven.
+        fn with_tool_schemas(tools: &[(&str, serde_json::Value)]) -> Self {
+            let mut mock = Self::new(&[]);
+            mock.tools = tools
+                .iter()
+                .map(|(name, schema)| McpToolDto {
+                    full_name: format!("mcp____{name}"),
+                    server_name: String::new(),
+                    tool_name: (*name).to_string(),
+                    description: format!("{name} tool"),
+                    input_schema: schema.clone(),
+                    search_hint: None,
+                    always_load: None,
+                    requires_user_interaction: false,
+                })
+                .collect();
+            mock
+        }
     }
 
     #[async_trait]
@@ -3400,6 +3472,20 @@ mod tests {
             timeout_ms: None,
             always_load: false,
             config_error: None,
+        }
+    }
+
+    /// [`cfg`] with a remote `http` spec, so the §20a per-server gate has a
+    /// hostname to resolve.
+    fn http_cfg(name: &str, url: &str) -> McpServerConfig {
+        McpServerConfig {
+            spec: McpTransportSpec::Http {
+                url: url.into(),
+                headers: Default::default(),
+                headers_helper: None,
+                oauth: None,
+            },
+            ..cfg(name)
         }
     }
 
@@ -4036,6 +4122,111 @@ mod tests {
         // A model-supplied normalized `<server>` token resolves the raw key.
         assert!(registry.get_client("my_server").await.is_some());
         assert!(registry.get_config("my_server").await.is_some());
+    }
+
+    /// §20a runs on the CONNECT path, not just on `McpClient::list_tools`.
+    ///
+    /// `McpRegistry::connect` fills `McpConnectionState::Connected { tools }`
+    /// from `self.transport.list_tools(...)` — the posix transport, which
+    /// never touches `tool_schema`. That is the list
+    /// `build_registered_mcp_tools` hands the model on every desktop session;
+    /// `McpClient::list_tools` (where the decision already lived) is reached
+    /// only by `refresh_catalog`. Without the decision here a root-`anyOf`
+    /// schema the oracle drops is forwarded to the model verbatim, and the
+    /// two `mock_mcp.rs` integration tests that cover `McpClient::list_tools`
+    /// stay green throughout.
+    #[tokio::test]
+    async fn connect_applies_the_tool_schema_decision_to_the_model_facing_list() {
+        let mock = Arc::new(BridgeMock::with_tool_schemas(&[
+            (
+                "plain_tool",
+                serde_json::json!({"type": "object", "properties": {"a": {"type": "string"}}}),
+            ),
+            (
+                "combo_tool",
+                serde_json::json!({"anyOf": [
+                    {"type": "object", "properties": {"a": {"type": "string"}}},
+                    {"type": "object", "properties": {"b": {"type": "string"}}}
+                ]}),
+            ),
+        ]));
+        let registry = McpRegistry::with_raw_conn(
+            mock.clone() as Arc<dyn McpTransport>,
+            mock as Arc<dyn RawConnectionProvider>,
+        );
+        registry.connect(cfg("combos")).await.unwrap();
+
+        let conns = registry.connections.read().await;
+        let McpConnectionState::Connected { tools, .. } = conns.get("combos").unwrap() else {
+            panic!("expected Connected state");
+        };
+        let names: Vec<&str> = tools.iter().map(|t| t.tool_name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["plain_tool"],
+            "the root-anyOf tool must be dropped from the CONNECTED tool list \
+             (the normalize gate is off by default), leaving the plain tool: {tools:?}"
+        );
+        assert_eq!(tools[0].full_name, "mcp__combos__plain_tool");
+    }
+
+    /// §20a's per-server gate resolves from the connected server's URL
+    /// hostname (oracle `Ot(e,t)`: `new URL(t.url).hostname`). `connect` must
+    /// therefore hand the gate the URL off `config.spec` — otherwise the gate
+    /// sees `None` for every server and only a bare `"*"` entry could ever
+    /// enable either transform.
+    ///
+    /// Written under the ORACLE's literal flag key rather than the module's
+    /// private constant, so a misspelling there cannot make this green.
+    // The §20a flags are PROCESS-global, so the guard must span both `connect`
+    // calls — that is the whole point of the lock, and the `mcp` lib test
+    // binary runs `tool_schema`'s gate tests in the same process.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn connect_resolves_the_schema_gate_from_the_servers_own_hostname() {
+        let _g = crate::tool_schema::flag_test_lock();
+        let flag = crate::tool_schema::ORACLE_NORMALIZE_FLAG_FOR_TEST;
+        telemetry::test_set_flag_list(flag, vec!["mcp.example.com".to_string()]);
+
+        let listed = |cfg: McpServerConfig| async move {
+            let mock = Arc::new(BridgeMock::with_tool_schemas(&[(
+                "combo_tool",
+                serde_json::json!({"anyOf": [
+                    {"type": "object", "properties": {"a": {"type": "string"}}}
+                ]}),
+            )]));
+            let registry = McpRegistry::with_raw_conn(
+                mock.clone() as Arc<dyn McpTransport>,
+                mock as Arc<dyn RawConnectionProvider>,
+            );
+            let name = cfg.name.clone();
+            registry.connect(cfg).await.unwrap();
+            let conns = registry.connections.read().await;
+            let McpConnectionState::Connected { tools, .. } = conns.get(&name).unwrap() else {
+                panic!("expected Connected state");
+            };
+            tools.clone()
+        };
+
+        // The LISTED hostname: normalization applies, the tool survives with a
+        // rewritten object schema and the "Input constraint:" note.
+        let listed_tools = listed(http_cfg("listed", "https://mcp.example.com/v1")).await;
+        assert_eq!(
+            listed_tools.len(),
+            1,
+            "a server whose hostname is on the flag list must have its schema NORMALIZED, not dropped: {listed_tools:?}"
+        );
+        assert_eq!(listed_tools[0].input_schema["type"], serde_json::json!("object"));
+        assert!(listed_tools[0].description.starts_with("Input constraint:"));
+
+        // An UNLISTED hostname takes the gate-off branch and is dropped.
+        let other_tools = listed(http_cfg("other", "https://mcp.other.org/v1")).await;
+        assert!(
+            other_tools.is_empty(),
+            "a server off the flag list must still be dropped: {other_tools:?}"
+        );
+
+        telemetry::test_clear_flag_list(flag);
     }
 
     #[tokio::test]

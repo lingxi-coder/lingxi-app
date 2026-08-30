@@ -29,9 +29,29 @@
 //! `permission/` does not and must not depend on `mcp` (no live registry
 //! lookup is possible here), so this port rides the ceiling on the SAME
 //! [`crate::PermissionRuleSource::McpServerPolicy`] bucket [`LXe`] builds: a
-//! `blocked` ceiling becomes a tool-wide DENY rule (deny always wins — matches
-//! `hI`'s hard filter); an `ask` ceiling becomes a tool-wide ASK rule. This is
-//! a faithful port of the OUTCOME, not the mechanism: [`PermissionPolicy`]'s
+//! `blocked` ceiling becomes a tool-wide DENY rule; an `ask` ceiling becomes a
+//! tool-wide ASK rule. This is an approximation of the OUTCOME, not the
+//! mechanism, and it is NOT equivalent to `hI` in two observable ways the
+//! eventual wirer must handle:
+//!
+//! * `blocked` — `hI` is a hard FILTER over the advertised tool array
+//!   (`return n.mcpInfo?.effectiveMaxPermission!=="blocked"`, @158550277), so
+//!   the model never sees the tool at all. A deny RULE leaves the tool in the
+//!   model's tool list: the model calls it and burns a turn on the denial.
+//!   Suppressing the tool needs a `mcp`-side filter at the tool-list build
+//!   (`build_registered_mcp_tools`), which this crate cannot reach. `/mcp`'s
+//!   tool browser additionally sorts blocked tools last (`Ah`/`Oh`
+//!   @184247711) — also unmodelled.
+//! * `ask` — the oracle's ceiling ask ALSO hides the always-allow row via
+//!   `isAskCappedByOrg: e.tool.mcpInfo?.effectiveMaxPermission==="ask"`
+//!   feeding `zn()`/`xet()` (@172369681, @177393036). A plain
+//!   `McpServerPolicy` ask rule does not reproduce that; the port's
+//!   equivalent channel is
+//!   `PermissionCheckContext::requires_user_interaction`, which nothing sets
+//!   from a ceiling.
+//!
+//! What the ask/deny bucket DOES reproduce faithfully is precedence:
+//! [`PermissionPolicy`]'s
 //! `authorize_inner` checks the WHOLE deny bucket, then the TOOL-WIDE ask
 //! bucket, before ANY allow rule is consulted (`policy.rs` steps 1a-1c), so a
 //! tool-wide ask/deny rule from this bucket cannot be beaten by a
@@ -50,14 +70,39 @@
 //!
 //! It deliberately does NOT parse `McpJsonEntry`/`McpServerConfig` — neither
 //! carries a `tools`/`toolPermissions` field yet (`mcp/src/json_config.rs`,
-//! `mcp/src/connection.rs`; both owned by a parallel wave this round). The
-//! composition root that assembles the live [`mcp`] registry and the
-//! [`crate::PolicyPermissionGate`] together is the intended caller once those
-//! fields land: it would build one [`McpServerPolicyView`] per dynamic-scope
-//! `http`/`sse` server, call [`mcp_server_policy_rules`], and feed the result
-//! into [`PermissionPolicy::from_rules`] (or splice it into the live rule
-//! state the way `tir`'s live-recompute call site does on every MCP config
-//! change). [`upstream_name_drift_warning`] is the matching diagnostic
+//! `mcp/src/connection.rs`), and both signal families come off the claude.ai
+//! connector surface (`dynamic` scope, the `[claudeai-mcp]` diagnostics
+//! prefix), not off `.mcp.json`. NOTHING IN THE TREE CALLS THIS TODAY: §1/§2
+//! has no runtime effect until a composition root wires it.
+//!
+//! 🚨 **The wirer MUST reproduce `tir`'s call-site gate, which is not visible
+//! from `tir` itself.** `tir` has exactly ONE production call site and it is
+//! conditional:
+//!
+//! ```js
+//! if(a.CLAUDE_CODE_REMOTE&&I("tengu_mcp_startup_policy_seed",!0))mo=tir(mo,Cl)
+//! ```
+//!
+//! (@166797318). An ordinary interactive desktop session NEVER seeds these
+//! rules: without `CLAUDE_CODE_REMOTE` in the environment, or with
+//! `tengu_mcp_startup_policy_seed` off, the whole `mcpServerPolicy` bucket
+//! stays empty. Calling [`mcp_server_policy_rules`] unconditionally would
+//! start enforcing org allow/ask/deny rules in sessions where the oracle
+//! never does. (The gate is deliberately NOT applied inside this producer:
+//! it is an environment/feature-flag read that belongs at the composition
+//! root, next to the other startup gates.)
+//!
+//! With that gate satisfied, the composition root that assembles the live
+//! [`mcp`] registry and the [`crate::PolicyPermissionGate`] together is the
+//! intended caller once those fields land: it would build one
+//! [`McpServerPolicyView`] per dynamic-scope `http`/`sse` server, call
+//! [`mcp_server_policy_rules`], and feed the result into
+//! [`PermissionPolicy::from_rules`] (or splice it into the live rule state the
+//! way `tir`'s live-recompute call site does on every MCP config change).
+//! Note also `Aon`'s bypass exemption for this exact bucket
+//! (`C.source==="mcpServerPolicy"&&a.CLAUDE_CODE_REMOTE&&…==="bypassPermissions"
+//! &&I("tengu_mcp_server_policy_bypass_exempt",!0)`, @160209494), which the
+//! port's gate does not model either. [`upstream_name_drift_warning`] is the matching diagnostic
 //! producer (`[claudeai-mcp] <server>: toolPermissions has N entries but none
 //! matched upstream tool names — backend name drift?`, offset ~182317179) —
 //! also unwired for the same reason: it needs the LIVE discovered tool-name
@@ -155,6 +200,9 @@ fn ceiling_severity(c: McpToolMaxPermission) -> Option<u8> {
     }
 }
 
+/// NOTE: `Blocked` maps to [`PermissionBehavior::Deny`], which is NOT what
+/// `hI` does — see the module docs' `blocked` bullet. The tool stays visible
+/// to the model; only the call is refused.
 fn behavior_for_severity(severity: u8) -> PermissionBehavior {
     match severity {
         0 => PermissionBehavior::Allow,

@@ -222,6 +222,44 @@ struct RawTool {
     description: String,
     #[serde(rename = "inputSchema", default)]
     input_schema: Value,
+    #[serde(default, rename = "_meta")]
+    meta: RawToolMeta,
+}
+
+/// The subset of a tool's `_meta` this transport forwards.
+///
+/// §27b — `anthropic/requiresUserInteraction` decides whether the permission
+/// dialog may offer a PERSISTENT "always allow" grant (oracle
+/// `requiresUserInteraction(){return Ee}` @182520425 →
+/// `suppressesAlwaysAllowRule` @182520462). This transport, not
+/// `mcp::client::McpClient`, is what fills
+/// `McpConnectionState::Connected { tools }` on the desktop connect path, so
+/// dropping the bit here made the whole §27b chain inert end to end.
+///
+/// `anthropic/searchHint` and `anthropic/alwaysLoad` are still dropped by this
+/// transport (pre-existing, out of this batch's scope — reported, not fixed).
+#[derive(Deserialize, Default)]
+struct RawToolMeta {
+    #[serde(default, rename = "anthropic/requiresUserInteraction")]
+    requires_user_interaction: bool,
+}
+
+impl RawTool {
+    /// Wire entry -> DTO. `server_name`/`full_name` carry the empty `<server>`
+    /// token; `McpRegistry::connect` rewrites both once it knows the registry
+    /// key.
+    fn into_dto(self) -> McpToolDto {
+        McpToolDto {
+            full_name: format!("mcp____{}", self.name),
+            server_name: String::new(),
+            tool_name: self.name,
+            description: self.description,
+            input_schema: self.input_schema,
+            search_hint: None,
+            always_load: None,
+            requires_user_interaction: self.meta.requires_user_interaction,
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -507,21 +545,7 @@ impl McpTransport for PosixMcpTransport {
         // only an `McpConnectionId`. We leave `server_name` empty (and the
         // `full_name` FQN unprefixed by a server) and let the `lingxi-mcp`
         // layer rewrite the FQN once it knows the registry key.
-        let server_name = String::new();
-        Ok(parsed
-            .tools
-            .into_iter()
-            .map(|t| McpToolDto {
-                full_name: format!("mcp__{server_name}__{}", t.name),
-                server_name: server_name.clone(),
-                tool_name: t.name,
-                description: t.description,
-                input_schema: t.input_schema,
-                search_hint: None,
-                always_load: None,
-                requires_user_interaction: false,
-            })
-            .collect())
+        Ok(parsed.tools.into_iter().map(RawTool::into_dto).collect())
     }
 
     async fn list_resources(
@@ -1212,6 +1236,52 @@ mod error_mapping_tests {
         assert_eq!(
             err.to_string(),
             format!("MCP server \"\" tool \"echo\" timed out after {EXAMPLE_TIMEOUT_SECS}s")
+        );
+    }
+}
+
+#[cfg(test)]
+mod tool_meta_tests {
+    use super::{RawTool, ToolsListResult};
+
+    /// §27b — the `_meta.anthropic/requiresUserInteraction` bit must survive
+    /// THIS transport, because `McpRegistry::connect` fills
+    /// `McpConnectionState::Connected { tools }` from
+    /// `PosixMcpTransport::list_tools`, and `build_registered_mcp_tools` reads
+    /// that state to construct every desktop `MCPTool`. The parallel decode in
+    /// `mcp::client::McpClient::list_tools` is reached only by
+    /// `refresh_catalog`, so a test there does NOT cover the connect path:
+    /// with the bit hardcoded `false` here a server declaring
+    /// `requiresUserInteraction` still got "Yes, allow always" offered.
+    #[test]
+    fn requires_user_interaction_meta_survives_the_posix_transport_decode() {
+        let raw = serde_json::json!({
+            "tools": [
+                {
+                    "name": "plain",
+                    "description": "no meta",
+                    "inputSchema": { "type": "object" }
+                },
+                {
+                    "name": "interactive",
+                    "description": "needs a live consent step",
+                    "inputSchema": { "type": "object" },
+                    "_meta": { "anthropic/requiresUserInteraction": true }
+                }
+            ]
+        });
+        let parsed: ToolsListResult = serde_json::from_value(raw).expect("decode");
+        let dtos: Vec<_> = parsed.tools.into_iter().map(RawTool::into_dto).collect();
+        assert_eq!(dtos.len(), 2);
+        assert_eq!(dtos[0].tool_name, "plain");
+        assert!(
+            !dtos[0].requires_user_interaction,
+            "a tool with no _meta must default to false"
+        );
+        assert_eq!(dtos[1].tool_name, "interactive");
+        assert!(
+            dtos[1].requires_user_interaction,
+            "_meta.anthropic/requiresUserInteraction must reach the DTO the registry stores"
         );
     }
 }

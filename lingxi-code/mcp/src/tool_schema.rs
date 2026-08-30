@@ -77,8 +77,15 @@ const CARRIED_ROOT_KEYS: [&str; 6] = [
 /// validates against.
 const META_SCHEMA_URL: &str = "https://json-schema.org/draft/2020-12/schema";
 
-/// oracle `O` — property-key validity regex, source form for messages.
+/// oracle `O` — property-key validity regex, SOURCE form (what `regex::Regex`
+/// compiles).
 const PROPERTY_KEY_PATTERN: &str = r"^[a-zA-Z0-9_.-]{1,64}$";
+/// The same regex as the oracle RENDERS it into the rejection detail. `O` is a
+/// `RegExp` object and the detail is a template literal
+/// (`` `... does not match ${O}` ``), so JS stringifies it WITH its `/`
+/// delimiters. Interpolating [`PROPERTY_KEY_PATTERN`] instead silently drops
+/// them from a user-visible message.
+const PROPERTY_KEY_PATTERN_RENDERED: &str = r"/^[a-zA-Z0-9_.-]{1,64}$/";
 
 fn property_key_regex() -> &'static regex::Regex {
     static RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
@@ -357,8 +364,13 @@ fn first_invalid_property_key(schema: &Value) -> Option<String> {
 fn check_schema_validity(schema: &Value) -> Result<(), String> {
     if let Some(bad_key) = first_invalid_property_key(schema) {
         let truncated: String = bad_key.chars().take(80).collect();
+        // oracle: `property key ${b(a.slice(0,80))} does not match ${O}` — `b`
+        // is `JSON.stringify`, so the key is QUOTED AND ESCAPED (a key holding
+        // a `"` or a backslash must not break out of the quotes), and `${O}`
+        // renders the RegExp with its `/` delimiters.
+        let quoted = Value::String(truncated).to_string();
         return Err(format!(
-            "property key \"{truncated}\" does not match {PROPERTY_KEY_PATTERN}"
+            "property key {quoted} does not match {PROPERTY_KEY_PATTERN_RENDERED}"
         ));
     }
 
@@ -389,21 +401,59 @@ fn check_schema_validity(schema: &Value) -> Result<(), String> {
     validate_against_meta_schema(&instance)
 }
 
+/// oracle `qr()` — the compiled 2020-12 meta-validator, built ONCE per process
+/// and memoized in module state (`if(M===void 0){…}return M`). Recompiling it
+/// per tool would re-run the whole draft-2020-12 vocabulary compile for every
+/// entry of every `tools/list`.
+///
+/// `None` = validator unavailable; the oracle then warns once and fails OPEN.
+fn meta_validator() -> Option<&'static (boon::Schemas, boon::SchemaIndex)> {
+    use boon::{Compiler, SchemaIndex, Schemas};
+    static META: std::sync::OnceLock<Option<(Schemas, SchemaIndex)>> = std::sync::OnceLock::new();
+    META.get_or_init(|| {
+        let mut schemas = Schemas::new();
+        let mut compiler = Compiler::new();
+        let Ok(sch) = compiler.compile(META_SCHEMA_URL, &mut schemas) else {
+            // oracle `qr()`'s `M===null` arm, verbatim (@182172867).
+            tracing::warn!(
+                "MCP: draft 2020-12 meta-validator unavailable \u{2014} tool schema checks fail open"
+            );
+            return None;
+        };
+        Some((schemas, sch))
+    })
+    .as_ref()
+}
+
 fn validate_against_meta_schema(instance: &Value) -> Result<(), String> {
-    use boon::{Compiler, Schemas};
-    let mut schemas = Schemas::new();
-    let mut compiler = Compiler::new();
-    let sch = match compiler.compile(META_SCHEMA_URL, &mut schemas) {
-        // oracle: meta-validator unavailable -> fail OPEN (valid:true). The
-        // bundled meta-schema always compiles in this port, but keep the
-        // fail-open shape for parity with an unavailable validator.
-        Err(_) => return Ok(()),
-        Ok(s) => s,
+    // oracle `Lr`: `if(e===null)return{valid:!0}` — an unavailable validator
+    // fails OPEN. The bundled meta-schema always compiles in this port, but
+    // keep the shape.
+    let Some((schemas, sch)) = meta_validator() else {
+        return Ok(());
     };
-    match schemas.validate(instance, sch) {
+    match schemas.validate(instance, *sch) {
         Ok(()) => Ok(()),
-        Err(e) => Err(format!("schema is invalid: {e}")),
+        // oracle: `let o=e.errors?.[0]; …`schema${o.instancePath} ${o.message}``
+        // — ONE line, anchored at the offending JSON pointer. `boon`'s
+        // `Display` renders a multi-line indented CAUSE TREE instead, which
+        // cannot be embedded in the single-sentence "would be rejected by the
+        // Anthropic API (<detail>)" message, so take the first leaf cause (the
+        // closest analogue of ajv's `allErrors:false` first error) and format
+        // it the oracle's way.
+        Err(e) => Err(first_leaf_detail(&e)),
     }
+}
+
+/// `schema<instancePath> <message>` from `boon`'s error tree — descend to the
+/// first leaf cause, which carries the deepest `instance_location`.
+fn first_leaf_detail(err: &boon::ValidationError<'_, '_>) -> String {
+    let mut node = err;
+    while let Some(first) = node.causes.first() {
+        node = first;
+    }
+    let pointer = node.instance_location.to_string();
+    format!("schema{pointer} {}", node.kind)
 }
 
 /// The decision for one tool's `inputSchema`, before it's added to the tool
@@ -498,19 +548,83 @@ pub fn decide_tool_schema(server_url: Option<&str>, schema: &Value) -> ToolSchem
     }
 }
 
+/// Serializes every test that writes the PROCESS-GLOBAL §20a feature flags.
+/// `registry.rs`'s connect-path gate tests run in the SAME test binary as this
+/// module's, so a registry test setting `tengu_mcp_normalize_root_combinators`
+/// would otherwise race `gate_default_empty_is_always_off` here.
+#[cfg(test)]
+pub(crate) fn flag_test_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// The oracle's `tengu_mcp_normalize_root_combinators` key, re-exported for the
+/// `registry.rs` connect-path gate test so BOTH sides are never routed through
+/// this module's private constant.
+#[cfg(test)]
+pub(crate) const ORACLE_NORMALIZE_FLAG_FOR_TEST: &str = "tengu_mcp_normalize_root_combinators";
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
 
     fn lock() -> std::sync::MutexGuard<'static, ()> {
-        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+        super::flag_test_lock()
     }
 
     fn clear_flags() {
         telemetry::test_clear_flag_list(FLAG_NORMALIZE_ROOT_COMBINATORS);
         telemetry::test_clear_flag_list(FLAG_DROP_INVALID_TOOL_SCHEMAS);
+    }
+
+    /// Every other gate test in this module writes the flag through
+    /// [`FLAG_NORMALIZE_ROOT_COMBINATORS`]/[`FLAG_DROP_INVALID_TOOL_SCHEMAS`]
+    /// and reads it back through the same constants, so both sides move
+    /// together and a corrupted constant stays GREEN while `GrowthBook`'s real
+    /// flag can never enable the transform in production. This test is the
+    /// only place either literal is asserted; it is the same discipline
+    /// `protocol_negotiation.rs`'s `ORACLE_DENYLIST_FLAG` records (where the
+    /// shared-constant form was verified to leave the whole module green
+    /// under a deliberately corrupted constant).
+    ///
+    /// Oracle: `Ot("tengu_mcp_normalize_root_combinators",…)` /
+    /// `Ot("tengu_mcp_drop_invalid_tool_schemas",…)` — binary @182279468 and
+    /// @182279535.
+    #[test]
+    fn gate_flag_names_are_the_oracle_literals() {
+        assert_eq!(
+            FLAG_NORMALIZE_ROOT_COMBINATORS,
+            "tengu_mcp_normalize_root_combinators"
+        );
+        assert_eq!(
+            FLAG_DROP_INVALID_TOOL_SCHEMAS,
+            "tengu_mcp_drop_invalid_tool_schemas"
+        );
+    }
+
+    /// The gate must resolve through the REAL flag reader under the oracle's
+    /// literal key, not merely through whatever `FLAG_*` happens to hold: a
+    /// misspelled constant here would leave every other gate test green while
+    /// the shipped binary's flag never reached `gate_enabled`.
+    #[test]
+    fn gate_reads_the_oracle_literal_key_end_to_end() {
+        const ORACLE_NORMALIZE_FLAG: &str = "tengu_mcp_normalize_root_combinators";
+        let _g = lock();
+        clear_flags();
+        telemetry::test_clear_flag_list(ORACLE_NORMALIZE_FLAG);
+        let schema = json!({"anyOf": [{"type": "object", "properties": {"a": {"type": "string"}}}]});
+        assert!(
+            decide_tool_schema(None, &schema).drop_reason.is_some(),
+            "baseline: with the oracle flag unset the combinator schema is dropped"
+        );
+        telemetry::test_set_flag_list(ORACLE_NORMALIZE_FLAG, vec!["*".to_string()]);
+        assert!(
+            decide_tool_schema(None, &schema).drop_reason.is_none(),
+            "setting the ORACLE's literal flag key must enable normalization"
+        );
+        telemetry::test_clear_flag_list(ORACLE_NORMALIZE_FLAG);
+        clear_flags();
     }
 
     // ── gate_enabled ─────────────────────────────────────────────────────
@@ -729,6 +843,58 @@ mod tests {
         let d = decide_tool_schema(None, &schema);
         assert!(d.drop_reason.is_some(), "{d:?}");
         clear_flags();
+    }
+
+    /// oracle `Lr`: ``detail: `property key ${b(a.slice(0,80))} does not match ${O}` ``
+    /// — `${O}` stringifies the `RegExp` WITH its `/` delimiters and `b` is
+    /// `JSON.stringify`, so a key holding a `"` is escaped rather than
+    /// breaking out of the quotes. This detail is embedded verbatim in the
+    /// user-visible drop / warn copy.
+    #[test]
+    fn property_key_detail_carries_the_regex_delimiters_and_escapes_the_key() {
+        let _g = lock();
+        clear_flags();
+        let schema = json!({"type": "object", "properties": {"bad key!": {"type": "string"}}});
+        let d = decide_tool_schema(None, &schema);
+        let warning = d.warning.expect("kept with a warning");
+        assert!(
+            warning.contains("does not match /^[a-zA-Z0-9_.-]{1,64}$/"),
+            "the regex must render with its delimiters, got: {warning}"
+        );
+        assert!(
+            warning.contains(r#"property key "bad key!""#),
+            "the key must be JSON-quoted, got: {warning}"
+        );
+
+        let schema = json!({"type": "object", "properties": {"a\"b!": {"type": "string"}}});
+        let warning = decide_tool_schema(None, &schema)
+            .warning
+            .expect("kept with a warning");
+        assert!(
+            warning.contains(r#"property key "a\"b!""#),
+            "a quote inside the key must be JSON-escaped, got: {warning}"
+        );
+    }
+
+    /// oracle `Lr`'s meta arm: ``detail: `schema${o.instancePath} ${o.message}` ``
+    /// — a ONE-LINE detail anchored at the offending JSON pointer. `boon`'s
+    /// `ValidationError` `Display` is a multi-line indented tree, which cannot
+    /// be embedded in the single-sentence "would be rejected by the Anthropic
+    /// API (<detail>)" copy.
+    #[test]
+    fn meta_failure_detail_is_one_line_anchored_at_the_instance_pointer() {
+        let _g = lock();
+        clear_flags();
+        let d = decide_tool_schema(None, &json!({"type": 5}));
+        let warning = d.warning.expect("kept with a warning");
+        assert!(
+            !warning.contains('\n'),
+            "the detail must be a single line, got: {warning:?}"
+        );
+        assert!(
+            warning.contains("schema/type "),
+            "the detail must be anchored at the /type instance pointer, got: {warning:?}"
+        );
     }
 
     #[test]

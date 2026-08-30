@@ -261,6 +261,15 @@ pub struct McpClient {
     /// [`McpTransportKind::Stdio`] (claude-code's `e?.type ?? "stdio"`) until the
     /// registry sets the real kind via [`Self::with_transport_kind`].
     transport_kind: McpTransportKind,
+    /// The server's connection URL, when it has one (`None` for `stdio`).
+    /// Feeds the §20a per-server schema-normalization gate
+    /// ([`crate::tool_schema::decide_tool_schema`]) the same way
+    /// `protocol_negotiation.rs`'s denylist gate consults a server's URL.
+    /// Defaults to `None` (byte-identical to omitting [`Self::with_server_url`]
+    /// entirely) until a caller threads the resolved
+    /// [`crate::McpTransportSpec`]'s URL through — no production call site
+    /// does yet; see the §20a batch report.
+    server_url: Option<String>,
 }
 
 impl McpClient {
@@ -365,6 +374,7 @@ impl McpClient {
             config_timeout_ms: None,
             config_always_load: false,
             transport_kind: McpTransportKind::Stdio,
+            server_url: None,
         }
     }
 
@@ -391,6 +401,19 @@ impl McpClient {
     #[must_use]
     pub fn with_transport_kind(mut self, kind: McpTransportKind) -> Self {
         self.transport_kind = kind;
+        self
+    }
+
+    /// Builder that records the server's connection URL (`None` for
+    /// `stdio`/url-less transports) so [`Self::list_tools`] can consult the
+    /// §20a per-server schema-normalization gate
+    /// ([`crate::tool_schema::decide_tool_schema`]) the same way a remote
+    /// server's URL feeds `protocol_negotiation.rs`'s denylist gate. Not
+    /// calling this is byte-identical to a url-less server for that gate
+    /// (only a bare `"*"` allowlist entry can still match).
+    #[must_use]
+    pub fn with_server_url(mut self, url: Option<String>) -> Self {
+        self.server_url = url;
         self
     }
 
@@ -523,7 +546,31 @@ impl McpClient {
         Ok(resp
             .tools
             .into_iter()
-            .map(|t| {
+            .filter_map(|t| {
+                // §20a — normalize or drop the tool's `inputSchema` before it
+                // reaches the model (oracle `Wrt`/`qrt`, see
+                // `crate::tool_schema`). Must run before the DTO is built so
+                // a dropped tool never gets constructed.
+                let decision =
+                    crate::tool_schema::decide_tool_schema(self.server_url.as_deref(), &t.input_schema);
+                if let Some(reason) = decision.drop_reason {
+                    tracing::warn!(
+                        server = %self.server_name,
+                        tool = %t.name,
+                        "Skipping tool \"{}\": {reason}. Other tools from this server remain available.",
+                        t.name
+                    );
+                    return None;
+                }
+                if let Some(warning) = &decision.warning {
+                    tracing::debug!(
+                        server = %self.server_name,
+                        tool = %t.name,
+                        "Tool \"{}\" {warning}",
+                        t.name
+                    );
+                }
+
                 // Normalize BOTH segments (server + tool) — 1:1 with TS
                 // `buildMcpToolName` = `getMcpPrefix(server) +
                 // normalizeNameForMCP(toolName)` (`mcpStringUtils.ts:51`).
@@ -533,11 +580,19 @@ impl McpClient {
                 } else {
                     format!("mcp__{normalized_server}__{norm_tool}")
                 };
-                McpToolDto {
+                let description = match decision.description_note {
+                    // oracle: `E.description ? \`${note}\n\n${description}\` : note`.
+                    Some(note) if !t.description.is_empty() => {
+                        format!("{note}\n\n{}", t.description)
+                    }
+                    Some(note) => note,
+                    None => t.description,
+                };
+                Some(McpToolDto {
                     full_name,
                     server_name: self.server_name.clone(),
-                    description: truncate_description(&t.description).into_owned(),
-                    input_schema: t.input_schema,
+                    description: truncate_description(&description).into_owned(),
+                    input_schema: decision.schema,
                     tool_name: t.name,
                     // Forward `_meta.anthropic/searchHint` + `alwaysLoad`
                     // from the wire (client.ts:1777-1780). Both default
@@ -551,7 +606,7 @@ impl McpClient {
                     } else {
                         t.meta.always_load
                     },
-                }
+                })
             })
             .collect())
     }

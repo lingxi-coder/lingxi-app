@@ -973,3 +973,97 @@ async fn inbound_elicitation_create_returns_cancel_literal() {
         "wire bytes must carry literal cancel result, got: {text}",
     );
 }
+
+// ── §20a — MCP tool JSON-Schema normalization (`mcp::tool_schema`) ─────────
+
+#[tokio::test]
+async fn list_tools_drops_root_combinator_schema_by_default() {
+    // The oracle's `tengu_mcp_normalize_root_combinators` gate defaults to an
+    // empty allowlist (off for everyone) with no flag fetcher wired, so a
+    // tool whose `inputSchema` root is a top-level `anyOf`/`oneOf`/`allOf` is
+    // unconditionally dropped from the list — never forwarded verbatim, and
+    // never silently normalized either. This is the list-length-changing
+    // half of §20a: a plain tool from the same server survives untouched.
+    let (client, _cap, _h) =
+        make_client_against_mock("combos", std::path::PathBuf::from("/tmp/work"), |req| {
+            let id = req["id"].clone();
+            let method = req["method"].as_str().unwrap_or("");
+            let result = match method {
+                "initialize" => json!({
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": { "tools": {} },
+                    "serverInfo": { "name": "m", "version": "0" }
+                }),
+                "tools/list" => json!({
+                    "tools": [
+                        {
+                            "name": "plain_tool",
+                            "description": "A normal tool",
+                            "inputSchema": { "type": "object", "properties": { "a": { "type": "string" } } }
+                        },
+                        {
+                            "name": "combo_tool",
+                            "description": "Uses a root anyOf",
+                            "inputSchema": {
+                                "anyOf": [
+                                    { "type": "object", "properties": { "a": { "type": "string" } } },
+                                    { "type": "object", "properties": { "b": { "type": "string" } } }
+                                ]
+                            }
+                        }
+                    ]
+                }),
+                _ => return None,
+            };
+            Some(json!({ "jsonrpc": "2.0", "id": id, "result": result }))
+        })
+        .await;
+
+    client.initialize().await.expect("init");
+    let tools = client.list_tools().await.expect("list");
+    assert_eq!(
+        tools.len(),
+        1,
+        "the root-anyOf tool must be dropped, only the plain tool remains: {tools:?}"
+    );
+    assert_eq!(tools[0].tool_name, "plain_tool");
+}
+
+#[tokio::test]
+async fn list_tools_keeps_a_meta_invalid_schema_with_warning_by_default() {
+    // The oracle's `tengu_mcp_drop_invalid_tool_schemas` gate also defaults
+    // to off, so a tool whose schema fails JSON-Schema-2020-12 meta
+    // validation (here: `"type": 5`, not a valid type keyword value) is KEPT
+    // — not dropped — matching the oracle's default "requests that include
+    // it may fail" warn-and-keep behavior rather than silently forwarding it
+    // as verbatim-valid OR dropping the tool from the list.
+    let (client, _cap, _h) =
+        make_client_against_mock("badschema", std::path::PathBuf::from("/tmp/work"), |req| {
+            let id = req["id"].clone();
+            let method = req["method"].as_str().unwrap_or("");
+            let result = match method {
+                "initialize" => json!({
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": { "tools": {} },
+                    "serverInfo": { "name": "m", "version": "0" }
+                }),
+                "tools/list" => json!({
+                    "tools": [
+                        {
+                            "name": "invalid_type_tool",
+                            "description": "Bad type keyword",
+                            "inputSchema": { "type": 5 }
+                        }
+                    ]
+                }),
+                _ => return None,
+            };
+            Some(json!({ "jsonrpc": "2.0", "id": id, "result": result }))
+        })
+        .await;
+
+    client.initialize().await.expect("init");
+    let tools = client.list_tools().await.expect("list");
+    assert_eq!(tools.len(), 1, "kept-with-warning, not dropped: {tools:?}");
+    assert_eq!(tools[0].input_schema, json!({ "type": 5 }));
+}

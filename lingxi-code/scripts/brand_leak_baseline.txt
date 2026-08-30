@@ -570,6 +570,7 @@ G1	lingxi-code/task-store/tests/todo_store_multiprocess.rs	LINGXI
 G1	lingxi-code/tasks/src/handlers/in_process_teammate.rs	LINGXI
 G1	lingxi-code/tasks/src/handlers/in_process_teammate_test.rs	LINGXI
 G1	lingxi-code/tasks/src/handlers/local_agent.rs	\.lingxi
+G1	lingxi-code/tasks/src/registry.rs	\.lingxi
 G1	lingxi-code/tasks/src/registry_test.rs	\.lingxi
 G1	lingxi-code/telemetry/src/bus.rs	LINGXI
 G1	lingxi-code/telemetry/src/otel/config.rs	LINGXI
@@ -1169,6 +1170,7 @@ G3	lingxi-code/session/tests/jsonl_path_test.rs	.lingxi
 G3	lingxi-code/session/tests/session_gap_fixes_test.rs	.lingxi
 G3	lingxi-code/skill-api/src/listing.rs	.lingxi
 G3	lingxi-code/tasks/src/handlers/local_agent.rs	.lingxi
+G3	lingxi-code/tasks/src/registry.rs	.lingxi
 G3	lingxi-code/tasks/src/registry_test.rs	.lingxi
 G3	lingxi-code/test-harness/src/contracts/worktree.rs	.lingxi
 G3	lingxi-code/test-harness/src/parity/fixtures/full_v0_4_0_smoke.json	.lingxi

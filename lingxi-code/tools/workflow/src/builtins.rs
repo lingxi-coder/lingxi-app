@@ -30,6 +30,38 @@ pub struct BuiltinWorkflowDescriptor {
     /// general-purpose workflow with no Local App identity at all, and nothing
     /// about its name distinguishes it -- only this field does.
     pub is_local_app_build: bool,
+    /// Which surface this Local App build workflow targets -- `None` for a
+    /// workflow with no Local App build identity at all (`deep-research`).
+    ///
+    /// `is_local_app_build` is `true` for BOTH build workflows and
+    /// (DOM and Canvas); it cannot answer "is this the Canvas one", so
+    /// before this field the only way to ask that was to compare a
+    /// caller-supplied name against the canvas build workflow's name literal
+    /// string (P-1.10). That selector is a name lookup away from ceasing to
+    /// exist: Phase 4 merges the two build workflows into one, at which
+    /// point there is no second name left to compare against, and every
+    /// Canvas-exclusive hard gate that only fired because a name-comparison
+    /// happened to route to the Canvas script vanishes silently along with
+    /// it. [`LocalAppSurface`] is the typed replacement -- see it for what
+    /// Dom vs Canvas actually governs.
+    pub local_app_surface: Option<LocalAppSurface>,
+}
+
+/// The surface a Local App build workflow targets -- see
+/// [`BuiltinWorkflowDescriptor::local_app_surface`] for why this exists
+/// alongside `is_local_app_build` instead of folding into it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LocalAppSurface {
+    /// A screen-hierarchy DOM app. `data_roundtrip` is its only hard gate;
+    /// `render_check` legitimately answers `not_applicable` whenever
+    /// `canvas_surfaces` is 0 (a DOM app may still embed an incidental
+    /// canvas element).
+    Dom,
+    /// A drawn Canvas surface. `render_check` has no `not_applicable`
+    /// escape at all (`canvas_surfaces >= 1` is mandatory), `motion_check`
+    /// is a second hard gate DOM does not have, and the allowed strategy /
+    /// runtime-family sets differ from DOM's.
+    Canvas,
 }
 
 /// Immutable registry of built-in workflow content.
@@ -42,6 +74,7 @@ const DEEP_RESEARCH: BuiltinWorkflowDescriptor = BuiltinWorkflowDescriptor {
     script: include_str!("deep_research_workflow.js"),
     manual_only: true,
     is_local_app_build: false,
+    local_app_surface: None,
 };
 
 /// The v3 local-app build segment: the `create-local-app` skill has the agent
@@ -62,6 +95,7 @@ const LOCAL_APP_BUILD: BuiltinWorkflowDescriptor = BuiltinWorkflowDescriptor {
     ),
     manual_only: false,
     is_local_app_build: true,
+    local_app_surface: Some(LocalAppSurface::Dom),
 };
 
 /// The drawn-surface sibling of [`LOCAL_APP_BUILD`].
@@ -83,6 +117,7 @@ const LOCAL_CANVAS_BUILD: BuiltinWorkflowDescriptor = BuiltinWorkflowDescriptor 
     ),
     manual_only: false,
     is_local_app_build: true,
+    local_app_surface: Some(LocalAppSurface::Canvas),
 };
 
 const BUILTINS: &[BuiltinWorkflowDescriptor] =
@@ -149,6 +184,75 @@ impl BuiltinWorkflowRegistry {
     pub fn is_local_app_build_script(self, script: &str) -> bool {
         self.local_app_build_descriptors()
             .any(|descriptor| descriptor.script == script)
+    }
+
+    /// Typed answer to "which surface does the built-in named `name`
+    /// target", or `None` when `name` is unknown or names a workflow with no
+    /// Local App build identity at all. This -- not a comparison against the
+    /// literal canvas-build name string -- is where Canvas policy is
+    /// selected from now on; see [`LocalAppSurface`] / P-1.10.
+    #[must_use]
+    pub fn local_app_surface(self, name: &str) -> Option<LocalAppSurface> {
+        self.get(name)
+            .and_then(|descriptor| descriptor.local_app_surface)
+    }
+
+    /// True iff `name` names the Canvas-surface Local App build workflow.
+    /// Decided by [`Self::local_app_surface`] (a typed field), never by
+    /// comparing `name` against a hardcoded string -- so a caller that used
+    /// to write `name == <the canvas build workflow's name>` to reach Canvas policy has a
+    /// typed replacement that survives the workflow being renamed, and does
+    /// not survive it being deleted without the field moving somewhere.
+    ///
+    /// Carries [`Self::is_local_app_build_workflow`]'s caveat unchanged: this
+    /// answers a question about a NAME. A caller-supplied name is not proof
+    /// that the compiled-in Canvas bytes are what will run, and this method
+    /// cannot make it one -- [`Self::is_local_app_build_script`] is the
+    /// unspoofable form of that question.
+    #[must_use]
+    pub fn is_local_app_canvas_build_workflow(self, name: &str) -> bool {
+        matches!(self.local_app_surface(name), Some(LocalAppSurface::Canvas))
+    }
+
+    /// The invocation name of the one built-in that targets `surface`, or
+    /// `None` when no built-in does -- or when more than one does, which is
+    /// ambiguity, not an answer.
+    ///
+    /// Returning `None` on a tie rather than the first match is deliberate:
+    /// the caller that wants "the Canvas build workflow" has no way to pick
+    /// between two, and silently handing it one of them is how a merge that
+    /// marks both descriptors the same surface would route every Canvas
+    /// build to the DOM script with nothing going red.
+    #[must_use]
+    fn build_workflow_name_for(self, surface: LocalAppSurface) -> Option<&'static str> {
+        let mut matching = self
+            .iter()
+            .filter(|descriptor| descriptor.local_app_surface == Some(surface));
+        let first = matching.next()?;
+        matching.next().is_none().then_some(first.name)
+    }
+
+    /// The Canvas-surface build workflow's invocation name, resolved through
+    /// the typed [`LocalAppSurface`] property.
+    ///
+    /// This exists ALONGSIDE [`Self::local_app_surface`] because that method
+    /// returns `Option<LocalAppSurface>` and `LocalAppSurface` is not part of
+    /// this crate's public surface (`mod builtins` is private and `lib.rs`
+    /// re-exports only the descriptor, the registry and `BUILTIN_WORKFLOWS`).
+    /// A caller in another crate therefore cannot name the enum to match on
+    /// it, so a typed accessor that only speaks `&'static str` is what a
+    /// cross-crate `=> <canvas build name>` literal can actually be replaced
+    /// by today. See the module tests for the migration this unblocks.
+    #[must_use]
+    pub fn canvas_build_workflow_name(self) -> Option<&'static str> {
+        self.build_workflow_name_for(LocalAppSurface::Canvas)
+    }
+
+    /// The DOM-surface build workflow's invocation name, resolved the same
+    /// way as [`Self::canvas_build_workflow_name`].
+    #[must_use]
+    pub fn dom_build_workflow_name(self) -> Option<&'static str> {
+        self.build_workflow_name_for(LocalAppSurface::Dom)
     }
 }
 
@@ -218,6 +322,139 @@ mod tests {
                 .is_local_app_build_script("export const meta = { name: 'local-app-build' };"),
             "a custom script that merely DECLARES the real name must not pass the byte check"
         );
+    }
+
+    /// P-1.10: Canvas policy must be reachable through the typed
+    /// `local_app_surface` field, not by comparing a workflow's `name`
+    /// against the canvas build workflow's name literal string -- the string
+    /// every Canvas-driving test used to pass to `drive_local_workflow`
+    /// directly, and the one Phase 4 deletes when it merges the two build
+    /// workflows into one.
+    ///
+    /// The proof has to be BEHAVIOURAL. Asserting that the typed field still
+    /// says `Canvas` after a rename is worthless -- struct update syntax
+    /// copies the field, so such an assertion holds no matter how broken the
+    /// policy is. So this takes the descriptor selected only by
+    /// `local_app_surface == Canvas`, renames it to something the registry
+    /// cannot resolve by name at all, runs it, and requires a
+    /// Canvas-EXCLUSIVE hard gate to still bite -- while the descriptor
+    /// selected by `Dom` accepts the very same verification. Policy follows
+    /// the field, both ways.
+    #[test]
+    fn canvas_policy_is_selected_by_typed_policy_not_by_workflow_name() {
+        assert_eq!(
+            BUILTIN_WORKFLOWS.local_app_surface("local-canvas-build"),
+            Some(LocalAppSurface::Canvas)
+        );
+        assert_eq!(
+            BUILTIN_WORKFLOWS.local_app_surface("local-app-build"),
+            Some(LocalAppSurface::Dom)
+        );
+        assert_eq!(BUILTIN_WORKFLOWS.local_app_surface("deep-research"), None);
+        assert_eq!(BUILTIN_WORKFLOWS.local_app_surface("not-a-workflow"), None);
+
+        assert!(BUILTIN_WORKFLOWS.is_local_app_canvas_build_workflow("local-canvas-build"));
+        assert!(!BUILTIN_WORKFLOWS.is_local_app_canvas_build_workflow("local-app-build"));
+        assert!(!BUILTIN_WORKFLOWS.is_local_app_canvas_build_workflow("deep-research"));
+        assert!(!BUILTIN_WORKFLOWS.is_local_app_canvas_build_workflow("not-a-workflow"));
+
+        // The enum-free accessors agree with the field, and disagree with
+        // each other -- a caller outside this crate cannot name
+        // `LocalAppSurface`, so these are what its `=> "local-canvas-build"`
+        // literals can be replaced by.
+        assert_eq!(
+            BUILTIN_WORKFLOWS.canvas_build_workflow_name(),
+            Some(descriptor_for_surface(LocalAppSurface::Canvas).name)
+        );
+        assert_eq!(
+            BUILTIN_WORKFLOWS.dom_build_workflow_name(),
+            Some(descriptor_for_surface(LocalAppSurface::Dom).name)
+        );
+        assert_ne!(
+            BUILTIN_WORKFLOWS.canvas_build_workflow_name(),
+            BUILTIN_WORKFLOWS.dom_build_workflow_name(),
+            "the two surfaces must not resolve to one workflow"
+        );
+
+        // The load-bearing half. Asserting that a struct-update copy of
+        // LOCAL_CANVAS_BUILD still reports `Canvas` proves nothing -- struct
+        // update syntax copies the field, so that assertion holds however
+        // broken the policy is. What has to be shown is that the POLICY, not
+        // just the label, follows the field: take the descriptor selected
+        // only by `local_app_surface == Canvas`, rename it to something the
+        // registry cannot find by name at all, run it, and watch a
+        // Canvas-exclusive hard gate still bite. This is the Phase 4 shape --
+        // the name `local-canvas-build` is gone -- and the gate survives it.
+        let renamed = BuiltinWorkflowDescriptor {
+            name: "totally-renamed-merged-build",
+            ..*descriptor_for_surface(LocalAppSurface::Canvas)
+        };
+        assert!(
+            BUILTIN_WORKFLOWS.get(renamed.name).is_none(),
+            "the renamed descriptor must be unreachable by name lookup, or this proves nothing"
+        );
+        let zero_surface_render = r#"{"status":"passed","canvas_surfaces":0,"frames_captured":3,"interactions_driven":["key ArrowLeft"],"evidence":"the captured frame shows the game"}"#;
+        let canvas_run = drive_local_descriptor(
+            &renamed,
+            local_canvas_args(Some("balanced"), Some("canvas_2d"), None, None, None),
+            move |prompts, _options| {
+                prompts
+                    .iter()
+                    .map(|prompt| {
+                        if prompt.contains("Act as the local app design lead") {
+                            canvas_design("canvas_2d")
+                        } else if prompt
+                            .contains("Generate the complete drawn-surface implementation")
+                            || prompt.contains("Repair the findings")
+                        {
+                            r#"{"ok":true,"preview_url":"http://preview/ok","summary":"built"}"#
+                                .to_string()
+                        } else if prompt.contains("Invoke $frontend-qa") {
+                            canvas_verification(zero_surface_render, CANVAS_MOTION_OK)
+                        } else {
+                            panic!("unexpected prompt: {prompt}");
+                        }
+                    })
+                    .collect()
+            },
+        );
+        let error = canvas_run
+            .outcome
+            .expect_err("Canvas policy must follow the typed surface, not the workflow name");
+        assert!(
+            error
+                .to_string()
+                .contains("canvas render check reported no canvas surface"),
+            "the Canvas-exclusive gate must be what blocked: {error}"
+        );
+
+        // The other half of the differential: the SAME verification shape is
+        // clean for the descriptor selected by `Dom`. Without this the test
+        // above would also pass if every workflow blocked everything.
+        let dom_run = drive_local_descriptor(
+            descriptor_for_surface(LocalAppSurface::Dom),
+            local_app_args(Some("fast"), None, None, None),
+            move |prompts, _options| {
+                prompts
+                    .iter()
+                    .map(|prompt| {
+                        if prompt.contains("Generate the complete React implementation") {
+                            r#"{"ok":true,"preview_url":"http://preview/ok","summary":"built"}"#
+                                .to_string()
+                        } else if prompt.contains("Invoke $frontend-qa") {
+                            format!(
+                                r#"{{"ok":true,"findings":[],"checked_matrix":["iphone"],"browser_available":true,"webview_checked":true,"degraded_verification":false,"data_roundtrip":{{"status":"not_applicable","collections":[],"evidence":"no writable collections"}},"render_check":{zero_surface_render},"summary":"verified"}}"#
+                            )
+                        } else {
+                            panic!("unexpected prompt: {prompt}");
+                        }
+                    })
+                    .collect()
+            },
+        );
+        dom_run
+            .outcome
+            .expect("zero canvas surfaces is not a defect for the DOM surface");
     }
 
     #[test]
@@ -413,7 +650,7 @@ mod tests {
         // block just had.
         assert!(
             BUILTIN_WORKFLOWS
-                .get("local-canvas-build")
+                .get(canvas_build_name())
                 .expect("built-in")
                 .script
                 .contains(canvas_frame_loop_mandate),
@@ -1148,6 +1385,144 @@ mod tests {
             .expect("a DOM app with a non-empty snapshot needs no frame");
     }
 
+    /// `render_check.status = "not_applicable"` on the CANVAS workflow had no
+    /// behavioural test: only a copy-pin -- a `descriptor.script.contains(...)`
+    /// assertion on the words "There is no not_applicable: this app draws its
+    /// whole interface" -- which proves the sentence is still in the prompt,
+    /// not that anything refuses the answer. (The DOM half of this was already
+    /// behavioural; `local_app_build_rejects_a_verification_that_observed_nothing`
+    /// case 1 drives the same `not_applicable` + `canvas_surfaces: 1` shape and
+    /// goes red on the same break, so a DOM-only test here would have added no
+    /// coverage at all. The two cases below that DO add coverage are the canvas
+    /// ones, and they are guarded by two DIFFERENT gates.)
+    ///
+    /// The four cases are a differential, not a list: the same `status` string
+    /// is legitimate on one surface and forbidden on the other, and on the
+    /// forbidden surface it is refused by a different gate depending on
+    /// `canvas_surfaces`. Asserting the message fragment per case is what
+    /// distinguishes "it blocked" from "it blocked for the reason claimed".
+    #[test]
+    fn render_check_status_not_applicable_has_a_behavioural_case() {
+        // The ordinary, legitimate answer for a DOM app: no drawn surface, so
+        // nothing to look at. This is the case that stops the rest of the test
+        // from passing on a workflow that simply blocks everything.
+        let clean_dom = r#"{"status":"not_applicable","canvas_surfaces":0,"frames_captured":0,"interactions_driven":[],"evidence":"DOM snapshot carried the evidence"}"#;
+        drive_local_app_build(
+            local_app_args(Some("fast"), None, None, None),
+            move |prompts, _options| {
+                prompts
+                    .iter()
+                    .map(|prompt| {
+                        if prompt.contains("Generate the complete React implementation") {
+                            r#"{"ok":true,"preview_url":"http://preview/ok","summary":"built"}"#
+                                .to_string()
+                        } else if prompt.contains("Invoke $frontend-qa") {
+                            dom_verification_with_render(clean_dom)
+                        } else {
+                            panic!("unexpected prompt: {prompt}");
+                        }
+                    })
+                    .collect()
+            },
+        )
+        .outcome
+        .expect("not_applicable with no canvas surface is the DOM answer, not a defect");
+
+        // Same status, but a canvas WAS reported: the gate is keyed on
+        // `canvas_surfaces`, not on the string the agent wrote beside it.
+        let unlooked_at = r#"{"status":"not_applicable","canvas_surfaces":1,"frames_captured":0,"interactions_driven":[],"evidence":"a mini-map canvas sits beside the DOM list but nobody looked at it"}"#;
+        let dom_run = drive_local_app_build(
+            local_app_args(Some("fast"), None, None, None),
+            move |prompts, _options| {
+                prompts
+                    .iter()
+                    .map(|prompt| {
+                        if prompt.contains("Generate the complete React implementation")
+                            || prompt.contains("Repair the findings")
+                        {
+                            r#"{"ok":true,"preview_url":"http://preview/ok","summary":"built"}"#
+                                .to_string()
+                        } else if prompt.contains("Invoke $frontend-qa") {
+                            dom_verification_with_render(unlooked_at)
+                        } else {
+                            panic!("unexpected prompt: {prompt}");
+                        }
+                    })
+                    .collect()
+            },
+        );
+        let error = dom_run.outcome.expect_err(
+            "not_applicable must not excuse a reported canvas surface from ever being observed",
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("a canvas surface was present but never verified as an image"),
+            "the failure must name the unverified surface, not just fail generically: {error}"
+        );
+        assert_eq!(
+            dom_run.prompts.len(),
+            4,
+            "an unverified canvas surface must buy a repair round like any other finding"
+        );
+
+        // The net-new half. On the Canvas workflow the schema says there is no
+        // `not_applicable` at all, and NOTHING drove that. Both spellings must
+        // block, and they are caught by different gates -- the shared core's
+        // render gate when a surface was reported, and the Canvas-exclusive
+        // `extraBlockingFindings` when none was. Only the second one is the gate
+        // Phase 4 can drop by merging the workflows, which is why asserting the
+        // fragment rather than just `expect_err` matters here.
+        for (render_check, expected) in [
+            (
+                unlooked_at,
+                "a canvas surface was present but never verified as an image",
+            ),
+            (
+                r#"{"status":"not_applicable","canvas_surfaces":0,"frames_captured":0,"interactions_driven":[],"evidence":"nothing was captured"}"#,
+                "canvas render check reported no canvas surface",
+            ),
+        ] {
+            let run = drive_local_workflow(
+                canvas_build_name(),
+                local_canvas_args(Some("balanced"), Some("canvas_2d"), None, None, None),
+                move |prompts, _options| {
+                    prompts
+                        .iter()
+                        .map(|prompt| {
+                            if prompt.contains("Act as the local app design lead") {
+                                canvas_design("canvas_2d")
+                            } else if prompt
+                                .contains("Generate the complete drawn-surface implementation")
+                                || prompt.contains("Repair the findings")
+                            {
+                                r#"{"ok":true,"preview_url":"http://preview/ok","summary":"built"}"#
+                                    .to_string()
+                            } else if prompt.contains("Invoke $frontend-qa") {
+                                canvas_verification(render_check, CANVAS_MOTION_OK)
+                            } else {
+                                panic!("unexpected prompt: {prompt}");
+                            }
+                        })
+                        .collect()
+                },
+            );
+            let error = run
+                .outcome
+                .expect_err("a drawn surface has no not_applicable: it draws its whole interface");
+            assert!(
+                error.to_string().contains(expected),
+                "expected {expected:?} in: {error}"
+            );
+            assert_eq!(
+                run.prompts.len(),
+                5,
+                "the finding must buy a repair round; prompts={:#?}",
+                run.prompts
+            );
+        }
+    }
+
     /// A non-empty `findings` blocks even when everything else is green, and
     /// that is deliberate.
     ///
@@ -1764,7 +2139,7 @@ mod tests {
             local_canvas_args(Some("balanced"), Some("canvas_2d"), None, None, None),
             &["scores"],
         );
-        let run = drive_local_workflow("local-canvas-build", args, |prompts, _options| {
+        let run = drive_local_workflow(canvas_build_name(), args, |prompts, _options| {
             prompts
                 .iter()
                 .map(|prompt| {
@@ -2046,7 +2421,7 @@ mod tests {
             CANVAS_MOTION_OK,
         );
         let run = drive_local_workflow(
-            "local-canvas-build",
+            canvas_build_name(),
             local_canvas_args(Some("balanced"), Some("canvas_2d"), None, None, None),
             move |prompts, _options| {
                 prompts
@@ -2181,6 +2556,43 @@ mod tests {
         args.to_string()
     }
 
+    /// The Canvas build workflow's invocation name, resolved through the
+    /// typed [`LocalAppSurface::Canvas`] property rather than hardcoded as
+    /// the canvas build workflow's name literal string, for the tests that still
+    /// go through the name-taking `drive_local_workflow`. It is a
+    /// convenience over [`canvas_build_descriptor`], not a second
+    /// derivation; the test that proves policy follows the FIELD rather than
+    /// the name drives the descriptor directly instead
+    /// (`canvas_policy_is_selected_by_typed_policy_not_by_workflow_name`).
+    fn canvas_build_name() -> &'static str {
+        canvas_build_descriptor().name
+    }
+
+    /// The Canvas built-in, selected ONLY by the typed surface property.
+    ///
+    /// Counts the matches instead of taking the first one and calling that
+    /// "exactly one": a Phase 4 merge that marked both build descriptors
+    /// `Canvas` would hand every canvas test the DOM descriptor, and `find`
+    /// would have reported no problem at all. The failure names the count.
+    fn canvas_build_descriptor() -> &'static BuiltinWorkflowDescriptor {
+        descriptor_for_surface(LocalAppSurface::Canvas)
+    }
+
+    fn descriptor_for_surface(surface: LocalAppSurface) -> &'static BuiltinWorkflowDescriptor {
+        let matching: Vec<_> = BUILTIN_WORKFLOWS
+            .iter()
+            .filter(|descriptor| descriptor.local_app_surface == Some(surface))
+            .collect();
+        assert_eq!(
+            matching.len(),
+            1,
+            "expected exactly one built-in with local_app_surface == {surface:?}, found {}: {:?}",
+            matching.len(),
+            matching.iter().map(|d| d.name).collect::<Vec<_>>()
+        );
+        matching[0]
+    }
+
     fn local_canvas_args(
         strategy: Option<&str>,
         runtime_family: Option<&str>,
@@ -2303,6 +2715,13 @@ mod tests {
         .to_string()
     }
 
+    /// A DOM verification that is clean apart from the `render_check` handed in.
+    fn dom_verification_with_render(render_check: &str) -> String {
+        format!(
+            r#"{{"ok":true,"findings":[],"checked_matrix":["iphone"],"browser_available":true,"webview_checked":true,"degraded_verification":false,"data_roundtrip":{{"status":"not_applicable","collections":[],"evidence":"no writable collections"}},"render_check":{render_check},"summary":"verified"}}"#
+        )
+    }
+
     fn dom_verification_with_webview(webview_checked: Option<bool>) -> String {
         let webview_field = webview_checked
             .map(|checked| format!(r#", "webview_checked":{checked}"#))
@@ -2333,6 +2752,28 @@ mod tests {
         canvas_verification_with_webview(render_check, motion_check, Some(true))
     }
 
+    /// A canvas verification with `motion_check` ABSENT -- not failed, not
+    /// malformed, simply not written. The most likely structured-output miss
+    /// there is, and the one the gate's fail-closed branch exists for.
+    fn canvas_verification_omitting_motion(render_check: &str) -> String {
+        format!(
+            r#"{{"ok":true,"findings":[],"checked_matrix":["iphone"],"browser_available":false,"webview_checked":true,"degraded_verification":false,"data_roundtrip":{{"status":"not_applicable","collections":[],"evidence":"no writable collections"}},"render_check":{render_check},"summary":"verified"}}"#
+        )
+    }
+
+    /// A canvas verification with `render_check` ABSENT, for the same reason.
+    fn canvas_verification_omitting_render(motion_check: &str) -> String {
+        format!(
+            r#"{{"ok":true,"findings":[],"checked_matrix":["iphone"],"browser_available":false,"webview_checked":true,"degraded_verification":false,"data_roundtrip":{{"status":"not_applicable","collections":[],"evidence":"no writable collections"}},"motion_check":{motion_check},"summary":"verified"}}"#
+        )
+    }
+
+    /// A DOM verification with `render_check` ABSENT.
+    fn dom_verification_omitting_render() -> String {
+        r#"{"ok":true,"findings":[],"checked_matrix":["iphone"],"browser_available":true,"webview_checked":true,"degraded_verification":false,"data_roundtrip":{"status":"not_applicable","collections":[],"evidence":"no writable collections"},"summary":"verified"}"#
+            .to_string()
+    }
+
     const CANVAS_RENDER_OK: &str = r#"{"status":"passed","canvas_surfaces":1,"frames_captured":3,"interactions_driven":["key ArrowLeft","pointer 120,300"],"evidence":"a magenta paddle on a dark field with seven rows of bricks above it"}"#;
     const CANVAS_MOTION_OK: &str = r#"{"status":"passed","frames_compared":2,"difference":"the ball moved from the upper left toward the paddle between the two captures"}"#;
 
@@ -2341,7 +2782,7 @@ mod tests {
     #[test]
     fn local_canvas_build_is_model_invocable_and_pins_its_contract() {
         let descriptor = BUILTIN_WORKFLOWS
-            .get("local-canvas-build")
+            .get(canvas_build_name())
             .expect("the drawn-surface workflow is a built-in");
         assert!(
             !descriptor.manual_only,
@@ -2429,7 +2870,7 @@ mod tests {
     #[test]
     fn the_canvas_workflow_refuses_the_strategy_that_skips_design() {
         let run = drive_local_workflow(
-            "local-canvas-build",
+            canvas_build_name(),
             local_canvas_args(Some("fast"), Some("canvas_2d"), None, None, None),
             |prompts, _options| {
                 panic!("no agent may run before the strategy is rejected: {prompts:?}")
@@ -2453,7 +2894,7 @@ mod tests {
             (Some("Three.js"), "requires args.runtime_profile.family"),
         ] {
             let run = drive_local_workflow(
-                "local-canvas-build",
+                canvas_build_name(),
                 local_canvas_args(Some("balanced"), runtime_family, None, None, None),
                 |_prompts, _options| {
                     panic!("invalid runtime_profile must fail before any agent starts")
@@ -2482,7 +2923,7 @@ mod tests {
                 webview_checked,
             );
             let run = drive_local_workflow(
-                "local-canvas-build",
+                canvas_build_name(),
                 local_canvas_args(Some("balanced"), Some("canvas_2d"), None, None, None),
                 move |prompts, _options| {
                     prompts
@@ -2534,7 +2975,7 @@ mod tests {
     #[test]
     fn canvas_design_runtime_family_must_match_the_persisted_profile_before_generation() {
         let run = drive_local_workflow(
-            "local-canvas-build",
+            canvas_build_name(),
             local_canvas_args(Some("balanced"), Some("three_3d"), None, None, None),
             |prompts, _options| {
                 prompts
@@ -2570,7 +3011,7 @@ mod tests {
             .expect("canvas args are an object")
             .insert("renderer".to_string(), Value::String("threejs".to_string()));
         let run = drive_local_workflow(
-            "local-canvas-build",
+            canvas_build_name(),
             args.to_string(),
             |prompts, _options| {
                 prompts
@@ -2621,10 +3062,19 @@ mod tests {
                 ),
                 "compared fewer than two frames",
             ),
+            (
+                // The MISSING case this test is named for, and which it did not
+                // have: `motion_check` simply absent. Deleting the gate's
+                // fail-closed branch outright left the whole canvas suite green,
+                // so a verifier that omits the field passed a frozen surface --
+                // the exact outcome the gate exists to prevent.
+                canvas_verification_omitting_motion(CANVAS_RENDER_OK),
+                "reported no motion_check",
+            ),
         ];
         for (verification, expected) in cases {
             let run = drive_local_workflow(
-                "local-canvas-build",
+                canvas_build_name(),
                 local_canvas_args(Some("balanced"), Some("canvas_2d"), None, None, None),
                 move |prompts, _options| {
                     prompts
@@ -2667,12 +3117,98 @@ mod tests {
         }
     }
 
+    /// `render_check` absent entirely, on both surfaces.
+    ///
+    /// `renderCheckFindings` opens with a fail-closed branch whose own comment
+    /// says "a gate that silently disappears when its input is missing is the
+    /// same outcome the gate exists to prevent" -- and nothing drove it.
+    /// Deleting that branch left all 46 tests in this module green, so a
+    /// verifier that simply omitted the newest required field passed an app
+    /// nobody had looked at, on either workflow. Both surfaces get a case
+    /// because the branch lives in the SHARED core: a Phase 4 merge that kept
+    /// only one of the two shapes would still have to keep this working for
+    /// whichever survived.
+    #[test]
+    fn a_verification_that_omits_render_check_fails_closed_on_both_surfaces() {
+        let dom_run = drive_local_app_build(
+            local_app_args(Some("fast"), None, None, None),
+            |prompts, _options| {
+                prompts
+                    .iter()
+                    .map(|prompt| {
+                        if prompt.contains("Generate the complete React implementation")
+                            || prompt.contains("Repair the findings")
+                        {
+                            r#"{"ok":true,"preview_url":"http://preview/ok","summary":"built"}"#
+                                .to_string()
+                        } else if prompt.contains("Invoke $frontend-qa") {
+                            dom_verification_omitting_render()
+                        } else {
+                            panic!("unexpected prompt: {prompt}");
+                        }
+                    })
+                    .collect()
+            },
+        );
+        let error = dom_run
+            .outcome
+            .expect_err("an absent render_check must fail closed, not pass");
+        assert!(
+            error.to_string().contains("reported no render_check"),
+            "the failure must name the absent field: {error}"
+        );
+        assert_eq!(
+            dom_run.prompts.len(),
+            4,
+            "an absent render_check buys a repair round like any other finding; prompts={:#?}",
+            dom_run.prompts
+        );
+
+        let canvas_run = drive_local_workflow(
+            canvas_build_name(),
+            local_canvas_args(Some("balanced"), Some("canvas_2d"), None, None, None),
+            |prompts, _options| {
+                prompts
+                    .iter()
+                    .map(|prompt| {
+                        if prompt.contains("Act as the local app design lead") {
+                            canvas_design("canvas_2d")
+                        } else if prompt
+                            .contains("Generate the complete drawn-surface implementation")
+                            || prompt.contains("Repair the findings")
+                        {
+                            r#"{"ok":true,"preview_url":"http://preview/ok","summary":"built"}"#
+                                .to_string()
+                        } else if prompt.contains("Invoke $frontend-qa") {
+                            canvas_verification_omitting_render(CANVAS_MOTION_OK)
+                        } else {
+                            panic!("unexpected prompt: {prompt}");
+                        }
+                    })
+                    .collect()
+            },
+        );
+        let error = canvas_run
+            .outcome
+            .expect_err("an absent render_check must fail closed on a drawn surface too");
+        assert!(
+            error.to_string().contains("reported no render_check"),
+            "the failure must name the absent field: {error}"
+        );
+        assert_eq!(
+            canvas_run.prompts.len(),
+            5,
+            "an absent render_check buys a repair round on canvas too; prompts={:#?}",
+            canvas_run.prompts
+        );
+    }
+
     /// The happy path, so the gates above are shown to be refusable rather than
     /// unconditional.
     #[test]
     fn a_canvas_app_that_rendered_and_moved_completes() {
         let run = drive_local_workflow(
-            "local-canvas-build",
+            canvas_build_name(),
             local_canvas_args(Some("balanced"), Some("canvas_2d"), None, None, None),
             |prompts, _options| {
                 prompts
@@ -2746,7 +3282,7 @@ mod tests {
             ),
         ] {
             let run = drive_local_workflow(
-                "local-canvas-build",
+                canvas_build_name(),
                 local_canvas_args(Some("balanced"), Some(runtime_family), None, None, None),
                 move |prompts, _options| {
                     prompts
@@ -2842,7 +3378,7 @@ mod tests {
                 let verification_round = Rc::new(Cell::new(0_u8));
                 let next_verification_round = verification_round.clone();
                 let run = drive_local_workflow(
-                    "local-canvas-build",
+                    canvas_build_name(),
                     local_canvas_args_with_spec(
                         Some(strategy),
                         Some(runtime_family),
@@ -2938,7 +3474,20 @@ mod tests {
         args: String,
         reply: impl Fn(&[String], &[String]) -> Vec<String> + 'static,
     ) -> LocalAppHarness {
-        let descriptor = BUILTIN_WORKFLOWS.get(name).expect("built-in");
+        drive_local_descriptor(BUILTIN_WORKFLOWS.get(name).expect("built-in"), args, reply)
+    }
+
+    /// Drive a descriptor DIRECTLY, with no name lookup anywhere in the path.
+    ///
+    /// `drive_local_workflow` still resolves through `get(name)`, which is a
+    /// name-keyed selector however the name was obtained; a test that means to
+    /// prove policy follows the typed `local_app_surface` field has to be able
+    /// to run a descriptor the registry could not find by name at all.
+    fn drive_local_descriptor(
+        descriptor: &BuiltinWorkflowDescriptor,
+        args: String,
+        reply: impl Fn(&[String], &[String]) -> Vec<String> + 'static,
+    ) -> LocalAppHarness {
         let prompts_seen = Rc::new(RefCell::new(Vec::<String>::new()));
         let captured_prompts = prompts_seen.clone();
         let phases_seen = Rc::new(RefCell::new(Vec::<String>::new()));

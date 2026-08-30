@@ -20,7 +20,14 @@
 mod builtins;
 mod size_guideline;
 mod ultracode;
-pub use builtins::{BuiltinWorkflowDescriptor, BuiltinWorkflowRegistry, BUILTIN_WORKFLOWS};
+// `LocalAppSurface` is exported because it is the TYPE the Canvas-vs-DOM
+// selectors outside this crate must match on. Without it, P-1.10's typed
+// policy is unreachable from `engine-mobile`, and the ~15 name-keyed
+// selectors Phase 4 deletes would have nothing to migrate ONTO — they would
+// keep comparing name literals while a typed answer existed but was private.
+pub use builtins::{
+    BuiltinWorkflowDescriptor, BuiltinWorkflowRegistry, LocalAppSurface, BUILTIN_WORKFLOWS,
+};
 pub use size_guideline::{prompt_appendix_for, WorkflowSizeGuideline};
 pub use ultracode::{
     workflows_enabled, UltracodeAttachment, UltracodeAttachmentKind, UltracodeConfig,

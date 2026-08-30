@@ -5502,7 +5502,11 @@ impl MobileEngineHandle {
                     .await;
                 self.inner
                     .workflow_checkpoints
-                    .adopt_session(&uuid.to_string(), self.inner.task_registry.as_ref())
+                    .adopt_session(
+                        &uuid.to_string(),
+                        self.inner.task_registry.as_ref(),
+                        &self.inner.workflow_launcher.app_data_root,
+                    )
                     .await;
                 let messages = client_adapter::lowering::lower_transcript(&replayed.state.history);
                 self.event_sink
@@ -5576,7 +5580,11 @@ impl MobileEngineHandle {
                     .await;
                 self.inner
                     .workflow_checkpoints
-                    .adopt_session(&uuid.to_string(), self.inner.task_registry.as_ref())
+                    .adopt_session(
+                        &uuid.to_string(),
+                        self.inner.task_registry.as_ref(),
+                        &self.inner.workflow_launcher.app_data_root,
+                    )
                     .await;
                 self.event_sink
                     .emit(ClientEvent::SessionResumed {

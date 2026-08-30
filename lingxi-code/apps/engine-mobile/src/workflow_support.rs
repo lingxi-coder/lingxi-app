@@ -564,6 +564,7 @@ impl MobileWorkflowCheckpointStore {
         &self,
         session_uuid: &str,
         registry: &tasks::registry::TaskRegistry,
+        app_data_root: &std::path::Path,
     ) {
         let checkpoints = {
             let _guard = self
@@ -609,6 +610,22 @@ impl MobileWorkflowCheckpointStore {
                 );
                 continue;
             }
+            // Re-derive Local App build authority from Host-owned state
+            // (the real script bytes on disk + the real app manifest),
+            // never from `checkpoint.workflow_id`/`args` themselves -- see
+            // `resolve_adopted_local_app_build_scope`'s doc comment and
+            // `tasks::registry::AdoptedWorkflow`'s doc comment for why. A
+            // checkpoint that fails re-validation (forged, unscaffolded,
+            // wrong app, or simply not a Local App build at all) yields
+            // `None`, which is exactly `register_adopted_workflow`'s
+            // pre-existing, safe behavior.
+            let scope = script.as_deref().and_then(|bytes| {
+                resolve_adopted_local_app_build_scope(
+                    app_data_root,
+                    bytes,
+                    checkpoint.args_json.as_deref(),
+                )
+            });
             let start_time = checkpoint
                 .start_time
                 .map(|millis| std::time::UNIX_EPOCH + std::time::Duration::from_millis(millis))
@@ -624,7 +641,10 @@ impl MobileWorkflowCheckpointStore {
                 description: checkpoint.description.clone(),
                 start_time,
             };
-            if let Err(error) = registry.register_adopted_workflow(adopted).await {
+            if let Err(error) = registry
+                .register_adopted_workflow_with_scope(adopted, scope)
+                .await
+            {
                 tracing::warn!(%error, "could not register adopted workflow");
                 continue;
             }
@@ -1348,6 +1368,69 @@ fn apply_materialized_local_app_collections_with_identity(
     Ok(Some(scope))
 }
 
+/// Re-mint Local App build authority for one restart-recovered checkpoint
+/// (`MobileWorkflowCheckpointStore::adopt_session`), re-resolving from state
+/// the Host owns rather than trusting anything the checkpoint itself
+/// recorded. Companion to
+/// [`apply_materialized_local_app_collections_with_identity`], which does the
+/// equivalent job for a LIVE launch; see
+/// [`tasks::registry::AdoptedWorkflow`]'s doc comment for the residual this
+/// closes.
+///
+/// `workflow_id` is deliberately NOT read from the checkpoint's own recorded
+/// `workflow_id` field: that field is the raw name a launch supplied
+/// (`meta.name` / `spec.name`), and a custom workflow's checkpoint can set it
+/// to any real build workflow's name -- exactly the forged case
+/// `AdoptedWorkflow`'s doc comment warns about. The only signal trusted here
+/// is the SCRIPT BYTES actually persisted at the checkpoint's `script_path`
+/// right now (`script_bytes`): they are hashed and looked up against the
+/// bundled catalog, exactly what `is_current_local_app_builtin_script` /
+/// `local_app_workflow_id_for_hash` do for a live launch's own identity,
+/// applied here to an adopted checkpoint's persisted script instead of a
+/// fresh [`tool_workflow::WorkflowLaunchSpec`]. A script that is not
+/// byte-identical to a currently-bundled build workflow -- including one
+/// whose app has since moved on to a newer bundled revision -- is
+/// conservatively treated as unverifiable and gets no scope, matching this
+/// file's existing stance elsewhere for resume provenance ("a missing marker
+/// is classified as legacy and rejected rather than executed").
+///
+/// `args_json`'s `app_id` is used only as a HINT for which app to resolve --
+/// the same role it plays in
+/// [`apply_materialized_local_app_collections_with_identity`] -- never as
+/// authority by itself. A forged `app_id` naming an unrelated or
+/// non-scaffolded app, or one not actually pinned to the host-verified
+/// `workflow_id`, fails the resolve below and yields `None`, same as any
+/// other unverifiable checkpoint.
+fn resolve_adopted_local_app_build_scope(
+    app_data_root: &std::path::Path,
+    script_bytes: &[u8],
+    args_json: Option<&str>,
+) -> Option<tasks::scope::LocalAppWorkflowTaskScope> {
+    let script = std::str::from_utf8(script_bytes).ok()?;
+    if !is_current_local_app_builtin_script(script) {
+        return None;
+    }
+    let workflow_id = local_app_workflow_id_for_hash(&sha256_hex(script_bytes))?;
+    let args_value: serde_json::Value = serde_json::from_str(args_json?).ok()?;
+    let app_id = args_value
+        .get("app_id")
+        .and_then(serde_json::Value::as_str)?;
+    if app_id.trim().is_empty() {
+        return None;
+    }
+    let layout = local_apps::AppLayout::new(app_data_root, app_id).ok()?;
+    let build_target = crate::local_apps_build::detect_build_target(&layout).ok()?;
+    let manifest = local_apps::load_manifest(&layout).ok()?;
+    let binding = manifest.runtime_profile.as_ref()?;
+    manifest.dependency_snapshot.as_ref()?;
+    let plugin_binding =
+        crate::local_app_plugin_binding::LocalAppPluginBinding::resolve(build_target);
+    plugin_binding
+        .enforce(app_id, binding.family, &workflow_id)
+        .ok()?;
+    tasks::scope::LocalAppWorkflowTaskScope::for_build(app_id).ok()
+}
+
 #[async_trait::async_trait]
 impl tool_workflow::WorkflowLauncher for MobileWorkflowLauncher {
     async fn launch(
@@ -1833,7 +1916,7 @@ mod run_id_tests {
             fs,
             output,
         );
-        store.adopt_session(session, &registry).await;
+        store.adopt_session(session, &registry, root.path()).await;
 
         let state = registry.get("wabc12345").await.expect("adopted task");
         assert_eq!(state.base().status, tasks::TaskStatus::Paused);
@@ -3933,6 +4016,192 @@ mod run_id_tests {
                  workspace lease and no delete block"
             );
         }
+    }
+
+    // ── P-1.12: re-mint scope at the restart-ADOPTION seam ──────────────
+
+    /// Write a checkpoint through the real `upsert`/journal machinery so
+    /// `adopt_session` sees exactly what a restart would find on disk, then
+    /// adopt it. `script_bytes` is what a genuine build's persisted script
+    /// would look like (bundled bytes) OR what a forged custom workflow's
+    /// would look like (anything else) -- `resolve_adopted_local_app_build_scope`
+    /// is supposed to tell those apart from the BYTES alone, never from
+    /// `workflow_id`/`args`.
+    async fn persist_and_adopt_checkpoint(
+        checkpoints: &super::MobileWorkflowCheckpointStore,
+        registry: &tasks::registry::TaskRegistry,
+        app_data_root: &std::path::Path,
+        session_uuid: &str,
+        task_id: &str,
+        run_id: &str,
+        workflow_id: &str,
+        app_id: &str,
+        script_bytes: &[u8],
+    ) {
+        let transcript_dir = checkpoints
+            .session_dir(session_uuid)
+            .join("subagents")
+            .join("workflows")
+            .join(run_id);
+        std::fs::create_dir_all(&transcript_dir).expect("transcript dir");
+        std::fs::write(transcript_dir.join("journal.jsonl"), "").expect("journal");
+        let script_path = app_data_root.join(format!("{run_id}.js"));
+        std::fs::write(&script_path, script_bytes).expect("persisted script");
+        checkpoints
+            .upsert(
+                session_uuid,
+                super::WorkflowCheckpoint {
+                    task_id: task_id.to_string(),
+                    workflow_run_id: run_id.to_string(),
+                    // A real build's name, and ALSO exactly what a forged
+                    // checkpoint would carry (see `AdoptedWorkflow`'s doc
+                    // comment) -- both tests below use the SAME
+                    // `workflow_id` on purpose, so only the script bytes can
+                    // be what tells them apart.
+                    workflow_id: workflow_id.to_string(),
+                    script_path: script_path.to_string_lossy().into_owned(),
+                    script_sha256: Some(super::sha256_hex(script_bytes)),
+                    script_is_verbatim_builtin: None,
+                    args_json: Some(serde_json::json!({ "app_id": app_id }).to_string()),
+                    description: "Build local app".into(),
+                    start_time: Some(1_234),
+                    transcript_dir: transcript_dir.to_string_lossy().into_owned(),
+                },
+            )
+            .expect("persist checkpoint");
+        checkpoints
+            .adopt_session(session_uuid, registry, app_data_root)
+            .await;
+    }
+
+    /// THE ADOPTION-SEAM REGRESSION (P-1.12 residual 1). A genuine Local App
+    /// build's checkpoint -- persisted with the REAL bundled build script's
+    /// bytes -- must come back from an engine restart still blocking its
+    /// app's delete: `resolve_adopted_local_app_build_scope` re-derives a
+    /// scope from the persisted script bytes + the real on-disk manifest, and
+    /// `register_adopted_workflow_with_scope` stamps it on the adopted
+    /// (`Paused`, non-terminal) row.
+    ///
+    /// Read back `checkpoint.workflow_id`/`args.app_id` instead of the real
+    /// script bytes and this test still passes (a forged checkpoint can set
+    /// those to the same values) while
+    /// `an_adopted_forged_workflow_still_gets_no_scope` below goes red -- that
+    /// asymmetry is the point of re-deriving from bytes, not from the
+    /// checkpoint's own claims.
+    #[tokio::test]
+    async fn an_adopted_in_flight_build_still_blocks_its_apps_delete() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let app_id = "resumedapp";
+        scaffold_local_app(root.path(), app_id, local_apps::AppRuntimeProfile::ReactDom);
+
+        let registry = scope_test_registry();
+        let checkpoints = super::MobileWorkflowCheckpointStore::new(
+            root.path().join(".claude"),
+            root.path().to_path_buf(),
+        );
+        let session_uuid = "session-adopt-genuine";
+        let real_script = tool_workflow::BUILTIN_WORKFLOWS
+            .get("local-app-build")
+            .expect("bundled local-app built-in")
+            .script;
+
+        persist_and_adopt_checkpoint(
+            &checkpoints,
+            &registry,
+            root.path(),
+            session_uuid,
+            "wgenuine1",
+            "wf_genuin1",
+            "local-app-build",
+            app_id,
+            real_script.as_bytes(),
+        )
+        .await;
+
+        let state = registry
+            .get("wgenuine1")
+            .await
+            .expect("adopted row must exist");
+        assert!(
+            !state.base().status.is_terminal(),
+            "an adopted row must be non-terminal (Paused)"
+        );
+        assert_eq!(
+            registry.find_nonterminal_local_app_workflows(app_id).await,
+            vec!["wgenuine1".to_string()],
+            "a genuine in-flight build recovered by adoption must still \
+             block its own app's delete"
+        );
+        assert!(
+            registry
+                .find_nonterminal_local_app_workflows("some-other-app")
+                .await
+                .is_empty(),
+            "and must block ONLY its own app's delete"
+        );
+    }
+
+    /// P-1.12 residual 1, the other half. A checkpoint that carries a real
+    /// build workflow's `workflow_id` and a victim app's id in `args` --
+    /// exactly as faithfully as a genuine build's checkpoint would, per
+    /// `AdoptedWorkflow`'s doc comment -- but whose PERSISTED SCRIPT is a
+    /// custom body (not the bundled bytes) must still get no scope on
+    /// adoption, and so must not block the victim app's delete. This is the
+    /// ⛔ constraint from the task brief made concrete: adoption must never
+    /// derive authority from `workflow_id`/`args` alone.
+    #[tokio::test]
+    async fn an_adopted_forged_workflow_still_gets_no_scope() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let victim_app_id = "victimapp1";
+        // The victim is a REAL, fully scaffolded app -- so the only thing
+        // missing from the forged checkpoint is the Host's own re-derived
+        // verdict, not the app.
+        scaffold_local_app(
+            root.path(),
+            victim_app_id,
+            local_apps::AppRuntimeProfile::ReactDom,
+        );
+
+        let registry = scope_test_registry();
+        let checkpoints = super::MobileWorkflowCheckpointStore::new(
+            root.path().join(".claude"),
+            root.path().to_path_buf(),
+        );
+        let session_uuid = "session-adopt-forged";
+        let forged_body =
+            "export const meta = { name: 'local-app-build', description: 'not a build' }\n\
+             return 1\n";
+
+        persist_and_adopt_checkpoint(
+            &checkpoints,
+            &registry,
+            root.path(),
+            session_uuid,
+            "wforged12",
+            "wf_forged1",
+            "local-app-build",
+            victim_app_id,
+            forged_body.as_bytes(),
+        )
+        .await;
+
+        let state = registry
+            .get("wforged12")
+            .await
+            .expect("adopted row must still exist even though it got no scope");
+        assert!(
+            !state.base().status.is_terminal(),
+            "the adopted row must be live when the guard is asked, or an \
+             empty guard result would prove nothing"
+        );
+        assert!(
+            registry
+                .find_nonterminal_local_app_workflows(victim_app_id)
+                .await
+                .is_empty(),
+            "a forged workflow_id/args.app_id pair must never block another \
+             app's delete just because it was adopted"
+        );
     }
 }
 

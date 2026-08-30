@@ -1599,6 +1599,261 @@ fn scanner_workflow_needles_survive_the_name_list_deletion() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// P-1.11 — a skill trigger must never bind to a Local App workflow's name.
+//
+// `skill-api/src/builtin/bundled.rs` compiles each `BundledSkill`'s
+// `triggers` array straight into `Skill::frontmatter.triggers`
+// (`skill-api/src/builtin/mod.rs`'s `parse_builtin` ASSIGNS that field after
+// parsing, so a bundled SKILL.md's own frontmatter cannot be a second source
+// for it — `bundled.rs` is the only construction path for a bundled skill's
+// triggers). That file lives OUTSIDE every root in [`SCAN_ROOTS`]
+// (`skill-api/src`, not `apps/engine-mobile/src` / `tasks/src` /
+// `tools/workflow/src`), so the literal-scan gate above has no reach into it
+// at all — the trigger array is a blind spot the file-literal scan was never
+// going to cover, which is why this defect needed its own narrower check
+// rather than an allowlist entry, and why the allowlist baseline is untouched
+// by it.
+//
+// If a trigger literal embeds a live Local App build workflow basename
+// ([`local_app_workflow_basenames`]), the skill becomes discoverable by a
+// phrase that is really someone ELSE's identifier, and it only looks correct
+// because that workflow has not been renamed yet — design doc §19.3's
+// cross-component name binding, aimed at a trigger phrase instead of a
+// match/dispatch arm.
+//
+// BOTH registries `bundled.rs` feeds are checked, not just the mobile one:
+// `BUILTIN_DESKTOP` and `BUILTIN_MOBILE` are two arrays in the SAME file
+// behind two public entry points (`skill_api::register_desktop` /
+// `skill_api::register_mobile`), and a failure message that names the file
+// while reading only one of its two arrays would leave the identical defect
+// reachable one array down.
+// ---------------------------------------------------------------------------
+
+/// Every bundled skill registry `skill-api/src/builtin/bundled.rs` feeds,
+/// labelled by the entry point that assembles it.
+fn bundled_skill_registries() -> Vec<(&'static str, skill_api::SkillRegistry)> {
+    let mut desktop = skill_api::SkillRegistry::new();
+    skill_api::register_desktop(&mut desktop);
+    vec![
+        (
+            "skill_api::register_mobile (BUILTIN_MOBILE)",
+            engine_mobile::mobile_skill_registry(),
+        ),
+        ("skill_api::register_desktop (BUILTIN_DESKTOP)", desktop),
+    ]
+}
+
+/// Every `(skill, trigger)` pair in `reg` whose trigger EMBEDS one of
+/// `workflow_names`.
+///
+/// Containment, not equality: a trigger spelled `"run local-app-build"`
+/// carries the workflow's identity exactly as much as one spelled
+/// `"local-app-build"` does, and `SkillRegistry::discover` substring-matches
+/// triggers against the query anyway — so an equality-only check would leave
+/// the same cross-component binding reachable by adding one word to the
+/// literal. Compared case-insensitively because `SkillRegistry::register`
+/// lowercases triggers when it indexes them, so case is not a distinction the
+/// runtime honours either.
+fn triggers_colliding_with_workflow_names(
+    reg: &skill_api::SkillRegistry,
+    workflow_names: &BTreeSet<String>,
+) -> Vec<String> {
+    let mut offenders = Vec::new();
+    for name in reg.names() {
+        let skill = reg.get(name).expect("just listed by SkillRegistry::names");
+        for trigger in &skill.frontmatter.triggers {
+            let lowered = trigger.to_lowercase();
+            for workflow in workflow_names {
+                if lowered.contains(&workflow.to_lowercase()) {
+                    offenders.push(format!(
+                        "skill `{name}` trigger {trigger:?} embeds workflow name {workflow:?}"
+                    ));
+                }
+            }
+        }
+    }
+    offenders
+}
+
+/// One real, NON-EMPTY trigger literal, read out of the live registry, for
+/// use as a positive-control needle. Sorted so the choice is deterministic
+/// rather than dependent on `SkillRegistry::names`' unspecified ordering, and
+/// empty triggers are skipped because `"".contains("")` would make the
+/// control pass without the detector reading anything real.
+fn a_live_trigger_of(label: &str, reg: &skill_api::SkillRegistry) -> String {
+    let mut triggers: Vec<String> = reg
+        .names()
+        .into_iter()
+        .flat_map(|name| {
+            reg.get(name)
+                .expect("just listed by SkillRegistry::names")
+                .frontmatter
+                .triggers
+                .clone()
+        })
+        .filter(|trigger| !trigger.trim().is_empty())
+        .collect();
+    triggers.sort();
+    triggers.into_iter().next().unwrap_or_else(|| {
+        panic!(
+            "{label} registered no skill trigger at all -- \
+             skill-api/src/builtin/bundled.rs is the source of every bundled \
+             trigger, so an empty set here means the two P-1.11 tests below \
+             would pass by reading nothing"
+        )
+    })
+}
+
+/// Prove `triggers_colliding_with_workflow_names` can actually SEE this
+/// registry's triggers and report a collision, by handing it a needle taken
+/// from the registry itself — a needle it MUST flag.
+///
+/// Without this control both P-1.11 tests would still pass if the helper
+/// silently read nothing (a renamed field, an empty registry, a `names()`
+/// that stopped listing bundled skills): "no offenders" and "no visibility"
+/// produce the identical green. This is what stops each assertion below from
+/// being a tautology that holds regardless of what `bundled.rs` says.
+fn assert_collision_detector_is_live(label: &str, reg: &skill_api::SkillRegistry) {
+    let needle = a_live_trigger_of(label, reg);
+    let control = BTreeSet::from([needle.clone()]);
+    let flagged = triggers_colliding_with_workflow_names(reg, &control);
+    assert!(
+        !flagged.is_empty(),
+        "positive control failed for {label}: \
+         triggers_colliding_with_workflow_names did not flag {needle:?}, a \
+         trigger literal read out of that very registry. The detector is \
+         blind, so the P-1.11 assertions in this file prove nothing about \
+         skill-api/src/builtin/bundled.rs until it is fixed."
+    );
+}
+
+/// The direct catch: no bundled skill — mobile or desktop — may carry a
+/// trigger embedding one of today's real Local App build workflow basenames.
+/// Before P-1.11 this failed for real: `create-local-app` carried
+/// `"local-app-build"` (a WORKFLOW's name) as its third trigger, alongside
+/// its own two genuine discovery phrases.
+#[test]
+fn a_workflow_name_is_not_a_skill_trigger() {
+    let workflows = local_app_workflow_basenames();
+    assert!(
+        !workflows.is_empty(),
+        "local_app_workflow_basenames() is empty, so this test would pass \
+         without reading a single trigger. tool_workflow::BUILTIN_WORKFLOWS \
+         must still expose at least one Local App build workflow name for \
+         skill-api/src/builtin/bundled.rs to be gated against."
+    );
+
+    for (label, reg) in bundled_skill_registries() {
+        assert_collision_detector_is_live(label, &reg);
+        let offenders = triggers_colliding_with_workflow_names(&reg, &workflows);
+        assert!(
+            offenders.is_empty(),
+            "skill-api/src/builtin/bundled.rs binds a Local App build \
+             workflow's own name as a skill trigger, reached via {label} -- \
+             exactly the cross-component name binding design doc §19.3 \
+             forbids ({} offender(s)): {offenders:?}. A workflow's name is \
+             that workflow's own identity; give the skill a discovery phrase \
+             that does not double as someone else's identifier.",
+            offenders.len()
+        );
+    }
+}
+
+/// The generalization `a_workflow_name_is_not_a_skill_trigger` alone cannot
+/// prove: Phase 4 is expected to MERGE `local-app-build` and
+/// `local-canvas-build` into one workflow spelled some other, not-yet-decided
+/// way. A trigger written to coincide with WHATEVER that new spelling turns
+/// out to be is the same silent binding P-1.11 removed, just aimed at
+/// tomorrow's name — and a check keyed only on today's two basenames could
+/// never catch it. The simulated name is deliberately disjoint from today's
+/// basenames in BOTH directions (neither contains the other), so a pass here
+/// cannot be explained by the literals the test above already covers; the
+/// positive control is what keeps that from making this a tautology.
+#[test]
+fn skill_triggers_survive_a_workflow_rename() {
+    let today = local_app_workflow_basenames();
+    let renamed: BTreeSet<String> = BTreeSet::from(["local-app-unified-build".to_string()]);
+    for candidate in &renamed {
+        for real in &today {
+            assert!(
+                !candidate.contains(real.as_str()) && !real.contains(candidate.as_str()),
+                "fixture bug: simulated post-rename name {candidate:?} overlaps \
+                 real basename {real:?}, so this test would prove nothing \
+                 beyond a_workflow_name_is_not_a_skill_trigger"
+            );
+        }
+    }
+
+    for (label, reg) in bundled_skill_registries() {
+        assert_collision_detector_is_live(label, &reg);
+        let offenders = triggers_colliding_with_workflow_names(&reg, &renamed);
+        assert!(
+            offenders.is_empty(),
+            "skill-api/src/builtin/bundled.rs has a trigger matching a \
+             simulated post-rename Local App workflow name, reached via \
+             {label} ({} offender(s)): {offenders:?}. A trigger tied to \
+             whichever spelling Phase 4's merge lands on is the same \
+             cross-component binding P-1.11 removed, just deferred until \
+             after the rename instead of caught before it.",
+            offenders.len()
+        );
+    }
+}
+
+/// The companion the two tests above need in order not to be gameable.
+///
+/// The cheapest way to green either of them is to DELETE the offending
+/// trigger's whole array: a skill with no triggers can never collide with a
+/// workflow name. That would also make the skill undiscoverable —
+/// `SkillPrefetch` (`skill-api/src/prefetch.rs`) reaches bundled skills only
+/// through `SkillRegistry::discover`, which matches nothing but triggers — and
+/// nothing else in the tree asserts that `create-local-app` in particular is
+/// still reachable (`local_app_specialists_are_independently_discoverable` in
+/// `skill-api/src/builtin/mod.rs` covers the specialists, not the
+/// coordinator). So P-1.11's fix — dropping ONE trigger from that array —
+/// must be shown to have left the skill's own discovery phrases behind, and
+/// that has to hold for every bundled skill rather than for one name spelled
+/// out here, so this file keeps deriving from the live registry instead of
+/// hardcoding a component name.
+#[test]
+fn every_bundled_skill_keeps_a_discovery_phrase_of_its_own() {
+    for (label, reg) in bundled_skill_registries() {
+        for name in reg.names() {
+            let skill = reg.get(name).expect("just listed by SkillRegistry::names");
+            assert!(
+                !skill.frontmatter.triggers.is_empty(),
+                "skill-api/src/builtin/bundled.rs leaves skill `{name}` \
+                 ({label}) with an EMPTY triggers array, so \
+                 SkillRegistry::discover can never surface it again. Removing \
+                 a cross-component trigger binding means replacing it with a \
+                 phrase the skill owns, not emptying the array to satisfy \
+                 a_workflow_name_is_not_a_skill_trigger."
+            );
+            for trigger in &skill.frontmatter.triggers {
+                assert!(
+                    !trigger.trim().is_empty(),
+                    "skill `{name}` ({label}) carries a BLANK trigger in \
+                     skill-api/src/builtin/bundled.rs. `SkillRegistry::discover` \
+                     asks `query.contains(trigger)`, and every string contains \
+                     the empty one, so a blank trigger makes this skill match \
+                     every query ever asked -- the opposite failure from an \
+                     empty array, and just as silent."
+                );
+                assert!(
+                    reg.discover(trigger).iter().any(|hit| hit.name == name),
+                    "skill `{name}` ({label}) carries trigger {trigger:?} in \
+                     skill-api/src/builtin/bundled.rs, but querying \
+                     SkillRegistry::discover with that very phrase does not \
+                     return it -- the trigger is decorative, so the skill is \
+                     one array edit away from being unreachable with nothing \
+                     to notice."
+                );
+            }
+        }
+    }
+}
+
 /// The load-bearing count. See the module doc comment: without pinning this
 /// number, the cheapest way to green a red scanner is to widen an allowlist
 /// entry, which would disable scanning for everything it now covers and never

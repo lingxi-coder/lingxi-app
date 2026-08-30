@@ -40,7 +40,24 @@ pub(crate) const BUILTIN_MOBILE: &[BundledSkill] = &[
     BundledSkill {
         name: "create-local-app",
         raw: include_str!("../../../../skills/create-local-app/SKILL.md"),
-        triggers: &["create local app", "local app", "local-app-build"],
+        // P-1.11: the third trigger used to be a copy of a Local App BUILD
+        // WORKFLOW's own name (one of the names
+        // `tool_workflow::BuiltinWorkflowRegistry::local_app_build_workflow_names`
+        // returns), not a skill discovery phrase. Binding a trigger to
+        // another component's identity is exactly the cross-component name
+        // binding design doc §19.3 forbids: Phase 4 merges those two build
+        // workflows, and a trigger spelled to match one of today's workflow
+        // names then silently stops matching anything, with nothing to
+        // notice. The remaining two phrases are this skill's own. See
+        // `apps/engine-mobile/tests/component_literal_scan.rs`'s
+        // `a_workflow_name_is_not_a_skill_trigger` and
+        // `skill_triggers_survive_a_workflow_rename`, which gate BOTH arrays
+        // in this file against a trigger ever embedding a live workflow
+        // basename again, plus
+        // `every_bundled_skill_keeps_a_discovery_phrase_of_its_own`, which
+        // stops the next such removal from being "satisfied" by emptying a
+        // triggers array and quietly making the skill undiscoverable.
+        triggers: &["create local app", "local app"],
         references: &[],
     },
     BundledSkill {

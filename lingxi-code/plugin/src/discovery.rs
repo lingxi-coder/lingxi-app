@@ -3702,7 +3702,7 @@ mod tests {
         let plugin = tmp.path();
         fs::write(
             plugin.join(".lsp.json"),
-            "\u{feff}{\"rust\":{\"name\":\"rust\",\"command\":\"rust-analyzer\",\"args\":[],\"env\":{},\"trigger_languages\":[\"rust\"],\"root_dir_markers\":[\"Cargo.toml\"],\"initialization_options\":null,\"extension_to_language\":{}}}",
+            "\u{feff}{\"rust\":{\"name\":\"rust\",\"command\":\"rust-analyzer\",\"args\":[],\"env\":{},\"trigger_languages\":[\"rust\"],\"root_dir_markers\":[\"Cargo.toml\"],\"initialization_options\":null,\"extensionToLanguage\":{\".rs\":\"rust\"}}}",
         )
         .unwrap();
 
@@ -3957,13 +3957,13 @@ mod tests {
         let plugin = tmp.path();
         fs::write(
             plugin.join("extra-lsp.json"),
-            r#"{"rust":{"name":"rust","command":"rust-analyzer","args":[],"env":{},"trigger_languages":["rust"],"root_dir_markers":["Cargo.toml"],"initialization_options":null,"extension_to_language":{}}}"#,
+            r#"{"rust":{"name":"rust","command":"rust-analyzer","args":[],"env":{},"trigger_languages":["rust"],"root_dir_markers":["Cargo.toml"],"initialization_options":null,"extensionToLanguage":{".rs":"rust"}}}"#,
         )
         .unwrap();
 
         let value = serde_json::json!([
             "./extra-lsp.json",
-            {"python": {"name": "python", "command": "pyright", "args": [], "env": {}, "trigger_languages": ["python"], "root_dir_markers": ["pyproject.toml"], "initialization_options": null, "extension_to_language": {}}}
+            {"python": {"name": "python", "command": "pyright", "args": [], "env": {}, "trigger_languages": ["python"], "root_dir_markers": ["pyproject.toml"], "initialization_options": null, "extensionToLanguage": {".py": "python"}}}
         ]);
 
         let servers = load_declared_lsp_servers(plugin, Some(value)).await;

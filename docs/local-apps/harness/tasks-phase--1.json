@@ -214,14 +214,17 @@
       "deps": [
         "P-1.2"
       ],
-      "notes": ""
+      "notes": "\n\nRE-GROUNDED before the task starts. `LocalAppWorkflowTaskScope` has ZERO hits and `tasks/src/scope.rs` does not exist — both CORRECT, because this task creates them. A must-name string for a symbol the task introduces is legitimate; the plant runs after the type exists. Noted so a later reader does not mistake this for the stale-descriptor defect P-1.2 hit, where `host_context` named a symbol that never existed anywhere."
     },
     {
       "id": "P-1.7",
       "title": "Workspace lease reads the typed scope; delete the tasks/src workflow-name list",
       "gate": "§19.3 a custom workflow with the same name gets NO workspace lease",
       "owns": [
-        "lingxi-code/tasks/src/lib.rs"
+        "lingxi-code/tasks/Cargo.toml",
+        "lingxi-code/tasks/src/handlers/local_workflow.rs",
+        "lingxi-code/tasks/src/lib.rs",
+        "lingxi-code/tasks/src/registry.rs"
       ],
       "crates": [
         "tasks"
@@ -238,12 +241,15 @@
         ]
       },
       "addedTests": [
-        "a_same_named_custom_workflow_gets_no_workspace_lease"
+        "a_custom_workflow_with_the_same_name_gets_no_lease_and_does_not_block_delete",
+        "a_local_workflow_task_with_no_scope_still_blocks_delete",
+        "a_same_named_custom_workflow_gets_no_workspace_lease",
+        "app_id_grammar_agrees_with_local_apps_ids"
       ],
       "deps": [
         "P-1.6"
       ],
-      "notes": ""
+      "notes": "\n\nMEASURED BLAST RADIUS (re-grounded before P-1.6 started). `tasks::LOCAL_APP_BUILD_WORKFLOWS` has 5 reader sites, of which the two that matter are `tasks/src/registry.rs:918` and `tasks/src/handlers/local_workflow.rs:523` — both PRODUCTION and both outside `tasks/src/lib.rs`, which is all this descriptor's `owns` currently names. Add both files to the owned set when this task runs, or it cannot delete the array it is asked to delete.\n\n🚨 FOUR GREEN-BY-CONSTRUCTION HAZARDS, handed over by P-1.6's verify pass. Each was demonstrated or traced, not speculated.\n\n(a) THE Option<scope> FALLBACK. The natural incremental migration is `scope: Option<..>` with `match scope { Some(s) => s.requires_workspace_lease(), None => LOCAL_APP_BUILD_WORKFLOWS.contains(..) }`. Every new test builds a Some, so the None arm is never exercised and stays green FOREVER — while every launch this task misses, and every task row persisted before the migration, takes the name-derived arm. P-1.9 would then 'delete the array' by inlining the two literals into that arm.\n\n(b) SCAN-ROOT BLIND SPOT. coordinator/, cron/ and apps/cli/ all depend on `tasks` and NONE is a component-scanner root (SCAN_ROOTS = engine-mobile/src, tasks/src, tools/workflow/src). A fallback that lands in any of them is invisible to that gate.\n\n(c) THE DELETE GUARD CAN ONLY WEAKEN. blocks_delete() is a constant true, so the type cannot express 'this row carries no authority' — that discrimination necessarily lives in the Option. If find_nonterminal_local_app_workflows (registry.rs:918) is rewritten as 'rows whose scope is Some', any Local App workflow launched without a scope stops blocking delete entirely and the App becomes deletable mid-build. Required test: a_local_workflow_task_with_no_scope_still_blocks_delete.\n\n(d) THE PREDICATES ARE ADVISORY. Nothing forces a caller to consult requires_workspace_lease(). Keeping the old name check ALONGSIDE the typed one as 'defense in depth' restores the exact grant while the suite stays green, because the typed path also works. This task's stated gate covers only the MODEL DEFAULT — not the lease, not the delete guard. Required test: a_custom_workflow_with_the_same_name_gets_no_lease_and_does_not_block_delete.\n\nINHERITED FOLLOW-UP from P-1.6. scope.rs mirrors local_apps::ids::is_valid_app_id's grammar with a corpus copied from that crate's own tests, because adding a production `local-apps` edge to `tasks` would drag bundled SQLite, vendored libgit2 and two tree-sitter grammars into a crate with 5 dependents for a 6-line predicate. A DEV-dependency is the right answer — check_deps.py excludes dev deps, so it is gate-legal and costs production builds nothing — and it enables a real cross-crate agreement test. Until then the two corpora can drift silently. tasks/Cargo.toml is now owned for this.\n\n⚠️ AND THE LIMIT P-1.6 COULD NOT CLOSE: the type guarantees the PURPOSE is the Host's choice and the app_id is well formed. It does NOT guarantee OWNERSHIP — `for_build(\"victim-app\")` succeeds, because the type cannot know entitlement. §8.1 requires defending a forged `args.app_id`; that half is THIS task's obligation. The Host MUST take app_id from the resolved LocalAppPluginBinding handle, never from caller args. scope.rs's `a_well_formed_victim_app_id_is_still_accepted` encodes the limit so it cannot be mistaken for a guarantee."
     },
     {
       "id": "P-1.8",
@@ -280,9 +286,11 @@
       "title": "workflowModel default reads the typed scope; delete the tools/workflow name list and apply_local_app_build_default_model",
       "gate": "§19.3 a custom workflow with the same name gets no model default",
       "owns": [
-        "lingxi-code/tools/workflow/src/lib.rs",
         "lingxi-code/apps/engine-desktop/src/lib.rs",
-        "lingxi-code/apps/engine-mobile/tests/component_literal_scan.rs"
+        "lingxi-code/apps/engine-mobile/src/local_apps_build.rs",
+        "lingxi-code/apps/engine-mobile/src/workflow_support.rs",
+        "lingxi-code/apps/engine-mobile/tests/component_literal_scan.rs",
+        "lingxi-code/tools/workflow/src/lib.rs"
       ],
       "crates": [
         "tool-workflow",
@@ -307,7 +315,7 @@
       "deps": [
         "P-1.8"
       ],
-      "notes": "apps/engine-desktop/src/lib.rs:1853 is the ONLY Local App reference in the entire desktop product and it calls apply_local_app_build_default_model, the function this task deletes. That one call site is the whole desktop blast radius for Phase -1.\n\nINHERITED OBLIGATION from P-1.0. Deleting LOCAL_APP_BUILD_WORKFLOWS breaks the compile of apps/engine-mobile/tests/component_literal_scan.rs, which derives its workflow needles from that array. That is intended: the failure is loud rather than silent. This task must re-point those needles at a source that survives — the typed scope from P-1.6, or BUILTIN_WORKFLOWS filtered by that typed property. ⛔ Do NOT resolve it by writing the two names into the test. A hardcoded needle list is precisely the static array this gate exists to forbid, it would stop covering any workflow added later, and it would stay green forever while doing so."
+      "notes": "apps/engine-desktop/src/lib.rs:1853 is the ONLY Local App reference in the entire desktop product and it calls apply_local_app_build_default_model, the function this task deletes. That one call site is the whole desktop blast radius for Phase -1.\n\nINHERITED OBLIGATION from P-1.0. Deleting LOCAL_APP_BUILD_WORKFLOWS breaks the compile of apps/engine-mobile/tests/component_literal_scan.rs, which derives its workflow needles from that array. That is intended: the failure is loud rather than silent. This task must re-point those needles at a source that survives — the typed scope from P-1.6, or BUILTIN_WORKFLOWS filtered by that typed property. ⛔ Do NOT resolve it by writing the two names into the test. A hardcoded needle list is precisely the static array this gate exists to forbid, it would stop covering any workflow added later, and it would stay green forever while doing so.\n\n🚨 SCOPE CORRECTED — measured, not estimated. Deleting `tool_workflow::LOCAL_APP_BUILD_WORKFLOWS` is not a one-file change. Production readers, counted above each file's first `#[cfg(test)]`:\n    apps/engine-mobile/src/workflow_support.rs   11  (ALL production, zero in test regions)\n    apps/engine-mobile/src/local_apps_build.rs    1\n    apps/engine-mobile/src/local_apps_host.rs     3  (all in the test region, which starts at 8874)\n    apps/engine-mobile/tests/component_literal_scan.rs 3  (P-1.0's needle source — the known coupling)\nThe original descriptor owned only tools/workflow/src/lib.rs and engine-desktop, which would have made this task impossible to complete inside its own ownership. workflow_support.rs and local_apps_build.rs are now owned.\n⚠️ Those 11 sites are the REAL work of this task: each one currently asks 'is this workflow name in the list', and each must instead ask the typed scope from P-1.6. A change that deletes the array but leaves the 11 questions name-shaped has moved the problem, not removed it."
     },
     {
       "id": "P-1.10",
@@ -372,7 +380,7 @@
       "deps": [
         "P-1.9"
       ],
-      "notes": "FOUND BY THE P-1.0 VERIFICATION PASS, outside the three scan roots, and confirmed by hand at lap/baseline.\n\nTHE DEFECT. skill-api/src/builtin/bundled.rs:43 gives the create-local-app SKILL the trigger array [\"create local app\", \"local app\", \"local-app-build\"]. The third entry is a WORKFLOW name used as a skill trigger phrase — a cross-component name binding, which is exactly the shape §19.3 exists to remove. It is genuine production code: there is no #[cfg(test)] above that line. Phase 4 merges the two workflows, at which point this trigger silently stops matching and nothing in the suite notices. The skill NAMES in the same file are the definition site and are legitimately unscannable; the trigger is not.\n\n⛔ THE LOOK-ALIKE THAT MUST NOT BE 'FIXED'. traits/src/mobile_linux.rs:46 declares LOCAL_APP_BUILD_ROOT = \"/var/lingxi/local-app-build\". That string coincides with a workflow name but is a FILESYSTEM MOUNT ROOT, not a reference to the workflow. It carries no name-derived authority, and renaming it to track a renamed workflow would silently move a path on real devices — the same class of silent data loss as renaming a SQLite table, which nothing in this repo would catch. Add it to the allowlist with this reasoning if traits/src ever enters the scan surface; do not touch the value.\n\nTEMPLATES, for the record. local-apps/templates/runtime-profiles/** is compiled into production wholesale by include_bytes! via the profile_file! macro, and the scanner cannot see it. Grepped at lap/baseline: it contains ZERO component-name needles today. That is a fact with a date on it, not a guarantee — it is the tree runtime-profile work touches, so the Phase 1 packer (P1.2) should carry the assertion rather than this scanner.\n\nSCOPE. Deliberately NOT solved by widening SCAN_ROOTS. Adding skill-api/src and traits/src would make the scanner red on landing for two occurrences of very different kinds, and the cheapest way to green that is an allowlist entry — which would preserve the defect while looking like it had been handled."
+      "notes": "FOUND BY THE P-1.0 VERIFICATION PASS, outside the three scan roots, and confirmed by hand at lap/baseline.\n\nTHE DEFECT. skill-api/src/builtin/bundled.rs:43 gives the create-local-app SKILL the trigger array [\"create local app\", \"local app\", \"local-app-build\"]. The third entry is a WORKFLOW name used as a skill trigger phrase — a cross-component name binding, which is exactly the shape §19.3 exists to remove. It is genuine production code: there is no #[cfg(test)] above that line. Phase 4 merges the two workflows, at which point this trigger silently stops matching and nothing in the suite notices. The skill NAMES in the same file are the definition site and are legitimately unscannable; the trigger is not.\n\n⛔ THE LOOK-ALIKE THAT MUST NOT BE 'FIXED'. traits/src/mobile_linux.rs:46 declares LOCAL_APP_BUILD_ROOT = \"/var/lingxi/local-app-build\". That string coincides with a workflow name but is a FILESYSTEM MOUNT ROOT, not a reference to the workflow. It carries no name-derived authority, and renaming it to track a renamed workflow would silently move a path on real devices — the same class of silent data loss as renaming a SQLite table, which nothing in this repo would catch. Add it to the allowlist with this reasoning if traits/src ever enters the scan surface; do not touch the value.\n\nTEMPLATES, for the record. local-apps/templates/runtime-profiles/** is compiled into production wholesale by include_bytes! via the profile_file! macro, and the scanner cannot see it. Grepped at lap/baseline: it contains ZERO component-name needles today. That is a fact with a date on it, not a guarantee — it is the tree runtime-profile work touches, so the Phase 1 packer (P1.2) should carry the assertion rather than this scanner.\n\nSCOPE. Deliberately NOT solved by widening SCAN_ROOTS. Adding skill-api/src and traits/src would make the scanner red on landing for two occurrences of very different kinds, and the cheapest way to green that is an allowlist entry — which would preserve the defect while looking like it had been handled.\n\nRE-GROUNDED before the task starts. The must-name `bundled.rs` has zero hits as file CONTENT — expected, since it is a path, not a symbol. It can therefore only reach the output if the test PRINTS the path in its failure message. That is a real constraint on how the test must be written, not a free property: an assertion that fails with `assert!(!triggers.contains(...))` and no message would satisfy the gate's `failures:` requirement while never naming the file, and the gate would pass. Write the assertion with a message naming skill-api/src/builtin/bundled.rs.\nVerified still present at re-grounding time: bundled.rs contains the `local-app-build` trigger."
     }
   ]
 }

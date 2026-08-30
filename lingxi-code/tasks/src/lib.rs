@@ -16,6 +16,7 @@ pub mod id;
 pub mod output_manager;
 pub mod registry;
 pub mod registry_status_sink;
+pub mod scope;
 pub mod state;
 pub mod task_trait;
 
@@ -44,5 +45,6 @@ pub use id::{generate_task_id, TaskType};
 pub use registry::{
     register_agent_handlers, register_dream_handler, register_self_contained_handlers,
 };
+pub use scope::{LocalAppWorkflowPurpose, LocalAppWorkflowTaskScope, MalformedAppId};
 pub use state::*;
 pub use task_trait::*;

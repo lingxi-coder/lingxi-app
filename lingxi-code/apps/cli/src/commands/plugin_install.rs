@@ -128,6 +128,11 @@ fn marketplace_entry_source_path(
     };
     let entry = serde_json::from_value::<plugin::marketplace::MarketplacePluginEntry>(raw_entry)
         .map_err(|error| format!("Invalid marketplace entry for \"{name}\": {error}"))?;
+    // §8: the catalog's own declared entry name is third-party-controlled the
+    // moment the marketplace is; install is one of the paths the finding
+    // calls out as never calling the name gate at all.
+    plugin::validate_plugin_name(&entry.name)
+        .map_err(|reason| format!("Invalid marketplace entry for \"{name}\": {reason}"))?;
     if let Some(MarketplacePluginSource::Structured(source)) = entry.source.as_ref() {
         match source {
             MarketplaceExternalSource::Github { .. }
@@ -2864,6 +2869,36 @@ mod tests {
         assert_eq!(
             msg,
             "Installing plugin \"hello@mymkt\"...✔ Plugin \"hello@mymkt\" is already installed (scope: user)"
+        );
+    }
+
+    /// §8: install previously never called the name gate at all — a
+    /// marketplace catalog entry declaring a space/control/bidi-laden `name`
+    /// materialized without complaint. Reproduces via a bare-relative source
+    /// entry, the simplest catalog shape.
+    #[test]
+    fn install_rejects_a_catalog_entry_with_an_invalid_name() {
+        let e = env();
+        let manifest = e
+            .market
+            .join(branding::PLUGIN_MANIFEST_DIR)
+            .join("marketplace.json");
+        std::fs::write(
+            &manifest,
+            r#"{"name":"mymkt","owner":{"name":"me"},"plugins":[
+                {"name":"hello","source":"./plugins/hello"},
+                {"name":"bad name","source":"./plugins/hello"}
+            ]}"#,
+        )
+        .unwrap();
+
+        let err = run_install("bad name@mymkt", None, &[], &e.plugins, &e.home, &e.cwd)
+            .unwrap_err();
+        assert_eq!(
+            err,
+            "Installing plugin \"bad name@mymkt\"...✘ Failed to install plugin \"bad name@mymkt\": \
+             Invalid marketplace entry for \"bad name\": Plugin name cannot contain spaces. \
+             Use kebab-case (e.g., \"my-plugin\")"
         );
     }
 

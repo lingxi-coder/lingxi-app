@@ -769,6 +769,271 @@ pub(crate) fn sanitize_segment(s: &str, allow_dot: bool) -> String {
     }
 }
 
+/// Oracle `yt` (2.1.251, `@~154669075`):
+/// `/[\p{Cc}\u200E\u200F\u202A-\u202E\u2066-\u2069]/u` — Unicode control
+/// characters plus the bidi-formatting marks/embeddings/isolates a name has no
+/// legitimate reason to carry (LRM/RLM, LRE/RLE/PDF/LRO/RLO, LRI/RLI/FSI/PDI).
+/// Shared by both the plugin- and marketplace-name validators below.
+fn control_or_bidi_regex() -> &'static regex::Regex {
+    static RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    RE.get_or_init(|| {
+        regex::Regex::new(r"[\p{Cc}\u{200E}\u{200F}\u{202A}-\u{202E}\u{2066}-\u{2069}]")
+            .expect("control/bidi regex is valid")
+    })
+}
+
+/// Standalone predicate over the same oracle `yt` character class, for a
+/// caller (e.g. `plugin init`'s own pre-existing path-safety guard) that
+/// wants just this one check without the rest of [`validate_plugin_name`]'s
+/// chain (which would also start enforcing the no-spaces rule this port's
+/// `plugin init` has never applied to a CLI-typed name).
+#[must_use]
+pub fn has_control_or_bidi_formatting(name: &str) -> bool {
+    control_or_bidi_regex().is_match(name)
+}
+
+/// Oracle `se` (`schemas.ts`): the plugin-name validator (2.1.247 hardening +
+/// the 2.1.201-era empty/space checks). Ported previously ONLY on the
+/// authoring path (`plugin tag`/`plugin init`); §8 wires it into the actual
+/// manifest LOAD path ([`load_plugin_from_path_with_mcp_gate`]) so a
+/// malformed name — including a bidi/control-character name crafted to spoof
+/// another plugin in `plugin list` output — is rejected instead of trusted
+/// verbatim.
+pub fn validate_plugin_name(name: &str) -> Result<(), String> {
+    if name.is_empty() {
+        return Err("Plugin name cannot be empty".to_string());
+    }
+    if name.contains(' ') {
+        return Err(
+            "Plugin name cannot contain spaces. Use kebab-case (e.g., \"my-plugin\")".to_string(),
+        );
+    }
+    if control_or_bidi_regex().is_match(name) {
+        return Err(
+            "Plugin name cannot contain control or bidirectional-formatting characters"
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
+/// Marketplace names literally reserved for Anthropic's own catalogs (oracle
+/// `goe`, the union of `Kqt` ∪ `lYe`). Exact (case-insensitive) membership
+/// here EXEMPTS a name from the impersonation check below — the oracle
+/// enforces that these specific names may only be registered from an
+/// `anthropics/*` GitHub/git source elsewhere (`validateOfficialNameSource`,
+/// §16), which is deferred alongside the `command` plugin-entry source this
+/// port does not yet have.
+const RESERVED_OFFICIAL_MARKETPLACE_NAMES: &[&str] = &[
+    "claude-code-marketplace",
+    "claude-code-plugins",
+    "claude-plugins-official",
+    "anthropic-marketplace",
+    "anthropic-plugins",
+    "agent-skills",
+    "anthropic-agent-skills",
+    "life-sciences",
+    "knowledge-work-plugins",
+    "claude-for-legal",
+    "claude-for-financial-services",
+    "financial-services-plugins",
+    "first-party-plugins",
+    "claude-community",
+    "claude-plugins-community",
+    "healthcare",
+];
+
+/// Oracle `ws` (2.1.251): case-insensitive impersonation pattern —
+/// `/(?:official[^a-z0-9]*(anthropic|claude)|(?:anthropic|claude)[^a-z0-9]*official|^(?:anthropic|claude)[^a-z0-9]*(marketplace|plugins|official))/i`.
+fn impersonation_regex() -> &'static regex::Regex {
+    static RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    RE.get_or_init(|| {
+        regex::RegexBuilder::new(
+            r"(?:official[^a-z0-9]*(anthropic|claude)|(?:anthropic|claude)[^a-z0-9]*official|^(?:anthropic|claude)[^a-z0-9]*(marketplace|plugins|official))",
+        )
+        .case_insensitive(true)
+        .build()
+        .expect("impersonation regex is valid")
+    })
+}
+
+/// Oracle `RAn(e)` (2.1.251): a reserved literal name (exact, case-insensitive
+/// match against [`RESERVED_OFFICIAL_MARKETPLACE_NAMES`]) is never flagged
+/// here (its legitimacy is judged by source instead, §16); otherwise ANY
+/// non-printable-ASCII character (`Ps`: `/[^ -~]/`, a broader net
+/// than the control/bidi check above — it also catches homoglyph/Unicode
+/// impersonation attempts) or the impersonation pattern itself is a match.
+fn is_impersonating_official_marketplace(name: &str) -> bool {
+    if RESERVED_OFFICIAL_MARKETPLACE_NAMES.contains(&name.to_ascii_lowercase().as_str()) {
+        return false;
+    }
+    if name.chars().any(|c| !(' '..='~').contains(&c)) {
+        return true;
+    }
+    impersonation_regex().is_match(name)
+}
+
+/// Names reserved for this port's internal scope kinds (oracle `lt`: `inline`
+/// / `builtin` / `skills-dir` / `synced`) — a marketplace cannot be
+/// registered under one of these literally, since they identify where a
+/// plugin *record* came from rather than a real catalog.
+fn reserved_internal_scope_description(name: &str) -> Option<&'static str> {
+    match name {
+        "inline" => Some("--plugin-dir session plugins"),
+        "builtin" => Some("built-in plugins"),
+        "skills-dir" => Some("plugins auto-loaded from .claude/skills/"),
+        "synced" => Some("plugins synced from your claude.ai account"),
+        _ => None,
+    }
+}
+
+/// Oracle `ut` (`schemas.ts`): the marketplace-name validator. Ported
+/// previously nowhere at all — §8's structural gap is that discovery,
+/// install, and marketplace ingestion never called it. Wired into
+/// `plugin_marketplace::run_add`'s three admission paths (directory / github+
+/// git clone / hosted URL), all of which resolve to a THIRD-PARTY-CONTROLLED
+/// name (the local `marketplace.json`'s own `name` field, or the cloned/
+/// fetched catalog's declared name) before it is written to the registry.
+pub fn validate_marketplace_name(name: &str) -> Result<(), String> {
+    if name.is_empty() {
+        return Err("Marketplace must have a name".to_string());
+    }
+    if name.contains(' ') {
+        return Err(
+            "Marketplace name cannot contain spaces. Use kebab-case (e.g., \"my-marketplace\")"
+                .to_string(),
+        );
+    }
+    if control_or_bidi_regex().is_match(name) {
+        return Err(
+            "Marketplace name cannot contain control or bidirectional-formatting characters"
+                .to_string(),
+        );
+    }
+    if name.contains('/') || name.contains('\\') || name.contains("..") || name == "." {
+        return Err(
+            "Marketplace name cannot contain path separators (/ or \\), \"..\" sequences, or be \".\""
+                .to_string(),
+        );
+    }
+    if is_impersonating_official_marketplace(name) {
+        return Err(
+            "Marketplace name impersonates an official Anthropic/Claude marketplace".to_string(),
+        );
+    }
+    let lower = name.to_ascii_lowercase();
+    if let Some(kind) = reserved_internal_scope_description(&lower) {
+        return Err(format!("Marketplace name \"{lower}\" is reserved for {kind}"));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod name_validation_tests {
+    use super::*;
+
+    #[test]
+    fn plugin_name_rejects_empty_spaces_and_control_bidi() {
+        assert_eq!(
+            validate_plugin_name(""),
+            Err("Plugin name cannot be empty".to_string())
+        );
+        assert_eq!(
+            validate_plugin_name("my plugin"),
+            Err(
+                "Plugin name cannot contain spaces. Use kebab-case (e.g., \"my-plugin\")"
+                    .to_string()
+            )
+        );
+        assert_eq!(
+            validate_plugin_name("my-plugin\u{202E}evil"),
+            Err(
+                "Plugin name cannot contain control or bidirectional-formatting characters"
+                    .to_string()
+            )
+        );
+        assert_eq!(
+            validate_plugin_name("my-plugin\u{0007}"),
+            Err(
+                "Plugin name cannot contain control or bidirectional-formatting characters"
+                    .to_string()
+            )
+        );
+        assert!(validate_plugin_name("my-plugin").is_ok());
+    }
+
+    #[test]
+    fn marketplace_name_rejects_empty_spaces_control_bidi_and_path_segments() {
+        assert_eq!(
+            validate_marketplace_name(""),
+            Err("Marketplace must have a name".to_string())
+        );
+        assert_eq!(
+            validate_marketplace_name("my market"),
+            Err(
+                "Marketplace name cannot contain spaces. Use kebab-case (e.g., \"my-marketplace\")"
+                    .to_string()
+            )
+        );
+        assert_eq!(
+            validate_marketplace_name("evil\u{200E}name"),
+            Err(
+                "Marketplace name cannot contain control or bidirectional-formatting characters"
+                    .to_string()
+            )
+        );
+        for bad in ["a/b", "a\\b", "a..b", "."] {
+            assert_eq!(
+                validate_marketplace_name(bad),
+                Err(
+                    "Marketplace name cannot contain path separators (/ or \\), \"..\" sequences, or be \".\""
+                        .to_string()
+                ),
+                "expected {bad:?} to be rejected"
+            );
+        }
+        assert!(validate_marketplace_name("my-marketplace").is_ok());
+    }
+
+    #[test]
+    fn marketplace_name_rejects_impersonation_of_an_official_marketplace() {
+        for bad in [
+            "anthropic-official",
+            "claude-official-store",
+            "official-anthropic-tools",
+            "anthropic-marketplace-mirror",
+            "claude-plugins",
+        ] {
+            assert_eq!(
+                validate_marketplace_name(bad),
+                Err("Marketplace name impersonates an official Anthropic/Claude marketplace"
+                    .to_string()),
+                "expected {bad:?} to be rejected as impersonation"
+            );
+        }
+        // An exact reserved literal is exempted HERE (judged by source instead).
+        assert!(validate_marketplace_name("claude-code-marketplace").is_ok());
+        // An ordinary name mentioning neither anthropic nor claude is fine.
+        assert!(validate_marketplace_name("acme-plugins").is_ok());
+    }
+
+    #[test]
+    fn marketplace_name_rejects_reserved_internal_scope_names() {
+        assert_eq!(
+            validate_marketplace_name("inline"),
+            Err("Marketplace name \"inline\" is reserved for --plugin-dir session plugins"
+                .to_string())
+        );
+        assert_eq!(
+            validate_marketplace_name("SKILLS-DIR"),
+            Err(
+                "Marketplace name \"skills-dir\" is reserved for plugins auto-loaded from .claude/skills/"
+                    .to_string()
+            )
+        );
+    }
+}
+
 /// Discover the plugins enabled by the `enabledPlugins` allowlist against the
 /// REAL claude-code on-disk layout.
 ///
@@ -1236,6 +1501,18 @@ pub(crate) async fn load_plugin_from_path_with_mcp_gate(
             return None;
         }
     };
+    // §8: the name validator previously existed only on the authoring path
+    // (`plugin tag`/`plugin init`); the actual LOAD path never called it, so a
+    // manifest with an empty/space-containing/bidi-spoofed `name` was trusted
+    // verbatim into `plugin list` and every downstream cache-path segment.
+    if let Err(reason) = validate_plugin_name(&parsed.name) {
+        tracing::warn!(
+            reason = %reason,
+            path = %manifest_path.display(),
+            "skipping plugin with an invalid name"
+        );
+        return None;
+    }
 
     let id = PluginId::new();
     let source = PluginSource::LocalPath {
@@ -2852,6 +3129,30 @@ mod tests {
                 "missing {missing:?} must sink the whole manifest, not just the field"
             );
         }
+    }
+
+    /// §8: the load path — NOT just `plugin tag`/`plugin init` — must reject a
+    /// manifest whose declared `name` fails the shared oracle validator (here,
+    /// a space; the other failure modes are unit-tested directly against
+    /// [`validate_plugin_name`] above).
+    #[tokio::test]
+    async fn load_path_skips_a_manifest_with_an_invalid_name() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin = tmp.path();
+        fs::create_dir_all(plugin.join(branding::PLUGIN_MANIFEST_DIR)).unwrap();
+        fs::write(
+            plugin
+                .join(branding::PLUGIN_MANIFEST_DIR)
+                .join("plugin.json"),
+            r#"{"name":"my plugin"}"#,
+        )
+        .unwrap();
+
+        assert!(
+            load_plugin_from_path(plugin).await.is_none(),
+            "a space-containing name must sink the whole manifest at the LOAD path, \
+             not just at `plugin tag`/`plugin init`"
+        );
     }
 
     /// Oracle `gt`'s `type` is a fixed enum (`string`/`number`/`boolean`/

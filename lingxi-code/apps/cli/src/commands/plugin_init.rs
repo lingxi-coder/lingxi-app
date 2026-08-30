@@ -364,6 +364,15 @@ pub fn run_init(
              (/ or \\), \"..\" sequences, or be \".\""
         ));
     }
+    // §8 (the 2.1.247 hardening, oracle `se`'s `yt`-backed refine): a name
+    // built from Unicode control/bidi-formatting characters could visually
+    // spoof a different plugin name once scaffolded and later listed.
+    if plugin::has_control_or_bidi_formatting(name) {
+        return Err(format!(
+            "✘ Invalid plugin name \"{name}\": Plugin name cannot contain control or \
+             bidirectional-formatting characters"
+        ));
+    }
 
     // Validate `--with` components up-front (before touching the filesystem), so
     // an unknown name errors cleanly and scaffolds nothing — matching the binary.
@@ -760,6 +769,23 @@ mod tests {
         // Nothing escaped the skills dir.
         assert!(!e.home.join("pwned").exists());
         assert!(!e.home.join("skills").join("a").exists());
+    }
+
+    /// §8 (the 2.1.247 hardening): a bidi-formatting character in a
+    /// scaffolded plugin name was accepted nowhere in this port before now.
+    #[test]
+    fn init_rejects_bidi_formatting_name() {
+        let e = env();
+        let bad = "evil\u{202E}reversed";
+        let err = run_init(bad, Some("A"), Some("a@b"), None, false, &[], &e.home).unwrap_err();
+        assert_eq!(
+            err,
+            format!(
+                "✘ Invalid plugin name \"{bad}\": Plugin name cannot contain control or \
+                 bidirectional-formatting characters"
+            )
+        );
+        assert!(!e.home.join("skills").join(bad).exists());
     }
 
     #[test]

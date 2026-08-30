@@ -635,6 +635,12 @@ fn add_directory(
             manifest_path.display()
         ));
     }
+    // §8: the name gate previously existed only on the authoring path
+    // (`plugin tag`/`plugin init`) — marketplace ingestion never called it, so
+    // a local `marketplace.json` naming itself e.g. `claude-official` (or
+    // carrying a bidi-spoofed name) registered without complaint.
+    plugin::validate_marketplace_name(&name)
+        .map_err(|reason| format!("Adding marketplace…✘ Failed to add marketplace: {reason}"))?;
     let identity = MarketplaceSourceIdentity::Directory {
         path: abs.display().to_string(),
     };
@@ -676,6 +682,15 @@ fn add_remote(
         Source::Url { url } => {
             let (name, staged_catalog) = fetch_hosted_marketplace(plugins_dir, url)
                 .map_err(|e| format!("Adding marketplace…✘ Failed to add marketplace: {e}"))?;
+            // §8: the hosted catalog's declared `name` is fully attacker-
+            // controlled (this fetch has no relationship to `<source>`'s own
+            // host); validate it before it can be registered.
+            if let Err(reason) = plugin::validate_marketplace_name(&name) {
+                let _ = std::fs::remove_dir_all(&staged_catalog);
+                return Err(format!(
+                    "Adding marketplace…✘ Failed to add marketplace: {reason}"
+                ));
+            }
             let identity = source_identity(remote);
             if let Err(reason) =
                 plugin_policy::ensure_marketplace_source_allowed(Some(&name), Some(&identity))
@@ -707,6 +722,15 @@ fn add_remote(
     // From here the "Adding marketplace…" progress prefix is part of the line.
     let (name, staged_clone) = clone_marketplace(plugins_dir, &clone_url, &hint, git_ref, sparse)
         .map_err(|e| format!("Adding marketplace…✘ Failed to add marketplace: {e}"))?;
+    // §8: the cloned catalog's declared `name` is attacker-controlled the
+    // moment `<source>` names a repo the caller doesn't own; validate it
+    // before it can be registered.
+    if let Err(reason) = plugin::validate_marketplace_name(&name) {
+        let _ = std::fs::remove_dir_all(&staged_clone);
+        return Err(format!(
+            "Adding marketplace…✘ Failed to add marketplace: {reason}"
+        ));
+    }
     let identity = source_identity(remote);
     if let Err(reason) =
         plugin_policy::ensure_marketplace_source_allowed(Some(&name), Some(&identity))
@@ -1488,6 +1512,33 @@ mod tests {
         assert_eq!(
             user["extraKnownMarketplaces"]["mymkt"],
             json!({"source": {"source": "directory", "path": abs}})
+        );
+    }
+
+    /// §8: marketplace ingestion previously never called the name gate at
+    /// all — a local `marketplace.json` naming itself after an official
+    /// Anthropic catalog registered without complaint.
+    #[test]
+    fn add_directory_rejects_a_marketplace_json_impersonating_an_official_catalog() {
+        let e = full_env();
+        std::fs::write(
+            e.market
+                .join(branding::PLUGIN_MANIFEST_DIR)
+                .join("marketplace.json"),
+            r#"{"name":"anthropic-official","owner":{"name":"me"},"plugins":[]}"#,
+        )
+        .unwrap();
+        let src = e.market.to_string_lossy().to_string();
+
+        let err = run_add(&src, None, &[], &e.plugins, &e.home, &e.cwd).unwrap_err();
+        assert_eq!(
+            err,
+            "Adding marketplace…✘ Failed to add marketplace: Marketplace name impersonates an \
+             official Anthropic/Claude marketplace"
+        );
+        assert!(
+            !e.plugins.join("known_marketplaces.json").exists(),
+            "a rejected name must never reach the registry"
         );
     }
 

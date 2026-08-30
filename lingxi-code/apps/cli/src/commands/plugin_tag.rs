@@ -91,14 +91,14 @@ fn run_tag_from_cwd(
     // --- (3) hard validation (short-circuits before warnings) ---
     let mut issues: Vec<String> = Vec::new();
     match value.get("name") {
-        Some(Value::String(s)) if s.is_empty() => {
-            issues.push("name: Plugin name cannot be empty".to_string());
+        // §8: reuse the shared oracle `se` validator (empty / spaces / the
+        // 2.1.247 control-and-bidirectional-formatting-character hardening)
+        // instead of re-deriving the same three checks here.
+        Some(Value::String(s)) => {
+            if let Err(reason) = plugin::validate_plugin_name(s) {
+                issues.push(format!("name: {reason}"));
+            }
         }
-        Some(Value::String(s)) if s.contains(' ') => issues.push(
-            "name: Plugin name cannot contain spaces. Use kebab-case (e.g., \"my-plugin\")"
-                .to_string(),
-        ),
-        Some(Value::String(_)) => {}
         other => issues.push(format!(
             "name: Invalid input: expected string, received {}",
             json_type(other)
@@ -931,6 +931,25 @@ mod tests {
         );
         // No warnings before a hard validation failure.
         assert!(!err.contains('⚠'), "{err}");
+    }
+
+    /// §8 (the 2.1.247 hardening): the shared oracle `se` validator now backs
+    /// this hard-validation arm, so a bidi-formatting name is rejected here
+    /// too, not just on the load path.
+    #[test]
+    fn name_control_bidi_validation_short_circuits() {
+        let r = repo_with(
+            "{ \"name\": \"evil\u{202E}reversed\", \"version\":\"1.0.0\" }",
+        );
+        let err = run_tag_from_cwd(&r.root, None, false, false, None, false, "origin").unwrap_err();
+        assert!(err.starts_with("✘ Plugin validation failed for "), "{err}");
+        assert!(
+            err.ends_with(
+                ":\n  name: Plugin name cannot contain control or bidirectional-formatting \
+                 characters"
+            ),
+            "{err}"
+        );
     }
 
     #[test]

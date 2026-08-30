@@ -91,7 +91,7 @@
       "deps": [
         "P0a.1"
       ],
-      "notes": "plugin/src/{manifest,discovery,manager}.rs were all touched by a003aba66 (plugin LSP-server support, which added lsp_servers: IndexMap<String, LspServerConfig> to PluginManifest). Re-read them at lap/baseline rather than working from any earlier reading."
+      "notes": "plugin/src/{manifest,discovery,manager}.rs were all touched by a003aba66 (plugin LSP-server support, which added lsp_servers: IndexMap<String, LspServerConfig> to PluginManifest). Re-read them at lap/baseline rather than working from any earlier reading.\n\nRE-GROUNDED before the batch started: PluginComponents still has NO `workflows` field (0 hits for `pub workflows` in plugin/src/manifest.rs). The seven slots are commands, agents, skills, output_styles, hooks, mcp_servers, lsp_servers — the last added by a003aba66's LSP work, which also reshaped manifest.rs, discovery.rs and manager.rs. Read them at current HEAD, not from any earlier note."
     },
     {
       "id": "P0a.3",
@@ -217,7 +217,7 @@
       "deps": [
         "P0a.5"
       ],
-      "notes": "§19.1's 'install(BuiltIn) keeps rejecting' is ALREADY GREEN at baseline (§22 records it as an existing fact), so on its own it is not a gate — the design's own rule. The gate here is the conjunction: reject still holds AND the new entry point registers AND stamps the source. Assert all three or this row is decorative."
+      "notes": "§19.1's 'install(BuiltIn) keeps rejecting' is ALREADY GREEN at baseline (§22 records it as an existing fact), so on its own it is not a gate — the design's own rule. The gate here is the conjunction: reject still holds AND the new entry point registers AND stamps the source. Assert all three or this row is decorative.\n\nRE-GROUNDED: `register_verified_builtin` does not exist yet (0 hits in plugin/src/manager.rs). Real work, not a rename."
     },
     {
       "id": "P0a.7",
@@ -248,7 +248,7 @@
       "deps": [
         "P0a.6"
       ],
-      "notes": "GREENFIELD, and the phase text calls it one bullet. plugin/ at lap/baseline has 70 tests, NO fixture directory, and NO brand normalization of any kind; every test builds its tree at runtime in a TempDir, and the literal \".lingxi-plugin\" is hardcoded across ~20 sites. The normalization layer itself is the work; the fixtures are downstream of it."
+      "notes": "GREENFIELD, and the phase text calls it one bullet. plugin/ at lap/baseline has 70 tests, NO fixture directory, and NO brand normalization of any kind; every test builds its tree at runtime in a TempDir, and the literal \".lingxi-plugin\" is hardcoded across ~20 sites. The normalization layer itself is the work; the fixtures are downstream of it.\n\nRE-GROUNDED: plugin/tests/ holds three files and NO fixtures directory. §19.1's brand-normalized oracle fixtures are greenfield including the normalization layer, exactly as recorded. Plugin crate baseline is now 74 tests, not the 70 measured at lap/baseline — the LSP commit added four."
     },
     {
       "id": "P0a.8",

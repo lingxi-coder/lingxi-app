@@ -516,10 +516,13 @@ G1	lingxi-code/platforms/posix/tests/process_spawn_env_test.rs	LINGXI
 G1	lingxi-code/platforms/pty/Cargo.toml	LingXi
 G1	lingxi-code/platforms/windows/src/process/runner.rs	LINGXI
 G1	lingxi-code/platforms/windows/src/worktree.rs	\.lingxi
+G1	lingxi-code/plugin/src/brand_normalize.rs	LingXi
 G1	lingxi-code/plugin/src/manager.rs	LINGXI
 G1	lingxi-code/plugin/src/manager.rs	\.lingxi
 G1	lingxi-code/plugin/tests/discovery_bootstrap.rs	\.lingxi
 G1	lingxi-code/plugin/tests/enabled_discovery.rs	\.lingxi
+G1	lingxi-code/plugin/tests/fixtures/brand-normalize-sample/.lingxi-plugin/plugin.json	LINGXI
+G1	lingxi-code/plugin/tests/fixtures/oracle-parity-sample/.lingxi-plugin/plugin.json	LINGXI
 G1	lingxi-code/plugin/tests/materialize.rs	LINGXI
 G1	lingxi-code/plugin/tests/materialize.rs	\.lingxi
 G1	lingxi-code/plugins/lingxi-local-app/skills/device/SKILL.md	\.lingxi
@@ -1135,6 +1138,7 @@ G3	lingxi-code/platforms/posix/src/worktree.rs	.lingxi
 G3	lingxi-code/platforms/posix/src/worktree_tmux.rs	.lingxi
 G3	lingxi-code/platforms/posix/tests/keychain_macos_service_name_test.rs	.lingxi
 G3	lingxi-code/platforms/windows/src/worktree.rs	.lingxi
+G3	lingxi-code/plugin/src/brand_normalize.rs	.lingxi
 G3	lingxi-code/plugin/src/manager.rs	.lingxi-plugin
 G3	lingxi-code/plugin/tests/discovery_bootstrap.rs	.lingxi-plugin
 G3	lingxi-code/plugin/tests/enabled_discovery.rs	.lingxi-plugin

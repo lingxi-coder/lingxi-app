@@ -16301,6 +16301,532 @@ mod tests {
             cat.iter().map(|d| &d.agent_type).collect::<Vec<_>>()
         );
     }
+
+    // ── P0a.9 — the desktop third-party plugin regression baseline ───────────
+
+    /// Write a versioned-cache plugin (`plugins/cache/{mkt}/{name}/{version}/`)
+    /// shipping every component type `PluginManager::enable` materializes —
+    /// commands, a skill (`skills/<dir>/SKILL.md`), a benign agent, an
+    /// `output-styles/*.md` style, a `hooks/hooks.json` hook, a `.mcp.json`
+    /// server, and a `.lsp.json` server — plus a `workflows/` script for the
+    /// P0a-new slot that discovery populates but (see the required test
+    /// below) nothing at the desktop composition root yet materializes.
+    ///
+    /// ⚠️ Fixture invariant, load-bearing for the test below: wherever a
+    /// component's registered name and its filename/directory are separate
+    /// axes, this fixture spells them DIFFERENTLY. Making them agree would
+    /// silently weaken every one of those assertions.
+    fn write_full_component_third_party_plugin(
+        plugins_dir: &std::path::Path,
+        marketplace: &str,
+        name: &str,
+        version: &str,
+    ) -> std::path::PathBuf {
+        let dir = plugins_dir
+            .join("cache")
+            .join(marketplace)
+            .join(name)
+            .join(version);
+        std::fs::create_dir_all(dir.join(".lingxi-plugin")).unwrap();
+        std::fs::write(
+            dir.join(".lingxi-plugin").join("plugin.json"),
+            format!(r#"{{"name":"{name}","version":"{version}"}}"#),
+        )
+        .unwrap();
+
+        // Commands.
+        std::fs::create_dir_all(dir.join("commands")).unwrap();
+        std::fs::write(
+            dir.join("commands").join("hello.md"),
+            "---\ndescription: says hello\n---\nHello from the plugin.\n",
+        )
+        .unwrap();
+
+        // Skills — `skills/<dir>/SKILL.md` layout. The registered name comes
+        // from the FRONTMATTER `name` (`skill_api::parse_skill_markdown` reads
+        // `fm.name`), NOT from the containing directory, so the two are
+        // deliberately DIFFERENT here (`greeter/` vs `politegreeter`): a
+        // fixture that spelled them identically would pass just as happily if
+        // the loader keyed on the directory, and the test below asserts the
+        // directory-derived name is ABSENT as its negative control.
+        std::fs::create_dir_all(dir.join("skills").join("greeter")).unwrap();
+        std::fs::write(
+            dir.join("skills").join("greeter").join("SKILL.md"),
+            "---\nname: politegreeter\ndescription: greets people\n---\nBody of the greeter skill.\n",
+        )
+        .unwrap();
+
+        // Agents — benign, no privileged frontmatter (that boundary is
+        // already pinned by
+        // `plugin_runtime_refresh_strips_agent_escalation_from_live_catalog`
+        // above; re-testing it here would only dilute this test's own
+        // per-component focus). Same axis discipline as skills: the catalog
+        // `agent_type` comes from the frontmatter `name`
+        // (`agent::parse_agent_markdown`), not the file stem, so the file is
+        // `helper.md` while the declared name is `sidekick`.
+        std::fs::create_dir_all(dir.join("agents")).unwrap();
+        std::fs::write(
+            dir.join("agents").join("helper.md"),
+            "---\nname: sidekick\ndescription: a benign helper\n---\nI help.\n",
+        )
+        .unwrap();
+
+        // Output styles — `output-styles/*.md`, the eighth component slot the
+        // composition root wires a plugin registry for. Same axis discipline:
+        // `parse_output_style` takes the file stem only as a FALLBACK
+        // (`fm.name.unwrap_or_else(|| stem)`), so the fixture's stem
+        // (`terse`) and its frontmatter `name` (`laconic`) differ.
+        std::fs::create_dir_all(dir.join("output-styles")).unwrap();
+        std::fs::write(
+            dir.join("output-styles").join("terse.md"),
+            "---\nname: laconic\ndescription: fewer words\n---\nBe brief.\n",
+        )
+        .unwrap();
+
+        // Hooks — `hooks/hooks.json`, the standard settings-shaped wrapper
+        // (`{"hooks": <HooksSettings>}`).
+        std::fs::create_dir_all(dir.join("hooks")).unwrap();
+        std::fs::write(
+            dir.join("hooks").join("hooks.json"),
+            r#"{"hooks":{"PreToolUse":[{"matcher":"Write","hooks":[{"type":"command","command":"echo ACME_HOOK_MARKER"}]}]}}"#,
+        )
+        .unwrap();
+
+        // MCP server — same shape `materialize.rs`'s
+        // `enable_materializes_skill_outputstyle_mcp_lsp_into_live_registries`
+        // uses: a real executable (`echo`) that is not itself an MCP server,
+        // so the handshake fails fast and `connect_all` still records a
+        // scoped, non-inert connection-state entry — proving the connect
+        // path was invoked without needing a real MCP server binary.
+        std::fs::write(
+            dir.join(".mcp.json"),
+            r#"{"mcpServers":{"echo":{"command":"echo","args":["hi"]}}}"#,
+        )
+        .unwrap();
+
+        // LSP server — public camelCase schema. `extensionToLanguage` is
+        // REQUIRED for `validate_lsp_config` to accept the record at all (an
+        // empty map is silently dropped, not just under-specified), so it is
+        // not optional decoration here. Registration only seeds a
+        // `Disconnected` config; it does not spawn anything.
+        std::fs::write(
+            dir.join(".lsp.json"),
+            r#"{"pyls":{"command":"echo","args":["--stdio"],"extensionToLanguage":{".py":"python"}}}"#,
+        )
+        .unwrap();
+
+        // Workflows — the P0a-new slot. `detect_components` populates
+        // `PluginManifest::components.workflows` for this by default-
+        // directory discovery, same as commands/agents/skills.
+        //
+        // ⚠️ The file stem and the script's `meta.name` are deliberately
+        // DIFFERENT (`build.js` vs `assemble`). `plugin/src/workflow.rs`'s own
+        // module doc states the rule this pins: workflow namespacing is
+        // "`<plugin-name>:<meta.name>` … by the script's OWN claimed
+        // `meta.name`, not by its filename, unlike commands/agents/skills".
+        // With both spelled `build` the assertion below would be satisfied by
+        // a filename-derived stand-in name — exactly the fallback
+        // `WorkflowInventoryEntry`'s doc says must NOT exist — so the fixture
+        // must vary along the axis the code actually reads.
+        std::fs::create_dir_all(dir.join("workflows")).unwrap();
+        std::fs::write(
+            dir.join("workflows").join("build.js"),
+            "export const meta = {\n  name: 'assemble',\n  description: 'd',\n};\n",
+        )
+        .unwrap();
+
+        dir
+    }
+
+    /// §19.11 / P0a.9 — desktop is the only product that actually runs
+    /// third-party plugins, and Phase 0a changed the whole generic
+    /// `plugin/` regression surface underneath it (the workflows slot,
+    /// warn-and-strip agent privileges, `register_verified_builtin`'s
+    /// second door). This test loads ONE plugin shipping every component
+    /// type desktop supports, through the SAME two seams the real bootstrap
+    /// uses — `discover_plugin_set` → `PluginManager::enable`, here via
+    /// `PluginRuntime::refresh` exactly like the three tests above — wired
+    /// to the same registry shapes `lib.rs`'s §6.5 composition-root block
+    /// wires (`with_agent_catalog`, the manager's own command / skill /
+    /// hook / output-style / MCP / LSP registries), and asserts each
+    /// component reaches ITS OWN live registry by the fixture's own
+    /// identifier (command/skill/agent name, a hook command marker, the
+    /// MCP/LSP scoped server name) — never a single "registries are
+    /// non-empty" check, so a regression in any ONE materialization path
+    /// can only fail that component's assertion.
+    ///
+    /// ## Why each assertion below is individually load-bearing
+    ///
+    /// Verified empirically, one plant per component — each mutating the
+    /// fixture along the AXIS that component's loader actually reads (not
+    /// merely deleting the file, which any presence check would catch), each
+    /// reverted afterwards with the file confirmed byte-identical:
+    ///
+    /// | component | plant | the named failure |
+    /// |---|---|---|
+    /// | commands  | `commands/hello.md` → `unrelated.md` | "the plugin's command must reach the live command registry as `acmeplugin:hello`" |
+    /// | skills    | frontmatter `name: politegreeter` → `greeter` (= the dir name) | "…under its frontmatter name; registry holds `["acmeplugin:greeter"]`" |
+    /// | agents    | frontmatter `name: sidekick` → `helper` (= the file stem) | "…under its frontmatter name; catalog holds `["acmeplugin:helper"]`" |
+    /// | hooks     | `"matcher":"Write"` → `"*"` | "the plugin hook's tool-name matcher must be the fixture's `Write`" |
+    /// | MCP       | server `"disabled": true` | "…must have gone through the live connect_all path (not … the inert `Disconnected{last_error:None}` seed)" |
+    /// | LSP       | drop `extensionToLanguage` (`validate_lsp_config` then silently drops the record) | "the plugin's LSP server must reach the live LSP registry as `plugin:acmeplugin:pyls`" |
+    /// | workflows | `meta.name: 'assemble'` → `'build'` (= the file stem) | "…must namespace to acmeplugin:assemble (NOT the file stem `build`)" |
+    /// | output styles | frontmatter `name: laconic` → `terse` (= the file stem) | "the plugin's output style must reach the live output-style registry under its frontmatter name" |
+    ///
+    /// Four of those plants exist only because the fixture is built to make
+    /// them possible: a skill's directory name, an agent's file stem, an
+    /// output style's file stem and a workflow's file stem are each spelled
+    /// DIFFERENTLY from the name its loader actually reads, so an assertion
+    /// cannot be satisfied by a loader keying on the wrong one. (Commands are
+    /// the exception on purpose — there the file stem IS the axis, and the
+    /// fixture declares no frontmatter `name` to compete with it.)
+    ///
+    /// The three `is_none()` checks below are the matching negative controls,
+    /// guarding the ADDITIVE failure the positives cannot see: a loader
+    /// registering the component under BOTH names. Each was itself verified to
+    /// fire — planting a second skill dir / agent file / output-style file
+    /// that claims the wrong-axis name leaves the positive assertion green and
+    /// turns only the negative control red ("registry holds
+    /// `["acmeplugin:greeter", "acmeplugin:politegreeter"]`").
+    ///
+    /// ## What this test does NOT cover — the honest boundary
+    ///
+    /// §19.11 and this project's plan both record that a human loading a
+    /// REAL third-party plugin is the actual check, and this machine test is
+    /// the last cheap abort point before Phase 1. Concretely, still open:
+    ///
+    /// 1. **Workflows have no live registry to reach.** Unlike the other
+    ///    seven components, `PluginManager::load_plugin` never reads
+    ///    `manifest.components.workflows` at all (`grep -c
+    ///    'components.workflows' plugin/src/manager.rs` → 0), and no
+    ///    PRODUCTION code under `apps/engine-desktop` calls
+    ///    `plugin::build_plugin_workflow_inventory`,
+    ///    `plugin::resolve_named_workflow`, or constructs a
+    ///    `plugin::VerifiedWorkflowHandle` — the only caller of any of the
+    ///    three in this file is the assertion at the bottom of this test. `plugin/src/manifest.rs`'s own
+    ///    doc comment says it plainly: "except for `workflows`, which
+    ///    discovery populates but nothing materializes yet." So there is no
+    ///    live workflow registry for this test to assert against — claiming
+    ///    one would be testing a registry that does not exist. The honest
+    ///    claim below is narrower: the exact `PluginManifest` the
+    ///    composition root's bootstrap loop hands to `pm.enable()` carries
+    ///    the shipped script in `components.workflows`, and the `plugin`
+    ///    crate's own next-layer function (`build_plugin_workflow_inventory`)
+    ///    turns it into a correctly namespaced inventory entry — i.e. the
+    ///    data survives all the way to the composition root's front door.
+    ///    It proves nothing about what happens past that door, because
+    ///    nothing happens past that door today.
+    /// 2. **The skill registry this test observes is not wired to anything
+    ///    else even in production.** `lib.rs`'s §6.5 comment says so
+    ///    directly: the composition root hands `PluginManager` a FRESH
+    ///    `SkillRegistry::new()`, not the shared instance (if any) a real
+    ///    turn loop would read from, because "the SKILL and OUTPUT-STYLE
+    ///    registries have no turn-loop consumer yet." So this test's skill
+    ///    assertion proves the manager's mutation code path runs — the same
+    ///    thing `plugin/tests/materialize.rs` already proves at the crate
+    ///    level — not that a plugin skill is visible to a real session
+    ///    today. That gap predates this task and is not introduced by it.
+    /// 3. **No real MCP or LSP server is dialed.** The MCP fixture's `echo`
+    ///    is not an MCP server and the LSP fixture's server is never
+    ///    started (LSP registration only seeds a `Disconnected` config); so
+    ///    this test proves the scoped config REACHES the registry, not that
+    ///    a real plugin's real server would actually connect, speak its
+    ///    protocol, or survive the reconnect loop.
+    /// 4. **Nothing here drives a real turn.** No tool call fires the
+    ///    registered hook; no `/`-command actually invokes the plugin
+    ///    command; no session spawns the plugin agent via the Task tool; no
+    ///    model ever sees the plugin skill in the per-turn skill listing.
+    ///    Each of those is a further hop past "materialized into a
+    ///    registry" that only a live session exercises.
+    /// 5. **No real fetch/marketplace/trust path.** The plugin here is
+    ///    written directly into the versioned cache layout, bypassing
+    ///    `install`'s network arms (git clone / marketplace HTTP / `.mcpb`
+    ///    unpack — still stubs), the marketplace catalog trust/policy gate,
+    ///    and the blocklist matching a REAL persisted `PluginId` across a
+    ///    restart (in-process `PluginId::new()` is a fresh UUID every run).
+    /// 6. **No `/reload-plugins` CLI round-trip.** `PluginRuntime::refresh`
+    ///    is called directly, not through the interactive slash-command
+    ///    binding a real user types.
+    ///
+    /// None of the above is a reason this test is weaker than it should be —
+    /// each is a hop this task's owned files (`apps/engine-desktop/src/lib.rs`,
+    /// `test-harness`) cannot reach, and machine-gating them would require
+    /// either a real MCP/LSP server binary, a real marketplace fetch, or an
+    /// actual interactive session — exactly the boundary §19.11 says only a
+    /// human loading a real plugin can close.
+    #[tokio::test]
+    async fn desktop_loads_a_third_party_plugin_end_to_end() {
+        use command_api::CommandRegistry;
+        use hooks::{HookEventType, HookExecutor, HookRegistry, HookSource};
+        use lsp::LspRegistry;
+        use mcp::McpRegistry;
+        use outputstyles::OutputStyleRegistry;
+        use platform_posix::{
+            PlainTextSecureStorage, PosixClock, PosixFileSystem, PosixHttp, PosixLspTransport,
+            PosixMcpTransport, PosixRuntime,
+        };
+        use plugin::{PluginBlocklist, PluginManager, StrictPluginOnlyPolicy};
+        use secret::CredentialManager;
+        use skill_api::SkillRegistry;
+        use tokio::sync::RwLock;
+        use tool_api::ToolRegistry;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        let cwd = tmp.path().join("cwd");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(&cwd).unwrap();
+        let plugins_dir = home.join("plugins");
+        write_full_component_third_party_plugin(&plugins_dir, "mkt", "acmeplugin", "1.0.0");
+        write_enabled_plugins(&home, &[("acmeplugin@mkt", true)]);
+
+        // Every registry the composition root wires `PluginManager` to
+        // (`lib.rs`'s §6.5 block), each kept as a live handle so it can be
+        // inspected AFTER `refresh` — the same shape the real bootstrap uses.
+        let command_registry = Arc::new(RwLock::new(CommandRegistry::new()));
+        let skill_registry = Arc::new(RwLock::new(SkillRegistry::new()));
+        let hook_registry = Arc::new(RwLock::new(HookRegistry::new()));
+        let output_style_registry = Arc::new(RwLock::new(OutputStyleRegistry::new()));
+        let tool_registry = Arc::new(RwLock::new(ToolRegistry::new()));
+        let mcp_registry = Arc::new(McpRegistry::new(Arc::new(PosixMcpTransport::new())));
+        let lsp_registry = Arc::new(LspRegistry::new(Arc::new(PosixLspTransport::new())));
+        let agent_catalog = Arc::new(RwLock::new(Vec::new()));
+
+        let storage = PlainTextSecureStorage::new(tmp.path().join("secrets"))
+            .await
+            .unwrap();
+        let credentials = Arc::new(CredentialManager::new(
+            Arc::new(storage),
+            Arc::new(PosixClock::new()),
+            Arc::new(PosixHttp::new()),
+        ));
+        let manager = Arc::new(
+            PluginManager::new(
+                plugins_dir.clone(),
+                Arc::new(PosixFileSystem::new(cwd.clone())),
+                Arc::new(PosixHttp::new()),
+                Arc::new(PosixRuntime::new()),
+                credentials,
+                Arc::new(PluginBlocklist::new(String::new())),
+                Arc::new(StrictPluginOnlyPolicy::empty()),
+                command_registry.clone(),
+                skill_registry.clone(),
+                hook_registry.clone(),
+                output_style_registry.clone(),
+                mcp_registry.clone(),
+                lsp_registry.clone(),
+                tool_registry.clone(),
+            )
+            .with_agent_catalog(agent_catalog.clone()),
+        );
+        let rt = super::PluginRuntime {
+            manager: manager.clone(),
+            plugins_dir: plugins_dir.clone(),
+            home: home.clone(),
+            cwd: cwd.clone(),
+            cli_plugin_dirs: Vec::new(),
+            additional_project_roots: Arc::new(RwLock::new(Vec::new())),
+            ambient: true,
+            inline: false,
+        };
+
+        let counts = rt.refresh().await;
+        assert_eq!(counts.errors, 0, "the plugin must load cleanly");
+        assert_eq!(counts.enabled, 1, "the plugin must be enabled");
+
+        // ── commands ───────────────────────────────────────────────────
+        // A plugin command's name is the FILE STEM, plugin-namespaced
+        // (`command_api::command_name_from_path` + the `{plugin}:` prefix in
+        // `load_plugin`), and the fixture's `commands/hello.md` carries no
+        // frontmatter `name`, so this identifier has exactly one possible
+        // source. NOTE the skill above ALSO registers a mirror into this same
+        // registry — the two names are deliberately distinct
+        // (`acmeplugin:hello` vs `acmeplugin:politegreeter`) so neither
+        // component can satisfy the other's assertion.
+        {
+            let reg = command_registry.read().await;
+            assert!(
+                reg.resolve("acmeplugin:hello").is_some(),
+                "the plugin's command must reach the live command registry as \
+                 `acmeplugin:hello`; registry holds {:?}",
+                reg.list_all().iter().map(|c| &c.name).collect::<Vec<_>>()
+            );
+        }
+
+        // ── skills ─────────────────────────────────────────────────────
+        // Positive: the FRONTMATTER name, plugin-namespaced. Negative
+        // control: the containing DIRECTORY's name must not be what landed —
+        // without it, a loader that keyed on the directory would satisfy a
+        // fixture whose two spellings agreed (the fixture deliberately makes
+        // them disagree).
+        {
+            let reg = skill_registry.read().await;
+            let names = reg.names();
+            assert!(
+                reg.get("acmeplugin:politegreeter").is_some(),
+                "the plugin's skill must reach the live skill registry under its \
+                 frontmatter name; registry holds {names:?}"
+            );
+            assert!(
+                reg.get("acmeplugin:greeter").is_none(),
+                "a plugin skill must be named by its frontmatter `name`, never by its \
+                 containing directory; registry holds {names:?}"
+            );
+        }
+
+        // ── agents ─────────────────────────────────────────────────────
+        // Same axis discipline: `agent_type` is the frontmatter `name`
+        // (`sidekick`), never the file stem (`helper`).
+        {
+            let cat = agent_catalog.read().await;
+            let types = cat.iter().map(|d| d.agent_type.clone()).collect::<Vec<_>>();
+            assert!(
+                types.iter().any(|t| t == "acmeplugin:sidekick"),
+                "the plugin's agent must reach the live agent catalog under its \
+                 frontmatter name; catalog holds {types:?}"
+            );
+            assert!(
+                !types.iter().any(|t| t == "acmeplugin:helper"),
+                "a plugin agent must be named by its frontmatter `name`, never by its \
+                 file stem; catalog holds {types:?}"
+            );
+        }
+
+        // ── output styles ──────────────────────────────────────────────
+        {
+            let reg = output_style_registry.read().await;
+            assert!(
+                reg.get("acmeplugin:laconic").is_some(),
+                "the plugin's output style must reach the live output-style registry \
+                 under its frontmatter name"
+            );
+            assert!(
+                reg.get("acmeplugin:terse").is_none(),
+                "a plugin output style must be named by its frontmatter `name` when it \
+                 declares one, never by its file stem"
+            );
+        }
+
+        // ── hooks ──────────────────────────────────────────────────────
+        {
+            let reg = hook_registry.read().await;
+            let hooks = reg.all_hooks();
+            let mine: Vec<_> = hooks
+                .iter()
+                .filter(|h| {
+                    h.source == HookSource::Plugin
+                        && h.events.contains(&HookEventType::PreToolUse)
+                        && matches!(
+                            &h.executor,
+                            HookExecutor::Command { command, .. }
+                                if command.contains("ACME_HOOK_MARKER")
+                        )
+                })
+                .collect();
+            assert_eq!(
+                mine.len(),
+                1,
+                "exactly the plugin's own PreToolUse/ACME_HOOK_MARKER hook must reach the \
+                 live hook registry as a Plugin-sourced hook, got {hooks:?}"
+            );
+            // The `"matcher": "Write"` half of the fixture must survive too: a
+            // hook that landed with its tool-name matcher dropped would fire on
+            // EVERY tool call, which the marker-only check above cannot see.
+            let cond = mine[0].if_condition.as_ref().unwrap_or_else(|| {
+                panic!(
+                    "the plugin hook's `matcher: Write` must survive as an if_condition; \
+                     hook={:?}",
+                    mine[0]
+                )
+            });
+            assert!(
+                cond.match_tool_name && cond.pattern == "Write",
+                "the plugin hook's tool-name matcher must be the fixture's `Write`, got \
+                 {cond:?}"
+            );
+        }
+
+        // ── MCP servers ────────────────────────────────────────────────
+        {
+            let conns = mcp_registry.connections.read().await;
+            let state = conns
+                .get("plugin:acmeplugin:echo")
+                .expect("the plugin's MCP server must reach the live MCP registry");
+            let is_inert_seed = matches!(
+                state,
+                mcp::McpConnectionState::Disconnected {
+                    last_error: None,
+                    ..
+                }
+            );
+            assert!(
+                !is_inert_seed,
+                "the plugin's MCP server must have gone through the live connect_all \
+                 path (not be left as the inert Disconnected{{last_error:None}} seed); \
+                 state={state:?}"
+            );
+        }
+
+        // ── LSP servers ────────────────────────────────────────────────
+        // `has_registered_servers()` discriminates the two ways this can go
+        // wrong — nothing registered at all vs. registered under a name other
+        // than the `plugin:{plugin}:{key}` scoping `load_plugin` applies — so
+        // the failure output says WHICH.
+        {
+            let cfg = lsp_registry.get_config("plugin:acmeplugin:pyls").await;
+            assert!(
+                cfg.is_some(),
+                "the plugin's LSP server must reach the live LSP registry as \
+                 `plugin:acmeplugin:pyls` (registry has any server registered at \
+                 all: {})",
+                lsp_registry.has_registered_servers()
+            );
+            let cfg = cfg.expect("checked is_some above");
+            assert_eq!(
+                cfg.command, "echo",
+                "the registered LSP config must be the fixture's own, not a default \
+                 stand-in; got {cfg:?}"
+            );
+        }
+
+        // ── workflows — the honest boundary (see this test's doc comment
+        //    for the full reasoning): no live registry exists, so the
+        //    strongest reachable claim is that the data survives discovery
+        //    all the way to the composition root's bootstrap front door. ──
+        let discovered_at_boot =
+            super::discover_plugin_set(true, false, &home, &cwd, &plugins_dir, &[], &[]).await;
+        assert_eq!(
+            discovered_at_boot.len(),
+            1,
+            "exactly the one fixture plugin should discover"
+        );
+        let (_, manifest_at_boot, _) = &discovered_at_boot[0];
+        assert_eq!(
+            manifest_at_boot.components.workflows.len(),
+            1,
+            "the manifest the composition root's bootstrap loop consumes must carry \
+             the shipped workflow script"
+        );
+        let inventory = plugin::build_plugin_workflow_inventory(
+            &manifest_at_boot.name,
+            &manifest_at_boot.components.workflows,
+        )
+        .await;
+        // The fixture's file stem (`build`) and its `meta.name` (`assemble`)
+        // differ, so this equality is only satisfiable by reading the script's
+        // own declared name — the axis `plugin/src/workflow.rs` documents.
+        // A `None` fqn (extraction failed) collapses the vec to empty and also
+        // fails, as does a filename-derived `acmeplugin:build`.
+        assert_eq!(
+            inventory
+                .iter()
+                .filter_map(|e| e.fqn.as_deref())
+                .collect::<Vec<_>>(),
+            vec!["acmeplugin:assemble"],
+            "the discovered script's own meta.name must namespace to acmeplugin:assemble \
+             (NOT the file stem `build`); got {inventory:?}"
+        );
+    }
 }
 
 #[cfg(test)]

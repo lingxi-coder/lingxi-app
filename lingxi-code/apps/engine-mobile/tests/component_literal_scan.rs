@@ -12,10 +12,17 @@
 //! - skill basenames come from [`engine_mobile::mobile_skill_registry`], which
 //!   delegates to `skill_api::register_mobile` (`apps/engine-mobile/src/
 //!   lib.rs:383`);
-//! - Local App workflow basenames come from the production constant
-//!   `tool_workflow::LOCAL_APP_BUILD_WORKFLOWS` (the one array in the whole
-//!   codebase that answers "what are the Local App build workflow names" —
-//!   `tools/workflow/src/lib.rs:310`; NOT a copy this file keeps).
+//! - Local App workflow basenames come from
+//!   `tool_workflow::BUILTIN_WORKFLOWS.local_app_build_workflow_names()`, which
+//!   answers "what are the Local App build workflow names" from a typed field
+//!   on each built-in's own descriptor (`is_local_app_build`,
+//!   `tools/workflow/src/builtins.rs`) — NOT a copy this file keeps, and (as of
+//!   P-1.9) not a second hand-maintained array anywhere else either: the two
+//!   arrays that used to answer this question
+//!   (`tasks::LOCAL_APP_BUILD_WORKFLOWS`, `tool_workflow::LOCAL_APP_BUILD_WORKFLOWS`)
+//!   are both deleted. `scanner_workflow_needles_survive_the_name_list_deletion`
+//!   below pins that this file's own needle derivation still works now that
+//!   they are gone.
 //!
 //! Design doc `docs/local-apps/LOCAL-APP-PLUGIN-DESIGN-V2.md` §8.5/§19.3:
 //! "Phase -1 尚无 Plugin inventory，scanner 暂时读取现有 live builtin
@@ -151,7 +158,14 @@ const PLUGIN_NAMESPACE: &str = "lingxi-local-app";
 /// exit code — is the thing that actually gates a regression. Phase 9 is
 /// expected to drive this to zero; any change to this constant must be
 /// accompanied by an equal change in the allowlist file, in the same diff.
-const ALLOWLIST_BASELINE_COUNT: usize = 28;
+///
+/// 28 → 24 (P-1.9): deleting `tasks::LOCAL_APP_BUILD_WORKFLOWS` and
+/// `tool_workflow::LOCAL_APP_BUILD_WORKFLOWS` (plus
+/// `apply_local_app_build_default_model`, which named a build workflow in its
+/// "args must be an object" error message) removed the last Local App
+/// workflow-name literals from `tasks/src/lib.rs` (2 entries) and
+/// `tools/workflow/src/lib.rs` (2 entries) — 4 entries gone, none added.
+const ALLOWLIST_BASELINE_COUNT: usize = 24;
 
 /// Scan roots, relative to the workspace root. Deny-by-default directory
 /// enumeration: every source file under each of these is scanned unless it is
@@ -273,16 +287,22 @@ fn skill_basenames(reg: &skill_api::SkillRegistry) -> BTreeSet<String> {
     reg.names().into_iter().map(str::to_owned).collect()
 }
 
-/// The Local App workflow basenames, read from the one production constant
-/// that answers this question (`tool_workflow::LOCAL_APP_BUILD_WORKFLOWS`).
+/// The Local App workflow basenames, read from the one typed field that
+/// answers this question: `BuiltinWorkflowDescriptor::is_local_app_build`
+/// (`tools/workflow/src/builtins.rs`), via
+/// `tool_workflow::BUILTIN_WORKFLOWS.local_app_build_workflow_names()`.
 /// Deliberately NOT `tool_workflow::BUILTIN_WORKFLOWS.names()`: that also
 /// contains `deep-research`, a general-purpose workflow with no Local App
 /// component identity, and including it would inflate the needle set with a
-/// name this scanner has no mandate to track.
+/// name this scanner has no mandate to track. `is_local_app_build` is what
+/// keeps `deep-research` out here without a second hardcoded name array: it
+/// answers `false` for that descriptor and `true` for exactly the two real
+/// build workflows.
 fn local_app_workflow_basenames() -> BTreeSet<String> {
-    tool_workflow::LOCAL_APP_BUILD_WORKFLOWS
-        .iter()
-        .map(|s| (*s).to_owned())
+    tool_workflow::BUILTIN_WORKFLOWS
+        .local_app_build_workflow_names()
+        .into_iter()
+        .map(str::to_owned)
         .collect()
 }
 
@@ -1530,6 +1550,53 @@ fn scanner_needle_comes_from_discovery_not_from_a_static_array() {
          got {production_hits:?}"
     );
     assert!(grown_needles.len() > production_needles.len());
+}
+
+/// P-1.9: `tasks::LOCAL_APP_BUILD_WORKFLOWS` and
+/// `tool_workflow::LOCAL_APP_BUILD_WORKFLOWS` -- the two hand-maintained name
+/// arrays this module doc's "must not grow a hardcoded name array" rule was
+/// written against -- are BOTH gone now. This pins that this file's own
+/// needle derivation (`local_app_workflow_basenames`) survived that deletion
+/// by reading a typed field instead
+/// (`BuiltinWorkflowDescriptor::is_local_app_build`), rather than by growing
+/// its own copy of the two names to compensate -- which is exactly the
+/// forbidden resolution the module doc calls out.
+#[test]
+fn scanner_workflow_needles_survive_the_name_list_deletion() {
+    let workflows = local_app_workflow_basenames();
+    assert_eq!(
+        workflows,
+        BTreeSet::from([
+            "local-app-build".to_string(),
+            "local-canvas-build".to_string()
+        ]),
+        "the needle set must be exactly the two real build workflows -- no more, no fewer"
+    );
+    assert!(
+        !workflows.contains("deep-research"),
+        "deep-research has no Local App identity and must not be pulled in just because \
+         BUILTIN_WORKFLOWS also lists it"
+    );
+
+    // The needles this function derives must still drive the real scan: a
+    // build-workflow basename planted in a fresh source tree is caught, using
+    // ONLY the typed derivation (never a name literal written in this test).
+    let needles = expand_with_namespace(&workflows);
+    let tmp = tempfile::tempdir().expect("tempdir");
+    for name in &workflows {
+        fs::write(
+            tmp.path().join(format!("{name}.rs")),
+            format!("pub const WORKFLOW: &str = \"{name}\";\n"),
+        )
+        .expect("write fixture");
+    }
+    let hits = scan_source_tree(tmp.path(), &needles);
+    assert_eq!(
+        hits.len(),
+        workflows.len(),
+        "every current build-workflow basename must still be caught by the derived \
+         needle set: {hits:?}"
+    );
 }
 
 /// The load-bearing count. See the module doc comment: without pinning this

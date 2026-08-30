@@ -20,30 +20,17 @@ pub mod scope;
 pub mod state;
 pub mod task_trait;
 
-/// The two workflow names that build a local app.
-///
-/// ⚠️ **No longer the authority for the workspace lease or the App delete
-/// guard.** Both used to key off membership in this list (a caller-supplied
-/// `workflow_id` string), which let any custom workflow that happened to
-/// reuse one of these names collect the same authority as the real build --
-/// see design §8.1 and [`crate::scope::LocalAppWorkflowTaskScope`], which
-/// replaces that name check. [`crate::handlers::local_workflow`]'s `spawn`
-/// and [`crate::registry::TaskRegistry::find_nonterminal_local_app_workflows`]
-/// now read a task's typed `scope` field instead and no longer reference
-/// this array.
-///
-/// **Still here, unused by this crate's own guards, for one reason:**
-/// `tool-workflow` keeps an independent copy of this same list for a
-/// different question (which builds honour the configured `workflowModel`
-/// default -- design §18 Phase -1 step 9, not yet migrated), and
-/// `engine-mobile`'s `local_app_build_workflow_sets_agree` test (outside
-/// this crate, outside this task's owned files) asserts the two arrays are
-/// byte-for-byte equal. Deleting this `pub const` is therefore a breaking
-/// change to a file this task does not own; closing it needs either that
-/// test's removal/rewrite or `tool-workflow`'s own migration (design §18
-/// Phase -1 step 9), neither of which belongs here. Do not read this array
-/// for lease/delete-guard purposes again -- read `scope` instead.
-pub const LOCAL_APP_BUILD_WORKFLOWS: &[&str] = &["local-app-build", "local-canvas-build"];
+// `LOCAL_APP_BUILD_WORKFLOWS` (P-1.7 doc'd it as unable to delete this
+// const because `engine-mobile`'s `local_app_build_workflow_sets_agree`
+// twinned it against `tool_workflow::LOCAL_APP_BUILD_WORKFLOWS`) is gone as
+// of P-1.9: this crate's own guards already read a task's typed
+// `scope::LocalAppWorkflowTaskScope` instead of a workflow-name string (see
+// `registry::TaskRegistry::find_nonterminal_local_app_workflows` and
+// `handlers::local_workflow::requires_workspace_lease`), and the ONLY other
+// reader was that twin-agreement test. `tool_workflow` now answers "is this
+// a Local App build workflow" from a typed field on its own
+// `BuiltinWorkflowDescriptor` (`is_local_app_build`), so there is no second
+// list left anywhere to twin this crate's (deleted) list against.
 
 pub use handlers::{
     DreamHandler, InProcessTeammateHandler, LocalAgentHandler, LocalBashHandler,

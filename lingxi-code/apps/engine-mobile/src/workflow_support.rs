@@ -197,8 +197,8 @@ impl MobileWorkflowCheckpointStore {
                 {
                     return None;
                 }
-                if !(tool_workflow::LOCAL_APP_BUILD_WORKFLOWS
-                    .contains(&checkpoint.workflow_id.as_str())
+                if !(tool_workflow::BUILTIN_WORKFLOWS
+                    .is_local_app_build_workflow(&checkpoint.workflow_id)
                     && checkpoint.workflow_run_id == run_id
                     && paths_equivalent(script_path, std::path::Path::new(&checkpoint.script_path)))
                 {
@@ -991,10 +991,11 @@ fn is_mobile_local_app_builtin(
         && no_script_path
         && no_inline_override
         && spec.name.as_deref().is_some_and(|name| {
-            tool_workflow::LOCAL_APP_BUILD_WORKFLOWS.contains(&name)
-                && tool_workflow::BUILTIN_WORKFLOWS
-                    .get(name)
-                    .is_some_and(|descriptor| descriptor.script == script)
+            tool_workflow::BUILTIN_WORKFLOWS
+                .get(name)
+                .is_some_and(|descriptor| {
+                    descriptor.is_local_app_build && descriptor.script == script
+                })
         });
     // Exact current bundled bytes are authoritative even for a resume whose
     // terminal checkpoint has already been removed. This is safe because the
@@ -1006,30 +1007,20 @@ fn is_mobile_local_app_builtin(
 }
 
 fn is_current_local_app_builtin_script(script: &str) -> bool {
-    tool_workflow::LOCAL_APP_BUILD_WORKFLOWS.iter().any(|name| {
-        tool_workflow::BUILTIN_WORKFLOWS
-            .get(name)
-            .is_some_and(|descriptor| descriptor.script == script)
-    })
+    tool_workflow::BUILTIN_WORKFLOWS.is_local_app_build_script(script)
 }
 
 fn is_current_local_app_builtin_hash(hash: &str) -> bool {
-    tool_workflow::LOCAL_APP_BUILD_WORKFLOWS.iter().any(|name| {
-        tool_workflow::BUILTIN_WORKFLOWS
-            .get(name)
-            .is_some_and(|descriptor| sha256_hex(descriptor.script.as_bytes()) == hash)
-    })
+    tool_workflow::BUILTIN_WORKFLOWS
+        .local_app_build_descriptors()
+        .any(|descriptor| sha256_hex(descriptor.script.as_bytes()) == hash)
 }
 
 fn local_app_workflow_id_for_hash(hash: &str) -> Option<String> {
-    tool_workflow::LOCAL_APP_BUILD_WORKFLOWS
-        .iter()
-        .find_map(|name| {
-            tool_workflow::BUILTIN_WORKFLOWS
-                .get(name)
-                .filter(|descriptor| sha256_hex(descriptor.script.as_bytes()) == hash)
-                .map(|_| (*name).to_string())
-        })
+    tool_workflow::BUILTIN_WORKFLOWS
+        .local_app_build_descriptors()
+        .find(|descriptor| sha256_hex(descriptor.script.as_bytes()) == hash)
+        .map(|descriptor| descriptor.name.to_string())
 }
 
 fn local_app_resume_identity_id(
@@ -1039,11 +1030,11 @@ fn local_app_resume_identity_id(
     spec.name
         .as_deref()
         .filter(|name| !name.is_empty())
-        .filter(|name| tool_workflow::LOCAL_APP_BUILD_WORKFLOWS.contains(name))
+        .filter(|&name| tool_workflow::BUILTIN_WORKFLOWS.is_local_app_build_workflow(name))
         .map(str::to_string)
         .or_else(|| {
             workflow::meta_string_value(script, "name")
-                .filter(|name| tool_workflow::LOCAL_APP_BUILD_WORKFLOWS.contains(&name.as_str()))
+                .filter(|name| tool_workflow::BUILTIN_WORKFLOWS.is_local_app_build_workflow(name))
         })
 }
 
@@ -1052,7 +1043,7 @@ fn local_app_resume_resolution_for_record(
     local_identity_id: Option<String>,
 ) -> Option<LocalAppResumeResolution> {
     let record_is_local =
-        tool_workflow::LOCAL_APP_BUILD_WORKFLOWS.contains(&record.workflow_id.as_str());
+        tool_workflow::BUILTIN_WORKFLOWS.is_local_app_build_workflow(&record.workflow_id);
     let hash_is_current = is_current_local_app_builtin_hash(&record.script_sha256);
     let expected_workflow_id = if record_is_local {
         Some(record.workflow_id.clone())
@@ -1119,7 +1110,7 @@ fn local_app_resume_resolution_for_launch(
         WorkflowProvenanceLookup::Invalid { workflow_id } => {
             let local_workflow_id = workflow_id
                 .as_deref()
-                .filter(|id| tool_workflow::LOCAL_APP_BUILD_WORKFLOWS.contains(id))
+                .filter(|&id| tool_workflow::BUILTIN_WORKFLOWS.is_local_app_build_workflow(id))
                 .map(str::to_string);
             let identity_id =
                 local_workflow_id.or_else(|| local_app_resume_identity_id(spec, script));
@@ -1238,7 +1229,7 @@ fn apply_materialized_local_app_collections_with_identity(
         .or_else(|| {
             spec.name
                 .as_deref()
-                .filter(|name| tool_workflow::LOCAL_APP_BUILD_WORKFLOWS.contains(name))
+                .filter(|&name| tool_workflow::BUILTIN_WORKFLOWS.is_local_app_build_workflow(name))
                 .map(str::to_string)
         })
         .ok_or_else(|| {
@@ -1509,11 +1500,7 @@ impl tool_workflow::WorkflowLauncher for MobileWorkflowLauncher {
         // clock. Shape: `wf_` + 8 hex + `-` + 3 hex.
         let run_id = tool_workflow::mint_run_id(spec.resume_from_run_id.as_deref());
         let workflow_name = workflow::meta_string_value(&script, "name");
-        tool_workflow::apply_local_app_build_default_model(
-            &cwd,
-            workflow_name.as_deref(),
-            &mut spec.args,
-        )?;
+        tool_workflow::apply_local_app_build_default_model(&cwd, &script, &mut spec.args)?;
         let summary = workflow::meta_string_value(&script, "description");
         let task_description = summary
             .clone()
@@ -1630,7 +1617,7 @@ impl tool_workflow::WorkflowLauncher for MobileWorkflowLauncher {
                 .filter(|run_id| !run_id.is_empty())
                 .is_none()
                 && !session_uuid.is_empty()
-                && tool_workflow::LOCAL_APP_BUILD_WORKFLOWS.contains(&workflow_id.as_str())
+                && tool_workflow::BUILTIN_WORKFLOWS.is_local_app_build_workflow(&workflow_id)
             {
                 self.checkpoints
                     .write_provenance_sidecar(
@@ -1949,6 +1936,10 @@ mod run_id_tests {
             .to_string(),
         )
         .expect("app metadata");
+        let real_build_script = tool_workflow::BUILTIN_WORKFLOWS
+            .get("local-app-build")
+            .expect("built-in")
+            .script;
         let mut args = Some(serde_json::json!({
             "app_id": "habits-1234",
             "spec": "confirmed"
@@ -1956,7 +1947,7 @@ mod run_id_tests {
 
         tool_workflow::apply_local_app_build_default_model(
             root.path(),
-            Some("local-app-build"),
+            real_build_script,
             &mut args,
         )
         .expect("inject persisted model");
@@ -1975,7 +1966,7 @@ mod run_id_tests {
         }));
         tool_workflow::apply_local_app_build_default_model(
             root.path(),
-            Some("local-app-build"),
+            real_build_script,
             &mut explicit,
         )
         .expect("preserve explicit model");

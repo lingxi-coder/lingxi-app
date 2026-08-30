@@ -11847,7 +11847,7 @@ mod tests {
             contract.contains("This app's surface is `canvas`"),
             "the contract must be the one for the CONFIRMED surface: {contract}"
         );
-        for workflow in tool_workflow::LOCAL_APP_BUILD_WORKFLOWS {
+        for workflow in tool_workflow::BUILTIN_WORKFLOWS.local_app_build_workflow_names() {
             assert!(
                 !contract.contains(workflow),
                 "the contract must not name a build workflow: the host authorizes one and \
@@ -11906,20 +11906,22 @@ mod tests {
     /// prose that no test other than the component scanner covered.
     #[tokio::test]
     async fn lingxi_md_contract_prose_names_no_workflow() {
-        // The needle set is the PRODUCTION constant, never a pair of names
-        // typed in here: `tool_workflow::LOCAL_APP_BUILD_WORKFLOWS` is the one
-        // array in the codebase that answers "what are the Local App build
-        // workflow names", and the component scanner's module doc forbids a
-        // second copy of it for exactly the reason that applies here — add a
-        // third build workflow, name it in this prose, and a hardcoded pair
-        // would sail past while only the scanner (one allowlist entry away
-        // from being talked out of it) fires.
-        let workflows = tool_workflow::LOCAL_APP_BUILD_WORKFLOWS;
+        // The needle set is derived from the PRODUCTION registry, never a
+        // pair of names typed in here:
+        // `tool_workflow::BUILTIN_WORKFLOWS.local_app_build_workflow_names()`
+        // reads the same typed `is_local_app_build` field the component
+        // scanner's needle derivation reads, and the scanner's module doc
+        // forbids a second hand-typed copy of these names for exactly the
+        // reason that applies here — add a third build workflow, name it in
+        // this prose, and a hardcoded pair would sail past while only the
+        // scanner (one allowlist entry away from being talked out of it)
+        // fires.
+        let workflows = tool_workflow::BUILTIN_WORKFLOWS.local_app_build_workflow_names();
         // An empty needle set would make every assertion below vacuously
         // true, which is the failure mode this whole test exists to prevent.
         assert!(
             workflows.len() >= 2,
-            "the build-workflow constant must be non-trivially populated, or the absence \
+            "the build-workflow registry must be non-trivially populated, or the absence \
              assertions below prove nothing: {workflows:?}"
         );
 
@@ -11935,7 +11937,7 @@ mod tests {
                 .expect("scaffold");
             let contract = fs::read_to_string(workspace_of(&root, &shell.id).join("LINGXI.md"))
                 .expect("read the formal contract");
-            for workflow in workflows {
+            for workflow in &workflows {
                 assert!(
                     !contract.contains(workflow),
                     "surface {surface}: the contract must name no build workflow — the host \
@@ -11959,7 +11961,7 @@ mod tests {
             ("scaffold_next_step_guidance", scaffold_next_step_guidance()),
             ("create_next_step_guidance", create_next_step_guidance()),
         ] {
-            for workflow in workflows {
+            for workflow in &workflows {
                 assert!(
                     !prose.contains(workflow),
                     "{generator} must name no build workflow — it is model-visible tool-result \

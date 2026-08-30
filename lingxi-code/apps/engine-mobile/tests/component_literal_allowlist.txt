@@ -94,18 +94,14 @@ apps/engine-mobile/src/local_app_plugin_binding.rs:local-canvas-build:1
 
 # --- tasks/src -------------------------------------------------------------
 
-# lib.rs — `tasks::LOCAL_APP_BUILD_WORKFLOWS`. As of P-1.7 this array is no
-# longer the lease/delete-guard authority (both now read a task's typed
-# `LocalAppWorkflowTaskScope` instead — see `tasks/src/scope.rs`); it survives
-# ONLY because `tool_workflow::LOCAL_APP_BUILD_WORKFLOWS` is its own separate
-# list for a different question (the `workflowModel` default, P-1.9) and
-# `engine-mobile`'s `local_app_build_workflow_sets_agree` test pins the two
-# equal. One occurrence each, in the const definition itself; the doc comment
-# no longer repeats either name in prose. §19.3/P-1.9 target this pair of
-# lists for real deletion; the entries make that removal visible when it
-# happens (the count going to zero fails as a STALE ENTRY).
-tasks/src/lib.rs:local-app-build:1
-tasks/src/lib.rs:local-canvas-build:1
+# lib.rs — no entries here any more. P-1.9 deleted `tasks::LOCAL_APP_BUILD_WORKFLOWS`
+# for real: it was already unused by this crate's own lease/delete guards
+# (both read a task's typed `LocalAppWorkflowTaskScope` instead — see
+# `tasks/src/scope.rs`) and survived only for a twin-agreement test in
+# `engine-mobile` (`local_app_build_workflow_sets_agree`), which is also
+# deleted now that there is no second list left to twin against —
+# `tool_workflow` answers the same question from a typed field
+# (`BuiltinWorkflowDescriptor::is_local_app_build`) instead of its own array.
 
 # --- tools/workflow/src ----------------------------------------------------
 
@@ -117,11 +113,15 @@ tools/workflow/src/builtins.rs:create-local-app:1
 tools/workflow/src/builtins.rs:local-app-build:1
 tools/workflow/src/builtins.rs:local-canvas-build:1
 
-# lib.rs — `LOCAL_APP_BUILD_WORKFLOWS` (both names on the const line), its doc
-# comment explaining why keying on `local-app-build` alone was the bug, and one
-# error message naming the workflow whose args must be an object.
-tools/workflow/src/lib.rs:local-app-build:3
-tools/workflow/src/lib.rs:local-canvas-build:1
+# lib.rs — no entries here any more. P-1.9 deleted both
+# `LOCAL_APP_BUILD_WORKFLOWS` and `apply_local_app_build_default_model` (the
+# only place in this file that named either workflow, in its name-check and
+# its "args must be an object" error message). The `workflowModel` default is
+# now applied by `engine-desktop` (the crate's one caller), keyed on the
+# resolved script's byte identity against `tool_workflow::BUILTIN_WORKFLOWS`
+# rather than on either workflow's name, and `engine-desktop` is not a scan
+# root (design §19.3's completion condition is stated over `tasks/src` and
+# `tools/workflow/src` only).
 
 # The three `include_str!`ed workflow scripts. These are production source that
 # merely is not Rust: `builtins.rs` concatenates them into the compiled

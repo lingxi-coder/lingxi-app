@@ -5,14 +5,16 @@
 //! Three things used to derive Local App authority from a workflow's NAME:
 //! `registry.rs`'s `find_nonterminal_local_app_workflows` (delete guard) and
 //! `handlers/local_workflow.rs`'s `requires_workspace_lease` both asked "is
-//! `workflow_id` a member of [`crate::LOCAL_APP_BUILD_WORKFLOWS`]?", and
-//! `tool-workflow` asks the same question of `meta.name` to pick a
+//! `workflow_id` a member of this crate's (now-deleted) `LOCAL_APP_BUILD_WORKFLOWS`?",
+//! and `tool-workflow` asked the same question of `meta.name` to pick a
 //! `workflowModel` default. A `workflow_id`/`meta.name` is a string a
 //! *caller* supplies when launching a workflow -- so any custom workflow
 //! that happens to reuse one of those names got the same answer as the
 //! real one. The first two now read a scope instead; `tool-workflow`'s
-//! `workflowModel` default is still keyed on the name (design §18 Phase -1
-//! step 9).
+//! `workflowModel` default (P-1.9, design §18 Phase -1 step 9) is now keyed
+//! on the resolved SCRIPT's identity against
+//! `tool_workflow::BuiltinWorkflowDescriptor::is_local_app_build`, which a
+//! caller-supplied name cannot spoof either.
 //!
 //! [`LocalAppWorkflowTaskScope`] is the replacement authority token: the Host
 //! (the composition binding that just resolved a real `LocalAppPluginBinding`
@@ -358,10 +360,11 @@ mod tests {
     /// only from which typed constructor the Host calls, never from a
     /// string that could collide with a real workflow's `meta.name`.
     ///
-    /// A hostile custom workflow could declare a `meta.name` equal to one of
-    /// [`crate::LOCAL_APP_BUILD_WORKFLOWS`]'s entries (the exact literals
-    /// that list keys off of today) while doing something else entirely.
-    /// Feed that exact string into the only public string input this type
+    /// A hostile custom workflow could declare a `meta.name` equal to the
+    /// real build workflow's name (`"local-app-build"`, a literal fixed here
+    /// as a TEST value -- not read from any production list, since this
+    /// crate no longer keeps one) while doing something else entirely. Feed
+    /// that exact string into the only public string input this type
     /// accepts (`app_id`) via a *non*-Build constructor, and purpose must
     /// stay whatever the Host asked for -- the string never gets
     /// reinterpreted as "this must be the real build workflow". Note the
@@ -369,7 +372,7 @@ mod tests {
     /// here, the absence of a name-taking constructor is.
     #[test]
     fn scope_is_constructed_by_the_host_not_derived_from_meta_name() {
-        let real_build_workflow_name = crate::LOCAL_APP_BUILD_WORKFLOWS[0];
+        let real_build_workflow_name = "local-app-build";
 
         let scope = LocalAppWorkflowTaskScope::for_use_test(real_build_workflow_name)
             .expect("a workflow name happens to be a well-formed app id");

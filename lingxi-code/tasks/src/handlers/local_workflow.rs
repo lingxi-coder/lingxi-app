@@ -517,10 +517,11 @@ fn local_app_workspace_root(data_root: &std::path::Path, app_id: &str) -> std::p
 ///
 /// Reads the task's typed [`crate::scope::LocalAppWorkflowTaskScope`]
 /// (design §18 Phase -1 step 8 / §8.1) instead of matching `workflow_id`
-/// against [`crate::LOCAL_APP_BUILD_WORKFLOWS`]: a `workflow_id` is a string
-/// the *caller* supplies when launching a workflow, so a custom workflow that
-/// happens to reuse a real build workflow's name used to collect the exact
-/// same lease. `None` -- no scope at all -- never requires the lease; only a
+/// against this crate's (since-deleted) `LOCAL_APP_BUILD_WORKFLOWS` array: a
+/// `workflow_id` is a string the *caller* supplies when launching a
+/// workflow, so a custom workflow that happens to reuse a real build
+/// workflow's name used to collect the exact same lease. `None` -- no scope
+/// at all -- never requires the lease; only a
 /// `Some` scope whose [`LocalAppWorkflowPurpose`](crate::scope::LocalAppWorkflowPurpose)
 /// is `Build` does (`LocalAppWorkflowTaskScope::requires_workspace_lease`).
 ///

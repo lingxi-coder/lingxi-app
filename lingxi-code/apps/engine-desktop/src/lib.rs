@@ -1850,11 +1850,7 @@ impl tool_workflow::WorkflowLauncher for TaskRegistryWorkflowLauncher {
         let run_id = tool_workflow::mint_run_id(spec.resume_from_run_id.as_deref());
         // `meta.name` → `workflowName` in the result.
         let workflow_name = workflow::meta_string_value(&script, "name");
-        tool_workflow::apply_local_app_build_default_model(
-            &cwd,
-            workflow_name.as_deref(),
-            &mut spec.args,
-        )?;
+        tool_workflow::apply_local_app_build_default_model(&cwd, &script, &mut spec.args)?;
         // `meta.description` → `summary` in the result (claude-code `p = c.meta.description`).
         let summary = workflow::meta_string_value(&script, "description");
         let task_description = summary

@@ -4314,26 +4314,18 @@ mod tests {
         assert_ne!(first, third, "changed source must still invalidate the key");
     }
 
-    /// The lease/delete guards (`tasks`) and the `workflowModel` default
-    /// (`tool-workflow`) each keep their own list of the local-app build
-    /// workflows, because the two crates share no natural home -- their only
-    /// common dependencies are the QuickJS runtime and `traits`.
-    ///
-    /// This crate depends on BOTH, so it is the only place the two can be
-    /// compared. Add a third build workflow to one list and this fails until
-    /// the other knows about it.
-    #[cfg(feature = "uniffi")]
-    #[test]
-    fn local_app_build_workflow_sets_agree() {
-        assert_eq!(
-            tasks::LOCAL_APP_BUILD_WORKFLOWS,
-            tool_workflow::LOCAL_APP_BUILD_WORKFLOWS,
-            "the lease/delete guard list and the workflowModel list must name \
-             the same build workflows"
-        );
-        assert!(
-            tasks::LOCAL_APP_BUILD_WORKFLOWS.contains(&"local-canvas-build"),
-            "the drawn-surface build is a local-app build"
-        );
-    }
+    // `local_app_build_workflow_sets_agree` used to pin
+    // `tasks::LOCAL_APP_BUILD_WORKFLOWS` and
+    // `tool_workflow::LOCAL_APP_BUILD_WORKFLOWS` byte-for-byte equal because
+    // the two crates each kept an independent hand-typed copy of "which
+    // workflows build a local app" and shared no natural home to hold ONE
+    // copy. P-1.9 deleted both arrays: `tasks`'s own guards read a task's
+    // typed `scope::LocalAppWorkflowTaskScope` and never needed a name list
+    // at all (this test was the array's only reader in that crate), and
+    // `tool_workflow` now answers the same question from a typed field on
+    // its own `BuiltinWorkflowDescriptor` (`is_local_app_build`) -- see
+    // `tools/workflow/src/builtins.rs`'s
+    // `local_app_build_is_the_exact_two_build_workflows` for the
+    // single-source-of-truth test this one is replaced by. There is no
+    // second list left anywhere to twin against.
 }

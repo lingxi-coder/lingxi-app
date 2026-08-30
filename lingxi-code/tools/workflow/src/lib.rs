@@ -297,26 +297,33 @@ where
     resolve_script_at(Path::new(""), spec, read)
 }
 
-/// Every workflow that builds a local app and therefore honours the app's
-/// configured `workflowModel`.
+/// Apply the configured local-app workflow model as a DEFAULT for the two
+/// Local App build workflows. An explicit `args.model` wins and is never
+/// overwritten.
 ///
-/// A LIST, not a single name: the drawn-surface workflow is a sibling of the
-/// routed one, and keying this on `"local-app-build"` alone would have made a
-/// canvas app silently ignore the model the user picked for it — with nothing
-/// failing, because the default is simply not applied.
-/// ⚠️ `tasks::LOCAL_APP_BUILD_WORKFLOWS` is the twin of this list, for the
-/// lease and delete guards. `engine-mobile`'s
-/// `local_app_build_workflow_sets_agree` pins the two equal.
-pub const LOCAL_APP_BUILD_WORKFLOWS: &[&str] = &["local-app-build", "local-canvas-build"];
-
-/// Apply the configured local-app workflow model as a DEFAULT for the local-app
-/// build workflows. An explicit `args.model` wins and is never overwritten.
+/// Two callers (`engine-desktop` and `engine-mobile`'s `workflow_support`)
+/// each launch workflows through their own composition root, so this stays a
+/// shared utility rather than being duplicated into both.
+///
+/// The check is deliberately about `script` BYTES, not a name. P-1.9 deleted
+/// this function's earlier form, which took `workflow_name: Option<&str>` and
+/// checked it against a hand-maintained name array -- a name derived from
+/// `workflow::meta_string_value(&script, "name")`, i.e. parsed from the very
+/// script about to be defaulted. That trusted a value a caller fully
+/// controls: an inline `script` (no `name`) whose own `meta.name` merely
+/// CLAIMS to be a real build workflow is a completely custom workflow, and
+/// the old check could not tell the difference.
+/// `BUILTIN_WORKFLOWS::is_local_app_build_script` compares the resolved
+/// script's bytes against the compiled-in descriptor instead, so a custom
+/// workflow that only reuses the name -- however it spells `meta.name` or
+/// the launch-time `name` selector -- gets no default, and only the literal,
+/// unmodified bundled script does.
 pub fn apply_local_app_build_default_model(
     cwd: &Path,
-    workflow_name: Option<&str>,
+    script: &str,
     args: &mut Option<Value>,
 ) -> Result<(), WorkflowLaunchError> {
-    if !workflow_name.is_some_and(|name| LOCAL_APP_BUILD_WORKFLOWS.contains(&name)) {
+    if !BUILTIN_WORKFLOWS.is_local_app_build_script(script) {
         return Ok(());
     }
     // `args.model` is the call-site authority. Do not even read app metadata
@@ -364,7 +371,8 @@ pub fn apply_local_app_build_default_model(
         }
         Some(_) => {
             return Err(WorkflowLaunchError(
-                "local-app-build args must be an object so the configured model can be applied"
+                "a Local App build workflow's args must be an object so the configured \
+                 model can be applied"
                     .to_string(),
             ));
         }
@@ -1359,6 +1367,13 @@ mod tests {
         assert!(names.split(", ").any(|name| name == "deep-research"));
     }
 
+    fn real_build_script() -> &'static str {
+        BUILTIN_WORKFLOWS
+            .get("local-app-build")
+            .expect("built-in")
+            .script
+    }
+
     #[test]
     fn explicit_local_app_model_bypasses_malformed_app_metadata() {
         let cwd = unique_temp_path("explicit-model-malformed-metadata");
@@ -1370,7 +1385,7 @@ mod tests {
             "app_id": "demo"
         }));
 
-        apply_local_app_build_default_model(&cwd, Some("local-app-build"), &mut args)
+        apply_local_app_build_default_model(&cwd, real_build_script(), &mut args)
             .expect("an explicit model must not parse app metadata");
 
         assert_eq!(
@@ -1394,7 +1409,7 @@ mod tests {
         .expect("write app metadata");
         let mut args = Some(serde_json::json!({"app_id": "demo"}));
 
-        apply_local_app_build_default_model(&cwd, Some("local-app-build"), &mut args)
+        apply_local_app_build_default_model(&cwd, real_build_script(), &mut args)
             .expect("metadata default applies");
 
         assert_eq!(
@@ -1403,6 +1418,42 @@ mod tests {
                 "app_id": "demo",
                 "model": "deepseek::deepseek-chat"
             }))
+        );
+        let _ = std::fs::remove_dir_all(cwd);
+    }
+
+    /// §19.3's gate: a custom workflow with the SAME NAME gets no model
+    /// default. This constructs a script that DECLARES
+    /// `meta.name = "local-app-build"` but is not the compiled bundled
+    /// script -- the exact shape the deleted, name-keyed check could not
+    /// distinguish from the real workflow.
+    #[test]
+    fn a_same_named_custom_workflow_gets_no_model_default() {
+        let cwd = unique_temp_path("same-name-spoof");
+        std::fs::create_dir_all(cwd.join(".lingxi")).expect("create app metadata dir");
+        std::fs::write(
+            cwd.join(".lingxi/app.json"),
+            br#"{"app":{"workflowModel":"deepseek::deepseek-chat"}}"#,
+        )
+        .expect("write app metadata");
+        let custom_script =
+            "export const meta = { name: 'local-app-build', description: 'not a build' };\nreturn 1\n";
+        assert_ne!(
+            custom_script,
+            real_build_script(),
+            "the fixture must actually differ from the real bundled bytes, or this test \
+             proves nothing"
+        );
+        let mut args = Some(serde_json::json!({"app_id": "demo"}));
+
+        apply_local_app_build_default_model(&cwd, custom_script, &mut args)
+            .expect("a non-local-app script must not error");
+
+        assert_eq!(
+            args,
+            Some(serde_json::json!({"app_id": "demo"})),
+            "a custom workflow that merely reuses the real build workflow's `meta.name` must \
+             not collect its workflowModel default"
         );
         let _ = std::fs::remove_dir_all(cwd);
     }

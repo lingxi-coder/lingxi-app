@@ -15,6 +15,21 @@ pub struct BuiltinWorkflowDescriptor {
     pub script: &'static str,
     /// Whether the workflow requires an explicit user invocation.
     pub manual_only: bool,
+    /// Whether this workflow builds/updates a Local App's workspace (design
+    /// §18 Phase -1 step 9 / §19.3).
+    ///
+    /// This is the ONE typed place that answers "is this a Local App build
+    /// workflow" -- replacing what used to be two separate hand-maintained
+    /// name arrays (`tasks::LOCAL_APP_BUILD_WORKFLOWS` and
+    /// `tool_workflow::LOCAL_APP_BUILD_WORKFLOWS`, deleted by P-1.9). Both
+    /// arrays answered the same question a different way for a different
+    /// caller, which is exactly why they had to be kept byte-for-byte equal
+    /// by a standalone twin-agreement test instead of being one source of
+    /// truth. `deep-research` is the reason this cannot just be
+    /// `BUILTIN_WORKFLOWS.names()` filtered some other way: it is a
+    /// general-purpose workflow with no Local App identity at all, and nothing
+    /// about its name distinguishes it -- only this field does.
+    pub is_local_app_build: bool,
 }
 
 /// Immutable registry of built-in workflow content.
@@ -26,6 +41,7 @@ const DEEP_RESEARCH: BuiltinWorkflowDescriptor = BuiltinWorkflowDescriptor {
     description: "Research a question across independent sources, verify each claim by vote, and synthesize a cited answer.",
     script: include_str!("deep_research_workflow.js"),
     manual_only: true,
+    is_local_app_build: false,
 };
 
 /// The v3 local-app build segment: the `create-local-app` skill has the agent
@@ -45,6 +61,7 @@ const LOCAL_APP_BUILD: BuiltinWorkflowDescriptor = BuiltinWorkflowDescriptor {
         include_str!("local_app_workflow_core.js"),
     ),
     manual_only: false,
+    is_local_app_build: true,
 };
 
 /// The drawn-surface sibling of [`LOCAL_APP_BUILD`].
@@ -65,6 +82,7 @@ const LOCAL_CANVAS_BUILD: BuiltinWorkflowDescriptor = BuiltinWorkflowDescriptor 
         include_str!("local_app_workflow_core.js"),
     ),
     manual_only: false,
+    is_local_app_build: true,
 };
 
 const BUILTINS: &[BuiltinWorkflowDescriptor] =
@@ -86,6 +104,51 @@ impl BuiltinWorkflowRegistry {
     #[must_use]
     pub fn names(self) -> Vec<&'static str> {
         self.iter().map(|descriptor| descriptor.name).collect()
+    }
+
+    /// Every built-in that builds/updates a Local App's workspace
+    /// (`descriptor.is_local_app_build`), in stable display order.
+    ///
+    /// This is the ONE place both the `workflowModel` default and the
+    /// component-literal scanner's needle derivation source their Local App
+    /// build identity from -- see [`BuiltinWorkflowDescriptor::is_local_app_build`].
+    pub fn local_app_build_descriptors(
+        self,
+    ) -> impl Iterator<Item = &'static BuiltinWorkflowDescriptor> {
+        self.iter()
+            .filter(|descriptor| descriptor.is_local_app_build)
+    }
+
+    /// Stable list of Local App build workflow names, derived from
+    /// [`Self::local_app_build_descriptors`] rather than a hand-maintained
+    /// array.
+    #[must_use]
+    pub fn local_app_build_workflow_names(self) -> Vec<&'static str> {
+        self.local_app_build_descriptors()
+            .map(|descriptor| descriptor.name)
+            .collect()
+    }
+
+    /// True iff `name` names a built-in that has Local App build identity.
+    /// A CUSTOM workflow that merely reuses one of these names is a
+    /// different question this method does not (and cannot) answer -- see
+    /// [`BuiltinWorkflowRegistry::local_app_build_descriptors`]'s callers for
+    /// why script identity, not name, is the trusted signal wherever a
+    /// caller-supplied name is in play.
+    #[must_use]
+    pub fn is_local_app_build_workflow(self, name: &str) -> bool {
+        self.get(name)
+            .is_some_and(|descriptor| descriptor.is_local_app_build)
+    }
+
+    /// True iff `script` is byte-identical to one of the compiled Local App
+    /// build descriptors' `script`. Unlike [`Self::is_local_app_build_workflow`],
+    /// this cannot be spoofed by a caller-supplied `name`/`meta.name`: the
+    /// only way to satisfy it is to run the actual compiled-in bytes.
+    #[must_use]
+    pub fn is_local_app_build_script(self, script: &str) -> bool {
+        self.local_app_build_descriptors()
+            .any(|descriptor| descriptor.script == script)
     }
 }
 
@@ -119,6 +182,42 @@ mod tests {
     #[test]
     fn unknown_names_do_not_fall_back() {
         assert!(BUILTIN_WORKFLOWS.get("not-a-workflow").is_none());
+    }
+
+    /// `is_local_app_build` (design §18 Phase -1 step 9 / §19.3) is the ONE
+    /// typed source every Local App build workflow question now reads from --
+    /// replacing the two hand-typed name arrays P-1.9 deleted
+    /// (`tasks::LOCAL_APP_BUILD_WORKFLOWS` and
+    /// `tool_workflow::LOCAL_APP_BUILD_WORKFLOWS`). `deep-research` pins the
+    /// negative case: it is a real built-in with no Local App identity at
+    /// all, so a query that fell back to `BUILTIN_WORKFLOWS.names()` instead
+    /// of this field would wrongly include it.
+    #[test]
+    fn local_app_build_is_the_exact_two_build_workflows() {
+        assert_eq!(
+            BUILTIN_WORKFLOWS.local_app_build_workflow_names(),
+            vec!["local-app-build", "local-canvas-build"],
+        );
+        assert!(BUILTIN_WORKFLOWS.is_local_app_build_workflow("local-app-build"));
+        assert!(BUILTIN_WORKFLOWS.is_local_app_build_workflow("local-canvas-build"));
+        assert!(
+            !BUILTIN_WORKFLOWS.is_local_app_build_workflow("deep-research"),
+            "deep-research is a general-purpose workflow with no Local App identity"
+        );
+        assert!(!BUILTIN_WORKFLOWS.is_local_app_build_workflow("not-a-workflow"));
+
+        let deep_research = BUILTIN_WORKFLOWS.get("deep-research").expect("built-in");
+        assert!(
+            !BUILTIN_WORKFLOWS.is_local_app_build_script(deep_research.script),
+            "the script-identity check must also reject deep-research's own bytes"
+        );
+        let local_app_build = BUILTIN_WORKFLOWS.get("local-app-build").expect("built-in");
+        assert!(BUILTIN_WORKFLOWS.is_local_app_build_script(local_app_build.script));
+        assert!(
+            !BUILTIN_WORKFLOWS
+                .is_local_app_build_script("export const meta = { name: 'local-app-build' };"),
+            "a custom script that merely DECLARES the real name must not pass the byte check"
+        );
     }
 
     #[test]

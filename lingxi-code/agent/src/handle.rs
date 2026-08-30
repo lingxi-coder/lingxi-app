@@ -262,6 +262,18 @@ pub struct PoolSubagentSpawner {
     /// (byte-identical legacy). Fork spawns NEVER get it (the parent's rendered
     /// prompt is replayed verbatim — no `enhanceSystemPromptWithEnvDetails`).
     subagent_env_renderer: Arc<std::sync::OnceLock<SubagentEnvRenderer>>,
+    /// §24b — per-spawn agent-scoped MCP tool builder (claude `Agr`). A
+    /// SET-ONCE cell mirroring [`Self::hook_executor`]/[`Self::skill_loader`]:
+    /// `agent` cannot itself hold the `Arc<mcp::McpRegistry>` +
+    /// `tool_api::BuiltinToolContext` a real `MCPTool` needs to dispatch
+    /// (both are composition-root-only concerns), so the host grabs
+    /// [`Self::mcp_tool_builder_handle`] before boxing and fills it once both
+    /// exist. Unfilled (the default / tests / minimal builds) ⇒
+    /// [`crate::agent_mcp_tools::AgentMcpToolSet::default`] (empty) — a
+    /// subagent's frontmatter `mcpServers` contribute NO tools, byte-identical
+    /// to legacy (this feature's whole prior history: named, computed, never
+    /// wired).
+    mcp_tool_builder: Arc<std::sync::OnceLock<crate::agent_mcp_tools::AgentMcpToolBuilder>>,
     /// Stable mobile host/tool-runtime snapshot. Kept separate from the
     /// provider/model environment renderer because inference routing is not a
     /// device capability and may change independently.
@@ -397,6 +409,7 @@ impl PoolSubagentSpawner {
             name_registry: Arc::new(RwLock::new(HashMap::new())),
             tool_wide_deny_names: Arc::new(std::sync::OnceLock::new()),
             subagent_env_renderer: Arc::new(std::sync::OnceLock::new()),
+            mcp_tool_builder: Arc::new(std::sync::OnceLock::new()),
             mobile_runtime_environment: None,
             mobile_workspace_cwd_provider: None,
             session_interactive: None,
@@ -455,6 +468,28 @@ impl PoolSubagentSpawner {
     #[must_use]
     pub fn with_subagent_env_renderer(self, renderer: SubagentEnvRenderer) -> Self {
         let _ = self.subagent_env_renderer.set(renderer);
+        self
+    }
+
+    /// §24b — grab the set-once agent-MCP-tool-builder cell BEFORE boxing, to
+    /// fill once the composition root's `Arc<mcp::McpRegistry>` + builtin
+    /// `BuiltinToolContext` exist (same construction-order cycle-break as
+    /// [`Self::hook_executor_handle`]/[`Self::skill_loader_handle`]).
+    #[must_use]
+    pub fn mcp_tool_builder_handle(
+        &self,
+    ) -> Arc<std::sync::OnceLock<crate::agent_mcp_tools::AgentMcpToolBuilder>> {
+        self.mcp_tool_builder.clone()
+    }
+
+    /// Builder: set the agent-MCP-tool-builder immediately (tests). The boot
+    /// path uses [`Self::mcp_tool_builder_handle`] to fill it later.
+    #[must_use]
+    pub fn with_mcp_tool_builder(
+        self,
+        builder: crate::agent_mcp_tools::AgentMcpToolBuilder,
+    ) -> Self {
+        let _ = self.mcp_tool_builder.set(builder);
         self
     }
 
@@ -1054,6 +1089,12 @@ impl PoolSubagentSpawner {
         // against Claude's configured maximum spawn depth. Threaded from
         // `request.depth`.
         depth: u32,
+        // §24b — this spawn's per-agent MCP tools (claude `Agr`'s `Fe`),
+        // already connected + built by [`Self::mcp_tool_builder`]. Appended by
+        // [`crate::tool_resolver::AgentToolResolver::resolve`] step (4) AFTER
+        // every drop/filter, exactly like every other MCP tool. Empty when the
+        // definition declared no `mcpServers` or no builder is wired.
+        agent_mcp_tools: &[Arc<dyn tool_api::Tool>],
     ) -> Result<(Vec<serde_json::Value>, Vec<String>), SubagentSpawnError> {
         let Some(registry) = self.tool_registry.get() else {
             return Ok((Vec::new(), Vec::new()));
@@ -1076,6 +1117,7 @@ impl PoolSubagentSpawner {
             denied,
             default_model.as_deref(),
             depth,
+            agent_mcp_tools,
         )
         .await
         .map_err(|e| SubagentSpawnError::Internal(e.to_string()))
@@ -1266,12 +1308,20 @@ impl PoolSubagentSpawner {
     /// [`StateMachinePool::send_event`]) instead of returning — and marks it
     /// async (background-scheduled). This is the basis of the resumable
     /// background local_agent (claude-code `run_in_background` + comes-to-rest).
+    /// Returns the built context alongside this spawn's §24b agent-scoped MCP
+    /// teardown handles (empty unless the definition declared `mcpServers`
+    /// AND a builder is wired) — the caller runs them
+    /// ([`crate::agent_mcp_tools::run_agent_mcp_cleanups`]) once the spawn's
+    /// run concludes, mirroring claude `Agr`'s `cleanup` closure.
     async fn build_subagent_context(
         &self,
         request: &SubagentSpawnRequest,
         inherit: SubagentInheritance,
         persistent: bool,
-    ) -> Result<SubagentContext, SubagentSpawnError> {
+    ) -> Result<
+        (SubagentContext, Vec<crate::agent_mcp_tools::AgentMcpCleanupHandle>),
+        SubagentSpawnError,
+    > {
         // The parent / main-loop model this spawn resolves against: the request's
         // `parent_model_override` (the LIVE session model at top level / the
         // immediate parent subagent's resolved model when nested — threaded by
@@ -1484,8 +1534,17 @@ impl PoolSubagentSpawner {
         // and is threaded by the runner into the child's dispatched tools.
         ctx.depth = request.depth;
         ctx.observer.clone_from(&request.observer);
+        // §24b: connect + build this spawn's per-agent inline `mcpServers`
+        // (claude `Agr`) BEFORE resolving the tool pool, so the pool's step
+        // (4) (`AgentToolResolver::resolve`'s `agent_mcp_tools` append) can
+        // include them. Unwired builder (tests / minimal builds) ⇒ empty —
+        // byte-identical legacy.
+        let agent_mcp = match self.mcp_tool_builder.get() {
+            Some(builder) => builder(ctx.agent_id, ctx.agent_definition.clone()).await,
+            None => crate::agent_mcp_tools::AgentMcpToolSet::default(),
+        };
         let (tool_schemas, allowed_tools) = self
-            .resolve_tools(&ctx.agent_definition, request.depth)
+            .resolve_tools(&ctx.agent_definition, request.depth, &agent_mcp.tools)
             .await?;
         ctx.tool_schemas = tool_schemas;
         ctx.allowed_tools = allowed_tools;
@@ -1551,7 +1610,7 @@ impl PoolSubagentSpawner {
         // `is_async` marks background scheduling (vs the foreground one-shot).
         ctx.persistent = persistent;
         ctx.is_async = persistent;
-        Ok(ctx)
+        Ok((ctx, agent_mcp.cleanups))
     }
 }
 
@@ -1603,7 +1662,15 @@ impl StreamingSubagentSpawner for PoolSubagentSpawner {
         request: SubagentSpawnRequest,
         inherit: SubagentInheritance,
     ) -> Result<(AgentId, tokio::sync::mpsc::Receiver<SubagentEvent>), SubagentSpawnError> {
-        let ctx = self.build_subagent_context(&request, inherit, true).await?;
+        // §24b DEFERRED: a persistent/background spawn's agent-scoped MCP
+        // connections (if any) are connected here but never torn down — this
+        // path "comes to rest" and may be resumed arbitrarily later, so there
+        // is no single point analogous to `spawn_with_observer`'s post-loop
+        // teardown to hook without a larger lifecycle change. Not a
+        // regression (nothing tore these down before this feature existed
+        // either), but a real gap versus the one-shot `spawn` path above.
+        let (ctx, _agent_mcp_cleanups_not_yet_wired_for_persistent_spawns) =
+            self.build_subagent_context(&request, inherit, true).await?;
         let agent_id = ctx.agent_id;
         let (_aid, rx) = self.pool.allocate(ctx).await.map_err(|e| match e {
             crate::pool::PoolError::TooManyAgents => SubagentSpawnError::PoolFull,
@@ -1883,7 +1950,7 @@ impl SubagentSpawner for PoolSubagentSpawner {
         // Build the child context (non-persistent: the one-shot `spawn` returns
         // on the first terminal stop). The persistent/resumable variant is
         // `spawn_persistent` below.
-        let mut ctx = self
+        let (mut ctx, agent_mcp_cleanups) = self
             .build_subagent_context(&request, inherit, false)
             .await?;
         let resolved_agent_type = ctx.agent_definition.agent_type.clone();
@@ -1906,10 +1973,24 @@ impl SubagentSpawner for PoolSubagentSpawner {
         let resolved_model = crate::runner::resolve_model(&ctx);
         let resolved_model_profile = ctx.model_profile.clone();
         let agent_id = ctx.agent_id;
-        let (_aid, mut rx) = self.pool.allocate(ctx).await.map_err(|e| match e {
-            crate::pool::PoolError::TooManyAgents => SubagentSpawnError::PoolFull,
-            other => SubagentSpawnError::Runtime(other.to_string()),
-        })?;
+        let (_aid, mut rx) = match self.pool.allocate(ctx).await {
+            Ok(pair) => pair,
+            Err(e) => {
+                // §24b: the pool never got a runner started for this spawn, so
+                // nobody else will ever tear these connections down — mirror
+                // claude's `finally` running even when the body never reached
+                // the model.
+                crate::agent_mcp_tools::run_agent_mcp_cleanups(
+                    agent_mcp_cleanups,
+                    &resolved_agent_type,
+                )
+                .await;
+                return Err(match e {
+                    crate::pool::PoolError::TooManyAgents => SubagentSpawnError::PoolFull,
+                    other => SubagentSpawnError::Runtime(other.to_string()),
+                });
+            }
+        };
 
         // Arm cancel-safety immediately after allocation, before awaiting any
         // observer. A cancelled or stalled observer must not orphan the already
@@ -1921,7 +2002,7 @@ impl SubagentSpawner for PoolSubagentSpawner {
         };
         observer_events.try_emit(SubagentObservation::Allocated {
             agent_id,
-            agent_type: resolved_agent_type,
+            agent_type: resolved_agent_type.clone(),
             name: request_name.clone(),
             model: resolved_model.clone(),
             model_profile: resolved_model_profile.clone(),
@@ -2065,6 +2146,11 @@ impl SubagentSpawner for PoolSubagentSpawner {
         // Best-effort deallocate; failures here don't change the surfaced
         // result.
         let _ = self.pool.deallocate(&agent_id).await;
+        // §24b (claude `Agr`'s `cleanup` — `runAgent`'s `finally`): tear down
+        // exactly the connections THIS spawn newly created, regardless of the
+        // terminal outcome (`Completed`/`Failed`/`Killed` all reach here).
+        crate::agent_mcp_tools::run_agent_mcp_cleanups(agent_mcp_cleanups, &resolved_agent_type)
+            .await;
 
         match &result {
             SubagentResult::Completed {
@@ -2617,6 +2703,117 @@ mod tests {
         std::env::remove_var("CLAUDE_CODE_EXPERIMENTAL_OBSERVER_AGENTS");
     }
 
+    /// §24b PRODUCTION reachability: a wired `mcp_tool_builder` must (a) have
+    /// its tools reach the model's advertised `tools` array through the REAL
+    /// `spawn()` chain — `build_subagent_context` → `resolve_tools` →
+    /// `AgentToolResolver::resolve`'s agent_mcp_tools append — and (b) have
+    /// its teardown handle run EXACTLY ONCE after the spawn concludes. This is
+    /// the "named, computed, never wired" gap this feature's whole prior
+    /// history was stuck on: `tool_resolver::tests::mcp_tools_always_survive`
+    /// already proves the resolver alone accepts a non-empty `agent_mcp_tools`
+    /// slice, so what was missing — and is asserted here — is the production
+    /// caller actually building and passing one.
+    ///
+    /// RED ON REVERT: reverting the `build_subagent_context`/`resolve_tools`
+    /// wiring back to a literal `&[]` (this feature's actual prior state)
+    /// fails the first assertion below with `mcp__fake__tool` absent from
+    /// `names`; reverting the `spawn_with_observer` post-loop cleanup call
+    /// fails the second with `torn_down == 0`.
+    #[tokio::test]
+    async fn agent_scoped_mcp_tools_reach_the_wire_and_are_torn_down_on_exit() {
+        let runtime = Arc::new(MockRuntimeSpawner::default());
+        let pool = Arc::new(StateMachinePool::new(runtime, 4));
+
+        let seen_tools: Arc<Mutex<Vec<Value>>> = Arc::new(Mutex::new(Vec::new()));
+        struct CapturingApi {
+            seen_tools: Arc<Mutex<Vec<Value>>>,
+        }
+        #[async_trait]
+        impl crate::api::SubagentApiClient for CapturingApi {
+            async fn messages_create(
+                &self,
+                _model: &str,
+                _system: Option<&str>,
+                _messages: Vec<protocol::ConversationMessage>,
+                tools: Vec<serde_json::Value>,
+            ) -> Result<llm_client::LlmResponse, llm_client::LlmError> {
+                *self.seen_tools.lock().unwrap() = tools;
+                Ok(text_response("done"))
+            }
+        }
+        let api = Arc::new(CapturingApi {
+            seen_tools: seen_tools.clone(),
+        });
+
+        let torn_down = Arc::new(AtomicUsize::new(0));
+        let torn_down_for_builder = torn_down.clone();
+        let builder: crate::agent_mcp_tools::AgentMcpToolBuilder =
+            Arc::new(move |_agent_id, _def| {
+                let torn_down = torn_down_for_builder.clone();
+                Box::pin(async move {
+                    let cleanup = crate::agent_mcp_tools::AgentMcpCleanupHandle {
+                        server_name: "fake".into(),
+                        run: Arc::new(move || {
+                            let torn_down = torn_down.clone();
+                            Box::pin(async move {
+                                torn_down.fetch_add(1, Ordering::SeqCst);
+                                Ok(())
+                            })
+                        }),
+                    };
+                    crate::agent_mcp_tools::AgentMcpToolSet {
+                        tools: vec![Arc::new(StubTool {
+                            name: "mcp__fake__tool",
+                            aliases: &[],
+                        }) as Arc<dyn Tool>],
+                        cleanups: vec![cleanup],
+                    }
+                })
+            });
+
+        let spawner = PoolSubagentSpawner::new(pool)
+            .with_api_client(api)
+            .with_tool_registry(registry_with(&[]))
+            .with_mcp_tool_builder(builder);
+
+        let request: SubagentSpawnRequest = serde_json::from_value(serde_json::json!({
+            "subagent_type": "general-purpose",
+            "prompt": "use the fake mcp tool"
+        }))
+        .expect("minimal spawn request");
+
+        let result = spawner
+            .spawn(
+                request,
+                SubagentInheritance {
+                    tool_invoker: Arc::new(DummyInvoker),
+                    budget: Arc::new(DummyBudget),
+                },
+            )
+            .await
+            .expect("spawn should complete");
+        assert!(
+            matches!(result, SubagentResult::Completed { .. }),
+            "expected a completed result, got {result:?}"
+        );
+
+        let names: Vec<String> = seen_tools
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|t| t["name"].as_str().map(str::to_string))
+            .collect();
+        assert!(
+            names.contains(&"mcp__fake__tool".to_string()),
+            "the wired agent-mcp tool must reach the model's advertised tools array, got {names:?}"
+        );
+        assert_eq!(
+            torn_down.load(Ordering::SeqCst),
+            1,
+            "the newly-created connection's cleanup must run exactly once after the spawn concludes"
+        );
+    }
+
     #[tokio::test]
     async fn blocked_lifecycle_observer_does_not_stall_child_event_pump() {
         let runtime = Arc::new(CountingRuntimeSpawner::default());
@@ -2905,6 +3102,7 @@ mod tests {
                     use_exact_tools: true,
                 }),
                 0,
+                &[],
             )
             .await
             .expect("unset registry should resolve to an empty tool set");
@@ -2925,6 +3123,7 @@ mod tests {
                     use_exact_tools: true,
                 }),
                 0,
+                &[],
             )
             .await
             .expect("all policy should resolve");
@@ -2953,6 +3152,7 @@ mod tests {
             .resolve_tools(
                 &agent_def(AgentToolPolicy::Explicit(vec!["Read".to_string()])),
                 0,
+                &[],
             )
             .await
             .expect("explicit Read should resolve");
@@ -2975,6 +3175,7 @@ mod tests {
             .resolve_tools(
                 &agent_def(AgentToolPolicy::Explicit(vec!["NoSuchTool".to_string()])),
                 0,
+                &[],
             )
             .await
             .expect_err("unknown explicit tool must reject the spawn");
@@ -3001,6 +3202,7 @@ mod tests {
                     use_exact_tools: true,
                 }),
                 0,
+                &[],
             )
             .await
             .expect("all policy should resolve with tool-wide deny");
@@ -3039,6 +3241,7 @@ mod tests {
                     use_exact_tools: true,
                 }),
                 0,
+                &[],
             )
             .await
             .expect("all policy should resolve with mcp server deny");
@@ -3070,6 +3273,7 @@ mod tests {
                     use_exact_tools: true,
                 }),
                 0,
+                &[],
             )
             .await
             .expect("all policy should resolve without deny");
@@ -3082,6 +3286,7 @@ mod tests {
                     use_exact_tools: true,
                 }),
                 0,
+                &[],
             )
             .await
             .expect("all policy should resolve with empty deny");
@@ -3112,6 +3317,7 @@ mod tests {
                     use_exact_tools: true,
                 }),
                 0,
+                &[],
             )
             .await
             .expect("all policy should resolve with aliases");
@@ -3149,7 +3355,7 @@ mod tests {
         };
         // depth 0: Agent kept (0 < default 3).
         let (schemas0, allowed0) = spawner
-            .resolve_tools(&policy(), 0)
+            .resolve_tools(&policy(), 0, &[])
             .await
             .expect("depth 0 should resolve");
         let names0: Vec<&str> = schemas0
@@ -3164,7 +3370,7 @@ mod tests {
         );
         // depth 3 (the 2.1.219 default cap): Agent gated → empty pool.
         let (schemas1, allowed1) = spawner
-            .resolve_tools(&policy(), 3)
+            .resolve_tools(&policy(), 3, &[])
             .await
             .expect("depth 3 should resolve");
         assert!(schemas1.is_empty(), "Agent gated at depth 3 → no schemas");
@@ -3192,6 +3398,7 @@ mod tests {
                     use_exact_tools: false,
                 }),
                 0,
+                &[],
             )
             .await
             .expect("all policy should resolve at depth 0");
@@ -3223,6 +3430,7 @@ mod tests {
                     use_exact_tools: false,
                 }),
                 0,
+                &[],
             )
             .await
             .expect("plan-mode all policy should resolve");
@@ -3257,6 +3465,7 @@ mod tests {
             .resolve_tools(
                 &agent_def(AgentToolPolicy::Except(vec!["Bash".to_string()])),
                 0,
+                &[],
             )
             .await
             .expect("except policy should resolve");
@@ -3508,7 +3717,7 @@ mod tests {
                 false,
             )
             .await
-            .expect("provider-qualified context");
+            .expect("provider-qualified context").0;
         assert_eq!(crate::runner::resolve_model(&context), "deepseek-v4-flash");
         assert_eq!(context.model_profile.as_deref(), Some("deepseek"));
     }
@@ -3544,7 +3753,7 @@ mod tests {
                 false,
             )
             .await
-            .expect("custom Anthropic parent selection");
+            .expect("custom Anthropic parent selection").0;
 
         assert_eq!(crate::runner::resolve_model(&context), "claude-opus-4-8");
         assert_eq!(context.model_profile, None);
@@ -3586,7 +3795,7 @@ mod tests {
                 false,
             )
             .await
-            .expect("catalog-resolved custom Anthropic parent");
+            .expect("catalog-resolved custom Anthropic parent").0;
 
         assert_eq!(crate::runner::resolve_model(&context), "claude-opus-4-8");
         assert_eq!(context.model_profile, None);
@@ -3622,7 +3831,7 @@ mod tests {
                 false,
             )
             .await
-            .expect("statusline child context");
+            .expect("statusline child context").0;
 
         assert_eq!(crate::runner::resolve_model(&context), "claude-sonnet-5");
         assert_eq!(
@@ -3687,7 +3896,7 @@ mod tests {
                 false,
             )
             .await
-            .expect("explicit provider-qualified spawn is self-contained");
+            .expect("explicit provider-qualified spawn is self-contained").0;
 
         assert_eq!(crate::runner::resolve_model(&context), "deepseek-v4-flash");
         assert_eq!(context.model_profile.as_deref(), Some("deepseek"));
@@ -3734,7 +3943,7 @@ mod tests {
                 false,
             )
             .await
-            .expect("barred model inherits the permitted parent");
+            .expect("barred model inherits the permitted parent").0;
 
         assert_eq!(crate::runner::resolve_model(&context), "claude-opus-4-7");
         assert_eq!(context.model_profile.as_deref(), Some("anthropic"));
@@ -3769,7 +3978,7 @@ mod tests {
                 false,
             )
             .await
-            .expect("live provider selection");
+            .expect("live provider selection").0;
 
         assert_eq!(crate::runner::resolve_model(&context), "claude-fable-5");
         assert_eq!(context.model_profile, None);
@@ -3840,7 +4049,7 @@ mod tests {
         let ctx = spawner
             .build_subagent_context(&req, inherit, false)
             .await
-            .expect("subagent context should build");
+            .expect("subagent context should build").0;
         assert!(
             matches!(&ctx.agent_definition.model, AgentModel::Explicit(m) if m == "claude-sonnet-5"),
             "nested spawn inherits its immediate parent's resolved model, got {:?}",
@@ -3979,7 +4188,7 @@ mod tests {
                     false,
                 )
                 .await
-                .expect("spawn context")
+                .expect("spawn context").0
         };
 
         let baseline = build().await;
@@ -4199,7 +4408,7 @@ mod tests {
             .with_tool_registry(registry_with(&["Read", "Grep", "Edit", "Write"]));
         let def = spawner.resolve_definition("Explore", None).await;
         let (schemas, allowed) = spawner
-            .resolve_tools(&def, 0)
+            .resolve_tools(&def, 0, &[])
             .await
             .expect("Explore tool set should resolve");
         let names: Vec<&str> = schemas
@@ -4555,7 +4764,7 @@ mod tests {
         let plan_ctx = spawner
             .build_subagent_context(&plan_req, mk_inherit(), false)
             .await
-            .expect("plan-mode context should build");
+            .expect("plan-mode context should build").0;
         assert_eq!(
             plan_ctx.permission_mode_override, None,
             "the deprecated mode:\"plan\" call param must be ignored (inherit the live mode)"
@@ -4566,7 +4775,7 @@ mod tests {
         let none_ctx = spawner
             .build_subagent_context(&base_req(), mk_inherit(), false)
             .await
-            .expect("default context should build");
+            .expect("default context should build").0;
         assert_eq!(
             none_ctx.permission_mode_override, None,
             "a mode-less spawn of a Bubble-default agent inherits the live mode"
@@ -4578,7 +4787,7 @@ mod tests {
         let escalate_ctx = spawner
             .build_subagent_context(&escalate_req, mk_inherit(), false)
             .await
-            .expect("escalating context should still build");
+            .expect("escalating context should still build").0;
         assert_eq!(
             escalate_ctx.permission_mode_override, None,
             "the deprecated mode call param cannot escalate the child's mode"
@@ -4591,7 +4800,7 @@ mod tests {
         let fork_ctx = spawner
             .build_subagent_context(&fork_req, mk_inherit(), false)
             .await
-            .expect("fork context should build");
+            .expect("fork context should build").0;
         assert_eq!(
             fork_ctx.permission_mode_override, None,
             "the fork path never applies a mode override"
@@ -4658,7 +4867,7 @@ mod tests {
         let ctx = spawner
             .build_subagent_context(&req, inherit, false)
             .await
-            .expect("definition-plan context should build");
+            .expect("definition-plan context should build").0;
         assert_eq!(
             ctx.permission_mode_override.as_deref(),
             Some("plan"),
@@ -4728,7 +4937,7 @@ mod tests {
         let ctx = spawner
             .build_subagent_context(&req, inherit, false)
             .await
-            .expect("plan-mode context should build");
+            .expect("plan-mode context should build").0;
         let names: Vec<&str> = ctx
             .tool_schemas
             .iter()
@@ -4791,7 +5000,7 @@ mod tests {
         let persistent = spawner
             .build_subagent_context(&req, mk_inherit(), true)
             .await
-            .expect("persistent context should build");
+            .expect("persistent context should build").0;
         assert!(
             persistent.persistent,
             "persistent agent must park (come to rest)"
@@ -4804,7 +5013,7 @@ mod tests {
         let one_shot = spawner
             .build_subagent_context(&req, mk_inherit(), false)
             .await
-            .expect("one-shot context should build");
+            .expect("one-shot context should build").0;
         assert!(
             !one_shot.persistent,
             "the one-shot spawn path must NOT park"
@@ -5008,7 +5217,7 @@ mod tests {
         let ctx = spawner
             .build_subagent_context(&req, mk_inherit(), false)
             .await
-            .expect("context should build");
+            .expect("context should build").0;
         let sys = ctx.rendered_system_prompt.as_deref().unwrap();
         assert!(
             sys.ends_with("\n\n<env>\nMODEL: claude-opus-4-8[1m]\nCWD: <none>\n</env>"),
@@ -5024,7 +5233,7 @@ mod tests {
         let wt_ctx = spawner
             .build_subagent_context(&wt_req, mk_inherit(), false)
             .await
-            .expect("worktree cwd context should build");
+            .expect("worktree cwd context should build").0;
         let wt_sys = wt_ctx.rendered_system_prompt.as_deref().unwrap();
         assert!(
             wt_sys.contains("CWD: /repo/.lingxi/worktrees/agent-x"),
@@ -5041,7 +5250,7 @@ mod tests {
         let fork_ctx = spawner
             .build_subagent_context(&req, mk_inherit(), false)
             .await
-            .expect("fork context should build");
+            .expect("fork context should build").0;
         assert_eq!(
             fork_ctx.rendered_system_prompt.as_deref(),
             Some("PARENT VERBATIM"),
@@ -5096,7 +5305,7 @@ mod tests {
         let ctx = spawner
             .build_subagent_context(&request, inherit, true)
             .await
-            .expect("context should build");
+            .expect("context should build").0;
 
         assert_eq!(ctx.agent_name.as_deref(), Some("researcher"));
         assert_eq!(ctx.team_name.as_deref(), Some("alpha"));

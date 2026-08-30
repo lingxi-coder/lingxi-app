@@ -566,6 +566,23 @@ fn validation_issues(entry: &Value, ty: &str) -> Vec<String> {
             issues.push("alwaysLoad: expected boolean".to_string());
         }
     }
+    // §11 — `discoveryCache: q().optional()` is declared by `OAn`/`sGt`
+    // (`sse` / `http` / `streamable-http`) ONLY, and with NO `.catch`, so a
+    // present-but-non-boolean value fails `safeParse` there and is an
+    // unknown-and-stripped key everywhere else. Without this the loader
+    // rejected the entry (`json_config::discovery_cache_flag`) while
+    // diagnostics stayed silent, so the server vanished from `mcp list` with
+    // no `Skipped —` line naming the field.
+    if crate::json_config::discovery_cache_is_schema_key_for(Some(ty)) {
+        if let Some(discovery_cache) = object.get("discoveryCache") {
+            if !discovery_cache.is_boolean() {
+                issues.push(format!(
+                    "discoveryCache: expected boolean, received {}",
+                    json_type_name(discovery_cache)
+                ));
+            }
+        }
+    }
     issues
 }
 

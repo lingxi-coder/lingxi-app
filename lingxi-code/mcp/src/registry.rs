@@ -1095,8 +1095,32 @@ impl McpRegistry {
             // (oracle: `case"resources/list":case"resources/templates/list":
             // case"resources/read":if(!this._capabilities.resources)throw…`,
             // @167690139), not a separate capability bit.
+            //
+            // The fetch is NON-FATAL. Templates are optional in the MCP spec:
+            // a server may declare `capabilities.resources` on the strength of
+            // `resources/list` alone and answer `-32601 Method not found` here
+            // (the posix transport flattens that to `McpError::Internal` via
+            // `map_call_err`). Oracle `Qe` (2.1.251 Mach-O @182528544) wraps
+            // the whole fetch in a catch that returns `[]` on EVERY error —
+            // `catch(t){ mr().resourceTemplateLists.delete(ur(e.name,e.config));
+            // Z(e.name,`Failed to fetch resource templates: ${l(t)}`); let r=[];
+            // if(!(t instanceof Er&&t.code===Ir.MethodNotFound))
+            // qt().discoveryFetchErrors.set(r,we(t)); return r }` — so it can
+            // never fail a connection. Propagating it with `?` instead
+            // disconnected the live transport below and dropped ALL of the
+            // server's tools/resources/prompts.
             let resource_templates = if caps.resources {
-                self.transport.list_resource_templates(&conn).await?
+                match self.transport.list_resource_templates(&conn).await {
+                    Ok(templates) => templates,
+                    Err(error) => {
+                        tracing::warn!(
+                            server = %config.name,
+                            %error,
+                            "Failed to fetch resource templates"
+                        );
+                        Vec::new()
+                    }
+                }
             } else {
                 Vec::new()
             };
@@ -3209,6 +3233,7 @@ mod tests {
         // (`initialize` reports `resources: true` only when this is set).
         resource_templates: Vec<traits::McpResourceTemplateDto>,
         resources_capability: AtomicBool,
+        list_resource_templates_fails: AtomicBool,
         conns: TestMutex<HashMap<ConnId, Arc<Connection>>>,
         list_tools_fails: AtomicBool,
         disconnect_fails: AtomicBool,
@@ -3238,6 +3263,7 @@ mod tests {
                 tools,
                 resource_templates: Vec::new(),
                 resources_capability: AtomicBool::new(false),
+                list_resource_templates_fails: AtomicBool::new(false),
                 conns: TestMutex::new(HashMap::new()),
                 list_tools_fails: AtomicBool::new(false),
                 disconnect_fails: AtomicBool::new(false),
@@ -3302,6 +3328,14 @@ mod tests {
             &self,
             _c: &McpRawConnection,
         ) -> Result<Vec<traits::McpResourceTemplateDto>, McpError> {
+            if self.list_resource_templates_fails.load(Ordering::SeqCst) {
+                // What a server with no `resources/templates/list` handler
+                // really replies: JSON-RPC -32601, which the posix transport
+                // flattens through `map_call_err` into `McpError::Internal`.
+                return Err(McpError::Internal(
+                    "MCP error -32601: Method not found".into(),
+                ));
+            }
             Ok(self.resource_templates.clone())
         }
         async fn list_tools(&self, _c: &McpRawConnection) -> Result<Vec<McpToolDto>, McpError> {
@@ -4249,6 +4283,56 @@ mod tests {
         assert!(
             resource_templates.is_empty(),
             "resources capability absent -> templates fetch must be skipped, got {resource_templates:?}"
+        );
+    }
+
+    /// §26a — a `resources/templates/list` FAILURE must never fail the
+    /// connection. Templates are optional in the MCP spec: a server can
+    /// legally declare `capabilities.resources` (because it registered
+    /// `resources/list`) and answer `-32601 Method not found` for
+    /// `resources/templates/list`. Oracle `Qe` (2.1.251 Mach-O @182528544)
+    /// wraps the whole fetch in `try{...}catch(t){ ...; let r=[]; if(!(t
+    /// instanceof Er&&t.code===Ir.MethodNotFound)) qt().discoveryFetchErrors
+    /// .set(r,we(t)); return r }` — EVERY error path returns an empty array,
+    /// and MethodNotFound is explicitly benign. Joining the fetch to the
+    /// catalog block with `?` instead disconnected the live transport
+    /// (registry.rs's `Err` arm) and returned `Err` from `connect`, so a
+    /// server that connected fine before the fetch existed lost ALL of its
+    /// tools, resources and prompts.
+    #[tokio::test]
+    async fn connect_survives_a_resource_templates_fetch_that_fails() {
+        let mock = Arc::new(BridgeMock::new(&["alpha"]));
+        mock.resources_capability.store(true, Ordering::SeqCst);
+        mock.list_resource_templates_fails
+            .store(true, Ordering::SeqCst);
+        let registry = McpRegistry::with_raw_conn(
+            mock.clone() as Arc<dyn McpTransport>,
+            mock as Arc<dyn RawConnectionProvider>,
+        );
+        let connected = registry.connect(cfg("srv")).await;
+        assert!(
+            connected.is_ok(),
+            "a -32601 on resources/templates/list must NOT fail the connection, got {:?}",
+            connected.err()
+        );
+
+        let conns = registry.connections.read().await;
+        let McpConnectionState::Connected {
+            tools,
+            resource_templates,
+            ..
+        } = conns.get("srv").unwrap()
+        else {
+            panic!("expected Connected state, got {:?}", conns.get("srv"));
+        };
+        assert_eq!(
+            tools.len(),
+            1,
+            "the server's tools must survive a failed template fetch"
+        );
+        assert!(
+            resource_templates.is_empty(),
+            "a failed template fetch yields an EMPTY list (oracle `Qe`'s catch), got {resource_templates:?}"
         );
     }
 

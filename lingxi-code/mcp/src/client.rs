@@ -1498,10 +1498,19 @@ fn resolve_idle_timeout_gld(
 /// claude-code's `xMy = new Set(["sse-ide","ws-ide","sdk"])` (`GLd`). These are
 /// same-process bridges (IDE / SDK control), for which a silence watchdog is
 /// meaningless.
+///
+/// All THREE `xMy` members are covered: `SseIde` = `"sse-ide"`, `WsIde` =
+/// `"ws-ide"` (§10's variant — omitting it gave a `ws-ide` transport the
+/// 5-minute `AMy` remote default the oracle disables), `SdkControl` = `"sdk"`.
+/// `InProcess` has no oracle counterpart and is this port's own same-process
+/// bridge, which belongs to the set for the same reason.
 fn transport_kind_is_in_process(kind: McpTransportKind) -> bool {
     matches!(
         kind,
-        McpTransportKind::SseIde | McpTransportKind::SdkControl | McpTransportKind::InProcess
+        McpTransportKind::SseIde
+            | McpTransportKind::WsIde
+            | McpTransportKind::SdkControl
+            | McpTransportKind::InProcess
     )
 }
 
@@ -2482,9 +2491,15 @@ mod timeout_tests {
     #[test]
     fn idle_is_zero_for_in_process_transports() {
         // xMy = {"sse-ide","ws-ide","sdk"} → no idle timeout. lingxi's in-process
-        // kinds (SseIde / SdkControl / InProcess) mirror that set.
+        // kinds (SseIde / WsIde / SdkControl / InProcess) mirror that set —
+        // `WsIde` is §10's new variant and is the literal `"ws-ide"` member of
+        // `xMy` (oracle @182263592 / @182470659:
+        // `var er=new Set(["sse-ide","ws-ide","sdk"]); function tr(e){let
+        // t=e?.type??"stdio"; if(er.has(t))return 0; …}`), so it must NOT fall
+        // through to the 5-minute remote default.
         for kind in [
             McpTransportKind::SseIde,
+            McpTransportKind::WsIde,
             McpTransportKind::SdkControl,
             McpTransportKind::InProcess,
         ] {

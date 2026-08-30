@@ -9,6 +9,7 @@ use std::collections::BTreeSet;
 use std::fmt;
 use std::path::PathBuf;
 
+use regex::{Regex, RegexBuilder};
 use serde_json::Value;
 
 /// Canonical identity of a marketplace source.
@@ -139,34 +140,58 @@ fn split_host_path(locator: &str) -> (String, String) {
     (String::new(), locator.to_string())
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 enum MarketplaceRule {
     Name(String),
     Exact(MarketplaceSourceIdentity),
+    /// Oracle `hostPattern`/`pathPattern` are JS `RegExp`, not glob — an
+    /// entry like `^github\.mycompany\.com$` is meant to anchor an exact
+    /// host, not match nothing the way a `*`/`?` glob would. Compiled once
+    /// at parse time (case-insensitive, matching JS `RegExp` without
+    /// per-pattern flags).
     Pattern {
-        host_pattern: Option<String>,
-        path_pattern: Option<String>,
+        host_pattern: PatternField,
+        path_pattern: PatternField,
     },
 }
 
+/// One `hostPattern`/`pathPattern` slot: absent (no constraint on that
+/// field), a compiled regex, or an invalid pattern. Invalid is deliberately
+/// distinct from absent — a diagnostic ("Invalid hostPattern regex in
+/// policy settings …") is logged and the RULE that carries it can never
+/// match, rather than the broken field silently becoming unconstrained.
+#[derive(Debug, Clone)]
+enum PatternField {
+    Absent,
+    Compiled(Regex),
+    Invalid,
+}
+
+impl PatternField {
+    fn is_match(&self, candidate: &str) -> bool {
+        match self {
+            Self::Absent => true,
+            Self::Compiled(regex) => regex.is_match(candidate),
+            Self::Invalid => false,
+        }
+    }
+}
+
 impl MarketplaceRule {
-    fn parse(value: &Value) -> Option<Self> {
+    /// `tier` names the managed-settings array this rule came from
+    /// (`strictKnownMarketplaces` or `blockedMarketplaces`), used only to
+    /// label diagnostics.
+    fn parse(value: &Value, tier: &str) -> Option<Self> {
         if let Some(name) = value.as_str().filter(|name| !name.is_empty()) {
             return Some(Self::Name(name.to_string()));
         }
         let object = value.as_object()?;
-        let host_pattern = object
-            .get("hostPattern")
-            .and_then(Value::as_str)
-            .map(ToOwned::to_owned);
-        let path_pattern = object
-            .get("pathPattern")
-            .and_then(Value::as_str)
-            .map(ToOwned::to_owned);
+        let host_pattern = object.get("hostPattern").and_then(Value::as_str);
+        let path_pattern = object.get("pathPattern").and_then(Value::as_str);
         if host_pattern.is_some() || path_pattern.is_some() {
             return Some(Self::Pattern {
-                host_pattern,
-                path_pattern,
+                host_pattern: compile_pattern_field(host_pattern, "hostPattern", tier),
+                path_pattern: compile_pattern_field(path_pattern, "pathPattern", tier),
             });
         }
         if let Some(name) = object
@@ -176,24 +201,67 @@ impl MarketplaceRule {
         {
             return Some(Self::Name(name.to_string()));
         }
-        MarketplaceSourceIdentity::from_value(value).map(Self::Exact)
+        let identity = MarketplaceSourceIdentity::from_value(value)?;
+        match &identity {
+            MarketplaceSourceIdentity::Github { repo, .. }
+                if repo.contains('*') && owner_wildcard(repo).is_none() =>
+            {
+                tracing::warn!(
+                    "Invalid owner-wildcard repo in policy settings {tier}: {repo:?} \
+                     (only \"<owner>/*\" is supported); entry only matches a literally \
+                     identical repo string"
+                );
+            }
+            MarketplaceSourceIdentity::Github { .. } => {}
+            _ if source_value_contains_wildcard(value) => {
+                tracing::warn!(
+                    "Invalid owner-wildcard url in policy settings {tier}: (wildcards are \
+                     only supported in github-form entries, as \"<owner>/*\"); entry does \
+                     not match github.com sources"
+                );
+            }
+            _ => {}
+        }
+        Some(Self::Exact(identity))
     }
 
     fn matches(&self, name: Option<&str>, source: Option<&MarketplaceSourceIdentity>) -> bool {
         match self {
             Self::Name(expected) => name == Some(expected.as_str()),
-            Self::Exact(expected) => source == Some(expected),
+            Self::Exact(expected) => {
+                // `owner/*` is honoured ONLY here (a policy rule), never as
+                // a real source: elsewhere it parses as a literal repo name
+                // and simply fails to clone.
+                if let (
+                    MarketplaceSourceIdentity::Github {
+                        repo: expected_repo,
+                        git_ref: expected_ref,
+                        path: expected_path,
+                    },
+                    Some(MarketplaceSourceIdentity::Github {
+                        repo: actual_repo,
+                        git_ref: actual_ref,
+                        path: actual_path,
+                    }),
+                ) = (expected, source)
+                {
+                    if let Some(owner) = owner_wildcard(expected_repo) {
+                        let actual_owner = actual_repo
+                            .split_once('/')
+                            .map_or(actual_repo.as_str(), |(owner, _)| owner);
+                        return actual_owner.eq_ignore_ascii_case(owner)
+                            && expected_ref == actual_ref
+                            && expected_path == actual_path;
+                    }
+                }
+                source == Some(expected)
+            }
             Self::Pattern {
                 host_pattern,
                 path_pattern,
             } => source.is_some_and(|source| {
                 let (host, path) = source.host_path();
-                host_pattern
-                    .as_deref()
-                    .is_none_or(|pattern| wildcard_matches(pattern, &host))
-                    && path_pattern
-                        .as_deref()
-                        .is_none_or(|pattern| wildcard_matches(pattern, &path))
+                host_pattern.is_match(&host) && path_pattern.is_match(&path)
             }),
         }
     }
@@ -201,6 +269,67 @@ impl MarketplaceRule {
     fn is_name_only(&self) -> bool {
         matches!(self, Self::Name(_))
     }
+}
+
+/// Compile an optional `hostPattern`/`pathPattern` string as a
+/// case-insensitive regex (oracle: JS `RegExp`, not glob). `None` (the key
+/// was absent) stays unconstrained; a present-but-invalid pattern is
+/// diagnosed and becomes `Invalid`, so the rule fails closed instead of the
+/// broken field silently matching everything.
+fn compile_pattern_field(pattern: Option<&str>, field: &str, tier: &str) -> PatternField {
+    let Some(pattern) = pattern else {
+        return PatternField::Absent;
+    };
+    match RegexBuilder::new(pattern).case_insensitive(true).build() {
+        Ok(regex) => PatternField::Compiled(regex),
+        Err(error) => {
+            tracing::warn!(
+                "Invalid {field} regex in policy settings {tier}: {pattern:?} ({error})"
+            );
+            PatternField::Invalid
+        }
+    }
+}
+
+/// `<owner>/*` is the only wildcard shape a policy rule's github `repo`
+/// field supports (oracle: "only \"<owner>/*\" is supported").
+fn owner_wildcard(repo: &str) -> Option<&str> {
+    let owner = repo.strip_suffix("/*")?;
+    (!owner.is_empty() && !owner.contains('*') && !owner.contains('/')).then_some(owner)
+}
+
+/// Whether any string field of a (non-github) rule source value contains a
+/// literal `*`, i.e. someone tried to use wildcard syntax somewhere it is
+/// not supported.
+fn source_value_contains_wildcard(value: &Value) -> bool {
+    let value = value
+        .get("source")
+        .filter(|nested| nested.is_object())
+        .unwrap_or(value);
+    value.as_object().is_some_and(|object| {
+        object
+            .values()
+            .any(|field| field.as_str().is_some_and(|value| value.contains('*')))
+    })
+}
+
+/// Oracle `D`: a suspicious git URL (`plugin::is_suspicious_url`) can never
+/// satisfy a strict-allowlist rule, regardless of what its fields would
+/// otherwise equal or pattern-match — the ambiguity itself is the reason to
+/// distrust it, so it fails closed instead of being resolved one way or the
+/// other. Deny-list matching is untouched: a confusable URL must still be
+/// caught by a `blockedMarketplaces` rule that would otherwise catch it.
+fn allow_rule_matches(
+    rule: &MarketplaceRule,
+    name: Option<&str>,
+    source: Option<&MarketplaceSourceIdentity>,
+) -> bool {
+    if let Some(MarketplaceSourceIdentity::Git { url, .. }) = source {
+        if plugin::is_suspicious_url(url) {
+            return false;
+        }
+    }
+    rule.matches(name, source)
 }
 
 /// Why a marketplace operation was rejected before side effects.
@@ -251,11 +380,18 @@ impl MarketplacePolicy {
                 );
             }
             if let Some(entries) = strict.or(allowed_alias) {
-                policy.strict_known =
-                    Some(entries.iter().filter_map(MarketplaceRule::parse).collect());
+                policy.strict_known = Some(
+                    entries
+                        .iter()
+                        .filter_map(|entry| MarketplaceRule::parse(entry, "strictKnownMarketplaces"))
+                        .collect(),
+                );
             }
             if let Some(entries) = value.get("blockedMarketplaces").and_then(Value::as_array) {
-                policy.blocked = entries.iter().filter_map(MarketplaceRule::parse).collect();
+                policy.blocked = entries
+                    .iter()
+                    .filter_map(|entry| MarketplaceRule::parse(entry, "blockedMarketplaces"))
+                    .collect();
             }
         }
         policy
@@ -273,7 +409,7 @@ impl MarketplacePolicy {
         if self
             .strict_known
             .as_ref()
-            .is_some_and(|rules| !rules.iter().any(|rule| rule.matches(name, source)))
+            .is_some_and(|rules| !rules.iter().any(|rule| allow_rule_matches(rule, name, source)))
         {
             return Err(MarketplacePolicyBlockReason::NotKnown);
         }
@@ -299,7 +435,9 @@ impl MarketplacePolicy {
                 return Err(MarketplacePolicyBlockReason::NotKnown);
             }
             if !rules.iter().any(MarketplaceRule::is_name_only)
-                && !rules.iter().any(|rule| rule.matches(None, Some(source)))
+                && !rules
+                    .iter()
+                    .any(|rule| allow_rule_matches(rule, None, Some(source)))
             {
                 return Err(MarketplacePolicyBlockReason::NotKnown);
             }
@@ -316,28 +454,6 @@ impl MarketplacePolicy {
             })
             .collect()
     }
-}
-
-fn wildcard_matches(pattern: &str, candidate: &str) -> bool {
-    let pattern: Vec<char> = pattern.to_ascii_lowercase().chars().collect();
-    let candidate: Vec<char> = candidate.to_ascii_lowercase().chars().collect();
-    let mut previous = vec![false; candidate.len() + 1];
-    previous[0] = true;
-    for token in pattern {
-        let mut current = vec![false; candidate.len() + 1];
-        if token == '*' {
-            current[0] = previous[0];
-        }
-        for index in 1..=candidate.len() {
-            current[index] = match token {
-                '*' => previous[index] || current[index - 1],
-                '?' => previous[index - 1],
-                literal => previous[index - 1] && literal == candidate[index - 1],
-            };
-        }
-        previous = current;
-    }
-    previous[candidate.len()]
 }
 
 /// The managed settings root, honoring the engine's test override.
@@ -459,17 +575,124 @@ mod tests {
 
     #[test]
     fn host_and_path_patterns_are_both_required() {
+        // Rewritten for §7: hostPattern/pathPattern are JS RegExp in the
+        // oracle, not `*`/`?` glob — `*.example.com` and `/team/*` are
+        // glob-shaped, not valid anchored regexes for "any host under
+        // example.com" / "any path under /team/".
         let allowed = MarketplaceSourceIdentity::Url {
             url: "https://plugins.example.com/team/marketplace.json".to_string(),
         };
-        let denied = MarketplaceSourceIdentity::Url {
+        let denied_path = MarketplaceSourceIdentity::Url {
             url: "https://plugins.example.com/private/marketplace.json".to_string(),
         };
+        let denied_host = MarketplaceSourceIdentity::Url {
+            url: "https://plugins.evil.com/team/marketplace.json".to_string(),
+        };
         let policy = policy(
-            r#"{"strictKnownMarketplaces":[{"hostPattern":"*.example.com","pathPattern":"/team/*"}]}"#,
+            r#"{"strictKnownMarketplaces":[{"hostPattern":"^plugins\\.example\\.com$","pathPattern":"^/team/"}]}"#,
         );
         assert!(policy.check(None, Some(&allowed)).is_ok());
-        assert!(policy.check(None, Some(&denied)).is_err());
+        assert!(policy.check(None, Some(&denied_path)).is_err());
+        assert!(policy.check(None, Some(&denied_host)).is_err());
+    }
+
+    #[test]
+    fn oracle_anchored_host_pattern_example_matches_under_regex_not_glob() {
+        // The oracle's own worked example: `^github\.mycompany\.com$` is
+        // meant to anchor an exact company git host. Under the OLD `*`/`?`
+        // glob engine this matched NOTHING (a literal `^`, `\`, `.`, `$`
+        // never appear in a real hostname); as a real regex it matches the
+        // host exactly and rejects a look-alike suffix.
+        let matched = MarketplaceSourceIdentity::Url {
+            url: "https://github.mycompany.com/acme/plugins.git".to_string(),
+        };
+        let unmatched = MarketplaceSourceIdentity::Url {
+            url: "https://github.mycompany.com.evil.example/acme/plugins.git".to_string(),
+        };
+        let policy =
+            policy(r#"{"strictKnownMarketplaces":[{"hostPattern":"^github\\.mycompany\\.com$"}]}"#);
+        assert!(policy.check(None, Some(&matched)).is_ok());
+        assert!(policy.check(None, Some(&unmatched)).is_err());
+    }
+
+    #[test]
+    fn invalid_pattern_regex_fails_the_rule_closed() {
+        // An unbalanced-paren "regex" must never silently become an
+        // unconstrained (always-matching) field.
+        let candidate = MarketplaceSourceIdentity::Url {
+            url: "https://plugins.example.com/team/marketplace.json".to_string(),
+        };
+        let policy = policy(r#"{"strictKnownMarketplaces":[{"hostPattern":"("}]}"#);
+        assert!(policy.check(None, Some(&candidate)).is_err());
+    }
+
+    #[test]
+    fn owner_wildcard_matches_any_repo_under_the_owner() {
+        let same_owner = MarketplaceSourceIdentity::Github {
+            repo: "acme/other-plugins".to_string(),
+            git_ref: None,
+            path: None,
+        };
+        let different_owner = MarketplaceSourceIdentity::Github {
+            repo: "someone-else/plugins".to_string(),
+            git_ref: None,
+            path: None,
+        };
+        let policy =
+            policy(r#"{"strictKnownMarketplaces":[{"source":"github","repo":"acme/*"}]}"#);
+        assert!(policy.check(None, Some(&same_owner)).is_ok());
+        assert!(policy.check(None, Some(&different_owner)).is_err());
+    }
+
+    #[test]
+    fn owner_wildcard_is_only_honoured_for_github_form_entries() {
+        // A `*` in a plain git/url rule is not a wildcard mechanism at all
+        // (oracle: "wildcards are only supported in github-form entries");
+        // it degrades to a literal string that can never match a real URL.
+        let candidate = MarketplaceSourceIdentity::Git {
+            url: "https://git.example.com/acme/plugins.git".to_string(),
+            git_ref: None,
+            path: None,
+        };
+        let policy = policy(
+            r#"{"strictKnownMarketplaces":[{"source":"git","url":"https://git.example.com/acme/*"}]}"#,
+        );
+        assert!(policy.check(None, Some(&candidate)).is_err());
+    }
+
+    #[test]
+    fn suspicious_git_url_never_satisfies_a_strict_allowlist() {
+        // Oracle `D`: `if (t.source === "git" && ffe(t.url)) return false` —
+        // a confusable git URL fails the allowlist match even when every
+        // field is textually identical to an approved rule.
+        let suspicious = MarketplaceSourceIdentity::Git {
+            url: r"https://good.example.com\@evil.example.com/plugins.git".to_string(),
+            git_ref: None,
+            path: None,
+        };
+        let policy = policy(&format!(
+            r#"{{"strictKnownMarketplaces":[{{"source":"git","url":{:?}}}]}}"#,
+            r"https://good.example.com\@evil.example.com/plugins.git"
+        ));
+        assert!(policy.check(None, Some(&suspicious)).is_err());
+    }
+
+    #[test]
+    fn suspicious_git_url_is_still_caught_by_a_blocklist_rule() {
+        // The `D` fail-closed behaviour is scoped to the ALLOWLIST matcher
+        // only: a blockedMarketplaces rule must still catch a confusable
+        // URL it would otherwise match — suspicion must never accidentally
+        // bypass a deny rule.
+        let suspicious = MarketplaceSourceIdentity::Git {
+            url: r"https://good.example.com\@evil.example.com/plugins.git".to_string(),
+            git_ref: None,
+            path: None,
+        };
+        let policy = policy(&format!(
+            r#"{{"blockedMarketplaces":[{{"source":"git","url":{:?}}}]}}"#,
+            r"https://good.example.com\@evil.example.com/plugins.git"
+        ));
+        assert!(policy.check(None, Some(&suspicious)).is_err());
     }
 
     #[test]

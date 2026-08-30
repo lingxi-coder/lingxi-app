@@ -45,7 +45,7 @@ pub use discovery::{
     discover_cli_plugin_dirs, discover_effective_plugins, discover_enabled_plugins,
     discover_installed_plugins, discover_recorded_plugins,
 };
-pub use git::clone_plugin_git;
+pub use git::{clone_plugin_git, is_suspicious_url};
 pub use lifecycle::PluginState;
 pub use loader::{resolve_user_config, LoaderError};
 pub use manager::{PluginManager, PluginManagerError};

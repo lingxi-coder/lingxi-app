@@ -69,6 +69,53 @@ fn update_submodules_recursive(repo: &git2::Repository) -> Result<(), git2::Erro
     Ok(())
 }
 
+/// Mirrors the oracle's `ffe`/`pfe` confusable-URL guard (2.1.251), applied
+/// at the official-name check, URL-normalisation credential stripping, the
+/// policy allowlist matcher, and marketplace classification. A git-ish
+/// locator is "suspicious" when it is shaped so two different parsers could
+/// disagree about which host it actually names:
+///
+/// - `scheme://authority/...` with a "special" scheme (`http`, `https`,
+///   `ws`, `wss`, `ftp`) whose RAW authority contains a backslash. Some URL
+///   parsers (browsers, `URL`) treat `\` as `/` inside the authority for
+///   these schemes only, so `https://evil.com\@good.com/` can resolve to
+///   `evil.com` in one parser and `good.com` in another that just splits on
+///   `@`.
+/// - `scheme://authority/...` with any OTHER scheme (`git:`, `git+ssh:`,
+///   `ssh:`, …) whose hostname contains `%`, a control character, DEL, or
+///   anything above ASCII (oracle: `/[%\x00-\x1f\x7f-\u{10FFFF}]/u`) — bytes
+///   a host has no legitimate reason to carry.
+/// - the scp shorthand `[user@]host:path` (no `scheme://` at all) where a
+///   `:` appears before the first `@`. A colon has no business inside the
+///   user segment of a real scp locator, and its presence there is exactly
+///   what lets one parser read the string differently from another.
+#[must_use]
+pub fn is_suspicious_url(candidate: &str) -> bool {
+    if let Some(scheme_end) = candidate.find("://") {
+        let scheme = &candidate[..scheme_end];
+        let after_scheme = &candidate[scheme_end + 3..];
+        let authority_end = after_scheme
+            .find(['/', '?', '#'])
+            .unwrap_or(after_scheme.len());
+        let authority = &after_scheme[..authority_end];
+        return if matches!(
+            scheme.to_ascii_lowercase().as_str(),
+            "http" | "https" | "ws" | "wss" | "ftp"
+        ) {
+            authority.contains('\\')
+        } else {
+            let host = authority.rsplit('@').next().unwrap_or(authority);
+            let host = host.rsplit_once(':').map_or(host, |(host, _)| host);
+            host.chars()
+                .any(|c| c == '%' || (c as u32) <= 0x1f || (c as u32) >= 0x7f)
+        };
+    }
+    match (candidate.find(':'), candidate.find('@')) {
+        (Some(colon), Some(at)) => colon < at,
+        _ => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -78,5 +125,39 @@ mod tests {
         let err = clone_plugin_git("ftp://evil/x", "", Path::new("/tmp/nope")).unwrap_err();
         assert!(err.contains("Invalid git URL protocol"), "{err}");
         assert!(err.contains("ftp://evil/x"), "{err}");
+    }
+
+    #[test]
+    fn flags_backslash_in_http_authority() {
+        // The oracle's own confusable example: some URL parsers treat `\`
+        // as `/` inside an http(s) authority, so this can resolve to either
+        // `evil.com` or `good.com` depending on which parser reads it.
+        assert!(is_suspicious_url(r"https://evil.com\@good.com/"));
+        assert!(is_suspicious_url(r"http://evil.com\@good.com/"));
+    }
+
+    #[test]
+    fn ordinary_urls_are_not_suspicious() {
+        assert!(!is_suspicious_url("https://github.com/owner/repo.git"));
+        assert!(!is_suspicious_url("git+ssh://git@github.com/owner/repo.git"));
+        assert!(!is_suspicious_url("git@github.com:owner/repo.git"));
+        assert!(!is_suspicious_url("ssh://git@github.com:22/owner/repo.git"));
+    }
+
+    #[test]
+    fn flags_control_characters_in_non_http_hostname() {
+        // oracle: /[%\x00-\x1f\x7f-\u{10FFFF}]/u applied to the hostname of
+        // any scheme outside http/https/ws/wss/ftp.
+        assert!(is_suspicious_url("ssh://evil%00host/owner/repo.git"));
+        assert!(is_suspicious_url("git+ssh://user@evil\u{0007}host/repo.git"));
+    }
+
+    #[test]
+    fn flags_colon_before_at_in_scp_form() {
+        // A real scp locator never has a colon inside the user segment
+        // before the `@`; its presence is the confusion signal itself.
+        assert!(is_suspicious_url("evil:trick@host:path"));
+        assert!(!is_suspicious_url("git@github.com:owner/repo.git"));
+        assert!(!is_suspicious_url("host:path"));
     }
 }

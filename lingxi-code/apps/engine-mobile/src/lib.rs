@@ -65,6 +65,12 @@ pub mod local_apps_tools;
 #[cfg(feature = "uniffi")]
 mod local_apps_bridge;
 
+// P1.4: mobile atomic materialization with digest verification (§19.2) for
+// the compiled-in builtin plugin bundle the packer (`local_apps::packer`)
+// produces. uniffi-gated like its `local_apps_*` siblings — it names
+// `local_apps::PackedFile`, which is pulled only under this feature.
+#[cfg(feature = "uniffi")]
+pub mod builtin_bundle;
 #[cfg(feature = "uniffi")]
 mod local_app_plugin_binding;
 #[cfg(feature = "uniffi")]

@@ -158,13 +158,23 @@ pub enum PackerError {
         /// The hash actually computed from disk.
         actual: String,
     },
-    /// The same root-relative path was declared twice.
+    /// The same root-relative path was declared twice. Detected on a
+    /// case-folded (Unicode lowercase) basis, not exact bytes — see
+    /// [`pack`]'s validation step for why.
     #[error("duplicate inventory path: {0}")]
     DuplicatePath(String),
     /// An inventory path is absolute, empty, or contains a `.`/`..`/prefix
     /// component — anything that could resolve outside `root`.
     #[error("inventory path is not a plain relative path: {0}")]
     InvalidPath(String),
+    /// A declared entry resolves — following any symlink, including one in a
+    /// parent-directory component, not just the final component — to a
+    /// location outside `root`. Distinct from [`PackerError::InvalidPath`]:
+    /// that check is a pure string/component inspection of the DECLARED path
+    /// and cannot see this, because the escape is introduced by what is on
+    /// disk (a symlink), not by the text of the path itself.
+    #[error("inventory entry escapes root via a symlink: {0}")]
+    SymlinkEscape(String),
     /// A filesystem read failed for a reason other than the file being
     /// absent — the directory walk itself, or an inventory entry that exists
     /// but cannot be read (a directory, a permission-denied file). Distinct
@@ -251,12 +261,34 @@ fn walk_non_pruned_files(
                 .expect("walked path is always under root by construction");
             out.insert(to_slash_string(rel));
         }
-        // Symlinks are neither `is_dir()` nor `is_file()` here and are
-        // silently skipped — the synthetic fixture never contains one, and
-        // symlink-escape handling is out of this task's scope (see the
-        // written report).
+        // Symlinks are neither `is_dir()` nor `is_file()` here (`DirEntry::
+        // file_type` is an `lstat`, so it does not follow them) and are
+        // silently skipped by this walk. That is fine for what this walk is
+        // for — reconciling "is every non-pruned on-disk file declared" —
+        // because a symlink invisible to the walk cannot silently enter the
+        // archive: it is only ever packed if the INVENTORY declares its path,
+        // and that path is separately guarded against escaping `root` in
+        // `pack`'s read loop (see [`escapes_root`]), regardless of whether
+        // the walk ever saw it.
     }
     Ok(())
+}
+
+/// True when `absolute` — resolved through every symlink on its path,
+/// including one in a parent-directory component, not just a symlink at the
+/// final component — lands outside `canonical_root`.
+///
+/// This must run BEFORE `std::fs::read(absolute)`: that call follows
+/// symlinks unconditionally and has no opinion about where the bytes it
+/// returns actually came from, so it is exactly the point at which an
+/// unguarded packer would read a symlink's target through the link — the
+/// packer's failure mode this function exists to close. `pack` treats a
+/// declared path here the same way whether the escaping component IS the
+/// final path or an ancestor directory: `canonicalize` resolves the whole
+/// chain, not just the leaf.
+fn escapes_root(canonical_root: &Path, absolute: &Path) -> Result<bool, std::io::Error> {
+    let canonical = std::fs::canonicalize(absolute)?;
+    Ok(!canonical.starts_with(canonical_root))
 }
 
 /// Serialize one archive record: `[u32 LE path_len][path][u64 LE content_len][content]`.
@@ -272,22 +304,48 @@ fn write_record(buf: &mut Vec<u8>, path: &str, content: &[u8]) {
 /// authority on what belongs in it.
 ///
 /// Algorithm:
-/// 1. Validate every inventory path (non-empty, purely relative, no
-///    duplicates).
+/// 1. Validate every inventory path (non-empty, purely relative, no `.`/`..`/
+///    prefix component, no duplicate — exact-byte or Unicode case-folded).
 /// 2. Walk `root` on disk, never descending into a pruned directory. Any
 ///    file found in a non-pruned directory that the inventory did not
 ///    declare fails the build ([`PackerError::FileOutsideInventory`]).
-/// 3. Read, hash, and (if pinned) verify every non-pruned inventory entry,
-///    in path-sorted order.
+/// 3. For every non-pruned inventory entry, in path-sorted order: confirm
+///    its resolved (symlink-followed) location is still inside `root`
+///    ([`PackerError::SymlinkEscape`]), then read, hash, and (if pinned)
+///    verify its content.
 /// 4. Concatenate sorted records into the archive and hash the whole thing.
 ///
 /// # Errors
 /// See [`PackerError`] variants; each names the offending path.
 pub fn pack(root: &Path, inventory: &[InventoryEntry]) -> Result<PackResult, PackerError> {
     let mut declared_paths: BTreeSet<&str> = BTreeSet::new();
+    // Duplicate detection is deliberately CASE-FOLDED, not exact-byte-only:
+    // this project ships to macOS, where the default APFS volume is
+    // case-insensitive-but-case-preserving. Two inventory entries that differ
+    // only by case (`Plugin.json` / `plugin.json`) name the SAME file on that
+    // filesystem — writing/reading both resolves to one on-disk entry, so
+    // treating them as distinct is the real archive hazard, not a false
+    // positive. (Measured, not assumed: with this check removed, this
+    // module's own duplicate test packs `B.txt` and `b.txt` as two records
+    // carrying the SAME sha256, because they are one file on this volume.)
+    //
+    // The fold is `to_lowercase` (full Unicode), NOT `to_ascii_lowercase`:
+    // the rationale above is APFS, and APFS folds case beyond ASCII, so an
+    // ASCII-only fold would under-deliver on the very hazard it names —
+    // `É.txt` and `é.txt` collide on the target filesystem but not in an
+    // ASCII fold. A fold BROADER than the filesystem's own can only ever fail
+    // a build loudly at pack time; it can never ship a broken archive, so
+    // over-folding is the safe direction to err in here.
+    //
+    // `declared_paths` (exact bytes) still runs first so an exact duplicate
+    // is reported with its own literal path rather than a folded one.
+    let mut case_folded_paths: BTreeSet<String> = BTreeSet::new();
     for entry in inventory {
         validate_relative_path(&entry.path)?;
         if !declared_paths.insert(entry.path.as_str()) {
+            return Err(PackerError::DuplicatePath(entry.path.clone()));
+        }
+        if !case_folded_paths.insert(entry.path.to_lowercase()) {
             return Err(PackerError::DuplicatePath(entry.path.clone()));
         }
     }
@@ -317,10 +375,34 @@ pub fn pack(root: &Path, inventory: &[InventoryEntry]) -> Result<PackResult, Pac
         .collect();
     ordered.sort_by(|a, b| a.path.cmp(&b.path));
 
+    // Resolved once: every entry's escape check below compares against this
+    // same canonical root rather than re-canonicalizing `root` per entry.
+    let canonical_root = std::fs::canonicalize(root).map_err(|e| PackerError::Io {
+        path: root.display().to_string(),
+        detail: e.to_string(),
+    })?;
+
     let mut archive = Vec::new();
     let mut packed = Vec::with_capacity(ordered.len());
     for entry in ordered {
         let absolute = root.join(&entry.path);
+
+        // Symlink-escape guard — MUST run before `std::fs::read` below, which
+        // follows symlinks unconditionally. See [`escapes_root`].
+        match escapes_root(&canonical_root, &absolute) {
+            Ok(true) => return Err(PackerError::SymlinkEscape(entry.path.clone())),
+            Ok(false) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Err(PackerError::MissingOnDisk(entry.path.clone()));
+            }
+            Err(e) => {
+                return Err(PackerError::Io {
+                    path: entry.path.clone(),
+                    detail: e.to_string(),
+                });
+            }
+        }
+
         let bytes = std::fs::read(&absolute).map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
                 PackerError::MissingOnDisk(entry.path.clone())
@@ -723,12 +805,197 @@ mod tests {
         assert_eq!(err, PackerError::DuplicatePath("a.txt".to_string()));
     }
 
+    /// §19.2 duplicate coverage. Pins the DELIBERATE decision on what "same
+    /// path" means: exact bytes (already covered above) AND case-folded —
+    /// this project ships to macOS, whose default APFS volume is
+    /// case-insensitive-but-case-preserving, so `A.txt` and `a.txt` name one
+    /// physical file there even though they are different Rust `String`s.
+    /// The fold is Unicode, not ASCII-only, and the non-ASCII case below is
+    /// what pins that: `to_ascii_lowercase` passes every other assertion in
+    /// this test.
+    /// Carries a POSITIVE CONTROL (the legitimate sibling, packed alone,
+    /// still succeeds) so a rejection below is legible as "the duplicate
+    /// specifically", not "this packer refuses everything".
+    #[test]
+    fn duplicate_path_is_rejected() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_file(tmp.path(), "legit/sibling.txt", b"ok");
+        let legit = vec![InventoryEntry::new("legit/sibling.txt")];
+
+        // Positive control: packed alone — nothing else declared, nothing
+        // else on disk yet — the legitimate sibling succeeds.
+        let control = pack(tmp.path(), &legit).unwrap();
+        assert_eq!(control.inventory[0].path, "legit/sibling.txt");
+
+        // Every sub-case below writes its own on-disk file(s) and declares
+        // every file present so far, so the walk's FileOutsideInventory
+        // reconciliation (a stray, undeclared file from an earlier sub-case)
+        // never masks the DuplicatePath assertion this test is actually about.
+        write_file(tmp.path(), "a.txt", b"first");
+
+        // Exact-byte duplicate.
+        let mut inv_exact = legit.clone();
+        inv_exact.push(InventoryEntry::new("a.txt"));
+        inv_exact.push(InventoryEntry::new("a.txt"));
+        let err = expect_pack_err(tmp.path(), &inv_exact, "exact-byte duplicate");
+        assert_eq!(err, PackerError::DuplicatePath("a.txt".to_string()));
+
+        // Case-variant duplicate. Deliberately NOT writing "b.txt" a second
+        // time under a different case to disk — the rejection must come from
+        // the inventory validation step (string comparison) rather than
+        // depending on the host filesystem's own case sensitivity, so this
+        // test is meaningful on both a case-insensitive (macOS/APFS) and a
+        // case-sensitive (Linux CI) runner.
+        write_file(tmp.path(), "B.txt", b"second");
+        let mut inv_case = legit.clone();
+        inv_case.push(InventoryEntry::new("a.txt"));
+        inv_case.push(InventoryEntry::new("B.txt"));
+        inv_case.push(InventoryEntry::new("b.txt"));
+        let err = expect_pack_err(tmp.path(), &inv_case, "ASCII case-variant duplicate");
+        match err {
+            PackerError::DuplicatePath(path) => {
+                assert_eq!(path.to_lowercase(), "b.txt");
+            }
+            other => panic!("expected DuplicatePath for a case-variant collision, got {other:?}"),
+        }
+
+        // Non-ASCII case-variant duplicate — the case that separates a Unicode
+        // fold from an ASCII one, since `to_ascii_lowercase` leaves `É`
+        // untouched.
+        //
+        // It gets its OWN root rather than reusing `tmp`. That is not tidiness:
+        // sharing `tmp` means the undeclared `a.txt`/`B.txt` written by the
+        // sub-cases above trip the walk's `FileOutsideInventory` reconciliation
+        // first, so an ASCII-fold regression surfaces as
+        // `FileOutsideInventory("B.txt")` — red, but pointing at the wrong
+        // thing entirely, and never actually exercising whether the two
+        // Unicode entries were admitted. (Measured: that is exactly what the
+        // shared-root version reported.) With an isolated root there is no
+        // stray file to trip over, so the only thing that can fail is the
+        // duplicate check itself.
+        //
+        // `Éclair.txt` IS written, so under an ASCII fold this root packs
+        // CLEANLY on a case-insensitive volume — both entries resolve to that
+        // one file — and the failure message shows two records carrying the
+        // same sha256, which is the hazard stated in prose. On a
+        // case-sensitive runner the second entry is instead `MissingOnDisk`,
+        // still red and still naming the Unicode path. Unplanted, both
+        // platforms reject at validation, before any filesystem access.
+        let unicode_root = tempfile::tempdir().unwrap();
+        write_file(unicode_root.path(), "Éclair.txt", b"pastry");
+        let inv_unicode = vec![
+            InventoryEntry::new("Éclair.txt"),
+            InventoryEntry::new("éclair.txt"),
+        ];
+        let err = expect_pack_err(
+            unicode_root.path(),
+            &inv_unicode,
+            "non-ASCII case-variant duplicate",
+        );
+        match err {
+            PackerError::DuplicatePath(path) => {
+                assert_eq!(path.to_lowercase(), "éclair.txt");
+            }
+            other => panic!("expected DuplicatePath for a non-ASCII case collision, got {other:?}"),
+        }
+
+        // Negative control for the Unicode fold specifically: two entries
+        // whose names are both non-ASCII but are NOT case variants of each
+        // other must still pack together, so the fold cannot be mistaken for
+        // "rejects anything non-ASCII".
+        let unicode_ok = tempfile::tempdir().unwrap();
+        write_file(unicode_ok.path(), "Éclair.txt", b"pastry");
+        write_file(unicode_ok.path(), "Ölandais.txt", b"other");
+        let result = pack(
+            unicode_ok.path(),
+            &[
+                InventoryEntry::new("Éclair.txt"),
+                InventoryEntry::new("Ölandais.txt"),
+            ],
+        )
+        .unwrap();
+        assert_eq!(result.inventory.len(), 2);
+
+        // Negative control on the SAME axis: distinct, non-colliding names
+        // that merely SHARE a length must still be accepted together —
+        // proves the fold rejects on genuine case-collision, not on a length
+        // or prefix fingerprint that would treat unrelated entries as
+        // duplicates too.
+        write_file(tmp.path(), "c.txt", b"third");
+        let mut inv_distinct = legit.clone();
+        inv_distinct.push(InventoryEntry::new("a.txt"));
+        inv_distinct.push(InventoryEntry::new("B.txt"));
+        inv_distinct.push(InventoryEntry::new("c.txt"));
+        let result = pack(tmp.path(), &inv_distinct).unwrap();
+        assert_eq!(result.inventory.len(), 4);
+    }
+
     #[test]
     fn traversal_inventory_path_is_rejected() {
         let tmp = tempfile::tempdir().unwrap();
         let inventory = vec![InventoryEntry::new("../escape.txt")];
         let err = pack(tmp.path(), &inventory).unwrap_err();
         assert_eq!(err, PackerError::InvalidPath("../escape.txt".to_string()));
+    }
+
+    /// §19.2 traversal coverage, broader than `traversal_inventory_path_is_
+    /// rejected` above: an absolute path, and a path that dips through a
+    /// REAL subdirectory before its `..` components carry it out past root
+    /// — not just the trivial `../x` case a naive prefix-string filter would
+    /// also catch. Every case carries a POSITIVE CONTROL: the legitimate
+    /// sibling entry, packed alone, must still succeed — proving a rejection
+    /// below is about the malicious entry specifically, not a packer that
+    /// rejects every inventory it is handed.
+    ///
+    /// The check exercised here (`validate_relative_path`) is a pure
+    /// component/string inspection of the DECLARED path, run before any
+    /// filesystem access — so on this platform (macOS/Unix) it runs strictly
+    /// BEFORE any canonicalisation ever touches the entry; canonicalisation
+    /// only enters later, in the separate symlink-escape guard.
+    #[test]
+    fn path_traversal_is_rejected() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_file(tmp.path(), "legit/sibling.txt", b"ok");
+        let legit = vec![InventoryEntry::new("legit/sibling.txt")];
+
+        // Positive control.
+        let control = pack(tmp.path(), &legit).unwrap();
+        assert_eq!(control.inventory[0].path, "legit/sibling.txt");
+
+        let malicious_cases = [
+            // Classic parent-dir traversal from the root.
+            "../escape.txt",
+            // Absolute path — bypasses `root.join` entirely if unguarded.
+            "/etc/passwd",
+            // Enters a REAL subdirectory first, then two `..` hops carry it
+            // out past `root` before the final component — the "leaves the
+            // root midway" shape a check that only inspects the first path
+            // segment (or only rejects a literal "../" prefix) would miss.
+            "legit/../../escape.txt",
+        ];
+        for malicious in malicious_cases {
+            let mut inventory = legit.clone();
+            inventory.push(InventoryEntry::new(malicious));
+            let err = expect_pack_err(tmp.path(), &inventory, malicious);
+            assert_eq!(
+                err,
+                PackerError::InvalidPath(malicious.to_string()),
+                "case {malicious:?} was not rejected as InvalidPath, or was \
+                 rejected citing the wrong path"
+            );
+        }
+
+        // Net-zero traversal — normalises BACK inside root — is still
+        // rejected: this check is component-based, not resolution-based, so
+        // it conservatively refuses any embedded `..` regardless of where it
+        // nets out. Documents the choice rather than asserting a bug.
+        let mut inventory = legit.clone();
+        inventory.push(InventoryEntry::new("legit/../sibling.txt"));
+        let err = expect_pack_err(tmp.path(), &inventory, "net-zero traversal");
+        assert_eq!(
+            err,
+            PackerError::InvalidPath("legit/../sibling.txt".to_string())
+        );
     }
 
     #[test]
@@ -768,5 +1035,130 @@ mod tests {
         let result = pack(tmp.path(), &inventory).unwrap();
         assert_eq!(result.inventory.len(), 1);
         assert_eq!(result.inventory[0].path, "a.txt");
+    }
+
+    /// §19.2 symlink-escape coverage. This packer's behaviour, stated
+    /// plainly: it does NOT record symlinks as a distinct entity (a
+    /// [`PackedFile`] only ever carries content bytes) — it PACKS BY READING
+    /// THROUGH the link, via `std::fs::read` on the resolved path. That read
+    /// call follows symlinks unconditionally and has no opinion of its own
+    /// about where the bytes came from, so the guard has to sit in front of
+    /// it ([`escapes_root`], checked before every read in [`pack`]), not
+    /// inside the archive-record format.
+    ///
+    /// Controls, so a rejection here cannot be read as "this packer refuses
+    /// every symlink" or "refuses everything":
+    /// - a plain (non-symlink) sibling entry, packed alone, still succeeds;
+    /// - a symlink pointing to a file INSIDE root is still packed.
+    ///
+    /// Both escaping cases place the malicious entry so that it sorts AFTER
+    /// a legitimate entry that must be packed successfully first. That is
+    /// load-bearing, not cosmetic: [`pack`] processes entries in path-sorted
+    /// order, so an entry named `escape-link.txt` is always the FIRST one
+    /// examined, and a packer that guarded only `ordered[0]` and skipped the
+    /// rest would satisfy this test while leaving every later entry
+    /// unguarded. Naming the links `zz-*` puts them last, so the assertion
+    /// below is that the guard runs PER ENTRY, not merely that it runs.
+    #[test]
+    fn symlink_escape_is_rejected() {
+        use std::os::unix::fs::symlink;
+
+        let outside = tempfile::tempdir().unwrap();
+        write_file(
+            outside.path(),
+            "secret.txt",
+            b"top secret, outside the root",
+        );
+
+        let tmp = tempfile::tempdir().unwrap();
+        write_file(tmp.path(), "legit/sibling.txt", b"ok");
+        let legit = vec![InventoryEntry::new("legit/sibling.txt")];
+
+        // Positive control: the plain sibling, packed alone, succeeds.
+        let control = pack(tmp.path(), &legit).unwrap();
+        assert_eq!(control.inventory[0].path, "legit/sibling.txt");
+
+        // Non-escaping symlink control: a symlink INSIDE root pointing to
+        // another file also INSIDE root must still be packed. Proves the
+        // guard is specifically about ESCAPE, not about symlinks per se —
+        // without it, a packer that rejected every symlink outright would
+        // pass the rejection assertions below for the wrong reason.
+        symlink(
+            tmp.path().join("legit/sibling.txt"),
+            tmp.path().join("inside-link.txt"),
+        )
+        .unwrap();
+        let mut inventory_inside = legit.clone();
+        inventory_inside.push(InventoryEntry::new("inside-link.txt"));
+        let result = pack(tmp.path(), &inventory_inside).unwrap();
+        assert!(
+            result.inventory.iter().any(|f| f.path == "inside-link.txt"),
+            "a non-escaping symlink must still be packed"
+        );
+
+        // Escape 1 — a symlink at the FINAL component, pointing outside root.
+        symlink(
+            outside.path().join("secret.txt"),
+            tmp.path().join("zz-escape-link.txt"),
+        )
+        .unwrap();
+        let mut inventory_leaf = legit.clone();
+        inventory_leaf.push(InventoryEntry::new("zz-escape-link.txt"));
+        assert_sorts_after_a_legit_entry(&inventory_leaf, "zz-escape-link.txt");
+        assert_eq!(
+            expect_pack_err(tmp.path(), &inventory_leaf, "leaf symlink escape"),
+            PackerError::SymlinkEscape("zz-escape-link.txt".to_string())
+        );
+
+        // Escape 2 — the escaping symlink is a PARENT DIRECTORY component,
+        // not the leaf. `escapes_root`'s doc claims `canonicalize` resolves
+        // the whole chain rather than just the final component; without this
+        // case that claim is asserted nowhere, and a guard implemented with
+        // `symlink_metadata` on the leaf alone (the obvious wrong way to
+        // write it) would pass Escape 1 while letting this one through.
+        symlink(outside.path(), tmp.path().join("zz-linked-dir")).unwrap();
+        let mut inventory_parent = legit.clone();
+        inventory_parent.push(InventoryEntry::new("zz-linked-dir/secret.txt"));
+        assert_sorts_after_a_legit_entry(&inventory_parent, "zz-linked-dir/secret.txt");
+        assert_eq!(
+            expect_pack_err(tmp.path(), &inventory_parent, "parent-dir symlink escape"),
+            PackerError::SymlinkEscape("zz-linked-dir/secret.txt".to_string())
+        );
+    }
+
+    /// Pack `inventory` expecting failure, panicking with a message that
+    /// NAMES what was packed instead. A bare `unwrap_err()` here dumps the
+    /// whole `PackResult` including the raw archive byte vector, which buries
+    /// the one fact a reader needs — which paths got in.
+    fn expect_pack_err(root: &Path, inventory: &[InventoryEntry], case: &str) -> PackerError {
+        match pack(root, inventory) {
+            Err(e) => e,
+            Ok(result) => panic!(
+                "{case}: expected a rejection, but the pack SUCCEEDED and admitted: {:?}",
+                result
+                    .inventory
+                    .iter()
+                    .map(|f| format!("{} ({} bytes, sha256 {})", f.path, f.bytes, f.sha256))
+                    .collect::<Vec<_>>()
+            ),
+        }
+    }
+
+    /// Guard against this test quietly losing its point: [`pack`] examines
+    /// entries in path-sorted order, so a malicious entry that sorts FIRST
+    /// only ever proves the guard fires on entry zero. Every escape case
+    /// above must sort strictly after at least one entry that packs cleanly.
+    fn assert_sorts_after_a_legit_entry(inventory: &[InventoryEntry], malicious: &str) {
+        let mut sorted: Vec<&str> = inventory.iter().map(|e| e.path.as_str()).collect();
+        sorted.sort_unstable();
+        let position = sorted
+            .iter()
+            .position(|p| *p == malicious)
+            .expect("declared");
+        assert!(
+            position > 0,
+            "fixture bug: {malicious:?} sorts to position {position} of {sorted:?}, so this \
+             case cannot distinguish a per-entry guard from a first-entry-only one"
+        );
     }
 }

@@ -295,6 +295,7 @@ G1	lingxi-code/llm-client/src/service_test.rs	LINGXI
 G1	lingxi-code/llm-client/src/service_test.rs	LingXi
 G1	lingxi-code/local-apps/src/checkpoints.rs	Lingxi
 G1	lingxi-code/local-apps/src/checkpoints.rs	\.lingxi
+G1	lingxi-code/local-apps/src/packer.rs	\.lingxi
 G1	lingxi-code/local-apps/src/permissions.rs	LINGXI
 G1	lingxi-code/local-apps/src/permissions.rs	\.lingxi
 G1	lingxi-code/local-apps/src/service.rs	\.lingxi
@@ -986,6 +987,7 @@ G3	lingxi-code/hooks/src/executor_test.rs	LINGXI.md
 G3	lingxi-code/hooks/src/hook_payload_test.rs	LINGXI.md
 G3	lingxi-code/llm-client/src/providers/openai.rs	LINGXI.md
 G3	lingxi-code/local-apps/src/checkpoints.rs	.lingxi
+G3	lingxi-code/local-apps/src/packer.rs	.lingxi-*
 G3	lingxi-code/local-apps/src/permissions.rs	.lingxi
 G3	lingxi-code/local-apps/src/permissions.rs	LINGXI.md
 G3	lingxi-code/local-apps/src/service.rs	.lingxi

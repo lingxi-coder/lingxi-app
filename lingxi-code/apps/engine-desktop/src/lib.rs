@@ -1741,6 +1741,56 @@ pub fn desktop_tool_registry(
     reg
 }
 
+/// Production [`agent::SubagentMcpConnector`] for spec §24b: connects a
+/// spawning subagent's OWN inline `mcpServers` frontmatter into the live
+/// session [`mcp::McpRegistry`] — the SAME registry the main session's
+/// `--mcp-config`/`.mcp.json` servers use, so an inline server inherits OAuth,
+/// roots, the elicitation hook dispatcher, and the reconnect loop for free —
+/// scoped to that agent instance via [`mcp::agent_scope::AgentScopedConnections`]
+/// (which per-agent-mangles the registry key so two subagents that happen to
+/// declare the same server name can never collide), and returns the resulting
+/// tools for that spawn's EXCLUSIVE use: never registered into the shared
+/// `tools` [`tool_api::ToolRegistry`], so a sibling subagent or the parent
+/// never sees them. Reuses `tool_mcp::build_registered_mcp_tools` — the same
+/// per-connection tool-wrapping the boot path (5.26) uses for the main
+/// session's servers — filtered down to just the connections THIS call made.
+/// Torn down by `agent::handle::PoolSubagentSpawner` on every exit path a
+/// subagent's pool slot is freed through (normal completion, `stop()`, and an
+/// early cancel/drop of the spawn future).
+struct DesktopSubagentMcpConnector {
+    registry: Arc<mcp::McpRegistry>,
+    tool_ctx: tool_api::BuiltinToolContext,
+    scope: tokio::sync::Mutex<mcp::agent_scope::AgentScopedConnections>,
+}
+
+#[async_trait::async_trait]
+impl agent::SubagentMcpConnector for DesktopSubagentMcpConnector {
+    async fn connect(
+        &self,
+        agent_id: protocol::AgentId,
+        configs: Vec<mcp::McpServerConfig>,
+    ) -> Vec<Arc<dyn tool_api::Tool>> {
+        let connected_ids = {
+            let mut scope = self.scope.lock().await;
+            scope.connect_all(&self.registry, agent_id, configs).await
+        };
+        if connected_ids.is_empty() {
+            return Vec::new();
+        }
+        tool_mcp::build_registered_mcp_tools(&self.registry, self.tool_ctx.clone())
+            .await
+            .into_iter()
+            .filter(|(id, _)| connected_ids.contains(id))
+            .flat_map(|(_, tools)| tools)
+            .collect()
+    }
+
+    async fn disconnect(&self, agent_id: protocol::AgentId) {
+        let mut scope = self.scope.lock().await;
+        scope.cleanup(&self.registry, &agent_id).await;
+    }
+}
+
 /// Launches `LocalWorkflow` background tasks for the `Workflow` tool by spawning
 /// through the shared [`tasks::registry::TaskRegistry`]. Resolves the spec's
 /// `scriptPath` / `script` / `name` to a script source (claude-code precedence);
@@ -7001,6 +7051,12 @@ pub async fn build(
     let subagent_hook_executor_cell = subagent_spawner_concrete.hook_executor_handle();
     let subagent_strict_plugin_hooks_cell =
         subagent_spawner_concrete.strict_plugin_only_hooks_handle();
+    // §24b: grab the managed MCP-slot-policy + connector cells BEFORE boxing,
+    // same cycle-break as the hook cells above — the connector is built once
+    // the live `mcp_registry` + `tools` (for `BuiltinToolContext`) exist,
+    // both well after this spawner is boxed.
+    let subagent_strict_plugin_mcp_cell = subagent_spawner_concrete.strict_plugin_only_mcp_handle();
+    let subagent_mcp_connector_cell = subagent_spawner_concrete.mcp_subagent_connector_handle();
     let subagent_skill_loader_cell = subagent_spawner_concrete.skill_loader_handle();
     // FIX 1 (subagent pool): grab the set-once tool-wide-deny-names cell BEFORE
     // boxing, to fill once the permission policy is built (same cycle-break as
@@ -7127,6 +7183,7 @@ pub async fn build(
     let strict_plugin_only_agents = strict_plugin_policy.is_locked(plugin::PluginComponent::Agents);
     let strict_plugin_only_skills = strict_plugin_policy.is_locked(plugin::PluginComponent::Skills);
     let _ = subagent_strict_plugin_hooks_cell.set(strict_plugin_only_hooks);
+    let _ = subagent_strict_plugin_mcp_cell.set(strict_plugin_only_mcp);
     let mut mcp_configs = mcp::load_mcp_servers(&project_mcp_path, &global_mcp_path, &cwd);
     // CLI `--mcp-config` servers: highest precedence — override a discovered
     // server of the same name, else append. (With `--strict-mcp-config` the host
@@ -9375,6 +9432,14 @@ pub async fn build(
     // copy (parity batch 21). First fill wins.
     let _ = subagent_tool_registry_cell.set(tools.clone());
     let _ = subagent_agent_catalog_cell.set(agent_catalog.clone());
+    // §24b: now that `mcp_registry` (5.1) and `mcp_tool_ctx` (5.26) both
+    // exist, wire the real per-subagent inline-`mcpServers` connect/inject/
+    // teardown seam. First fill wins, same as every other cell in this block.
+    let _ = subagent_mcp_connector_cell.set(Arc::new(DesktopSubagentMcpConnector {
+        registry: mcp_registry.clone(),
+        tool_ctx: mcp_tool_ctx.clone(),
+        scope: tokio::sync::Mutex::new(mcp::agent_scope::AgentScopedConnections::new()),
+    }) as Arc<dyn agent::SubagentMcpConnector>);
     let profile_first_party_for_subagents = profile_first_party.clone();
     let _ = subagent_provider_first_party_resolver_cell.set(Arc::new(move |profile| {
         profile_first_party_for_subagents.get(profile).copied()
@@ -10666,6 +10731,64 @@ mod tests {
             SRC.matches(&uses).count(),
             2,
             "the launcher must pass its registry to BOTH resolve_script_at and workflow_source_for_name (`{uses}`)"
+        );
+    }
+
+    /// §24b — a WIRING gate, not a behaviour test, on the same rationale as
+    /// [`build_wires_one_plugin_workflow_registry_into_every_participant`]:
+    /// `agent::tool_resolver::resolve_subagent_tools`, `DesktopSubagentMcpConnector`,
+    /// and `mcp::agent_scope::AgentScopedConnections` are ALL unit-tested in
+    /// isolation (see `agent/src/tool_resolver.rs` and `mcp/src/agent_scope.rs`)
+    /// and every one of those tests passes whether or not `build()` ever fills
+    /// the connector cell — exactly how round 9 found the ORIGINAL gap (a
+    /// resolver parameter with a live test suite, fed a literal `&[]` at its
+    /// one production call site). Standing up the whole desktop runtime just to
+    /// prove one `OnceLock::set` fires is disproportionate (`build()` needs a
+    /// live filesystem, settings tree, and MCP transport), so — like the
+    /// plugin-workflow gate above — this reads `build()`'s own source, with
+    /// needles assembled from split fragments so this test's own lines can
+    /// never inflate the counts it asserts.
+    #[test]
+    fn build_fills_the_subagent_mcp_connector_cell_after_the_registry_exists() {
+        const SRC: &str = include_str!("lib.rs");
+        let grab = format!(
+            "let subagent_mcp_connector_cell = subagent_spawner_concrete.{}();",
+            "mcp_subagent_connector_handle"
+        );
+        let fill_start = format!(
+            "let _ = subagent_mcp_connector_cell.set(Arc::new({}Connector {{",
+            "DesktopSubagentMcp"
+        );
+        assert_eq!(
+            SRC.matches(&grab).count(),
+            1,
+            "build() must grab the connector cell exactly once, before boxing the spawner (`{grab}`)"
+        );
+        assert_eq!(
+            SRC.matches(&fill_start).count(),
+            1,
+            "build() must fill it with exactly one DesktopSubagentMcpConnector (`{fill_start}`)"
+        );
+        // Ordering: the grab must precede the fill (cycle-break — the
+        // connector needs `mcp_registry` + `mcp_tool_ctx`, which do not exist
+        // yet when the spawner itself is constructed).
+        let grab_at = SRC.find(&grab).expect("grab line must be present");
+        let fill_at = SRC.find(&fill_start).expect("fill line must be present");
+        assert!(
+            grab_at < fill_at,
+            "the cell must be grabbed BEFORE it is filled (cycle-break ordering)"
+        );
+        // The struct's own fields must thread the LIVE registry + tool ctx
+        // (`.clone()` of the already-constructed `Arc`s), not fresh/default
+        // ones — a `DesktopSubagentMcpConnector` built from an unrelated
+        // registry would connect servers the shared registry never sees.
+        assert!(
+            SRC.contains("registry: mcp_registry.clone(),"),
+            "the connector must be built from the SAME live mcp_registry"
+        );
+        assert!(
+            SRC.contains("tool_ctx: mcp_tool_ctx.clone(),"),
+            "the connector must be built from the SAME live mcp_tool_ctx"
         );
     }
 

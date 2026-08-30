@@ -47,6 +47,38 @@ use std::sync::Arc;
 use thiserror::Error;
 use tool_api::Tool;
 
+/// Production connect/inject seam for a subagent's OWN inline `mcpServers`
+/// frontmatter (spec §24b). `agent` itself has no dependency on a live
+/// `mcp::McpRegistry` or `tool_api::BuiltinToolContext` — the composition
+/// root does, so it builds the real implementation and hands it in through
+/// [`crate::handle::PoolSubagentSpawner::with_mcp_subagent_connector`] /
+/// `..._handle()` (the same set-once-cell cycle-break every other late-bound
+/// boot dependency on that spawner uses). Kept as a trait — rather than
+/// threading `mcp`/`tool-mcp` types directly through [`resolve_subagent_tools`]
+/// — so this module's existing tests keep exercising [`AgentToolResolver::resolve`]
+/// with a plain `Vec<Arc<dyn Tool>>`, with no live connection required.
+#[async_trait::async_trait]
+pub trait SubagentMcpConnector: Send + Sync {
+    /// Connect `configs` (already converted by
+    /// [`crate::mcp_servers::agent_mcp_specs_to_scoped_configs`]) scoped to
+    /// `agent_id`, and return the resulting tools for THIS spawn's exclusive
+    /// use. Best-effort per server: a server that fails to connect
+    /// contributes no tools rather than failing the whole spawn — mirrors
+    /// `mcp::McpRegistry::connect_all`'s partial-success semantics.
+    async fn connect(
+        &self,
+        agent_id: protocol::AgentId,
+        configs: Vec<mcp::McpServerConfig>,
+    ) -> Vec<Arc<dyn Tool>>;
+
+    /// Tear down every connection `agent_id` owns. Idempotent: called on
+    /// every exit path a subagent's pool slot is freed through (normal
+    /// completion, `stop()`, and an early cancel/drop of the spawn future) —
+    /// a no-op when `agent_id` connected nothing, including when it never
+    /// declared inline `mcpServers` in the first place.
+    async fn disconnect(&self, agent_id: protocol::AgentId);
+}
+
 /// Stateless utility that computes the effective tool set for an agent
 /// spawn from the agent definition plus the surrounding tool sets.
 pub struct AgentToolResolver;
@@ -326,6 +358,22 @@ fn auto_memory_enabled() -> bool {
 /// dispatch guard accepts the SAME surface the inherited `RegistryToolInvoker`
 /// does (e.g. `AgentTool`'s legacy `"Task"`); the advertised schemas stay
 /// canonical-name-only. An empty `tool_wide_deny` drops nothing.
+///
+/// ## Per-subagent inline `mcpServers` (spec §24b)
+///
+/// `agent_def.mcp_servers` is the agent definition's OWN frontmatter
+/// `mcpServers:` block — distinct from the main session's `--mcp-config` /
+/// `.mcp.json` set, which never reaches this function (it is already folded
+/// into `registry`'s `parent_tools` at boot). When that block is non-empty
+/// AND `mcp_connector` is `Some`, it is converted via
+/// [`crate::mcp_servers::agent_mcp_specs_to_scoped_configs`] and handed to the
+/// connector, which connects it scoped to `agent_id` and returns the
+/// resulting tools for THIS spawn only — never registered into the shared
+/// `registry`, so a sibling subagent or the parent never sees them. An empty
+/// `mcp_servers` block (the overwhelming common case) short-circuits before
+/// ever consulting the connector, so an unfilled/`None` connector is a true
+/// no-op, byte-identical to the pre-§24b behavior.
+#[allow(clippy::too_many_arguments)]
 pub async fn resolve_subagent_tools(
     registry: &tool_api::ToolRegistry,
     agent_def: &AgentDefinition,
@@ -334,6 +382,16 @@ pub async fn resolve_subagent_tools(
     // The resolved subagent's own recursion depth — gates its `Agent` tool
     // against Claude's configured maximum. Threaded from the spawn request.
     depth: u32,
+    // This spawn's own [`protocol::AgentId`] — scopes the inline `mcpServers`
+    // connection (and its teardown on exit) to THIS subagent instance.
+    agent_id: protocol::AgentId,
+    // Managed `strictPluginOnlyCustomization` lock for the MCP slot (mirrors
+    // the main-agent merge's `AgentMcpMergeGates::strict_plugin_only_mcp`).
+    strict_plugin_only_mcp: bool,
+    // Production connect/inject seam for §24b — `None` (tests, or a boot
+    // build that never wires one) skips inline `mcpServers` entirely, same as
+    // before this fix.
+    mcp_connector: Option<&dyn SubagentMcpConnector>,
 ) -> Result<(Vec<serde_json::Value>, Vec<String>), ToolResolutionError> {
     use tool_api::tool_trait::{PromptOptions, ToolStaticContext};
 
@@ -357,7 +415,20 @@ pub async fn resolve_subagent_tools(
             ));
         }
     }
-    let mut resolved = AgentToolResolver::resolve(agent_def, &parent_tools, &[], depth, false);
+    let agent_mcp_tools: Vec<Arc<dyn Tool>> = if agent_def.mcp_servers.is_empty() {
+        Vec::new()
+    } else if let Some(connector) = mcp_connector {
+        let scoped =
+            crate::mcp_servers::agent_mcp_specs_to_scoped_configs(agent_def, strict_plugin_only_mcp);
+        if scoped.is_empty() {
+            Vec::new()
+        } else {
+            connector.connect(agent_id, scoped).await
+        }
+    } else {
+        Vec::new()
+    };
+    let mut resolved = AgentToolResolver::resolve(agent_def, &parent_tools, &agent_mcp_tools, depth, false);
     if !tool_wide_deny.is_empty() {
         resolved.retain(|t| {
             !tool_wide_deny
@@ -1144,5 +1215,175 @@ mod tests {
                 "TaskStop must be available at depth {depth}"
             );
         }
+    }
+
+    // ── resolve_subagent_tools(): §24b — the production connect/inject seam ──
+
+    /// Records every `connect`/`disconnect` call it receives and hands back a
+    /// fixed tool set from `connect`, so tests can assert BOTH that the
+    /// connector fires with the right (agent_id, configs) and that its output
+    /// actually reaches the resolved pool.
+    #[derive(Default)]
+    struct RecordingMcpConnector {
+        connect_calls: std::sync::Mutex<Vec<(protocol::AgentId, Vec<String>)>>,
+        disconnect_calls: std::sync::Mutex<Vec<protocol::AgentId>>,
+    }
+
+    #[async_trait]
+    impl SubagentMcpConnector for RecordingMcpConnector {
+        async fn connect(
+            &self,
+            agent_id: protocol::AgentId,
+            configs: Vec<mcp::McpServerConfig>,
+        ) -> Vec<Arc<dyn Tool>> {
+            self.connect_calls.lock().unwrap().push((
+                agent_id,
+                configs.iter().map(|c| c.name.clone()).collect(),
+            ));
+            vec![tool("mcp__docs__search")]
+        }
+
+        async fn disconnect(&self, agent_id: protocol::AgentId) {
+            self.disconnect_calls.lock().unwrap().push(agent_id);
+        }
+    }
+
+    /// A connector whose `connect` panics — used to prove the empty-`mcp_servers`
+    /// fast path never even consults the connector.
+    struct PanicIfCalledConnector;
+
+    #[async_trait]
+    impl SubagentMcpConnector for PanicIfCalledConnector {
+        async fn connect(
+            &self,
+            _agent_id: protocol::AgentId,
+            _configs: Vec<mcp::McpServerConfig>,
+        ) -> Vec<Arc<dyn Tool>> {
+            panic!("connect() must not be called when agent_def.mcp_servers is empty");
+        }
+
+        async fn disconnect(&self, _agent_id: protocol::AgentId) {
+            panic!("disconnect() is never called by resolve_subagent_tools itself");
+        }
+    }
+
+    fn agent_def_with_inline_mcp_server(tools: AgentToolPolicy) -> AgentDefinition {
+        let mut map = serde_json::Map::new();
+        map.insert(
+            "docs".to_string(),
+            serde_json::json!({"command": "npx", "args": ["-y", "docs-mcp"]}),
+        );
+        let mut def = agent_def(tools);
+        def.mcp_servers = vec![crate::definition::AgentMcpServerSpec::Record(map)];
+        def
+    }
+
+    fn registry_with(names: &[&'static str]) -> tool_api::ToolRegistry {
+        let mut registry = tool_api::ToolRegistry::new();
+        for name in names {
+            registry.register_builtin(tool(name));
+        }
+        registry
+    }
+
+    #[tokio::test]
+    async fn resolve_subagent_tools_connects_and_injects_the_agents_own_inline_mcp_server() {
+        // This is the §24b production path: a subagent whose OWN frontmatter
+        // declares `mcpServers` must have that server connected (scoped to
+        // ITS agent_id) and the resulting tool injected into its advertised
+        // pool — NOT the literal `&[]` round 9 found at the one production
+        // call site.
+        let registry = registry_with(&["Read"]);
+        let connector = RecordingMcpConnector::default();
+        let agent_id = protocol::AgentId::new();
+        let def = agent_def_with_inline_mcp_server(all_policy());
+
+        let (schemas, allowed) = resolve_subagent_tools(
+            &registry,
+            &def,
+            &[],
+            None,
+            0,
+            agent_id,
+            false,
+            Some(&connector),
+        )
+        .await
+        .expect("resolve should succeed");
+
+        let schema_names: Vec<&str> = schemas.iter().map(|t| t["name"].as_str().unwrap()).collect();
+        assert!(
+            schema_names.contains(&"mcp__docs__search"),
+            "the connector's tool must be advertised, got: {schema_names:?}"
+        );
+        assert!(allowed.contains(&"mcp__docs__search".to_string()));
+
+        let calls = connector.connect_calls.lock().unwrap();
+        assert_eq!(calls.len(), 1, "connect() must fire exactly once");
+        assert_eq!(calls[0].0, agent_id, "must scope the connect to THIS spawn's agent_id");
+        assert_eq!(
+            calls[0].1,
+            vec!["docs".to_string()],
+            "must hand the connector the agent's OWN scoped config, converted from its frontmatter"
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_subagent_tools_skips_the_connector_when_mcp_servers_is_empty() {
+        // The overwhelming common case (no inline `mcpServers` at all) must
+        // never even consult the connector — proven here with a connector
+        // that panics if called at all.
+        let registry = registry_with(&["Read"]);
+        let connector = PanicIfCalledConnector;
+        let def = agent_def(all_policy()); // mcp_servers: vec![] by construction
+
+        let (schemas, _allowed) = resolve_subagent_tools(
+            &registry,
+            &def,
+            &[],
+            None,
+            0,
+            protocol::AgentId::new(),
+            false,
+            Some(&connector),
+        )
+        .await
+        .expect("resolve should succeed");
+        assert!(
+            !schemas
+                .iter()
+                .any(|t| t["name"].as_str() == Some("mcp__docs__search")),
+            "no inline mcpServers ⇒ no connector-sourced tool"
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_subagent_tools_with_no_connector_is_the_pre_24b_no_op() {
+        // An unwired connector (boot builds that never fill the cell, or a test
+        // harness) must leave a definition WITH inline mcpServers exactly as
+        // before this fix: no extra tool, no error — the literal `&[]` case
+        // round 9 found. This is the case that must go RED if `mcp_connector`
+        // stops being consulted (see the revert evidence in the task report).
+        let registry = registry_with(&["Read"]);
+        let def = agent_def_with_inline_mcp_server(all_policy());
+
+        let (schemas, _allowed) = resolve_subagent_tools(
+            &registry,
+            &def,
+            &[],
+            None,
+            0,
+            protocol::AgentId::new(),
+            false,
+            None,
+        )
+        .await
+        .expect("resolve should succeed even with no connector wired");
+        assert!(
+            !schemas
+                .iter()
+                .any(|t| t["name"].as_str() == Some("mcp__docs__search")),
+            "unwired connector ⇒ inline mcpServers contribute nothing (legacy behavior)"
+        );
     }
 }

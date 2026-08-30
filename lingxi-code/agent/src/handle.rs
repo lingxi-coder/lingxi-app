@@ -191,6 +191,23 @@ pub struct PoolSubagentSpawner {
     /// Managed hook-slot lock, filled by the composition root after settings
     /// policy resolution. Unfilled means the legacy permissive default.
     strict_plugin_only_hooks: Arc<std::sync::OnceLock<bool>>,
+    /// Managed `strictPluginOnlyCustomization` lock for the MCP slot (spec
+    /// §24b), consulted when converting a spawning subagent's OWN inline
+    /// `mcpServers` frontmatter — mirrors [`Self::strict_plugin_only_hooks`]
+    /// (same cycle-break, same unfilled-is-permissive default) and the
+    /// composition root's main-agent `AgentMcpMergeGates::strict_plugin_only_mcp`.
+    strict_plugin_only_mcp: Arc<std::sync::OnceLock<bool>>,
+    /// Production connect/inject/teardown seam for a subagent's OWN inline
+    /// `mcpServers` frontmatter (spec §24b). SET-ONCE cell mirroring
+    /// [`Self::hook_executor`]: the real implementation is built at the
+    /// composition root once the live `mcp::McpRegistry` exists (after this
+    /// spawner is boxed), so the host grabs
+    /// [`Self::mcp_subagent_connector_handle`] before boxing and fills it
+    /// later. Unfilled (the default / tests) ⇒ a spawning subagent's inline
+    /// `mcpServers` are never connected — byte-identical to the pre-§24b
+    /// behavior, which always passed a literal empty tool slice.
+    mcp_subagent_connector:
+        Arc<std::sync::OnceLock<Arc<dyn crate::tool_resolver::SubagentMcpConnector>>>,
     /// Skill loader handed to every child runner via
     /// [`SubagentContext::skill_loader`] so the runner can preload the agent
     /// definition's frontmatter `skills:` (claude runAgent.ts:577-646). A leaf
@@ -388,6 +405,8 @@ impl PoolSubagentSpawner {
             session_provider_first_party: true,
             hook_executor: Arc::new(std::sync::OnceLock::new()),
             strict_plugin_only_hooks: Arc::new(std::sync::OnceLock::new()),
+            strict_plugin_only_mcp: Arc::new(std::sync::OnceLock::new()),
+            mcp_subagent_connector: Arc::new(std::sync::OnceLock::new()),
             skill_loader: Arc::new(std::sync::OnceLock::new()),
             hook_session_id: protocol::SessionId::nil(),
             hook_cwd: std::path::PathBuf::new(),
@@ -793,6 +812,39 @@ impl PoolSubagentSpawner {
         self.strict_plugin_only_hooks.clone()
     }
 
+    /// Return the set-once managed MCP-slot policy cell (spec §24b). The
+    /// composition root fills this the same way it fills
+    /// [`Self::strict_plugin_only_hooks_handle`] — after loading managed
+    /// settings but before any child can spawn.
+    #[must_use]
+    pub fn strict_plugin_only_mcp_handle(&self) -> Arc<std::sync::OnceLock<bool>> {
+        self.strict_plugin_only_mcp.clone()
+    }
+
+    /// Builder: set the subagent MCP connector immediately (use when it is
+    /// available at construction — tests). The boot path instead uses
+    /// [`Self::mcp_subagent_connector_handle`] to fill the cell later (the real
+    /// connector is built from the live `mcp::McpRegistry`, which does not
+    /// exist at construction). See the field doc.
+    #[must_use]
+    pub fn with_mcp_subagent_connector(
+        self,
+        connector: Arc<dyn crate::tool_resolver::SubagentMcpConnector>,
+    ) -> Self {
+        let _ = self.mcp_subagent_connector.set(connector);
+        self
+    }
+
+    /// Return a clone of the set-once subagent-MCP-connector cell so the host
+    /// can fill it AFTER the real connector is built (same cycle-break as
+    /// [`Self::hook_executor_handle`]). First fill wins.
+    #[must_use]
+    pub fn mcp_subagent_connector_handle(
+        &self,
+    ) -> Arc<std::sync::OnceLock<Arc<dyn crate::tool_resolver::SubagentMcpConnector>>> {
+        self.mcp_subagent_connector.clone()
+    }
+
     /// Builder: set the skill loader immediately (tests). The boot path uses
     /// [`Self::skill_loader_handle`] to fill it later. Threaded onto every child
     /// via [`SubagentContext::skill_loader`].
@@ -1054,6 +1106,12 @@ impl PoolSubagentSpawner {
         // against Claude's configured maximum spawn depth. Threaded from
         // `request.depth`.
         depth: u32,
+        // This spawn's own id — scopes a subagent's inline `mcpServers`
+        // connection (spec §24b) to THIS instance. Threaded from
+        // `ctx.agent_id` on the production call site; test call sites pass a
+        // fresh scratch id (inert whenever the fixture's `mcp_servers` is
+        // empty, which every existing test's `agent_def()` helper is).
+        agent_id: AgentId,
     ) -> Result<(Vec<serde_json::Value>, Vec<String>), SubagentSpawnError> {
         let Some(registry) = self.tool_registry.get() else {
             return Ok((Vec::new(), Vec::new()));
@@ -1070,12 +1128,17 @@ impl PoolSubagentSpawner {
         let empty: Vec<String> = Vec::new();
         let denied = self.tool_wide_deny_names.get().unwrap_or(&empty);
         let default_model = self.resolved_default_model();
+        let strict_plugin_only_mcp = self.strict_plugin_only_mcp.get().copied().unwrap_or(false);
+        let connector = self.mcp_subagent_connector.get().map(|c| c.as_ref());
         crate::tool_resolver::resolve_subagent_tools(
             registry,
             agent_def,
             denied,
             default_model.as_deref(),
             depth,
+            agent_id,
+            strict_plugin_only_mcp,
+            connector,
         )
         .await
         .map_err(|e| SubagentSpawnError::Internal(e.to_string()))
@@ -1485,7 +1548,7 @@ impl PoolSubagentSpawner {
         ctx.depth = request.depth;
         ctx.observer.clone_from(&request.observer);
         let (tool_schemas, allowed_tools) = self
-            .resolve_tools(&ctx.agent_definition, request.depth)
+            .resolve_tools(&ctx.agent_definition, request.depth, ctx.agent_id)
             .await?;
         ctx.tool_schemas = tool_schemas;
         ctx.allowed_tools = allowed_tools;
@@ -1635,6 +1698,12 @@ impl StreamingSubagentSpawner for PoolSubagentSpawner {
             .pool
             .send_event(agent_id, engine::Event::UserExit)
             .await;
+        // §24b teardown: tear down this agent's inline `mcpServers` BEFORE
+        // freeing the pool slot. A no-op when unwired or the agent connected
+        // nothing (including: it never declared inline `mcpServers`).
+        if let Some(connector) = self.mcp_subagent_connector.get() {
+            connector.disconnect(*agent_id).await;
+        }
         self.pool
             .deallocate(agent_id)
             .await
@@ -1799,6 +1868,11 @@ struct SpawnDeallocGuard {
     pool: Arc<StateMachinePool>,
     agent_id: AgentId,
     armed: bool,
+    /// §24b teardown: torn down alongside the pool slot on EVERY exit path
+    /// this guard covers (early cancel/drop here; the normal terminal path
+    /// disarms this guard and tears down separately — see the disarm site).
+    /// `None` when unwired or the agent connected nothing.
+    mcp_connector: Option<Arc<dyn crate::tool_resolver::SubagentMcpConnector>>,
 }
 
 impl Drop for SpawnDeallocGuard {
@@ -1811,7 +1885,11 @@ impl Drop for SpawnDeallocGuard {
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
             let pool = self.pool.clone();
             let id = self.agent_id;
+            let mcp_connector = self.mcp_connector.take();
             handle.spawn(async move {
+                if let Some(connector) = mcp_connector {
+                    connector.disconnect(id).await;
+                }
                 let _ = pool.deallocate(&id).await;
             });
         }
@@ -1918,6 +1996,7 @@ impl SubagentSpawner for PoolSubagentSpawner {
             pool: self.pool.clone(),
             agent_id,
             armed: true,
+            mcp_connector: self.mcp_subagent_connector.get().cloned(),
         };
         observer_events.try_emit(SubagentObservation::Allocated {
             agent_id,
@@ -2062,6 +2141,11 @@ impl SubagentSpawner for PoolSubagentSpawner {
         // Normal terminal path: deallocate explicitly and disarm the guard so
         // it does not double-deallocate on drop.
         dealloc_guard.armed = false;
+        // §24b teardown: tear down this agent's inline `mcpServers` BEFORE
+        // freeing the pool slot, same as the `stop()` / early-cancel paths.
+        if let Some(connector) = dealloc_guard.mcp_connector.take() {
+            connector.disconnect(agent_id).await;
+        }
         // Best-effort deallocate; failures here don't change the surfaced
         // result.
         let _ = self.pool.deallocate(&agent_id).await;
@@ -2905,6 +2989,7 @@ mod tests {
                     use_exact_tools: true,
                 }),
                 0,
+                AgentId::new(),
             )
             .await
             .expect("unset registry should resolve to an empty tool set");
@@ -2925,6 +3010,7 @@ mod tests {
                     use_exact_tools: true,
                 }),
                 0,
+                AgentId::new(),
             )
             .await
             .expect("all policy should resolve");
@@ -2953,6 +3039,7 @@ mod tests {
             .resolve_tools(
                 &agent_def(AgentToolPolicy::Explicit(vec!["Read".to_string()])),
                 0,
+                AgentId::new(),
             )
             .await
             .expect("explicit Read should resolve");
@@ -2975,6 +3062,7 @@ mod tests {
             .resolve_tools(
                 &agent_def(AgentToolPolicy::Explicit(vec!["NoSuchTool".to_string()])),
                 0,
+                AgentId::new(),
             )
             .await
             .expect_err("unknown explicit tool must reject the spawn");
@@ -3001,6 +3089,7 @@ mod tests {
                     use_exact_tools: true,
                 }),
                 0,
+                AgentId::new(),
             )
             .await
             .expect("all policy should resolve with tool-wide deny");
@@ -3039,6 +3128,7 @@ mod tests {
                     use_exact_tools: true,
                 }),
                 0,
+                AgentId::new(),
             )
             .await
             .expect("all policy should resolve with mcp server deny");
@@ -3070,6 +3160,7 @@ mod tests {
                     use_exact_tools: true,
                 }),
                 0,
+                AgentId::new(),
             )
             .await
             .expect("all policy should resolve without deny");
@@ -3082,6 +3173,7 @@ mod tests {
                     use_exact_tools: true,
                 }),
                 0,
+                AgentId::new(),
             )
             .await
             .expect("all policy should resolve with empty deny");
@@ -3112,6 +3204,7 @@ mod tests {
                     use_exact_tools: true,
                 }),
                 0,
+                AgentId::new(),
             )
             .await
             .expect("all policy should resolve with aliases");
@@ -3149,7 +3242,7 @@ mod tests {
         };
         // depth 0: Agent kept (0 < default 3).
         let (schemas0, allowed0) = spawner
-            .resolve_tools(&policy(), 0)
+            .resolve_tools(&policy(), 0, AgentId::new())
             .await
             .expect("depth 0 should resolve");
         let names0: Vec<&str> = schemas0
@@ -3164,7 +3257,7 @@ mod tests {
         );
         // depth 3 (the 2.1.219 default cap): Agent gated → empty pool.
         let (schemas1, allowed1) = spawner
-            .resolve_tools(&policy(), 3)
+            .resolve_tools(&policy(), 3, AgentId::new())
             .await
             .expect("depth 3 should resolve");
         assert!(schemas1.is_empty(), "Agent gated at depth 3 → no schemas");
@@ -3192,6 +3285,7 @@ mod tests {
                     use_exact_tools: false,
                 }),
                 0,
+                AgentId::new(),
             )
             .await
             .expect("all policy should resolve at depth 0");
@@ -3223,6 +3317,7 @@ mod tests {
                     use_exact_tools: false,
                 }),
                 0,
+                AgentId::new(),
             )
             .await
             .expect("plan-mode all policy should resolve");
@@ -3257,6 +3352,7 @@ mod tests {
             .resolve_tools(
                 &agent_def(AgentToolPolicy::Except(vec!["Bash".to_string()])),
                 0,
+                AgentId::new(),
             )
             .await
             .expect("except policy should resolve");
@@ -4199,7 +4295,7 @@ mod tests {
             .with_tool_registry(registry_with(&["Read", "Grep", "Edit", "Write"]));
         let def = spawner.resolve_definition("Explore", None).await;
         let (schemas, allowed) = spawner
-            .resolve_tools(&def, 0)
+            .resolve_tools(&def, 0, AgentId::new())
             .await
             .expect("Explore tool set should resolve");
         let names: Vec<&str> = schemas

@@ -898,6 +898,17 @@ impl McpRegistry {
         if let Some(err) = &config.config_error {
             return Err(McpError::Connection(err.clone()));
         }
+        // 3. §18 — the oracle's CONNECT-TIME `new URL(t.url)` re-check, run in
+        //    the same block as gate 2 (`Ve` @182283839 / `Ae` @182488092:
+        //    `let C=t.configError; if(!C&&"url" in t) try{new URL(t.url)}
+        //    catch{C="'url' is not a valid URL. ..."}; if(C) return ...`).
+        //    `configError` wins (gate 2 already returned), so this only fires
+        //    for a url the LOADER never flagged: present, non-blank, and
+        //    unparseable (a bare hostname with no scheme, say). Same
+        //    `errorCode:"INVALID_CONFIG"` as gate 2; also does not dial.
+        if let Some(err) = config.connect_time_url_error() {
+            return Err(McpError::Connection(err.to_string()));
+        }
 
         self.connections.write().await.insert(
             config.name.clone(),
@@ -4786,6 +4797,29 @@ mod snapshot_tests {
         assert_eq!(
             r.connect(broken).await.unwrap_err().to_string(),
             "connection failed: 'url' \"${MISSING:-}\" expanded to an empty string."
+        );
+
+        // §18 — the oracle's CONNECT-TIME `new URL(t.url)` re-check
+        // (`Ve`/`Ae` @182283839 / @182488092), which fires on a url that is
+        // present and non-blank but does not parse. Nothing at load time
+        // records a `config_error` for it, so before this gate existed the
+        // registry dialed a garbage url and surfaced a raw transport error.
+        // `StubTransport::connect` is `unreachable!()`, so reaching the dial
+        // panics the test.
+        let mut malformed = stdio_cfg("malformed");
+        malformed.spec = McpTransportSpec::Http {
+            url: "api.example.com/mcp".into(),
+            headers: traits::McpHeaders::default(),
+            headers_helper: None,
+            oauth: None,
+        };
+        assert!(
+            !malformed.is_unconfigured(),
+            "a non-blank url is never UNCONFIGURED"
+        );
+        assert_eq!(
+            r.connect(malformed).await.unwrap_err().to_string(),
+            "connection failed: 'url' is not a valid URL. Update the server's config and reconnect."
         );
     }
 

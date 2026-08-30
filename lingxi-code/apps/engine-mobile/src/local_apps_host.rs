@@ -14230,6 +14230,54 @@ mod tests {
         assert_eq!(result["device_context"]["formFactor"], "ipad");
     }
 
+    /// The surface is fixed at creation, and `update_manifest` is the one
+    /// mutation path an agent can reach after that. Its refusal was the only
+    /// member of the family without a test — `create` (`local_apps_mcp.rs`:
+    /// `create_rejects_runtime_profile_and_surface_overrides`), `scaffold`
+    /// (`scaffold_rejects_an_empty_brief_and_an_unknown_surface`) and the
+    /// shell-mode create (`host.rs`:
+    /// `create_app_in_shell_mode_rejects_a_surface`) are all covered — so
+    /// deleting the four-line `if` was a silent green.
+    ///
+    /// It must REFUSE, not ignore: `manifest.surface` is carried through the
+    /// load-modify-save untouched, so a dropped refusal returns `ok` to an
+    /// agent that then believes it converted the app, while the workspace on
+    /// disk still holds the other scaffold's source.
+    #[tokio::test]
+    async fn update_manifest_rejects_a_caller_supplied_surface() {
+        let root = TempDir::new().expect("tempdir");
+        let service = test_service(&root).await;
+        let broker = LocalAppsHostBroker::new(
+            root.path().to_path_buf(),
+            MockSink::arc(),
+            None,
+            false,
+            None,
+        );
+        assert!(broker.attach_service(service.clone()).is_ok());
+        let app_id = create_app_fixture(&root, &service, "Fixed").await;
+        let layout = AppLayout::new(root.path().to_path_buf(), app_id.clone()).expect("layout");
+        let before = load_manifest(&layout).expect("manifest").surface;
+
+        let error = broker
+            .update_manifest(json!({
+                "app_id": app_id,
+                "surface": "canvas",
+            }))
+            .await
+            .expect_err("a caller-supplied surface must be refused, not silently ignored");
+        assert!(
+            error.contains("an app's surface is fixed when the app is created"),
+            "got {error}"
+        );
+
+        let after = load_manifest(&layout).expect("manifest").surface;
+        assert_eq!(
+            before, after,
+            "the refusal must happen before the manifest is saved"
+        );
+    }
+
     #[tokio::test]
     async fn an_undeclared_capability_is_refused_without_prompting() {
         let root = TempDir::new().expect("tempdir");

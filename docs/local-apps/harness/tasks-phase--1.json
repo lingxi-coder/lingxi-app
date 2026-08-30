@@ -68,7 +68,7 @@
       "title": "Bind Host launch-context injection to the resolved handle",
       "gate": "§19.3 workflow context is injected only by the Host; caller-supplied host_context/profile/template/renderer/surface is rejected or overridden",
       "owns": [
-        "lingxi-code/apps/engine-mobile/src/local_apps_host.rs",
+        "lingxi-code/apps/engine-mobile/src/workflow_support.rs",
         "lingxi-code/apps/engine-mobile/src/local_app_plugin_binding.rs"
       ],
       "crates": [
@@ -80,20 +80,22 @@
       "exclusive": false,
       "repeatRuns": 1,
       "plantedFailure": {
-        "edit": "accept a caller-supplied host_context instead of overriding it",
+        "edit": "change the runtime_profile injection in apply_materialized_local_app_collections_with_identity from object.insert(..) to object.entry(..).or_insert_with(..), so a caller-supplied value survives",
         "mustNameInOutput": [
-          "host_context"
+          "runtime_profile",
+          "caller_supplied_runtime_profile_is_overridden_by_the_host"
         ]
       },
       "addedTests": [
-        "caller_supplied_host_context_is_rejected_or_overridden",
-        "caller_supplied_profile_is_rejected_or_overridden",
-        "caller_supplied_surface_is_rejected_or_overridden"
+        "caller_supplied_runtime_profile_is_overridden_by_the_host",
+        "caller_supplied_expected_writable_collections_is_overridden_by_the_host",
+        "host_injected_arg_keys_are_exactly_the_expected_set",
+        "update_manifest_rejects_a_caller_supplied_surface"
       ],
       "deps": [
         "P-1.1"
       ],
-      "notes": ""
+      "notes": "DESCRIPTOR CORRECTED after the verify pass ran lap_gate.py against it and it FAILED. Two errors, both mine, both from writing the descriptor out of the design's §19.3 wording without checking the symbols exist in this codebase:\n  - plantedFailure named `host_context`, which does not exist anywhere in the local-apps surface. The     only workspace hits are the unrelated permission classifier (permission/src/host_context.rs). A gate     whose must-name string cannot appear can never pass.\n  - owns named local_apps_host.rs + local_app_plugin_binding.rs; the uncovered half of §19.3 is actually     the workflow-args seam in workflow_support.rs. The profile/surface half in local_apps_host.rs already     HAS tests at HEAD (create_rejects_runtime_profile_and_surface_overrides,     scaffold_rejects_an_empty_brief_and_an_unknown_surface, create_app_in_shell_mode_rejects_a_surface),     so testing there would have been redundant while the workflow injection had nothing.\n\nThe lesson generalises: a descriptor written from design prose can name a symbol the code does not have, and `lap-gate.sh tasks` cannot catch that — it validates that a must-name string EXISTS, not that it is REACHABLE. Descriptors for later phases should be re-grounded against the code before their task starts."
     },
     {
       "id": "P-1.3",

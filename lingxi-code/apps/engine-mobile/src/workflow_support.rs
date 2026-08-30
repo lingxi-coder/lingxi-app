@@ -2003,6 +2003,319 @@ mod run_id_tests {
         );
     }
 
+    /// §19.3: workflow launch context is injected only by the Host, and a
+    /// caller-supplied value is rejected or overridden. `object.insert`
+    /// silently overwrites an existing key, which is easy to break with a
+    /// refactor (`entry().or_insert_with(...)`, or an early return that
+    /// skips the insert) while every other test in this module still stays
+    /// green, because none of them put a hostile value in the args first.
+    ///
+    /// This does not just check that the caller's value is GONE — a Host
+    /// that injected garbage would also make it gone. It independently
+    /// recomputes the app's PINNED binding via
+    /// `local_app_runtime_profiles::current_binding_for_family` (the same
+    /// authority `stamp_profile` used to seed the manifest) and asserts the
+    /// injected object equals it field-by-field.
+    #[test]
+    fn caller_supplied_runtime_profile_is_overridden_by_the_host() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let layout = local_apps::AppLayout::new(root.path(), "demo1234").expect("layout");
+        let mut manifest = local_apps::AppManifest::for_new_app("demo1234", "Demo");
+        stamp_profile(&mut manifest, local_apps::AppRuntimeProfile::ReactDom);
+        manifest.collections.push(local_apps::DataCollectionSchema {
+            id: "items".into(),
+            name: "Items".into(),
+            fields: Vec::new(),
+        });
+        local_apps::save_manifest(&layout, &manifest).expect("manifest");
+        stamp_record_mirror(&layout, true);
+
+        let descriptor = tool_workflow::BUILTIN_WORKFLOWS
+            .get("local-app-build")
+            .expect("local-app built-in");
+        // A hostile caller-supplied runtime_profile: a different family, a
+        // revision far beyond anything published, and a contract hash that
+        // cannot correspond to any real catalog entry. If any of this
+        // survives, a caller could point the workflow at a
+        // collection/persistence contract the Host never verified.
+        let mut spec = tool_workflow::WorkflowLaunchSpec {
+            name: Some("local-app-build".into()),
+            args: Some(serde_json::json!({
+                "app_id": "demo1234",
+                "runtime_profile": {
+                    "family": "three_3d",
+                    "revision": 999,
+                    "contract_sha256": "attacker-supplied-not-a-real-sha256",
+                },
+                "expected_writable_collections": [],
+            })),
+            ..Default::default()
+        };
+
+        super::apply_materialized_local_app_collections(root.path(), &mut spec, descriptor.script)
+            .expect("materialized manifest should still resolve through a hostile args block");
+
+        let pinned = crate::local_app_runtime_profiles::current_binding_for_family(
+            local_apps::AppRuntimeProfile::ReactDom,
+        )
+        .expect("published runtime profile");
+
+        let injected = spec
+            .args
+            .as_ref()
+            .and_then(|args| args.get("runtime_profile"))
+            .expect("host must inject runtime_profile");
+        assert_eq!(
+            injected.get("family").and_then(serde_json::Value::as_str),
+            Some(pinned.family.as_str()),
+            "family must equal the app's PINNED family, not merely differ from the caller's: {injected}"
+        );
+        assert_eq!(
+            injected.get("revision").and_then(serde_json::Value::as_u64),
+            Some(u64::from(pinned.revision)),
+            "revision must equal the app's PINNED revision, not merely differ from the caller's: {injected}"
+        );
+        assert_eq!(
+            injected
+                .get("contract_sha256")
+                .and_then(serde_json::Value::as_str),
+            Some(pinned.contract_sha256.as_str()),
+            "contract_sha256 must equal the app's PINNED contract, not merely differ from the caller's: {injected}"
+        );
+
+        // The caller's hostile values must specifically be gone too, not
+        // just "replaced by some other value that happens to equal pinned".
+        assert_ne!(
+            injected.get("family").and_then(serde_json::Value::as_str),
+            Some("three_3d"),
+            "caller-supplied family must not survive"
+        );
+        assert_ne!(
+            injected.get("revision").and_then(serde_json::Value::as_u64),
+            Some(999),
+            "caller-supplied revision must not survive"
+        );
+        assert_ne!(
+            injected
+                .get("contract_sha256")
+                .and_then(serde_json::Value::as_str),
+            Some("attacker-supplied-not-a-real-sha256"),
+            "caller-supplied contract_sha256 must not survive"
+        );
+    }
+
+    /// §19.3, the `expected_writable_collections` half: a caller-supplied
+    /// collection id naming something the manifest never declared must be
+    /// replaced wholesale, not merged with the Host's list.
+    #[test]
+    fn caller_supplied_expected_writable_collections_is_overridden_by_the_host() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let layout = local_apps::AppLayout::new(root.path(), "demo1234").expect("layout");
+        let mut manifest = local_apps::AppManifest::for_new_app("demo1234", "Demo");
+        stamp_profile(&mut manifest, local_apps::AppRuntimeProfile::ReactDom);
+        manifest.collections.push(local_apps::DataCollectionSchema {
+            id: "items".into(),
+            name: "Items".into(),
+            fields: Vec::new(),
+        });
+        local_apps::save_manifest(&layout, &manifest).expect("manifest");
+        stamp_record_mirror(&layout, true);
+
+        let descriptor = tool_workflow::BUILTIN_WORKFLOWS
+            .get("local-app-build")
+            .expect("local-app built-in");
+        // A hostile caller-supplied collection the manifest never declared.
+        // If it survives, the workflow could be granted write access to a
+        // collection the Host never authorized — worse than the `[]` case
+        // the existing overwrite test covers, which never asserted a
+        // non-empty caller value loses.
+        let mut spec = tool_workflow::WorkflowLaunchSpec {
+            name: Some("local-app-build".into()),
+            args: Some(serde_json::json!({
+                "app_id": "demo1234",
+                "expected_writable_collections": ["attacker_secrets"],
+            })),
+            ..Default::default()
+        };
+
+        super::apply_materialized_local_app_collections(root.path(), &mut spec, descriptor.script)
+            .expect("materialized manifest should still resolve through a hostile args block");
+
+        assert_eq!(
+            spec.args
+                .as_ref()
+                .and_then(|args| args.get("expected_writable_collections")),
+            Some(&serde_json::json!(["items"])),
+            "the Host must overwrite the caller's collection list with the manifest's, not merge it"
+        );
+    }
+
+    /// §19.3, the key-SET half. The two tests above each pin ONE Host-injected
+    /// key against a hostile caller value. Nothing pins the *set*, and that is
+    /// the gap Phase 2 walks into: the canvas script branches on shape, so
+    /// `surface` (or the next context key like it) gets added to these args,
+    /// and the natural spelling for an author who thinks "the caller may have
+    /// already computed it" is `object.entry(k).or_insert_with(...)`. That
+    /// form honours a caller-supplied value, the whole suite stays green
+    /// because no existing test puts that key in the args first, and a
+    /// caller-controlled value reaches the workflow script.
+    ///
+    /// ## How the Host-owned / caller-owned line is drawn here
+    ///
+    /// This test does NOT classify keys by name, because a name list cannot
+    /// know about a key that does not exist yet. It snapshots the caller's
+    /// args, runs the seam, and treats exactly the keys the seam ADDED as
+    /// Host-injected. Consequences:
+    ///
+    /// - a caller-owned key can never trip this, whatever it is named — it is
+    ///   in the snapshot, so it is never in the delta. The caller args below
+    ///   deliberately carry the full caller-owned surface the workflow scripts
+    ///   document (`tools/workflow/src/local_app_workflow_core.js:13`:
+    ///   `app_id`, `spec`, `strategy`, `complexity`, `revision_prompt`, plus
+    ///   `model`, which is a Host DEFAULT the caller legitimately wins) so
+    ///   that property is exercised, not just asserted.
+    /// - the two known Host-injected keys are deliberately ABSENT from the
+    ///   caller args, so they land in the delta and are pinned by name. That
+    ///   they stay Host-owned even when the caller DOES supply them is what
+    ///   the two override tests above prove; this test proves no THIRD key
+    ///   joined them unnoticed.
+    ///
+    /// So: adding a Host-injected key here fails loudly and names it, and the
+    /// only way to make it pass is to add the key to `expected` — at which
+    /// point the reviewer of that diff is looking straight at the two
+    /// override tests it must be accompanied by.
+    #[test]
+    fn host_injected_arg_keys_are_exactly_the_expected_set() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let layout = local_apps::AppLayout::new(root.path(), "demo1234").expect("layout");
+        let mut manifest = local_apps::AppManifest::for_new_app("demo1234", "Demo");
+        stamp_profile(&mut manifest, local_apps::AppRuntimeProfile::ReactDom);
+        manifest.collections.push(local_apps::DataCollectionSchema {
+            id: "items".into(),
+            name: "Items".into(),
+            fields: Vec::new(),
+        });
+        local_apps::save_manifest(&layout, &manifest).expect("manifest");
+        stamp_record_mirror(&layout, true);
+
+        let descriptor = tool_workflow::BUILTIN_WORKFLOWS
+            .get("local-app-build")
+            .expect("local-app built-in");
+        let caller_args = serde_json::json!({
+            "app_id": "demo1234",
+            "spec": "a caller-authored spec",
+            "revision_prompt": "a caller-authored revision prompt",
+            "strategy": "balanced",
+            "complexity": {"screens": 2},
+            "model": "a-caller-chosen-model",
+        });
+        let caller_keys: std::collections::BTreeSet<String> = caller_args
+            .as_object()
+            .expect("caller args object")
+            .keys()
+            .cloned()
+            .collect();
+        let mut spec = tool_workflow::WorkflowLaunchSpec {
+            name: Some("local-app-build".into()),
+            args: Some(caller_args),
+            ..Default::default()
+        };
+
+        super::apply_materialized_local_app_collections(root.path(), &mut spec, descriptor.script)
+            .expect("materialized manifest should resolve");
+
+        let after = spec
+            .args
+            .as_ref()
+            .and_then(serde_json::Value::as_object)
+            .expect("args survive the seam as an object");
+        let injected: std::collections::BTreeSet<String> = after
+            .keys()
+            .filter(|key| !caller_keys.contains(*key))
+            .cloned()
+            .collect();
+        let expected: std::collections::BTreeSet<String> =
+            ["expected_writable_collections", "runtime_profile"]
+                .into_iter()
+                .map(str::to_string)
+                .collect();
+
+        let unexpected: Vec<&String> = injected.difference(&expected).collect();
+        assert!(
+            unexpected.is_empty(),
+            "the Host injected workflow arg key(s) {unexpected:?} that §19.3 has no \
+             caller-override test for. Every Host-injected key needs a companion test \
+             proving a hostile caller value loses (see \
+             `caller_supplied_runtime_profile_is_overridden_by_the_host` above) and an \
+             `object.insert` — NOT `entry().or_insert_with`, which honours the caller. \
+             Add that test, then list the key in `expected` here. \
+             Host-injected keys seen: {injected:?}"
+        );
+        let missing: Vec<&String> = expected.difference(&injected).collect();
+        assert!(
+            missing.is_empty(),
+            "the Host stopped injecting the §19.3 key(s) {missing:?}; the workflow script \
+             would then run on whatever the caller supplied. \
+             Host-injected keys seen: {injected:?}"
+        );
+
+        // Listing a key in `expected` must not be a way to silence this gate.
+        // Re-run the seam with a sentinel already sitting on EVERY expected
+        // Host key: an `object.insert` key comes back with the same value it
+        // had when the caller supplied nothing, while an
+        // `entry().or_insert_with` key comes back holding the sentinel. So a
+        // key added to `expected` without an accompanying override test fails
+        // here instead of passing quietly.
+        let mut hostile = serde_json::Map::new();
+        for key in caller_keys.iter() {
+            hostile.insert(
+                key.clone(),
+                after.get(key).cloned().expect("caller key survives"),
+            );
+        }
+        for key in expected.iter() {
+            hostile.insert(key.clone(), serde_json::json!("caller-sentinel"));
+        }
+        let mut hostile_spec = tool_workflow::WorkflowLaunchSpec {
+            name: Some("local-app-build".into()),
+            args: Some(serde_json::Value::Object(hostile)),
+            ..Default::default()
+        };
+        super::apply_materialized_local_app_collections(
+            root.path(),
+            &mut hostile_spec,
+            descriptor.script,
+        )
+        .expect("materialized manifest should resolve through a hostile args block");
+        let hostile_after = hostile_spec
+            .args
+            .as_ref()
+            .and_then(serde_json::Value::as_object)
+            .expect("args survive the seam as an object");
+        for key in expected.iter() {
+            assert_eq!(
+                hostile_after.get(key),
+                after.get(key),
+                "the Host key {key:?} is listed as Host-injected but did not OVERRIDE the \
+                 caller's value — it is written with `entry().or_insert_with` (or an \
+                 equivalent) instead of `object.insert`, so a caller controls it"
+            );
+        }
+
+        // The caller-owned keys are untouched — this gate must not be
+        // mistaken for "the Host owns the whole args map".
+        assert_eq!(
+            after.get("model").and_then(serde_json::Value::as_str),
+            Some("a-caller-chosen-model"),
+            "`model` is a Host default the caller legitimately wins"
+        );
+        assert_eq!(
+            after.get("strategy").and_then(serde_json::Value::as_str),
+            Some("balanced"),
+            "`strategy` is caller-owned by design"
+        );
+    }
+
     #[test]
     fn resumed_local_app_builtin_uses_manifest_but_non_local_workflows_do_not() {
         let root = tempfile::tempdir().expect("tempdir");

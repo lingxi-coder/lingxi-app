@@ -7375,6 +7375,7 @@ dependencies = [
  "async-trait",
  "branding",
  "engine",
+ "mcp",
  "once_cell",
  "permission",
  "protocol",

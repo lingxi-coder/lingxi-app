@@ -115,6 +115,28 @@ def _resolved(path, what):
     return p
 
 
+def target_to_package(repo):
+    """target 名 -> package 名。
+
+    cargo 的输出里,一个测试二进制是按 **target** 命名的
+    (`commands_test|tests/commands_test.rs`),而任务的范围是按 **package** 划的
+    (`-p client-protocol`)。两者不是一回事:client-protocol 的集成测试 target 叫
+    `commands_test`、`events_test`……名字里没有 package 的影子。拿 package 名去
+    子串匹配 binary key,只会匹配到 lib unittests,把同一个 package 的十几个集成
+    测试二进制判成「范围外」。所以这张表必须问 cargo 要,不能猜。"""
+    out = subprocess.run(
+        ["cargo", "metadata", "--no-deps", "--format-version", "1"],
+        capture_output=True, text=True, cwd=repo,
+    )
+    if out.returncode != 0:
+        fail("cargo metadata failed, cannot attribute test binaries to packages: %s" % out.stderr.strip()[:200])
+    table = {}
+    for pkg in json.loads(out.stdout)["packages"]:
+        for t in pkg["targets"]:
+            table[t["name"].replace("-", "_")] = pkg["name"]
+    return table
+
+
 def load_run(path):
     p = _resolved(path, "run file")
     text = p.read_text(encoding="utf-8", errors="replace")
@@ -141,6 +163,28 @@ def cmd_parse(args):
         fail(
             "%s names no test binary at all (no 'Running …(target/…/deps/…)' line) — "
             "the run did not execute tests, whatever it exited with" % args.run
+        )
+    run["binaryPackage"] = {}
+    if args.no_attribute:
+        ok("parsed %s -> %s (%d binaries, attribution SKIPPED: --only will be unavailable)"
+           % (args.run, args.out, len(run["binaries"])))
+        Path(os.environ.get("LAP_GATE_CWD", ".")).joinpath(args.out).write_text(
+            json.dumps(run, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        return 0
+    table = target_to_package(args.workspace_dir)
+    unattributed = []
+    for key in list(run["binaries"]) + run["started"]:
+        target = key.split("|", 1)[0]
+        pkg = table.get(target)
+        if pkg is None:
+            unattributed.append(key)
+        else:
+            run["binaryPackage"][key] = pkg
+    if unattributed:
+        fail(
+            "%d test binary/binaries could not be attributed to a package: %s — "
+            "an unattributable binary silently escapes every per-task scope filter"
+            % (len(unattributed), ", ".join(sorted(set(unattributed))[:6]))
         )
     Path(os.environ.get("LAP_GATE_CWD", ".")) .joinpath(args.out).write_text(json.dumps(run, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     ok(
@@ -212,6 +256,39 @@ def cmd_green(args):
     run = load_run(args.run)
     removed = set(args.tests_removed)
     problems = []
+
+    # 每个任务只跑自己的 crate,所以判据 3 必须只对**本次范围内**的 baseline 二进制生效,
+    # 否则每一个任务都会因为「没跑别人的二进制」而红。--only 就是这个范围。
+    #
+    # ⚠️ 范围必须**收窄 baseline**,不能改成「只检查本次运行里出现过的二进制」——
+    # 后者会让被截断的二进制自动退出检查,判据 3 就恒真了。
+    if args.only:
+        attrib = base.get("binaryPackage") or {}
+        if not attrib:
+            fail("baseline has no binaryPackage attribution — regenerate it with `lap-gate.sh parse`")
+        unknown = [o for o in args.only if o not in set(attrib.values())]
+        if unknown:
+            fail(
+                "--only names %s, which no baseline binary belongs to — packages the baseline knows: %s"
+                % (", ".join(repr(u) for u in unknown), ", ".join(sorted(set(attrib.values()))))
+            )
+        kept = {k: v for k, v in base["binaries"].items() if attrib.get(k) in args.only}
+        if not kept:
+            fail(
+                "--only %s matches ZERO baseline binaries — the scope filter selected nothing, so every "
+                "later assertion would be vacuous. Baseline knows: %s"
+                % (args.only, ", ".join(sorted(base["binaries"])[:8]) + " ...")
+            )
+        base = {
+            "binaries": kept,
+            "redlist": [r for r in base["redlist"] if attrib.get(r.split("::", 1)[0]) in args.only],
+        }
+        stray = [k for k in run["binaries"] if attrib.get(k) not in args.only]
+        if stray:
+            problems.append(
+                "run contains %d binary/binaries outside --only %s: %s — the run and the scope disagree"
+                % (len(stray), args.only, ", ".join(sorted(stray)[:5]))
+            )
 
     # 3. baseline 记过的每个二进制都必须有 test result 行。
     #    一个 SIGABRT 会截断二进制且**不留 failures: 指名**，本仓库出过
@@ -322,6 +399,60 @@ def cmd_identical(args):
     return 0
 
 
+def cmd_tasks(args):
+    """加载时校验任务清单。**没有种雷方案的任务在这里就被拒绝**——
+    一个你打不破的门不是门,而「我给它写了个门」是本仓库最常见的假交付形状。"""
+    root = Path(os.environ.get("LAP_GATE_CWD", ".")) / args.dir
+    files = sorted(root.glob("tasks-phase-*.json"))
+    if not files:
+        fail("no tasks-phase-*.json under %s — refusing to report a clean task set from an empty enumeration" % root.resolve())
+    problems = []
+    seen = {}
+    for f in files:
+        try:
+            doc = json.loads(f.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            problems.append("%s is not valid JSON: %s" % (f.name, exc)); continue
+        tasks = doc.get("tasks")
+        if not tasks:
+            problems.append("%s declares ZERO tasks" % f.name); continue
+        for t in tasks:
+            tid = t.get("id") or "<no id>"
+            where = "%s/%s" % (f.name, tid)
+            if tid in seen:
+                problems.append("%s: duplicate task id, already defined in %s" % (where, seen[tid]))
+            seen[tid] = f.name
+            pf = t.get("plantedFailure") or {}
+            if not pf.get("edit"):
+                problems.append("%s: no plantedFailure.edit — a gate you cannot break is not a gate" % where)
+            if not pf.get("mustNameInOutput"):
+                problems.append("%s: plantedFailure names nothing the output must contain — "
+                                "red-somewhere is not evidence of red-at-this-thing" % where)
+            if not t.get("owns"):
+                problems.append("%s: no owned paths — criterion 7 cannot be evaluated" % where)
+            if not t.get("gate"):
+                problems.append("%s: no gate reference — it is not traceable to a section 19 row" % where)
+            for c in t.get("crates", []):
+                if c in REPEAT_RUN_CRATES and t.get("repeatRuns", 1) < 3:
+                    problems.append("%s: owns %s but repeatRuns=%s — that suite shares process globals, "
+                                    "so one green run proves nothing" % (where, c, t.get("repeatRuns", 1)))
+    # 依赖必须解析得到,否则调度器会静默跳过一个任务。
+    for f in files:
+        try:
+            doc = json.loads(f.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            continue
+        for t in doc.get("tasks", []):
+            for d in t.get("deps", []):
+                if d not in seen:
+                    problems.append("%s/%s: depends on %r, which no descriptor defines" % (f.name, t.get("id"), d))
+    if problems:
+        fail("task descriptors:\n  - " + "\n  - ".join(problems))
+    ok("task descriptors: %d file(s), %d task(s), every one has a planted failure that names something"
+       % (len(files), len(seen)))
+    return 0
+
+
 # --- 自检 -----------------------------------------------------------------
 
 # 本引擎自己的「种雷」证据。一个从没被看着变红过的门，和没有门是同一件事——
@@ -368,7 +499,7 @@ def cmd_selftest(args):
         for f in fixtures.glob("*.txt"):
             shutil.copy(f, Path(tmp) / f.name)
         r = subprocess.run(
-            [sys.executable, engine, "parse", "--run", "base.txt", "--out", "base.json"],
+            [sys.executable, engine, "parse", "--run", "base.txt", "--out", "base.json", "--no-attribute"],
             capture_output=True, text=True, env={**os.environ, "LAP_GATE_CWD": tmp},
         )
         if r.returncode != 0:
@@ -400,6 +531,7 @@ def cmd_list(args):
     print("                                      (6) every added test appears as '... ok'")
     print("  owned      --range R --owns P...    (7) commits touch only declared paths")
     print("  identical  --runs F F F             (8) count identity across runs")
+    print("  tasks      --dir D                     reject any task with no planted failure")
     print("  selftest                            run the engine's own planted cases (10, both directions)")
     print("crates requiring repeatRuns: %s" % ", ".join(sorted(REPEAT_RUN_CRATES)))
     return 0
@@ -407,10 +539,17 @@ def cmd_list(args):
 
 def main():
     ap = argparse.ArgumentParser(prog="lap-gate")
-    ap.add_argument("--repo", default=str(Path(__file__).resolve().parents[2]))
+    ap.add_argument("--repo", default=str(Path(__file__).resolve().parents[2]),
+                    help="git root (for git status / git diff)")
+    # cargo 的工作区根是 lingxi-code/,不是 git 根。两者不同,而 `cargo metadata`
+    # 在 git 根跑会以 "could not find Cargo.toml" 失败——一条把排查引向错误方向的报错。
+    ap.add_argument("--workspace-dir", default=str(Path(__file__).resolve().parents[1]),
+                    help="cargo workspace root (for cargo metadata)")
     sub = ap.add_subparsers(dest="cmd")
 
     p = sub.add_parser("parse"); p.add_argument("--run", required=True); p.add_argument("--out", required=True)
+    p.add_argument("--no-attribute", action="store_true",
+                   help="skip cargo-metadata package attribution (fixtures / offline)")
     p.set_defaults(fn=cmd_parse)
 
     p = sub.add_parser("precheck"); p.add_argument("--baseline")
@@ -423,6 +562,9 @@ def main():
     p = sub.add_parser("green"); p.add_argument("--run", required=True); p.add_argument("--baseline", required=True)
     p.add_argument("--tests-removed", action="append", default=[])
     p.add_argument("--added-test", action="append", default=[])
+    p.add_argument("--only", action="append", default=[],
+                   help="restrict the BASELINE to binaries belonging to this cargo package")
+    # (repeatable)
     p.set_defaults(fn=cmd_green)
 
     p = sub.add_parser("owned"); p.add_argument("--range", required=True)
@@ -431,6 +573,9 @@ def main():
 
     p = sub.add_parser("identical"); p.add_argument("--runs", nargs="+", required=True)
     p.set_defaults(fn=cmd_identical)
+
+    p = sub.add_parser("tasks"); p.add_argument("--dir", default="../docs/local-apps/harness")
+    p.set_defaults(fn=cmd_tasks)
 
     p = sub.add_parser("selftest"); p.set_defaults(fn=cmd_selftest)
 

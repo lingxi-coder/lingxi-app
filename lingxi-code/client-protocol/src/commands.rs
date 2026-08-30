@@ -661,3 +661,60 @@ pub enum ListingKindDto {
     /// Coordinator-team roster → `CoordinatorWorker` (one per worker) (T18).
     Coordinator,
 }
+
+/// `ClientCommand` 的 UniFFI 元数据预算门。
+///
+/// `uniffi_macros::create_metadata_items` 为**每个类型**生成一个
+/// `MetadataBuffer`，而 `uniffi_core::metadata::BUF_SIZE` 是写死的 16,384 字节
+/// （`uniffi_core-0.28.3/src/metadata.rs:87`）。装不下时的表现是 const-eval 的
+/// `error[E0080]`。
+///
+/// 这个门存在的理由是那次失败**看不见**：溢出同时打断 iOS 和 Android 两个构建，
+/// 而 `cargo build --workspace`、`cargo test --workspace --all-features`、clippy、
+/// 依赖门**全部照常绿**——本仓库已经吃过一次，21 个任务加一整支评审全程放行。
+/// 唯一会先报警的东西就是这一行。
+///
+/// 留 1 KiB 余量而不是顶到 16,384，是为了让它在 `cargo check` 里响，而不是在
+/// 一个 40 分钟的 Xcode 构建走到最后一步时响。
+///
+/// ⚠️ 成本主要是**散文，不是结构**：Rust doc comment 会被逐字拷进这个 buffer。
+/// 给一个变体加一段长注释，和加一个变体一样贵。
+///
+/// 顶到上限时不要靠删注释来腾地方——把新增 operation 收进一个
+/// `LocalApp(LocalAppCommand)` 变体。嵌套是真的搬走了字节，因为嵌套类型会拿到
+/// **自己的**一个 16 KiB buffer。
+#[cfg(feature = "uniffi")]
+const CLIENT_COMMAND_METADATA_BUDGET: usize = 15_360;
+
+#[cfg(feature = "uniffi")]
+const _: () = assert!(
+    UNIFFI_META_CONST_CLIENT_PROTOCOL_ENUM_CLIENTCOMMAND.size < CLIENT_COMMAND_METADATA_BUDGET,
+    "ClientCommand 的 UniFFI 元数据超出预算。装不下 16,384 字节时两个移动端都构建不了，\
+     而所有常规门都看不见。把新增 operation 收进一个嵌套的 LocalAppCommand 变体，\
+     不要靠删 doc comment 腾地方。实际字节数见测试 client_command_metadata_headroom。"
+);
+
+#[cfg(all(test, feature = "uniffi"))]
+mod metadata_budget_tests {
+    use super::*;
+
+    /// 报出实际字节数。const assert 只能说「超了」，说不出超了多少、还剩多少，
+    /// 而「还剩多少」才是决定要不要现在就做嵌套的那个数字。
+    #[test]
+    fn client_command_metadata_headroom() {
+        let used = UNIFFI_META_CONST_CLIENT_PROTOCOL_ENUM_CLIENTCOMMAND.size;
+        let hard_limit = UNIFFI_META_CONST_CLIENT_PROTOCOL_ENUM_CLIENTCOMMAND.bytes.len();
+        println!(
+            "ClientCommand UniFFI metadata: {used} / {hard_limit} bytes ({:.1}% used), \
+             {} free to the hard limit, {} free to the gate at {CLIENT_COMMAND_METADATA_BUDGET}",
+            100.0 * used as f64 / hard_limit as f64,
+            hard_limit - used,
+            CLIENT_COMMAND_METADATA_BUDGET.saturating_sub(used),
+        );
+        assert!(
+            used < CLIENT_COMMAND_METADATA_BUDGET,
+            "ClientCommand metadata is {used} bytes, over the {CLIENT_COMMAND_METADATA_BUDGET} \
+             byte gate ({hard_limit} is the hard limit at which both mobile builds break)"
+        );
+    }
+}

@@ -20,11 +20,18 @@ pub mod ignore_pattern;
 /// `ALL_EVENT_NAMES` — separate from the count-locked event set; kept here for
 /// string-lock testing only, mirroring `workflow`).
 pub mod kairos;
+/// `tengu_mcp_*` analytics-event schemas (2.1.251 §18/§20b). Only the two
+/// confirmed real events; the ~100 other `tengu_mcp_*` binary strings are
+/// Statsig feature-flag names, not events — see the module doc.
+pub mod mcp;
 pub mod memory;
 pub mod migration;
 pub mod oauth;
 pub mod orchestrator;
 pub mod permission;
+/// `tengu_plugin_*` event schemas (2.1.251 §20c — the port's telemetry
+/// catalogue had no plugin module at all before this).
+pub mod plugin;
 /// Queue-operation telemetry event names (NOT in `ALL_EVENT_NAMES` — these are
 /// LingXi-native `lingxi_queue_*` observability events, kept apart from the
 /// count-locked `tengu_*` set; mirrors `workflow`).
@@ -96,6 +103,16 @@ pub const ALL_EVENT_NAMES: &[&str] = {
     // left empty `""` slots → duplicate/bad-prefix failures), derive TOTAL from
     // the actual per-block `NAMES.len()` so the array size ALWAYS equals the
     // number of names concat_all appends, in the SAME block order.
+    // 2.1.251 byte-alignment B8 (telemetry-modules): two new GLOBAL-TAIL
+    // blocks, appended after oauth::AWS_AUTH_NAMES.
+    //   - mcp::NAMES (+2 — tengu_mcp_server_config_invalid,
+    //     tengu_mcp_tools_listed; the only two confirmed real `tengu_mcp_*`
+    //     ANALYTICS events at the oracle — everything else with that prefix
+    //     is a Statsig feature-flag name, not an event; see mcp.rs's module
+    //     doc): 347 + 2 = 349.
+    //   - plugin::NAMES (+14 — tengu_plugin_enabled_for_session and its 13
+    //     siblings; the port had NO plugin telemetry module before this):
+    //     349 + 14 = 363.
     const TOTAL: usize = api::NAMES.len()
         + agent::NAMES.len()
         + session::NAMES.len()
@@ -112,7 +129,9 @@ pub const ALL_EVENT_NAMES: &[&str] = {
         + migration::NAMES.len()
         + permission::NAMES.len()
         + coordinator::NAMES.len()
-        + oauth::AWS_AUTH_NAMES.len();
+        + oauth::AWS_AUTH_NAMES.len()
+        + mcp::NAMES.len()
+        + plugin::NAMES.len();
     const fn concat_all() -> [&'static str; TOTAL] {
         let mut out: [&'static str; TOTAL] = [""; TOTAL];
         let mut idx = 0;
@@ -231,6 +250,24 @@ pub const ALL_EVENT_NAMES: &[&str] = {
         let mut i = 0;
         while i < oauth::AWS_AUTH_NAMES.len() {
             out[idx] = oauth::AWS_AUTH_NAMES[i];
+            idx += 1;
+            i += 1;
+        }
+        // 2.1.251 byte-alignment B8: MCP analytics-event block (2 events —
+        // tengu_mcp_server_config_invalid, tengu_mcp_tools_listed) appended
+        // after the AWS auth-refresh block.
+        let mut i = 0;
+        while i < mcp::NAMES.len() {
+            out[idx] = mcp::NAMES[i];
+            idx += 1;
+            i += 1;
+        }
+        // 2.1.251 byte-alignment B8: plugin event block (14 events —
+        // tengu_plugin_enabled_for_session and 13 siblings) appended after
+        // the MCP block.
+        let mut i = 0;
+        while i < plugin::NAMES.len() {
+            out[idx] = plugin::NAMES[i];
             idx += 1;
             i += 1;
         }

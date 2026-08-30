@@ -93,7 +93,7 @@ pub const REPL_SESSION_ENDED: &str = "tengu_repl_session_ended";
 ///
 /// Kept OUT of the count-locked [`NAMES`] / `ALL_EVENT_NAMES` (a post-fixture
 /// addition), mirroring how `kairos`/`queue`/`workflow` event names sit apart
-/// from the frozen registry — so adding it does not perturb the 347-entry
+/// from the frozen registry — so adding it does not perturb the 363-entry
 /// completeness lock.
 pub const POST_AUTOCOMPACT_TURN: &str = "tengu_post_autocompact_turn";
 

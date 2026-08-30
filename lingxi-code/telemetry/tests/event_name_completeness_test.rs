@@ -79,7 +79,20 @@ fn registry_is_exactly_347_entries() {
     // events to the tool block (WORKTREE_KEPT = tengu_worktree_kept,
     // WORKTREE_REMOVED = tengu_worktree_removed): tool block 133 → 135,
     // 345 + 2 = 347.
-    assert_eq!(ALL_EVENT_NAMES.len(), 347);
+    // 2.1.251 byte-alignment B8 (telemetry-modules) added two new
+    // GLOBAL-TAIL blocks, appended after oauth::AWS_AUTH_NAMES:
+    //   - mcp::NAMES (+2 — tengu_mcp_server_config_invalid,
+    //     tengu_mcp_tools_listed; the ONLY two confirmed real `tengu_mcp_*`
+    //     analytics events at the oracle — the ~100 other `tengu_mcp_*`
+    //     binary strings are Statsig feature-flag names, not events):
+    //     347 + 2 = 349.
+    //   - plugin::NAMES (+14 — tengu_plugin_enabled_for_session and its 13
+    //     siblings; the port had NO plugin telemetry module before this):
+    //     349 + 14 = 363.
+    // Re-counted by hand against telemetry/src/tengu/mcp.rs::NAMES.len() (2)
+    // and telemetry/src/tengu/plugin.rs::NAMES.len() (14), not pasted from a
+    // failing assertion.
+    assert_eq!(ALL_EVENT_NAMES.len(), 363);
 }
 
 #[test]
@@ -320,6 +333,39 @@ fn category_ordering_preserved() {
         telemetry::tengu::oauth::AWS_AUTH_NAMES,
         "AWS auth-refresh trust-gate tail block",
     );
+    // MCP analytics-event block (2 events, 2.1.251 byte-alignment B8)
+    // appended after the AWS auth-refresh block — tengu_mcp_server_config_invalid,
+    // tengu_mcp_tools_listed. Positions 347..349.
+    assert_eq!(
+        &ALL_EVENT_NAMES[347..349],
+        telemetry::tengu::mcp::NAMES,
+        "MCP analytics-event tail block",
+    );
+    // Plugin event block (14 events, 2.1.251 byte-alignment B8) appended
+    // after the MCP block — tengu_plugin_enabled_for_session and 13
+    // siblings. Positions 349..363.
+    assert_eq!(
+        &ALL_EVENT_NAMES[349..363],
+        telemetry::tengu::plugin::NAMES,
+        "plugin event tail block",
+    );
+}
+
+#[test]
+fn mcp_events_registered() {
+    assert!(ALL_EVENT_NAMES.contains(&"tengu_mcp_server_config_invalid"));
+    assert!(ALL_EVENT_NAMES.contains(&"tengu_mcp_tools_listed"));
+}
+
+#[test]
+fn plugin_events_registered() {
+    for n in telemetry::tengu::plugin::NAMES {
+        assert!(
+            ALL_EVENT_NAMES.contains(n),
+            "{n} must be registered in ALL_EVENT_NAMES"
+        );
+    }
+    assert_eq!(telemetry::tengu::plugin::NAMES.len(), 14);
 }
 
 #[test]

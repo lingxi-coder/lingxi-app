@@ -218,7 +218,7 @@ pub struct McpRawConnection {
 ///
 /// Mirrors the JSON-RPC capability object — booleans indicate whether the
 /// server exposes the corresponding feature category.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[allow(clippy::struct_excessive_bools)] // mirrors the MCP wire spec exactly
 pub struct ServerCapabilitiesDto {
     /// Server exposes one or more tools.
@@ -234,7 +234,7 @@ pub struct ServerCapabilitiesDto {
 }
 
 /// One tool advertised by an MCP server.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct McpToolDto {
     /// Server name (logical, e.g. registry key).
     pub server_name: String,
@@ -279,7 +279,7 @@ fn is_false(b: &bool) -> bool {
 }
 
 /// One resource advertised by an MCP server.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct McpResourceDto {
     /// Resource URI.
     pub uri: String,
@@ -302,7 +302,7 @@ pub struct McpResourceDto {
 /// @167622755); the response envelope is `{resourceTemplates:[...]}` (oracle
 /// `MYe = yEt.extend({resourceTemplates:H(GGt)})`, same offset). `annotations`
 /// / `_meta` are not yet surfaced here — no consumer needs them.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct McpResourceTemplateDto {
     /// RFC 6570 URI template, e.g. `"file:///{path}"`.
     #[serde(rename = "uriTemplate")]
@@ -318,7 +318,7 @@ pub struct McpResourceTemplateDto {
 }
 
 /// One prompt advertised by an MCP server.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct McpPromptDto {
     /// Prompt name as exposed by the server.
     pub name: String,
@@ -330,7 +330,7 @@ pub struct McpPromptDto {
 }
 
 /// One named argument declared by an MCP prompt.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct McpPromptArgumentDto {
     /// Wire argument name sent to `prompts/get`.
     pub name: String,

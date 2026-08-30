@@ -238,6 +238,15 @@ pub struct McpRegistry {
     /// Consumed by [`Self::run_reconnect_loop`]; matches claude-code's
     /// `MAX_RECONNECT_ATTEMPTS = 5`.
     pub max_retry_count: u32,
+    /// §11 — the discovery-cache store. `None` by default (every existing
+    /// caller unaffected): no entry is ever written, no decision is ever
+    /// consulted, no `tengu_mcp_discovery_source` telemetry fires. Set via
+    /// [`Self::with_discovery_cache_store`]. Resolving the real production
+    /// root directory is a CLI-owned concern (see
+    /// `crate::discovery_cache`'s module doc) — this registry only knows
+    /// how to read/write whatever [`crate::discovery_cache::DiscoveryCacheStore`]
+    /// it is handed.
+    discovery_cache_store: Option<Arc<crate::discovery_cache::DiscoveryCacheStore>>,
 }
 
 /// Message for a remote server with no usable URL (oracle
@@ -285,7 +294,19 @@ impl McpRegistry {
             additional_roots: crate::new_shared_roots(Vec::new()),
             health_check_interval: Duration::from_secs(30),
             max_retry_count: 5,
+            discovery_cache_store: None,
         }
+    }
+
+    /// Wire in a §11 discovery-cache store. See
+    /// [`Self::discovery_cache_store`]'s doc.
+    #[must_use]
+    pub fn with_discovery_cache_store(
+        mut self,
+        store: crate::discovery_cache::DiscoveryCacheStore,
+    ) -> Self {
+        self.discovery_cache_store = Some(Arc::new(store));
+        self
     }
 
     fn lifecycle_lock(&self, name: &str) -> Arc<Mutex<()>> {
@@ -921,6 +942,9 @@ impl McpRegistry {
         let key = table_key.clone().unwrap_or_else(|| config.name.clone());
         let result = self.connect_locked_inner(config.clone(), table_key).await;
         if let Err(error) = &result {
+            // §11 strike accounting — see `record_discovery_cache_connect_failure`'s
+            // doc. Best-effort, before `config` moves into `Disconnected` below.
+            self.record_discovery_cache_connect_failure(&config);
             // A failed public connect must never strand the registry in
             // `Connecting`. Reconnect scheduling only considers disconnected
             // states, and `/mcp` should expose the actual last failure.
@@ -985,6 +1009,13 @@ impl McpRegistry {
             );
             return Err(McpError::Connection(err.to_string()));
         }
+
+        // §11 — observability only: report what the discovery cache WOULD
+        // decide for this server before dialing. See
+        // `emit_discovery_source_for_pending_connect`'s doc for why only the
+        // MISS side is reported today (Stage 2 — actually serving a
+        // Fresh/Stale hit without dialing — is not wired).
+        self.emit_discovery_source_for_pending_connect(&config);
 
         self.connections.write().await.insert(
             key.clone(),
@@ -1394,6 +1425,20 @@ impl McpRegistry {
             telemetry::emit_mcp_degraded(&payload);
         }
 
+        // §11 — write-through: persist (or purge) the discovery-cache entry
+        // for this server now that a LIVE discovery round has actually
+        // completed. Must run before `config`/`caps`/`tools`/`resources`/
+        // `resource_templates`/`prompts` are moved into the `Connected`
+        // state just below.
+        self.persist_or_purge_discovery_cache(
+            &config,
+            &caps,
+            &tools,
+            &resources,
+            &resource_templates,
+            &prompts,
+        );
+
         let connection_id = conn.connection_id;
         let server_name = config.name.clone();
         // Capture the per-server config options before `config` is moved into
@@ -1506,6 +1551,158 @@ impl McpRegistry {
         }
 
         Ok(connection_id)
+    }
+
+    /// §11 — before dialing, compute what the discovery cache WOULD decide
+    /// for this server (oracle `cot`/`me`) and, when a store is wired,
+    /// report the observable half of it. This port does not yet skip the
+    /// dial on a `Fresh`/`Stale` decision (see `discovery_cache`'s module
+    /// doc — Stage 2 is deferred), so every connect goes live regardless;
+    /// only the [`crate::discovery_cache::MissReason`]s the oracle's `Ko`
+    /// gate reports are surfaced ([`crate::discovery_cache::miss_emits_discovery_source_telemetry`]),
+    /// exactly mirroring the oracle's own `if(Ho()&&Ko(U))` guard on the
+    /// live-dial path. A `Fresh`/`Stale` decision emits NOTHING — see
+    /// [`discovery_source_emission`]'s doc for why.
+    fn emit_discovery_source_for_pending_connect(&self, config: &McpServerConfig) {
+        let Some(store) = &self.discovery_cache_store else {
+            return;
+        };
+        let feature_enabled = crate::discovery_cache::feature_enabled();
+        let decision = match crate::discovery_cache::cache_gate(&config.spec, None, feature_enabled)
+        {
+            Some(reason) => crate::discovery_cache::Decision::Miss {
+                reason: reason.miss_reason(),
+            },
+            None => {
+                let cache_key = crate::discovery_cache::DiscoveryCacheStore::cache_key(
+                    &config.name,
+                    &config.spec,
+                );
+                let lookup = store.load(&cache_key);
+                let policy = crate::discovery_cache::DiscoveryCachePolicy::from_env(
+                    crate::discovery_cache::now_ms(),
+                );
+                crate::discovery_cache::decide(&config.spec, None, feature_enabled, lookup, policy)
+            }
+        };
+        let Some(source) = discovery_source_emission(&decision) else {
+            return;
+        };
+        telemetry::emit_mcp_discovery_source(&telemetry::tengu::mcp::DiscoverySourcePayload {
+            transport_type: telemetry::pii::Verified::assert_safe(config.spec.kind().to_string()),
+            source: telemetry::pii::Verified::assert_safe(source.to_string()),
+            entry_age_ms: None,
+        });
+    }
+
+    /// §11 write-through: after a LIVE discovery round completes
+    /// (`connect_locked_inner`, right before `config`/`caps`/`tools`/…
+    /// move into the `Connected` state), persist the freshly discovered
+    /// catalog for a cache-ELIGIBLE server so a future connect can serve it
+    /// once Stage 2 wires the read side. Oracle `Wo`'s write gate additionally
+    /// checks identity-epoch/in-flight-swap conditions this port has no
+    /// concept of (see `discovery_cache`'s module doc); this is restricted to
+    /// the portion this port CAN evaluate, [`crate::discovery_cache::cache_gate`]
+    /// (the exact port of `JK`'s `me(e)===undefined`).
+    ///
+    /// A gate reason [`crate::discovery_cache::CacheGateReason::purges_existing_entry`]
+    /// flags instead purges any existing on-disk entry, best-effort — the
+    /// write-side application of the same purge the oracle's read-side
+    /// `cot` performs on an `opt-out`/`headers-helper` miss (this port
+    /// doesn't call `decide` from a real cache-CONSULTING call site yet, so
+    /// applying the purge here, at the one real write opportunity available
+    /// today, is the closest equivalent).
+    ///
+    /// Best-effort throughout: any store I/O failure is logged and
+    /// swallowed, matching the oracle's `catch(r){Z(e.name, \`Discovery
+    /// cache write-through skipped: ${l(r)}\`)}` around `Wo`.
+    #[allow(clippy::too_many_arguments)]
+    fn persist_or_purge_discovery_cache(
+        &self,
+        config: &McpServerConfig,
+        caps: &ServerCapabilitiesDto,
+        tools: &[traits::McpToolDto],
+        resources: &[traits::McpResourceDto],
+        resource_templates: &[traits::McpResourceTemplateDto],
+        prompts: &[traits::McpPromptDto],
+    ) {
+        let Some(store) = &self.discovery_cache_store else {
+            return;
+        };
+        let feature_enabled = crate::discovery_cache::feature_enabled();
+        let gate = crate::discovery_cache::cache_gate(&config.spec, None, feature_enabled);
+        let cache_key =
+            crate::discovery_cache::DiscoveryCacheStore::cache_key(&config.name, &config.spec);
+        match gate {
+            None => {
+                let entry = crate::discovery_cache::DiscoveryCacheEntry::new(
+                    cache_key,
+                    crate::discovery_cache::now_ms(),
+                    caps.clone(),
+                    tools.to_vec(),
+                    resources.to_vec(),
+                    resource_templates.to_vec(),
+                    prompts.to_vec(),
+                );
+                if let Err(error) = store.store(&entry) {
+                    tracing::warn!(
+                        server = %config.name,
+                        %error,
+                        "Discovery cache write-through skipped"
+                    );
+                }
+            }
+            Some(reason) if reason.purges_existing_entry() => {
+                if let Err(error) = store.purge(&cache_key) {
+                    tracing::warn!(
+                        server = %config.name,
+                        %error,
+                        "Discovery cache purge skipped"
+                    );
+                }
+            }
+            Some(_) => {}
+        }
+    }
+
+    /// §11 strike accounting: a connect attempt that ultimately FAILS for a
+    /// cache-ELIGIBLE server with an EXISTING on-disk entry increments that
+    /// entry's `consecutive_refresh_failures` (best-effort). A server with
+    /// no entry yet records nothing — there is nothing to strike, and this
+    /// port never fabricates an entry purely to hold a failure count.
+    ///
+    /// This approximates the oracle's background-revalidation strike
+    /// counter (`_6e`, reachable only from a `Stale`-hit's async
+    /// revalidation): this port has no background revalidation yet (Stage
+    /// 3, deferred — see `discovery_cache`'s module doc), so the nearest
+    /// available signal is treating every connect as an implicit refresh
+    /// attempt against whatever entry already exists.
+    fn record_discovery_cache_connect_failure(&self, config: &McpServerConfig) {
+        let Some(store) = &self.discovery_cache_store else {
+            return;
+        };
+        if crate::discovery_cache::cache_gate(
+            &config.spec,
+            None,
+            crate::discovery_cache::feature_enabled(),
+        )
+        .is_some()
+        {
+            return;
+        }
+        let cache_key =
+            crate::discovery_cache::DiscoveryCacheStore::cache_key(&config.name, &config.spec);
+        if let crate::discovery_cache::EntryLookup::Found(mut entry) = store.load(&cache_key) {
+            entry.consecutive_refresh_failures =
+                entry.consecutive_refresh_failures.saturating_add(1);
+            if let Err(error) = store.store(&entry) {
+                tracing::warn!(
+                    server = %config.name,
+                    %error,
+                    "Discovery cache strike write skipped"
+                );
+            }
+        }
     }
 
     /// Connect and initialize under one deadline. If initialization fails or
@@ -3388,6 +3585,25 @@ fn connected_zero_tools_fires(caps_tools: bool, raw_tool_count: usize) -> bool {
     caps_tools && raw_tool_count == 0
 }
 
+/// §11 — pure core of `McpRegistry::emit_discovery_source_for_pending_connect`:
+/// given the pre-dial [`crate::discovery_cache::Decision`], what `source`
+/// string to emit on `tengu_mcp_discovery_source` (if anything). `None`
+/// means do not emit at all — either a `Fresh`/`Stale` decision (this port
+/// doesn't serve from cache, so there's nothing honest to report about
+/// "adopting" a cached catalog it never actually adopted), or a `Miss`
+/// reason the oracle's `Ko` gate excludes (`Disabled`/`Transport`/
+/// `LiveConnection`/`SkillsCapable`/`ChannelCapable`).
+fn discovery_source_emission(decision: &crate::discovery_cache::Decision) -> Option<&'static str> {
+    match decision {
+        crate::discovery_cache::Decision::Miss { reason }
+            if crate::discovery_cache::miss_emits_discovery_source_telemetry(*reason) =>
+        {
+            Some(crate::discovery_cache::miss_telemetry_value(*reason))
+        }
+        _ => None,
+    }
+}
+
 fn tools_listed_payload(
     transport_kind: &str,
     elapsed: std::time::Duration,
@@ -4760,6 +4976,320 @@ mod tests {
         assert!(
             resource_templates.is_empty(),
             "a failed template fetch yields an empty list, not an error"
+        );
+    }
+
+    // ── §11 discovery-cache wiring ──────────────────────────────────────
+
+    /// A `None` `discovery_cache_store` (every registry not built with
+    /// [`McpRegistry::with_discovery_cache_store`]) must leave every §11
+    /// helper a total no-op: no store, no write, no purge, no strike, no
+    /// telemetry decision. This is the guard that keeps every EXISTING
+    /// connect test in this file (none of which wires a store) unaffected.
+    #[tokio::test]
+    async fn no_store_configured_is_a_total_no_op() {
+        let _guard = crate::discovery_cache::tests_env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        std::env::set_var(crate::discovery_cache::ENV_ENABLED, "true");
+
+        let mock = Arc::new(BridgeMock::new(&["alpha"]));
+        let registry = McpRegistry::with_raw_conn(
+            mock.clone() as Arc<dyn McpTransport>,
+            mock as Arc<dyn RawConnectionProvider>,
+        );
+        let result = registry
+            .connect(http_cfg("srv", "https://mcp.example.com/v1"))
+            .await;
+        std::env::remove_var(crate::discovery_cache::ENV_ENABLED);
+
+        assert!(result.is_ok(), "no store must never perturb a connect");
+    }
+
+    /// The write half: a successful live discovery for a cache-ELIGIBLE
+    /// server (http, feature enabled, no headers helper) must persist the
+    /// FULL catalog to disk, versioned, with strikes reset to 0. Asserted
+    /// against the store's own `load`, not the `Connected` state — proving
+    /// the SEPARATE persistence path actually ran.
+    #[tokio::test]
+    async fn connect_persists_a_discovery_cache_entry_for_an_eligible_server() {
+        let _guard = crate::discovery_cache::tests_env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        std::env::set_var(crate::discovery_cache::ENV_ENABLED, "true");
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = crate::discovery_cache::DiscoveryCacheStore::new(dir.path());
+        let mock = Arc::new(BridgeMock::new(&["alpha"]));
+        let registry = McpRegistry::with_raw_conn(
+            mock.clone() as Arc<dyn McpTransport>,
+            mock as Arc<dyn RawConnectionProvider>,
+        )
+        .with_discovery_cache_store(crate::discovery_cache::DiscoveryCacheStore::new(dir.path()));
+
+        let cfg = http_cfg("srv", "https://mcp.example.com/v1");
+        let cache_key = crate::discovery_cache::DiscoveryCacheStore::cache_key("srv", &cfg.spec);
+        registry.connect(cfg).await.unwrap();
+        std::env::remove_var(crate::discovery_cache::ENV_ENABLED);
+
+        let entry = match store.load(&cache_key) {
+            crate::discovery_cache::EntryLookup::Found(entry) => entry,
+            other => panic!("expected a persisted entry, got {other:?}"),
+        };
+        assert_eq!(entry.version, crate::discovery_cache::CACHE_SCHEMA_VERSION);
+        assert_eq!(entry.cache_key, cache_key);
+        assert_eq!(entry.consecutive_refresh_failures, 0);
+        assert!(entry.capabilities.tools, "the mock declares the tools capability");
+        assert_eq!(
+            entry.tools.iter().map(|t| t.tool_name.as_str()).collect::<Vec<_>>(),
+            vec!["alpha"],
+            "the persisted entry must carry the ACTUAL discovered catalog"
+        );
+    }
+
+    /// A gate-ineligible server (stdio: [`crate::discovery_cache::CacheGateReason::Transport`])
+    /// must never touch the store at all, even with a store wired and the
+    /// feature enabled.
+    #[tokio::test]
+    async fn connect_does_not_persist_for_a_transport_ineligible_server() {
+        let _guard = crate::discovery_cache::tests_env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        std::env::set_var(crate::discovery_cache::ENV_ENABLED, "true");
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mock = Arc::new(BridgeMock::new(&["alpha"]));
+        let registry = McpRegistry::with_raw_conn(
+            mock.clone() as Arc<dyn McpTransport>,
+            mock as Arc<dyn RawConnectionProvider>,
+        )
+        .with_discovery_cache_store(crate::discovery_cache::DiscoveryCacheStore::new(dir.path()));
+
+        // `cfg` builds a stdio spec — `Transport`-ineligible regardless of
+        // the feature flag.
+        registry.connect(cfg("srv")).await.unwrap();
+        std::env::remove_var(crate::discovery_cache::ENV_ENABLED);
+
+        assert!(
+            std::fs::read_dir(dir.path())
+                .map(|mut it| it.next().is_none())
+                .unwrap_or(true),
+            "a stdio (transport-ineligible) connect must create NO cache files at all"
+        );
+    }
+
+    /// The purge half: [`McpRegistry::persist_or_purge_discovery_cache`]
+    /// must remove any EXISTING on-disk entry when the gate reason is
+    /// [`crate::discovery_cache::CacheGateReason::HeadersHelper`] — the one
+    /// gate reason besides `OptOut` that
+    /// [`crate::discovery_cache::CacheGateReason::purges_existing_entry`]
+    /// flags, and the only one actually reachable from a real config today
+    /// (`OptOut` requires `discovery_cache_opt_out`, which no production
+    /// call site can produce yet). Called directly (not through `connect`)
+    /// because a real `headersHelper` would spawn an actual subprocess —
+    /// the gate decision itself does not depend on that subprocess ever
+    /// running, only on `config.spec` carrying `headers_helper: Some(_)`.
+    #[tokio::test]
+    async fn persist_or_purge_removes_an_existing_entry_when_the_gate_is_headers_helper() {
+        let _guard = crate::discovery_cache::tests_env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        std::env::set_var(crate::discovery_cache::ENV_ENABLED, "true");
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = crate::discovery_cache::DiscoveryCacheStore::new(dir.path());
+        let mock = Arc::new(BridgeMock::new(&[]));
+        let registry = McpRegistry::with_raw_conn(
+            mock.clone() as Arc<dyn McpTransport>,
+            mock as Arc<dyn RawConnectionProvider>,
+        )
+        .with_discovery_cache_store(crate::discovery_cache::DiscoveryCacheStore::new(dir.path()));
+
+        let mut cfg = http_cfg("srv", "https://mcp.example.com/v1");
+        let McpTransportSpec::Http { headers_helper, .. } = &mut cfg.spec else {
+            unreachable!()
+        };
+        *headers_helper = Some("./helper".to_string());
+        let cache_key = crate::discovery_cache::DiscoveryCacheStore::cache_key("srv", &cfg.spec);
+
+        // Pre-seed an entry as if it were written before `headersHelper` got
+        // configured on this server.
+        store
+            .store(&crate::discovery_cache::DiscoveryCacheEntry::new(
+                cache_key.clone(),
+                1,
+                ServerCapabilitiesDto::default(),
+                vec![],
+                vec![],
+                vec![],
+                vec![],
+            ))
+            .expect("seed store");
+        assert!(matches!(
+            store.load(&cache_key),
+            crate::discovery_cache::EntryLookup::Found(_)
+        ));
+
+        registry.persist_or_purge_discovery_cache(
+            &cfg,
+            &ServerCapabilitiesDto::default(),
+            &[],
+            &[],
+            &[],
+            &[],
+        );
+        std::env::remove_var(crate::discovery_cache::ENV_ENABLED);
+
+        assert_eq!(
+            store.load(&cache_key),
+            crate::discovery_cache::EntryLookup::Absent,
+            "a headersHelper-gated server must have its stale entry purged"
+        );
+    }
+
+    /// Strike accounting: a connect that ultimately FAILS (here, a
+    /// `tools/list` failure — the same real failure mode
+    /// `connect_survives_a_resource_templates_fetch_that_fails`'s sibling
+    /// tests use) for a cache-ELIGIBLE server with an EXISTING on-disk
+    /// entry must increment that entry's `consecutive_refresh_failures` by
+    /// exactly 1. A server with no prior entry (the OTHER half of this gate)
+    /// is covered by `connect_does_not_persist_for_a_transport_ineligible_server`'s
+    /// sibling assumption implicitly: nothing to strike, nothing written —
+    /// see `record_discovery_cache_connect_failure`'s doc.
+    #[tokio::test]
+    async fn a_failed_connect_increments_strikes_on_an_existing_entry() {
+        let _guard = crate::discovery_cache::tests_env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        std::env::set_var(crate::discovery_cache::ENV_ENABLED, "true");
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = crate::discovery_cache::DiscoveryCacheStore::new(dir.path());
+        let cfg = http_cfg("srv", "https://mcp.example.com/v1");
+        let cache_key = crate::discovery_cache::DiscoveryCacheStore::cache_key("srv", &cfg.spec);
+        store
+            .store(&crate::discovery_cache::DiscoveryCacheEntry::new(
+                cache_key.clone(),
+                1,
+                ServerCapabilitiesDto::default(),
+                vec![],
+                vec![],
+                vec![],
+                vec![],
+            ))
+            .expect("seed store");
+
+        let mock = Arc::new(BridgeMock::new(&["alpha"]));
+        mock.list_tools_fails.store(true, Ordering::SeqCst);
+        let registry = McpRegistry::with_raw_conn(
+            mock.clone() as Arc<dyn McpTransport>,
+            mock as Arc<dyn RawConnectionProvider>,
+        )
+        .with_discovery_cache_store(crate::discovery_cache::DiscoveryCacheStore::new(dir.path()));
+
+        let result = registry.connect(cfg).await;
+        std::env::remove_var(crate::discovery_cache::ENV_ENABLED);
+
+        assert!(result.is_err(), "a tools/list failure must fail the connect");
+        let entry = match store.load(&cache_key) {
+            crate::discovery_cache::EntryLookup::Found(entry) => entry,
+            other => panic!("expected the seeded entry to survive, got {other:?}"),
+        };
+        assert_eq!(
+            entry.consecutive_refresh_failures, 1,
+            "exactly one strike must be recorded for the one failed connect"
+        );
+    }
+
+    /// A connect failure for a server with NO existing entry records
+    /// nothing — there is nothing to strike, and this port never fabricates
+    /// an entry purely to hold a failure count.
+    #[tokio::test]
+    async fn a_failed_connect_with_no_existing_entry_writes_nothing() {
+        let _guard = crate::discovery_cache::tests_env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        std::env::set_var(crate::discovery_cache::ENV_ENABLED, "true");
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mock = Arc::new(BridgeMock::new(&["alpha"]));
+        mock.list_tools_fails.store(true, Ordering::SeqCst);
+        let registry = McpRegistry::with_raw_conn(
+            mock.clone() as Arc<dyn McpTransport>,
+            mock as Arc<dyn RawConnectionProvider>,
+        )
+        .with_discovery_cache_store(crate::discovery_cache::DiscoveryCacheStore::new(dir.path()));
+
+        let result = registry
+            .connect(http_cfg("srv", "https://mcp.example.com/v1"))
+            .await;
+        std::env::remove_var(crate::discovery_cache::ENV_ENABLED);
+
+        assert!(result.is_err());
+        assert!(
+            std::fs::read_dir(dir.path())
+                .map(|mut it| it.next().is_none())
+                .unwrap_or(true),
+            "no prior entry means no strike file must ever be created"
+        );
+    }
+
+    /// Pure-function coverage of the emission gate `emit_discovery_source_for_pending_connect`
+    /// consults: a `Fresh`/`Stale` decision emits nothing (Stage 2 isn't
+    /// wired — see the module doc); a `Miss` emits iff
+    /// `crate::discovery_cache::miss_emits_discovery_source_telemetry` says
+    /// so, with the exact `miss_telemetry_value` string.
+    #[test]
+    fn discovery_source_emission_matches_the_miss_gate() {
+        use crate::discovery_cache::{Decision, DiscoveryCacheEntry, MissReason};
+
+        assert_eq!(
+            discovery_source_emission(&Decision::Miss {
+                reason: MissReason::Absent
+            }),
+            Some("live")
+        );
+        assert_eq!(
+            discovery_source_emission(&Decision::Miss {
+                reason: MissReason::Expired
+            }),
+            Some("miss_expired")
+        );
+        assert_eq!(
+            discovery_source_emission(&Decision::Miss {
+                reason: MissReason::Disabled
+            }),
+            None,
+            "a gate-level miss must not emit"
+        );
+        assert_eq!(
+            discovery_source_emission(&Decision::Miss {
+                reason: MissReason::Transport
+            }),
+            None,
+            "a gate-level miss must not emit"
+        );
+        let entry = DiscoveryCacheEntry::new(
+            "k".into(),
+            1,
+            ServerCapabilitiesDto::default(),
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+        );
+        assert_eq!(
+            discovery_source_emission(&Decision::Fresh {
+                entry: entry.clone(),
+                age_ms: 1
+            }),
+            None,
+            "this port doesn't serve from cache yet, so a HIT must emit nothing"
+        );
+        assert_eq!(
+            discovery_source_emission(&Decision::Stale { entry, age_ms: 1 }),
+            None,
+            "this port doesn't serve from cache yet, so a HIT must emit nothing"
         );
     }
 

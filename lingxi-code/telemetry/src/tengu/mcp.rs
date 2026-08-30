@@ -1,6 +1,7 @@
-//! `tengu_mcp_*` **analytics-event** schemas (2.1.251 byte-alignment §18/§20b).
+//! `tengu_mcp_*` **analytics-event** schemas (2.1.251 byte-alignment §18/§20b,
+//! §11 discovery-cache).
 //!
-//! ## Scope: 3 of the oracle's 53 `tengu_mcp_*` analytics events
+//! ## Scope: 4 of the oracle's 53 `tengu_mcp_*` analytics events
 //!
 //! An earlier revision of this doc claimed the two originally-ported names
 //! were "the ONLY two confirmed real `tengu_mcp_*` ANALYTICS events at the
@@ -12,7 +13,7 @@
 //! `_failed`, `tengu_mcp_list_changed`, `tengu_mcp_listen_reopen`,
 //! `tengu_mcp_sdk_generation`, `tengu_mcp_oauth_flow_start`/`_success`/
 //! `_failure`/`_error`, `tengu_mcp_registry_fetch`,
-//! `tengu_mcp_elicitation_shown`/`_response`, `tengu_mcp_discovery_source`
+//! `tengu_mcp_elicitation_shown`/`_response`,
 //! and `tengu_mcp_first_party_auto_auth`. Several are independently
 //! corroborated by the oracle's own event allowlist array (@156122853).
 //!
@@ -28,13 +29,13 @@
 //! events", and conflating the two produced both the retracted claim below
 //! and an under-modelled [`DegradedReason`].
 //!
-//! **This module deliberately ports 3 of the 53.** The remaining 50 are an
+//! **This module deliberately ports 4 of the 53.** The remaining 49 are an
 //! OPEN parity gap (§20b-remainder), not a closed one. Do not read
-//! `NAMES.len() == 3`, [`crate::tengu::ALL_EVENT_NAMES`], or the
+//! `NAMES.len() == 4`, [`crate::tengu::ALL_EVENT_NAMES`], or the
 //! `tengu_events.json` parity fixture as evidence that MCP analytics is
 //! complete.
 //!
-//! ## The three ported events
+//! ## The four ported events
 //!
 //! - `tengu_mcp_server_config_invalid` — `mcp/src/connection.rs`'s
 //!   `Transport::connect_time_url_error` / `config_error` paths already
@@ -47,6 +48,10 @@
 //!   alwaysLoadCount:Q(L,(E)=>E.alwaysLoad===!0),discoverySource:c(r),..._,
 //!   mcpServerName:EA(ln(e.name),HT(e.name,e.config))})`.
 //! - `tengu_mcp_degraded` — see [`DegradedReason`].
+//! - `tengu_mcp_discovery_source` — §11 discovery-cache observability. See
+//!   [`DiscoverySourcePayload`] for the two oracle call sites (a fresh/stale
+//!   HIT, and a MISS gated by `Ko`) and `mcp::discovery_cache`'s module doc
+//!   for what this port actually wires (today: the MISS side only).
 //!
 //! ## `listDurationMs` measures `tools/list` ALONE
 //!
@@ -117,10 +122,18 @@ pub const TOOLS_LISTED: &str = "tengu_mcp_tools_listed";
 /// `tengu_mcp_degraded` — one of the §20a tool-schema classifications (or
 /// the process-global validator-unavailable fallback) fired at least once.
 pub const DEGRADED: &str = "tengu_mcp_degraded";
+/// `tengu_mcp_discovery_source` — §11 discovery-cache observability. See
+/// [`DiscoverySourcePayload`].
+pub const DISCOVERY_SOURCE: &str = "tengu_mcp_discovery_source";
 
 /// Registry block — order is locked (append-only). Consumed by
 /// [`crate::tengu::ALL_EVENT_NAMES`].
-pub const NAMES: &[&str] = &[SERVER_CONFIG_INVALID, TOOLS_LISTED, DEGRADED];
+pub const NAMES: &[&str] = &[
+    SERVER_CONFIG_INVALID,
+    TOOLS_LISTED,
+    DEGRADED,
+    DISCOVERY_SOURCE,
+];
 
 /// Oracle `HT(name, config)` — decides whether `mcpServerName` is attached
 /// to `tengu_mcp_tools_listed` / `tengu_mcp_degraded` at all (see the module
@@ -218,6 +231,43 @@ pub struct ToolsListedPayload {
     /// for every ordinary user-configured server; see the module doc.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mcp_server_name: Option<Verified>,
+}
+
+/// Payload for [`DISCOVERY_SOURCE`] (§11).
+///
+/// Two oracle call sites feed this event, both recovered from 2.1.251 in the
+/// same chunk as `cot`/`me` (`mcp::discovery_cache`'s module doc has the full
+/// disassembly):
+///
+/// * A fresh/stale HIT (@182535700 region): `s("tengu_mcp_discovery_source",
+///   {source:w(U.kind==="fresh"?"cache_fresh":"cache_stale"),
+///   transportType:c(E.type??"stdio"),entryAgeMs:ie,...Oe(E,C)})` —
+///   unconditional once a `Fresh`/`Stale` decision is reached.
+/// * A MISS on the live-dial path (@182538500 region): `if(Ho()&&Ko(U))
+///   s("tengu_mcp_discovery_source",{source:w(Jo(U)),
+///   transportType:c(E.type??"stdio"),...Oe(E,C)})` — gated by `Ko` (see
+///   the `mcp` crate's `discovery_cache::miss_emits_discovery_source_telemetry`,
+///   which ports `Ko` byte-exact) and carries NO `entryAgeMs` (there is no
+///   entry).
+///
+/// Both call sites also spread `...Oe(E,C)` — the SAME `mcpServerBaseUrl`/
+/// `mcpServerKeyHash` identity spread already documented as known-missing on
+/// [`ToolsListedPayload`]'s module doc (`Xe`/`Oe` are chunk-local aliases for
+/// one helper); not modelled here for the same reason.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DiscoverySourcePayload {
+    /// Transport kind, same default rule as [`ServerConfigInvalidPayload`].
+    pub transport_type: Verified,
+    /// `cache_fresh` / `cache_stale` (HIT) or one of `mcp`'s
+    /// `discovery_cache::miss_telemetry_value` strings (MISS): `live`,
+    /// `miss_disabled`, `miss_expired`, `miss_corrupt`, `miss_strike`,
+    /// `miss_no_fingerprint`.
+    pub source: Verified,
+    /// Entry age in milliseconds — present ONLY on a `Fresh`/`Stale` HIT
+    /// (oracle `entryAgeMs:ie`). Always absent on a MISS.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub entry_age_ms: Option<u64>,
 }
 
 /// `tengu_mcp_degraded`'s `reason`.

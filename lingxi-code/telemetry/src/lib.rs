@@ -525,6 +525,127 @@ pub fn emit_mcp_tools_listed(payload: &crate::tengu::mcp::ToolsListedPayload) {
     );
 }
 
+/// Emit [`crate::tengu::mcp::DISCOVERY_SOURCE`] — §11 discovery-cache
+/// observability. See [`crate::tengu::mcp::DiscoverySourcePayload`] for the
+/// two oracle call sites this covers.
+pub fn emit_mcp_discovery_source(payload: &crate::tengu::mcp::DiscoverySourcePayload) {
+    tracing::info!(
+        event = crate::tengu::mcp::DISCOVERY_SOURCE,
+        transport_type = payload.transport_type.as_str(),
+        source = payload.source.as_str(),
+        entry_age_ms = payload.entry_age_ms,
+    );
+}
+
+#[cfg(test)]
+mod mcp_discovery_source_tests {
+    use super::*;
+    use crate::tengu::mcp::DiscoverySourcePayload;
+    use std::sync::{Arc, Mutex as StdMutex};
+    use tracing::field::Field;
+    use tracing::Event;
+    use tracing::Subscriber;
+    use tracing_subscriber::layer::{Context, Layer};
+    use tracing_subscriber::prelude::*;
+    use tracing_subscriber::Registry;
+
+    type DiscoverySourceRow = (String, String, Option<u64>);
+
+    #[derive(Default, Clone)]
+    struct Capture {
+        rows: Arc<StdMutex<Vec<DiscoverySourceRow>>>,
+    }
+
+    impl<S: Subscriber> Layer<S> for Capture {
+        fn on_event(&self, event: &Event<'_>, _ctx: Context<'_, S>) {
+            struct V {
+                event: Option<String>,
+                source: Option<String>,
+                entry_age_ms: Option<u64>,
+            }
+            impl tracing::field::Visit for V {
+                fn record_u64(&mut self, field: &Field, value: u64) {
+                    if field.name() == "entry_age_ms" {
+                        self.entry_age_ms = Some(value);
+                    }
+                }
+                fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+                    let rendered = format!("{value:?}").trim_matches('"').to_string();
+                    match field.name() {
+                        "event" => self.event = Some(rendered),
+                        "source" => self.source = Some(rendered),
+                        _ => {}
+                    }
+                }
+                fn record_str(&mut self, field: &Field, value: &str) {
+                    match field.name() {
+                        "event" => self.event = Some(value.to_string()),
+                        "source" => self.source = Some(value.to_string()),
+                        _ => {}
+                    }
+                }
+            }
+            let mut v = V {
+                event: None,
+                source: None,
+                entry_age_ms: None,
+            };
+            event.record(&mut v);
+            if let (Some(e), Some(s)) = (v.event, v.source) {
+                self.rows.lock().unwrap().push((e, s, v.entry_age_ms));
+            }
+        }
+    }
+
+    /// A HIT carries `entry_age_ms`; reverting the field mapping (e.g.
+    /// swapping `source`/`transport_type`) is caught by asserting the exact
+    /// row, not just that SOME event fired.
+    #[test]
+    fn hit_emits_source_and_entry_age() {
+        let cap = Capture::default();
+        let _guard = tracing::subscriber::set_default(Registry::default().with(cap.clone()));
+
+        emit_mcp_discovery_source(&DiscoverySourcePayload {
+            transport_type: Verified::assert_safe("http".to_string()),
+            source: Verified::assert_safe("cache_fresh".to_string()),
+            entry_age_ms: Some(1_234),
+        });
+
+        assert_eq!(
+            cap.rows.lock().unwrap().clone(),
+            vec![(
+                crate::tengu::mcp::DISCOVERY_SOURCE.to_string(),
+                "cache_fresh".to_string(),
+                Some(1_234)
+            )]
+        );
+    }
+
+    /// A MISS carries no `entry_age_ms` — must stay absent, not `Some(0)` or
+    /// any other default that would silently fabricate an age for an entry
+    /// that never existed.
+    #[test]
+    fn miss_emits_no_entry_age() {
+        let cap = Capture::default();
+        let _guard = tracing::subscriber::set_default(Registry::default().with(cap.clone()));
+
+        emit_mcp_discovery_source(&DiscoverySourcePayload {
+            transport_type: Verified::assert_safe("http".to_string()),
+            source: Verified::assert_safe("miss_expired".to_string()),
+            entry_age_ms: None,
+        });
+
+        assert_eq!(
+            cap.rows.lock().unwrap().clone(),
+            vec![(
+                crate::tengu::mcp::DISCOVERY_SOURCE.to_string(),
+                "miss_expired".to_string(),
+                None
+            )]
+        );
+    }
+}
+
 #[cfg(test)]
 mod mcp_degraded_tests {
     use super::*;

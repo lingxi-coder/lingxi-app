@@ -90,33 +90,90 @@
 //!   correction warns against — not built. `live-connection` similarly ties
 //!   to an in-flight-connection check at the plugin-discovery call site this
 //!   port doesn't have; also not built.
-//! * **Registry/store wiring.** [`decide`] and [`DiscoveryCacheStore`] are
-//!   pure and fully tested but NOT called from `mcp::registry`'s connect/
-//!   `list_tools` path. Wiring them in needs (a) a real root directory
-//!   (resolving the equivalent of `$LINGXI_CONFIG_DIR` is a CLI-owned
-//!   concern), and (b) `discoveryCache`/`role` threaded from
-//!   [`crate::json_config`] onto a config type — which hits a HARD blast-
-//!   radius wall this batch: `apps/cli/src/commands/mcp.rs` (forbidden —
-//!   the parallel telemetry agent's surface) constructs BOTH
-//!   `McpServerConfig` and every `McpTransportSpec` variant as exhaustive
-//!   struct literals with no `..`, so adding a field to either breaks that
-//!   file's compile and this batch cannot touch it to fix that. (The same is
-//!   true, non-fatally, of ~7 more files outside this batch's ownership:
-//!   `tools/meta/src/tool_search.rs`, `apps/engine-desktop/src/lib.rs`,
-//!   `orchestrator/tests/list_mcp_real.rs`, and four `test-harness/tests/*`
-//!   files.) [`cache_gate`]/[`decide`] therefore accept the two flags as
-//!   explicit parameters rather than reading them off a spec/config type —
-//!   a future wave with `apps/cli` back in scope can thread them through
-//!   without changing this module's signature.
+//! * **`discoveryCache`/`role` config threading.** `McpServerConfig` still has
+//!   no `discovery_cache_opt_out` field for the same reason as before: `apps/
+//!   cli/src/commands/mcp.rs` and ~7 sibling files (see git blame on this
+//!   paragraph) construct `McpServerConfig`/every `McpTransportSpec` variant
+//!   as exhaustive struct literals with no `..`, so adding a field to either
+//!   breaks their compile and remains out of scope here. [`cache_gate`]/
+//!   [`decide`] therefore keep accepting `discovery_cache_opt_out` as an
+//!   explicit `Option<bool>` parameter; every production call site in
+//!   `mcp::registry` passes `None` (nothing can ever produce
+//!   [`CacheGateReason::OptOut`] in practice today — only direct unit tests
+//!   of [`cache_gate`] exercise that arm). [`CacheGateReason::HeadersHelper`]
+//!   IS reachable in production (`McpTransportSpec::Http`/`Sse` already carry
+//!   `headers_helper`).
+//!
+//! ## What §11 Stage 1 wires in (this revision)
+//!
+//! `mcp::registry::McpRegistry` gained an optional
+//! `Arc<DiscoveryCacheStore>` (set via `with_discovery_cache_store`; `None`
+//! by default, so every existing caller is unaffected). When set:
+//!
+//! * **Write.** After a successful LIVE discovery round, `connect` persists
+//!   the full catalog (tools/resources/resource_templates/prompts +
+//!   capabilities) for a cache-ELIGIBLE server ([`cache_gate`] returning
+//!   `None`) via [`DiscoveryCacheEntry::new`]/[`DiscoveryCacheStore::store`],
+//!   resetting `consecutive_refresh_failures` to 0 (oracle `Wo`/`Mt`,
+//!   restricted to the identity/in-flight-swap-free subset this port can
+//!   evaluate — see the deferred note above). A gate reason that
+//!   [`CacheGateReason::purges_existing_entry`] flags (`HeadersHelper`, and
+//!   `OptOut` if it ever becomes reachable) instead purges any existing
+//!   on-disk entry, best-effort.
+//! * **Strikes.** A connect attempt that ultimately FAILS for a
+//!   cache-eligible server with an EXISTING on-disk entry increments that
+//!   entry's `consecutive_refresh_failures` (best-effort; a server with no
+//!   entry yet records nothing — there is nothing to strike). This is an
+//!   approximation of the oracle's background-revalidation strike counter
+//!   (`_6e`, only reachable from a `Stale`-hit's revalidation path): this
+//!   port has no background revalidation yet (Stage 3, deferred), so the
+//!   nearest available signal is treating every connect as an implicit
+//!   refresh attempt.
+//! * **Telemetry.** [`crate::registry`] calls [`decide`] before every dial
+//!   purely for observability and reports [`MissReason`]s that oracle `Ko`
+//!   (2.1.251, same chunk as `cot`) surfaces (`absent`/`expired`/`corrupt`/
+//!   `strike-threshold`/`no-fingerprint`) as `tengu_mcp_discovery_source`
+//!   with `source` = [`miss_telemetry_value`] — see
+//!   [`miss_emits_discovery_source_telemetry`] for the exact set and the
+//!   recovered `Ko`/`Jo` source. A `Fresh`/`Stale` decision emits NOTHING:
+//!   the oracle's hit-branch event describes actually SERVING the cached
+//!   catalog without dialing, which this port does not do yet (see Stage 2
+//!   below), so emitting `cache_fresh`/`cache_stale` here would misreport an
+//!   action that never happened.
+//!
+//! ## What is still NOT built (Stage 2 / Stage 3)
+//!
+//! * **Serving from cache (Stage 2).** A `Fresh`/`Stale` decision does not
+//!   skip the dial — every connect still goes live and re-discovers the
+//!   catalog over the wire, then overwrites the entry it just read. Building
+//!   this needs a `type:"cached"` connection state in `mcp::connection` plus
+//!   a lazy first-tool-use dial, which is real transport-lifecycle surgery;
+//!   see the batch report for what specifically blocks it if it was not
+//!   completed this wave.
+//! * **Background revalidation on a `Stale` hit (Stage 3).** The oracle
+//!   kicks off an async re-dial after serving a stale entry immediately;
+//!   without Stage 2 there is no "serve stale, refresh behind it" moment to
+//!   hang this off of.
 
-use traits::McpTransportSpec;
+use traits::{
+    McpPromptDto, McpResourceDto, McpResourceTemplateDto, McpToolDto, McpTransportSpec,
+    ServerCapabilitiesDto,
+};
 
 // ── config-independent constants (oracle `Pe`/`Me`/`Ae`/`xe`) ──────────────
 
 /// Schema version tag written into every persisted entry (`v` in the oracle
-/// schema `B`, literal `1`). A version this store doesn't recognize is
-/// treated as [`EntryLookup::Corrupt`] — never trusted, never an error.
-pub const CACHE_SCHEMA_VERSION: u32 = 1;
+/// schema `B`, literal `1` there — this port's own numbering, bumped to `2`
+/// when the entry grew a full catalog payload; see [`DiscoveryCacheEntry`]).
+/// A version this store doesn't recognize is treated as
+/// [`EntryLookup::Corrupt`] — never trusted, never an error. A `v1` entry
+/// (this module's original metadata-only shape) still PARSES cleanly —
+/// every field schema v2 added is `#[serde(default)]`, on purpose, so a
+/// future additive change never needs another version bump — but is
+/// rejected by the explicit `entry.version != CACHE_SCHEMA_VERSION` check in
+/// [`DiscoveryCacheStore::load`], never trusted with a silently-defaulted
+/// (empty) catalog.
+pub const CACHE_SCHEMA_VERSION: u32 = 2;
 
 /// The feature opt-in env var (oracle `MCP_DISCOVERY_CACHE`, read through a
 /// boolean-coerced env schema — `a.MCP_DISCOVERY_CACHE===true`/`===false`).
@@ -335,14 +392,82 @@ pub fn miss_telemetry_value(reason: MissReason) -> &'static str {
     }
 }
 
+/// Oracle `Ko(e)` (2.1.251, the SAME chunk as `cot`/`Jo`/`Vo` — resolved from
+/// the region around @182512938, NOT the unrelated `Ko`/`Jo` functions that
+/// share these minified names elsewhere in the binary; see this module's
+/// header note on chunk-local names). Recovered source:
+/// ```text
+/// function Ko(e){switch(e.reason){
+///   case"absent":case"expired":case"corrupt":
+///   case"strike-threshold":case"no-fingerprint":return!0;
+///   case"disabled":case"transport":case"live-connection":
+///   case"skills-capable":case"channel-capable":return!1;
+///   default:return e.reason}}
+/// ```
+/// This gates whether `tengu_mcp_discovery_source` fires at ALL on a MISS
+/// decision — `true` for the five reasons meaning "a disk read was actually
+/// attempted and came up unusable", `false` for the three gate-level reasons
+/// meaning the cache was never consulted (`disabled`/`transport`/
+/// `live-connection`) plus the two capability-miss reasons this port never
+/// constructs. The fresh/stale HIT branch emits unconditionally — this gate
+/// applies only to [`Decision::Miss`] (see the module doc's "What §11 Stage
+/// 1 wires in" section for why a hit emits nothing in THIS port today).
+#[must_use]
+pub fn miss_emits_discovery_source_telemetry(reason: MissReason) -> bool {
+    matches!(
+        reason,
+        MissReason::Absent
+            | MissReason::Expired
+            | MissReason::Corrupt
+            | MissReason::Strike
+            | MissReason::NoFingerprint
+    )
+}
+
+/// Wall-clock "now", ms since the Unix epoch — the real-clock reading
+/// production callers hand to [`DiscoveryCachePolicy::from_env`]/
+/// [`DiscoveryCacheEntry::new`]. Tests use their own literal values instead
+/// (both take `now_ms`/`saved_at_ms` as plain parameters precisely so they
+/// don't need this).
+#[must_use]
+pub fn now_ms() -> u64 {
+    u64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis(),
+    )
+    .unwrap_or(u64::MAX)
+}
+
 // ── the persisted entry + decision (oracle `B`/`cot`) ───────────────────────
 
-/// One persisted discovery-cache entry. Deliberately narrower than the
-/// oracle's `B` schema (no `serverInfo`/`negotiatedEra`/`tools`/`commands`/
-/// `resources`/`templates` bodies) — this greenfield format only carries what
-/// [`decide`] actually needs; a fuller payload is store/wiring work, not a
-/// decision-logic concern, and can be added additively (new `#[serde(default)]`
-/// fields) without another schema-version bump.
+/// `serverInfo` from the server's `initialize` response (oracle schema `B`'s
+/// `serverInfo` sub-object — spread onto the served "cached" client only
+/// when present: `...v.serverInfo && {serverInfo:{name:...,version:...}}`).
+///
+/// This port's [`traits::McpTransport::initialize`] returns only
+/// [`ServerCapabilitiesDto`] — the wire `serverInfo` block is discarded
+/// before it reaches `mcp::registry`, so nothing populates this field today.
+/// Kept as a real (rather than omitted) field so schema v2 is
+/// forward-compatible with whichever future change threads `serverInfo`
+/// through the transport trait.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct DiscoveryCacheServerInfo {
+    /// Server name as reported at `initialize`.
+    pub name: String,
+    /// Server version as reported at `initialize`.
+    pub version: String,
+}
+
+/// One persisted discovery-cache entry.
+///
+/// Schema v2: carries the FULL catalog a cache hit would need to serve a
+/// server without dialing (tools/resources/resource_templates/prompts +
+/// capabilities), not just the metadata v1 needed to make the fresh/stale/
+/// miss decision. Still narrower than the oracle's `B` schema
+/// (`negotiatedEra` is not modelled — no protocol-era negotiation reaches
+/// this deep in the port; see `mcp::protocol_negotiation`'s module docs).
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct DiscoveryCacheEntry {
     /// Schema version — see [`CACHE_SCHEMA_VERSION`].
@@ -361,24 +486,44 @@ pub struct DiscoveryCacheEntry {
     /// Consecutive refresh failures recorded against this entry.
     #[serde(default)]
     pub consecutive_refresh_failures: u32,
-    /// Whether the server declared the `tools` capability at `initialize`.
-    /// Kept as a single bit rather than the full
-    /// [`traits::ServerCapabilitiesDto`] — see the module-level DEFERRED note.
+    /// Server capability flags returned by `initialize`. [`decide`]'s
+    /// degenerate check reads `capabilities.tools` directly (oracle
+    /// `k.capabilities.tools`).
     #[serde(default)]
-    pub capabilities_tools: bool,
-    /// Number of tools the cached `tools/list` returned.
+    pub capabilities: ServerCapabilitiesDto,
+    /// `serverInfo`, when this port has one to store — see
+    /// [`DiscoveryCacheServerInfo`]'s doc (always `None` today).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server_info: Option<DiscoveryCacheServerInfo>,
+    /// The cached `tools/list` result. [`decide`]'s degenerate check reads
+    /// `tools.is_empty()` directly (oracle `k.tools.length===0`).
     #[serde(default)]
-    pub tool_count: u32,
+    pub tools: Vec<McpToolDto>,
+    /// The cached `resources/list` result.
+    #[serde(default)]
+    pub resources: Vec<McpResourceDto>,
+    /// The cached `resources/templates/list` result.
+    #[serde(default)]
+    pub resource_templates: Vec<McpResourceTemplateDto>,
+    /// The cached `prompts/list` result.
+    #[serde(default)]
+    pub prompts: Vec<McpPromptDto>,
 }
 
 impl DiscoveryCacheEntry {
-    /// Build a fresh entry for `cache_key`, saved "now".
+    /// Build a fresh entry for `cache_key`, saved "now" (`saved_at_ms`),
+    /// with `consecutive_refresh_failures` reset to 0 and no `server_info`
+    /// (see [`Self::with_server_info`] to attach one when a future change
+    /// makes that possible).
     #[must_use]
     pub fn new(
         cache_key: String,
         saved_at_ms: u64,
-        capabilities_tools: bool,
-        tool_count: u32,
+        capabilities: ServerCapabilitiesDto,
+        tools: Vec<McpToolDto>,
+        resources: Vec<McpResourceDto>,
+        resource_templates: Vec<McpResourceTemplateDto>,
+        prompts: Vec<McpPromptDto>,
     ) -> Self {
         Self {
             version: CACHE_SCHEMA_VERSION,
@@ -386,9 +531,22 @@ impl DiscoveryCacheEntry {
             saved_at_ms,
             tools_saved_at_ms: None,
             consecutive_refresh_failures: 0,
-            capabilities_tools,
-            tool_count,
+            capabilities,
+            server_info: None,
+            tools,
+            resources,
+            resource_templates,
+            prompts,
         }
+    }
+
+    /// Attach a `serverInfo` — chainable builder, kept separate from
+    /// [`Self::new`] so the common (server-info-less) construction doesn't
+    /// have to thread an extra `None` through every call site.
+    #[must_use]
+    pub fn with_server_info(mut self, server_info: DiscoveryCacheServerInfo) -> Self {
+        self.server_info = Some(server_info);
+        self
     }
 }
 
@@ -515,8 +673,10 @@ pub fn decide(
     // `k.capabilities.tools&&k.tools.length===0` — a server that claims the
     // tools capability but returned none is treated as degenerate and never
     // served fresh, even within the TTL window (ties to the oracle's
-    // `connected_zero_tools` degraded-connection telemetry).
-    let degenerate = entry.capabilities_tools && entry.tool_count == 0;
+    // `connected_zero_tools` degraded-connection telemetry). Schema v2 stores
+    // the real fields, so this reads them directly — byte-exact with the
+    // oracle expression, not a flattened approximation.
+    let degenerate = entry.capabilities.tools && entry.tools.is_empty();
     if age_ms < policy.ttl_ms && !degenerate {
         Decision::Fresh { entry, age_ms }
     } else {
@@ -792,10 +952,82 @@ mod tests {
         }
     }
 
+    /// Oracle `Ko`'s exact true/false split, transcribed above
+    /// [`miss_emits_discovery_source_telemetry`]'s doc. Note `Absent` is
+    /// `Ko`-true (the event DOES fire, with `source:"live"` via
+    /// [`miss_telemetry_value`]) even though it maps to the same `"live"`
+    /// string `Transport` does, which is `Ko`-false — the two are easy to
+    /// conflate since `miss_telemetry_value` alone can't tell them apart;
+    /// this gate is a SEPARATE decision on the reason, not on the string.
+    #[test]
+    fn miss_emits_discovery_source_telemetry_matches_the_oracle_ko_split() {
+        for should_emit in [
+            MissReason::Absent,
+            MissReason::Expired,
+            MissReason::Corrupt,
+            MissReason::Strike,
+            MissReason::NoFingerprint,
+        ] {
+            assert!(
+                miss_emits_discovery_source_telemetry(should_emit),
+                "{should_emit:?} must emit"
+            );
+        }
+        for should_not_emit in [
+            MissReason::Disabled,
+            MissReason::Transport,
+            MissReason::LiveConnection,
+            MissReason::SkillsCapable,
+            MissReason::ChannelCapable,
+        ] {
+            assert!(
+                !miss_emits_discovery_source_telemetry(should_not_emit),
+                "{should_not_emit:?} must NOT emit"
+            );
+        }
+    }
+
     // ── decide ────────────────────────────────────────────────────────────
 
+    /// `ServerCapabilitiesDto` with only `tools` set, the shape every
+    /// existing `decide` test needs.
+    fn caps_tools(tools: bool) -> ServerCapabilitiesDto {
+        ServerCapabilitiesDto {
+            tools,
+            resources: false,
+            prompts: false,
+            logging: false,
+            experimental: std::collections::HashMap::new(),
+        }
+    }
+
+    fn sample_tools(n: usize) -> Vec<McpToolDto> {
+        (0..n)
+            .map(|i| McpToolDto {
+                server_name: "srv".into(),
+                tool_name: format!("t{i}"),
+                description: String::new(),
+                input_schema: serde_json::json!({}),
+                full_name: format!("mcp__srv__t{i}"),
+                search_hint: None,
+                always_load: None,
+                requires_user_interaction: false,
+            })
+            .collect()
+    }
+
+    /// An entry with `capabilities.tools=true` and 3 tools — non-degenerate,
+    /// matching every pre-schema-v2 test's implicit assumption.
     fn entry_at(saved_at_ms: u64) -> DiscoveryCacheEntry {
-        DiscoveryCacheEntry::new("k".into(), saved_at_ms, true, 3)
+        DiscoveryCacheEntry::new(
+            "k".into(),
+            saved_at_ms,
+            caps_tools(true),
+            sample_tools(3),
+            vec![],
+            vec![],
+            vec![],
+        )
     }
 
     fn policy(
@@ -983,7 +1215,15 @@ mod tests {
     #[test]
     fn decide_degenerate_zero_tools_forces_stale_even_within_ttl() {
         let spec = http_spec("https://x.example", None);
-        let entry = DiscoveryCacheEntry::new("k".into(), 1_000, true, 0);
+        let entry = DiscoveryCacheEntry::new(
+            "k".into(),
+            1_000,
+            caps_tools(true),
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+        );
         let d = decide(
             &spec,
             None,
@@ -997,9 +1237,17 @@ mod tests {
     #[test]
     fn decide_zero_tools_without_the_tools_capability_is_not_degenerate() {
         let spec = http_spec("https://x.example", None);
-        // capabilities_tools=false, tool_count=0: the server never CLAIMED
+        // capabilities.tools=false, tools=[]: the server never CLAIMED
         // tools, so an empty list is expected, not degenerate.
-        let entry = DiscoveryCacheEntry::new("k".into(), 1_000, false, 0);
+        let entry = DiscoveryCacheEntry::new(
+            "k".into(),
+            1_000,
+            caps_tools(false),
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+        );
         let d = decide(
             &spec,
             None,
@@ -1083,7 +1331,32 @@ mod tests {
     fn store_roundtrips_an_entry() {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = DiscoveryCacheStore::new(dir.path());
-        let entry = DiscoveryCacheEntry::new("abc123".into(), 42, true, 5);
+        let entry = DiscoveryCacheEntry::new(
+            "abc123".into(),
+            42,
+            caps_tools(true),
+            sample_tools(5),
+            vec![traits::McpResourceDto {
+                uri: "file:///a".into(),
+                name: "a".into(),
+                mime_type: None,
+            }],
+            vec![traits::McpResourceTemplateDto {
+                uri_template: "file:///{path}".into(),
+                name: "tmpl".into(),
+                description: None,
+                mime_type: None,
+            }],
+            vec![traits::McpPromptDto {
+                name: "p".into(),
+                description: None,
+                arguments: vec![],
+            }],
+        )
+        .with_server_info(DiscoveryCacheServerInfo {
+            name: "srv".into(),
+            version: "1.0".into(),
+        });
         store.store(&entry).expect("store");
         assert_eq!(store.load("abc123"), EntryLookup::Found(entry));
     }
@@ -1116,15 +1389,41 @@ mod tests {
     fn store_load_wrong_schema_version_is_corrupt() {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = DiscoveryCacheStore::new(dir.path());
+        // Otherwise-complete v2 shape, but a version this store doesn't
+        // recognize — must be Corrupt via the explicit version check, not
+        // the parse-failure path (unlike the v1-shape test below).
         let bad = serde_json::json!({
             "v": 999,
             "cache_key": "k",
             "saved_at_ms": 1,
             "consecutive_refresh_failures": 0,
-            "capabilities_tools": false,
-            "tool_count": 0,
+            "capabilities": {"tools": false, "resources": false, "prompts": false, "logging": false, "experimental": {}},
+            "tools": [],
+            "resources": [],
+            "resource_templates": [],
+            "prompts": [],
         });
         std::fs::write(dir.path().join("k.json"), bad.to_string()).expect("write");
+        assert_eq!(store.load("k"), EntryLookup::Corrupt);
+    }
+
+    #[test]
+    fn store_load_old_v1_shape_is_corrupt() {
+        // The pre-schema-v2 on-disk shape: correct `v`, but missing every
+        // field schema v2 added. Must be Corrupt — proving the version bump
+        // actually invalidates old entries rather than silently defaulting
+        // their new fields to something `decide` might trust.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = DiscoveryCacheStore::new(dir.path());
+        let old = serde_json::json!({
+            "v": 1,
+            "cache_key": "k",
+            "saved_at_ms": 1,
+            "consecutive_refresh_failures": 0,
+            "capabilities_tools": true,
+            "tool_count": 3,
+        });
+        std::fs::write(dir.path().join("k.json"), old.to_string()).expect("write");
         assert_eq!(store.load("k"), EntryLookup::Corrupt);
     }
 
@@ -1134,7 +1433,15 @@ mod tests {
         let store = DiscoveryCacheStore::new(dir.path());
         // Stored under path "k.json" but its OWN cacheKey field says "other" —
         // simulates the oracle's "entry keyed for another server" case.
-        let entry = DiscoveryCacheEntry::new("other".into(), 1, false, 0);
+        let entry = DiscoveryCacheEntry::new(
+            "other".into(),
+            1,
+            caps_tools(false),
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+        );
         std::fs::write(
             dir.path().join("k.json"),
             serde_json::to_string(&entry).expect("serialize"),
@@ -1148,7 +1455,15 @@ mod tests {
     fn store_load_symlink_is_corrupt() {
         let dir = tempfile::tempdir().expect("tempdir");
         let real = dir.path().join("real.json");
-        let entry = DiscoveryCacheEntry::new("k".into(), 1, false, 0);
+        let entry = DiscoveryCacheEntry::new(
+            "k".into(),
+            1,
+            caps_tools(false),
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+        );
         std::fs::write(&real, serde_json::to_string(&entry).expect("serialize")).expect("write");
         std::os::unix::fs::symlink(&real, dir.path().join("k.json")).expect("symlink");
         let store = DiscoveryCacheStore::new(dir.path());
@@ -1166,7 +1481,15 @@ mod tests {
     fn purge_removes_a_stored_entry() {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = DiscoveryCacheStore::new(dir.path());
-        let entry = DiscoveryCacheEntry::new("abc".into(), 1, false, 0);
+        let entry = DiscoveryCacheEntry::new(
+            "abc".into(),
+            1,
+            caps_tools(false),
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+        );
         store.store(&entry).expect("store");
         store.purge("abc").expect("purge");
         assert_eq!(store.load("abc"), EntryLookup::Absent);

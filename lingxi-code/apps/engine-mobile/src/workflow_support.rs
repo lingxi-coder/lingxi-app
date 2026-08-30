@@ -1176,28 +1176,6 @@ fn apply_materialized_local_app_collections_with_provenance(
     )
 }
 
-/// The single Local App build workflow authorized for a build target.
-///
-/// This is the map `apply_materialized_local_app_collections_with_identity`
-/// enforces below: it is the "one place a build target maps to its required
-/// workflow id" the component-literal allowlist documents. Phase -1 P-1.1
-/// wraps its output in a typed handle (`local_app_plugin_binding`) so the
-/// seam below stops comparing raw strings itself; P-1.3 is expected to
-/// remove this map in favor of typed routing throughout — this function is
-/// deliberately still exactly the pre-Phase -1 match, moved rather than
-/// rewritten, so that removal has one obvious place to happen.
-pub(crate) fn required_workflow_id_for(
-    build_target: crate::local_apps_build::LocalAppBuildTarget,
-) -> &'static str {
-    match build_target {
-        crate::local_apps_build::LocalAppBuildTarget::ReactDomR1 => "local-app-build",
-        crate::local_apps_build::LocalAppBuildTarget::Canvas2dR1
-        | crate::local_apps_build::LocalAppBuildTarget::Three3dR1
-        | crate::local_apps_build::LocalAppBuildTarget::Phaser2dR1
-        | crate::local_apps_build::LocalAppBuildTarget::Babylon3dR1 => "local-canvas-build",
-    }
-}
-
 fn apply_materialized_local_app_collections_with_identity(
     app_data_root: &std::path::Path,
     spec: &mut tool_workflow::WorkflowLaunchSpec,

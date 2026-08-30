@@ -93,12 +93,13 @@ apps/engine-mobile/src/local_apps_host.rs:local-canvas-build:1
 apps/engine-mobile/src/local_apps_mcp.rs:accessibility:1
 apps/engine-mobile/src/local_apps_mcp.rs:frontend-qa:1
 
-# workflow_support.rs — the one place a build target maps to its required
-# workflow id (composition binding: this IS the binding P-1.1/P-1.3 replace
-# with a typed handle; until then the two workflow names live here by name,
-# once each).
-apps/engine-mobile/src/workflow_support.rs:local-app-build:1
-apps/engine-mobile/src/workflow_support.rs:local-canvas-build:1
+# local_app_plugin_binding.rs — the one place a build target maps to its
+# required workflow id, as of P-1.3 (moved here from workflow_support.rs,
+# which now contains no Local App workflow name at all). The Host never reads
+# these literals itself: it asks LocalAppPluginBinding::resolve/enforce, which
+# is the composition binding this scanner's own allowlist header describes.
+apps/engine-mobile/src/local_app_plugin_binding.rs:local-app-build:1
+apps/engine-mobile/src/local_app_plugin_binding.rs:local-canvas-build:1
 
 # --- tasks/src -------------------------------------------------------------
 

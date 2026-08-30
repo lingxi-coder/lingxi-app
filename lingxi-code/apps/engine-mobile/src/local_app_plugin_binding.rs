@@ -1,26 +1,47 @@
 //! Composition binding from a Local App build target to the one workflow
-//! authorized to build it (plan v3 Phase -1, task P-1.1).
+//! authorized to build it (plan v3 Phase -1, tasks P-1.1/P-1.3).
 //!
-//! Today a build target maps to a workflow NAME string, and that string is
-//! then used as authority: `workflow_support::apply_materialized_local_app_collections_with_identity`
-//! resolves a `required_workflow_id` for the app's pinned runtime profile and
+//! A build target maps to a workflow NAME string, and that string is then
+//! used as authority: `workflow_support::apply_materialized_local_app_collections_with_identity`
+//! resolves a required workflow id for the app's pinned runtime profile and
 //! REFUSES a caller-selected workflow that does not match it. That refusal is
 //! security-relevant — without it a caller could point any app at any
-//! workflow's collection/persistence contract — and nothing in the suite
-//! pinned it before this task (see the characterization tests added to
-//! `workflow_support::tests` in this same change).
+//! workflow's collection/persistence contract — and it is pinned by the
+//! characterization tests in this module plus
+//! `workflow_support::tests::local_app_workflow_routes_each_published_profile_to_its_matching_workflow`
+//! and its two refusal siblings.
 //!
-//! P-1.1 does not delete the name map (`workflow_support::required_workflow_id_for`
-//! keeps it, unchanged, in the one place it lived before). It wraps that map
-//! in a typed [`LocalAppWorkflowHandle`] so the Host (the `apply_materialized_*`
-//! seam) stops doing its own string comparison and error formatting: it asks
-//! this binding to `resolve` a build target and `enforce` the result against
-//! the caller's launched workflow id. P-1.3 is expected to go further and
-//! remove the underlying string map entirely once the launcher itself can key
-//! on a handle instead of a `BUILTIN_WORKFLOWS` name lookup; that is out of
-//! scope here.
+//! P-1.1 wrapped the map's output in a typed [`LocalAppWorkflowHandle`] so the
+//! Host (the `apply_materialized_*` seam) stopped doing its own string
+//! comparison and error formatting: it asks this binding to `resolve` a build
+//! target and `enforce` the result against the caller's launched workflow id.
+//! P-1.1 left the map itself (`required_workflow_id_for`) inside
+//! `workflow_support.rs`, delegated to from here. P-1.3 moves the map INTO
+//! this module: `workflow_support.rs` no longer contains a Local App workflow
+//! name of any kind, so this binding is now the one place a build target maps
+//! to its required workflow id, both in the sense that the Host never
+//! compares the strings itself (Phase -1's original point) and in the sense
+//! that no name lives outside this file (§18 Phase -1 step 4 / §19.3's gate).
 
 use crate::local_apps_build::LocalAppBuildTarget;
+
+/// The single Local App build workflow authorized for a build target.
+///
+/// This is the map [`LocalAppPluginBinding::resolve`] wraps in a typed
+/// handle. It is deliberately still exactly the pre-Phase -1 match — moved,
+/// not rewritten — so a reader diffing this task's change sees only the
+/// relocation, not a behavior change. Private to this module: nothing outside
+/// `local_app_plugin_binding` may read a workflow name off a build target
+/// directly, only through `resolve`/`enforce`.
+fn required_workflow_id_for(build_target: LocalAppBuildTarget) -> &'static str {
+    match build_target {
+        LocalAppBuildTarget::ReactDomR1 => "local-app-build",
+        LocalAppBuildTarget::Canvas2dR1
+        | LocalAppBuildTarget::Three3dR1
+        | LocalAppBuildTarget::Phaser2dR1
+        | LocalAppBuildTarget::Babylon3dR1 => "local-canvas-build",
+    }
+}
 
 /// A resolved workflow identity for a Local App build target.
 ///
@@ -57,15 +78,12 @@ pub(crate) struct LocalAppPluginBinding {
 impl LocalAppPluginBinding {
     /// Resolve the workflow handle a `build_target` is pinned to.
     ///
-    /// Delegates to `workflow_support::required_workflow_id_for`, which still
-    /// owns the build-target → workflow-id map (P-1.3's job to remove); this
-    /// binding only wraps that map's output in a typed handle so callers stop
-    /// touching the string themselves.
+    /// Reads the build-target → workflow-id map owned by this module
+    /// ([`required_workflow_id_for`]) and wraps its output in a typed handle
+    /// so callers never touch the string themselves.
     pub(crate) fn resolve(build_target: LocalAppBuildTarget) -> Self {
         Self {
-            handle: LocalAppWorkflowHandle(crate::workflow_support::required_workflow_id_for(
-                build_target,
-            )),
+            handle: LocalAppWorkflowHandle(required_workflow_id_for(build_target)),
         }
     }
 
@@ -96,58 +114,61 @@ impl LocalAppPluginBinding {
 mod tests {
     use super::*;
 
-    /// The runtime-profile family and the LITERAL workflow id every build
-    /// target must resolve to.
+    /// Generates [`expected_binding`] and [`ALL_BUILD_TARGETS`] from ONE list
+    /// so they cannot drift apart.
     ///
-    /// Deliberately a wildcard-free `match` rather than an array of pairs:
-    /// an array cannot be exhaustive, so a `LocalAppBuildTarget` variant
-    /// added tomorrow would silently go untested. Here the test module stops
-    /// compiling until the new variant is given an arm — a decision, not a
-    /// default.
-    ///
-    /// The ids are restated as literals; they are NOT read back out of
-    /// `workflow_support::required_workflow_id_for`. Asking the map what the
-    /// map says pins no value — it only proves `resolve` still delegates,
-    /// and passes unchanged if the map itself is rewritten wrongly. That
-    /// matters most for `Babylon3dR1`, whose `local-canvas-build` mapping is
-    /// pinned NOWHERE else in the suite: the `workflow_support` seam tests
-    /// cannot reach it, because `detect_build_target` rejects the
-    /// not-yet-published Babylon runtime profile first.
-    fn expected_binding(
-        target: LocalAppBuildTarget,
-    ) -> (local_apps::AppRuntimeProfile, &'static str) {
-        match target {
-            LocalAppBuildTarget::ReactDomR1 => {
-                (local_apps::AppRuntimeProfile::ReactDom, "local-app-build")
+    /// Before this task each was maintained separately: `expected_binding`
+    /// was its own wildcard-free `match`, and `ALL_BUILD_TARGETS` was a
+    /// hand-typed `[LocalAppBuildTarget; 5]` array beside it. Adding a sixth
+    /// `LocalAppBuildTarget` variant forces `expected_binding` (and
+    /// `required_workflow_id_for`) to gain an arm — proven: it is
+    /// `error[E0004]` otherwise — but filling in ONLY that arm compiled and
+    /// passed, because nothing tied the array's length to the variant count:
+    /// the new mapping would ship with the whole suite green and zero
+    /// characterization coverage of it. This macro closes that gap: extending
+    /// the invocation below to cover a new variant (still forced, since the
+    /// generated `expected_binding` match is still wildcard-free) extends
+    /// `ALL_BUILD_TARGETS` in the very same edit, so the loop in
+    /// `resolve_pins_the_literal_workflow_id_of_every_build_target` is
+    /// guaranteed to exercise it.
+    macro_rules! build_targets {
+        ($($variant:ident => ($family:expr, $required:expr)),+ $(,)?) => {
+            /// Every build target the suite below exercises. Generated by
+            /// `build_targets!` in lockstep with [`expected_binding`] — see
+            /// that macro's doc comment for why this is not a hand-typed
+            /// array.
+            const ALL_BUILD_TARGETS: &[LocalAppBuildTarget] =
+                &[$(LocalAppBuildTarget::$variant),+];
+
+            /// The runtime-profile family and the LITERAL workflow id every
+            /// build target must resolve to.
+            ///
+            /// The ids are restated as literals; they are NOT read back out
+            /// of [`required_workflow_id_for`]. Asking the map what the map
+            /// says pins no value — it only proves `resolve` still delegates,
+            /// and passes unchanged if the map itself is rewritten wrongly.
+            /// That matters most for `Babylon3dR1`, whose
+            /// `local-canvas-build` mapping is pinned NOWHERE else in the
+            /// suite: the `workflow_support` seam tests cannot reach it,
+            /// because `detect_build_target` rejects the not-yet-published
+            /// Babylon runtime profile first.
+            fn expected_binding(
+                target: LocalAppBuildTarget,
+            ) -> (local_apps::AppRuntimeProfile, &'static str) {
+                match target {
+                    $(LocalAppBuildTarget::$variant => ($family, $required),)+
+                }
             }
-            LocalAppBuildTarget::Canvas2dR1 => (
-                local_apps::AppRuntimeProfile::Canvas2d,
-                "local-canvas-build",
-            ),
-            LocalAppBuildTarget::Three3dR1 => {
-                (local_apps::AppRuntimeProfile::Three3d, "local-canvas-build")
-            }
-            LocalAppBuildTarget::Phaser2dR1 => (
-                local_apps::AppRuntimeProfile::Phaser2d,
-                "local-canvas-build",
-            ),
-            LocalAppBuildTarget::Babylon3dR1 => (
-                local_apps::AppRuntimeProfile::Babylon3d,
-                "local-canvas-build",
-            ),
-        }
+        };
     }
 
-    /// Every build target, so the assertions below actually run over the
-    /// whole enum. Kept adjacent to [`expected_binding`] on purpose: a new
-    /// variant's compile error lands in that match, a few lines from here.
-    const ALL_BUILD_TARGETS: [LocalAppBuildTarget; 5] = [
-        LocalAppBuildTarget::ReactDomR1,
-        LocalAppBuildTarget::Canvas2dR1,
-        LocalAppBuildTarget::Three3dR1,
-        LocalAppBuildTarget::Phaser2dR1,
-        LocalAppBuildTarget::Babylon3dR1,
-    ];
+    build_targets! {
+        ReactDomR1 => (local_apps::AppRuntimeProfile::ReactDom, "local-app-build"),
+        Canvas2dR1 => (local_apps::AppRuntimeProfile::Canvas2d, "local-canvas-build"),
+        Three3dR1 => (local_apps::AppRuntimeProfile::Three3d, "local-canvas-build"),
+        Phaser2dR1 => (local_apps::AppRuntimeProfile::Phaser2d, "local-canvas-build"),
+        Babylon3dR1 => (local_apps::AppRuntimeProfile::Babylon3d, "local-canvas-build"),
+    }
 
     /// The other member of the two-element workflow-id set, used to drive the
     /// refusal path for a target whose required id is `required`.
@@ -161,8 +182,48 @@ mod tests {
 
     #[test]
     fn resolve_pins_the_literal_workflow_id_of_every_build_target() {
-        for target in ALL_BUILD_TARGETS {
+        for &target in ALL_BUILD_TARGETS {
             let (family, required) = expected_binding(target);
+
+            // The `family` column, unlike `required`, was pinned by nothing.
+            // It is only fed to `enforce` and then re-used to BUILD the
+            // expected refusal message, so both assertions below predict the
+            // value they were handed: giving `Three3dR1` the flatly wrong
+            // family `Phaser2d` left the whole suite green. Nothing else in
+            // the suite caught it either, because `Three3d`, `Phaser2d` and
+            // `Babylon3d` all require the SAME workflow id — the `required`
+            // column cannot disambiguate them.
+            //
+            // So cross the column against a source that is not itself.
+            // `LocalAppBuildTarget::template_id` is the PRODUCTION target ->
+            // scaffold-id map (`local_apps_build`, the id reported back to the
+            // model and serialized by `local_apps_host`), and
+            // `AppRuntimeProfile::as_str` is the production family -> wire
+            // spelling (`local-apps`). Neither is derived from this table, and
+            // the expected value is DERIVED — the kebab-cased wire spelling —
+            // rather than a second hand-written target -> family match, so
+            // this stays honest for a sixth variant without a new arm here:
+            // the only arm that variant needs is the production `template_id`
+            // one the exhaustive match already forces.
+            //
+            // Not `LocalAppBuildTarget::runtime_profile()`, the obvious second
+            // map: it is a module-private `#[cfg(test)]` method of
+            // `local_apps_build` and is unreachable from this module. Not the
+            // `current_binding_for_family` + `from_runtime_binding` round trip
+            // either: `available_contracts()` publishes four families, so that
+            // path cannot reach `Babylon3dR1` at all — the one row this suite
+            // is otherwise the sole cover for.
+            let scaffold_id = target.template_id();
+            let family_named_by_scaffold_id = scaffold_id.split('/').nth(1).unwrap_or_else(|| {
+                panic!("{target:?} scaffold id {scaffold_id:?} has no family segment")
+            });
+            assert_eq!(
+                family_named_by_scaffold_id,
+                family.as_str().replace('_', "-"),
+                "{target:?} is listed in `build_targets!` under runtime profile family {family}, \
+                 but its production scaffold id {scaffold_id:?} names a different family"
+            );
+
             let binding = LocalAppPluginBinding::resolve(target);
 
             binding
@@ -179,11 +240,20 @@ mod tests {
                 .enforce("demo1234", family, launched)
                 .expect_err("a workflow id other than the pinned one must be refused");
             let message = error.to_string();
-            let expected_fragment =
-                format!("must use {required}; refusing caller-selected workflow {launched}");
-            assert!(
-                message.contains(&expected_fragment),
-                "{target:?} refusal must read {expected_fragment:?}, got: {message}"
+            // Full-message equality, not a substring `contains`: this also
+            // pins the two things a `contains` check on the tail fragment
+            // alone would miss — the `family` clause (nothing else in this
+            // test asserts it survives a refactor) and the `{app_id:?}` DEBUG
+            // quoting (a `{app_id}` plain-display regression would still
+            // satisfy `contains("demo1234")`).
+            let expected_message = format!(
+                "app {:?} is pinned to runtime profile {family}, which must use {required}; \
+                 refusing caller-selected workflow {launched}",
+                "demo1234"
+            );
+            assert_eq!(
+                message, expected_message,
+                "{target:?} refusal message must be byte-identical to the pinned form"
             );
         }
     }
@@ -211,9 +281,18 @@ mod tests {
             )
             .expect_err("mismatched launched workflow id must be refused");
         let message = error.to_string();
+        // The debug-quoted app id specifically — `{app_id:?}`, not
+        // `{app_id}` — so a regression that swapped Debug for Display (both
+        // satisfy a bare `contains("demo1234")`) is caught here.
         assert!(
-            message.contains("demo1234"),
-            "must name the app id: {message}"
+            message.contains("\"demo1234\""),
+            "must name the app id in DEBUG-quoted form: {message}"
+        );
+        // The runtime-profile family clause: nothing else in this suite
+        // fails if it is dropped from the message.
+        assert!(
+            message.contains("is pinned to runtime profile react_dom, which"),
+            "must name the pinned runtime-profile family: {message}"
         );
         // Ordered fragment, not two independent `contains`: a refactor that
         // swapped the required and the caller-selected id would satisfy the
@@ -223,6 +302,14 @@ mod tests {
                 "must use local-app-build; refusing caller-selected workflow local-canvas-build"
             ),
             "must name the required id first and the caller-selected id second: {message}"
+        );
+        // Byte-identical to HEAD's pre-Phase -1 inline refusal message, in
+        // full — not merely fragment-by-fragment.
+        assert_eq!(
+            message,
+            "app \"demo1234\" is pinned to runtime profile react_dom, which must use \
+             local-app-build; refusing caller-selected workflow local-canvas-build",
+            "refusal message must be byte-identical to the pinned form: {message}"
         );
     }
 }

@@ -4715,9 +4715,18 @@ fn merge_agent_frontmatter_mcp_servers(
     {
         return Vec::new();
     }
-    let scoped = agent::agent_mcp_specs_to_scoped_configs(def, gates.strict_plugin_only_mcp);
+    // claude `Zx(r)`: a by-name entry resolves against whatever the session
+    // already has discovered/configured — the SAME `existing` list this
+    // merge folds INTO, snapshotted before the mutation loop below.
+    let scoped = agent::agent_mcp_specs_to_scoped_configs(
+        def,
+        gates.strict_plugin_only_mcp,
+        gates.strict_mcp_config,
+        existing.as_slice(),
+    );
     let mut blocked = Vec::new();
-    for cfg in scoped {
+    for scoped_cfg in scoped {
+        let cfg = scoped_cfg.config;
         // `Yee` — enterprise allow/deny per server (sdk short-circuit inside).
         if !mcp::enterprise_policy::is_server_allowed(&cfg, policy) {
             blocked.push(cfg.name);
@@ -4734,6 +4743,124 @@ fn merge_agent_frontmatter_mcp_servers(
         }
     }
     blocked
+}
+
+/// §24b (claude `Agr`, 2.1.251 @~160977000): connect + build ONE subagent
+/// spawn's per-agent inline `mcpServers` tools. Reuses the SAME `PRn`
+/// conversion as the main-thread-agent merge above
+/// ([`agent::agent_mcp_specs_to_scoped_configs`]) against a snapshot of the
+/// registry's LIVE connected servers (`existing_configs`, for by-name
+/// resolution). An inline RECORD entry (`is_newly_created`) connects under an
+/// agent-scoped table key ([`mcp::McpRegistry::connect_agent_scoped`]) so
+/// concurrent spawns declaring the same plain server name never clobber each
+/// other, and its tools are built with `MCPTool::bound_server_key` set to that
+/// key; a by-name entry connects (or reuses) through the ordinary shared path
+/// with no scoping, exactly like every other session-level server. A connect
+/// failure is logged with claude's exact copy and drops only that one
+/// server's tools — never fatal to the spawn.
+async fn build_agent_mcp_tool_set(
+    mcp_registry: Arc<mcp::McpRegistry>,
+    mcp_tool_ctx: tool_api::BuiltinToolContext,
+    strict_plugin_only_mcp: bool,
+    strict_mcp_config: bool,
+    agent_id: protocol::AgentId,
+    def: agent::AgentDefinition,
+) -> agent::agent_mcp_tools::AgentMcpToolSet {
+    if def.mcp_servers.is_empty() {
+        return agent::agent_mcp_tools::AgentMcpToolSet::default();
+    }
+    let existing_configs: Vec<mcp::McpServerConfig> = {
+        let conns = mcp_registry.connections.read().await;
+        conns.values().map(|s| s.config().clone()).collect()
+    };
+    let scoped = agent::agent_mcp_specs_to_scoped_configs(
+        &def,
+        strict_plugin_only_mcp,
+        strict_mcp_config,
+        &existing_configs,
+    );
+    let mut tools: Vec<Arc<dyn tool_api::Tool>> = Vec::new();
+    let mut cleanups = Vec::new();
+    for entry in scoped {
+        let plain_name = entry.config.name.clone();
+        let (table_key, bound_key): (String, Option<String>) = if entry.is_newly_created {
+            match mcp_registry
+                .connect_agent_scoped(entry.config, agent_id)
+                .await
+            {
+                Ok((_, key)) => (key.clone(), Some(key)),
+                Err(error) => {
+                    tracing::warn!(
+                        "[Agent: {}] Failed to connect to MCP server '{}': {}",
+                        def.agent_type,
+                        plain_name,
+                        error
+                    );
+                    continue;
+                }
+            }
+        } else {
+            match mcp_registry.connect(entry.config).await {
+                Ok(_) => (plain_name.clone(), None),
+                Err(error) => {
+                    tracing::warn!(
+                        "[Agent: {}] Failed to connect to MCP server '{}': {}",
+                        def.agent_type,
+                        plain_name,
+                        error
+                    );
+                    continue;
+                }
+            }
+        };
+        let dtos: Vec<traits::McpToolDto> = {
+            let conns = mcp_registry.connections.read().await;
+            match conns.get(&table_key) {
+                Some(mcp::McpConnectionState::Connected { tools, .. }) => tools.clone(),
+                _ => Vec::new(),
+            }
+        };
+        tracing::info!(
+            "[Agent: {}] Connected to MCP server '{}' with {} tools",
+            def.agent_type,
+            plain_name,
+            dtos.len()
+        );
+        for dto in &dtos {
+            let tool = tool_mcp::MCPTool::new_for_tool(
+                mcp_tool_ctx.clone(),
+                dto.full_name.clone(),
+                dto.description.clone(),
+                dto.input_schema.clone(),
+                dto.search_hint.clone(),
+                dto.always_load.unwrap_or(false),
+                dto.requires_user_interaction,
+            );
+            let tool = match &bound_key {
+                Some(key) => tool.with_bound_server_key(key.clone()),
+                None => tool,
+            };
+            tools.push(Arc::new(tool) as Arc<dyn tool_api::Tool>);
+        }
+        if entry.is_newly_created {
+            let cleanup_registry = mcp_registry.clone();
+            let cleanup_key = table_key.clone();
+            cleanups.push(agent::agent_mcp_tools::AgentMcpCleanupHandle {
+                server_name: plain_name,
+                run: Arc::new(move || {
+                    let registry = cleanup_registry.clone();
+                    let key = cleanup_key.clone();
+                    Box::pin(async move {
+                        registry
+                            .disconnect_agent_scoped(&key)
+                            .await
+                            .map_err(|error| error.to_string())
+                    })
+                }),
+            });
+        }
+    }
+    agent::agent_mcp_tools::AgentMcpToolSet { tools, cleanups }
 }
 
 /// Read the merged `settings.enabledPlugins` allowlist (`plugin@marketplace` →
@@ -7002,6 +7129,10 @@ pub async fn build(
     let subagent_strict_plugin_hooks_cell =
         subagent_spawner_concrete.strict_plugin_only_hooks_handle();
     let subagent_skill_loader_cell = subagent_spawner_concrete.skill_loader_handle();
+    // §24b: grab the set-once agent-MCP-tool-builder cell BEFORE boxing, to
+    // fill once `mcp_registry` + `mcp_tool_ctx` exist (same cycle-break as the
+    // hook/skill cells above — see `mcp_tool_builder`'s doc in `agent::handle`).
+    let subagent_mcp_tool_builder_cell = subagent_spawner_concrete.mcp_tool_builder_handle();
     // FIX 1 (subagent pool): grab the set-once tool-wide-deny-names cell BEFORE
     // boxing, to fill once the permission policy is built (same cycle-break as
     // the registry/catalog/hook cells). Filled inside the enforcement branch
@@ -9375,6 +9506,30 @@ pub async fn build(
     // copy (parity batch 21). First fill wins.
     let _ = subagent_tool_registry_cell.set(tools.clone());
     let _ = subagent_agent_catalog_cell.set(agent_catalog.clone());
+    // §24b: fill the agent-MCP-tool-builder now that `mcp_registry` (7935) +
+    // `mcp_tool_ctx` (8967) both exist. The closure owns clones of both plus
+    // the boot-resolved strict-MCP gates (the SAME values
+    // `merge_agent_frontmatter_mcp_servers` used for the main-thread agent
+    // above) so every subagent Task spawn's frontmatter `mcpServers` connects
+    // + builds tools through the identical `PRn` conversion.
+    {
+        let mcp_registry_for_agents = mcp_registry.clone();
+        let mcp_tool_ctx_for_agents = mcp_tool_ctx.clone();
+        let _ = subagent_mcp_tool_builder_cell.set(Arc::new(move |agent_id, def| {
+            let mcp_registry = mcp_registry_for_agents.clone();
+            let mcp_tool_ctx = mcp_tool_ctx_for_agents.clone();
+            Box::pin(build_agent_mcp_tool_set(
+                mcp_registry,
+                mcp_tool_ctx,
+                strict_plugin_only_mcp,
+                cfg.strict_mcp_config,
+                agent_id,
+                def,
+            )) as std::pin::Pin<
+                Box<dyn std::future::Future<Output = agent::agent_mcp_tools::AgentMcpToolSet> + Send>,
+            >
+        }));
+    }
     let profile_first_party_for_subagents = profile_first_party.clone();
     let _ = subagent_provider_first_party_resolver_cell.set(Arc::new(move |profile| {
         profile_first_party_for_subagents.get(profile).copied()

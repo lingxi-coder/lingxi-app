@@ -105,6 +105,21 @@ iOS 把占位符放在 **key** 里、Android 放在**值**里，所以每个带�
 `LocalApp(LocalAppCommand)` 变体是真的搬走了字节（≈50 B vs ≈1,980 B 平铺）。
 这是 Phase 8 **设计期**的决定，不是编码期的。
 
+### `bridge-server` 今天是稳的,但判据仍然是三次运行
+
+    run 1: 12 binaries, 88 passed, 0 failed
+    run 2: 12 binaries, 88 passed, 0 failed
+    run 3: 12 binaries, 88 passed, 0 failed        -> 三次导出的计数逐字节相同
+
+`apps/bridge-server/src/driver.rs:553` 的 `LOOP_KA_TEST_SERIAL` 是
+`std::sync::Mutex<()>`,**不是环境变量**。它在一个二进制内部串行化线程,
+跨二进制什么都不做。所以「今天绿」不能推出「明天绿」,任何拥有这个 crate 的任务
+仍然必须 `repeatRuns: 3`——`lap-gate.sh tasks` 会强制这一点。
+
+`cargo-nextest` **未安装**。面对一个 15,430 个测试的套件,装 nextest 是最自然的
+反应,而它会把每个二进制拆进独立进程,于是上面那把进程内的锁保护的每一个 race
+都会静默回来。⛔ 不要在本项目里引入 nextest。
+
 ### 其他量出来的事实
 
 | 事实 | 值 |

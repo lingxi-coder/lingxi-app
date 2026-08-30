@@ -5,7 +5,7 @@
 use telemetry::tengu::ALL_EVENT_NAMES;
 
 #[test]
-fn registry_is_exactly_347_entries() {
+fn registry_is_exactly_364_entries() {
     // M4-05 added 24 events (8 agent/task tools × 3 lifecycle stages),
     // M4-06 added 6 (2 team tools × 3 lifecycle stages),
     // M4-07 added 13 (1 MCP_STARTED + 4 new tools × 3 lifecycle stages),

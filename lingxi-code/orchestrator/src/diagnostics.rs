@@ -266,7 +266,11 @@ fn check_telemetry_schema() -> DoctorCheck {
     //        tengu_awsCredentialExport_missing_trust) → 343.
     // 2.1.206 worktree lifecycle (merged from main): +4 tengu_worktree_ events
     //        (created / entered_existing / kept / removed) → 347.
-    let expected = 347;
+    // 2.1.251 mcp/plugin byte alignment: +3 mcp::NAMES
+    //        (tengu_mcp_server_config_invalid / tengu_mcp_tools_listed /
+    //        tengu_mcp_degraded) +14 plugin::NAMES
+    //        (tengu_plugin_enabled_for_session and its 13 siblings) → 364.
+    let expected = 364;
     DoctorCheck {
         name: "telemetry-schema".to_string(),
         status: if actual == expected {

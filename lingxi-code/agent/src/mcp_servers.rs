@@ -1,17 +1,40 @@
 //! Agent frontmatter `mcpServers` → scoped [`mcp::McpServerConfig`]s.
 //!
-//! Port of claude `agentMcpSpecsToScopedConfigs` (minified `obs`,
-//! 2.1.220 @231497090): the conversion the main-thread agent merge (`FWt`)
-//! runs before folding an agent's inline servers into the session's dynamic
-//! MCP config. String (by-name) entries, multi-key records, reserved names and
-//! internal-only IDE transports are skipped — each with claude's exact debug
-//! log line — and every surviving config is stamped `scope:"agent"`
-//! ([`mcp::ConfigScope::Agent`]).
+//! Port of claude `PRn`/`agentMcpSpecsToScopedConfigs` (2.1.251 @160975900):
+//! the per-entry conversion BOTH the main-thread agent merge (`FWt`) and the
+//! per-SUBAGENT-spawn connect (`Agr`) run before folding an agent's inline
+//! `mcpServers` into their respective connect lists. String (by-name),
+//! multi-key records, reserved names and internal-only IDE transports are
+//! skipped — each with claude's exact debug log line — and every surviving
+//! RECORD config is stamped `scope:"agent"` ([`mcp::ConfigScope::Agent`]) and
+//! flagged `is_newly_created: true` (claude `isNewlyCreated:true` — `Agr`
+//! connects it and tears it down on subagent exit); a resolved BY-NAME entry
+//! is flagged `is_newly_created: false` (claude `isNewlyCreated:false` — `Agr`
+//! reuses whatever connection already exists for that name and never tears it
+//! down on this spawn's behalf).
 
 use crate::definition::{AgentDefinition, AgentMcpServerSpec, AgentSource};
 
+/// One converted per-agent MCP server config, paired with claude `PRn`'s
+/// `isNewlyCreated` flag.
+#[derive(Debug, Clone)]
+pub struct ScopedAgentMcpServer {
+    /// The agent-scoped (`ConfigScope::Agent`) or as-configured (by-name)
+    /// server config.
+    pub config: mcp::McpServerConfig,
+    /// `true` ⇒ built FRESH from an inline record spec: the caller must
+    /// CONNECT it (claude `Agr`'s `connectToServer`) and TEAR IT DOWN when
+    /// the subagent spawn exits. `false` ⇒ resolved BY NAME against an
+    /// existing config the caller already knows about: the caller reuses
+    /// whatever connection already exists (or connects it through the
+    /// ordinary shared path) and must NEVER disconnect it on this spawn's
+    /// behalf.
+    pub is_newly_created: bool,
+}
+
 /// Convert `def`'s frontmatter `mcpServers` into agent-scoped
-/// [`mcp::McpServerConfig`]s (claude `obs`).
+/// [`ScopedAgentMcpServer`]s (claude `PRn`, called once per entry by both
+/// `FWt` and `Agr`).
 ///
 /// `strict_plugin_only_mcp` mirrors `Y0("mcp")` — the managed
 /// `strictPluginOnlyCustomization` lock on the MCP slot. When set, agents from
@@ -20,8 +43,25 @@ use crate::definition::{AgentDefinition, AgentMcpServerSpec, AgentSource};
 /// the strict policy today (`StrictPluginOnlyPolicy::empty()`), so production
 /// callers pass `false`; the parameter keeps the gate 1:1 and testable.
 ///
+/// `strict_mcp_config` mirrors `rx()` — the `--strict-mcp-config` CLI flag.
+/// It gates ONLY the by-name (`ByName`) branch: a string spec resolves from
+/// disk config, which `--strict-mcp-config` explicitly excludes, so it is
+/// skipped with claude's exact copy rather than resolved.
+///
+/// `existing_configs` is searched (by `config.name`) to resolve a `ByName`
+/// entry (claude `Zx(r)` — "look up an existing configured server by name");
+/// callers pass whatever server list they already have in scope (the
+/// session's discovered/dynamic MCP configs for the main-thread-agent case,
+/// or the session's live server list for a subagent spawn). A name absent
+/// from it is logged + skipped, matching claude's `if(!_) return null` →
+/// `"[Agent: X] MCP server not found: <name>"`.
+///
 /// Skip rules, in claude's order per entry:
-/// - string entry (`ByName`) — silent skip;
+/// - string entry (`ByName`) under `--strict-mcp-config` — `MCP server '<name>'
+///   skipped: string specs resolve from disk config, which --strict-mcp-config
+///   ignores`;
+/// - string entry (`ByName`) not found in `existing_configs` — `MCP server not
+///   found: <name>`;
 /// - record with != 1 key — `Invalid MCP server spec: expected exactly one key`;
 /// - reserved server name (`BIt`) — `Skipping reserved MCP server name …`;
 /// - `type: sse-ide` / `ws-ide` — `Skipping internal-only MCP transport …`;
@@ -32,7 +72,9 @@ use crate::definition::{AgentDefinition, AgentMcpServerSpec, AgentSource};
 pub fn agent_mcp_specs_to_scoped_configs(
     def: &AgentDefinition,
     strict_plugin_only_mcp: bool,
-) -> Vec<mcp::McpServerConfig> {
+    strict_mcp_config: bool,
+    existing_configs: &[mcp::McpServerConfig],
+) -> Vec<ScopedAgentMcpServer> {
     if def.mcp_servers.is_empty() {
         return Vec::new();
     }
@@ -44,12 +86,41 @@ pub fn agent_mcp_specs_to_scoped_configs(
         );
         return Vec::new();
     }
-    let mut out: Vec<mcp::McpServerConfig> = Vec::new();
+    let mut out: Vec<ScopedAgentMcpServer> = Vec::new();
+    let mut upsert = |cfg: mcp::McpServerConfig, is_newly_created: bool| {
+        match out.iter_mut().find(|s| s.config.name == cfg.name) {
+            Some(slot) => *slot = ScopedAgentMcpServer { config: cfg, is_newly_created },
+            None => out.push(ScopedAgentMcpServer { config: cfg, is_newly_created }),
+        }
+    };
     for spec in &def.mcp_servers {
         let record = match spec {
-            // claude `typeof r === "string"` → by-name entries are resolved by
-            // the host, never materialized here.
-            AgentMcpServerSpec::ByName(_) => continue,
+            // claude `typeof r === "string"` (`PRn`): a by-name entry
+            // resolves from an EXISTING config rather than being built here.
+            AgentMcpServerSpec::ByName(name) => {
+                if strict_mcp_config {
+                    tracing::warn!(
+                        "[Agent: {}] MCP server '{}' skipped: string specs resolve from disk config, which --strict-mcp-config ignores",
+                        def.agent_type,
+                        name
+                    );
+                    continue;
+                }
+                match existing_configs.iter().find(|c| &c.name == name) {
+                    Some(cfg) => {
+                        upsert(cfg.clone(), false);
+                        continue;
+                    }
+                    None => {
+                        tracing::warn!(
+                            "[Agent: {}] MCP server not found: {}",
+                            def.agent_type,
+                            name
+                        );
+                        continue;
+                    }
+                }
+            }
             AgentMcpServerSpec::Record(map) => map,
         };
         if record.len() != 1 {
@@ -86,10 +157,7 @@ pub fn agent_mcp_specs_to_scoped_configs(
         // LAST-wins and keeps its original key position; the `Vec` stands in
         // for `t`'s insertion order.
         if let Some(cfg) = mcp::build_server_from_json_entry(name, raw, mcp::ConfigScope::Agent) {
-            match out.iter_mut().find(|c| c.name == cfg.name) {
-                Some(slot) => *slot = cfg,
-                None => out.push(cfg),
-            }
+            upsert(cfg, true);
         }
     }
     out
@@ -138,19 +206,71 @@ mod tests {
         AgentMcpServerSpec::Record(map)
     }
 
-    #[test]
-    fn empty_specs_yield_no_configs() {
-        let def = def_with_specs(vec![], AgentSource::Project);
-        assert!(agent_mcp_specs_to_scoped_configs(&def, false).is_empty());
+    /// Convenience wrapper over the production signature for tests that don't
+    /// care about `--strict-mcp-config` / by-name resolution.
+    fn convert(def: &AgentDefinition, strict_plugin_only_mcp: bool) -> Vec<ScopedAgentMcpServer> {
+        agent_mcp_specs_to_scoped_configs(def, strict_plugin_only_mcp, false, &[])
+    }
+
+    fn existing_stdio(name: &str, command: &str) -> mcp::McpServerConfig {
+        mcp::build_server_from_json_entry(
+            name,
+            &serde_json::json!({"command": command}),
+            mcp::ConfigScope::User,
+        )
+        .expect("well-formed stdio entry builds")
     }
 
     #[test]
-    fn by_name_entries_are_skipped() {
+    fn empty_specs_yield_no_configs() {
+        let def = def_with_specs(vec![], AgentSource::Project);
+        assert!(convert(&def, false).is_empty());
+    }
+
+    #[test]
+    fn by_name_entry_not_found_is_skipped() {
+        // claude `Zx(r)` returns nothing for an unknown name → `PRn` returns
+        // `null` → "[Agent: X] MCP server not found: <name>", not fatal to
+        // siblings.
         let def = def_with_specs(
             vec![AgentMcpServerSpec::ByName("slack".into())],
             AgentSource::Project,
         );
-        assert!(agent_mcp_specs_to_scoped_configs(&def, false).is_empty());
+        assert!(agent_mcp_specs_to_scoped_configs(&def, false, false, &[]).is_empty());
+    }
+
+    #[test]
+    fn by_name_entry_resolves_existing_config_as_not_newly_created() {
+        // claude `PRn`: `{name:r, config:_, isNewlyCreated:false}` — REUSE the
+        // existing config, do not stamp `scope:"agent"` or flag it as
+        // freshly connected (the caller must never tear it down on this
+        // spawn's behalf).
+        let existing = vec![existing_stdio("slack", "slack-mcp")];
+        let def = def_with_specs(
+            vec![AgentMcpServerSpec::ByName("slack".into())],
+            AgentSource::Project,
+        );
+        let cfgs = agent_mcp_specs_to_scoped_configs(&def, false, false, &existing);
+        assert_eq!(cfgs.len(), 1);
+        assert_eq!(cfgs[0].config.name, "slack");
+        assert!(!cfgs[0].is_newly_created, "resolved-by-name is NOT newly created");
+        assert_eq!(
+            cfgs[0].config.scope,
+            mcp::ConfigScope::User,
+            "the EXISTING config's scope is preserved verbatim, not overwritten to Agent"
+        );
+    }
+
+    #[test]
+    fn by_name_entry_is_skipped_under_strict_mcp_config_even_when_it_exists() {
+        // claude `PRn`: `if(rx()) return {skipped:"strict", name:r}` — checked
+        // BEFORE the by-name lookup, so an existing config is never consulted.
+        let existing = vec![existing_stdio("slack", "slack-mcp")];
+        let def = def_with_specs(
+            vec![AgentMcpServerSpec::ByName("slack".into())],
+            AgentSource::Project,
+        );
+        assert!(agent_mcp_specs_to_scoped_configs(&def, false, true, &existing).is_empty());
     }
 
     #[test]
@@ -162,12 +282,13 @@ mod tests {
             )],
             AgentSource::Project,
         );
-        let cfgs = agent_mcp_specs_to_scoped_configs(&def, false);
+        let cfgs = convert(&def, false);
         assert_eq!(cfgs.len(), 1);
-        assert_eq!(cfgs[0].name, "docs");
-        assert_eq!(cfgs[0].scope, mcp::ConfigScope::Agent);
+        assert_eq!(cfgs[0].config.name, "docs");
+        assert_eq!(cfgs[0].config.scope, mcp::ConfigScope::Agent);
+        assert!(cfgs[0].is_newly_created, "an inline record IS newly created");
         assert!(matches!(
-            &cfgs[0].spec,
+            &cfgs[0].config.spec,
             traits::McpTransportSpec::Stdio { command, .. } if command == "npx"
         ));
     }
@@ -181,10 +302,10 @@ mod tests {
             )],
             AgentSource::UserDefined,
         );
-        let cfgs = agent_mcp_specs_to_scoped_configs(&def, false);
+        let cfgs = convert(&def, false);
         assert_eq!(cfgs.len(), 1);
         assert!(matches!(
-            &cfgs[0].spec,
+            &cfgs[0].config.spec,
             traits::McpTransportSpec::Http { url, .. } if url == "https://mcp.example/api"
         ));
     }
@@ -197,7 +318,7 @@ mod tests {
         map.insert("a".into(), serde_json::json!({"command": "x"}));
         map.insert("b".into(), serde_json::json!({"command": "y"}));
         let def = def_with_specs(vec![AgentMcpServerSpec::Record(map)], AgentSource::Project);
-        assert!(agent_mcp_specs_to_scoped_configs(&def, false).is_empty());
+        assert!(convert(&def, false).is_empty());
     }
 
     #[test]
@@ -208,7 +329,7 @@ mod tests {
                 AgentSource::Project,
             );
             assert!(
-                agent_mcp_specs_to_scoped_configs(&def, false).is_empty(),
+                convert(&def, false).is_empty(),
                 "reserved name {reserved} must be skipped"
             );
         }
@@ -225,7 +346,7 @@ mod tests {
                 AgentSource::Project,
             );
             assert!(
-                agent_mcp_specs_to_scoped_configs(&def, false).is_empty(),
+                convert(&def, false).is_empty(),
                 "transport {ty} must be skipped"
             );
         }
@@ -240,9 +361,9 @@ mod tests {
             ],
             AgentSource::Project,
         );
-        let cfgs = agent_mcp_specs_to_scoped_configs(&def, false);
+        let cfgs = convert(&def, false);
         assert_eq!(cfgs.len(), 1);
-        assert_eq!(cfgs[0].name, "ok");
+        assert_eq!(cfgs[0].config.name, "ok");
     }
 
     #[test]
@@ -258,12 +379,12 @@ mod tests {
             ],
             AgentSource::Project,
         );
-        let cfgs = agent_mcp_specs_to_scoped_configs(&def, false);
+        let cfgs = convert(&def, false);
         assert_eq!(cfgs.len(), 2, "one config per name");
-        assert_eq!(cfgs[0].name, "docs");
-        assert_eq!(cfgs[1].name, "other");
+        assert_eq!(cfgs[0].config.name, "docs");
+        assert_eq!(cfgs[1].config.name, "other");
         assert!(
-            matches!(&cfgs[0].spec, traits::McpTransportSpec::Stdio { command, .. } if command == "second"),
+            matches!(&cfgs[0].config.spec, traits::McpTransportSpec::Stdio { command, .. } if command == "second"),
             "the LAST entry for a name wins"
         );
     }
@@ -279,7 +400,7 @@ mod tests {
         ] {
             let def = def_with_specs(specs(), src);
             assert!(
-                agent_mcp_specs_to_scoped_configs(&def, true).is_empty(),
+                convert(&def, true).is_empty(),
                 "{src:?} must be locked under strictPluginOnlyCustomization"
             );
         }
@@ -291,7 +412,7 @@ mod tests {
         ] {
             let def = def_with_specs(specs(), src);
             assert_eq!(
-                agent_mcp_specs_to_scoped_configs(&def, true).len(),
+                convert(&def, true).len(),
                 1,
                 "{src:?} is wke-exempt from the strict lock"
             );

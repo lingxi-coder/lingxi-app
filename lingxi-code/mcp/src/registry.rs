@@ -5039,9 +5039,16 @@ mod tests {
         assert_eq!(entry.version, crate::discovery_cache::CACHE_SCHEMA_VERSION);
         assert_eq!(entry.cache_key, cache_key);
         assert_eq!(entry.consecutive_refresh_failures, 0);
-        assert!(entry.capabilities.tools, "the mock declares the tools capability");
+        assert!(
+            entry.capabilities.tools,
+            "the mock declares the tools capability"
+        );
         assert_eq!(
-            entry.tools.iter().map(|t| t.tool_name.as_str()).collect::<Vec<_>>(),
+            entry
+                .tools
+                .iter()
+                .map(|t| t.tool_name.as_str())
+                .collect::<Vec<_>>(),
             vec!["alpha"],
             "the persisted entry must carry the ACTUAL discovered catalog"
         );
@@ -5190,7 +5197,10 @@ mod tests {
         let result = registry.connect(cfg).await;
         std::env::remove_var(crate::discovery_cache::ENV_ENABLED);
 
-        assert!(result.is_err(), "a tools/list failure must fail the connect");
+        assert!(
+            result.is_err(),
+            "a tools/list failure must fail the connect"
+        );
         let entry = match store.load(&cache_key) {
             crate::discovery_cache::EntryLookup::Found(entry) => entry,
             other => panic!("expected the seeded entry to survive, got {other:?}"),

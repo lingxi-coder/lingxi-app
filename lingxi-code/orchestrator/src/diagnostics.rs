@@ -270,7 +270,21 @@ fn check_telemetry_schema() -> DoctorCheck {
     //        (tengu_mcp_server_config_invalid / tengu_mcp_tools_listed /
     //        tengu_mcp_degraded) +14 plugin::NAMES
     //        (tengu_plugin_enabled_for_session and its 13 siblings) → 364.
-    let expected = 364;
+    // §11 discovery-cache wiring: +1 mcp::NAMES
+    //        (tengu_mcp_discovery_source) → 365.
+    //
+    // 🚨 THIS COUNT IS PINNED IN FOUR PLACES. They must move together, and
+    // they have now gone out of sync twice on the 2.1.251 backlog — this one
+    // is the easiest to miss because it lives in `orchestrator`, not
+    // `telemetry`, and it drives a USER-VISIBLE `/doctor` check rather than
+    // only a test:
+    //   1. telemetry/tests/event_name_completeness_test.rs  (the canonical one)
+    //   2. telemetry/tests/settings_schema_test.rs           (a duplicate)
+    //   3. telemetry/tests/mcp_schema_test.rs                (per-block: mcp::NAMES)
+    //   4. HERE
+    // Re-count against `mcp::NAMES.len()` / `plugin::NAMES.len()`; never paste
+    // the number a failing assertion printed.
+    let expected = 365;
     DoctorCheck {
         name: "telemetry-schema".to_string(),
         status: if actual == expected {

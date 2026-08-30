@@ -18,8 +18,8 @@ fn all_3_settings_event_names_are_locked() {
 }
 
 #[test]
-fn registry_is_exactly_364_entries() {
-    // Canonical count is pinned by event_name_completeness_test (364). Grep/Glob
+fn registry_is_exactly_365_entries() {
+    // Canonical count is pinned by event_name_completeness_test (365). Grep/Glob
     // emit NO telemetry (claude-code v2.1.183 emits no tengu_tool_grep_* /
     // tengu_tool_glob_* events): 6 fabricated tool names removed (353 → 347).
     // Strict-parity (2.1.195) then removed D1 tengu_tool_todo_write_* (3), D2
@@ -33,7 +33,13 @@ fn registry_is_exactly_364_entries() {
     // tengu_worktree_removed): 345 + 2 = 347. 2.1.251 byte-alignment B8
     // (telemetry-modules) added the mcp (+2) and plugin (+14) global-tail
     // blocks: 347 + 2 + 14 = 363. §20a/§20b wiring added tengu_mcp_degraded
-    // to the mcp block (+1): 363 + 1 = 364. Re-counted by hand, not pasted
-    // from a failing assertion.
-    assert_eq!(telemetry::tengu::ALL_EVENT_NAMES.len(), 364);
+    // to the mcp block (+1): 363 + 1 = 364. §11 discovery-cache wiring added
+    // tengu_mcp_discovery_source to the mcp block (+1): 364 + 1 = 365.
+    // Re-counted by hand, not pasted from a failing assertion.
+    //
+    // NOTE: this assertion is a DUPLICATE of the one in
+    // event_name_completeness_test. Both must move together — the §11 change
+    // updated only that one and this file went red, which is the third time a
+    // count-lock site was missed on this backlog.
+    assert_eq!(telemetry::tengu::ALL_EVENT_NAMES.len(), 365);
 }

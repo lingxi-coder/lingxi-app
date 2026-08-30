@@ -5,9 +5,16 @@ use telemetry::tengu::mcp::{
 };
 
 #[test]
-fn all_three_mcp_event_names_are_locked() {
-    let names: &[&str] = &[mcp::SERVER_CONFIG_INVALID, mcp::TOOLS_LISTED, mcp::DEGRADED];
-    assert_eq!(names.len(), 3);
+fn all_four_mcp_event_names_are_locked() {
+    let names: &[&str] = &[
+        mcp::SERVER_CONFIG_INVALID,
+        mcp::TOOLS_LISTED,
+        mcp::DEGRADED,
+        // §11 — emitted on a cache hit (with `entryAgeMs`) and, per oracle
+        // `Ko` @182515145, on the `Ko`-true miss reasons only (without it).
+        mcp::DISCOVERY_SOURCE,
+    ];
+    assert_eq!(names.len(), 4);
     for n in names {
         assert!(n.starts_with("tengu_mcp_"));
     }

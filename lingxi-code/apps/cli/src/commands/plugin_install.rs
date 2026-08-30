@@ -1753,8 +1753,24 @@ pub async fn run_uninstall_secure(
         )?;
         message.push('\n');
         message.push_str(&prune_message);
+    } else {
+        // §22 (oracle `QWn`): without `--prune`, proactively point out any
+        // auto-installed dependency this removal just orphaned, instead of
+        // leaving it silently stranded until the user happens to run
+        // `plugin prune` on their own.
+        message.push_str(&uninstall_orphan_suffix(plugins_dir, scope_value, &project));
     }
     Ok(message)
+}
+
+/// The trailing text a non-`--prune` `plugin uninstall` appends (oracle
+/// `QWn`): any auto-installed dependency the removal just left unreachable,
+/// or `""` when there is nothing to report. Reads the just-updated installed
+/// DB, so it reflects the POST-removal dependency graph.
+fn uninstall_orphan_suffix(plugins_dir: &Path, scope: Scope, project: &Option<String>) -> String {
+    let db = load_installed(plugins_dir);
+    let orphans = crate::commands::plugin_prune::scan_orphans(&db, scope, project);
+    crate::commands::plugin_prune::orphan_notice(&orphans, scope.label())
 }
 
 /// Validate a `plugin update` `--scope`. Unlike the install family, update's
@@ -3114,6 +3130,52 @@ mod tests {
             .plugins
             .join("cache/mymkt/hello/1.2.3/commands/hi.md")
             .exists());
+    }
+
+    /// §22 (oracle `QWn`): a non-`--prune` uninstall's message gains a
+    /// trailing notice naming any auto-installed dependency the DB shows as
+    /// newly unreachable — here modeled directly against an installed DB
+    /// carrying only the orphan (nothing manual reaches it).
+    #[test]
+    fn uninstall_orphan_suffix_reports_a_newly_orphaned_dependency() {
+        let e = env();
+        let dep_path = e.plugins.join("cache/mymkt/dep/1.0.0");
+        std::fs::create_dir_all(dep_path.join(branding::PLUGIN_MANIFEST_DIR)).unwrap();
+        std::fs::write(
+            dep_path.join(branding::PLUGIN_MANIFEST_DIR).join("plugin.json"),
+            r#"{"name":"dep","version":"1.0.0"}"#,
+        )
+        .unwrap();
+        write_installed(
+            &e.plugins,
+            &serde_json::json!({
+                "version": 2,
+                "plugins": {
+                    "dep@mymkt": [{
+                        "scope": "user",
+                        "installPath": dep_path.display().to_string(),
+                        "version": "1.0.0",
+                        "installedAt": "2026-01-01T00:00:00.000Z",
+                        "lastUpdated": "2026-01-01T00:00:00.000Z",
+                        "auto": true,
+                    }]
+                }
+            }),
+        )
+        .unwrap();
+
+        let suffix = uninstall_orphan_suffix(&e.plugins, Scope::User, &None);
+        assert_eq!(
+            suffix,
+            "\n1 auto-installed dependency no longer needed: dep. Run `lingxi-cli plugin prune` \
+             to remove."
+        );
+    }
+
+    #[test]
+    fn uninstall_orphan_suffix_is_empty_with_no_orphans() {
+        let e = env();
+        assert_eq!(uninstall_orphan_suffix(&e.plugins, Scope::User, &None), "");
     }
 
     #[test]

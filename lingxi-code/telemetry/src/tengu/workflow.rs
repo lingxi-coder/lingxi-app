@@ -2,7 +2,7 @@
 //!
 //! These are NOT added to the count-locked `ALL_EVENT_NAMES` / `tengu_events.json`
 //! fixture (that snapshot is from an OLDER claude event set; adding these would
-//! break the 347-entry byte-parity lock). They live here for string-lock testing,
+//! break the 363-entry byte-parity lock). They live here for string-lock testing,
 //! mirroring how `agent::AGENT_TOOL_NAMES` is kept apart.
 
 /// `tengu_workflow_launched` — workflow invoked.

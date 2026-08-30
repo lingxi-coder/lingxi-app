@@ -93,7 +93,7 @@ fn marketplace_of(id: &str) -> Option<&str> {
     id.split_once('@').map(|(_, marketplace)| marketplace)
 }
 
-fn marketplace_source(
+pub(crate) fn marketplace_source(
     home: &Path,
     marketplace: &str,
 ) -> Option<plugin_policy::MarketplaceSourceIdentity> {
@@ -107,7 +107,7 @@ fn marketplace_source(
 
 /// The `enabledPlugins` map from a scope's settings file (missing key / missing
 /// / malformed file ⇒ empty map).
-fn read_enabled(path: &Path) -> Map<String, Value> {
+pub(crate) fn read_enabled(path: &Path) -> Map<String, Value> {
     read_settings_map(path)
         .ok()
         .and_then(|m| m.get("enabledPlugins").and_then(Value::as_object).cloned())

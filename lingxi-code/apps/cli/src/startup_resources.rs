@@ -255,10 +255,56 @@ pub(crate) async fn download_plugin_archive(
         .map_err(|e| format!("create plugin extraction directory: {e}"))?;
     plugin::unpack_plugin_archive(&bytes, dest)
         .map_err(|e| format!("invalid plugin archive `{url}`: {e}"))?;
+    // §22: an archive that unpacked cleanly but held nothing but macOS zip
+    // cruft (a bare `__MACOSX/` sibling, or an archive with zero entries) is
+    // its own distinct failure — the oracle's exact copy names the URL and
+    // tells the author what to fix, rather than falling through to
+    // `ensure_plugin_manifest`'s generic "manifest invalid" error below.
+    if !archive_has_plugin_files(dest) {
+        return Err(format!(
+            "Plugin archive from {url} contained no plugin files. The archive was not \
+             installed. Verify the URL serves a zip of the plugin contents."
+        ));
+    }
     let plugin_root = unwrap_plugin_root(dest)?;
     plugin::ensure_plugin_manifest(&plugin_root)
         .map_err(|e| format!("invalid plugin manifest `{url}`: {e}"))?;
     Ok(plugin_root)
+}
+
+/// The oracle's own filter for "did this archive extract anything besides
+/// macOS zip cruft" (`!B.startsWith("__MACOSX/") && bc(B)!==".DS_Store"`,
+/// applied to every extracted entry). Recurses through the whole tree — a
+/// legitimate `__MACOSX/` sibling can appear at any depth, not just the
+/// archive root.
+fn archive_has_plugin_files(dir: &Path) -> bool {
+    fn walk(dir: &Path, at_root: bool, found: &mut bool) {
+        if *found {
+            return;
+        }
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            if *found {
+                return;
+            }
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else { continue };
+            if at_root && name == "__MACOSX" {
+                continue;
+            }
+            let is_dir = entry.file_type().map(|kind| kind.is_dir()).unwrap_or(false);
+            if is_dir {
+                walk(&entry.path(), false, found);
+            } else if name != ".DS_Store" {
+                *found = true;
+            }
+        }
+    }
+    let mut found = false;
+    walk(dir, true, &mut found);
+    found
 }
 
 fn has_plugin_manifest(root: &Path) -> bool {
@@ -607,5 +653,86 @@ mod tests {
             std::fs::read_to_string(plugin_root.join(branding::PLUGIN_MANIFEST_DIR).join("plugin.json"))
                 .unwrap();
         assert!(manifest.contains("archive-demo"));
+    }
+
+    // --- §22: "contained no plugin files" ------------------------------
+
+    /// A zip with zero entries at all.
+    fn build_empty_zip() -> Vec<u8> {
+        let mut buf = Vec::new();
+        zip::ZipWriter::new(std::io::Cursor::new(&mut buf))
+            .finish()
+            .unwrap();
+        buf
+    }
+
+    /// A zip holding only the macOS Archive Utility's cruft — a `__MACOSX/`
+    /// resource-fork sibling and a stray `.DS_Store` — nothing an
+    /// `ensure_plugin_manifest` scan should ever treat as real content.
+    fn build_macosx_only_zip() -> Vec<u8> {
+        use std::io::Write;
+        let mut buf = Vec::new();
+        {
+            let mut writer = zip::ZipWriter::new(std::io::Cursor::new(&mut buf));
+            writer
+                .start_file("__MACOSX/._plugin.json", zip::write::SimpleFileOptions::default())
+                .unwrap();
+            writer.write_all(b"resource fork junk").unwrap();
+            writer
+                .start_file(".DS_Store", zip::write::SimpleFileOptions::default())
+                .unwrap();
+            writer.write_all(b"finder junk").unwrap();
+            writer.finish().unwrap();
+        }
+        buf
+    }
+
+    #[test]
+    fn archive_has_plugin_files_is_true_for_a_real_plugin() {
+        let dest = tempfile::tempdir().unwrap();
+        plugin::unpack_plugin_archive(&build_plugin_zip(), dest.path()).unwrap();
+        assert!(archive_has_plugin_files(dest.path()));
+    }
+
+    #[test]
+    fn archive_has_plugin_files_is_false_for_an_empty_archive() {
+        let dest = tempfile::tempdir().unwrap();
+        plugin::unpack_plugin_archive(&build_empty_zip(), dest.path()).unwrap();
+        assert!(!archive_has_plugin_files(dest.path()));
+    }
+
+    #[test]
+    fn archive_has_plugin_files_is_false_for_macosx_cruft_only() {
+        let dest = tempfile::tempdir().unwrap();
+        plugin::unpack_plugin_archive(&build_macosx_only_zip(), dest.path()).unwrap();
+        assert!(!archive_has_plugin_files(dest.path()));
+    }
+
+    /// End-to-end: downloading an archive with no real content is refused
+    /// with the oracle's exact copy, naming the URL, before
+    /// `ensure_plugin_manifest`'s generic "invalid plugin manifest" error
+    /// ever gets a chance to fire.
+    #[tokio::test]
+    async fn download_plugin_archive_rejects_a_content_free_zip_with_the_oracle_copy() {
+        let zip_bytes = build_macosx_only_zip();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(respond_once(listener, zip_bytes));
+        let dest = tempfile::tempdir().unwrap();
+        let target = dest.path().join("out");
+        let url = format!("http://{addr}/plugin.zip");
+
+        let error = download_plugin_archive(&url, None, &target)
+            .await
+            .expect_err("a content-free archive must be refused");
+        server.await.unwrap();
+
+        assert_eq!(
+            error,
+            format!(
+                "Plugin archive from {url} contained no plugin files. The archive was not \
+                 installed. Verify the URL serves a zip of the plugin contents."
+            )
+        );
     }
 }

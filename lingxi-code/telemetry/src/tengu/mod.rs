@@ -20,11 +20,18 @@ pub mod ignore_pattern;
 /// `ALL_EVENT_NAMES` — separate from the count-locked event set; kept here for
 /// string-lock testing only, mirroring `workflow`).
 pub mod kairos;
+/// `tengu_mcp_*` analytics-event schemas (2.1.251 §18/§20b). Only the two
+/// confirmed real events; the ~100 other `tengu_mcp_*` binary strings are
+/// Statsig feature-flag names, not events — see the module doc.
+pub mod mcp;
 pub mod memory;
 pub mod migration;
 pub mod oauth;
 pub mod orchestrator;
 pub mod permission;
+/// `tengu_plugin_*` event schemas (2.1.251 §20c — the port's telemetry
+/// catalogue had no plugin module at all before this).
+pub mod plugin;
 /// Queue-operation telemetry event names (NOT in `ALL_EVENT_NAMES` — these are
 /// LingXi-native `lingxi_queue_*` observability events, kept apart from the
 /// count-locked `tengu_*` set; mirrors `workflow`).
@@ -96,6 +103,29 @@ pub const ALL_EVENT_NAMES: &[&str] = {
     // left empty `""` slots → duplicate/bad-prefix failures), derive TOTAL from
     // the actual per-block `NAMES.len()` so the array size ALWAYS equals the
     // number of names concat_all appends, in the SAME block order.
+    // 2.1.251 byte-alignment B8 (telemetry-modules): two new GLOBAL-TAIL
+    // blocks, appended after oauth::AWS_AUTH_NAMES.
+    //   - mcp::NAMES (+3 — tengu_mcp_server_config_invalid,
+    //     tengu_mcp_tools_listed, tengu_mcp_degraded).
+    //     ⚠️ An earlier revision of this comment claimed these were "the only
+    //     two confirmed real `tengu_mcp_*` ANALYTICS events at the oracle —
+    //     everything else with that prefix is a Statsig feature-flag name".
+    //     THAT CLAIM WAS FALSE and is retracted: scanning 2.1.251 for the
+    //     analytics-bus call shape `s("tengu_mcp_<name>"` returns 53 distinct
+    //     event names (tengu_mcp_server_connection_succeeded/_failed,
+    //     _list_changed, _listen_reopen, _tripwire, _sdk_generation, the four
+    //     _oauth_flow_* , _registry_fetch, _elicitation_shown/_response,
+    //     _discovery_source, _first_party_auto_auth, …), several of them
+    //     corroborated by the oracle's own event allowlist at @156122853.
+    //     This block ports 3 of 53; the other 50 are an OPEN gap. It IS true
+    //     that many `tengu_mcp_*` STRINGS are Statsig flags, but that does
+    //     not make the event set two. See mcp.rs's module doc.
+    //     347 + 3 = 350.
+    //   - plugin::NAMES (+14 — tengu_plugin_enabled_for_session and its 13
+    //     siblings; the port had NO plugin telemetry module before this).
+    //     ⚠️ SUBSTRATE ONLY: none of the 14 has a production emit site, so
+    //     §20c is OPEN. See plugin.rs's module doc.
+    //     350 + 14 = 364.
     const TOTAL: usize = api::NAMES.len()
         + agent::NAMES.len()
         + session::NAMES.len()
@@ -112,7 +142,9 @@ pub const ALL_EVENT_NAMES: &[&str] = {
         + migration::NAMES.len()
         + permission::NAMES.len()
         + coordinator::NAMES.len()
-        + oauth::AWS_AUTH_NAMES.len();
+        + oauth::AWS_AUTH_NAMES.len()
+        + mcp::NAMES.len()
+        + plugin::NAMES.len();
     const fn concat_all() -> [&'static str; TOTAL] {
         let mut out: [&'static str; TOTAL] = [""; TOTAL];
         let mut idx = 0;
@@ -231,6 +263,24 @@ pub const ALL_EVENT_NAMES: &[&str] = {
         let mut i = 0;
         while i < oauth::AWS_AUTH_NAMES.len() {
             out[idx] = oauth::AWS_AUTH_NAMES[i];
+            idx += 1;
+            i += 1;
+        }
+        // 2.1.251 byte-alignment B8: MCP analytics-event block (2 events —
+        // tengu_mcp_server_config_invalid, tengu_mcp_tools_listed) appended
+        // after the AWS auth-refresh block.
+        let mut i = 0;
+        while i < mcp::NAMES.len() {
+            out[idx] = mcp::NAMES[i];
+            idx += 1;
+            i += 1;
+        }
+        // 2.1.251 byte-alignment B8: plugin event block (14 events —
+        // tengu_plugin_enabled_for_session and 13 siblings) appended after
+        // the MCP block.
+        let mut i = 0;
+        while i < plugin::NAMES.len() {
+            out[idx] = plugin::NAMES[i];
             idx += 1;
             i += 1;
         }

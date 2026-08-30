@@ -3,7 +3,7 @@
 //!
 //! Like [`workflow`](crate::tengu::workflow) these are NOT added to the
 //! count-locked `ALL_EVENT_NAMES` / `tengu_events.json` fixture (that snapshot is
-//! from an OLDER claude event set; adding these would break the 347-entry
+//! from an OLDER claude event set; adding these would break the 363-entry
 //! byte-parity lock). They live here for string-lock testing only.
 //!
 //! Two families:

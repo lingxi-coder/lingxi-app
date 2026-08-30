@@ -414,10 +414,21 @@ fn meta_validator() -> Option<&'static (boon::Schemas, boon::SchemaIndex)> {
         let mut schemas = Schemas::new();
         let mut compiler = Compiler::new();
         let Ok(sch) = compiler.compile(META_SCHEMA_URL, &mut schemas) else {
-            // oracle `qr()`'s `M===null` arm, verbatim (@182172867).
+            // oracle `qr()`'s `M===null` arm, verbatim (@182172867):
+            // `n("MCP: draft 2020-12 meta-validator unavailable — tool
+            // schema checks fail open",{level:"warn"}),
+            // s("tengu_mcp_degraded",{reason:w("schema_validator_unavailable")})`.
             tracing::warn!(
                 "MCP: draft 2020-12 meta-validator unavailable \u{2014} tool schema checks fail open"
             );
+            telemetry::emit_mcp_degraded(&telemetry::tengu::mcp::DegradedPayload {
+                reason: telemetry::tengu::mcp::DegradedReason::SchemaValidatorUnavailable,
+                transport_type: None,
+                normalized_count: None,
+                skipped_count: None,
+                kept_count: None,
+                mcp_server_name: None,
+            });
             return None;
         };
         Some((schemas, sch))
@@ -473,6 +484,35 @@ pub struct ToolSchemaDecision {
     /// the Anthropic API; log a warning (oracle: "…would be rejected…;
     /// requests that include it may fail").
     pub warning: Option<String>,
+    /// The tool's schema was flattened — the oracle's `x++`
+    /// (`ToolSchemaNormalized`) counter.
+    ///
+    /// **This is INDEPENDENT of [`Self::classification`], because the oracle's
+    /// two counters are independent.** `yn`'s flatMap body (@182317450) does
+    ///
+    /// ```text
+    /// else if(pe.outcome==="normalized"&&U){ x++; …; ie={...E,inputSchema:pe.schema,…} }
+    /// …
+    /// let le=qrt(ie.inputSchema);
+    /// if(le.valid)return[ie];
+    /// if(!ee){ if(le.check==="meta")F++; else X++; …; return[ie] }
+    /// if(le.check==="meta")_e++; else xe++;
+    /// ```
+    ///
+    /// — the `x++` arm FALLS THROUGH into the validity check, so a tool that
+    /// is normalized and then fails validation increments `x` *and* one of
+    /// `_e`/`xe`/`F`/`X`, and the oracle fires TWO `tengu_mcp_degraded`
+    /// events for it. Collapsing both into a single `classification` (as an
+    /// earlier revision did) silently under-counted `normalizedCount` — to
+    /// zero, on a server where every normalized tool also failed validity.
+    pub normalized: bool,
+    /// The TERMINAL `tengu_mcp_degraded` classification — the validity or
+    /// drop outcome — or `None` for a schema-valid tool. Never
+    /// `ToolSchemaNormalized`; that bucket is [`Self::normalized`], for the
+    /// reason spelled out there. The caller aggregates both per server and
+    /// fires one [`telemetry::tengu::mcp::DEGRADED`] event per nonzero
+    /// bucket, NOT one per tool.
+    pub classification: Option<telemetry::tengu::mcp::DegradedReason>,
 }
 
 /// Process one tool's `inputSchema` (oracle's `M.flatMap` body inside `yn`,
@@ -488,6 +528,8 @@ pub struct ToolSchemaDecision {
 /// …"/"Tool … input schema …" wrapper text).
 #[must_use]
 pub fn decide_tool_schema(server_url: Option<&str>, schema: &Value) -> ToolSchemaDecision {
+    use telemetry::tengu::mcp::DegradedReason;
+
     let normalize_gate = gate_enabled(FLAG_NORMALIZE_ROOT_COMBINATORS, server_url);
     let drop_gate = gate_enabled(FLAG_DROP_INVALID_TOOL_SCHEMAS, server_url);
 
@@ -505,6 +547,8 @@ pub fn decide_tool_schema(server_url: Option<&str>, schema: &Value) -> ToolSchem
                     combinators.join("/")
                 )),
                 warning: None,
+                normalized: false,
+                classification: Some(DegradedReason::ToolSchemaNormalizeGated),
             };
         }
         RootCombinatorOutcome::Drop(reason) => {
@@ -513,9 +557,19 @@ pub fn decide_tool_schema(server_url: Option<&str>, schema: &Value) -> ToolSchem
                 description_note: None,
                 drop_reason: Some(reason),
                 warning: None,
+                normalized: false,
+                classification: Some(DegradedReason::ToolSchemaUnsupported),
             };
         }
     };
+    // Reaching here with `description_note.is_some()` means the flatten DID
+    // apply (the `Normalized { .. } if normalize_gate` arm above) — the
+    // oracle's `x++` counter (`ToolSchemaNormalized`) fires unconditionally
+    // for that arm, before the schema-validity check even runs, and the arm
+    // FALLS THROUGH into that check rather than returning. So `normalized`
+    // rides out on EVERY arm below, including the two `Err` ones: see
+    // `ToolSchemaDecision::normalized` for the oracle disassembly.
+    let normalized = description_note.is_some();
 
     match check_schema_validity(&working_schema) {
         Ok(()) => ToolSchemaDecision {
@@ -523,8 +577,14 @@ pub fn decide_tool_schema(server_url: Option<&str>, schema: &Value) -> ToolSchem
             description_note,
             drop_reason: None,
             warning: None,
+            normalized,
+            classification: None,
         },
         Err(detail) => {
+            // oracle: `le.check==="meta"` (the meta-schema validator failed)
+            // vs. everything else (the property-key regex failed) — see
+            // `check_schema_validity`'s early-return shape.
+            let is_property_key = detail.starts_with("property key ");
             if drop_gate {
                 ToolSchemaDecision {
                     schema: working_schema,
@@ -533,11 +593,23 @@ pub fn decide_tool_schema(server_url: Option<&str>, schema: &Value) -> ToolSchem
                         "its input schema would be rejected by the Anthropic API ({detail})"
                     )),
                     warning: None,
+                    normalized,
+                    classification: Some(if is_property_key {
+                        DegradedReason::ToolPropertyKeyInvalid
+                    } else {
+                        DegradedReason::ToolSchemaInvalid
+                    }),
                 }
             } else {
                 ToolSchemaDecision {
                     schema: working_schema,
                     description_note,
+                    normalized,
+                    classification: Some(if is_property_key {
+                        DegradedReason::ToolPropertyKeyInvalidGated
+                    } else {
+                        DegradedReason::ToolSchemaInvalidGated
+                    }),
                     drop_reason: None,
                     warning: Some(format!(
                         "input schema would be rejected by the Anthropic API ({detail}); requests that include it may fail"
@@ -601,6 +673,112 @@ mod tests {
             FLAG_DROP_INVALID_TOOL_SCHEMAS,
             "tengu_mcp_drop_invalid_tool_schemas"
         );
+    }
+
+    /// Oracle `yn`'s `x++` arm FALLS THROUGH into the schema-validity check,
+    /// so a tool that is normalized AND then fails validity increments TWO
+    /// counters and fires TWO `tengu_mcp_degraded` events. An earlier
+    /// revision collapsed both into one `Option<DegradedReason>`: the `Err`
+    /// arms overwrote the classification with the invalid variant and dropped
+    /// the normalize tally on the floor, so `tool_schema_normalized` never
+    /// fired for such a server and `normalizedCount` silently under-reported
+    /// (to ZERO, on a server where every normalized tool also failed).
+    ///
+    /// ## Why the co-occurrence is reached through a CARRIED root key
+    ///
+    /// The review that raised this proposed a flattened schema failing the
+    /// PROPERTY-KEY regex. That repro is impossible — at this port and at the
+    /// oracle alike. Both merges filter invalid keys out while merging:
+    /// `merge_properties` tests `property_key_regex().is_match(k)`, and the
+    /// oracle's `Wrt` (@182171131) does the same with
+    /// `a=(f)=>{…if(O.test(m)&&!(m in r)&&He(_))r[m]=_}`. A flattened schema
+    /// therefore never CONTAINS a bad property key, so
+    /// `tool_schema_normalized` + `tool_property_key_invalid` cannot co-occur.
+    ///
+    /// The reachable co-occurrence is the META branch. `CARRIED_ROOT_KEYS`
+    /// (oracle `rt`) copies `$defs` / `definitions` / `$schema` /
+    /// `additionalProperties` / `description` / `title` from the ORIGINAL
+    /// schema into the flattened one verbatim, unvalidated. A meta-invalid
+    /// value among them survives the flatten and then fails `qrt` with
+    /// `check === "meta"` — the oracle's `x++` AND `_e++` (drop gate on) or
+    /// `x++` AND `F++` (gate off). `additionalProperties: 5` is such a value:
+    /// the 2020-12 meta-schema requires a schema (object or boolean) there.
+    #[test]
+    fn a_normalized_tool_that_then_fails_meta_validity_reports_both_buckets() {
+        let _g = lock();
+        clear_flags();
+        telemetry::test_set_flag_list(FLAG_NORMALIZE_ROOT_COMBINATORS, vec!["*".to_string()]);
+        telemetry::test_set_flag_list(FLAG_DROP_INVALID_TOOL_SCHEMAS, vec!["*".to_string()]);
+
+        let schema = json!({
+            "anyOf": [{"type": "object", "properties": {"ok": {"type": "string"}}}],
+            "additionalProperties": 5
+        });
+        let decision = decide_tool_schema(None, &schema);
+
+        assert!(
+            decision.normalized,
+            "the flatten DID apply (oracle `x++`), so the normalize bucket must be tallied \
+             even though the flattened schema then failed meta-validation"
+        );
+        assert_eq!(
+            decision.classification,
+            Some(telemetry::tengu::mcp::DegradedReason::ToolSchemaInvalid),
+            "the terminal outcome is still the meta failure (oracle `_e++`, drop gate on)"
+        );
+        assert!(
+            decision.drop_reason.is_some(),
+            "drop gate is ON, so the tool is dropped"
+        );
+        clear_flags();
+    }
+
+    /// The same co-occurrence with the drop gate OFF: oracle `x++` AND `F++`
+    /// (`tool_schema_invalid_gated`, `keptCount`).
+    #[test]
+    fn a_normalized_tool_kept_with_a_meta_warning_still_reports_the_normalize_bucket() {
+        let _g = lock();
+        clear_flags();
+        telemetry::test_set_flag_list(FLAG_NORMALIZE_ROOT_COMBINATORS, vec!["*".to_string()]);
+
+        let schema = json!({
+            "anyOf": [{"type": "object", "properties": {"ok": {"type": "string"}}}],
+            "additionalProperties": 5
+        });
+        let decision = decide_tool_schema(None, &schema);
+
+        assert!(decision.normalized, "oracle `x++` still fires");
+        assert_eq!(
+            decision.classification,
+            Some(telemetry::tengu::mcp::DegradedReason::ToolSchemaInvalidGated),
+            "oracle `F++` — kept with a warning"
+        );
+        assert!(decision.drop_reason.is_none(), "drop gate is OFF, tool kept");
+        clear_flags();
+    }
+
+    /// The companion guard: `classification` must never carry
+    /// `ToolSchemaNormalized` any more (that bucket moved to `normalized`),
+    /// or the caller would double-count a normalized-and-valid tool.
+    #[test]
+    fn a_normalized_but_valid_tool_reports_only_the_normalize_bucket() {
+        let _g = lock();
+        clear_flags();
+        telemetry::test_set_flag_list(FLAG_NORMALIZE_ROOT_COMBINATORS, vec!["*".to_string()]);
+
+        let schema = json!({
+            "anyOf": [{"type": "object", "properties": {"ok": {"type": "string"}}}]
+        });
+        let decision = decide_tool_schema(None, &schema);
+
+        assert!(decision.normalized, "the flatten applied");
+        assert_eq!(
+            decision.classification, None,
+            "a schema-valid tool has no TERMINAL classification; the normalize tally lives \
+             on `normalized` alone so the caller cannot count it twice"
+        );
+        assert!(decision.drop_reason.is_none());
+        clear_flags();
     }
 
     /// The gate must resolve through the REAL flag reader under the oracle's

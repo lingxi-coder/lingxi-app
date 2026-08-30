@@ -56,6 +56,8 @@ pub mod raw_conn;
 pub mod registry;
 pub mod server_gate;
 pub mod tool_schema;
+#[cfg(test)]
+mod tracing_capture;
 pub mod xaa;
 pub mod xaa_idp;
 

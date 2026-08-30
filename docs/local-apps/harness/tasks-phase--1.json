@@ -123,7 +123,7 @@
       "deps": [
         "P-1.1"
       ],
-      "notes": "The map is at workflow_support.rs:1286-1290 at lap/baseline. Anchor on the symbol, never the line."
+      "notes": "The map is at workflow_support.rs:1286-1290 at lap/baseline. Anchor on the symbol, never the line.\n\nTHREE OBSERVATIONS FROM P-1.1'S VERIFICATION — for this task, not defects in P-1.1.\n1. ALL_BUILD_TARGETS is a hardcoded [LocalAppBuildTarget; 5]. A new variant DOES hard-error in expected_binding's wildcard-free match (proven: adding a 6th gave error[E0004] at both local_app_plugin_binding.rs:119 and workflow_support.rs:1192), but filling in that arm alone compiles and passes — nothing ties the array length to the variant count, so the new mapping would ship unexercised. If this task reshapes the routing, tie iteration to the enum.\n2. The `is pinned to runtime profile {family}, which` clause is asserted by nothing. All four refusal assertions check the app id plus the ordered `must use ...; refusing caller-selected workflow ...` fragment, so dropping the family from the message leaves the suite green. Diagnostic quality, not security content — but the binding's doc claims the family is preserved and that claim is unpinned.\n3. `{app_id:?}` vs `{app_id}` is unpinned; contains(\"demo1234\") passes either way, so the debug quoting could silently become plain. Cosmetic."
     },
     {
       "id": "P-1.4",

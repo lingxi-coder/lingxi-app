@@ -66,6 +66,8 @@ pub mod local_apps_tools;
 mod local_apps_bridge;
 
 #[cfg(feature = "uniffi")]
+mod local_app_plugin_binding;
+#[cfg(feature = "uniffi")]
 mod local_app_runtime_profiles;
 #[cfg(feature = "uniffi")]
 mod local_apps_build;

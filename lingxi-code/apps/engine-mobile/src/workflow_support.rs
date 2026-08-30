@@ -1176,6 +1176,28 @@ fn apply_materialized_local_app_collections_with_provenance(
     )
 }
 
+/// The single Local App build workflow authorized for a build target.
+///
+/// This is the map `apply_materialized_local_app_collections_with_identity`
+/// enforces below: it is the "one place a build target maps to its required
+/// workflow id" the component-literal allowlist documents. Phase -1 P-1.1
+/// wraps its output in a typed handle (`local_app_plugin_binding`) so the
+/// seam below stops comparing raw strings itself; P-1.3 is expected to
+/// remove this map in favor of typed routing throughout — this function is
+/// deliberately still exactly the pre-Phase -1 match, moved rather than
+/// rewritten, so that removal has one obvious place to happen.
+pub(crate) fn required_workflow_id_for(
+    build_target: crate::local_apps_build::LocalAppBuildTarget,
+) -> &'static str {
+    match build_target {
+        crate::local_apps_build::LocalAppBuildTarget::ReactDomR1 => "local-app-build",
+        crate::local_apps_build::LocalAppBuildTarget::Canvas2dR1
+        | crate::local_apps_build::LocalAppBuildTarget::Three3dR1
+        | crate::local_apps_build::LocalAppBuildTarget::Phaser2dR1
+        | crate::local_apps_build::LocalAppBuildTarget::Babylon3dR1 => "local-canvas-build",
+    }
+}
+
 fn apply_materialized_local_app_collections_with_identity(
     app_data_root: &std::path::Path,
     spec: &mut tool_workflow::WorkflowLaunchSpec,
@@ -1282,19 +1304,15 @@ fn apply_materialized_local_app_collections_with_identity(
             "local-app build workflow requires app {app_id:?} to have a verified dependency snapshot"
         )));
     }
-    let required_workflow_id = match build_target {
-        crate::local_apps_build::LocalAppBuildTarget::ReactDomR1 => "local-app-build",
-        crate::local_apps_build::LocalAppBuildTarget::Canvas2dR1
-        | crate::local_apps_build::LocalAppBuildTarget::Three3dR1
-        | crate::local_apps_build::LocalAppBuildTarget::Phaser2dR1
-        | crate::local_apps_build::LocalAppBuildTarget::Babylon3dR1 => "local-canvas-build",
-    };
-    if launched_workflow_id != required_workflow_id {
-        return Err(tool_workflow::WorkflowLaunchError(format!(
-            "app {app_id:?} is pinned to runtime profile {}, which must use {required_workflow_id}; refusing caller-selected workflow {launched_workflow_id}",
-            binding.family
-        )));
-    }
+    // The Host consumes a typed handle rather than picking or comparing a
+    // workflow name itself: the binding resolves the build target's
+    // authorized workflow and enforces it against the caller's selection,
+    // keeping the pre-Phase -1 refusal semantics (same app id, family, and
+    // both workflow ids named on mismatch) behind a composition seam instead
+    // of an inline string comparison.
+    let plugin_binding =
+        crate::local_app_plugin_binding::LocalAppPluginBinding::resolve(build_target);
+    plugin_binding.enforce(app_id, binding.family, &launched_workflow_id)?;
     object.insert(
         "runtime_profile".to_string(),
         serde_json::json!({
@@ -2259,6 +2277,110 @@ mod run_id_tests {
                     .and_then(serde_json::Value::as_str),
                 Some(family.as_str()),
                 "runtime profile must remain visible to the routed specialist"
+            );
+        }
+    }
+
+    // Characterization tests for the build-target → required-workflow
+    // REFUSAL (plan v3 Phase -1, P-1.1). Before this change nothing in the
+    // workspace pinned this behaviour — a grep for `refusing caller-selected
+    // workflow` and `required_workflow_id` had zero hits outside the
+    // production site. P-1.3 replaces the inline match these tests exercise
+    // with typed routing through `local_app_plugin_binding`; these tests must
+    // keep passing unchanged across that replacement, since they assert on
+    // the launcher's observable behaviour (Err vs Ok, and what the error
+    // names), not on how the routing is implemented.
+
+    #[test]
+    fn react_dom_app_launched_with_canvas_workflow_is_refused() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let layout = local_apps::AppLayout::new(root.path(), "demo1234").expect("layout");
+        let mut manifest = local_apps::AppManifest::for_new_app("demo1234", "Demo");
+        stamp_profile(&mut manifest, local_apps::AppRuntimeProfile::ReactDom);
+        local_apps::save_manifest(&layout, &manifest).expect("manifest");
+        stamp_record_mirror(&layout, true);
+
+        let descriptor = tool_workflow::BUILTIN_WORKFLOWS
+            .get("local-canvas-build")
+            .expect("canvas local-app built-in");
+        let mut spec = tool_workflow::WorkflowLaunchSpec {
+            name: Some("local-canvas-build".into()),
+            args: Some(serde_json::json!({"app_id": "demo1234"})),
+            ..Default::default()
+        };
+        let error = super::apply_materialized_local_app_collections(
+            root.path(),
+            &mut spec,
+            descriptor.script,
+        )
+        .expect_err("a react-dom app must refuse a caller-selected canvas workflow");
+        let message = error.to_string();
+        assert!(
+            message.contains("demo1234"),
+            "refusal must name the app id: {message}"
+        );
+        // Ordered fragment, not two independent `contains`: asserting only
+        // that both ids appear lets a refactor that SWAPS them ("must use
+        // local-canvas-build; refusing caller-selected workflow
+        // local-app-build") pass every assertion while telling the operator
+        // the exact opposite of the truth. The direction is the security
+        // content of this message, so it is what gets pinned.
+        let expected_refusal =
+            "must use local-app-build; refusing caller-selected workflow local-canvas-build";
+        assert!(
+            message.contains(expected_refusal),
+            "refusal must read {expected_refusal:?}: {message}"
+        );
+    }
+
+    #[test]
+    fn canvas_family_apps_launched_with_the_dom_workflow_are_refused() {
+        // Babylon3d is intentionally excluded: its runtime profile is not yet
+        // published, so it fails earlier with a different error ("not
+        // published in this host build") before this refusal is reached —
+        // see the sibling test that pins that behaviour above.
+        for family in [
+            local_apps::AppRuntimeProfile::Canvas2d,
+            local_apps::AppRuntimeProfile::Three3d,
+            local_apps::AppRuntimeProfile::Phaser2d,
+        ] {
+            let root = tempfile::tempdir().expect("tempdir");
+            let layout = local_apps::AppLayout::new(root.path(), "demo1234").expect("layout");
+            let mut manifest = local_apps::AppManifest::for_new_app("demo1234", "Demo");
+            stamp_profile(&mut manifest, family);
+            local_apps::save_manifest(&layout, &manifest).expect("manifest");
+            stamp_record_mirror(&layout, true);
+
+            let descriptor = tool_workflow::BUILTIN_WORKFLOWS
+                .get("local-app-build")
+                .expect("dom local-app built-in");
+            let mut spec = tool_workflow::WorkflowLaunchSpec {
+                name: Some("local-app-build".into()),
+                args: Some(serde_json::json!({"app_id": "demo1234"})),
+                ..Default::default()
+            };
+            let error = super::apply_materialized_local_app_collections(
+                root.path(),
+                &mut spec,
+                descriptor.script,
+            )
+            .expect_err(&format!(
+                "a {family} app must refuse a caller-selected dom workflow"
+            ));
+            let message = error.to_string();
+            assert!(
+                message.contains("demo1234"),
+                "refusal must name the app id (family={family}): {message}"
+            );
+            // The mirror image of the sibling test's assertion, and the
+            // reason both are written as ONE ordered fragment: between the
+            // two tests each id appears in both positions, so a refactor
+            // that swaps them cannot stay green by symmetry.
+            let expected_refusal =
+                "must use local-canvas-build; refusing caller-selected workflow local-app-build";
+            assert!(
+                message.contains(expected_refusal),
+                "refusal must read {expected_refusal:?} (family={family}): {message}"
             );
         }
     }

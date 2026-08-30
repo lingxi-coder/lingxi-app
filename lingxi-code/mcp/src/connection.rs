@@ -111,11 +111,9 @@ impl McpServerConfig {
     /// `errorCode:"UNCONFIGURED"`, not `"INVALID_CONFIG"`) or parses.
     ///
     /// The oracle's `errorCode` for a `Some` return is `"INVALID_CONFIG"` —
-    /// the same code [`Self::config_error`] already produces at its one
-    /// existing call site (`mcp/src/registry.rs::connect_locked_inner`), so
-    /// wiring this in is a one-line `.or_else` alongside that check, not a
-    /// new branch. NOT YET WIRED there (registry.rs is out of this task's
-    /// file ownership) — see `McpConnectErrorCode` doc below.
+    /// the same code [`Self::config_error`] already produces — so this is
+    /// checked immediately after that one, as the third pre-dial gate in
+    /// `mcp/src/registry.rs::connect_locked_inner`.
     #[must_use]
     pub fn connect_time_url_error(&self) -> Option<&'static str> {
         if self.config_error.is_some() {
@@ -139,92 +137,6 @@ impl McpServerConfig {
             None
         }
     }
-}
-
-/// Oracle `errorCode` vocabulary for a failed MCP connect attempt — the
-/// discriminator field on claude's `{type:"failed", ...}` (`Nxe`/`Ve`/`Ae`).
-/// The frozen [`traits::McpError`] carries no code field (byte-exact display
-/// text only — see the doc on [`McpServerConfig::config_error`]), so a
-/// caller needing the oracle's discriminator re-derives it from the config
-/// plus the failure text, exactly as [`McpServerConfig::is_unconfigured`]
-/// already does for `UNCONFIGURED` alone. [`Self::classify`] generalizes
-/// that to the three codes buildable from information already on this port's
-/// connect path.
-///
-/// Deliberately NOT covered here:
-/// - `AUTH_HEADER_REJECTED` / `HEADERS_HELPER_AUTH_REJECTED` (§19, LANDED in
-///   `crate::negotiation::classify_auth_failure`) — that function returns a
-///   byte-exact MESSAGE, not a discriminated code, and lives outside this
-///   task's file ownership (`mcp/src/registry.rs`/`negotiation.rs` wiring).
-/// - `FIRST_PARTY_AUTH_REJECTED` — a deliberate non-goal per
-///   `crate::negotiation`'s module doc (no first-party-auth/claudeai-proxy
-///   bearer concept exists in this port to trigger it).
-/// - Every code in the discovery-cache / server-identity-epoch family
-///   (`lazy_dial_failed`, the `cached-row ... subscriber threw:` log lines,
-///   `IDENTITY_CHANGED`/`mcp_reconnect_identity_changed`) and the `roots/list`
-///   staging-root log line — these belong to an `identityBaseline` /
-///   `identityEpoch` / cached-row-subscriber subsystem this port has no
-///   analogue of at all (confirmed absent — see §24e in
-///   `docs/mcp-plugin-byte-alignment-2.1.251-2026-08-28.md`), not a gap in
-///   this error-code model. Building them means building that subsystem
-///   first; out of scope for this task.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum McpConnectErrorCode {
-    /// Oracle `errorCode:"UNCONFIGURED"` — [`McpServerConfig::is_unconfigured`].
-    Unconfigured,
-    /// Oracle `errorCode:"INVALID_CONFIG"` — a loader-time
-    /// [`McpServerConfig::config_error`] OR this port's connect-time
-    /// [`McpServerConfig::connect_time_url_error`] re-check.
-    InvalidConfig,
-    /// Oracle `errorCode:"CONNECT_TIMEOUT"` (2.1.251 @182283392 `xo`/@182487645
-    /// `No`): `Object.assign(new R(msg,"MCP connection timeout"),
-    /// {code:"CONNECT_TIMEOUT"})`, gated `tengu_mcp_connect_timeout_retry`
-    /// (default-on; DEFERRED — no feature-flag plumbing exists in this port,
-    /// so the tag applies unconditionally, matching the flag's shipped
-    /// default). NOTE the correction: `"MCP connection timeout"` is the
-    /// `TelemetrySafeError`'s SECOND constructor arg — `telemetryMessage`, a
-    /// generic label used only for telemetry hashing — NOT the user-visible
-    /// text. The displayed message stays the oracle's first arg, the exact
-    /// detailed string this port's `registry.rs::connect_attempt` already
-    /// emits (`MCP server "{name}" connection timed out after {ms}ms`); no
-    /// message text changes, only the missing discriminator.
-    ConnectTimeout,
-    /// Any other failure (a real transport/handshake error, an auth-type
-    /// rejection classified by message text only, etc.) — the oracle's
-    /// remaining codes are out of this model's scope (see the type doc).
-    Other,
-}
-
-impl McpConnectErrorCode {
-    /// Re-derive the oracle's `errorCode` for one connect failure.
-    /// `config` is the server's static config; `message` is the text the
-    /// connect attempt actually failed with (`McpError`'s `Display`, or a
-    /// stored `McpConnectionState::Failed::error`).
-    ///
-    /// Ordering mirrors the oracle's `Nxe`: unconfigured is checked FIRST
-    /// (never dials), then invalid config (never dials either), and only
-    /// once both pass could a real dial have happened — so `ConnectTimeout`
-    /// is only reachable once neither pre-dial gate applies.
-    #[must_use]
-    pub fn classify(config: &McpServerConfig, message: &str) -> Self {
-        if config.is_unconfigured() {
-            return Self::Unconfigured;
-        }
-        if config.config_error.is_some() || config.connect_time_url_error().is_some() {
-            return Self::InvalidConfig;
-        }
-        if is_connect_timeout_message(message) {
-            return Self::ConnectTimeout;
-        }
-        Self::Other
-    }
-}
-
-/// Matches the exact text `registry.rs::connect_attempt`'s `timeout_error`
-/// closure emits (`MCP server "{name}" connection timed out after {ms}ms`) —
-/// the only producer of this text on the connect path today.
-fn is_connect_timeout_message(message: &str) -> bool {
-    message.contains("connection timed out after")
 }
 
 /// `skip_serializing_if` predicate: omit a `bool` field from the serialized
@@ -457,53 +369,5 @@ mod tests {
     fn transports_without_a_url_field_are_never_flagged() {
         let c = cfg(stdio_spec(), None);
         assert_eq!(c.connect_time_url_error(), None);
-    }
-
-    // ── `McpConnectErrorCode::classify` ──
-
-    #[test]
-    fn classify_unconfigured_beats_everything_else() {
-        let c = cfg(http_spec(""), None);
-        assert_eq!(
-            McpConnectErrorCode::classify(&c, "irrelevant message"),
-            McpConnectErrorCode::Unconfigured
-        );
-    }
-
-    #[test]
-    fn classify_invalid_config_from_loader_error() {
-        let c = cfg(http_spec("https://ok.example"), Some("bad config"));
-        assert_eq!(
-            McpConnectErrorCode::classify(&c, "irrelevant message"),
-            McpConnectErrorCode::InvalidConfig
-        );
-    }
-
-    #[test]
-    fn classify_invalid_config_from_connect_time_url_check() {
-        let c = cfg(http_spec("not-a-url"), None);
-        assert_eq!(
-            McpConnectErrorCode::classify(&c, "irrelevant message"),
-            McpConnectErrorCode::InvalidConfig
-        );
-    }
-
-    #[test]
-    fn classify_connect_timeout_from_message_text() {
-        let c = cfg(http_spec("https://ok.example"), None);
-        let msg = r#"MCP server "srv" connection timed out after 30000ms"#;
-        assert_eq!(
-            McpConnectErrorCode::classify(&c, msg),
-            McpConnectErrorCode::ConnectTimeout
-        );
-    }
-
-    #[test]
-    fn classify_other_for_an_ordinary_transport_failure() {
-        let c = cfg(http_spec("https://ok.example"), None);
-        assert_eq!(
-            McpConnectErrorCode::classify(&c, "connection refused"),
-            McpConnectErrorCode::Other
-        );
     }
 }

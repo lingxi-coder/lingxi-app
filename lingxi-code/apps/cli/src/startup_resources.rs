@@ -65,6 +65,74 @@ fn same_origin(left: &reqwest::Url, right: &reqwest::Url) -> bool {
         && left.port_or_known_default() == right.port_or_known_default()
 }
 
+/// Oracle `Zqt`/`PTt` (§15): *"Archive URLs must use https:// and must not
+/// point at a loopback, link-local, or cloud-metadata host."* Applied to
+/// every plugin-archive / `--plugin-url` download AND to every hop of a
+/// redirect — an attacker-controlled HTTPS origin can otherwise 30x an
+/// initially-valid URL onto `169.254.169.254` or similar, which the scheme
+/// and cross-origin-redirect checks alone do not catch (this port's plugin
+/// downloads run with cross-origin redirects allowed, so that check is a
+/// no-op for this attack).
+fn is_denied_download_host(host: &str) -> bool {
+    let lower = host.to_ascii_lowercase();
+    if lower == "localhost" || lower.ends_with(".localhost") {
+        return true;
+    }
+    // `Url::host_str` returns an IPv6 literal WITH its brackets (`"[::1]"`);
+    // strip them before handing the bare address to `IpAddr::parse`.
+    let unbracketed = host.strip_prefix('[').and_then(|h| h.strip_suffix(']'));
+    unbracketed
+        .unwrap_or(host)
+        .parse::<std::net::IpAddr>()
+        .is_ok_and(is_denied_download_ip)
+}
+
+fn is_denied_download_ip(ip: std::net::IpAddr) -> bool {
+    use std::net::{IpAddr, Ipv6Addr};
+    match ip {
+        IpAddr::V4(v4) => is_denied_download_ipv4(v4),
+        IpAddr::V6(v6) => {
+            if let Some(mapped) = v6.to_ipv4_mapped() {
+                return is_denied_download_ipv4(mapped);
+            }
+            v6.is_loopback() // ::1
+                || v6.is_unspecified() // ::
+                || v6 == "fd00:ec2::254".parse::<Ipv6Addr>().unwrap() // AWS IMDSv2 link-local alias
+                || (v6.segments()[0] & 0xffc0) == 0xfe80 // fe80::/10
+        }
+    }
+}
+
+fn is_denied_download_ipv4(v4: std::net::Ipv4Addr) -> bool {
+    let o = v4.octets();
+    o[0] == 127 // 127.0.0.0/8
+        || (o[0] == 169 && o[1] == 254) // 169.254.0.0/16
+        || o[0] == 0 // 0.0.0.0/8
+        || v4 == std::net::Ipv4Addr::new(100, 100, 100, 200) // Alibaba Cloud metadata
+}
+
+fn reject_denylisted_download_url(url: &reqwest::Url) -> Result<(), String> {
+    if let Some(host) = url.host_str() {
+        if is_denied_download_host(host) {
+            return Err(format!(
+                "refusing to download `{url}`: archive URLs must use https:// and must not point \
+                 at a loopback, link-local, or cloud-metadata host (got `{host}`)"
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Same check, bypassed under `cfg(test)` — tests exercise the download path
+/// against a plaintext `127.0.0.1` server (see the scheme bypass alongside
+/// this one), which the loopback denylist would otherwise trip on every run.
+fn reject_denylisted_download_url_unless_test(url: &reqwest::Url) -> Result<(), String> {
+    if cfg!(test) {
+        return Ok(());
+    }
+    reject_denylisted_download_url(url)
+}
+
 fn download_client(allow_cross_origin_redirects: bool) -> Result<reqwest::Client, String> {
     reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::custom(move |attempt| {
@@ -72,6 +140,8 @@ fn download_client(allow_cross_origin_redirects: bool) -> Result<reqwest::Client
                 attempt.error("too many redirects")
             } else if attempt.url().scheme() != "https" && !cfg!(test) {
                 attempt.error("refusing redirect to a non-HTTPS URL")
+            } else if let Err(reason) = reject_denylisted_download_url_unless_test(attempt.url()) {
+                attempt.error(reason)
             } else if !allow_cross_origin_redirects
                 && attempt
                     .previous()
@@ -100,6 +170,7 @@ async fn bounded_get(
     if parsed.scheme() != "https" && !cfg!(test) {
         return Err(format!("refusing non-HTTPS URL `{url}`"));
     }
+    reject_denylisted_download_url_unless_test(&parsed)?;
     let mut request = client.get(parsed);
     for (name, value) in headers {
         request = request.header(name, value);
@@ -313,6 +384,52 @@ async fn materialize_files(specs: &[String]) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// §15 — oracle `Zqt`/`PTt`: an https archive URL naming a loopback,
+    /// link-local, or cloud-metadata host must be refused before the download
+    /// is even attempted (`bounded_get` is the shared path for both
+    /// `--plugin-url` and the marketplace `archive` source's fetch).
+    #[test]
+    fn denylisted_hosts_are_refused() {
+        for denied in [
+            "https://127.0.0.1/x",
+            "https://127.255.255.255/x",
+            "https://169.254.169.254/latest/meta-data/",
+            "https://0.0.0.0/x",
+            "https://100.100.100.200/x", // Alibaba Cloud metadata
+            "https://localhost/x",
+            "https://sub.localhost/x",
+            "https://[::1]/x",
+            "https://[::]/x",
+            "https://[fd00:ec2::254]/x", // AWS IMDSv2 IPv6 alias
+            "https://[fe80::1]/x",
+            "https://[::ffff:127.0.0.1]/x", // IPv4-mapped loopback
+            "https://[::ffff:169.254.1.1]/x", // IPv4-mapped link-local
+        ] {
+            let url = reqwest::Url::parse(denied).unwrap();
+            assert!(
+                reject_denylisted_download_url(&url).is_err(),
+                "expected `{denied}` to be denylisted"
+            );
+        }
+    }
+
+    /// An ordinary public host must NOT be denylisted.
+    #[test]
+    fn ordinary_hosts_are_not_denylisted() {
+        for allowed in [
+            "https://github.com/x",
+            "https://objects.githubusercontent.com/x",
+            "https://8.8.8.8/x",
+            "https://[2001:4860:4860::8888]/x",
+        ] {
+            let url = reqwest::Url::parse(allowed).unwrap();
+            assert!(
+                reject_denylisted_download_url(&url).is_ok(),
+                "expected `{allowed}` to be allowed"
+            );
+        }
+    }
 
     #[test]
     fn file_paths_are_confined() {

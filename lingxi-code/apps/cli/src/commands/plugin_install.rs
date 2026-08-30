@@ -1952,6 +1952,41 @@ fn update_inner(arg: &str, scope: &str, plugins_dir: &Path, cwd: &Path) -> Resul
         ));
     }
 
+    // A versionless plugin's cache dir is a FIXED path
+    // (`cache/<marketplace>/<plugin>/unknown`) shared by every scope, so this
+    // update's dest may already be the install path some OTHER record (a
+    // different scope, project, or plugin id) still points at — a live
+    // scope/session may be reading it right now. Real per-session liveness
+    // has no substrate in this port; the available proxy (per §21.9) is
+    // whether any OTHER installed-plugin record still references this exact
+    // path (oracle `ice`: "Cache for {name} at {path} is in use by another
+    // session; deferring overwrite until it exits", returning WITHOUT
+    // deleting). Skip the check when dest doesn't exist yet — nothing to
+    // protect, and this is also reached for a fresh (non-"unknown") version
+    // whose cache dir just happens to collide, which is equally worth
+    // guarding.
+    if dest.exists() {
+        let referenced_elsewhere = installed
+            .get("plugins")
+            .and_then(Value::as_object)
+            .is_some_and(|plugins| {
+                plugins.iter().any(|(other_id, records)| {
+                    records.as_array().is_some_and(|records| {
+                        records.iter().enumerate().any(|(i, record)| {
+                            !(other_id == &id && i == idx)
+                                && record.get("installPath").and_then(Value::as_str)
+                                    == Some(dest_str.as_str())
+                        })
+                    })
+                })
+            });
+        if referenced_elsewhere {
+            return Ok(format!(
+                "Cache for \"{name}\" at {dest_str} is in use by another session; deferring overwrite until it exits."
+            ));
+        }
+    }
+
     // Re-materialize into the (new) versioned cache.
     let _ = std::fs::remove_dir_all(&dest);
     copy_dir(&plugin_src, &dest).map_err(|e| e.to_string())?;
@@ -3029,6 +3064,75 @@ mod tests {
             user_settings(&e)["enabledPlugins"]["hello@mymkt"],
             Value::Bool(true)
         );
+    }
+
+    /// §21.9 — a versionless plugin's cache dir (`cache/<market>/<plugin>/unknown`)
+    /// is FIXED and shared by every scope. Install the same versionless plugin
+    /// at two scopes (both records land on the identical shared cache dir), then
+    /// update one scope: the update must defer instead of blowing the shared
+    /// directory away out from under the other scope's still-live record.
+    #[test]
+    fn update_defers_when_versionless_cache_is_shared_by_another_scope() {
+        let e = env();
+        // Strip `version` so the marketplace resolves to "unknown".
+        std::fs::write(
+            e.market
+                .join("plugins")
+                .join("hello")
+                .join(branding::PLUGIN_MANIFEST_DIR)
+                .join("plugin.json"),
+            r#"{"name":"hello"}"#,
+        )
+        .unwrap();
+        run_install("hello@mymkt", Some("user"), &[], &e.plugins, &e.home, &e.cwd).unwrap();
+        run_install(
+            "hello@mymkt",
+            Some("project"),
+            &[],
+            &e.plugins,
+            &e.home,
+            &e.cwd,
+        )
+        .unwrap();
+
+        let shared_cache = e.plugins.join("cache/mymkt/hello/unknown");
+        assert!(shared_cache.join("commands/hi.md").exists());
+        let db = installed_db(&e);
+        let records = db["plugins"]["hello@mymkt"].as_array().unwrap();
+        assert_eq!(records.len(), 2, "both scopes share one record set");
+        assert!(records
+            .iter()
+            .all(|r| r["installPath"] == shared_cache.display().to_string()));
+
+        // Add a new file upstream — an ordinary update would re-copy over it.
+        std::fs::write(
+            e.market
+                .join("plugins")
+                .join("hello")
+                .join("commands")
+                .join("new.md"),
+            "# new",
+        )
+        .unwrap();
+
+        let msg = run_update("hello@mymkt", "user", &e.plugins, &e.home, &e.cwd).unwrap();
+        assert_eq!(
+            msg,
+            format!(
+                "Checking for updates for plugin \"hello@mymkt\" at user scope\u{2026}\n\
+                 \u{2714} Cache for \"hello\" at {} is in use by another session; deferring \
+                 overwrite until it exits.",
+                shared_cache.display()
+            )
+        );
+
+        // The shared cache directory must survive untouched: the pre-existing
+        // file is still there and the new upstream file was NOT copied in.
+        assert!(shared_cache.join("commands/hi.md").exists());
+        assert!(!shared_cache.join("commands/new.md").exists());
+        // Neither record was mutated by the deferred update.
+        let db_after = installed_db(&e);
+        assert_eq!(db_after, db);
     }
 
     #[test]

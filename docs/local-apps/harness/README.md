@@ -156,21 +156,42 @@ iOS 客户端确实实现了 `RuntimeProfileSelection`（`clients/ios/Sources/Lo
 如果它真的是问题的话。参考 [[local-app-phase-1a-ui-contract-2026-08-24]]：那批 UI 契约
 15 个提交全绿且过评审，一行都没上过真机。
 
-### 🚨 「实现了但模型够不着」出现了第二例
+### ⚠️ 四个操作有 dispatch 分支和 schema，但没有调用方（**上一版记错了，这是更正**）
 
-第一例是 `confirm_runtime_profile`（见上）。写七个 agent 时又撞到一例，同一个形状：
+⛔ **先记我记错的地方。** 我一度写下「`list_tools` 把这些当工具广告出去、`call_tool`
+又拒绝执行」，并说这是「一整类缺陷的第二例」。**两处都不对**，多查一层就翻转了：
 
-`confirm_dependency_change`（`local_apps_host.rs:6459`）和 `update_dependencies`（`:6590`）
-都是真实实现的 Host 操作，而 `LOCAL_APP_TOOLS` 那张 **24 个操作**的模型可调用表里
-**零命中**。于是没有任何 agent 能调到它们。
+- `list_tools`（`local_apps_mcp.rs:1850`）**根本不服务** `tool_catalog()`，它只服务
+  `dynamic_tool_catalog(&manifest)`，即 per-app 动态命名空间。它自己的注释写明了原因：
+  静态 host 操作现在是 builtin 工具（`LocalApp*`），同时从 MCP 端再暴露一次会让
+  「同一个操作在两个名字下可达，而两套权限语义不同」。
+- 所以 `call_tool` 拒绝静态名字**是和 `list_tools` 一致的**，不是矛盾。
+  **没有任何「列出来却调不动」的工具。**
 
-两例合起来说明这不是一次疏漏，而是**一整类**：Host 操作的实现和它进入工具表是两件
-分开的事，中间没有任何东西对账。一个操作可以写完、测完、被 trait 暴露，然后永远没有
-调用者——而所有测试都是绿的，因为测试直接调函数，绕过了那张表。
+**实测到的、确实成立的事实**（比我原来的说法窄）：
 
-⚠️ **这值得一道门**：把 `LocalAppsMcpHost` 的 dispatch 分支集合与 `LOCAL_APP_TOOLS`
-的 operation 集合对账，差集非空就点名。Phase -1 的组件扫描器管的是「名字不该出现在
-哪」，这条管的是「实现了却没接上」，是另一回事。
+| 操作 | builtin 表 | dispatch 分支 | `tool_catalog()` schema |
+| --- | --- | --- | --- |
+| `confirm_runtime_profile` | ❌ | ✅ | ✅ |
+| `confirm_dependency_change` | ❌ | ✅ | ✅ |
+| `update_dependencies` | ❌ | ✅ | ✅ |
+| `migrate_runtime_profile` | ❌ | ✅ | ✅ |
+
+`tool_catalog()` 声明 28 个，`LOCAL_APP_TOOLS` 只有 24 个，差就是这四个。
+`call_host_operation` 的唯一调用方（`local_apps_tools.rs:409`）拿的是表里的
+`self.operation`，所以这四条 dispatch 分支**我没找到调用方**。
+
+⚠️ 它们四个都是**确认 / 迁移**类操作 —— 即铸 receipt 的那一类。这和上面
+`confirm_runtime_profile` 那条线索是同一件事，只是范围更清楚了：不是「一整类缺陷」，
+是**同一条未接通的确认通路上的四个操作**。
+
+判据仍然只能是真机：跑一次「创建 → 确认 runtime profile → scaffold」。
+每一层的单测都是绿的，因为测试直接调函数、绕过了那张表。
+
+**方法论教训**（比结论本身值钱）：我在两个不同的地方，凭「A 引用了 B、B 拒绝了 A」
+的形状就宣布了缺陷，两次都是再查一层就翻转。证据链看起来闭合的时候，恰恰是最该
+多查一层的时候——尤其是当结论意味着「这个功能在生产上根本不可能工作」，而这个功能
+明显在工作。
 
 ### ⚠️ builder agent 的写边界是**构建期**的，不是写入期的
 

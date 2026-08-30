@@ -336,6 +336,41 @@
         "P-1.9"
       ],
       "notes": "HIGHEST silent-loss risk in the backlog. Five Canvas hard gates reach their policy through drive_local_workflow(\"local-canvas-build\"), a name §8.3 deletes — exactly 1 call site at lap/baseline. Merging the workflows without re-entering the policy makes five gates vanish with every test still green. Exit criterion: the call-site count reaches 0 AND both named functions still exist (builtins.rs:1944 and :2509 at lap/baseline). If the count hits 0 and the functions are gone, the gates were deleted, not migrated — anchor on function names, never line numbers. Separately, render_check.status=\"not_applicable\" has NO behavioural test today: builtins.rs:2263 pins a schema-description string, which is copy-pinning, not a gate. That case is net-new, not a migration."
+    },
+    {
+      "id": "P-1.11",
+      "title": "Cut the workflow-name trigger binding in skill-api, and pin the two look-alikes that must NOT be touched",
+      "gate": "§19.3 no Local App component name carries authority outside the composition binding",
+      "owns": [
+        "lingxi-code/skill-api/src/builtin/bundled.rs",
+        "lingxi-code/apps/engine-mobile/tests/component_literal_scan.rs",
+        "lingxi-code/apps/engine-mobile/tests/component_literal_allowlist.txt"
+      ],
+      "crates": [
+        "skill-api",
+        "engine-mobile"
+      ],
+      "testPackages": [
+        "skill-api",
+        "engine-mobile"
+      ],
+      "exclusive": false,
+      "repeatRuns": 1,
+      "plantedFailure": {
+        "edit": "restore \"local-app-build\" to the create-local-app skill's triggers array in bundled.rs",
+        "mustNameInOutput": [
+          "bundled.rs",
+          "local-app-build"
+        ]
+      },
+      "addedTests": [
+        "a_workflow_name_is_not_a_skill_trigger",
+        "skill_triggers_survive_a_workflow_rename"
+      ],
+      "deps": [
+        "P-1.9"
+      ],
+      "notes": "FOUND BY THE P-1.0 VERIFICATION PASS, outside the three scan roots, and confirmed by hand at lap/baseline.\n\nTHE DEFECT. skill-api/src/builtin/bundled.rs:43 gives the create-local-app SKILL the trigger array [\"create local app\", \"local app\", \"local-app-build\"]. The third entry is a WORKFLOW name used as a skill trigger phrase — a cross-component name binding, which is exactly the shape §19.3 exists to remove. It is genuine production code: there is no #[cfg(test)] above that line. Phase 4 merges the two workflows, at which point this trigger silently stops matching and nothing in the suite notices. The skill NAMES in the same file are the definition site and are legitimately unscannable; the trigger is not.\n\n⛔ THE LOOK-ALIKE THAT MUST NOT BE 'FIXED'. traits/src/mobile_linux.rs:46 declares LOCAL_APP_BUILD_ROOT = \"/var/lingxi/local-app-build\". That string coincides with a workflow name but is a FILESYSTEM MOUNT ROOT, not a reference to the workflow. It carries no name-derived authority, and renaming it to track a renamed workflow would silently move a path on real devices — the same class of silent data loss as renaming a SQLite table, which nothing in this repo would catch. Add it to the allowlist with this reasoning if traits/src ever enters the scan surface; do not touch the value.\n\nTEMPLATES, for the record. local-apps/templates/runtime-profiles/** is compiled into production wholesale by include_bytes! via the profile_file! macro, and the scanner cannot see it. Grepped at lap/baseline: it contains ZERO component-name needles today. That is a fact with a date on it, not a guarantee — it is the tree runtime-profile work touches, so the Phase 1 packer (P1.2) should carry the assertion rather than this scanner.\n\nSCOPE. Deliberately NOT solved by widening SCAN_ROOTS. Adding skill-api/src and traits/src would make the scanner red on landing for two occurrences of very different kinds, and the cheapest way to green that is an allowlist entry — which would preserve the defect while looking like it had been handled."
     }
   ]
 }

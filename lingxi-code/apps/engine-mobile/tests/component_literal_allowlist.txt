@@ -1,0 +1,151 @@
+# component_literal_allowlist.txt — P-1.0
+#
+# One explicit `path:literal:expected_count` entry per PERMITTED (path,
+# literal) pair — an occurrence of a Local App component (skill / workflow)
+# name as a literal in PRODUCTION source. `path` is relative to the cargo
+# workspace root (`lingxi-code/`), matched by EXACT string equality; so is
+# `literal`. No globs, no directory entries, no prefixes.
+#
+# Scan surface (component_literal_scan.rs's SCAN_ROOTS):
+#   apps/engine-mobile/src, tasks/src, tools/workflow/src
+# — the latter two because design doc §19.3's last bullet and P-1.9's
+# completion condition are stated over exactly those directories, so a scanner
+# rooted only at engine-mobile could never gate them.
+#
+# Within those roots EVERY file type is scanned except the known-binary
+# extensions in SKIPPED_EXTENSIONS: the filter is a deny-list, so an unknown
+# extension is scanned rather than skipped. That is why `.txt` and `.json` under
+# tools/workflow/src (`workflow_description.txt`, the Workflow tool's own
+# model-facing description, and `workflow_input_schema.json` — both
+# `include_str!`ed into production) are in the scan surface. Neither contains a
+# component name today, so neither appears below; if a later phase moves
+# workflow-selection prose out of an allowlisted `.js` script and into the
+# description text, the arrival now shows up here as a LEAK rather than only the
+# departure showing up as a STALE ENTRY.
+#
+# ## Why entries are NOT keyed on line numbers
+#
+# They used to be, and that made every unrelated edit above an allowlisted
+# line produce a spurious "leak" whose cheapest fix is re-typing line numbers
+# with the count unchanged — the re-baseline reflex this gate exists to
+# prevent. P-1.2/P-1.4 edit local_apps_host.rs, P-1.3 edits
+# workflow_support.rs, P-1.5 edits lib.rs; all of them would have paid it.
+# The FAILURE OUTPUT is still line-numbered ("name the file and the line" is a
+# requirement on what the gate says, not on how the allowlist is keyed).
+#
+# ## Why every entry carries a COUNT, and why the count is EXACT
+#
+# - Without a count, ONE entry covers unlimited same-file occurrences of that
+#   literal — including new ones added later.
+# - Without exactness in the DOWNWARD direction, the allowlist is a permitted
+#   superset: deleting the code an entry points at, or dropping a file out of
+#   the directory walk, leaves the gate green with a standing pre-approved
+#   hole behind it. component_literal_scan.rs's
+#   `every_allowlist_entry_still_matches_a_real_occurrence` and its
+#   COUNT MISMATCH finding close both directions.
+#
+# The NUMBER OF ENTRIES is pinned separately by ALLOWLIST_BASELINE_COUNT
+# (`allowlist_entry_count_matches_the_committed_baseline`), so replacing
+# several precise lines with one broad one still has to explain, in the same
+# diff, why the committed count moved.
+#
+# Phase -1 deliberately KEEPS the two pre-existing Local App workflow
+# registrations (tools/workflow/src/builtins.rs plus the three .js files it
+# include_str!s) and the skill-name mirror `register_mobile_skill_commands`
+# duplicates into the slash-command catalog, so this file cannot be empty
+# today, by design — Phase 9 is expected to drive it to zero.
+#
+# `#[cfg(test)]` regions — inline blocks AND out-of-line test modules such as
+# `tasks/src/registry_test.rs` and `tasks/src/handlers/local_workflow_test.rs`
+# — are skipped by the scanner and therefore appear nowhere below.
+
+# --- apps/engine-mobile/src ------------------------------------------------
+
+# lib.rs — register_mobile_skill_commands mirrors the live skill registry into
+# the mobile slash-command catalog by name (composition binding: it derives the
+# slash palette from the SAME registry this scanner reads its needles from; it
+# does not invent a second source of truth).
+apps/engine-mobile/src/lib.rs:create-local-app:1
+apps/engine-mobile/src/lib.rs:frontend-design:1
+apps/engine-mobile/src/lib.rs:frontend-qa:1
+apps/engine-mobile/src/lib.rs:accessibility:1
+apps/engine-mobile/src/lib.rs:react-best-practices:1
+apps/engine-mobile/src/lib.rs:ionic-react-local-app:1
+apps/engine-mobile/src/lib.rs:canvas-2d-local-app:1
+apps/engine-mobile/src/lib.rs:threejs-local-app:1
+apps/engine-mobile/src/lib.rs:phaser-2d-local-app:1
+apps/engine-mobile/src/lib.rs:babylon-3d-local-app:1
+
+# local_apps_host.rs — Host-authored prompt text told to the model at build
+# time, naming which workflow the app's surface requires so the model does not
+# invoke the other one. Composition binding, not a leak: the names are not read
+# back from anywhere, they are values the Host asserts. `local-app-build`
+# occurs twice (once alone, once on the same line as its canvas sibling).
+apps/engine-mobile/src/local_apps_host.rs:local-app-build:2
+apps/engine-mobile/src/local_apps_host.rs:local-canvas-build:1
+
+# local_apps_mcp.rs — incidental prose matches, not component-name leaks: the
+# `inspect_ui` MCP tool's own description ("the structured accessibility/DOM
+# snapshot"), and a code comment citing `skills/frontend-qa/SKILL.md`'s
+# inversion formula by path. Neither is a case/dispatch/lookup on the literal;
+# both are listed explicitly precisely because a generic English word and a doc
+# citation are exactly the kind of match a scanner must still name.
+apps/engine-mobile/src/local_apps_mcp.rs:accessibility:1
+apps/engine-mobile/src/local_apps_mcp.rs:frontend-qa:1
+
+# workflow_support.rs — the one place a build target maps to its required
+# workflow id (composition binding: this IS the binding P-1.1/P-1.3 replace
+# with a typed handle; until then the two workflow names live here by name,
+# once each).
+apps/engine-mobile/src/workflow_support.rs:local-app-build:1
+apps/engine-mobile/src/workflow_support.rs:local-canvas-build:1
+
+# --- tasks/src -------------------------------------------------------------
+
+# lib.rs — `tasks::LOCAL_APP_BUILD_WORKFLOWS`, the lease/delete-guard twin of
+# `tool_workflow::LOCAL_APP_BUILD_WORKFLOWS`. One occurrence each in the const
+# itself plus one each in the doc comment that explains why it is a LIST.
+# §19.3/P-1.9 target exactly this pair of lists; the entries make the removal
+# visible when it happens (the count going to zero fails as a STALE ENTRY).
+tasks/src/lib.rs:local-app-build:2
+tasks/src/lib.rs:local-canvas-build:2
+
+# --- tools/workflow/src ----------------------------------------------------
+
+# builtins.rs — the two Phase -1 workflow registrations themselves
+# (`BuiltinWorkflowDescriptor { name: "local-app-build" | "local-canvas-build" }`)
+# plus the doc comment naming the `create-local-app` skill that hands them the
+# confirmed spec.
+tools/workflow/src/builtins.rs:create-local-app:1
+tools/workflow/src/builtins.rs:local-app-build:1
+tools/workflow/src/builtins.rs:local-canvas-build:1
+
+# lib.rs — `LOCAL_APP_BUILD_WORKFLOWS` (both names on the const line), its doc
+# comment explaining why keying on `local-app-build` alone was the bug, and one
+# error message naming the workflow whose args must be an object.
+tools/workflow/src/lib.rs:local-app-build:3
+tools/workflow/src/lib.rs:local-canvas-build:1
+
+# The three `include_str!`ed workflow scripts. These are production source that
+# merely is not Rust: `builtins.rs` concatenates them into the compiled
+# descriptors. Their occurrences are prompt prose telling the model which
+# specialist skill to consult at each step (`frontend-design`, `frontend-qa`,
+# `accessibility`, the framework skills) plus each script's own `export const
+# meta` workflow name.
+tools/workflow/src/local_app_build_workflow.js:local-app-build:1
+tools/workflow/src/local_app_build_workflow.js:frontend-design:1
+tools/workflow/src/local_app_build_workflow.js:frontend-qa:2
+tools/workflow/src/local_app_build_workflow.js:accessibility:2
+tools/workflow/src/local_app_build_workflow.js:react-best-practices:2
+tools/workflow/src/local_app_build_workflow.js:ionic-react-local-app:2
+tools/workflow/src/local_app_canvas_workflow.js:local-canvas-build:1
+tools/workflow/src/local_app_canvas_workflow.js:frontend-design:1
+tools/workflow/src/local_app_canvas_workflow.js:frontend-qa:3
+tools/workflow/src/local_app_canvas_workflow.js:accessibility:2
+tools/workflow/src/local_app_canvas_workflow.js:react-best-practices:2
+tools/workflow/src/local_app_canvas_workflow.js:canvas-2d-local-app:1
+tools/workflow/src/local_app_canvas_workflow.js:threejs-local-app:1
+tools/workflow/src/local_app_canvas_workflow.js:phaser-2d-local-app:1
+tools/workflow/src/local_app_canvas_workflow.js:babylon-3d-local-app:1
+tools/workflow/src/local_app_workflow_core.js:frontend-qa:2
+tools/workflow/src/local_app_workflow_core.js:accessibility:1

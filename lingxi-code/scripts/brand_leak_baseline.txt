@@ -521,6 +521,7 @@ G1	lingxi-code/plugin/tests/discovery_bootstrap.rs	\.lingxi
 G1	lingxi-code/plugin/tests/enabled_discovery.rs	\.lingxi
 G1	lingxi-code/plugin/tests/materialize.rs	LINGXI
 G1	lingxi-code/plugin/tests/materialize.rs	\.lingxi
+G1	lingxi-code/plugins/lingxi-local-app/skills/device/SKILL.md	\.lingxi
 G1	lingxi-code/protocol/src/messages.rs	LINGXI
 G1	lingxi-code/pypi/hatch_build.py	LINGXI
 G1	lingxi-code/pypi/pyproject.toml	LingXi
@@ -1135,6 +1136,13 @@ G3	lingxi-code/platforms/windows/src/worktree.rs	.lingxi
 G3	lingxi-code/plugin/tests/discovery_bootstrap.rs	.lingxi-plugin
 G3	lingxi-code/plugin/tests/enabled_discovery.rs	.lingxi-plugin
 G3	lingxi-code/plugin/tests/materialize.rs	.lingxi-plugin
+G3	lingxi-code/plugins/lingxi-local-app/agents/builder.md	.lingxi
+G3	lingxi-code/plugins/lingxi-local-app/agents/builder.md	LINGXI.md
+G3	lingxi-code/plugins/lingxi-local-app/agents/designer.md	.lingxi
+G3	lingxi-code/plugins/lingxi-local-app/skills/device/SKILL.md	.lingxi
+G3	lingxi-code/plugins/lingxi-local-app/skills/local-app-data/SKILL.md	LINGXI.md
+G3	lingxi-code/plugins/lingxi-local-app/skills/local-app-test/SKILL.md	LINGXI.md
+G3	lingxi-code/plugins/lingxi-local-app/skills/local-app-use/SKILL.md	LINGXI.md
 G3	lingxi-code/protocol/src/messages.rs	LINGXI.md
 G3	lingxi-code/sandbox-runtime/src/fs_args.rs	.lingxi
 G3	lingxi-code/sandbox-runtime/src/macos.rs	.lingxi

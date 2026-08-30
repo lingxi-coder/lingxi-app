@@ -207,6 +207,25 @@ iOS 客户端确实实现了 `RuntimeProfileSelection`（`clients/ios/Sources/Lo
 会把 host-managed 的那些覆盖回来。对「防止 agent 意外改坏脚手架」来说够用；对
 「防止 agent 故意写别处」来说不够。写 builder 的 prompt 时不要暗示写入本身受限。
 
+### 门的覆盖面：三条实测边界
+
+**组件字面量扫描器看不到 `plugins/`。** `SCAN_ROOTS` 是
+`["apps/engine-mobile/src", "tasks/src", "tools/workflow/src"]` —— plugin 包不在里面。
+这是**对的**：plugin 包本来就该包含组件名（那是它的内容）。但要记住这句话的另一半：
+「§19.3 的属性成立」说的是**这三个目录**，不是整个仓库。
+
+**品牌门看得到 `plugins/`。** 实测过，不是推的：往 `skills/device/SKILL.md` 种一个
+`.lingxi-plugin` 立刻报红并点名。它按 `git ls-files` 枚举全仓库。
+
+⚠️ **我犯的流程错误**：内容批次落地后我跑了 frontmatter 门，**没跑品牌门**。
+于是 8 条合法的 plugin 内容引用（`workspace/LINGXI.md`、`.lingxi/source-policy.json`）
+一直红着，直到我为了别的事去跑它才发现。**新增一批文件之后要跑的门不止一道**，
+而「我记得跑哪几道」不是机制。
+
+**§19.3 品牌 planted-positive 的第二半现在可构造了。** 它要求往
+`plugins/lingxi-local-app/` 里种一个 `CLAUDE_PLUGIN_ROOT` 并要求变红。之前那个目录
+不存在所以只能推迟；现在它存在且有 31 个已跟踪文件。P0a.0 可以把这一半补上了。
+
 ### 其他量出来的事实
 
 | 事实 | 值 |

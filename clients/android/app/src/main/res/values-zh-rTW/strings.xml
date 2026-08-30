@@ -459,6 +459,7 @@
     <string name="composer_placeholder">向靈犀提問…</string>
     <string name="composer_add_attachment">新增附件</string>
     <string name="composer_stopping">正在停止</string>
+    <string name="composer_discard_recovery">捨棄待恢復的回合</string>
     <string name="composer_stop">停止</string>
     <string name="composer_stop_recording">結束普通錄音</string>
     <string name="composer_record">普通錄音</string>
@@ -1764,4 +1765,21 @@
     <string name="local_apps_widget_setup_step_3">3. 搜尋「灵犀」，新增它的本地應用 Widget。</string>
     <string name="local_apps_widget_setup_continue">繼續</string>
     <string name="local_apps_error_widget_snapshot">無法更新主畫面 Widget 的資料。</string>
+    <string name="chat_discarding">正在捨棄…</string>
+    <string name="chat_error_discard_background_failed">捨棄背景對話失敗：%1$s</string>
+    <string name="chat_error_background_resume_failed">背景對話恢復失敗：%1$s</string>
+    <string name="chat_error_discard_unconfirmed">背景對話的捨棄未獲確認，已解除該對話的鎖定。</string>
+    <string name="chat_error_finish_background_turn_first">請先處理背景對話（繼續或捨棄），再進行此操作。</string>
+    <string name="chat_error_open_conversation_failed">無法從通知開啟該對話，請在對話列表中選擇。</string>
+    <string name="composer_discard_background_turn">捨棄背景對話</string>
+    <string name="chat_live_activity_status_running">執行中</string>
+    <string name="chat_live_activity_status_waiting">正在等待你</string>
+    <string name="chat_live_activity_status_paused">已安全暫停</string>
+    <string name="chat_live_activity_status_completed">已完成</string>
+    <string name="chat_live_activity_status_failed">需要處理</string>
+    <string name="chat_live_activity_short_running">執行</string>
+    <string name="chat_live_activity_short_waiting">等待</string>
+    <string name="chat_live_activity_short_paused">暫停</string>
+    <string name="chat_live_activity_short_completed">完成</string>
+    <string name="chat_live_activity_short_failed">失敗</string>
 </resources>

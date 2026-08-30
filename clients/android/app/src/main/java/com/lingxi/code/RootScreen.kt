@@ -146,6 +146,14 @@ private const val LANDING_SWITCH_RETRY_MS = 250L
 private const val SESSION_READY_TIMEOUT_MS = 20_000L
 
 /**
+ * A conversation notification is usually tapped on a COLD start, so the first
+ * attempt can land before the engine source is bound. Retry on the same budget
+ * shape as the created-app landing, then report instead of dropping the route.
+ */
+private const val CONVERSATION_LAUNCH_ATTEMPTS = 40
+private const val CONVERSATION_LAUNCH_RETRY_MS = 250L
+
+/**
  * Root composable for the app shell.
  *
  * Wraps the conversation surface in a Material 3 [ModalNavigationDrawer] that
@@ -343,7 +351,26 @@ fun RootScreen(
     LaunchedEffect(requestedConversationLaunch) {
         val request = requestedConversationLaunch ?: return@LaunchedEffect
         showingApps = false
-        chatViewModel.openSession(SessionRef(request.sessionId, ""))
+        // NOT `openSession`: every one of these notifications announces a
+        // PARKED durable turn, and `openSession` refuses exactly that state.
+        // The tap therefore did nothing, and `onConversationLaunchHandled()`
+        // below then threw the request away — no retry, no feedback. Route
+        // through the entry point that is allowed to cross the parked-turn
+        // guard, carry the announced `turnId` so the checkpoint the user was
+        // sent to look at is preserved, and retry the way the created-app
+        // landing below does (the engine source may not be bound yet on a cold
+        // start from the notification).
+        var routed = false
+        var attempt = 0
+        while (!routed && attempt < CONVERSATION_LAUNCH_ATTEMPTS) {
+            if (attempt > 0) delay(CONVERSATION_LAUNCH_RETRY_MS)
+            attempt += 1
+            routed = chatViewModel.openSessionFromNotification(
+                ref = SessionRef(request.sessionId, ""),
+                turnId = request.turnId,
+            )
+        }
+        if (!routed) chatViewModel.reportConversationLaunchFailed()
         onConversationLaunchHandled()
     }
     LaunchedEffect(requestedLocalAppLaunch, localAppsState.loading) {

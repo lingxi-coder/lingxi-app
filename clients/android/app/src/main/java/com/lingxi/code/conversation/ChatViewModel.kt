@@ -31,6 +31,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.async
 import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -396,6 +397,14 @@ class ChatViewModel(
     private var liveWaitingTurnId: Long? = null
     private var durableDiscardInFlightTurnId: Long? = null
     /**
+     * Bounded wait for the terminal `TurnRecoveryState` that a submitted
+     * discard is supposed to be confirmed by. See [discardRecoveredTurn] —
+     * command acceptance is NOT terminal, and the host has an acceptance path
+     * that emits no snapshot at all, so without this the latch below never
+     * clears.
+     */
+    private var durableDiscardWatchdogJob: Job? = null
+    /**
      * A cold SessionResumed transcript already contains the terminal turn
      * result.  Retained envelopes for that turn are checkpoint history, not
      * new output; remember the id until ResumeTurn's terminal confirmation so
@@ -727,6 +736,7 @@ class ChatViewModel(
                             if (inactiveWaitingTurnId == recoveredId) {
                                 inactiveWaitingTurnId = null
                                 durableDiscardInFlightTurnId = null
+                                cancelDurableDiscardWatchdog()
                             }
                             _state.update {
                                 it.copy(
@@ -946,6 +956,7 @@ class ChatViewModel(
         pendingRecoveredReplayAckTurnId = null
         inactiveWaitingTurnId = failure.turnId
         durableDiscardInFlightTurnId = null
+        cancelDurableDiscardWatchdog()
         _state.update {
             it.copy(
                 streaming = false,
@@ -953,11 +964,20 @@ class ChatViewModel(
                 durableRecoveryBlocked = true,
                 statusLine = strings.resolve(
                     R.string.chat_background_paused_text,
-                    "后台时间已暂停，打开对话即可安全恢复",
+                    // The fallback must be the resource's OWN zh-Hans copy —
+                    // `DefaultConversationStrings` returns it verbatim, so a
+                    // drifted fallback makes every JVM test assert copy the
+                    // device never renders.
+                    "后台时间已结束，打开对话即可安全恢复",
                 ),
                 error = ChatError(
                     strings.resolve(
-                        R.string.chat_error_session_switch_failed,
+                        // Was `chat_error_session_switch_failed` — whose real
+                        // copy is "会话切换失败"/"Failed to switch session", which
+                        // is what the DEVICE rendered for a failure to REATTACH
+                        // a background turn. Only the (drifted) fallback below
+                        // ever said "后台对话恢复失败", and only in JVM tests.
+                        R.string.chat_error_background_resume_failed,
                         "后台对话恢复失败：%1\$s",
                         failure.cause?.message ?: failure.phase,
                     ),
@@ -1029,6 +1049,7 @@ class ChatViewModel(
         if (clearsInactive) {
             inactiveWaitingTurnId = null
             durableDiscardInFlightTurnId = null
+            cancelDurableDiscardWatchdog()
         }
         if (clearsLive) liveWaitingTurnId = null
         if (durableTurnId == recoveredId) durableTurnId = null
@@ -1109,9 +1130,47 @@ class ChatViewModel(
     }
 
     /**
+     * Refuse an action that would abandon a parked durable checkpoint — AND SAY
+     * SO. Returns true when the action must not proceed.
+     *
+     * These guards used to be bare `return`s. A silent refusal on
+     * [switchWorkspaceSource] is precisely the failure `RootScreen`'s
+     * created-app landing comment describes ("the app's agent rooted in the
+     * wrong directory, which is the exact failure ... observed on device"), and
+     * the same silence on [send] / [openSession] / [newChat] made a tap do
+     * literally nothing. The pre-existing streaming refusal right below the
+     * `switchWorkspaceSource` call raises a visible banner; this one now does
+     * too, and names the thing the user has to do first.
+     */
+    private fun refuseWhileDurableTurnParked(): Boolean {
+        if (inactiveWaitingTurnId == null && liveWaitingTurnId == null) return false
+        _state.update {
+            it.copy(
+                error = ChatError(
+                    message = strings.resolve(
+                        R.string.chat_error_finish_background_turn_first,
+                        "请先处理后台对话（继续或丢弃），再进行此操作。",
+                    ),
+                    kind = ChatErrorKind.GENERIC,
+                ),
+            )
+        }
+        return true
+    }
+
+    /**
      * Discard an inactive recovered checkpoint by its durable turn id. The
      * identity remains guarded until the source delivers the correlated
      * terminal TurnRecoveryState; command acceptance alone is not terminal.
+     *
+     * ACCEPTANCE CAN BE THE ONLY SIGNAL. `cancel_active_turn`'s inactive branch
+     * maps `DurableTurnStoreError::NotFound` / `Terminal` to `snapshot = None`
+     * and returns `Ok(())` — so a checkpoint that is already gone (or already
+     * terminal) is discarded successfully and emits NOTHING. Waiting only for a
+     * correlated terminal state then latched [durableDiscardInFlightTurnId]
+     * forever: every further Discard tap returned at the guard below, the
+     * status line stayed on "正在丢弃…" and the composer stayed blocked with no
+     * timeout and no retry. [armDurableDiscardWatchdog] bounds that wait.
      */
     fun discardRecoveredTurn() {
         val turnId = inactiveWaitingTurnId ?: return
@@ -1119,17 +1178,22 @@ class ChatViewModel(
         durableDiscardInFlightTurnId = turnId
         _state.update {
             it.copy(
+                // Was `chat_stopping` ("正在停止…"/"Stopping…") — the device told
+                // the user the turn was being STOPPED while it was being
+                // discarded; only the fallback ever said "正在丢弃…".
                 statusLine = strings.resolve(
-                    R.string.chat_stopping,
+                    R.string.chat_discarding,
                     "正在丢弃…",
                 ),
             )
         }
+        armDurableDiscardWatchdog(turnId)
         viewModelScope.launch {
             runCatching { source.discardDurableTurn(turnId) }
                 .onFailure { error ->
                     if (inactiveWaitingTurnId == turnId) {
                         durableDiscardInFlightTurnId = null
+                        cancelDurableDiscardWatchdog()
                         _state.update {
                             it.copy(
                                 statusLine = strings.resolve(
@@ -1138,7 +1202,10 @@ class ChatViewModel(
                                 ),
                                 error = ChatError(
                                     strings.resolve(
-                                        R.string.chat_error_cancel_generation_failed,
+                                        // Was `chat_error_cancel_generation_failed`
+                                        // ("取消生成失败：%1\$s") — wrong verb for a
+                                        // discard, and wrong on the device.
+                                        R.string.chat_error_discard_background_failed,
                                         "丢弃后台对话失败：%1\$s",
                                         "${error.message ?: error::class.simpleName}",
                                     ),
@@ -1149,6 +1216,49 @@ class ChatViewModel(
                     }
                 }
         }
+    }
+
+    /**
+     * Bound the wait for a submitted discard's terminal confirmation.
+     *
+     * The host can accept a discard and emit no `TurnRecoveryState` at all (see
+     * [discardRecoveredTurn]). When the wait expires, release the recovery
+     * ownership the same way a real terminal state would — the engine ACCEPTED
+     * the discard, so it is not going to run this checkpoint — and say so, so
+     * the composer never stays blocked on a confirmation that is never coming.
+     *
+     * A correlated terminal state that does arrive first cancels this job
+     * through [cancelDurableDiscardWatchdog]; the identity check makes a late
+     * fire a no-op even if a cancel is missed.
+     */
+    private fun armDurableDiscardWatchdog(turnId: Long) {
+        cancelDurableDiscardWatchdog()
+        durableDiscardWatchdogJob = viewModelScope.launch {
+            delay(DISCARD_CONFIRMATION_TIMEOUT_MS)
+            if (durableDiscardInFlightTurnId != turnId) return@launch
+            if (inactiveWaitingTurnId != turnId) return@launch
+            durableDiscardWatchdogJob = null
+            clearDurableRecoveryAfterTerminal(
+                recoveredId = turnId,
+                hadMatchingDurableIdentity = true,
+            )
+            _state.update {
+                it.copy(
+                    error = ChatError(
+                        strings.resolve(
+                            R.string.chat_error_discard_unconfirmed,
+                            "后台对话的丢弃未获确认，已解除该对话的锁定。",
+                        ),
+                        ChatErrorKind.GENERIC,
+                    ),
+                )
+            }
+        }
+    }
+
+    private fun cancelDurableDiscardWatchdog() {
+        durableDiscardWatchdogJob?.cancel()
+        durableDiscardWatchdogJob = null
     }
 
     /** Resume one paused workflow without creating a new conversation turn. */
@@ -1283,7 +1393,7 @@ class ChatViewModel(
         persistSelection: suspend () -> Unit = {},
         onCommitted: () -> Unit = {},
     ): Boolean = workspaceSwitchMutex.withLock {
-        if (inactiveWaitingTurnId != null || liveWaitingTurnId != null) return@withLock false
+        if (refuseWhileDurableTurnParked()) return@withLock false
         if (_state.value.streaming ||
             (_state.value.sessionTransitioning && !replacePendingTransition)
         ) {
@@ -1519,7 +1629,7 @@ class ChatViewModel(
 
     /** Switch to another session through the real engine. */
     fun openSession(ref: SessionRef, empty: Boolean = false) {
-        if (inactiveWaitingTurnId != null || liveWaitingTurnId != null) return
+        if (refuseWhileDurableTurnParked()) return
         val canonicalRef = ref.copy(id = canonicalSessionId(ref.id))
         if (canonicalRef.id.isBlank() || canonicalRef.id == "new") return
         if (_state.value.sessionReady && _state.value.session.id == canonicalRef.id) return
@@ -1531,9 +1641,105 @@ class ChatViewModel(
         )
     }
 
+    /**
+     * Land the user on the conversation a background notification announced.
+     *
+     * This must NOT go through [openSession]. Every one of these notifications
+     * is posted for a turn that is parked (`WaitingForUser` /
+     * `PausedRecoverable`) or has just gone terminal, so
+     * [refuseWhileDurableTurnParked] is true almost by construction —
+     * `openSession` refused, the caller cleared the pending request anyway, and
+     * the marquee "tap the notification to get back to your turn" affordance
+     * did nothing at all, with no retry and no feedback.
+     *
+     * [turnId] is the durable turn the notification named, and it decides two
+     * things. When it is a turn this ViewModel already holds for the SAME
+     * session, the user is already looking at the announced turn and there is
+     * nothing to do — true even before `sessionReady` flips, which is the cold
+     * start case where a second Resume would abandon the attach in flight. When
+     * the destination is a different session, the parked checkpoint belongs to
+     * the session being LEFT, so its latch (and the composer block it owns) is
+     * released before the transition: carrying it across would hand the
+     * destination a composer blocked on a turn that is not in it.
+     *
+     * Returns false when the request could not be started — a blank id, or a
+     * session transition already in flight — so the caller can retry rather
+     * than silently dropping the request.
+     */
+    fun openSessionFromNotification(ref: SessionRef, turnId: Long? = null): Boolean {
+        val canonicalRef = ref.copy(id = canonicalSessionId(ref.id))
+        if (canonicalRef.id.isBlank() || canonicalRef.id == "new") return false
+        val onAnnouncedSession =
+            canonicalSessionId(_state.value.session.id) == canonicalRef.id
+        val holdingAnnouncedTurn = turnId != null && (
+            turnId == inactiveWaitingTurnId ||
+                turnId == liveWaitingTurnId ||
+                turnId == durableTurnId
+            )
+        if (onAnnouncedSession && (holdingAnnouncedTurn || _state.value.sessionReady)) {
+            // Already on the announced conversation — and, when [turnId] says
+            // so, already holding the announced TURN, which is true mid-attach
+            // on a cold start before `sessionReady` flips. Switching would only
+            // tear down the very transcript the notification asked the user to
+            // look at, and would abandon the attach in flight.
+            return true
+        }
+        // Do not enqueue a second ambiguous Resume while the first one's
+        // SessionResumed/SessionStarted is still in flight — the same rule
+        // `beginSessionTransition` enforces, reported here so the caller
+        // retries instead of losing the route.
+        if (_state.value.sessionTransitioning && sessionTransitionJob != null) return false
+        if (!onAnnouncedSession) releaseDurableRecoveryForSessionChange()
+        beginSessionTransition(
+            canonicalRef,
+            newSession = false,
+            status = strings.resolve(R.string.chat_status_resuming_session, "正在恢复会话…"),
+            allowInactiveWaitingRecovery = true,
+        )
+        return true
+    }
+
+    /**
+     * Drop the parked-checkpoint latch owned by the session being LEFT.
+     *
+     * Only reached once the destination is known to be a different session, so
+     * the latch cannot be the announced turn's own. Carrying it across would
+     * hand the destination session a composer blocked on a checkpoint that is
+     * not in it, with no affordance able to release it; the destination's own
+     * AttachTurn re-establishes whatever checkpoint it has.
+     */
+    private fun releaseDurableRecoveryForSessionChange() {
+        inactiveWaitingTurnId = null
+        liveWaitingTurnId = null
+        durableDiscardInFlightTurnId = null
+        cancelDurableDiscardWatchdog()
+        _state.update {
+            it.copy(durableRecoveryBlocked = false, liveTurnWaitingForUser = false)
+        }
+    }
+
+    /**
+     * The notification route could not be honoured after every retry. Say so —
+     * the previous behaviour cleared the request and left the user staring at
+     * whatever conversation happened to be open.
+     */
+    fun reportConversationLaunchFailed() {
+        _state.update {
+            it.copy(
+                error = ChatError(
+                    message = strings.resolve(
+                        R.string.chat_error_open_conversation_failed,
+                        "无法从通知打开该对话，请在会话列表中选择。",
+                    ),
+                    kind = ChatErrorKind.GENERIC,
+                ),
+            )
+        }
+    }
+
     /** Start a fresh chat through the real engine. */
     fun newChat() {
-        if (inactiveWaitingTurnId != null || liveWaitingTurnId != null) return
+        if (refuseWhileDurableTurnParked()) return
         beginSessionTransition(
             target = SessionRef(id = "new", title = strings.resolve(R.string.chat_new_conversation, "新对话")),
             newSession = true,
@@ -1586,10 +1792,7 @@ class ChatViewModel(
         status: String,
         allowInactiveWaitingRecovery: Boolean = false,
     ) {
-        if (
-            (inactiveWaitingTurnId != null || liveWaitingTurnId != null) &&
-                !allowInactiveWaitingRecovery
-        ) return
+        if (!allowInactiveWaitingRecovery && refuseWhileDurableTurnParked()) return
         // Do not enqueue a second ambiguous Resume/New while the first command
         // is accepted but its SessionResumed/SessionStarted event is still in
         // flight. Those events do not carry a client operation id.
@@ -1723,7 +1926,7 @@ class ChatViewModel(
         val trimmed = text.trim()
         if (trimmed.isEmpty()) return
         if (_state.value.streaming) return // ignore overlapping submit while streaming
-        if (inactiveWaitingTurnId != null || liveWaitingTurnId != null) return
+        if (refuseWhileDurableTurnParked()) return
         if (!_state.value.sessionReady || _state.value.sessionTransitioning) return
         if (explicitCancellation?.isActive == true) return
 
@@ -2371,13 +2574,22 @@ class ChatViewModel(
         }
     }
 
-    private companion object {
+    internal companion object {
         // SavedStateHandle keys for lightweight process-death navigation state.
         const val LEGACY_KEY_TRANSCRIPT = "chat.transcript" // removed on migration; never decoded
         const val KEY_DRAFT = "chat.draft" // String — unsent composer text
         const val KEY_SESSION_ID = "chat.session.id" // String
         const val KEY_SESSION_TITLE = "chat.session.title" // String
         const val KEY_IS_NEW = "chat.isNew" // Boolean — empty-state hero vs list
+
+        /**
+         * How long a submitted discard may wait for its terminal
+         * `TurnRecoveryState` before the client releases the checkpoint itself.
+         * Generous enough that an ordinary round-trip always confirms first;
+         * short enough that a host acceptance which emits nothing does not
+         * block the composer for the rest of the session.
+         */
+        const val DISCARD_CONFIRMATION_TIMEOUT_MS = 8_000L
     }
 }
 

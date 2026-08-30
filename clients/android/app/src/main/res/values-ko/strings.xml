@@ -459,6 +459,7 @@
     <string name="composer_placeholder">灵犀에게 물어보세요…</string>
     <string name="composer_add_attachment">첨부 파일 추가</string>
     <string name="composer_stopping">중지하는 중</string>
+    <string name="composer_discard_recovery">복구 대기 턴 폐기</string>
     <string name="composer_stop">중지</string>
     <string name="composer_stop_recording">일반 녹음 종료</string>
     <string name="composer_record">일반 녹음</string>
@@ -1764,4 +1765,21 @@
     <string name="local_apps_widget_setup_step_3">3. 灵犀 앱을 검색해 로컬 앱 Widget을 추가합니다.</string>
     <string name="local_apps_widget_setup_continue">계속</string>
     <string name="local_apps_error_widget_snapshot">홈 화면 Widget 데이터를 업데이트하지 못했습니다.</string>
+    <string name="chat_discarding">삭제하는 중…</string>
+    <string name="chat_error_discard_background_failed">백그라운드 대화를 삭제하지 못했습니다: %1$s</string>
+    <string name="chat_error_background_resume_failed">백그라운드 대화를 재개하지 못했습니다: %1$s</string>
+    <string name="chat_error_discard_unconfirmed">삭제가 확인되지 않았습니다. 이 대화의 잠금을 해제했습니다.</string>
+    <string name="chat_error_finish_background_turn_first">먼저 백그라운드 대화를 재개하거나 삭제한 뒤 진행하세요.</string>
+    <string name="chat_error_open_conversation_failed">알림에서 해당 대화를 열지 못했습니다. 세션 목록에서 선택하세요.</string>
+    <string name="composer_discard_background_turn">백그라운드 대화 삭제</string>
+    <string name="chat_live_activity_status_running">실행 중</string>
+    <string name="chat_live_activity_status_waiting">기다리는 중</string>
+    <string name="chat_live_activity_status_paused">안전하게 일시정지됨</string>
+    <string name="chat_live_activity_status_completed">완료</string>
+    <string name="chat_live_activity_status_failed">확인 필요</string>
+    <string name="chat_live_activity_short_running">실행</string>
+    <string name="chat_live_activity_short_waiting">대기</string>
+    <string name="chat_live_activity_short_paused">일시정지</string>
+    <string name="chat_live_activity_short_completed">완료</string>
+    <string name="chat_live_activity_short_failed">실패</string>
 </resources>

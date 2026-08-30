@@ -101,13 +101,22 @@ class AndroidConversationBackgroundExecution(context: Context) : ConversationBac
     override fun updateTurn(snapshot: ConversationBackgroundSnapshot?) {
         latestSnapshot = snapshot
         if (snapshot == null || (!lease.isActive && !lease.isStartPending)) return
-        appContext.startService(
-            ConversationTurnService.intent(
-                context = appContext,
-                action = ConversationTurnService.ACTION_UPDATE,
-                snapshot = snapshot,
-            ),
-        )
+        // `isStartPending` means the START was submitted but promotion has NOT
+        // been acknowledged yet, so the service may not be a foreground service
+        // at all. A plain `startService` from a backgrounded process then
+        // throws (Android 12+ raises `BackgroundServiceStartNotAllowedException`,
+        // an IllegalStateException) — and this is a status refresh, never worth
+        // taking the process down for. The next ACTION_START/ACTION_UPDATE
+        // carries `latestSnapshot`, which was already stored above.
+        runCatching {
+            appContext.startService(
+                ConversationTurnService.intent(
+                    context = appContext,
+                    action = ConversationTurnService.ACTION_UPDATE,
+                    snapshot = snapshot,
+                ),
+            )
+        }.onFailure { Log.w(TAG, "Unable to refresh conversation foreground notification", it) }
     }
 
     override fun finishTurn(
@@ -729,13 +738,30 @@ internal object ConversationHeadlessRecovery {
                         }
                         when (recovery.state) {
                             TurnRecoveryStateDto.RUNNING -> {
-                                context.startService(
-                                    ConversationTurnService.intent(
-                                        context,
-                                        ConversationTurnService.ACTION_UPDATE,
-                                        current,
-                                    ),
-                                )
+                                // Headless recovery runs with the process in the
+                                // background. When the ACTION_CANCEL path reached
+                                // here after a FAILED foreground promotion (it
+                                // deliberately does not stop the service), this
+                                // plain `startService` throws
+                                // `BackgroundServiceStartNotAllowedException` —
+                                // inside the `clientEvents` collector, which would
+                                // tear down the whole recovery monitor over a
+                                // notification-text refresh.
+                                runCatching {
+                                    context.startService(
+                                        ConversationTurnService.intent(
+                                            context,
+                                            ConversationTurnService.ACTION_UPDATE,
+                                            current,
+                                        ),
+                                    )
+                                }.onFailure {
+                                    Log.w(
+                                        "ConversationRecovery",
+                                        "Unable to refresh recovery notification",
+                                        it,
+                                    )
+                                }
                             }
                             TurnRecoveryStateDto.WAITING_FOR_USER ->
                                 if (stateIndex >= minimumActionStateIndex) {

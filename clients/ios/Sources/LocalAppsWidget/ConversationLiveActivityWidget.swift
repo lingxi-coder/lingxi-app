@@ -1,3 +1,4 @@
+import Foundation
 import SwiftUI
 
 #if canImport(ActivityKit)
@@ -50,11 +51,12 @@ import SwiftUI
 
         private func shortStatus(_ status: ConversationLiveActivitySnapshot.Status) -> String {
             switch status {
-            case .running: return "Run"
-            case .waiting: return "Wait"
-            case .paused: return "Pause"
-            case .completed: return "Done"
-            case .failed: return "Fail"
+            case .running: return conversationLiveActivityString("chat_live_activity_short_running", "Run")
+            case .waiting: return conversationLiveActivityString("chat_live_activity_short_waiting", "Wait")
+            case .paused: return conversationLiveActivityString("chat_live_activity_short_paused", "Pause")
+            case .completed:
+                return conversationLiveActivityString("chat_live_activity_short_completed", "Done")
+            case .failed: return conversationLiveActivityString("chat_live_activity_short_failed", "Fail")
             }
         }
     }
@@ -90,11 +92,28 @@ import SwiftUI
 
         private var statusLabel: String {
             switch state.status {
-            case .running: return "Running"
-            case .waiting: return "Waiting for you"
-            case .paused: return "Paused safely"
-            case .completed: return "Finished"
-            case .failed: return "Needs attention"
+            case .running:
+                return conversationLiveActivityString("chat_live_activity_status_running", "Running")
+            case .waiting:
+                return conversationLiveActivityString(
+                    "chat_live_activity_status_waiting",
+                    "Waiting for you"
+                )
+            case .paused:
+                return conversationLiveActivityString(
+                    "chat_live_activity_status_paused",
+                    "Paused safely"
+                )
+            case .completed:
+                return conversationLiveActivityString(
+                    "chat_live_activity_status_completed",
+                    "Finished"
+                )
+            case .failed:
+                return conversationLiveActivityString(
+                    "chat_live_activity_status_failed",
+                    "Needs attention"
+                )
             }
         }
 
@@ -116,5 +135,22 @@ import SwiftUI
             case .failed: return .red
             }
         }
+    }
+
+    /// Localize one Live Activity status chip.
+    ///
+    /// `state.title` / `state.subtitle` arrive from the APP already localized
+    /// (`preferredLiveActivitySnapshot` builds them with `String(localized:)`),
+    /// so the status chips beside them were the only hardcoded English left on
+    /// this surface — a Chinese/Japanese/Korean device read
+    /// "灵犀正在等待你 / Waiting for you".
+    ///
+    /// `NSLocalizedString(_:value:)` — not `String(localized:)` — on purpose:
+    /// this code runs inside the widget EXTENSION, whose `Bundle.main` is the
+    /// extension bundle. If `Resources/Localizable.xcstrings` is ever dropped
+    /// from that target, the `value:` overload returns this English default
+    /// rather than rendering the raw key at the user.
+    private func conversationLiveActivityString(_ key: String, _ fallback: String) -> String {
+        NSLocalizedString(key, value: fallback, comment: "Live Activity status chip")
     }
 #endif

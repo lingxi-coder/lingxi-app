@@ -459,6 +459,7 @@
     <string name="composer_placeholder">灵犀に質問する…</string>
     <string name="composer_add_attachment">添付を追加</string>
     <string name="composer_stopping">停止中</string>
+    <string name="composer_discard_recovery">復旧待ちのターンを破棄</string>
     <string name="composer_stop">停止</string>
     <string name="composer_stop_recording">通常録音を終了</string>
     <string name="composer_record">通常録音</string>
@@ -1764,4 +1765,21 @@
     <string name="local_apps_widget_setup_step_3">3. 「灵犀」を検索し、ローカルアプリの Widget を追加します。</string>
     <string name="local_apps_widget_setup_continue">続ける</string>
     <string name="local_apps_error_widget_snapshot">ホーム画面 Widget のデータを更新できませんでした。</string>
+    <string name="chat_discarding">破棄しています…</string>
+    <string name="chat_error_discard_background_failed">バックグラウンドの会話を破棄できませんでした: %1$s</string>
+    <string name="chat_error_background_resume_failed">バックグラウンドの会話を再開できませんでした: %1$s</string>
+    <string name="chat_error_discard_unconfirmed">破棄が確認されませんでした。この会話のロックを解除しました。</string>
+    <string name="chat_error_finish_background_turn_first">先にバックグラウンドの会話を再開するか破棄してください。</string>
+    <string name="chat_error_open_conversation_failed">通知からこの会話を開けませんでした。セッション一覧から選んでください。</string>
+    <string name="composer_discard_background_turn">バックグラウンドの会話を破棄</string>
+    <string name="chat_live_activity_status_running">実行中</string>
+    <string name="chat_live_activity_status_waiting">あなたを待っています</string>
+    <string name="chat_live_activity_status_paused">安全に一時停止中</string>
+    <string name="chat_live_activity_status_completed">完了</string>
+    <string name="chat_live_activity_status_failed">対応が必要</string>
+    <string name="chat_live_activity_short_running">実行</string>
+    <string name="chat_live_activity_short_waiting">待機</string>
+    <string name="chat_live_activity_short_paused">一時停止</string>
+    <string name="chat_live_activity_short_completed">完了</string>
+    <string name="chat_live_activity_short_failed">失敗</string>
 </resources>

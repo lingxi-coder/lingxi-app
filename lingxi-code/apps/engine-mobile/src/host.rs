@@ -5118,6 +5118,32 @@ impl TurnLifecycleListener {
                 | ClientEvent::ApiRetry { .. }
         )
     }
+
+    /// Events that belong to one conversation turn's replayable transcript.
+    ///
+    /// The turn journal is the attach/replay source of truth for a single
+    /// turn, and it is bounded (`MAX_RETAINED_EVENTS`). Connection-scoped
+    /// listing/session/app/task/settings events are neither owned by the turn
+    /// nor decodable by the clients' retained-event decoders — they replay as
+    /// envelopes that map to null — so journaling them only evicts real turn
+    /// output from the retention window and makes
+    /// `DurableTurnCheckpoint::can_resume_without_user` false for a turn that
+    /// has produced nothing of its own. The boundary set here is the same one
+    /// `turn_durability::event_requires_durable_flush` already names, plus the
+    /// live-turn payloads.
+    fn is_turn_journal_event(event: &ClientEvent) -> bool {
+        Self::is_live_turn_payload(event)
+            || matches!(
+                event,
+                ClientEvent::TurnStarted { .. }
+                    | ClientEvent::TurnEnded { .. }
+                    | ClientEvent::Error { .. }
+                    | ClientEvent::AskUserQuestion { .. }
+                    | ClientEvent::AskUserQuestionResolved { .. }
+                    | ClientEvent::PermissionRequestResolved { .. }
+                    | ClientEvent::PlanUpdated { .. }
+            )
+    }
 }
 
 #[async_trait]
@@ -5177,45 +5203,51 @@ impl ClientEventListener for TurnLifecycleListener {
                 event,
                 ClientEvent::TurnRecoveryState { .. } | ClientEvent::TurnEventReplay { .. }
             );
-            let (retained_event, retention_failed) = if !is_recovery_event {
-                match durable_identity {
-                    Some((session_id, turn_id)) => {
-                        let Some(event_json) = serde_json::to_string(&event).ok() else {
-                            tracing::warn!(
-                                session_id,
-                                turn_id,
-                                "mobile: failed to serialize turn event for durability"
-                            );
-                            return;
-                        };
-                        match self.durable_turns.as_ref() {
-                            Some(store) => {
-                                match store.append_event(session_id, turn_id, event_json) {
-                                    Ok(retained) => {
-                                        (Some((session_id.to_string(), turn_id, retained)), false)
-                                    }
-                                    Err(error) => {
-                                        tracing::warn!(%error, session_id, turn_id, "mobile: failed to checkpoint turn event; withholding event delivery");
-                                        (None, true)
-                                    }
-                                }
-                            }
-                            None => (None, false),
-                        }
-                    }
-                    None => (None, false),
-                }
+            // The sequenced `TurnEventReplay` envelope — not the raw event — is
+            // what advances a recovery cursor. Withholding ONLY that envelope
+            // keeps the invariant "never acknowledge a sequence for an event
+            // that was never retained" while a journal failure degrades replay
+            // instead of live delivery.
+            //
+            // Suppressing the raw event too is not a disk-full edge case:
+            // `cancel_active_turn` marks the checkpoint `Cancelled` (terminal)
+            // BEFORE the executor unwinds, so on every Stop each non-terminal
+            // event the unwinding executor emits gets `Err(Terminal)` from
+            // `append_event`. The old `return` therefore dropped a completing
+            // Block tool's `ToolUseResult` on the floor — the client kept the
+            // tool "running" forever, and the journal could not recover it
+            // either. Worse, `TurnEnded` had already consumed the
+            // `terminal_emitted` latch above, so a dropped terminal silenced
+            // every later terminal event and left the client streaming with no
+            // path back to Send.
+            let retained_event = if is_recovery_event {
+                None
             } else {
-                (None, false)
+                durable_identity
+                    .filter(|_| Self::is_turn_journal_event(&event))
+                    .and_then(|(session_id, turn_id)| {
+                        let store = self.durable_turns.as_ref()?;
+                        let event_json = match serde_json::to_string(&event) {
+                            Ok(event_json) => event_json,
+                            Err(error) => {
+                                tracing::warn!(
+                                    %error,
+                                    session_id,
+                                    turn_id,
+                                    "mobile: failed to serialize turn event for durability; delivering without a replay sequence"
+                                );
+                                return None;
+                            }
+                        };
+                        match store.append_event(session_id, turn_id, event_json) {
+                            Ok(retained) => Some((session_id.to_string(), turn_id, retained)),
+                            Err(error) => {
+                                tracing::warn!(%error, session_id, turn_id, "mobile: failed to checkpoint turn event; delivering without a replay sequence");
+                                None
+                            }
+                        }
+                    })
             };
-
-            // A durable turn event is the source of truth for attach/replay.
-            // Never acknowledge a serialized event to the client if the
-            // journal append failed; a later recovery must not advance a
-            // cursor past an event that was never retained.
-            if retention_failed {
-                return;
-            }
 
             let recovery_snapshot = durable_identity.and_then(|(session_id, turn_id)| {
                 let (state, safe_to_resume, reason) = match &event {
@@ -5224,10 +5256,27 @@ impl ClientEventListener for TurnLifecycleListener {
                         false,
                         Some("tool_boundary_requires_confirmation".to_string()),
                     ),
+                    // AskUserQuestion is connection-scoped (see
+                    // `is_live_turn_payload`): a background workflow can park
+                    // on it while the conversation turn streams normally. The
+                    // forward edge is kept because a turn whose slot is held
+                    // while a question is outstanding must not auto-resume,
+                    // but it MUST have a reverse edge — the broker always
+                    // emits `AskUserQuestionResolved` on answer, cancel,
+                    // timeout, and owner unwind. Without it the turn stayed
+                    // labelled `WaitingForUser` for the rest of its life even
+                    // though it was still running.
                     ClientEvent::AskUserQuestion { .. } => (
                         TurnRecoveryStateDto::WaitingForUser,
                         false,
                         Some("waiting_for_user".to_string()),
+                    ),
+                    // `safe_to_resume` stays false: a question was asked, so
+                    // re-running the prompt is still not side-effect free.
+                    ClientEvent::AskUserQuestionResolved { .. } => (
+                        TurnRecoveryStateDto::Running,
+                        false,
+                        Some("ask_user_question_resolved".to_string()),
                     ),
                     ClientEvent::TurnEnded { outcome, .. } => match outcome {
                         TurnOutcomeDto::EndTurn => {
@@ -5891,16 +5940,10 @@ impl MobileEngineHandle {
     /// cancellation/late live events rather than exposing `Cancelled`.
     async fn pause_active_turn(&self, turn_id: u64, reason: String) -> Result<(), ClientError> {
         let active = self.active_cancel.lock().await.clone();
-        let session_id = if let Some(turn) = active {
-            if turn.turn_id != Some(turn_id) {
-                tracing::debug!(
-                    requested_turn_id = turn_id,
-                    active_turn_id = ?turn.turn_id,
-                    "mobile: ignored stale turn pause"
-                );
-                return Ok(());
-            }
-
+        let owns_live_slot = active
+            .as_ref()
+            .is_some_and(|turn| turn.turn_id == Some(turn_id));
+        let session_id = if let Some(turn) = active.clone().filter(|_| owns_live_slot) {
             let session_id = turn.session_id.clone();
             turn.request_quiesce();
             if let Some(owner_id) = turn.permission_owner_id {
@@ -5920,6 +5963,20 @@ impl MobileEngineHandle {
             );
             session_id
         } else {
+            // A pause for a turn that does not own the live executor slot must
+            // still be ANSWERED. The previous `return Ok(())` completed the
+            // command while emitting nothing at all, and a client that awaits
+            // the acknowledging `TurnRecoveryState` (iOS parks an untimed
+            // continuation in `pauseAcknowledgements`) then waited forever.
+            // Fall through to the same durable path a background pause takes:
+            // it publishes the requested turn's snapshot, or maps a
+            // missing/terminal checkpoint to a `ClientError` the caller can
+            // observe. Nothing here touches the unrelated live turn.
+            tracing::debug!(
+                requested_turn_id = turn_id,
+                active_turn_id = ?active.as_ref().and_then(|turn| turn.turn_id),
+                "mobile: pausing a turn that does not own the live executor slot"
+            );
             self.active_session_id()
         };
 
@@ -13452,6 +13509,335 @@ mod tests {
                 && session_id == "session-a"
                 && event_json.contains("\"text_delta\"")
         ));
+    }
+
+    /// `cancel_active_turn` marks the durable checkpoint `Cancelled` BEFORE
+    /// the executor unwinds, so every non-terminal event the unwinding
+    /// executor still emits is refused by `append_event` with
+    /// `DurableTurnStoreError::Terminal`. That journal-only refusal must not
+    /// swallow CLIENT delivery: a Block tool that completes during
+    /// cancellation would otherwise stay "running" forever with no replay
+    /// path back.
+    #[tokio::test]
+    async fn lifecycle_listener_delivers_events_the_cancelled_journal_refuses() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let store = Arc::new(crate::turn_durability::DurableTurnStore::new(
+            temp.path().join("turns"),
+        ));
+        store
+            .begin("session-a", 21, "stop me".to_string(), None, Vec::new())
+            .expect("begin");
+        store.cancel("session-a", 21).expect("cancel");
+
+        let inner = Arc::new(FakeListener::default());
+        let active = Arc::new(tokio::sync::Mutex::new(Some(Arc::new(
+            super::ActiveTurn::new_owned(Some(21), "session-a".to_string(), 1),
+        ))));
+        let listener =
+            super::TurnLifecycleListener::new_durable(inner.clone(), active, store.clone());
+
+        listener
+            .on_event(Ev::ToolUseResult {
+                id: "tool-1".to_string(),
+                tool: "Bash".to_string(),
+                result_json: "{}".to_string(),
+                is_error: false,
+                display: None,
+            })
+            .await;
+
+        let events = inner.received.lock().await;
+        assert!(
+            matches!(
+                events.as_slice(),
+                [Ev::ToolUseResult { id, .. }] if id == "tool-1"
+            ),
+            "a refused journal append must still deliver the raw event and \
+             withhold only the sequenced replay envelope, got {events:?}"
+        );
+        assert_eq!(
+            store
+                .load("session-a", 21)
+                .expect("load cancelled turn")
+                .last_sequence,
+            0,
+            "the refused event must not advance the replay cursor"
+        );
+    }
+
+    /// The `TurnEnded` arm consumes the `terminal_emitted` latch BEFORE the
+    /// journal write. If a refused write dropped the event, that burnt latch
+    /// would suppress every later terminal event and strand the client
+    /// streaming with no path back to Send.
+    #[tokio::test]
+    async fn lifecycle_listener_delivers_terminal_event_the_journal_refuses() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let store = Arc::new(crate::turn_durability::DurableTurnStore::new(
+            temp.path().join("turns"),
+        ));
+        store
+            .begin("session-a", 22, "done".to_string(), None, Vec::new())
+            .expect("begin");
+        store
+            .transition(
+                "session-a",
+                22,
+                TurnRecoveryStateDto::Completed,
+                false,
+                None,
+            )
+            .expect("complete");
+
+        let inner = Arc::new(FakeListener::default());
+        let active = Arc::new(tokio::sync::Mutex::new(Some(Arc::new(
+            super::ActiveTurn::new_owned(Some(22), "session-a".to_string(), 1),
+        ))));
+        let listener = super::TurnLifecycleListener::new_durable(inner.clone(), active, store);
+
+        listener
+            .on_event(Ev::TurnEnded {
+                outcome: client_protocol::events::TurnOutcomeDto::EndTurn,
+                stop_reason: Some("end_turn".to_string()),
+                cost: client_protocol::events::CostDto {
+                    total_usd: 0.0,
+                    input_tokens: 0,
+                    output_tokens: 0,
+                    api_calls: 0,
+                    session_duration_secs: 0,
+                    formatted: "$0.00".to_string(),
+                },
+            })
+            .await;
+
+        let events = inner.received.lock().await;
+        assert!(
+            matches!(events.first(), Some(Ev::TurnEnded { .. })),
+            "the terminal event whose journal append was refused must still \
+             reach the client that already consumed the latch, got {events:?}"
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, Ev::TurnEventReplay { .. })),
+            "the refused event must not be acknowledged with a replay sequence, \
+             got {events:?}"
+        );
+    }
+
+    /// Connection-scoped listing/session/app/task events are not owned by the
+    /// live turn. Journaling them evicted real turn output from the bounded
+    /// retention window, replayed as envelopes the clients decode to null, and
+    /// made `can_resume_without_user` false for a turn that had produced
+    /// nothing of its own.
+    #[tokio::test]
+    async fn lifecycle_listener_keeps_connection_scoped_events_out_of_the_turn_journal() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let store = Arc::new(crate::turn_durability::DurableTurnStore::new(
+            temp.path().join("turns"),
+        ));
+        store
+            .begin("session-a", 23, "list".to_string(), None, Vec::new())
+            .expect("begin");
+
+        let inner = Arc::new(FakeListener::default());
+        let active = Arc::new(tokio::sync::Mutex::new(Some(Arc::new(
+            super::ActiveTurn::new_owned(Some(23), "session-a".to_string(), 1),
+        ))));
+        let listener =
+            super::TurnLifecycleListener::new_durable(inner.clone(), active, store.clone());
+
+        listener
+            .on_event(Ev::TurnStarted { turn_id: Some(23) })
+            .await;
+        listener
+            .on_event(Ev::SessionList {
+                sessions: Vec::new(),
+            })
+            .await;
+        listener
+            .on_event(Ev::ModelList {
+                models: Vec::new(),
+                current: "m".to_string(),
+                details: Vec::new(),
+            })
+            .await;
+
+        {
+            let events = inner.received.lock().await;
+            let replayed = events
+                .iter()
+                .filter_map(|event| match event {
+                    Ev::TurnEventReplay { event_json, .. } => Some(event_json.clone()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                replayed.len(),
+                1,
+                "only the turn-owned turn_started may be sequenced, got {replayed:?}"
+            );
+            assert!(
+                replayed[0].contains("\"turn_started\""),
+                "the single retained envelope must be turn_started, got {replayed:?}"
+            );
+            assert!(
+                events
+                    .iter()
+                    .any(|event| matches!(event, Ev::SessionList { .. })),
+                "the connection-scoped event must still reach the client live"
+            );
+        }
+
+        let checkpoint = store.load("session-a", 23).expect("load");
+        assert_eq!(
+            checkpoint.last_sequence, 1,
+            "session_list / model_list must not consume the retention budget"
+        );
+
+        store
+            .transition(
+                "session-a",
+                23,
+                TurnRecoveryStateDto::PausedRecoverable,
+                true,
+                Some("process_restarted".to_string()),
+            )
+            .expect("pause");
+        let (disposition, _) = store.resume("session-a", 23).expect("resume");
+        assert_eq!(
+            disposition,
+            crate::turn_durability::ResumeDisposition::Ready,
+            "a turn that only emitted turn_started must stay auto-resumable"
+        );
+    }
+
+    /// `AskUserQuestion` is connection-scoped, so its recovery transition needs
+    /// the reverse edge the broker always emits. Without it the turn stayed
+    /// labelled `WaitingForUser` for the rest of its life.
+    #[tokio::test]
+    async fn lifecycle_listener_restores_running_when_a_question_resolves() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let store = Arc::new(crate::turn_durability::DurableTurnStore::new(
+            temp.path().join("turns"),
+        ));
+        store
+            .begin("session-a", 24, "ask".to_string(), None, Vec::new())
+            .expect("begin");
+
+        let inner = Arc::new(FakeListener::default());
+        let active = Arc::new(tokio::sync::Mutex::new(Some(Arc::new(
+            super::ActiveTurn::new_owned(Some(24), "session-a".to_string(), 1),
+        ))));
+        let listener =
+            super::TurnLifecycleListener::new_durable(inner.clone(), active, store.clone());
+
+        listener
+            .on_event(Ev::AskUserQuestion {
+                request: client_protocol::ask_user_question::AskUserQuestionRequestDto {
+                    request_id: 5,
+                    questions: Vec::new(),
+                    timeout_secs: None,
+                },
+            })
+            .await;
+        assert_eq!(
+            store.load("session-a", 24).expect("load parked").state,
+            TurnRecoveryStateDto::WaitingForUser
+        );
+
+        listener
+            .on_event(Ev::AskUserQuestionResolved { request_id: 5 })
+            .await;
+
+        let checkpoint = store.load("session-a", 24).expect("load resolved");
+        assert_eq!(
+            checkpoint.state,
+            TurnRecoveryStateDto::Running,
+            "AskUserQuestionResolved must restore Running"
+        );
+        assert!(
+            !checkpoint.safe_to_resume,
+            "a resolved question is still a side effect: re-running the prompt \
+             stays user-gated"
+        );
+        let snapshots = inner
+            .received
+            .lock()
+            .await
+            .iter()
+            .filter_map(|event| match event {
+                Ev::TurnRecoveryState { snapshot } => Some(snapshot.state.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            snapshots,
+            vec![
+                TurnRecoveryStateDto::WaitingForUser,
+                TurnRecoveryStateDto::Running
+            ],
+            "the client must observe both edges"
+        );
+    }
+
+    /// `PauseTurn` for a turn that does not own the live executor slot used to
+    /// return `Ok(())` while emitting NOTHING. The iOS client parks an untimed
+    /// continuation in `pauseAcknowledgements` that only the acknowledging
+    /// event resolves, so the silent answer deadlocked it.
+    #[test]
+    fn submit_pause_for_a_non_active_turn_still_acknowledges() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let (handle, listener) = build_submit_handle(tmp.path());
+
+        handle.runtime().block_on(async {
+            let session_id = handle.active_session_id();
+            handle
+                .durable_turns
+                .begin(&session_id, 41, "background".to_string(), None, Vec::new())
+                .expect("begin background turn");
+            // A DIFFERENT turn owns the live executor slot.
+            *handle.active_cancel.lock().await = Some(Arc::new(super::ActiveTurn::new_owned(
+                Some(42),
+                session_id.clone(),
+                7,
+            )));
+            listener.received.lock().await.clear();
+
+            handle
+                .submit(ClientCommand::PauseTurn {
+                    turn_id: 41,
+                    reason: "background_time_expired".to_string(),
+                })
+                .await
+                .expect("pause accepted");
+
+            let events = listener.received.lock().await;
+            let snapshots = events
+                .iter()
+                .filter_map(|event| match event {
+                    ClientEvent::TurnRecoveryState { snapshot } => Some(snapshot.clone()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                snapshots.len(),
+                1,
+                "a pause for a non-active turn must emit exactly one \
+                 acknowledging TurnRecoveryState, got {events:?}"
+            );
+            assert_eq!(snapshots[0].turn_id, 41);
+            assert_eq!(snapshots[0].state, TurnRecoveryStateDto::PausedRecoverable);
+            assert_eq!(
+                handle
+                    .active_cancel
+                    .lock()
+                    .await
+                    .as_ref()
+                    .and_then(|turn| turn.turn_id),
+                Some(42),
+                "the unrelated live turn must be left alone"
+            );
+        });
     }
 
     /// A connection owns at most one live turn. A second `SendPrompt` must be

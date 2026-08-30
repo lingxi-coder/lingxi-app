@@ -1428,9 +1428,10 @@ mod tests {
         LOCK.get_or_init(|| Mutex::new(()))
     }
 
+    // Delegates to the crate-level lock: these globals are per-process, so a
+    // file-local mutex would only serialize this file against itself.
     fn process_lock() -> &'static Mutex<()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
+        crate::process_globals_lock()
     }
 
     /// Records every `(from, to, content)` it is asked to route and always acks

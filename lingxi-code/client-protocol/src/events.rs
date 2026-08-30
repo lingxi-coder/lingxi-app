@@ -122,25 +122,6 @@ pub enum ClientEvent {
         cost: CostDto,
     },
 
-    /// Authoritative durable state for one mobile turn. Emitted on attach,
-    /// resume, recovery gating, and every terminal transition.
-    TurnRecoveryState {
-        snapshot: TurnRecoverySnapshotDto,
-    },
-
-    /// Sequenced retained copy of a turn event. It is emitted beside live
-    /// delivery and replayed after
-    /// [`ClientCommand::AttachTurn`](crate::commands::ClientCommand::AttachTurn).
-    /// `event_json` is the original serialized `ClientEvent`; keeping it a
-    /// string avoids a recursive UniFFI enum while preserving the exact wire
-    /// payload for future SSE/WebSocket transports.
-    TurnEventReplay {
-        session_id: String,
-        turn_id: u64,
-        sequence: u64,
-        event_json: String,
-    },
-
     CostUpdate {
         total_usd: f64,
         input_tokens: u64,
@@ -229,10 +210,6 @@ pub enum ClientEvent {
 
     McpServers {
         servers: Vec<McpServerDto>,
-    },
-
-    Skills {
-        skills: Vec<SkillDto>,
     },
 
     Hooks {
@@ -495,6 +472,28 @@ pub enum ClientEvent {
         request_id: u64,
         /// The operation the client should perform.
         op: AudioOpDto,
+    },
+    /// Authoritative durable state for one mobile turn. Emitted on attach,
+    /// resume, recovery gating, and every terminal transition.
+    TurnRecoveryState {
+        snapshot: TurnRecoverySnapshotDto,
+    },
+
+    /// Sequenced retained copy of a turn event. It is emitted beside live
+    /// delivery and replayed after
+    /// [`ClientCommand::AttachTurn`](crate::commands::ClientCommand::AttachTurn).
+    /// `event_json` is the original serialized `ClientEvent`; keeping it a
+    /// string avoids a recursive UniFFI enum while preserving the exact wire
+    /// payload for future SSE/WebSocket transports.
+    TurnEventReplay {
+        session_id: String,
+        turn_id: u64,
+        sequence: u64,
+        event_json: String,
+    },
+
+    Skills {
+        skills: Vec<SkillDto>,
     },
 }
 

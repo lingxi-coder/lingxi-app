@@ -214,6 +214,13 @@ fun Composer(
                 )
                 Spacer(Modifier.weight(1f))
                 val stopGeneratingDescription = stringResource(R.string.composer_stop_generating)
+                // The Discard affordance is a DIFFERENT action from Stop: it
+                // throws away a parked background checkpoint rather than
+                // interrupting live generation. It used to announce
+                // "Stop generating" to TalkBack, which is the one thing it does
+                // not do.
+                val discardRecoveryDescription =
+                    stringResource(R.string.composer_discard_background_turn)
                 val sendDescription = stringResource(R.string.composer_send)
                 val recordDescription = stringResource(R.string.composer_record)
                 val startRecordingLabel = stringResource(R.string.composer_start_recording)
@@ -259,7 +266,7 @@ fun Composer(
                                 .clip(RoundedCornerShape(3.dp))
                                 .background(Color.White)
                                 .clearAndSetSemantics {
-                                    contentDescription = stopGeneratingDescription
+                                    contentDescription = discardRecoveryDescription
                                 },
                         )
                     }

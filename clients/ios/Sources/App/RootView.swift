@@ -153,6 +153,18 @@ struct RootView: View {
     @State private var conversationBackgroundAlerts =
         ConversationBackgroundAlertController.live()
     @State private var projectSwitching = false
+    /// `LingxiAppActionStore.drain()` REMOVES what it hands back, so an action
+    /// refused by `ConversationSessionMutationPolicy` used to be destroyed by
+    /// the very act of reading it. A conversation notification is posted
+    /// exactly for `waitingForUser` / `pausedRecoverable` turns, which is
+    /// precisely when `hasUnresolvedTurnRecovery` is true and the gate refuses
+    /// — so the marquee "tap the notification to reopen the conversation" path
+    /// dropped its own action every time. Park refused actions here and retry
+    /// them the moment the gate opens.
+    @State private var deferredAppActions: [LingxiAppAction] = []
+    /// A stuck gate plus a notification storm must not grow this without
+    /// bound; only the newest few taps are worth replaying.
+    private static let maxDeferredAppActions = 8
 
     private let appSandboxRoot: String
     private let scopedPreferences: ProjectScopedPreferences
@@ -438,6 +450,19 @@ struct RootView: View {
             }
             .onReceive(NotificationCenter.default.publisher(for: .lingxiAppActionPending)) { _ in
                 Task { await consumePendingAppActions() }
+            }
+            // The three inputs of `ConversationSessionMutationPolicy`. A
+            // conversation notification is only ever posted for a turn that
+            // makes at least one of them true, so without these the drained
+            // action would stay parked forever.
+            .onChange(of: source.model.hasUnresolvedTurnRecovery) { _, _ in
+                retryDeferredAppActions()
+            }
+            .onChange(of: source.model.hasInactiveDurableRecovery) { _, _ in
+                retryDeferredAppActions()
+            }
+            .onChange(of: source.model.isCancelling) { _, _ in
+                retryDeferredAppActions()
             }
             .onReceive(NotificationCenter.default.publisher(for: UIApplication.didReceiveMemoryWarningNotification)) { _ in
                 Task { await localAppsStore.handleMemoryWarning() }
@@ -1368,11 +1393,44 @@ struct RootView: View {
     private func consumePendingAppActions() async {
         let actions = await LingxiAppActionStore.shared.drain()
         for action in actions {
-            applyAppAction(action)
+            parkRefusedAppAction(action, applied: applyAppAction(action))
         }
     }
 
-    private func applyAppAction(_ action: LingxiAppAction) {
+    /// Park an action the session-mutation gate refused instead of losing it.
+    private func parkRefusedAppAction(_ action: LingxiAppAction, applied: Bool) {
+        guard !applied else { return }
+        deferredAppActions.append(action)
+        if deferredAppActions.count > Self.maxDeferredAppActions {
+            deferredAppActions.removeFirst(
+                deferredAppActions.count - Self.maxDeferredAppActions
+            )
+        }
+    }
+
+    /// Re-run whatever the mutation gate refused earlier. Called from the
+    /// `onChange` hooks on the three gate inputs, so a notification tapped
+    /// while a durable turn still owned the engine slot lands as soon as that
+    /// turn resolves rather than being silently discarded.
+    private func retryDeferredAppActions() {
+        guard !deferredAppActions.isEmpty else { return }
+        guard ConversationSessionMutationPolicy.allowsCallerMutation(
+            hasInactiveDurableRecovery: source.model.hasInactiveDurableRecovery,
+            hasUnresolvedTurnRecovery: source.model.hasUnresolvedTurnRecovery,
+            isCancelling: source.model.isCancelling
+        ) else { return }
+        let pending = deferredAppActions
+        deferredAppActions = []
+        for action in pending {
+            parkRefusedAppAction(action, applied: applyAppAction(action))
+        }
+    }
+
+    /// Returns `false` when the session-mutation gate refused the action, so
+    /// the caller can retry it later. `true` means the action was consumed
+    /// (including the cases that never touch session selection).
+    @discardableResult
+    private func applyAppAction(_ action: LingxiAppAction) -> Bool {
         navigation.closeSidebar()
         navigation.closeSettings()
         navigation.closePresentedRoute()
@@ -1380,27 +1438,34 @@ struct RootView: View {
 
         switch action {
         case .openApp:
-            break
+            return true
         case .newConversation:
-            beginAppIntegratedConversation(draftText: "")
+            return beginAppIntegratedConversation(draftText: "")
         case let .ask(question):
             let trimmed = question.trimmingCharacters(in: .whitespacesAndNewlines)
-            beginAppIntegratedConversation(draftText: trimmed)
+            return beginAppIntegratedConversation(draftText: trimmed)
+        // `turnID` is deliberately unused: neither client has a
+        // navigate-to-turn API. Android's own consumer takes the same route
+        // payload and calls `chatViewModel.openSession(SessionRef(request.sessionId, ""))`
+        // (RootScreen.kt), reading only the session id — so dropping the turn
+        // id here is parity, not a gap.
         case let .openConversation(sessionID, _):
             guard ConversationSessionMutationPolicy.allowsCallerMutation(
                 hasInactiveDurableRecovery: source.model.hasInactiveDurableRecovery,
                 hasUnresolvedTurnRecovery: source.model.hasUnresolvedTurnRecovery,
                 isCancelling: source.model.isCancelling
-            ) else { return }
+            ) else { return false }
             pendingSessionRestoreID = sessionID
             activeSession = sessionID
             requestSessionResume(sessionID, scope: activeScope, using: source)
+            return true
         case let .openTerminal(sessionID, initialCommand):
             navigation.openTerminal(
                 sessionID: sessionID,
                 initialCommand: initialCommand,
                 projectID: projectStore.activeProjectId
             )
+            return true
         case let .openLocalApp(appID, destination, autostart, _):
             Task {
                 await openLocalAppFromDeepLink(
@@ -1409,6 +1474,7 @@ struct RootView: View {
                     autostart: autostart
                 )
             }
+            return true
         }
     }
 
@@ -1422,15 +1488,16 @@ struct RootView: View {
             }
         #endif
         guard let action = LingxiDeepLink.action(from: url) else { return }
-        applyAppAction(action)
+        parkRefusedAppAction(action, applied: applyAppAction(action))
     }
 
-    private func beginAppIntegratedConversation(draftText: String) {
+    @discardableResult
+    private func beginAppIntegratedConversation(draftText: String) -> Bool {
         guard ConversationSessionMutationPolicy.allowsCallerMutation(
             hasInactiveDurableRecovery: source.model.hasInactiveDurableRecovery,
             hasUnresolvedTurnRecovery: source.model.hasUnresolvedTurnRecovery,
             isCancelling: source.model.isCancelling
-        ) else { return }
+        ) else { return false }
         voiceInteraction.handleContextChange()
         pendingSessionRestoreID = nil
         activeSession = ""
@@ -1438,6 +1505,7 @@ struct RootView: View {
         scopedPreferences.setActiveSessionID("", scope: activeScope)
         draft = draftText
         source.startNewConversation()
+        return true
     }
 
     private func openLocalAppFromDeepLink(

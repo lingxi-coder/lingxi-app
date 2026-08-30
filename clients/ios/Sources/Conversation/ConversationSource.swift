@@ -2901,6 +2901,7 @@ final class MockConversationSource: ConversationSource {
             try await withCheckedThrowingContinuation { continuation in
                 pauseAcknowledgements[token, default: []].append(continuation)
                 guard shouldSubmit else { return }
+                armPauseAcknowledgementDeadline(token: token)
                 Task { [weak self] in
                     guard let self else { return }
                     do {
@@ -4119,6 +4120,7 @@ final class MockConversationSource: ConversationSource {
         private enum PauseAcknowledgementError: LocalizedError {
             case invalidated
             case recoveryState(TurnRecoveryStateDto)
+            case timedOut(turnID: UInt64)
 
             var errorDescription: String? {
                 switch self {
@@ -4126,7 +4128,46 @@ final class MockConversationSource: ConversationSource {
                     return "PauseTurn was invalidated by a session transition"
                 case let .recoveryState(state):
                     return "PauseTurn was not acknowledged: \(String(describing: state))"
+                case let .timedOut(turnID):
+                    return "PauseTurn was not acknowledged for turn \(turnID)"
                 }
+            }
+        }
+
+        /// A pause acknowledgement is a REMOTE event, not a command result:
+        /// `submitCommand` returning proves only that the host accepted the
+        /// command. `MobileHost::pause_active_turn` answers a request whose
+        /// turn id is no longer the active one with `Ok(())` and emits NOTHING,
+        /// so the continuation parked in `pauseAcknowledgements` would never be
+        /// resumed and the submit `catch` never runs. Because
+        /// `pauseAcknowledgements.isEmpty` gates `startNewConversation`,
+        /// `send`, `openSession` and `resumeSession` — and the only drain
+        /// (`invalidateTurnContext`) is reachable only through those same
+        /// blocked entry points — one unacknowledged pause bricked the app for
+        /// the rest of the session. Bound the wait exactly the way
+        /// `waitForCancellationAcknowledgement` bounds cancel.
+        private static let pauseAcknowledgementTimeout: TimeInterval = 5
+
+        /// Fail every continuation still parked on `token` once the deadline
+        /// passes. A late `PausedRecoverable` snapshot is then a no-op:
+        /// `resolvePauseAcknowledgements` finds no entry and returns.
+        private func armPauseAcknowledgementDeadline(token: ConversationTurnToken) {
+            Task { @MainActor [weak self] in
+                try? await Task.sleep(
+                    nanoseconds: UInt64(Self.pauseAcknowledgementTimeout * 1_000_000_000)
+                )
+                guard let self, self.pauseAcknowledgements[token] != nil else { return }
+                let error = PauseAcknowledgementError.timedOut(turnID: token.clientTurnId)
+                if self.activeConversationTurnToken == token {
+                    // Same posture as a rejected submit: the turn stays owned
+                    // and the host failure is visible, rather than an unknown
+                    // state being laundered into Cancelled.
+                    self.model.error = ConversationError(
+                        kind: .host,
+                        message: error.localizedDescription
+                    )
+                }
+                self.resolvePauseAcknowledgements(token: token, result: .failure(error))
             }
         }
 
@@ -6409,6 +6450,53 @@ final class MockConversationSource: ConversationSource {
                         display: nil
                     ))
                 }
+            // The engine journals every forwarded live-turn event verbatim
+            // (`serde_json::to_string(&event)` in `TurnLifecycleListener`), and
+            // `is_live_turn_payload` explicitly includes `SystemNotice` and
+            // `ThinkingDelta`. Dropping them here meant a turn that reasoned or
+            // emitted notices while the app was backgrounded came back with no
+            // reasoning trace and no notices at all, while Android's
+            // `retainedTurnEventToReply` projected both.
+            case "thinking_delta":
+                if let thinking = object["thinking"] as? String {
+                    apply(.thinkingDelta(
+                        thinking: thinking,
+                        signature: object["signature"] as? String
+                    ))
+                }
+            case "system_notice":
+                if let message = object["message"] as? String {
+                    apply(.systemNotice(
+                        message: message,
+                        isError: object["is_error"] as? Bool ?? false
+                    ))
+                }
+            // `turn_started`, `turn_ended` and `error` are deliberately NOT
+            // projected. Unlike Android, whose `ReplyEvent` cases only append to
+            // a transcript, the iOS handlers for these three mutate
+            // durable-recovery OWNERSHIP, and projecting one mid-replay destroys
+            // the checkpoint the replay is reading from:
+            //   - `.turnStarted` sets `executorOwnedTurnID` and
+            //     `model.streaming = true`, which shows Stop for a parked turn.
+            //   - `.turnEnded` calls `durableTurns.clear(turnID:)` plus
+            //     `clearTurnPointers`.
+            //   - `.error` reaches `fail(...)`, which likewise calls
+            //     `durableTurns.clear(turnID:)`, drops `hasUnresolvedTurnRecovery`
+            //     and nils `currentTurnId` via `clearTurnPointers(keepEpoch:false)`.
+            // Once the checkpoint is gone, `applyRetainedTurnEvent`'s
+            // `currentTurnId == turnID` guard silently rejects every REMAINING
+            // event in the same replay suffix — strictly worse than the silence
+            // it would replace.
+            //
+            // Do NOT restate the old rationale that the engine "transitions the
+            // checkpoint to a terminal state alongside journalling them", which
+            // would make this rule look redundant. It is false for the case that
+            // matters: `host.rs`'s `TurnOutcomeDto::Cancelled => return None`
+            // (and the `_ => return None` beside it) journal the event with NO
+            // transition at all, so a non-terminal snapshot really can be
+            // followed by these events in the replayed suffix. Surfacing a
+            // replayed failure needs a path that does not clear the checkpoint,
+            // not an entry in this switch.
             default:
                 break
             }

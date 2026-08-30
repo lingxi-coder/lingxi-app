@@ -459,6 +459,7 @@
     <string name="composer_placeholder">Ask Lingxi…</string>
     <string name="composer_add_attachment">Add Attachment</string>
     <string name="composer_stopping">Stopping</string>
+    <string name="composer_discard_recovery">Discard Recovery</string>
     <string name="composer_stop">Stop</string>
     <string name="composer_stop_recording">Stop Recording</string>
     <string name="composer_record">Record</string>
@@ -1770,4 +1771,21 @@
     <string name="local_apps_widget_setup_step_3">3. Search for Lingxi and add its local app Widget.</string>
     <string name="local_apps_widget_setup_continue">Continue</string>
     <string name="local_apps_error_widget_snapshot">Couldn\'t update the Home Screen Widget data.</string>
+    <string name="chat_discarding">Discarding…</string>
+    <string name="chat_error_discard_background_failed">Failed to discard the background conversation: %1$s</string>
+    <string name="chat_error_background_resume_failed">Failed to resume the background conversation: %1$s</string>
+    <string name="chat_error_discard_unconfirmed">The discard was never confirmed. The conversation has been unblocked.</string>
+    <string name="chat_error_finish_background_turn_first">Resume or discard the background conversation before doing this.</string>
+    <string name="chat_error_open_conversation_failed">Couldn\'t open that conversation from the notification. Pick it from the session list.</string>
+    <string name="composer_discard_background_turn">Discard background conversation</string>
+    <string name="chat_live_activity_status_running">Running</string>
+    <string name="chat_live_activity_status_waiting">Waiting for you</string>
+    <string name="chat_live_activity_status_paused">Paused safely</string>
+    <string name="chat_live_activity_status_completed">Finished</string>
+    <string name="chat_live_activity_status_failed">Needs attention</string>
+    <string name="chat_live_activity_short_running">Run</string>
+    <string name="chat_live_activity_short_waiting">Wait</string>
+    <string name="chat_live_activity_short_paused">Pause</string>
+    <string name="chat_live_activity_short_completed">Done</string>
+    <string name="chat_live_activity_short_failed">Fail</string>
 </resources>

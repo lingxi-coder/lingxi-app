@@ -25,6 +25,28 @@ pub mod report_findings;
 pub mod send_message;
 pub mod sleep;
 pub mod synthetic_output;
+
+/// ONE lock for every test that mutates `traits::live_sessions`'s process
+/// globals (`set_process_dir` / `set_process_session_id` / `set_process_name`).
+///
+/// It lives at crate level because those globals are per-PROCESS and the whole
+/// crate's unit tests share one process. `list_agents.rs` and `send_message.rs`
+/// each used to declare their own `process_lock()` with its own `static LOCK` —
+/// two distinct mutexes guarding one resource, so each file serialized against
+/// itself and against nothing else. A `send_message` test could call
+/// `set_process_dir` into its own TempDir while a `list_agents` test was
+/// reading, and the listing lost the peer entry it had just written.
+///
+/// The failure was load-dependent: `-p tool-ui --lib` alone passed 119/119 four
+/// times over (including `--test-threads=1`), and only went red inside a larger
+/// multi-crate run, where more binaries competing for cores changed the
+/// interleaving. A file-local lock cannot fix that; the lock has to be as wide
+/// as the state it guards.
+#[cfg(test)]
+pub(crate) fn process_globals_lock() -> &'static std::sync::Mutex<()> {
+    static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| std::sync::Mutex::new(()))
+}
 pub use artifact::ArtifactTool;
 pub use ask_user_question::AskUserQuestionTool;
 pub use brief::BriefTool;
@@ -245,5 +267,51 @@ mod ask_timeout_wiring_tests {
             .await
             .expect_err("headless cannot answer on the user's behalf");
         assert!(matches!(err, tool_api::ToolError::InteractionRequired(_)));
+    }
+}
+
+#[cfg(test)]
+mod process_globals_lock_gate {
+    /// Both files that mutate `traits::live_sessions`'s per-process globals must
+    /// route through ONE lock. They previously each declared a `process_lock()`
+    /// backed by its own `static LOCK`, so each serialized against itself and
+    /// against nothing else, and the suite went red only under load.
+    ///
+    /// This is a SOURCE gate rather than a behavioural one on purpose: the race
+    /// it guards is load-dependent and does not reproduce on demand, so a
+    /// behavioural test would be green whether or not the bug was present. What
+    /// is deterministic is the structure — a file-local `static` under
+    /// `fn process_lock` is the defect itself, so that is what this asserts.
+    const SHARED: &str = "crate::process_globals_lock()";
+
+    fn process_lock_body(source: &str, file: &str) -> String {
+        let start = source
+            .find("fn process_lock()")
+            .unwrap_or_else(|| panic!("{file} no longer declares `fn process_lock()`; if it was renamed, retarget this gate rather than deleting it"));
+        let rest = &source[start..];
+        let end = rest.find("\n    }").unwrap_or_else(|| panic!("{file}: could not find the end of `fn process_lock()`"));
+        rest[..end].to_string()
+    }
+
+    #[test]
+    fn neither_file_reintroduces_a_private_process_lock() {
+        for (file, source) in [
+            ("list_agents.rs", include_str!("list_agents.rs")),
+            ("send_message.rs", include_str!("send_message.rs")),
+        ] {
+            let body = process_lock_body(source, file);
+            assert!(
+                body.contains(SHARED),
+                "{file}'s `process_lock()` does not delegate to `{SHARED}`. Its body is:\n{body}\n\n                 A file-local `static LOCK` here guards only this file. `list_agents.rs` and \
+                 `send_message.rs` both call `traits::live_sessions::set_process_dir` / \
+                 `set_process_session_id` / `set_process_name`, which are PER-PROCESS, so two \
+                 mutexes let a `send_message` test repoint the process dir while a `list_agents` \
+                 test is reading it — the listing then loses the peer entry it just wrote."
+            );
+            assert!(
+                !body.contains("static LOCK"),
+                "{file}'s `process_lock()` still declares its own `static LOCK`"
+            );
+        }
     }
 }

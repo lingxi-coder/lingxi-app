@@ -1302,13 +1302,37 @@ internal fun retainedTurnEventToReply(
             strings,
         )
         "error" -> ReplyEvent.Error(event.optString("message"))
-        "turn_ended" -> when (event.optString("outcome")) {
+        // `outcome` is an internally TAGGED OBJECT on the wire, not a string:
+        // client-protocol's `TurnOutcomeDto` carries `#[serde(tag = "type")]`,
+        // and the blessed fixture
+        // `lingxi-code/client-protocol/snapshots/event/turn_ended.json` pins
+        // `"outcome": {"type": "end_turn"}`. Reading it with
+        // `optString("outcome")` can never yield "end_turn" under ANY org.json
+        // build — AOSP hands back the fallback, the reference implementation
+        // hands back the object's own `{"type":"end_turn"}` text — so the
+        // `when` always fell to `else -> null` and a REPLAYED turn_ended never
+        // produced `ReplyEvent.End`: `streaming` stayed true and the composer
+        // stayed locked on every recovered turn. Read the nested tag instead.
+        "turn_ended" -> when (retainedTurnOutcome(event)) {
             "end_turn" -> ReplyEvent.End
             else -> null
         }
         else -> null
     }
 }.getOrNull()
+
+/**
+ * The `type` tag of a retained `turn_ended` envelope's `outcome`.
+ *
+ * The object form is the only shape the engine emits today; a bare string is
+ * still accepted so a journal retained by an older build stays readable.
+ */
+private fun retainedTurnOutcome(event: JSONObject): String? {
+    event.optJSONObject("outcome")?.let { outcome ->
+        return outcome.optString("type").takeUnless(String::isEmpty)
+    }
+    return (event.opt("outcome") as? String)?.takeUnless(String::isEmpty)
+}
 
 /**
  * Convert transport diagnostics into concise, actionable mobile copy.

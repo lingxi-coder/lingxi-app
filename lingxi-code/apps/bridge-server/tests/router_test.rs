@@ -3156,3 +3156,119 @@ async fn upsert_mcp_server_rejects_an_empty_name_with_protocol_error() {
         "a rejected empty name must never create the target file"
     );
 }
+
+// ── Durable turn recovery is not a desktop-bridge capability ─────────────────
+
+/// `attach_turn` / `resume_turn` / `pause_turn` are request-reply commands on
+/// the MOBILE host (`engine-mobile`'s `host.rs`): the client sends one and
+/// waits for a `turn_recovery_state` snapshot (and, after `attach_turn`, a
+/// `turn_event_replay` burst). This bridge has no retained turn-event window
+/// and no recovery state machine, so it cannot answer them — and until this
+/// test's arms existed they fell into `route`'s `#[non_exhaustive]` catch-all
+/// and were only `tracing::debug!`-logged, which leaves a mobile-shaped client
+/// waiting forever for a reply that is never coming.
+///
+/// The assertion is on the EXACT emitted event, so a future regression back to
+/// the silent catch-all fails here as "left: [] right: [Error ...]" rather than
+/// passing on an empty sink.
+#[tokio::test]
+async fn durable_turn_recovery_commands_are_explicitly_rejected_not_silently_dropped() {
+    let cases: Vec<(ClientCommand, &str)> = vec![
+        (
+            ClientCommand::AttachTurn {
+                turn_id: 7,
+                after_sequence: Some(3),
+            },
+            "attach_turn is unavailable on this bridge",
+        ),
+        (
+            ClientCommand::ResumeTurn { turn_id: 7 },
+            "resume_turn is unavailable on this bridge",
+        ),
+        (
+            ClientCommand::PauseTurn {
+                turn_id: 7,
+                reason: "background_time_expired".to_string(),
+            },
+            "pause_turn is unavailable on this bridge",
+        ),
+    ];
+
+    for (command, expected_message) in cases {
+        let router = router_with(
+            Arc::new(MockOrchestratorHandle::new()),
+            Arc::new(MockTaskRegistry { rows: vec![] }),
+        );
+        let sink = CapturingSink::arc();
+
+        router.route(command.clone(), sink.clone()).await;
+
+        assert_eq!(
+            sink.events().await,
+            vec![ClientEvent::Error {
+                kind: ErrorKindDto::Rejected,
+                message: expected_message.to_string(),
+            }],
+            "{command:?} must be answered with one typed rejection naming the command"
+        );
+    }
+}
+
+/// `attach_turn` with no `after_sequence` (the "replay the whole retained
+/// window" request) takes the same rejection path — the arm must not be keyed
+/// on the optional field.
+#[tokio::test]
+async fn attach_turn_without_a_sequence_is_rejected_the_same_way() {
+    let router = router_with(
+        Arc::new(MockOrchestratorHandle::new()),
+        Arc::new(MockTaskRegistry { rows: vec![] }),
+    );
+    let sink = CapturingSink::arc();
+
+    router
+        .route(
+            ClientCommand::AttachTurn {
+                turn_id: 1,
+                after_sequence: None,
+            },
+            sink.clone(),
+        )
+        .await;
+
+    assert_eq!(
+        sink.events().await,
+        vec![ClientEvent::Error {
+            kind: ErrorKindDto::Rejected,
+            message: "attach_turn is unavailable on this bridge".to_string(),
+        }]
+    );
+}
+
+/// The sibling rejection this arm was modelled on, pinned so the two stay one
+/// convention: `resume_workflow` is likewise a host capability this bridge does
+/// not have, and likewise answers rather than drops.
+#[tokio::test]
+async fn resume_workflow_is_explicitly_rejected() {
+    let router = router_with(
+        Arc::new(MockOrchestratorHandle::new()),
+        Arc::new(MockTaskRegistry { rows: vec![] }),
+    );
+    let sink = CapturingSink::arc();
+
+    router
+        .route(
+            ClientCommand::ResumeWorkflow {
+                task_id: "wf-1".to_string(),
+            },
+            sink.clone(),
+        )
+        .await;
+
+    assert_eq!(
+        sink.events().await,
+        vec![ClientEvent::Error {
+            kind: ErrorKindDto::Rejected,
+            message: "resume_workflow is unavailable on this bridge".to_string(),
+        }]
+    );
+}

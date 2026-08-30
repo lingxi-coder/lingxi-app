@@ -535,6 +535,7 @@ G1	lingxi-code/sandbox/src/policy_convert.rs	\.lingxi
 G1	lingxi-code/sandbox/tests/path_pattern_test.rs	\.lingxi
 G1	lingxi-code/sandbox/tests/policy_convert_test.rs	\.lingxi
 G1	lingxi-code/scripts/bench-startup.py	LingXi
+G1	lingxi-code/scripts/lap_gate.py	LINGXI
 G1	lingxi-code/scripts/mobile-linux/check-authorizations.sh	LINGXI
 G1	lingxi-code/scripts/mobile-linux/check-rootfs-manifest.sh	LINGXI
 G1	lingxi-code/scripts/mobile-linux/check-sbom-and-licenses.sh	LINGXI

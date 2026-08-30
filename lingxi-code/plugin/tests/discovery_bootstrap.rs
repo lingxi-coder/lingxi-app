@@ -115,7 +115,7 @@ async fn detects_skill_subdirs_mcp_and_lsp_configs() {
     .unwrap();
     fs::write(
         dir.join(".lsp.json"),
-        r#"{"pyls":{"name":"pyls","command":"pylsp","args":[],"env":{},"trigger_languages":["python"],"root_dir_markers":["pyproject.toml"],"initialization_options":null}}"#,
+        r#"{"pyls":{"command":"pylsp","extensionToLanguage":{".py":"python"}}}"#,
     )
     .unwrap();
 

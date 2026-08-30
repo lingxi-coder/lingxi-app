@@ -69,6 +69,34 @@ impl InboundHandler for Echo {
     }
 }
 
+struct NullEcho;
+
+#[async_trait]
+impl InboundHandler for NullEcho {
+    async fn handle(&self, req: Request) -> Response {
+        Response::success(req.id, serde_json::Value::Null)
+    }
+}
+
+#[allow(clippy::type_complexity)]
+fn outbound_capture_pipe() -> (
+    impl futures::Stream<Item = Result<Bytes, std::io::Error>> + Send + Unpin + 'static,
+    impl futures::Sink<Bytes, Error = std::io::Error> + Send + Unpin + 'static,
+    mpsc::UnboundedReceiver<Bytes>,
+) {
+    use futures::stream;
+
+    let inbound = Box::pin(stream::pending::<Result<Bytes, std::io::Error>>());
+    let (tx, rx) = mpsc::unbounded_channel::<Bytes>();
+    let outbound = Box::pin(futures::sink::unfold(tx, |tx, item: Bytes| async move {
+        tx.send(item)
+            .map_err(|_| std::io::Error::other("sink closed"))?;
+        Ok::<_, std::io::Error>(tx)
+    }));
+
+    (inbound, outbound, rx)
+}
+
 #[tokio::test]
 async fn end_to_end_request_response_via_line_codec() {
     let (a_in, a_out, b_in, b_out) = duplex_pipe();
@@ -91,6 +119,23 @@ async fn end_to_end_request_response_via_lsp_codec() {
 
     let out: serde_json::Value = conn_a.call("echo", json!({"y": 2})).await.unwrap();
     assert_eq!(out, json!({"y": 2}));
+}
+
+#[tokio::test]
+async fn end_to_end_null_result_response_is_treated_as_success() {
+    let (a_in, a_out, b_in, b_out) = duplex_pipe();
+    let conn_a = Connection::builder(LspCodec::default()).build(a_in, a_out);
+    let conn_b = Connection::builder(LspCodec::default()).build(b_in, b_out);
+
+    conn_b
+        .register_handler("nullEcho", Arc::new(NullEcho))
+        .await;
+
+    let out: serde_json::Value = conn_a.call("nullEcho", json!({})).await.unwrap();
+    assert!(
+        out.is_null(),
+        "result:null must not be converted into an error"
+    );
 }
 
 #[tokio::test]
@@ -163,6 +208,118 @@ async fn malformed_frame_surfaces_as_codec_error_on_reader() {
         Err(BrokerError::Codec(CodecError::MalformedHeader(_))) => {}
         other => panic!("expected MalformedHeader, got: {other:?}"),
     }
+}
+
+#[tokio::test]
+async fn lsp_connection_reports_closed_after_framing_failure() {
+    use tokio::io::AsyncWriteExt;
+
+    let (client_io, mut peer_io) = tokio::io::duplex(1024);
+    let (reader, writer) = tokio::io::split(client_io);
+    let connection = Connection::new_lsp(reader, writer);
+
+    peer_io
+        .write_all(b"X-Bad-Header: 5\r\n\r\nhello")
+        .await
+        .unwrap();
+    for _ in 0..100 {
+        if connection.is_closed() {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert!(
+        connection.is_closed(),
+        "framing failure must make the LSP lifecycle restartable"
+    );
+}
+
+#[tokio::test]
+async fn framing_failure_immediately_fails_an_inflight_request() {
+    use tokio::io::AsyncWriteExt;
+
+    let (client_io, mut peer_io) = tokio::io::duplex(1024);
+    let (reader, writer) = tokio::io::split(client_io);
+    let connection = Arc::new(Connection::new_lsp(reader, writer));
+    let caller = Arc::clone(&connection);
+    let request = tokio::spawn(async move {
+        caller
+            .call_with_timeout::<_, serde_json::Value>(
+                "textDocument/hover",
+                json!({}),
+                Duration::from_secs(5),
+            )
+            .await
+    });
+
+    // Let the request install its pending response slot before the peer emits
+    // a fatal framing error.
+    tokio::task::yield_now().await;
+    peer_io
+        .write_all(b"X-Bad-Header: 5\r\n\r\nhello")
+        .await
+        .unwrap();
+
+    let error = tokio::time::timeout(Duration::from_millis(250), request)
+        .await
+        .expect("reader failure must wake the request before its 5s deadline")
+        .expect("request task")
+        .expect_err("framing failure must fail the request");
+    assert!(matches!(
+        error,
+        jsonrpc::ConnectionError::Router(RouterError::WriterClosed)
+    ));
+    assert!(connection.is_closed());
+}
+
+#[tokio::test]
+async fn lsp_connection_emits_first_request_with_id_zero_and_claude_ordering() {
+    let (inbound, outbound, mut captured) = outbound_capture_pipe();
+    let conn = Connection::builder(LspCodec::default()).build(inbound, outbound);
+
+    let call = tokio::spawn(async move {
+        conn.call_with_timeout::<_, serde_json::Value>(
+            "initialize",
+            json!({"capabilities": {}}),
+            Duration::from_millis(10),
+        )
+        .await
+    });
+
+    let frame = captured.recv().await.expect("outbound frame");
+    let raw = std::str::from_utf8(&frame).unwrap();
+    assert!(raw.starts_with("Content-Length: "));
+    assert!(raw.contains("\r\n\r\n"));
+    assert!(raw.contains(
+        "\"jsonrpc\":\"2.0\",\"id\":0,\"method\":\"initialize\",\"params\":{\"capabilities\":{}}"
+    ));
+
+    let err = call.await.unwrap().unwrap_err();
+    assert!(matches!(
+        err,
+        jsonrpc::ConnectionError::Router(RouterError::Timeout(_))
+    ));
+}
+
+#[tokio::test]
+async fn line_connection_keeps_first_request_id_one() {
+    let (inbound, outbound, mut captured) = outbound_capture_pipe();
+    let conn = Connection::builder(LineCodec::default()).build(inbound, outbound);
+
+    let call = tokio::spawn(async move {
+        conn.call_with_timeout::<_, serde_json::Value>("ping", json!({}), Duration::from_millis(10))
+            .await
+    });
+
+    let frame = captured.recv().await.expect("outbound frame");
+    let raw = std::str::from_utf8(&frame).unwrap();
+    assert!(raw.contains("\"id\":1"));
+
+    let err = call.await.unwrap().unwrap_err();
+    assert!(matches!(
+        err,
+        jsonrpc::ConnectionError::Router(RouterError::Timeout(_))
+    ));
 }
 
 #[tokio::test]

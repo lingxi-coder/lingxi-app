@@ -399,6 +399,29 @@ impl BuiltinToolContext {
             .unwrap_or_else(|| self.read_deny_exclude_globs.clone())
     }
 
+    /// Best-effort Edit/Write → LSP document synchronization.
+    ///
+    /// No registry or no matching plugin server is a normal inert case. Other
+    /// failures are logged without changing the file tool's successful result.
+    pub async fn sync_lsp_after_file_write(&self, path: &std::path::Path, text: &str) {
+        let Some(registry) = &self.lsp_registry else {
+            return;
+        };
+        let workspace_cwd = self.cwd();
+        match registry
+            .sync_file_after_edit_in_workspace(path, text, &workspace_cwd)
+            .await
+        {
+            Ok(()) | Err(traits::LspError::Unavailable) => {}
+            Err(error) => tracing::warn!(
+                target: "lingxi_lsp::file_sync",
+                path = %path.display(),
+                %error,
+                "failed to synchronize edited file with LSP"
+            ),
+        }
+    }
+
     /// The sandbox config the shell tools should actually use: the frozen
     /// [`Self::sandbox_runtime`] with its `enabled` flag overridden live by the
     /// `/sandbox` toggle cell when one is wired, plus a per-call reconcile of

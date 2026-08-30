@@ -576,6 +576,14 @@ impl PluginManager {
             Value::Object(m) => m,
             _ => Map::new(),
         };
+        // Create the writable plugin-data directory before mutating any live
+        // registry. A filesystem failure must not leave a partially loaded
+        // plugin behind.
+        let plugin_data_dir = if manifest.components.lsp_servers.is_empty() {
+            None
+        } else {
+            Some(ensure_plugin_data_dir(&self.install_dir, &plugin_key).await?)
+        };
 
         // All-or-nothing ordering: VALIDATE every fallible input BEFORE
         // mutating any live registry, so a rejected plugin never leaves an
@@ -968,7 +976,22 @@ impl PluginManager {
         // `pub(crate)` so user/project settings cannot bypass this gate.
         // Matches claude-code's `getAllLspServers()`
         // (`claude-code/src/services/lsp/config.ts`).
-        let configs: Vec<_> = manifest.components.lsp_servers.values().cloned().collect();
+        let configs: Vec<_> = manifest
+            .components
+            .lsp_servers
+            .iter()
+            .map(|(local_name, cfg)| {
+                let mut scoped = cfg.clone();
+                scoped.name = format!("plugin:{plugin_name}:{local_name}");
+                substitute_lsp_config(
+                    &mut scoped,
+                    &subst_ctx,
+                    install_dir,
+                    plugin_data_dir.as_deref(),
+                );
+                scoped
+            })
+            .collect();
         self.lsp_registry
             .register_plugin_servers(manifest.id, configs)
             .await;
@@ -1064,6 +1087,65 @@ fn substitute_mcp_config(cfg: &mut McpServerConfig, ctx: &Map<String, Value>) {
         | McpTransportSpec::SseIde { .. }
         | McpTransportSpec::SdkControl { .. } => {}
     }
+}
+
+/// Apply the public plugin-LSP substitution pass before registration.
+///
+/// Claude Code expands the plugin root, resolved `${user_config.KEY}` values,
+/// and ordinary `${ENV_VAR}` references across command/args/env/workspaceFolder,
+/// then injects the host paths into the server environment.  Keep the Claude
+/// names for third-party plugin compatibility and the LingXi aliases for local
+/// plugins authored against this port.
+fn substitute_lsp_config(
+    cfg: &mut traits::LspServerConfig,
+    ctx: &Map<String, Value>,
+    install_dir: &Path,
+    plugin_data_dir: Option<&Path>,
+) {
+    let plugin_root = install_dir.to_string_lossy().into_owned();
+    let plugin_data = plugin_data_dir
+        .map(|path| path.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let project_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let project_dir = project_dir.to_string_lossy().into_owned();
+    let expand = |value: &str| {
+        let value = value
+            .replace("${CLAUDE_PLUGIN_ROOT}", &plugin_root)
+            .replace("${LINGXI_PLUGIN_ROOT}", &plugin_root)
+            .replace("${CLAUDE_PLUGIN_DATA}", &plugin_data)
+            .replace("${LINGXI_PLUGIN_DATA}", &plugin_data)
+            .replace("${CLAUDE_PROJECT_DIR}", &project_dir)
+            .replace("${LINGXI_PROJECT_DIR}", &project_dir);
+        let value = user_config::substitute_string_field(&value, ctx);
+        mcp::expand_env_vars_in_string(&value).expanded
+    };
+
+    cfg.command = expand(&cfg.command);
+    cfg.args = cfg.args.iter().map(|arg| expand(arg)).collect();
+    for value in cfg.env.values_mut() {
+        *value = expand(value);
+    }
+    if let Some(workspace_folder) = &mut cfg.workspace_folder {
+        *workspace_folder = expand(workspace_folder);
+    }
+    cfg.env
+        .entry("CLAUDE_PLUGIN_ROOT".to_string())
+        .or_insert_with(|| plugin_root.clone());
+    cfg.env
+        .entry("LINGXI_PLUGIN_ROOT".to_string())
+        .or_insert_with(|| plugin_root.clone());
+    cfg.env
+        .entry("CLAUDE_PLUGIN_DATA".to_string())
+        .or_insert_with(|| plugin_data.clone());
+    cfg.env
+        .entry("LINGXI_PLUGIN_DATA".to_string())
+        .or_insert_with(|| plugin_data.clone());
+    cfg.env
+        .entry("CLAUDE_PROJECT_DIR".to_string())
+        .or_insert_with(|| project_dir.clone());
+    cfg.env
+        .entry("LINGXI_PROJECT_DIR".to_string())
+        .or_insert_with(|| project_dir);
 }
 
 /// Apply a plugin's resolved `userConfig` (`ctx`, keyed by bare field name) to
@@ -1177,6 +1259,20 @@ fn cache_marketplace_name(install_dir: &Path) -> Option<String> {
         .flatten()
 }
 
+async fn ensure_plugin_data_dir(
+    install_root: &Path,
+    plugin_key: &str,
+) -> Result<PathBuf, PluginManagerError> {
+    let data_key = crate::discovery::sanitize_segment(plugin_key, false);
+    let path = install_root.join("data").join(data_key);
+    tokio::fs::create_dir_all(&path).await.map_err(|err| {
+        PluginManagerError::Io(format!(
+            "failed to create plugin data dir for {plugin_key}: {err}"
+        ))
+    })?;
+    Ok(path)
+}
+
 /// Derive a stable, sanitized `host/owner/repo` sub-path from a git URL, used as
 /// both the `repos/<…>/` clone destination and the cache `<marketplace>`
 /// identity. Strips a trailing `.git`, the `git@host:owner/repo` SSH form, and
@@ -1265,6 +1361,17 @@ mod user_config_tests {
     use protocol::HookId;
     use serde_json::json;
     use std::collections::HashMap;
+
+    #[tokio::test]
+    async fn plugin_data_dir_sanitizes_installed_identity() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = ensure_plugin_data_dir(tmp.path(), "hello@mymkt")
+            .await
+            .unwrap();
+
+        assert_eq!(path, tmp.path().join("data/hello-mymkt"));
+        assert!(path.is_dir());
+    }
 
     fn command_hook(name: &str, command: &str, args: &[&str]) -> HookDefinition {
         HookDefinition {

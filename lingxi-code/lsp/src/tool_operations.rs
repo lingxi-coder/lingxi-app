@@ -15,7 +15,7 @@
 //! `getMethodAndParams` switch (lines 427-513).
 
 use crate::client::LspClient;
-use crate::open_file_tracker::OpenFileTracker;
+use crate::open_file_tracker::{DocumentSync, OpenFileTracker};
 use lsp_types::{
     CallHierarchyIncomingCallsParams, CallHierarchyItem, CallHierarchyOutgoingCallsParams,
     CallHierarchyPrepareParams, DocumentSymbolParams, Position, ReferenceContext, ReferenceParams,
@@ -102,7 +102,7 @@ pub enum LspOperationError {
     #[error("file is not valid utf-8: {0}")]
     NotUtf8(String),
     /// Underlying LSP transport / server error.
-    #[error("lsp: {0}")]
+    #[error("{0}")]
     Lsp(#[from] traits::LspError),
 }
 
@@ -148,16 +148,7 @@ pub fn language_id_for(server_config: &LspServerConfig, file_path: &Path) -> Str
         .unwrap_or_else(|| "plaintext".to_string())
 }
 
-/// Open `file_path` on the LSP server if it has not been opened already.
-///
-/// This is the core didOpen-gating routine. On first open per
-/// `(server_name, uri)` pair:
-/// 1. Reject files larger than [`MAX_LSP_FILE_SIZE_BYTES`].
-/// 2. Read the bytes from disk.
-/// 3. Decode as UTF-8 (LSP wire is UTF-16 code units but the file
-///    payload is UTF-8 text).
-/// 4. Send `textDocument/didOpen` with `{uri, languageId, version: 1, text}`.
-/// 5. Mark the tracker so subsequent requests skip steps 1-4.
+/// Synchronize `file_path` from disk before a direct LSP operation.
 async fn ensure_did_open(
     client: &LspClient,
     tracker: &OpenFileTracker,
@@ -165,9 +156,6 @@ async fn ensure_did_open(
     file_path: &Path,
     uri: &Url,
 ) -> Result<(), LspOperationError> {
-    if tracker.is_open(client.name(), uri).await {
-        return Ok(());
-    }
     let meta = fs::metadata(file_path)
         .await
         .map_err(|e| LspOperationError::Io(format!("stat {}: {}", file_path.display(), e)))?;
@@ -182,34 +170,89 @@ async fn ensure_did_open(
         .await
         .map_err(|e| LspOperationError::Io(format!("read {}: {}", file_path.display(), e)))?;
     let text = String::from_utf8(bytes).map_err(|e| LspOperationError::NotUtf8(e.to_string()))?;
-    let language_id = language_id_for(config, file_path);
+    sync_document_text(client, tracker, config, file_path, uri, &text).await
+}
 
-    client
-        .notify(
-            "textDocument/didOpen",
-            json!({
-                "textDocument": {
-                    "uri": uri,
-                    "languageId": language_id,
-                    "version": 1,
-                    "text": text,
-                }
-            }),
-        )
-        .await?;
-    for (server_name, evicted_uri) in tracker.mark_open(client.name(), uri.clone()).await {
-        if server_name == client.name() {
+/// Synchronize already-available UTF-8 text with one LSP server.
+///
+/// The shared tracker chooses `didOpen`, full-text `didChange` + `didSave`, or
+/// no notification for byte-identical content. This is reused by direct LSP
+/// operations and by successful Edit/Write calls.
+pub(crate) async fn sync_document_text(
+    client: &LspClient,
+    tracker: &OpenFileTracker,
+    config: &LspServerConfig,
+    file_path: &Path,
+    uri: &Url,
+    text: &str,
+) -> Result<(), LspOperationError> {
+    let language_id = language_id_for(config, file_path);
+    let _sync_guard = tracker.lock_sync().await;
+    let connection = client.connection();
+    tracker
+        .register_connection(client.name(), connection.clone())
+        .await;
+    if !tracker
+        .is_active_connection(client.name(), &connection)
+        .await
+    {
+        return Err(LspOperationError::Lsp(traits::LspError::Unavailable));
+    }
+
+    match tracker.plan_sync(client.name(), uri.clone(), text).await {
+        DocumentSync::Open { version, evicted } => {
             client
                 .notify(
-                    "textDocument/didClose",
+                    "textDocument/didOpen",
                     json!({
                         "textDocument": {
-                            "uri": evicted_uri,
+                            "uri": uri,
+                            "languageId": language_id,
+                            "version": version,
+                            "text": text,
                         }
                     }),
                 )
                 .await?;
+            for (server_name, evicted_uri) in evicted {
+                let owner = if server_name == client.name() {
+                    Some(connection.clone())
+                } else {
+                    tracker.connection_for_server(&server_name).await
+                };
+                if let Some(owner) = owner {
+                    if let Err(error) = owner.notify(
+                        "textDocument/didClose",
+                        json!({ "textDocument": { "uri": evicted_uri } }),
+                    ) {
+                        tracing::warn!(
+                            target: "lingxi_lsp::client",
+                            server = %server_name,
+                            %error,
+                            "LSP didClose notification failed; continuing"
+                        );
+                    }
+                }
+            }
         }
+        DocumentSync::Change { version } => {
+            client
+                .notify(
+                    "textDocument/didChange",
+                    json!({
+                        "textDocument": { "uri": uri, "version": version },
+                        "contentChanges": [{ "text": text }],
+                    }),
+                )
+                .await?;
+            client
+                .notify(
+                    "textDocument/didSave",
+                    json!({ "textDocument": { "uri": uri } }),
+                )
+                .await?;
+        }
+        DocumentSync::Unchanged => {}
     }
     Ok(())
 }

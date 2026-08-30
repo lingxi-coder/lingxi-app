@@ -12,6 +12,7 @@ use crate::source::PluginSource;
 use crate::trust::PluginTrustLevel;
 use crate::PluginDependency;
 use hooks::HookDefinition;
+use indexmap::IndexMap;
 use mcp::McpServerConfig;
 use protocol::PluginId;
 use serde::{Deserialize, Serialize};
@@ -92,7 +93,7 @@ pub struct PluginComponents {
     /// MCP servers contributed by this plugin, keyed by logical name.
     pub mcp_servers: HashMap<String, McpServerConfig>,
     /// LSP servers contributed by this plugin, keyed by logical name.
-    pub lsp_servers: HashMap<String, LspServerConfig>,
+    pub lsp_servers: IndexMap<String, LspServerConfig>,
 }
 
 /// On-disk component reference plus arbitrary metadata.

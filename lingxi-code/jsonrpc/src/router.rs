@@ -2,7 +2,7 @@
 //! enforces per-call timeout (default 60s), and removes pending entries when
 //! the caller's future is dropped.
 
-use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -17,6 +17,8 @@ use crate::messages::{Id, Notification, Request, Response, ResponseError};
 
 /// Per-call timeout default — matches claude-code MCP / vscode-jsonrpc default.
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(60);
+/// First request id for protocol modes that do not override the sequence.
+pub const DEFAULT_STARTING_REQUEST_ID: i64 = 1;
 
 /// Outbound-routing errors.
 #[derive(Debug, Error)]
@@ -48,6 +50,21 @@ pub struct Router {
     pub(crate) pending: PendingMap,
     outbound: mpsc::UnboundedSender<OutboundMessage>,
     default_timeout: Duration,
+    closed: Arc<AtomicBool>,
+}
+
+/// Lightweight terminal handle that does not keep the outbound queue open.
+#[derive(Clone)]
+pub(crate) struct RouterCloseHandle {
+    pending: PendingMap,
+    closed: Arc<AtomicBool>,
+}
+
+impl RouterCloseHandle {
+    pub(crate) fn close(&self) {
+        self.closed.store(true, Ordering::Release);
+        self.pending.clear();
+    }
 }
 
 /// What the writer task drains from the outbound queue.
@@ -66,11 +83,19 @@ impl Router {
     #[must_use]
     pub fn new(outbound: mpsc::UnboundedSender<OutboundMessage>) -> Self {
         Self {
-            next_id: Arc::new(AtomicI64::new(1)),
+            next_id: Arc::new(AtomicI64::new(DEFAULT_STARTING_REQUEST_ID)),
             pending: Arc::new(DashMap::new()),
             outbound,
             default_timeout: DEFAULT_TIMEOUT,
+            closed: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    /// Override the first numeric request id allocated by this router.
+    #[must_use]
+    pub fn with_initial_request_id(mut self, initial_request_id: i64) -> Self {
+        self.next_id = Arc::new(AtomicI64::new(initial_request_id));
+        self
     }
 
     /// Override the default per-call timeout.
@@ -78,6 +103,21 @@ impl Router {
     pub fn with_default_timeout(mut self, timeout: Duration) -> Self {
         self.default_timeout = timeout;
         self
+    }
+
+    /// Mark the transport closed and wake every pending request immediately.
+    pub(crate) fn close(&self) {
+        self.close_handle().close();
+    }
+
+    /// Terminal handle for broker tasks. Unlike a full [`Router`] clone, this
+    /// does not retain the outbound sender and therefore cannot keep the writer
+    /// loop alive after peer EOF.
+    pub(crate) fn close_handle(&self) -> RouterCloseHandle {
+        RouterCloseHandle {
+            pending: Arc::clone(&self.pending),
+            closed: Arc::clone(&self.closed),
+        }
     }
 
     /// Drain side of the router used by the broker reader task: dispatch a
@@ -107,6 +147,9 @@ impl Router {
 
     /// Send an outbound notification (fire-and-forget).
     pub fn notify<P: Serialize>(&self, method: &str, params: P) -> Result<(), RouterError> {
+        if self.closed.load(Ordering::Acquire) {
+            return Err(RouterError::WriterClosed);
+        }
         let params = serde_json::to_value(params).map_err(RouterError::Serialize)?;
         let n = Notification::new(method, Some(params));
         self.outbound
@@ -125,6 +168,15 @@ impl Router {
             .await
     }
 
+    /// Send an outbound request without applying a local deadline.
+    pub async fn call_unbounded<P: Serialize, R: DeserializeOwned>(
+        &self,
+        method: &str,
+        params: P,
+    ) -> Result<R, RouterError> {
+        self.call_inner(method, params, None).await
+    }
+
     /// Send an outbound request and await the typed response with an explicit timeout.
     pub async fn call_with_timeout<P: Serialize, R: DeserializeOwned>(
         &self,
@@ -132,6 +184,18 @@ impl Router {
         params: P,
         timeout: Duration,
     ) -> Result<R, RouterError> {
+        self.call_inner(method, params, Some(timeout)).await
+    }
+
+    async fn call_inner<P: Serialize, R: DeserializeOwned>(
+        &self,
+        method: &str,
+        params: P,
+        timeout: Option<Duration>,
+    ) -> Result<R, RouterError> {
+        if self.closed.load(Ordering::Acquire) {
+            return Err(RouterError::WriterClosed);
+        }
         let id = Id::Number(self.next_id.fetch_add(1, Ordering::Relaxed));
         let params_value = serde_json::to_value(params).map_err(RouterError::Serialize)?;
         let req = Request::new(method, Some(params_value), id.clone());
@@ -145,6 +209,14 @@ impl Router {
             id: id.clone(),
         };
 
+        // Close may race the first check. Re-check after insertion so a
+        // terminal clear cannot happen immediately before a late pending slot
+        // is added.
+        if self.closed.load(Ordering::Acquire) {
+            self.pending.remove(&id);
+            return Err(RouterError::WriterClosed);
+        }
+
         self.outbound
             .send(OutboundMessage::Request(req))
             .map_err(|_| {
@@ -153,25 +225,31 @@ impl Router {
                 RouterError::WriterClosed
             })?;
 
-        let outcome = tokio::time::timeout(timeout, rx).await;
-        // Successful completion — defuse the guard so we don't double-remove.
-        std::mem::forget(drop_guard);
+        let outcome = if let Some(timeout) = timeout {
+            match tokio::time::timeout(timeout, rx).await {
+                Ok(outcome) => outcome,
+                Err(_elapsed) => {
+                    self.pending.remove(&id);
+                    return Err(RouterError::Timeout(timeout));
+                }
+            }
+        } else {
+            rx.await
+        };
+        drop(drop_guard);
 
         let value = match outcome {
-            Ok(Ok(Ok(v))) => v,
-            Ok(Ok(Err(remote))) => return Err(RouterError::Remote(remote)),
-            Ok(Err(_recv_err)) => return Err(RouterError::WriterClosed),
-            Err(_elapsed) => {
-                self.pending.remove(&id);
-                return Err(RouterError::Timeout(timeout));
-            }
+            Ok(Ok(v)) => v,
+            Ok(Err(remote)) => return Err(RouterError::Remote(remote)),
+            Err(_recv_err) => return Err(RouterError::WriterClosed),
         };
 
         serde_json::from_value(value).map_err(RouterError::Deserialize)
     }
 }
 
-/// Removes the pending entry on Drop unless explicitly defused.
+/// Removes the pending entry on drop. This is idempotent when a response has
+/// already removed the entry before completing the call.
 struct DropGuard {
     pending: PendingMap,
     id: Id,
@@ -314,6 +392,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn completed_call_releases_drop_guard_pending_arc() {
+        let (router, mut rx) = router_with_writer();
+        let baseline = Arc::strong_count(&router.pending);
+        let router_clone = router.clone();
+        let responder = tokio::spawn(async move {
+            let OutboundMessage::Request(req) = rx.recv().await.unwrap() else {
+                unreachable!("expected request");
+            };
+            router_clone.dispatch_response(Response::success(req.id, json!({"ok": true})));
+        });
+
+        let out: serde_json::Value = router.call("ping", json!({})).await.unwrap();
+        assert_eq!(out, json!({"ok": true}));
+        responder.await.unwrap();
+        assert_eq!(
+            Arc::strong_count(&router.pending),
+            baseline,
+            "completed calls must not leak a retained pending-map Arc"
+        );
+    }
+
+    #[tokio::test]
     async fn one_hundred_concurrent_calls_resolve_to_correct_responses() {
         let (router, mut rx) = router_with_writer();
         let router_clone = router.clone();
@@ -352,7 +452,30 @@ mod tests {
             .map(|v| v["echo"].as_i64().expect("number"))
             .collect();
         echoed_ids.sort_unstable();
-        // Ids start at 1 (Router::new sets AtomicI64::new(1)) and are monotonic.
-        assert_eq!(echoed_ids, (1..=100).collect::<Vec<_>>());
+        // Ids start at 1 by default and are monotonic.
+        assert_eq!(
+            echoed_ids,
+            (DEFAULT_STARTING_REQUEST_ID..=(DEFAULT_STARTING_REQUEST_ID + 99)).collect::<Vec<_>>()
+        );
+    }
+
+    #[tokio::test]
+    async fn custom_initial_request_id_is_used_for_first_call() {
+        let (router, mut rx) = {
+            let (tx, rx) = mpsc::unbounded_channel();
+            (Router::new(tx).with_initial_request_id(0), rx)
+        };
+
+        let router_clone = router.clone();
+        tokio::spawn(async move {
+            let OutboundMessage::Request(req) = rx.recv().await.unwrap() else {
+                unreachable!("expected request");
+            };
+            assert_eq!(req.id, Id::Number(0));
+            router_clone.dispatch_response(Response::success(req.id, json!({"ok": true})));
+        });
+
+        let out: serde_json::Value = router.call("ping", json!({})).await.unwrap();
+        assert_eq!(out, json!({"ok": true}));
     }
 }

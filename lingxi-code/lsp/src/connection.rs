@@ -28,6 +28,9 @@ pub enum LspConnectionState {
         started_at: SystemTime,
         /// OS-level process id.
         pid: u32,
+        /// Restart counter inherited from the prior `Failed` / `Initialized`
+        /// state so cancellation during startup does not reset crash recovery.
+        restarts: u32,
     },
     /// `initialize` succeeded and the server is ready to handle requests.
     Initialized {
@@ -39,6 +42,10 @@ pub enum LspConnectionState {
         server_capabilities: LspServerCapabilities,
         /// OS-level process id.
         pid: u32,
+        /// Restart counter for the current crash-recovery window. Successful
+        /// startup resets this to zero; runtime crashes increment it when the
+        /// registry re-enters `Failed`.
+        restarts: u32,
     },
     /// Start-up or runtime failed; the registry retries the next request
     /// from this state until the crash-recovery cap (claude-code's

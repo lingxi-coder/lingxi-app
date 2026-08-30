@@ -94,7 +94,7 @@ async fn enable_materializes_command_and_hook_into_live_registries() {
     let (id, manifest, dir) = discovered.into_iter().next().unwrap();
 
     manager
-        .enable(&id, manifest, dir)
+        .enable(&id, manifest, dir.clone())
         .await
         .expect("enable should materialize the plugin");
 
@@ -417,7 +417,7 @@ fn write_full_component_plugin(root: &Path, dir_name: &str, plugin_name: &str) {
     // LSP server config (.lsp.json) — a record keyed by server name.
     fs::write(
         plugin_dir.join(".lsp.json"),
-        r#"{"pyls":{"name":"pyls","command":"pylsp","args":[],"env":{},"trigger_languages":["python"],"root_dir_markers":["pyproject.toml"],"initialization_options":null}}"#,
+        r#"{"pyls":{"command":"${CLAUDE_PLUGIN_ROOT}/bin/pylsp","args":["--plugin-data","${CLAUDE_PLUGIN_DATA}/cache","--project","${CLAUDE_PROJECT_DIR}"],"env":{"PLUGIN_DATA":"${LINGXI_PLUGIN_DATA}/env","PLUGIN_ROOT":"${LINGXI_PLUGIN_ROOT}","PROJECT_DIR":"${CLAUDE_PROJECT_DIR}"},"workspaceFolder":"${CLAUDE_PLUGIN_DATA}/workspace","extensionToLanguage":{".py":"python"},"settings":{"pylsp":{"plugins":{"pyflakes":{"enabled":true}}}}}}"#,
     )
     .unwrap();
 }
@@ -465,7 +465,7 @@ async fn enable_materializes_skill_outputstyle_mcp_lsp_into_live_registries() {
     let (id, manifest, dir) = discovered.into_iter().next().unwrap();
 
     manager
-        .enable(&id, manifest, dir)
+        .enable(&id, manifest, dir.clone())
         .await
         .expect("enable should materialize all components");
 
@@ -515,10 +515,76 @@ async fn enable_materializes_skill_outputstyle_mcp_lsp_into_live_registries() {
              (not be left as the inert Disconnected{{last_error:None}} seed); state={state:?}"
         );
     }
-    // LSP server config: registered (config name as key).
+    // LSP server config: plugin-scoped, public camelCase schema loaded, and
+    // plugin host tokens expanded before registration.
+    let lsp_name = "plugin:fullplugin:pyls";
+    let project_dir = std::env::current_dir().unwrap();
+    let plugin_data_dir = tmp.path().join("data").join("fullplugin");
     assert!(
-        lsp_registry.get_config("pyls").await.is_some(),
-        "plugin LSP server config should be registered"
+        plugin_data_dir.is_dir(),
+        "plugin data dir should be created alongside the plugin cache root"
+    );
+    let lsp_config = lsp_registry
+        .get_config(lsp_name)
+        .await
+        .expect("plugin LSP server config should be registered under its scoped name");
+    assert_eq!(
+        lsp_config.command,
+        dir.join("bin/pylsp").to_string_lossy(),
+        "CLAUDE_PLUGIN_ROOT is expanded"
+    );
+    assert_eq!(
+        lsp_config
+            .extension_to_language
+            .get(".py")
+            .map(String::as_str),
+        Some("python")
+    );
+    assert_eq!(
+        lsp_config.args,
+        vec![
+            "--plugin-data".to_string(),
+            format!("{}/cache", plugin_data_dir.display()),
+            "--project".to_string(),
+            project_dir.to_string_lossy().into_owned()
+        ]
+    );
+    assert_eq!(
+        lsp_config.workspace_folder.as_deref(),
+        Some(format!("{}/workspace", plugin_data_dir.display()).as_str())
+    );
+    assert!(lsp_config.settings.is_some());
+    assert_eq!(
+        lsp_config.env.get("CLAUDE_PLUGIN_ROOT").map(String::as_str),
+        Some(dir.to_string_lossy().as_ref())
+    );
+    assert_eq!(
+        lsp_config.env.get("LINGXI_PLUGIN_ROOT").map(String::as_str),
+        Some(dir.to_string_lossy().as_ref())
+    );
+    assert_eq!(
+        lsp_config.env.get("CLAUDE_PLUGIN_DATA").map(String::as_str),
+        Some(plugin_data_dir.to_string_lossy().as_ref())
+    );
+    assert_eq!(
+        lsp_config.env.get("LINGXI_PLUGIN_DATA").map(String::as_str),
+        Some(plugin_data_dir.to_string_lossy().as_ref())
+    );
+    assert_eq!(
+        lsp_config.env.get("CLAUDE_PROJECT_DIR").map(String::as_str),
+        Some(project_dir.to_string_lossy().as_ref())
+    );
+    assert_eq!(
+        lsp_config.env.get("PLUGIN_DATA").map(String::as_str),
+        Some(format!("{}/env", plugin_data_dir.display()).as_str())
+    );
+    assert_eq!(
+        lsp_config.env.get("PLUGIN_ROOT").map(String::as_str),
+        Some(dir.to_string_lossy().as_ref())
+    );
+    assert_eq!(
+        lsp_config.env.get("PROJECT_DIR").map(String::as_str),
+        Some(project_dir.to_string_lossy().as_ref())
     );
 
     // Unload removes all of them.
@@ -546,7 +612,7 @@ async fn enable_materializes_skill_outputstyle_mcp_lsp_into_live_registries() {
         "MCP config removed on unload"
     );
     assert!(
-        lsp_registry.get_config("pyls").await.is_none(),
+        lsp_registry.get_config(lsp_name).await.is_none(),
         "LSP config removed on unload"
     );
 }

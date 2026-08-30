@@ -60,6 +60,7 @@ async fn register_plugin_servers_is_public_and_works() {
         root_dir_markers: vec!["Cargo.toml".into()],
         initialization_options: None,
         extension_to_language: HashMap::new(),
+        ..Default::default()
     };
     registry
         .register_plugin_servers(PluginId::new(), vec![config])

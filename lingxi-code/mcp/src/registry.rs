@@ -1172,7 +1172,7 @@ impl McpRegistry {
         // Gated on `caps.tools` for the same reason `tools_listed` is: with
         // no tools capability the oracle never reaches `yn` at all, so an
         // empty list there is not a degraded signal.
-        if caps.tools && tools.is_empty() {
+        if connected_zero_tools_fires(caps.tools, tools.len()) {
             degraded_counts.insert(telemetry::tengu::mcp::DegradedReason::ConnectedZeroTools, 1);
         }
         tools.retain_mut(|dto| {
@@ -3171,6 +3171,24 @@ fn is_format_char(c: char) -> bool {
 /// oracle's `discoverySource` also covers (§18's deferred
 /// `cached-row adopt subscriber threw` item; this port has no cached-row
 /// adoption at all yet).
+/// Oracle `yn`'s FIRST statement (@182316780):
+/// `if(u.length===0&&r==="live")s("tengu_mcp_degraded",{reason:w("connected_zero_tools"),…})`.
+///
+/// Pure and separate from the `connect` body so the three conditions are
+/// unit-testable without standing up a transport:
+///
+/// * `u.length === 0` — `u` is the RAW `tools/list` response, so emptiness is
+///   measured BEFORE the §20a schema filter runs. A server whose every tool
+///   that filter dropped reports its drop reason, NOT zero-tools.
+/// * `r === "live"` — always true on this path (a fresh dial); the oracle's
+///   cached-row adoption path, which also feeds `yn`, does not exist here.
+/// * `caps.tools` — with no tools capability the oracle never reaches `yn`,
+///   so an empty list there is not a degraded signal (same gate as
+///   `tengu_mcp_tools_listed`).
+fn connected_zero_tools_fires(caps_tools: bool, raw_tool_count: usize) -> bool {
+    caps_tools && raw_tool_count == 0
+}
+
 fn tools_listed_payload(
     transport_kind: &str,
     elapsed: std::time::Duration,
@@ -4497,6 +4515,59 @@ mod tests {
                 "`http` is user-configurable; the oracle's HT gate drops the name"
             );
         }
+    }
+
+    /// ROUND-1 REGRESSION. `connected_zero_tools` is the FIRST statement of
+    /// the oracle's `yn` — 20 lines above the seven tool-schema counters the
+    /// module doc transcribed verbatim while calling that set complete. The
+    /// port emitted nothing for it, so the most common silent-MCP-failure
+    /// signal (an OAuth-pending, resources-only, or fully-filtered server)
+    /// was invisible.
+    ///
+    /// NOTE ON COVERAGE: this pins the predicate, not the call site. The
+    /// aggregated event itself cannot be asserted from a `connect` test here
+    /// — see `connect_still_drops_both_anyof_tools_with_aggregation_wired`
+    /// for why this file deliberately does no tracing capture. What the call
+    /// site must preserve, and what review must check, is that the argument
+    /// is the RAW `tools.len()` read BEFORE `retain_mut` filters the list.
+    #[test]
+    fn connected_zero_tools_fires_only_on_an_empty_raw_list_with_the_tools_capability() {
+        assert!(
+            connected_zero_tools_fires(true, 0),
+            "server advertised tools/list and returned an empty array"
+        );
+        assert!(
+            !connected_zero_tools_fires(true, 2),
+            "a NON-empty raw list never fires it, however many tools the \u{a7}20a filter \
+             later drops \u{2014} those report their own drop reason instead"
+        );
+        assert!(
+            !connected_zero_tools_fires(false, 0),
+            "with no tools capability the oracle never reaches `yn`, so an empty list is \
+             not a degraded signal"
+        );
+        assert!(!connected_zero_tools_fires(false, 3));
+    }
+
+    /// The reason maps to a payload with NO count field — the oracle emits
+    /// `{reason,transportType,mcpServerName,..._}` for it.
+    #[test]
+    fn connected_zero_tools_bucket_becomes_a_countless_payload() {
+        let counts = std::collections::HashMap::from([(
+            telemetry::tengu::mcp::DegradedReason::ConnectedZeroTools,
+            1,
+        )]);
+        let payloads = degraded_payloads_for_server(&counts, "stdio", "srv");
+        assert_eq!(payloads.len(), 1, "one payload for the one nonzero bucket");
+        let p = &payloads[0];
+        assert_eq!(p.reason.wire_str(), "connected_zero_tools");
+        assert!(p.normalized_count.is_none());
+        assert!(p.skipped_count.is_none());
+        assert!(p.kept_count.is_none());
+        assert_eq!(
+            p.transport_type.as_ref().map(telemetry::pii::Verified::as_str),
+            Some("stdio")
+        );
     }
 
     #[test]

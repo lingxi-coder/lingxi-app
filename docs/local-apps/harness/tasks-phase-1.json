@@ -406,6 +406,37 @@
       ],
       "deps": [],
       "notes": "CONFIRMED: no reference to check-brand-leaks / check-skill-frontmatter / check-i18n-pairing / lap-gate in .github/workflows, and `git remote -v` is EMPTY — there is no CI to run them.\n\nThis was known at pre-flight and recorded then ('every §19 gate must be a checked-in script invoked by name, not \"CI executes X\"'), which is why the gates are scripts rather than workflow steps. But nothing closed the loop: they run when a human or an agent remembers. This session already lost one round to exactly that — the brand gate went unrun after three content commits and eight legitimate entries sat red until an unrelated question surfaced them.\n\n⚠️ Registering them in ci.yml buys nothing until a remote exists. A local pre-commit hook or a make-style entry point is the reachable version. Decide deliberately; do not add a CI step that never fires and call it done."
+    },
+    {
+      "id": "P1.13",
+      "title": "Reconcile the duplicate plugin-workflow port against upstream main",
+      "gate": "rebase-time duplicate-port finding, severity high",
+      "owns": [
+        "lingxi-code/plugin/src/workflow.rs",
+        "lingxi-code/plugin/src/lib.rs",
+        "lingxi-code/plugin/src/manifest.rs",
+        "lingxi-code/workflow/tests/plugin_workflow_scripts.rs"
+      ],
+      "crates": [
+        "plugin"
+      ],
+      "testPackages": [
+        "plugin",
+        "workflow"
+      ],
+      "exclusive": true,
+      "repeatRuns": 1,
+      "plantedFailure": {
+        "edit": "break the SURVIVING registration path and show a test names it; then verify the OTHER path does not silently keep the test green",
+        "mustNameInOutput": [
+          "with_plugin_workflows"
+        ]
+      },
+      "addedTests": [],
+      "deps": [
+        "P1.9"
+      ],
+      "notes": "MEASURED at merge-base main...HEAD (main +79, branch +45).\n\nBOTH SIDES INDEPENDENTLY ADDED `workflows: Vec<ComponentPath>` TO `PluginComponents`. This is the repo's known red flag: a clean auto-merge between two ports of one function means silent double execution and spliced tests.\n\nmain (parity/mcp-2251 batch, commits 78447b957 + ee8d7c09d 'Fix round 1: reach the plugin-workflow registry from production'):\n  - slot placed after `themes`; consumed at plugin/src/manager.rs:750 inside the discovery loop\n  - gated on `self.plugin_workflows.is_some()`, wired by `with_plugin_workflows` at THREE\n    real composition roots (engine-desktop/src/lib.rs:8528, :9332, :10266)\n  - oracle-faithful: MAX_WORKFLOW_SCRIPT_BYTES=524288, validate_meta, symlink-follow semantics,\n    and an explicit note that `experimental.workflows` has NO alias (unlike themes)\n\nbranch (P1.9): slot appended last; a NEW FILE plugin/src/workflow.rs (~520 lines).\n  ZERO PRODUCTION CALLERS. Every public symbol resolves only to the `pub use` re-export in\n  plugin/src/lib.rs:78-79. `script_digest` and `verify_resume_digest`: 0 references anywhere.\n  The single non-re-export caller, `build_plugin_workflow_inventory` at\n  engine-desktop/src/lib.rs:16810, is inside the `#[cfg(test)]` module that opens at line 10574.\n  That test calls the real `discover_plugin_set` and then — in its own words — walks\n  'all the way to the composition root's bootstrap front door' before performing the final\n  inventory step BY HAND. Walking to the front door is not going through it.\n\n⚠️ Because plugin/src/workflow.rs is a NEW FILE with no counterpart on main, a rebase merges it\nwith ZERO CONFLICT while main's manager.rs loop also survives. The struct field collides (different\npositions) and will conflict visibly; the behaviour will not. Resolving only the visible conflict\nis how the double registration ships.\n\nDIRECTION: take main's implementation; drop the branch's slot and workflow.rs. Keep only the\nlocal-app-specific residue — the checked-in plugin workflow scripts and\nworkflow/tests/plugin_workflow_scripts.rs — retargeted at main's registry.\n\nAlso stale on the branch: the doc comment at engine-desktop/src/lib.rs:16500-16501 records\n`grep -c 'components.workflows' plugin/src/manager.rs` -> 0 as the JUSTIFICATION for building a\nseparate module. That grep now returns non-zero on main. The reason the module exists has expired.\n\nThis is the FOURTH 'implemented but not wired' instance on this branch (with P1.10 builtin_bundle,\nP1.11 PluginCommand, P1.12 script gates) and the only one found by looking at the rebase rather\nthan at the branch — no per-task gate could have seen it, because the defect is a relationship\nbetween the branch and upstream, not a property of either."
     }
   ]
 }

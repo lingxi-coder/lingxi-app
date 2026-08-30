@@ -10084,7 +10084,6 @@ pub async fn build(
                 http.clone(),
                 Arc::new(PosixRuntime::new()),
                 credentials.clone(),
-                Arc::new(plugin::PluginBlocklist::new(String::new())),
                 strict_plugin_policy.clone(),
                 shared_command_registry.clone(),
                 Arc::new(RwLock::new(SkillRegistry::new())),
@@ -15960,7 +15959,7 @@ mod tests {
             PlainTextSecureStorage, PosixClock, PosixFileSystem, PosixHttp, PosixLspTransport,
             PosixMcpTransport, PosixRuntime,
         };
-        use plugin::{PluginBlocklist, PluginManager, StrictPluginOnlyPolicy};
+        use plugin::{PluginManager, StrictPluginOnlyPolicy};
         use secret::CredentialManager;
         use skill_api::SkillRegistry;
         use tokio::sync::RwLock;
@@ -15992,7 +15991,6 @@ mod tests {
             Arc::new(PosixHttp::new()),
             Arc::new(PosixRuntime::new()),
             credentials,
-            Arc::new(PluginBlocklist::new(String::new())),
             Arc::new(StrictPluginOnlyPolicy::empty()),
             command_registry.clone(),
             Arc::new(RwLock::new(SkillRegistry::new())),
@@ -16078,7 +16076,7 @@ mod tests {
             PlainTextSecureStorage, PosixClock, PosixFileSystem, PosixHttp, PosixLspTransport,
             PosixMcpTransport, PosixRuntime,
         };
-        use plugin::{PluginBlocklist, PluginManager, StrictPluginOnlyPolicy};
+        use plugin::{PluginManager, StrictPluginOnlyPolicy};
         use secret::CredentialManager;
         use skill_api::SkillRegistry;
         use tokio::sync::RwLock;
@@ -16100,7 +16098,6 @@ mod tests {
                 Arc::new(PosixHttp::new()),
                 Arc::new(PosixRuntime::new()),
                 credentials,
-                Arc::new(PluginBlocklist::new(String::new())),
                 Arc::new(StrictPluginOnlyPolicy::empty()),
                 command_registry.clone(),
                 Arc::new(RwLock::new(SkillRegistry::new())),

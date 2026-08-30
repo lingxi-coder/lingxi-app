@@ -27,7 +27,6 @@
 //!
 //! See spec §15.3.
 
-use crate::blocklist::PluginBlocklist;
 use crate::lifecycle::PluginState;
 use crate::loader::resolve_user_config;
 use crate::manifest::{ComponentPath, PluginManifest, PluginUserConfig};
@@ -59,9 +58,6 @@ pub enum PluginManagerError {
     /// No plugin with this id is currently installed.
     #[error("plugin not found: {0}")]
     NotFound(PluginId),
-    /// Blocklist matched the plugin (static or remote).
-    #[error("plugin blocked: {0}")]
-    Blocked(String),
     /// Manifest validation rejected the plugin.
     #[error("validation: {0}")]
     Validation(String),
@@ -86,8 +82,8 @@ pub enum PluginManagerError {
 /// The plugin lifecycle coordinator.
 ///
 /// Holds a state map keyed by [`PluginId`], references to every engine
-/// registry the manager materialises into, the credential manager (for
-/// sensitive user-config values), and the blocklist.
+/// registry the manager materialises into, and the credential manager (for
+/// sensitive user-config values).
 ///
 /// The `fs`, `http`, and `runtime` fields are reserved for Plan 16's
 /// install/fetch code; they are not used by the M1.21 stub.
@@ -102,7 +98,6 @@ pub struct PluginManager {
     #[allow(dead_code)] // Used by Plan 16 install paths.
     runtime: Arc<dyn RuntimeSpawner>,
     credentials: Arc<CredentialManager>,
-    blocklist: Arc<PluginBlocklist>,
     /// Persisted non-sensitive `userConfig` state, keyed by plugin identity
     /// (`name@marketplace` for cache-installed plugins, bare `name` for local
     /// ones). Read from the settings `pluginConfigs` scope at construction (via
@@ -164,7 +159,6 @@ impl PluginManager {
         http: Arc<dyn HttpTransport>,
         runtime: Arc<dyn RuntimeSpawner>,
         credentials: Arc<CredentialManager>,
-        blocklist: Arc<PluginBlocklist>,
         _strict: Arc<StrictPluginOnlyPolicy>,
         command_registry: Arc<RwLock<CommandRegistry>>,
         skill_registry: Arc<RwLock<SkillRegistry>>,
@@ -181,7 +175,6 @@ impl PluginManager {
             http,
             runtime,
             credentials,
-            blocklist,
             plugin_configs: RwLock::new(HashMap::new()),
             blocked_marketplaces: RwLock::new(HashSet::new()),
             command_registry,
@@ -356,17 +349,12 @@ impl PluginManager {
 
     /// Mark `id` as `Loaded` and inject its components into the engine
     /// registries.
-    ///
-    /// Returns [`PluginManagerError::Blocked`] when the blocklist matches.
     pub async fn enable(
         &self,
         id: &PluginId,
         manifest: PluginManifest,
         install_dir: PathBuf,
     ) -> Result<(), PluginManagerError> {
-        if let Some(reason) = self.blocklist.is_blocked(id).await {
-            return Err(PluginManagerError::Blocked(reason));
-        }
         if let Some(marketplace) = cache_marketplace_name(&install_dir) {
             if self
                 .blocked_marketplaces

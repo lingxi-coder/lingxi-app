@@ -14,7 +14,7 @@ use hooks::HookRegistry;
 use lsp::LspRegistry;
 use mcp::McpRegistry;
 use outputstyles::OutputStyleRegistry;
-use plugin::{PluginBlocklist, PluginManager, StrictPluginOnlyPolicy};
+use plugin::{PluginManager, StrictPluginOnlyPolicy};
 use secret::CredentialManager;
 use skill_api::SkillRegistry;
 use tokio::sync::RwLock;
@@ -78,7 +78,6 @@ async fn enable_materializes_command_and_hook_into_live_registries() {
         Arc::new(PosixHttp::new()),
         Arc::new(PosixRuntime::new()),
         credentials,
-        Arc::new(PluginBlocklist::new(String::new())),
         Arc::new(StrictPluginOnlyPolicy::empty()),
         command_registry.clone(),
         skill_registry,
@@ -168,7 +167,6 @@ async fn install_local_path_arm_materializes_and_returns_id() {
         Arc::new(PosixHttp::new()),
         Arc::new(PosixRuntime::new()),
         credentials,
-        Arc::new(PluginBlocklist::new(String::new())),
         Arc::new(StrictPluginOnlyPolicy::empty()),
         command_registry.clone(),
         skill_registry,
@@ -237,7 +235,6 @@ async fn enable_rejects_agent_with_escalating_frontmatter() {
         Arc::new(PosixHttp::new()),
         Arc::new(PosixRuntime::new()),
         credentials,
-        Arc::new(PluginBlocklist::new(String::new())),
         Arc::new(StrictPluginOnlyPolicy::empty()),
         command_registry,
         skill_registry,
@@ -305,7 +302,6 @@ async fn escalating_agent_leaves_no_orphan_command_registered() {
         Arc::new(PosixHttp::new()),
         Arc::new(PosixRuntime::new()),
         credentials,
-        Arc::new(PluginBlocklist::new(String::new())),
         Arc::new(StrictPluginOnlyPolicy::empty()),
         command_registry.clone(),
         skill_registry,
@@ -364,7 +360,6 @@ async fn install_marketplace_arm_returns_typed_error_not_panic() {
         Arc::new(PosixHttp::new()),
         Arc::new(PosixRuntime::new()),
         credentials,
-        Arc::new(PluginBlocklist::new(String::new())),
         Arc::new(StrictPluginOnlyPolicy::empty()),
         command_registry,
         skill_registry,
@@ -449,7 +444,6 @@ async fn enable_materializes_skill_outputstyle_mcp_lsp_into_live_registries() {
         Arc::new(PosixHttp::new()),
         Arc::new(PosixRuntime::new()),
         credentials,
-        Arc::new(PluginBlocklist::new(String::new())),
         Arc::new(StrictPluginOnlyPolicy::empty()),
         command_registry,
         skill_registry.clone(),
@@ -609,7 +603,6 @@ async fn enable_materializes_declared_workflow_into_plugin_workflow_registry() {
         Arc::new(PosixHttp::new()),
         Arc::new(PosixRuntime::new()),
         credentials,
-        Arc::new(PluginBlocklist::new(String::new())),
         Arc::new(StrictPluginOnlyPolicy::empty()),
         command_registry,
         skill_registry,
@@ -721,7 +714,6 @@ async fn enable_skips_workflow_scripts_with_no_meta_block_or_over_the_size_cap()
         Arc::new(PosixHttp::new()),
         Arc::new(PosixRuntime::new()),
         credentials,
-        Arc::new(PluginBlocklist::new(String::new())),
         Arc::new(StrictPluginOnlyPolicy::empty()),
         command_registry,
         skill_registry,
@@ -822,7 +814,6 @@ async fn enable_materializes_declared_theme_into_plugin_theme_registry() {
         Arc::new(PosixHttp::new()),
         Arc::new(PosixRuntime::new()),
         credentials,
-        Arc::new(PluginBlocklist::new(String::new())),
         Arc::new(StrictPluginOnlyPolicy::empty()),
         command_registry,
         skill_registry,
@@ -886,7 +877,6 @@ async fn make_manager(
         Arc::new(PosixHttp::new()),
         Arc::new(PosixRuntime::new()),
         credentials,
-        Arc::new(PluginBlocklist::new(String::new())),
         Arc::new(StrictPluginOnlyPolicy::empty()),
         command_registry.clone(),
         Arc::new(RwLock::new(SkillRegistry::new())),
@@ -1019,7 +1009,6 @@ async fn enable_substitutes_user_config_into_scoped_mcp_env() {
         Arc::new(PosixHttp::new()),
         Arc::new(PosixRuntime::new()),
         credentials.clone(),
-        Arc::new(PluginBlocklist::new(String::new())),
         Arc::new(StrictPluginOnlyPolicy::empty()),
         Arc::new(RwLock::new(CommandRegistry::new())),
         Arc::new(RwLock::new(SkillRegistry::new())),

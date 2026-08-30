@@ -1,6 +1,5 @@
-//! Plugin subsystem — manifest model, 7-state lifecycle, blocklist, strict
-//! policy, agent-frontmatter privilege validation, and the 8-registry
-//! materialiser.
+//! Plugin subsystem — manifest model, 7-state lifecycle, strict policy,
+//! agent-frontmatter privilege validation, and the 8-registry materialiser.
 //!
 //! Plugins are the most cross-cutting subsystem in the engine: every
 //! component slot they declare (commands / agents / skills / hooks /
@@ -13,7 +12,6 @@
 #![forbid(unsafe_code)]
 
 pub mod agent_validation;
-pub mod blocklist;
 pub mod dependency;
 pub mod discovery;
 mod git;
@@ -37,7 +35,6 @@ pub mod trust;
 pub use hooks::user_config;
 
 pub use agent_validation::{validate_plugin_agent_frontmatter, AgentValidationError};
-pub use blocklist::PluginBlocklist;
 pub use dependency::{
     merge_dependency_requirements, parse_dependencies, version_satisfies_all, PluginDependency,
 };

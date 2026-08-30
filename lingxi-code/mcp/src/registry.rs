@@ -846,17 +846,88 @@ impl McpRegistry {
         }
         let lifecycle = self.lifecycle_lock(&config.name);
         let _guard = lifecycle.lock().await;
-        self.connect_locked(config).await
+        self.connect_locked(config, None).await
     }
 
-    async fn connect_locked(&self, config: McpServerConfig) -> Result<McpConnectionId, McpError> {
-        let result = self.connect_locked_inner(config.clone()).await;
+    /// §24b: connect a per-SUBAGENT inline `mcpServers` entry (claude `Agr`'s
+    /// `connectToServer(name, config, ...)`, invoked once per subagent
+    /// spawn). Registers the connection under a table key namespaced by
+    /// `agent_id` ([`agent_scope_table_key`]) so two concurrent subagents
+    /// that each declare an inline server sharing the same plain
+    /// `config.name` never clobber each other's connection state or dispatch
+    /// target — `config.name` itself, `McpTransportSpec::kind()`, and header
+    /// construction are all UNCHANGED, so the model-facing FQN, permission
+    /// rule matching, and `oauth::server_key` (which hashes `config.name`)
+    /// stay exactly as they are for a shared/session-level connect.
+    ///
+    /// Returns the connection id plus the table key the caller must retain to
+    /// build the per-tool [`MCPTool::bound_server_key`]-equivalent dispatch
+    /// target (`tool_mcp`'s per-agent tool builder) and to later call
+    /// [`Self::disconnect_agent_scoped`].
+    ///
+    /// Does NOT fire [`Self::catalog_changes`] on success — that broadcast
+    /// drives the SHARED session `ToolRegistry`'s auto-register-on-connect
+    /// listener (`apps/engine-desktop`/`apps/engine-mobile`), and an
+    /// agent-scoped connection must never become visible outside the
+    /// subagent that opened it.
+    pub async fn connect_agent_scoped(
+        &self,
+        config: McpServerConfig,
+        agent_id: AgentId,
+    ) -> Result<(McpConnectionId, String), McpError> {
+        if is_unconfigured_remote(&config.spec) {
+            return Err(McpError::Connection(UNCONFIGURED_MESSAGE.to_string()));
+        }
+        let table_key = agent_scope_table_key(agent_id, &config.name);
+        let lifecycle = self.lifecycle_lock(&table_key);
+        let _guard = lifecycle.lock().await;
+        let id = self
+            .connect_locked(config, Some(table_key.clone()))
+            .await?;
+        Ok((id, table_key))
+    }
+
+    /// Tear down an agent-scoped connection opened by
+    /// [`Self::connect_agent_scoped`] — the port's equivalent of the oracle's
+    /// per-client `cleanup()` in `Agr`'s returned closure. A PLAIN transport
+    /// close: unlike [`Self::disconnect`]/[`Self::remove`] (explicit
+    /// user-facing `/mcp` actions), this does NOT revoke any stored OAuth/XAA
+    /// token — revoking a real persisted grant merely because one subagent
+    /// spawn finished using it would silently log the user out of that
+    /// server for every future session. No-op when nothing is connected
+    /// under `table_key` (e.g. the connect attempt itself failed, so the
+    /// oracle's `isNewlyCreated` client was never actually live).
+    pub async fn disconnect_agent_scoped(&self, table_key: &str) -> Result<(), McpError> {
+        let lifecycle = self.lifecycle_lock(table_key);
+        let _guard = lifecycle.lock().await;
+        let connection_id = {
+            let conns = self.connections.read().await;
+            match conns.get(table_key) {
+                Some(McpConnectionState::Connected { connection_id, .. }) => Some(*connection_id),
+                _ => None,
+            }
+        };
+        if let Some(connection_id) = connection_id {
+            self.transport.disconnect(connection_id).await?;
+        }
+        self.connections.write().await.remove(table_key);
+        self.clients.write().await.shift_remove(table_key);
+        Ok(())
+    }
+
+    async fn connect_locked(
+        &self,
+        config: McpServerConfig,
+        table_key: Option<String>,
+    ) -> Result<McpConnectionId, McpError> {
+        let key = table_key.clone().unwrap_or_else(|| config.name.clone());
+        let result = self.connect_locked_inner(config.clone(), table_key).await;
         if let Err(error) = &result {
             // A failed public connect must never strand the registry in
             // `Connecting`. Reconnect scheduling only considers disconnected
             // states, and `/mcp` should expose the actual last failure.
             self.connections.write().await.insert(
-                config.name.clone(),
+                key,
                 McpConnectionState::Disconnected {
                     config,
                     last_error: Some(error.to_string()),
@@ -869,9 +940,11 @@ impl McpRegistry {
     async fn connect_locked_inner(
         &self,
         config: McpServerConfig,
+        table_key: Option<String>,
     ) -> Result<McpConnectionId, McpError> {
+        let key = table_key.clone().unwrap_or_else(|| config.name.clone());
         if let Some(McpConnectionState::Connected { connection_id, .. }) =
-            self.connections.read().await.get(&config.name)
+            self.connections.read().await.get(&key)
         {
             return Ok(*connection_id);
         }
@@ -916,7 +989,7 @@ impl McpRegistry {
         }
 
         self.connections.write().await.insert(
-            config.name.clone(),
+            key.clone(),
             McpConnectionState::Connecting {
                 config: config.clone(),
                 started_at: SystemTime::now(),
@@ -1309,7 +1382,7 @@ impl McpRegistry {
         // the §20a per-server gate on the `McpClient` refresh path.
         let config_server_url = gate_url.clone();
         self.connections.write().await.insert(
-            server_name.clone(),
+            key.clone(),
             McpConnectionState::Connected {
                 config,
                 connection_id,
@@ -1334,11 +1407,20 @@ impl McpRegistry {
         // `/mcp` display stays raw; `get_client` matches by normalized key.
         if let Some(raw_conn) = &self.raw_conn {
             if let Some(connection) = raw_conn.connection_for(connection_id) {
-                self.spawn_catalog_change_listener(
-                    server_name.clone(),
-                    connection_id,
-                    connection.clone(),
-                );
+                // §24b: an agent-scoped connection's live `list_changed`
+                // notifications must never reach `catalog_changes` — that
+                // channel drives the SHARED session ToolRegistry's
+                // auto-register listener, and this connection must stay
+                // private to the subagent that opened it (see the initial
+                // `catalog_changes.send` gate below, and
+                // `connect_agent_scoped`'s doc).
+                if table_key.is_none() {
+                    self.spawn_catalog_change_listener(
+                        server_name.clone(),
+                        connection_id,
+                        connection.clone(),
+                    );
+                }
                 let cwd = std::env::current_dir().unwrap_or_default();
                 // Forward the optional hook dispatcher so this server's
                 // `elicitation/create` handler can fire the `Elicitation` hook.
@@ -1371,7 +1453,7 @@ impl McpRegistry {
                     // bare `"*"` entry.
                     .with_server_url(config_server_url),
                 );
-                self.register_connected_client(&server_name, connection_id, client)
+                self.register_connected_client(&key, connection_id, client)
                     .await;
             }
         }
@@ -1380,12 +1462,22 @@ impl McpRegistry {
         // and reconnects. The startup event is an idempotent replacement; a
         // reconnect needs it because its new connection id did not exist in the
         // boot-time MCP partition.
-        let _ = self.catalog_changes.send(McpCatalogChanged {
-            server_name,
-            connection_id,
-            retired_connection_id: None,
-            kind: McpCatalogKind::Tools,
-        });
+        //
+        // §24b: SKIPPED for an agent-scoped connect (`table_key.is_some()`) —
+        // this is the mechanism that grafts a connection's discovered tools
+        // onto the shared session `ToolRegistry` (`apps/engine-desktop` /
+        // `apps/engine-mobile`'s `mcp_catalog_changes` listener), and an
+        // agent-scoped server must stay private to the subagent spawn that
+        // opened it. The subagent's own tool set is built directly from this
+        // connection (by `key`) by the per-agent MCP tool builder instead.
+        if table_key.is_none() {
+            let _ = self.catalog_changes.send(McpCatalogChanged {
+                server_name,
+                connection_id,
+                retired_connection_id: None,
+                kind: McpCatalogKind::Tools,
+            });
+        }
 
         Ok(connection_id)
     }
@@ -2154,7 +2246,7 @@ impl McpRegistry {
                 // sleep before the first connect (`useManageMCPConnections.ts:372`).
                 // `connect_locked` (NOT `connect`) — the lifecycle lock is already
                 // held; `connect` would re-acquire it and deadlock.
-                match self.connect_locked(config.clone()).await {
+                match self.connect_locked(config.clone(), None).await {
                     Ok(_) => {
                         tracing::info!(server = %name, attempt, "MCP reconnect succeeded");
                         return;
@@ -2373,7 +2465,7 @@ impl McpRegistry {
         // ("not connected"). This mirrors claude's `u(name)` fulfilling with
         // `{type:"failed"}` rather than rejecting, so the /mcp handler can emit
         // "Enabled …, but it isn't connected yet." instead of a hard error.
-        let _ = self.connect_locked(config).await;
+        let _ = self.connect_locked(config, Some(name.to_string())).await;
         let resulting = {
             let conns = self.connections.read().await;
             conns
@@ -2406,7 +2498,15 @@ impl McpRegistry {
         // fresh connect. `connect` early-returns the existing id if already
         // connected, so the disconnect must land first.
         self.disconnect_locked(name).await?;
-        self.connect_locked(config).await.map(|_| ())
+        // Thread `name` back in as the table key: for an ordinary
+        // (unscoped) server `name == config.name` already, so this is a
+        // no-op; for an agent-scoped entry it keeps the reconnected
+        // connection under the SAME scoped key it was torn down from,
+        // instead of falling back to the plain `config.name` and stranding
+        // the subagent's dispatch target.
+        self.connect_locked(config, Some(name.to_string()))
+            .await
+            .map(|_| ())
     }
 
     /// The names of every registered server (any connection state), sorted —
@@ -2714,13 +2814,27 @@ impl McpRegistry {
     /// Returns `None` when no connected server matches it or `full_name` is
     /// unknown — the caller then falls back to the parsed (normalized) segment,
     /// a no-op for valid-identifier names where raw == normalized.
+    ///
+    /// `table_key`, when `Some`, restricts the search to the ONE entry
+    /// stored under that exact table key (§24b agent-scoped dispatch) —
+    /// without it, two connections sharing the same plain `config.name` (an
+    /// agent-scoped inline server and a same-named shared/session server)
+    /// would resolve ambiguously against whichever one `HashMap` iteration
+    /// happens to visit first. `None` preserves the original behaviour
+    /// exactly: scan every connection by normalized display name.
     pub async fn resolve_wire_tool_name(
         &self,
         normalized_server: &str,
         full_name: &str,
+        table_key: Option<&str>,
     ) -> Option<String> {
         let conns = self.connections.read().await;
-        for state in conns.values() {
+        for (key, state) in conns.iter() {
+            if let Some(want) = table_key {
+                if key != want {
+                    continue;
+                }
+            }
             if let McpConnectionState::Connected { config, tools, .. } = state {
                 if normalize_name_for_mcp(&config.name) == normalized_server {
                     return tools
@@ -2732,6 +2846,27 @@ impl McpRegistry {
         }
         None
     }
+}
+
+/// §24b: build the internal `connections`/`clients` table key for a
+/// per-SUBAGENT inline `mcpServers` entry. Uses ONLY
+/// `[a-zA-Z0-9_-]` (normalizing `server_name` and rendering `agent_id`'s bare
+/// UUID, never its `agent:`-prefixed [`std::fmt::Display`]) so
+/// `normalize_name_for_mcp` is the IDENTITY on the result — the fuzzy
+/// by-normalized-name lookups in [`McpRegistry::get_client`] /
+/// [`McpRegistry::get_config`] / [`McpRegistry::has_callable_server`] /
+/// [`McpRegistry::call_tool_with_auth_retry`] therefore match this key by
+/// plain string equality when a caller passes it verbatim, exactly as they
+/// match a normal (unscoped) `config.name`. Two different agent spawns produce
+/// two different keys even for the identical plain server name, since each
+/// carries its own [`AgentId`].
+#[must_use]
+pub fn agent_scope_table_key(agent_id: AgentId, server_name: &str) -> String {
+    format!(
+        "__lingxi_agent_scope__{}__{}",
+        agent_id.as_uuid(),
+        normalize_name_for_mcp(server_name)
+    )
 }
 
 /// MCPLIFE.4: the connect+initialize handshake deadline, mirroring claude-code's
@@ -4989,7 +5124,7 @@ mod tests {
         // the RAW wire name the server expects on `tools/call`.
         assert_eq!(
             registry
-                .resolve_wire_tool_name("forecast", "mcp__forecast__weather_now")
+                .resolve_wire_tool_name("forecast", "mcp__forecast__weather_now", None)
                 .await
                 .as_deref(),
             Some("weather.now"),
@@ -4998,15 +5133,142 @@ mod tests {
         // segment, a no-op for valid-identifier names).
         assert_eq!(
             registry
-                .resolve_wire_tool_name("forecast", "mcp__forecast__missing")
+                .resolve_wire_tool_name("forecast", "mcp__forecast__missing", None)
                 .await,
             None,
         );
         assert_eq!(
             registry
-                .resolve_wire_tool_name("nope", "mcp__forecast__weather_now")
+                .resolve_wire_tool_name("nope", "mcp__forecast__weather_now", None)
                 .await,
             None,
+        );
+    }
+
+    #[tokio::test]
+    async fn agent_scoped_connect_does_not_collide_with_a_shared_connect_of_the_same_name() {
+        // §24b: a subagent's inline `mcpServers: {docs: ...}` must never clobber
+        // (or be clobbered by) an unrelated shared/session-level "docs" server.
+        let mock = Arc::new(BridgeMock::new(&["search"]));
+        let registry = McpRegistry::with_raw_conn(
+            mock.clone() as Arc<dyn McpTransport>,
+            mock as Arc<dyn RawConnectionProvider>,
+        );
+        let shared_id = registry.connect(cfg("docs")).await.unwrap();
+        let (scoped_id, table_key) = registry
+            .connect_agent_scoped(cfg("docs"), AgentId::new())
+            .await
+            .unwrap();
+
+        assert_ne!(
+            shared_id, scoped_id,
+            "the scoped connect must be a SEPARATE connection, not a no-op reuse of the shared one"
+        );
+        assert_ne!(
+            table_key, "docs",
+            "the scoped table key must never equal the plain server name"
+        );
+        // Both entries independently readable by their OWN key; `config.name`
+        // ("docs") is IDENTICAL on both — the plain display name is untouched.
+        let shared_cfg = registry.get_config("docs").await.unwrap();
+        assert_eq!(shared_cfg.name, "docs");
+        let scoped_cfg = registry.get_config(&table_key).await.unwrap();
+        assert_eq!(
+            scoped_cfg.name, "docs",
+            "the scoped config's plain `name` field must stay unmangled"
+        );
+        assert!(registry.has_callable_server("docs").await);
+        assert!(registry.has_callable_server(&table_key).await);
+    }
+
+    #[tokio::test]
+    async fn agent_scoped_connect_is_unreachable_by_the_plain_server_name() {
+        // §24b core invariant: dispatch by the model-facing plain name must
+        // NEVER accidentally resolve a private agent-scoped connection when no
+        // shared server of that name exists — that would leak a subagent's
+        // private server to every other caller.
+        let mock = Arc::new(BridgeMock::new(&["search"]));
+        let registry = McpRegistry::with_raw_conn(
+            mock.clone() as Arc<dyn McpTransport>,
+            mock as Arc<dyn RawConnectionProvider>,
+        );
+        let (_id, table_key) = registry
+            .connect_agent_scoped(cfg("docs"), AgentId::new())
+            .await
+            .unwrap();
+
+        assert!(
+            registry.get_config("docs").await.is_none(),
+            "no SHARED \"docs\" server exists — the plain name must resolve to nothing"
+        );
+        assert!(
+            !registry.has_callable_server("docs").await,
+            "the plain name must not dispatch to the private scoped connection"
+        );
+        // The scoped key is the ONLY way to reach it.
+        assert!(registry.get_config(&table_key).await.is_some());
+        assert!(registry.has_callable_server(&table_key).await);
+        assert!(registry.get_client(&table_key).await.is_some());
+    }
+
+    #[tokio::test]
+    async fn disconnect_agent_scoped_tears_down_only_its_own_connection() {
+        // §24b: tearing down a subagent's OWN newly-created connection must
+        // never touch an unrelated shared connection of the same plain name.
+        let mock = Arc::new(BridgeMock::new(&["search"]));
+        let registry = McpRegistry::with_raw_conn(
+            mock.clone() as Arc<dyn McpTransport>,
+            mock as Arc<dyn RawConnectionProvider>,
+        );
+        registry.connect(cfg("docs")).await.unwrap();
+        let (_id, table_key) = registry
+            .connect_agent_scoped(cfg("docs"), AgentId::new())
+            .await
+            .unwrap();
+
+        registry.disconnect_agent_scoped(&table_key).await.unwrap();
+
+        assert!(
+            registry.get_config(&table_key).await.is_none(),
+            "the scoped entry must be fully removed after teardown"
+        );
+        assert!(
+            registry.has_callable_server("docs").await,
+            "the UNRELATED shared \"docs\" connection must survive the scoped teardown"
+        );
+    }
+
+    #[tokio::test]
+    async fn two_agent_scoped_connects_of_the_same_name_get_independent_keys() {
+        // §24b: TWO concurrent subagent spawns each declaring an inline
+        // `mcpServers: {docs: ...}` must not collide with EACH OTHER either
+        // (not just against a shared server) — this is the exact scenario the
+        // reverted `agent_scope.rs` attempt mangled the name to prevent.
+        let mock = Arc::new(BridgeMock::new(&["search"]));
+        let registry = McpRegistry::with_raw_conn(
+            mock.clone() as Arc<dyn McpTransport>,
+            mock as Arc<dyn RawConnectionProvider>,
+        );
+        let (id_a, key_a) = registry
+            .connect_agent_scoped(cfg("docs"), AgentId::new())
+            .await
+            .unwrap();
+        let (id_b, key_b) = registry
+            .connect_agent_scoped(cfg("docs"), AgentId::new())
+            .await
+            .unwrap();
+
+        assert_ne!(key_a, key_b, "distinct agent ids must get distinct table keys");
+        assert_ne!(id_a, id_b, "each spawn gets its own live connection");
+        assert!(registry.get_config(&key_a).await.is_some());
+        assert!(registry.get_config(&key_b).await.is_some());
+
+        // Tearing down A must leave B fully intact.
+        registry.disconnect_agent_scoped(&key_a).await.unwrap();
+        assert!(registry.get_config(&key_a).await.is_none());
+        assert!(
+            registry.get_config(&key_b).await.is_some(),
+            "spawn B's connection must survive spawn A's teardown"
         );
     }
 

@@ -9,17 +9,35 @@
 //! (M2-02b — see `docs/superpowers/plans/2026-05-23-m2-02b-mcp-client.md`).
 //!
 //! There used to be a separate `agent_scope.rs` holding an
-//! `AgentScopedConnections` table for a subagent's own inline
-//! `mcpServers` (§24b). Both the scaffolding and the connect/inject/
-//! teardown chain built on top of it were removed: the shared registry
-//! is keyed by server NAME and the model-facing tool FQN is
-//! `mcp__<name>__<tool>`, so the per-agent name mangling that kept two
-//! subagents from colliding also produced `mcp____agent_scope__<uuid>__
-//! <server>__<tool>` — an FQN whose server segment parses EMPTY, which
-//! `tools/mcp::parse_full_name` rejects outright, `servers_with_tools`
-//! drops, and no `mcp__<server>` permission rule can match. A working
-//! §24b needs the registry key and the FQN/OAuth-key name to be
-//! separable, plus a per-spawn dispatch overlay; see the revert commit.
+//! `AgentScopedConnections` table (`AgentId -> server name -> connection
+//! id`) for a subagent's own inline `mcpServers` (§24b). It and the
+//! chain built on it were reverted, and the recorded reason was WRONG in
+//! a way worth naming, because it sent the next reader down the same
+//! dead end.
+//!
+//! What actually happened: that table presumed a subagent's connections
+//! must live in the SHARED, name-keyed registry. Under that premise the
+//! only way to stop two subagents colliding on one server name was to
+//! mangle the name, which produced the FQN
+//! `mcp____agent_scope__<uuid>__<server>__<tool>` — an empty server
+//! segment that `tools/mcp::parse_full_name` rejects, `servers_with_tools`
+//! drops, and no `mcp__<server>` permission rule can match.
+//!
+//! But the oracle never uses a shared table here. `Agr` (2.1.251
+//! @~160977000) connects each frontmatter server under its PLAIN name and
+//! keeps the clients in a per-spawn list that travels with the subagent;
+//! `cleanup` tears down only the ones that spawn newly created, leaving a
+//! parent's pre-existing connection alone. `PRn` (@160975900) is what
+//! decides: a STRING spec references an existing disk-config server
+//! (`isNewlyCreated:false`, never torn down), an OBJECT spec is an inline
+//! definition (`isNewlyCreated:true`, torn down on exit). Two subagents
+//! cannot collide because neither inline client is ever globally
+//! registered.
+//!
+//! So the premise was the bug, not the naming. The port needs the table
+//! key to be scoped internally while `config.name` stays plain — the
+//! model-facing FQN, the permission rules and `oauth::server_key` all key
+//! off that plain name and must not change.
 //!
 //! There used to be a separate `approval.rs` with its own
 //! `McpApprovalPolicy`/`ApprovalStatus`; it was a dead duplicate (zero

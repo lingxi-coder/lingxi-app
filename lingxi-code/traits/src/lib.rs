@@ -30,7 +30,7 @@
 /// the port — and the port has been burned by the opposite error too (it once
 /// advertised 2.1.217 while implementing 2.1.220), which is why all three
 /// identifiers derive from this one constant.
-pub const CLAUDE_CODE_VERSION: &str = "2.1.246";
+pub const CLAUDE_CODE_VERSION: &str = "2.1.251";
 
 pub mod agent_name_registry;
 pub mod agent_view;

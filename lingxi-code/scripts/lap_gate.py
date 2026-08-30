@@ -19,6 +19,7 @@ import json
 import os
 import re
 import shutil
+import tempfile
 import subprocess
 import sys
 from pathlib import Path
@@ -369,6 +370,68 @@ def cmd_green(args):
     return 0
 
 
+def cmd_fmt(args):
+    """判据 9：任务交付的文件必须是 rustfmt 干净的。
+
+    这条是 P-1.0 落地之后补的:它带着 20 处 rustfmt diff 进了仓库,而我那八条判据
+    里没有一条看格式——计划把 `cargo fmt --all -- --check` 放在 phase 边界。
+    只在边界上查,等于让第一个撞到边界的人去重排**别人的**文件,而那时已经分不清
+    是谁弄脏的了。
+
+    ⚠️ 必须区分「本任务弄脏的」和「本来就脏的」。本分支上 `cargo fmt --all --check`
+    对一批不属于当前任务的文件已经是红的;不区分的话,任何碰到既有脏文件的任务
+    都永远过不了,而正确的做法是让它**看见**自己没弄脏它。
+    做法:同时对工作区版本和 HEAD 版本跑 rustfmt --check。
+
+    ⛔ 不要用 `cargo fmt --all` 来修。它会重排整个工作区,包括**别的写者尚未提交的
+    文件**;本会话已经因为在别人正在编辑的文件上做写-还原而弄崩过一次构建。
+    只对自己拥有的文件跑 `rustfmt`。"""
+    repo = Path(args.repo)
+    if not args.file:
+        fail("fmt: no --file given — a formatting check over zero files is vacuously clean")
+    rustfmt = shutil.which("rustfmt")
+    if rustfmt is None:
+        fail("fmt: rustfmt not on PATH — cannot verify formatting, and an unverifiable check must not pass")
+    introduced, inherited, checked = [], [], 0
+    for rel in args.file:
+        path = repo / rel
+        if not path.is_file():
+            fail("fmt: %s does not exist (resolved %s) — a task cannot deliver a file that is not there"
+                 % (rel, path))
+        checked += 1
+        now = subprocess.run([rustfmt, "--edition", "2021", "--check", str(path)],
+                             capture_output=True, text=True)
+        if now.returncode == 0 and not now.stdout.strip():
+            continue
+        blob = subprocess.run(["git", "show", "HEAD:%s" % rel], capture_output=True, text=True, cwd=repo)
+        if blob.returncode != 0:
+            introduced.append((rel, "new file"))
+            continue
+        with tempfile.NamedTemporaryFile("w", suffix=".rs", delete=False) as fh:
+            fh.write(blob.stdout)
+            tmp = fh.name
+        was = subprocess.run([rustfmt, "--edition", "2021", "--check", tmp], capture_output=True, text=True)
+        os.unlink(tmp)
+        if was.returncode == 0 and not was.stdout.strip():
+            introduced.append((rel, "clean at HEAD, unclean now"))
+        else:
+            inherited.append(rel)
+    problems = []
+    for rel, why in introduced:
+        problems.append("%s is not rustfmt-clean (%s) — this task introduced it" % (rel, why))
+    for rel in inherited:
+        problems.append(
+            "%s is not rustfmt-clean, and was ALREADY unclean at HEAD — inherited, but this task owns "
+            "the file, so clean it here rather than leaving it for whoever hits the phase boundary. "
+            "⛔ run rustfmt on THIS FILE ONLY, never `cargo fmt --all`: other writers have uncommitted "
+            "files in this checkout" % rel
+        )
+    if problems:
+        fail("fmt:\n  - " + "\n  - ".join(problems))
+    ok("fmt: %d owned file(s) rustfmt-clean" % checked)
+    return 0
+
+
 def cmd_owned(args):
     """判据 7：这次任务的提交只能碰它自己声明拥有的路径。"""
     out = subprocess.run(
@@ -548,6 +611,7 @@ def cmd_list(args):
     print("                                      (4) per-binary passed count non-decreasing")
     print("                                      (5) redlist(run) subset of redlist(baseline)")
     print("                                      (6) every added test appears as '... ok'")
+    print("  fmt        --file F --file F        (9) owned files are rustfmt-clean")
     print("  owned      --range R --owns P...    (7) commits touch only declared paths")
     print("  identical  --runs F F F             (8) count identity across runs")
     print("  tasks      --dir D                     reject any task with no planted failure")
@@ -585,6 +649,9 @@ def main():
                    help="restrict the BASELINE to binaries belonging to this cargo package")
     # (repeatable)
     p.set_defaults(fn=cmd_green)
+
+    p = sub.add_parser("fmt"); p.add_argument("--file", action="append", default=[])
+    p.set_defaults(fn=cmd_fmt)
 
     p = sub.add_parser("owned"); p.add_argument("--range", required=True)
     p.add_argument("--owns", action="append", default=[], required=True)

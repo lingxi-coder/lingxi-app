@@ -42,6 +42,24 @@
 //! function the packer itself pins its known-answer vectors against) — never
 //! a byte-count stand-in. The tests below tamper a single byte while holding
 //! every length constant specifically to prove that.
+//!
+//! ## P1.5 — the §6.2 idempotent short-circuit
+//!
+//! A second startup whose digest has not changed must not re-decode
+//! `archive` and must not re-hash a single file. [`ensure_verified_builtin_root`]
+//! gets this from [`short_circuit_candidate`]: a previously-promoted root is
+//! trusted on sight ONLY when a sibling manifest ([`RootManifest`], written by
+//! [`write_manifest`] the moment a root is verified and promoted) still names
+//! this exact digest and every component the caller currently expects. Six
+//! independent conditions can defeat it — a missing directory, a directory
+//! that is actually a symlink, a missing manifest, an empty or entry-short
+//! component list, a component whose recorded byte count or digest disagrees
+//! with what the caller declares, or a manifest whose marker field names a
+//! different digest — and each is tested in isolation below specifically so
+//! a check that quietly didn't exist could not hide behind a neighbor firing
+//! instead. Every defeat falls all the way through to the same full
+//! decode-and-verify path a first-ever materialization takes; nothing about
+//! the short-circuit weakens what happens when it declines to fire.
 
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -171,12 +189,198 @@ fn staging_dir_name(expected_digest: &str) -> String {
 }
 
 /// The final promoted-root path for `expected_digest` under `data_root`.
-/// Digest-named so a later idempotent-reuse check (§6.2's short-circuit — out
-/// of this task's owned files) can recognize an already-promoted root by path
+/// Digest-named so the idempotent-reuse short-circuit (P1.5 —
+/// `short_circuit_candidate`) can recognize an already-promoted root by path
 /// alone; naming is otherwise this module's own implementation detail, never
 /// part of a wire contract.
 fn promoted_root_path(data_root: &Path, expected_digest: &str) -> PathBuf {
     data_root.join(format!("root-{expected_digest}"))
+}
+
+/// The §6.2 short-circuit manifest path for `expected_digest`'s promoted
+/// root under `data_root` — a plain SIBLING file next to
+/// [`promoted_root_path`]'s directory, never inside it, so it can never
+/// collide with a payload path the archive legitimately contains, and its
+/// own presence/absence is independent of whatever is on disk inside the
+/// promoted root.
+fn manifest_path(data_root: &Path, expected_digest: &str) -> PathBuf {
+    data_root.join(format!("root-{expected_digest}.manifest.json"))
+}
+
+/// On-disk evidence a promoted root's manifest carries so a LATER call can
+/// trust it without re-decoding the archive or re-hashing any file. See
+/// [`write_manifest`] (the write side, called only after a root is fully
+/// verified and promoted) and [`short_circuit_candidate`] (the read side,
+/// and the exhaustive enumeration of every way this evidence can fail to be
+/// trusted).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct RootManifest {
+    /// The marker field: the whole-archive digest this root was verified
+    /// against at promotion time. Must equal the CALLER's `expected_digest`
+    /// for the short-circuit to fire — a manifest that is stale, or was
+    /// somehow copied from a different digest's root, must never be trusted
+    /// just because it happens to sit at the path this call is checking.
+    digest: String,
+    /// One entry per file the inventory declared at promotion time. An
+    /// empty list, or a list missing an entry the caller's CURRENT inventory
+    /// requires (or disagreeing with it on byte count / digest), defeats the
+    /// short-circuit exactly as if the manifest did not exist at all.
+    components: Vec<ManifestComponent>,
+}
+
+/// One promoted file's recorded identity: enough to recognize whether the
+/// caller's current inventory still names the same content, without
+/// re-reading or re-hashing the file itself.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct ManifestComponent {
+    path: String,
+    bytes: u64,
+    sha256: String,
+}
+
+/// Persist a §6.2 short-circuit manifest for a just-verified `final_root`
+/// (identified by `expected_digest`, under `data_root`): the whole-archive
+/// digest (the marker field) plus one component entry per file `inventory`
+/// declares. Called only from the two success returns of
+/// [`materialize_new_root_with_fault_injection`] — never on an interrupted
+/// or rejected attempt — so a manifest existing at all is itself evidence
+/// that a full verification once succeeded here.
+///
+/// Written as a plain sibling file, never inside the promoted root (see
+/// [`manifest_path`]) — a crash between promoting the root and writing this
+/// file just means the NEXT call finds no manifest and safely re-verifies
+/// (§6.2's own missing-manifest defeat case), not a hazard this write itself
+/// needs to be atomic against.
+fn write_manifest(
+    data_root: &Path,
+    expected_digest: &str,
+    inventory: &[PackedFile],
+) -> Result<(), MaterializeError> {
+    let manifest = RootManifest {
+        digest: expected_digest.to_string(),
+        components: inventory
+            .iter()
+            .map(|entry| ManifestComponent {
+                path: entry.path.clone(),
+                bytes: entry.bytes,
+                sha256: entry.sha256.clone(),
+            })
+            .collect(),
+    };
+    let path = manifest_path(data_root, expected_digest);
+    let json = serde_json::to_vec(&manifest).map_err(|e| MaterializeError::Io {
+        path: path.display().to_string(),
+        detail: e.to_string(),
+    })?;
+    std::fs::write(&path, json).map_err(|e| MaterializeError::Io {
+        path: path.display().to_string(),
+        detail: e.to_string(),
+    })
+}
+
+/// A previously-promoted root this call can trust WITHOUT re-decoding
+/// `archive` or re-hashing any file — or `None` if any one of the five §6.2
+/// defeat conditions holds, in which case the caller must fall through to a
+/// full [`materialize_new_root_with_fault_injection`] exactly as if no
+/// promoted root existed at all:
+///
+/// 1. no directory exists at the digest-named path yet;
+/// 2. that path is not a genuine directory — in particular a SYMLINK,
+///    checked with `symlink_metadata` (which does NOT follow a symlink,
+///    unlike `Path::is_dir`/`std::fs::metadata`) so a link is rejected
+///    without ever caring what it resolves to;
+/// 3. no manifest file sits beside it (never written, or removed);
+/// 4. the manifest's `digest` marker field does not name THIS call's
+///    `expected_digest`;
+/// 5. the manifest's component list is empty (no inventory was ever
+///    recorded at all), or is missing an entry for one of the paths
+///    `inventory` (the caller's current declared file set) requires, or
+///    that entry's recorded byte count / digest disagrees with what
+///    `inventory` declares for that path.
+///
+/// This module's tests corrupt exactly ONE of these at a time, holding
+/// everything else genuinely valid, specifically so a check that quietly
+/// didn't exist could not hide behind a neighbor firing instead. (5)'s two
+/// named scenarios — an entirely empty component list, and a list missing
+/// one specific entry — are both proven independently even though they
+/// share the same loop: each test corrupts only its own scenario, and a
+/// weakened loop that stopped rejecting on a failed lookup would turn BOTH
+/// tests red, which is the correct, expected coupling for two states that
+/// really are the same failure at different scale.
+fn short_circuit_candidate(
+    data_root: &Path,
+    expected_digest: &str,
+    inventory: &[PackedFile],
+) -> Option<PathBuf> {
+    let candidate = promoted_root_path(data_root, expected_digest);
+
+    // (1) & (2): must exist AND be a real directory, never a symlink —
+    // `symlink_metadata` is load-bearing here; `candidate.is_dir()` would
+    // follow the link and defeat the whole point of this check.
+    let root_meta = std::fs::symlink_metadata(&candidate).ok()?;
+    if !root_meta.file_type().is_dir() {
+        return None;
+    }
+
+    // (3): the manifest sibling file must exist and parse as a manifest.
+    let manifest_bytes = std::fs::read(manifest_path(data_root, expected_digest)).ok()?;
+    let manifest: RootManifest = serde_json::from_slice(&manifest_bytes).ok()?;
+
+    // (4): the marker field.
+    if manifest.digest != expected_digest {
+        return None;
+    }
+
+    // (5): every currently-declared component must have a matching entry
+    // recorded — same path, same byte count, same digest. An entirely EMPTY
+    // component list needs no separate branch: it falls out of this same
+    // loop, since every one of `inventory`'s (non-empty, in every real
+    // caller) entries then fails its lookup against an empty map on the
+    // very first iteration.
+    let by_path: std::collections::BTreeMap<&str, &ManifestComponent> = manifest
+        .components
+        .iter()
+        .map(|component| (component.path.as_str(), component))
+        .collect();
+    for entry in inventory {
+        match by_path.get(entry.path.as_str()) {
+            Some(component)
+                if component.bytes == entry.bytes && component.sha256 == entry.sha256 => {}
+            _ => return None,
+        }
+    }
+
+    Some(candidate)
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Test-only observable for the §6.2 short-circuit's own tests: how many
+    /// times [`materialize_new_root_with_fault_injection`] has actually run the
+    /// archive decode + per-file verification path on THIS THREAD — i.e. how
+    /// many times the short-circuit did NOT fire. Needed because "the call
+    /// returned `Ok`" cannot by itself distinguish a genuine skip from a full
+    /// re-verification that happens to reach the same keep-existing-directory
+    /// outcome; see `unchanged_digest_skips_unpack` for the full argument.
+    ///
+    /// THREAD-LOCAL, and that is the load-bearing part. A process-global
+    /// counter is not a sound observable here, and a mutex over the *reading*
+    /// tests does not make it one: `cargo test` runs tests in parallel, and the
+    /// twelve OTHER tests in this module that call into the materializer never
+    /// had any reason to take such a lock, so their increments land inside a
+    /// reading test's "must not move" window regardless. (Measured, not
+    /// assumed: with a global counter and a readers-only mutex, delaying one
+    /// non-locking sibling into that window failed
+    /// `unchanged_digest_skips_unpack` with `left: 30, right: 28`.) Because
+    /// every call into the materializer during a test is synchronous on that
+    /// test's own thread, a thread-local count is exactly this test's own — no
+    /// lock, and no window a sibling can reach into at all.
+    static FULL_MATERIALIZE_ATTEMPTS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn full_materialize_attempts() -> u64 {
+    FULL_MATERIALIZE_ATTEMPTS.with(|c| c.get())
 }
 
 /// True when every component of `path` is a plain path segment — no empty
@@ -360,6 +564,14 @@ fn materialize_new_root_with_fault_injection(
     inventory: &[PackedFile],
     interrupt_at: Option<InterruptPoint>,
 ) -> Result<PathBuf, MaterializeError> {
+    // P1.5's own test observable: every entry into the real decode+verify
+    // path, whether or not it ends up taking the keep-existing-root branch.
+    // Never used to gate behavior — read-only instrumentation for tests that
+    // must distinguish "genuinely skipped" from "ran again and reached the
+    // same outcome".
+    #[cfg(test)]
+    FULL_MATERIALIZE_ATTEMPTS.with(|c| c.set(c.get() + 1));
+
     let actual_digest = local_apps::sha256_hex(archive);
     if actual_digest != expected_digest {
         return Err(MaterializeError::DigestMismatch {
@@ -426,6 +638,7 @@ fn materialize_new_root_with_fault_injection(
         // explicitly later work. The contract this branch owes is narrower
         // and absolute: promotion never destroys a verified root.)
         let _ = std::fs::remove_dir_all(&staging);
+        write_manifest(data_root, expected_digest, inventory)?;
         return Ok(final_root);
     }
 
@@ -441,6 +654,7 @@ fn materialize_new_root_with_fault_injection(
         path: final_root.display().to_string(),
         detail: e.to_string(),
     })?;
+    write_manifest(data_root, expected_digest, inventory)?;
 
     Ok(final_root)
 }
@@ -498,6 +712,15 @@ pub(crate) fn ensure_verified_builtin_root_with_fault_injection(
     previous_verified_root: Option<&Path>,
     interrupt_at: Option<InterruptPoint>,
 ) -> Result<PathBuf, BuiltinBundleError> {
+    // P1.5 (§6.2 short-circuit): a previously-promoted root whose on-disk
+    // manifest still names this exact digest and every component the caller
+    // currently expects is returned immediately — `archive` is never decoded
+    // and no file is re-hashed. See `short_circuit_candidate` for the full
+    // set of conditions that must ALL hold for this to fire.
+    if let Some(root) = short_circuit_candidate(data_root, expected_digest, inventory) {
+        return Ok(root);
+    }
+
     match materialize_new_root_with_fault_injection(
         data_root,
         archive,
@@ -930,10 +1153,13 @@ mod tests {
 
     /// Idempotent-shape sanity: materializing the SAME archive twice with no
     /// previous root supplied the second time still succeeds and produces
-    /// the same digest-named root path both times (this module does not yet
-    /// implement the §6.2 short-circuit that skips re-verification — that is
-    /// explicitly later work — but promotion of an identical archive twice
-    /// must not itself be an error).
+    /// the same digest-named root path both times. This calls the RAW
+    /// `materialize_new_root` directly, which always fully re-decodes and
+    /// re-verifies (it has no short-circuit of its own — P1.5's short-circuit
+    /// lives one layer up, in `ensure_verified_builtin_root`, and is covered
+    /// by that function's own tests below). What this test pins is narrower
+    /// but still real: promotion of an identical archive twice, with full
+    /// re-verification both times, must not itself be an error.
     #[test]
     fn materializing_the_same_archive_twice_reaches_the_same_root_path() {
         let source = tempfile::tempdir().unwrap();
@@ -1016,6 +1242,20 @@ mod tests {
     /// re-materialization case: app relaunch, re-verification), which the
     /// two required interruption tests cannot reach because they interrupt
     /// during the staging write, long before any promote.
+    ///
+    /// The "case under test" section below calls
+    /// `materialize_new_root_with_fault_injection` DIRECTLY rather than
+    /// through `ensure_verified_builtin_root_with_fault_injection` — as it did
+    /// before P1.5. That is deliberate, not incidental: P1.5's short-circuit
+    /// (`short_circuit_candidate`) now recognizes this exact scenario (a
+    /// manifest-backed root already promoted at this digest) and returns it
+    /// WITHOUT ever calling this function at all, which would make the
+    /// `BeforePromote` fault below unreachable and this test vacuous — it
+    /// would keep passing for a reason that has nothing to do with the
+    /// atomicity property it names. Calling the lower-level function directly
+    /// keeps this test exercising exactly what it always exercised: the
+    /// keep-don't-destroy branch inside the raw materializer, independent of
+    /// the higher-level short-circuit that now sits in front of it.
     #[test]
     fn promote_never_destroys_an_existing_verified_root_at_the_same_digest() {
         let source = tempfile::tempdir().unwrap();
@@ -1064,12 +1304,14 @@ mod tests {
         let router_before = fs::read(previous_root.join("skills/router.md")).unwrap();
         fs::write(previous_root.join("sentinel.marker"), b"i was here").unwrap();
 
-        let result = ensure_verified_builtin_root_with_fault_injection(
+        // Direct call to the raw materializer (see the doc comment above for
+        // why): this is the seam that actually owns the keep-vs-destroy
+        // decision this test is about.
+        let result = materialize_new_root_with_fault_injection(
             data_root.path(),
             &packed.archive,
             &packed.archive_digest,
             &packed.inventory,
-            Some(&previous_root),
             Some(InterruptPoint::BeforePromote),
         )
         .expect("re-materializing an already-promoted digest must not fail");
@@ -1290,5 +1532,675 @@ mod tests {
             ),
             other => panic!("expected MalformedArchive, got {other:?}"),
         }
+    }
+
+    // -----------------------------------------------------------------
+    // P1.5 — the §6.2 idempotent short-circuit.
+    // -----------------------------------------------------------------
+
+    /// Read back a promoted root's §6.2 manifest as a test-mutable struct —
+    /// the same struct, from the same file, `write_manifest` produced — so a
+    /// test can flip exactly ONE field and write it back with
+    /// `overwrite_manifest`, holding every other piece of evidence genuinely
+    /// valid.
+    fn read_manifest(data_root: &Path, expected_digest: &str) -> RootManifest {
+        let bytes = fs::read(manifest_path(data_root, expected_digest)).unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    /// Write a (possibly test-corrupted) manifest back to exactly the path
+    /// `write_manifest` would have used.
+    fn overwrite_manifest(data_root: &Path, expected_digest: &str, manifest: &RootManifest) {
+        let bytes = serde_json::to_vec(manifest).unwrap();
+        fs::write(manifest_path(data_root, expected_digest), bytes).unwrap();
+    }
+
+    /// The §6.2 short-circuit's core promise: a second `ensure_verified_
+    /// builtin_root` call for a digest that has not changed must not unpack
+    /// anything and must not re-verify a single file. "It returned `Ok`"
+    /// cannot by itself prove that — a full re-verification that happens to
+    /// land on the existing-root keep branch (`materialize_new_root_with_
+    /// fault_injection`'s `final_root.is_dir()` check) ALSO returns `Ok`
+    /// with the same root path.
+    ///
+    /// Nor can "a file mutated under the promoted root survived". That
+    /// observable is VACUOUS here and is deliberately not asserted as a skip
+    /// proof below: a re-verification pass decodes the archive into a fresh
+    /// staging directory and then takes the keep branch, which never writes
+    /// into the already-promoted directory at all — so the mutation survives
+    /// on BOTH paths. (Measured, not assumed: disabling the short-circuit
+    /// call site outright and neutralising only the counter assertion left
+    /// this test GREEN.)
+    ///
+    /// Two observables that are genuinely decisive are used instead:
+    ///
+    /// 1. instrumentation-free, and the one that pins the actual §6.2 words
+    ///    "does not re-decode the archive": the second call is handed an
+    ///    archive of GARBAGE bytes while still naming the FIRST archive's
+    ///    digest. Anything that so much as hashes `archive` computes a
+    ///    mismatch and — with no previous verified root supplied — returns
+    ///    `BuiltinBundleUnavailable`. Only an implementation that never
+    ///    looks at `archive` can return `Ok`. A positive control on a fresh
+    ///    `data_root` proves that probe genuinely fires rather than being
+    ///    inert;
+    /// 2. `full_materialize_attempts()`, a thread-local counter incremented
+    ///    at the very top of the decode/verify function, asserted to be
+    ///    EXACTLY unchanged.
+    ///
+    /// The required inverse pairing: a THIRD phase materializes a genuinely
+    /// DIFFERENT archive (a different digest) into the SAME `data_root` and
+    /// confirms the counter advances by exactly one and the returned root
+    /// holds that archive's own content — proving the short-circuit
+    /// recognizes an UNCHANGED digest specifically, not merely "this
+    /// `data_root` already has something in it" (an implementation that
+    /// always skips once anything is promoted would pass phases 1-2 above
+    /// but fail this one).
+    #[test]
+    fn unchanged_digest_skips_unpack() {
+        let source = tempfile::tempdir().unwrap();
+        let inventory = variant_fixture(source.path(), 1);
+        let packed = pack(source.path(), &inventory).unwrap();
+        let data_root = tempfile::tempdir().unwrap();
+
+        let first = ensure_verified_builtin_root(
+            data_root.path(),
+            &packed.archive,
+            &packed.archive_digest,
+            &packed.inventory,
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            fs::read(first.join("plugin.json")).unwrap(),
+            br#"{"variant":1}"#
+        );
+
+        // The probe for observable (1): the same length, every byte flipped,
+        // so it cannot possibly hash to `packed.archive_digest`.
+        let garbage: Vec<u8> = packed.archive.iter().map(|b| b ^ 0xFF).collect();
+        assert_eq!(
+            garbage.len(),
+            packed.archive.len(),
+            "fixture bug: the probe must not be distinguishable by length"
+        );
+        let garbage_digest = local_apps::sha256_hex(&garbage);
+        assert_ne!(
+            garbage_digest, packed.archive_digest,
+            "fixture bug: the probe archive must not hash to the digest it claims"
+        );
+
+        // POSITIVE CONTROL for that probe, on a data root holding no
+        // promoted root at all: reading the archive is unavoidable there, so
+        // the mismatch MUST surface. Without this, the `Ok` asserted below
+        // could mean the probe is simply inert.
+        let fresh = tempfile::tempdir().unwrap();
+        match ensure_verified_builtin_root(
+            fresh.path(),
+            &garbage,
+            &packed.archive_digest,
+            &packed.inventory,
+            None,
+        ) {
+            Err(BuiltinBundleError::BuiltinBundleUnavailable(detail)) => assert!(
+                detail.contains("archive digest mismatch")
+                    && detail.contains(&packed.archive_digest),
+                "the probe must be rejected by the DIGEST gate specifically, got: {detail}"
+            ),
+            other => panic!("probe is inert: a garbage archive was not rejected, got {other:?}"),
+        }
+
+        // A skip never repairs the promoted root either — §6.2 trades
+        // re-verification away deliberately. Recorded here as the documented
+        // consequence it is, NOT as evidence of skipping (see the doc
+        // comment: this survives a re-verification too).
+        fs::write(first.join("plugin.json"), b"TAMPERED-BY-TEST").unwrap();
+
+        let attempts_before = full_materialize_attempts();
+        let second = ensure_verified_builtin_root(
+            data_root.path(),
+            &garbage, // <- never looked at, if the short-circuit is real
+            &packed.archive_digest,
+            &packed.inventory,
+            None,
+        )
+        .expect(
+            "an unchanged digest must be served from the promoted root without ever \
+             decoding — or even hashing — the archive handed in",
+        );
+
+        assert_eq!(
+            second, first,
+            "the same digest must resolve to the same root"
+        );
+        assert_eq!(
+            full_materialize_attempts(),
+            attempts_before,
+            "an unchanged digest must not re-enter the archive decode/verify path at all"
+        );
+        assert_eq!(
+            fs::read(first.join("plugin.json")).unwrap(),
+            b"TAMPERED-BY-TEST",
+            "the skip returns the existing root as-is; it does not re-unpack over it"
+        );
+
+        // The required inverse: a DIFFERENT archive must NOT be served from
+        // the first archive's cached evidence.
+        let v2_source = tempfile::tempdir().unwrap();
+        let v2_inventory = variant_fixture(v2_source.path(), 2);
+        let v2_packed = pack(v2_source.path(), &v2_inventory).unwrap();
+        assert_ne!(
+            packed.archive_digest, v2_packed.archive_digest,
+            "fixture bug: v1 and v2 must be different bundles"
+        );
+
+        let attempts_before_v2 = full_materialize_attempts();
+        let third = ensure_verified_builtin_root(
+            data_root.path(),
+            &v2_packed.archive,
+            &v2_packed.archive_digest,
+            &v2_packed.inventory,
+            None,
+        )
+        .unwrap();
+
+        assert_ne!(
+            third, first,
+            "a changed digest must promote a DIFFERENT root"
+        );
+        assert_eq!(
+            full_materialize_attempts(),
+            attempts_before_v2 + 1,
+            "a changed digest must genuinely re-enter the decode/verify path exactly \
+             once, not be served from the first archive's cached evidence"
+        );
+        assert_eq!(
+            fs::read(third.join("plugin.json")).unwrap(),
+            br#"{"variant":2}"#,
+            "the second archive's own content must actually have been unpacked"
+        );
+    }
+
+    /// One of §6.2's five INDEPENDENT defeat conditions: the manifest's
+    /// `digest` marker field does not name this call's `expected_digest`.
+    /// Every other piece of evidence — the directory, the component list —
+    /// is held genuinely valid, so a check that quietly didn't exist could
+    /// not be hiding behind one of its neighbors firing instead. (This test
+    /// is not in the task's named list, but the design doc's prose names
+    /// the marker field as its own required defeat condition alongside the
+    /// four that are named, so it gets the same isolated treatment here.)
+    #[test]
+    fn a_wrong_marker_field_defeats_the_short_circuit() {
+        let source = tempfile::tempdir().unwrap();
+        let inventory = variant_fixture(source.path(), 1);
+        let packed = pack(source.path(), &inventory).unwrap();
+        let data_root = tempfile::tempdir().unwrap();
+
+        let root = materialize_new_root(
+            data_root.path(),
+            &packed.archive,
+            &packed.archive_digest,
+            &packed.inventory,
+        )
+        .unwrap();
+
+        // Positive control: the untouched, genuinely valid manifest DOES
+        // short-circuit — proves this fixture would pass if not corrupted.
+        assert_eq!(
+            short_circuit_candidate(data_root.path(), &packed.archive_digest, &packed.inventory),
+            Some(root.clone()),
+            "fixture bug: a genuinely valid manifest must short-circuit"
+        );
+
+        let mut manifest = read_manifest(data_root.path(), &packed.archive_digest);
+        manifest.digest = "0".repeat(64);
+        overwrite_manifest(data_root.path(), &packed.archive_digest, &manifest);
+
+        assert_eq!(
+            short_circuit_candidate(data_root.path(), &packed.archive_digest, &packed.inventory),
+            None,
+            "a manifest whose marker field names a different digest must not be trusted"
+        );
+
+        // The caller-visible entry point must genuinely re-verify rather
+        // than silently trust the corrupted marker.
+        let attempts_before = full_materialize_attempts();
+        let result = ensure_verified_builtin_root(
+            data_root.path(),
+            &packed.archive,
+            &packed.archive_digest,
+            &packed.inventory,
+            None,
+        )
+        .expect("a valid archive must still materialize despite a corrupted cached marker");
+        assert_eq!(result, root);
+        assert_eq!(
+            full_materialize_attempts(),
+            attempts_before + 1,
+            "defeating the short-circuit must fall through to exactly one full \
+             decode-and-verify pass"
+        );
+        assert_eq!(
+            read_manifest(data_root.path(), &packed.archive_digest).digest,
+            packed.archive_digest,
+            "the corrupted marker must be repaired by the fresh materialization"
+        );
+    }
+
+    /// One of §6.2's five independent defeat conditions: the manifest
+    /// sibling file itself is gone (never written, or removed) while the
+    /// promoted root directory is untouched and genuinely valid.
+    #[test]
+    fn a_missing_manifest_defeats_the_short_circuit() {
+        let source = tempfile::tempdir().unwrap();
+        let inventory = variant_fixture(source.path(), 1);
+        let packed = pack(source.path(), &inventory).unwrap();
+        let data_root = tempfile::tempdir().unwrap();
+
+        let root = materialize_new_root(
+            data_root.path(),
+            &packed.archive,
+            &packed.archive_digest,
+            &packed.inventory,
+        )
+        .unwrap();
+
+        assert_eq!(
+            short_circuit_candidate(data_root.path(), &packed.archive_digest, &packed.inventory),
+            Some(root.clone()),
+            "fixture bug: a genuinely valid manifest must short-circuit"
+        );
+
+        fs::remove_file(manifest_path(data_root.path(), &packed.archive_digest)).unwrap();
+
+        assert_eq!(
+            short_circuit_candidate(data_root.path(), &packed.archive_digest, &packed.inventory),
+            None,
+            "a promoted root with no manifest at all must not be trusted"
+        );
+
+        let attempts_before = full_materialize_attempts();
+        let result = ensure_verified_builtin_root(
+            data_root.path(),
+            &packed.archive,
+            &packed.archive_digest,
+            &packed.inventory,
+            None,
+        )
+        .expect("a valid archive must still materialize with no cached manifest");
+        assert_eq!(result, root);
+        assert_eq!(
+            full_materialize_attempts(),
+            attempts_before + 1,
+            "defeating the short-circuit must fall through to exactly one full \
+             decode-and-verify pass"
+        );
+        assert!(
+            manifest_path(data_root.path(), &packed.archive_digest).exists(),
+            "the missing manifest must be recreated by the fresh materialization"
+        );
+    }
+
+    /// One of §6.2's five independent defeat conditions: the manifest
+    /// exists with a correct marker field, but its component list is
+    /// EMPTY — no per-file inventory was ever recorded. This is the
+    /// total-loss extreme of the SAME per-entry lookup the next test below
+    /// exercises with one entry missing rather than all of them (there is
+    /// no separate "is it empty" branch in `short_circuit_candidate` — an
+    /// empty component map fails the very first lookup the loop makes) —
+    /// still an independently meaningful, independently named scenario:
+    /// this test corrupts only "clear every component", holding the
+    /// directory, the manifest's presence, and its marker field genuinely
+    /// valid, so it stands on its own regardless of what the next test
+    /// proves.
+    #[test]
+    fn a_missing_inventory_defeats_the_short_circuit() {
+        let source = tempfile::tempdir().unwrap();
+        let inventory = variant_fixture(source.path(), 1);
+        let packed = pack(source.path(), &inventory).unwrap();
+        let data_root = tempfile::tempdir().unwrap();
+
+        let root = materialize_new_root(
+            data_root.path(),
+            &packed.archive,
+            &packed.archive_digest,
+            &packed.inventory,
+        )
+        .unwrap();
+
+        assert_eq!(
+            short_circuit_candidate(data_root.path(), &packed.archive_digest, &packed.inventory),
+            Some(root.clone()),
+            "fixture bug: a genuinely valid manifest must short-circuit"
+        );
+
+        let mut manifest = read_manifest(data_root.path(), &packed.archive_digest);
+        assert!(
+            !manifest.components.is_empty(),
+            "fixture bug: nothing to empty"
+        );
+        manifest.components.clear();
+        overwrite_manifest(data_root.path(), &packed.archive_digest, &manifest);
+
+        assert_eq!(
+            short_circuit_candidate(data_root.path(), &packed.archive_digest, &packed.inventory),
+            None,
+            "a manifest with no recorded inventory at all must not be trusted"
+        );
+
+        let attempts_before = full_materialize_attempts();
+        let result = ensure_verified_builtin_root(
+            data_root.path(),
+            &packed.archive,
+            &packed.archive_digest,
+            &packed.inventory,
+            None,
+        )
+        .expect("a valid archive must still materialize with an emptied cached inventory");
+        assert_eq!(result, root);
+        assert_eq!(
+            full_materialize_attempts(),
+            attempts_before + 1,
+            "defeating the short-circuit must fall through to exactly one full \
+             decode-and-verify pass"
+        );
+        // Name every restored entry rather than just counting them.
+        let repaired = read_manifest(data_root.path(), &packed.archive_digest);
+        for entry in &packed.inventory {
+            let restored = repaired
+                .components
+                .iter()
+                .find(|c| c.path == entry.path)
+                .unwrap_or_else(|| panic!("{} was not repopulated", entry.path));
+            assert_eq!(restored.bytes, entry.bytes, "{}", entry.path);
+            assert_eq!(restored.sha256, entry.sha256, "{}", entry.path);
+        }
+        assert_eq!(repaired.components.len(), packed.inventory.len());
+    }
+
+    /// One of §6.2's five independent defeat conditions: the manifest
+    /// exists, its marker field is correct, and its component list is
+    /// non-empty — but it is missing the entry for ONE specific path the
+    /// caller's inventory still requires. The other entries stay present
+    /// and correct, so this is genuinely distinct from the empty-inventory
+    /// case above (a single check covering both would leave one of them
+    /// unfalsifiable).
+    #[test]
+    fn a_missing_component_entry_defeats_the_short_circuit() {
+        let source = tempfile::tempdir().unwrap();
+        let inventory = variant_fixture(source.path(), 1);
+        let packed = pack(source.path(), &inventory).unwrap();
+        assert!(
+            packed.inventory.len() >= 3,
+            "fixture bug: need at least 2 remaining entries after dropping 1"
+        );
+        let data_root = tempfile::tempdir().unwrap();
+
+        let root = materialize_new_root(
+            data_root.path(),
+            &packed.archive,
+            &packed.archive_digest,
+            &packed.inventory,
+        )
+        .unwrap();
+
+        assert_eq!(
+            short_circuit_candidate(data_root.path(), &packed.archive_digest, &packed.inventory),
+            Some(root.clone()),
+            "fixture bug: a genuinely valid manifest must short-circuit"
+        );
+
+        let mut manifest = read_manifest(data_root.path(), &packed.archive_digest);
+        let dropped_path = "skills/router.md";
+        // Anti-`ordered[0]` guard. A check that inspected only the FIRST
+        // inventory entry would be vacuously satisfied by a fixture whose
+        // corrupted entry always sorts first — the exact shape that left
+        // eighteen packer tests green around a guard reading `ordered[0]`.
+        // Pin that the entry this test drops is NOT the one a first-entry-only
+        // implementation would look at.
+        assert_ne!(
+            packed.inventory[0].path, dropped_path,
+            "fixture bug: the dropped component must not be the first inventory entry, \
+             or a first-entry-only check would pass this test vacuously"
+        );
+        let dropped = packed
+            .inventory
+            .iter()
+            .find(|e| e.path == dropped_path)
+            .expect("fixture bug: the dropped path must be in the inventory")
+            .clone();
+        let before_len = manifest.components.len();
+        manifest.components.retain(|c| c.path != dropped_path);
+        assert_eq!(
+            manifest.components.len(),
+            before_len - 1,
+            "fixture bug: the target component was not present to drop"
+        );
+        overwrite_manifest(data_root.path(), &packed.archive_digest, &manifest);
+
+        assert_eq!(
+            short_circuit_candidate(data_root.path(), &packed.archive_digest, &packed.inventory),
+            None,
+            "a manifest missing ONE component the caller's inventory still requires \
+             must not be trusted, even with every other entry intact"
+        );
+
+        let attempts_before = full_materialize_attempts();
+        let result = ensure_verified_builtin_root(
+            data_root.path(),
+            &packed.archive,
+            &packed.archive_digest,
+            &packed.inventory,
+            None,
+        )
+        .expect("a valid archive must still materialize with a partially-truncated inventory");
+        assert_eq!(result, root);
+        assert_eq!(
+            full_materialize_attempts(),
+            attempts_before + 1,
+            "defeating the short-circuit must fall through to exactly one full \
+             decode-and-verify pass"
+        );
+        // Name what was restored, not merely how many things there are: a
+        // length check alone would be satisfied by any entry at all
+        // reappearing under any path.
+        let repaired = read_manifest(data_root.path(), &packed.archive_digest);
+        let restored = repaired
+            .components
+            .iter()
+            .find(|c| c.path == dropped_path)
+            .expect("the dropped entry must be restored by the fresh materialization");
+        assert_eq!(restored.bytes, dropped.bytes);
+        assert_eq!(restored.sha256, dropped.sha256);
+        assert_eq!(repaired.components.len(), packed.inventory.len());
+    }
+
+    /// The component comparison's CONTENT half, which no other test in this
+    /// module reaches. `short_circuit_candidate` accepts a recorded component
+    /// only when its `bytes` AND its `sha256` both agree with what the
+    /// caller's inventory declares — but every other test here leaves both
+    /// fields untouched, so both sub-conditions are vacuously true in every
+    /// state they exercise. (Measured, not assumed: deleting
+    /// `component.sha256 == entry.sha256` from the guard left all seventeen
+    /// of those tests GREEN.)
+    ///
+    /// This is not a cosmetic gap. The manifest is the ONLY evidence the
+    /// short-circuit consults before deciding to skip verification entirely,
+    /// so a manifest recording a different digest for a path is precisely the
+    /// state in which a tampered root gets served as verified. The two
+    /// sub-conditions are corrupted in separate phases, each against an
+    /// otherwise genuinely valid fixture, so neither can hide behind the
+    /// other firing.
+    #[test]
+    fn a_component_that_disagrees_on_content_defeats_the_short_circuit() {
+        let source = tempfile::tempdir().unwrap();
+        let inventory = variant_fixture(source.path(), 1);
+        let packed = pack(source.path(), &inventory).unwrap();
+        let data_root = tempfile::tempdir().unwrap();
+
+        let root = materialize_new_root(
+            data_root.path(),
+            &packed.archive,
+            &packed.archive_digest,
+            &packed.inventory,
+        )
+        .unwrap();
+
+        let pristine = read_manifest(data_root.path(), &packed.archive_digest);
+        // Anti-`ordered[0]` guard, as in the missing-entry test: corrupt an
+        // entry a first-entry-only implementation would never inspect.
+        let target = "skills/router.md";
+        assert_ne!(
+            packed.inventory[0].path, target,
+            "fixture bug: the corrupted component must not be the first inventory entry"
+        );
+
+        // Phase 1 — the DIGEST disagrees, byte count held identical. A
+        // length- or count-derived stand-in for the comparison cannot tell
+        // these two states apart; a real digest comparison must.
+        let mut manifest = pristine.clone();
+        let entry = manifest
+            .components
+            .iter_mut()
+            .find(|c| c.path == target)
+            .expect("fixture bug: target component missing");
+        let real_sha = entry.sha256.clone();
+        let real_bytes = entry.bytes;
+        entry.sha256 = HELLO_WORLD_SHA256.to_string();
+        assert_ne!(
+            entry.sha256, real_sha,
+            "fixture bug: the substituted digest must differ from the real one"
+        );
+        assert_eq!(
+            entry.bytes, real_bytes,
+            "fixture bug: only the DIGEST may change in this phase"
+        );
+        overwrite_manifest(data_root.path(), &packed.archive_digest, &manifest);
+
+        assert_eq!(
+            short_circuit_candidate(data_root.path(), &packed.archive_digest, &packed.inventory),
+            None,
+            "a manifest recording a DIFFERENT digest for a path must not be trusted"
+        );
+
+        // Positive control between the two phases: restoring the pristine
+        // manifest short-circuits again, proving the refusal above is caused
+        // by the substituted digest and by nothing else in this fixture.
+        overwrite_manifest(data_root.path(), &packed.archive_digest, &pristine);
+        assert_eq!(
+            short_circuit_candidate(data_root.path(), &packed.archive_digest, &packed.inventory),
+            Some(root.clone()),
+            "fixture bug: the pristine manifest must still short-circuit"
+        );
+
+        // Phase 2 — the BYTE COUNT disagrees, digest held identical.
+        let mut manifest = pristine.clone();
+        let entry = manifest
+            .components
+            .iter_mut()
+            .find(|c| c.path == target)
+            .expect("fixture bug: target component missing");
+        entry.bytes = real_bytes + 1;
+        assert_eq!(
+            entry.sha256, real_sha,
+            "fixture bug: only the BYTE COUNT may change in this phase"
+        );
+        overwrite_manifest(data_root.path(), &packed.archive_digest, &manifest);
+
+        assert_eq!(
+            short_circuit_candidate(data_root.path(), &packed.archive_digest, &packed.inventory),
+            None,
+            "a manifest recording a different byte count for a path must not be trusted"
+        );
+
+        // And the caller-visible entry point genuinely re-verifies rather
+        // than trusting the corrupted record.
+        let attempts_before = full_materialize_attempts();
+        let result = ensure_verified_builtin_root(
+            data_root.path(),
+            &packed.archive,
+            &packed.archive_digest,
+            &packed.inventory,
+            None,
+        )
+        .expect("a valid archive must still materialize despite a corrupted cached component");
+        assert_eq!(result, root);
+        assert_eq!(
+            full_materialize_attempts(),
+            attempts_before + 1,
+            "defeating the short-circuit must fall through to exactly one full \
+             decode-and-verify pass"
+        );
+        let repaired = read_manifest(data_root.path(), &packed.archive_digest);
+        let fixed = repaired
+            .components
+            .iter()
+            .find(|c| c.path == target)
+            .expect("the corrupted entry must survive the repair");
+        assert_eq!(fixed.sha256, real_sha, "the digest must be repaired");
+        assert_eq!(fixed.bytes, real_bytes, "the byte count must be repaired");
+    }
+
+    /// One of §6.2's five independent defeat conditions: the digest-named
+    /// path is a SYMLINK rather than a genuine directory. Checked directly
+    /// against `short_circuit_candidate` — the exact function production
+    /// calls — rather than only at the `ensure_verified_builtin_root`
+    /// integration level, because a symlink pointing AT a directory would
+    /// also satisfy `Path::is_dir` (which follows links), so an
+    /// integration-level "did it decode the archive" observable could not
+    /// tell "the short-circuit refused the symlink" apart from "the raw
+    /// materializer's own `is_dir` keep-check happened to follow it". The
+    /// property that must hold at THIS seam, unambiguously, is that a
+    /// symlink is never trusted regardless of what it resolves to — proven
+    /// by pointing it at a directory holding content that is otherwise
+    /// perfectly valid (the very same promoted files, just moved) and
+    /// confirming the short-circuit still refuses it.
+    #[test]
+    fn a_symlink_root_defeats_the_short_circuit() {
+        use std::os::unix::fs::symlink;
+
+        let source = tempfile::tempdir().unwrap();
+        let inventory = variant_fixture(source.path(), 1);
+        let packed = pack(source.path(), &inventory).unwrap();
+        let data_root = tempfile::tempdir().unwrap();
+
+        let root = materialize_new_root(
+            data_root.path(),
+            &packed.archive,
+            &packed.archive_digest,
+            &packed.inventory,
+        )
+        .unwrap();
+
+        // Positive control on the untouched, genuine directory.
+        assert_eq!(
+            short_circuit_candidate(data_root.path(), &packed.archive_digest, &packed.inventory),
+            Some(root.clone()),
+            "fixture bug: a genuinely valid, non-symlink root must short-circuit"
+        );
+
+        // Move the real, verified content aside, then put a symlink to it
+        // at the promoted path — so the only thing that changes is the file
+        // TYPE at `root`, never the bytes it resolves to.
+        let decoy = data_root.path().join("decoy-target");
+        fs::rename(&root, &decoy).unwrap();
+        symlink(&decoy, &root).unwrap();
+        assert!(
+            root.is_dir(),
+            "fixture bug: the symlink must resolve to a real directory"
+        );
+        assert!(
+            fs::symlink_metadata(&root)
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "fixture bug: `root` must literally be a symlink for this test to mean anything"
+        );
+
+        assert_eq!(
+            short_circuit_candidate(data_root.path(), &packed.archive_digest, &packed.inventory),
+            None,
+            "a symlink at the promoted-root path must never be trusted, even when it \
+             resolves to genuinely valid content"
+        );
     }
 }

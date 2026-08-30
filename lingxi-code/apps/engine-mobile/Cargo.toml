@@ -108,6 +108,21 @@ uniffi = [
     "dep:futures-util",
     "dep:reqwest",
     "dep:sha2",
+    # P1.6 (§19.2): the plugin lifecycle/materialiser mobile composes for the
+    # first time — the ONLY plugin mobile ever loads is the one compiled-in
+    # Local App plugin (`lingxi-local-app`), registered through
+    # `PluginManager::register_verified_builtin` (never `install`; mobile has
+    # no marketplace, no `~/.claude/plugins` cache scan, no `--plugin-dir`).
+    # Engine-tier (no `apps/*` edge — `engine-desktop`/`apps/cli` already carry
+    # the same edge, confirmed by `scripts/check-deps.sh`), optional +
+    # uniffi-gated like its runtime-wiring siblings above. `lsp` and
+    # `outputstyles` are pulled alongside it only because
+    # `PluginManager::new`'s signature names their registry types directly
+    # (`plugin` does not re-export them) — mobile does not otherwise start an
+    # LSP or output-style subsystem.
+    "dep:plugin",
+    "dep:lsp",
+    "dep:outputstyles",
 ]
 
 [dependencies]
@@ -199,6 +214,15 @@ session = { path = "../../session", optional = true }
 # SESSIONS/HISTORY (live ResumeSession): parse the command's `session_id` String
 # into a `uuid::Uuid`. Parse-only (no v4/serde) — optional + uniffi-gated.
 uuid = { version = "1.10", optional = true }
+# P1.6 (§19.2): the plugin lifecycle/materialiser (`PluginManager`,
+# `PluginManifest`, `register_verified_builtin`). Engine-tier (no `apps/*`
+# edge), optional + uniffi-gated like its runtime-wiring siblings above.
+plugin = { path = "../../plugin", optional = true }
+# Named directly by `PluginManager::new`'s signature (`plugin` does not
+# re-export `LspRegistry`/`OutputStyleRegistry`); mobile starts neither
+# subsystem otherwise. Optional + uniffi-gated.
+lsp = { path = "../../lsp", optional = true }
+outputstyles = { path = "../../outputstyles", optional = true }
 
 tokio = { workspace = true, optional = true, features = ["rt-multi-thread", "macros", "sync", "time", "net", "io-util", "fs"] }
 base64 = { version = "0.22", optional = true }

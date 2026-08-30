@@ -138,6 +138,411 @@ pub use client_adapter::{ClientEventListener, ListenerSink, PermissionRequestSin
 #[cfg(feature = "uniffi")]
 uniffi::setup_scaffolding!();
 
+// ---------------------------------------------------------------------------
+// P1.6 (§19.2) — mobile composes `PluginManager` for the first time.
+//
+// Mobile's plugin surface is exactly ONE compiled-in plugin
+// (`lingxi-local-app`, the on-device Local App authoring/build/test workflow
+// bundle under `plugins/lingxi-local-app/`). Unlike `engine-desktop`, mobile
+// has no `~/.claude/plugins` cache to scan, no marketplace, and no
+// `--plugin-dir`/`--add-dir` session surface — so mobile never calls
+// `PluginManager::install` at all. The single compiled-in plugin is
+// registered through `register_verified_builtin`, the door P0a.6 opened
+// specifically for a plugin whose `(id, manifest, install_dir)` triple never
+// passed through untrusted, attacker-influenced input.
+//
+// `register_mobile_builtin_plugin` refuses anything whose `manifest.source`
+// is not already `PluginSource::BuiltIn` — defense in depth from the
+// opposite direction of `PluginManager::install`'s own unconditional
+// rejection of that SAME variant, so a manifest that ever passed through a
+// network/local-path install arm cannot be smuggled through this door and
+// come out re-labeled trusted.
+//
+// What this task deliberately leaves undone, because it is out of scope for
+// this task's owned files (`Cargo.toml` / `lib.rs` /
+// `local_app_plugin_binding.rs`):
+//   - Wiring this into `host::build_mobile_inner` — `host.rs` is owned by a
+//     different task/session; the functions below are ready for it to call
+//     but nothing calls them yet outside this file's own tests.
+//   - Embedding the plugin's real components (skills/agents/workflows under
+//     `plugins/lingxi-local-app/`) — `manifest.components` is left at
+//     `PluginComponents::default()` until the compiled-in bundle
+//     (`builtin_bundle`/`local_apps::packer`) has a materialized on-device
+//     root for this manifest to point components at. That is not a load
+//     failure today: `PluginManager::load_plugin` materializes zero
+//     components and returns `Ok` when a manifest declares none.
+//   - §19.0's binary-size/startup budgets
+//     (`local-apps/src/performance_thresholds.rs`'s `load_baseline()`, which
+//     has no caller anywhere in the workspace) start binding once `plugin`
+//     is linked in by this task. The natural call site is inside
+//     `host::build_mobile_inner`, right after it wires this plugin edge in —
+//     not here, since this file never constructs the real on-device
+//     `MobileRuntime`.
+/// The one plugin name mobile ever discovers (§19.2's completion condition).
+#[cfg(feature = "uniffi")]
+pub const MOBILE_BUILTIN_PLUGIN_NAME: &str = "lingxi-local-app";
+
+/// The compiled-in identity of that one plugin, as a fixed UUID.
+///
+/// Deliberately a CONSTANT, not `PluginId::new()`. `PluginId` is the key that
+/// `PluginManager`'s state map, `disable`/`unload_plugin`, and — security
+/// relevantly — `PluginBlocklist::is_blocked` all match on. A fresh v4 UUID
+/// per call would mean:
+///   - two `register_mobile_builtin_plugins` calls against one manager
+///     register the SAME plugin twice, under two different ids, so
+///     "mobile loads exactly one plugin" stops holding at the manager;
+///   - `disable`/`unload_plugin` cannot be handed a stable id by anything
+///     that did not itself just call [`mobile_builtin_plugins`]; and
+///   - no managed-settings blocklist entry could ever name this plugin,
+///     because its id would differ on every boot. `plugin::manager`'s own
+///     `register_verified_builtin` doc calls out exactly that failure ("…
+///     `PluginId::new()` is a fresh v4 UUID per process, so the check runs
+///     but can only match an id the host minted and blocked within the same
+///     run").
+///
+/// The bytes are hand-picked (`6c69 6e67 7869 4c41` is ASCII `lingxiLA`) so
+/// the value is visibly a compiled-in constant rather than a captured random
+/// id somebody could be tempted to "refresh".
+#[cfg(feature = "uniffi")]
+pub const MOBILE_BUILTIN_PLUGIN_UUID: u128 = 0x6c69_6e67_7869_4c41_0000_0000_0000_0001;
+
+/// The compiled-in [`protocol::PluginId`] for [`MOBILE_BUILTIN_PLUGIN_NAME`].
+#[cfg(feature = "uniffi")]
+#[must_use]
+pub fn mobile_builtin_plugin_id() -> protocol::PluginId {
+    protocol::PluginId::from_uuid(uuid::Uuid::from_u128(MOBILE_BUILTIN_PLUGIN_UUID))
+}
+
+/// Build the compiled-in Local App plugin's manifest.
+///
+/// `source` is stamped `PluginSource::BuiltIn` here directly (and re-stamped
+/// by `register_verified_builtin` unconditionally regardless, so this can
+/// never silently drift from it) so [`mobile_builtin_plugins`] itself already
+/// carries the completion condition's shape — name and source — without
+/// waiting on registration against a live `PluginManager`.
+#[cfg(feature = "uniffi")]
+fn mobile_builtin_plugin_manifest() -> (protocol::PluginId, plugin::PluginManifest) {
+    let id = mobile_builtin_plugin_id();
+    let manifest = plugin::PluginManifest {
+        id,
+        name: MOBILE_BUILTIN_PLUGIN_NAME.to_string(),
+        display_name: None,
+        default_enabled: true,
+        version: "1.0.0".to_string(),
+        description: "On-device Local App authoring/build/test workflow set.".to_string(),
+        author: Some(branding::PRODUCT_NAME.to_string()),
+        homepage: None,
+        source: plugin::PluginSource::BuiltIn,
+        components: plugin::PluginComponents::default(),
+        trust_level: plugin::default_trust_for_source(&plugin::PluginSource::BuiltIn),
+        depends_on: Vec::new(),
+        dependencies: Vec::new(),
+        user_config: None,
+        channels: Vec::new(),
+        settings: std::collections::HashMap::new(),
+    };
+    (id, manifest)
+}
+
+/// Every plugin mobile ships, compiled in. Exactly one today: the pinned
+/// [`MOBILE_BUILTIN_PLUGIN_NAME`] builtin (§19.2's completion condition).
+/// Mobile deliberately has no disk-scan/marketplace/session-plugin discovery
+/// path, so this IS the entire mobile plugin surface, not a subset of some
+/// larger discovered set a caller is expected to filter.
+#[cfg(feature = "uniffi")]
+#[must_use]
+pub fn mobile_builtin_plugins() -> Vec<(
+    protocol::PluginId,
+    plugin::PluginManifest,
+    std::path::PathBuf,
+)> {
+    let (id, manifest) = mobile_builtin_plugin_manifest();
+    vec![(id, manifest, std::path::PathBuf::new())]
+}
+
+/// Register one mobile-builtin plugin into `manager` through the verified-
+/// builtin door, refusing anything whose `manifest.source` is not already
+/// `PluginSource::BuiltIn`.
+///
+/// This refusal is mobile-specific defense in depth, not something
+/// `register_verified_builtin` itself enforces (that method stamps `source`
+/// to `BuiltIn` unconditionally by design, trusting a caller that already
+/// did its own verification before calling it). Gating here too means a
+/// manifest that ever passed through a network/local-path install arm cannot
+/// reach this door and quietly come out re-labeled trusted.
+#[cfg(feature = "uniffi")]
+pub async fn register_mobile_builtin_plugin(
+    manager: &plugin::PluginManager,
+    id: &protocol::PluginId,
+    manifest: plugin::PluginManifest,
+    install_dir: std::path::PathBuf,
+) -> Result<(), plugin::PluginManagerError> {
+    if !matches!(manifest.source, plugin::PluginSource::BuiltIn) {
+        return Err(plugin::PluginManagerError::Io(format!(
+            "refusing to register {:?} through the mobile builtin-plugin door: \
+             source must be PluginSource::BuiltIn, got {:?}",
+            manifest.name, manifest.source
+        )));
+    }
+    manager
+        .register_verified_builtin(id, manifest, install_dir)
+        .await
+}
+
+/// Register every mobile-builtin plugin (today: exactly the one
+/// [`mobile_builtin_plugins`] names) into `manager`.
+#[cfg(feature = "uniffi")]
+pub async fn register_mobile_builtin_plugins(
+    manager: &plugin::PluginManager,
+) -> Result<(), plugin::PluginManagerError> {
+    for (id, manifest, install_dir) in mobile_builtin_plugins() {
+        register_mobile_builtin_plugin(manager, &id, manifest, install_dir).await?;
+    }
+    Ok(())
+}
+
+#[cfg(all(test, feature = "uniffi"))]
+mod mobile_plugin_composition_tests {
+    use super::*;
+    use plugin::{PluginManager, PluginSource};
+    use std::sync::Arc;
+    use tokio::sync::RwLock;
+
+    /// A fully-wired `PluginManager` (every registry live, no mocks) rooted at
+    /// `root` — the same shape `plugin::manager::register_verified_builtin_tests`'s
+    /// own `build_manager` uses, built from `platform-posix-minimal`'s fakes
+    /// (already an engine-mobile dependency) instead of the full `platforms/posix`
+    /// crate desktop links.
+    fn build_manager(root: &std::path::Path) -> PluginManager {
+        let credentials = Arc::new(secret::CredentialManager::new(
+            Arc::new(platform_posix_minimal::PlainTextSecureStorage::new()),
+            Arc::new(platform_posix_minimal::PosixClock::new()),
+            Arc::new(platform_posix_minimal::PosixHttp::new()),
+        ));
+        PluginManager::new(
+            root.to_path_buf(),
+            Arc::new(platform_posix_minimal::PosixFileSystem::new(
+                root.to_path_buf(),
+            )),
+            Arc::new(platform_posix_minimal::PosixHttp::new()),
+            Arc::new(platform_posix_minimal::PosixRuntime::new()),
+            credentials,
+            Arc::new(plugin::PluginBlocklist::new(String::new())),
+            Arc::new(plugin::StrictPluginOnlyPolicy::empty()),
+            Arc::new(RwLock::new(CommandRegistry::new())),
+            Arc::new(RwLock::new(SkillRegistry::new())),
+            Arc::new(RwLock::new(hooks::HookRegistry::new())),
+            Arc::new(RwLock::new(outputstyles::OutputStyleRegistry::new())),
+            Arc::new(mcp::McpRegistry::new(Arc::new(
+                platform_posix_minimal::PosixMcp::new(),
+            ))),
+            Arc::new(lsp::LspRegistry::new(Arc::new(
+                platform_posix_minimal::PosixLsp::new(),
+            ))),
+            Arc::new(RwLock::new(ToolRegistry::new())),
+        )
+    }
+
+    /// §19.2's completion condition, asserted against PRODUCTION discovery —
+    /// [`mobile_builtin_plugins`] — not a hand-built vector standing in for
+    /// it, and against the plugin's OWN name, not merely a count.
+    #[tokio::test]
+    async fn mobile_discovers_exactly_one_plugin() {
+        let discovered = mobile_builtin_plugins();
+        assert_eq!(
+            discovered.len(),
+            1,
+            "mobile must discover exactly one compiled-in plugin"
+        );
+        let (discovered_id, manifest, _) = &discovered[0];
+        // Against the LITERAL §19.2 pins, not against
+        // `MOBILE_BUILTIN_PLUGIN_NAME` — the manifest is BUILT from that
+        // constant, so `manifest.name == MOBILE_BUILTIN_PLUGIN_NAME` is a
+        // tautology that stays green through any rename. The completion
+        // condition names a specific string; the test has to too.
+        assert_eq!(
+            manifest.name, "lingxi-local-app",
+            "the one discovered plugin must be named lingxi-local-app, not merely \
+             counted"
+        );
+        assert!(
+            matches!(manifest.source, PluginSource::BuiltIn),
+            "the one discovered plugin must be sourced BuiltIn, got {:?}",
+            manifest.source
+        );
+
+        // Round-trip through a REAL `PluginManager`: if `mobile_builtin_plugins`
+        // ever regressed to returning an empty list (the House Defect this
+        // brief warns about — "a discovery path that finds nothing"),
+        // `register_mobile_builtin_plugins` would register nothing and
+        // `loaded_plugin_ids` would come back empty, failing this too — so
+        // this is not satisfied by the manifest list alone.
+        let tmp = tempfile::tempdir().expect("temp install dir");
+        let manager = build_manager(tmp.path());
+        register_mobile_builtin_plugins(&manager)
+            .await
+            .expect("the mobile builtin plugin must register cleanly");
+        // NAME what was counted: the Loaded set must be exactly the id
+        // production discovery returned, not "some one plugin". A bare
+        // `len() == 1` cannot tell the builtin apart from anything else that
+        // happened to end up Loaded.
+        assert_eq!(
+            manager.loaded_plugin_ids().await,
+            vec![*discovered_id],
+            "the Loaded set after mobile's plugin boot must be exactly the id \
+             mobile_builtin_plugins() returned"
+        );
+    }
+
+    /// The compiled-in plugin's `PluginId` must be a STABLE constant, not a
+    /// fresh v4 per call.
+    ///
+    /// `PluginId` is what `PluginManager`'s state map, `disable`/
+    /// `unload_plugin` and `PluginBlocklist::is_blocked` all key on. This is
+    /// the paired non-vacuous case for `mobile_discovers_exactly_one_plugin`,
+    /// whose `len() == 1` is trivially satisfied because it registers exactly
+    /// once — an id that changes per call keeps that assertion green while
+    /// breaking the invariant it is supposed to stand for.
+    #[tokio::test]
+    async fn mobile_builtin_plugin_identity_is_stable_across_calls() {
+        let first = mobile_builtin_plugins();
+        let second = mobile_builtin_plugins();
+        assert_eq!(
+            first[0].0, second[0].0,
+            "two calls to mobile_builtin_plugins() must yield the SAME PluginId; \
+             a per-call id makes the blocklist unfireable and double-registers \
+             the plugin"
+        );
+        assert_eq!(
+            first[0].0,
+            mobile_builtin_plugin_id(),
+            "discovery must hand out the compiled-in constant id"
+        );
+        // And the constant itself is FROZEN, pinned against a literal rather
+        // than against `MOBILE_BUILTIN_PLUGIN_UUID` (which would be a
+        // tautology): this id is what per-plugin settings, disable state and
+        // blocklist entries are keyed by on device, so changing it silently
+        // orphans all of them across an app upgrade.
+        assert_eq!(
+            mobile_builtin_plugin_id().to_string(),
+            "plg:6c696e67-7869-4c41-0000-000000000001",
+            "the compiled-in plugin id is an on-device identity; changing it \
+             orphans every persisted per-plugin record keyed by it"
+        );
+
+        // The observable consequence: registering mobile's plugin set twice
+        // against ONE manager must leave exactly one Loaded plugin. With a
+        // per-call id the second pass inserts a second state-map entry under
+        // a second id and this comes back with two.
+        let tmp = tempfile::tempdir().expect("temp install dir");
+        let manager = build_manager(tmp.path());
+        register_mobile_builtin_plugins(&manager)
+            .await
+            .expect("first registration must succeed");
+        register_mobile_builtin_plugins(&manager)
+            .await
+            .expect("re-registering the compiled-in plugin must be idempotent");
+        assert_eq!(
+            manager.loaded_plugin_ids().await,
+            vec![mobile_builtin_plugin_id()],
+            "registering mobile's builtin set twice must leave exactly the one \
+             compiled-in id Loaded, not two entries for the same plugin"
+        );
+    }
+
+    /// The negative half: a manifest whose source is anything OTHER than
+    /// `PluginSource::BuiltIn` must be refused by mobile's own registration
+    /// door, not merely "the one plugin present happens to be BuiltIn"
+    /// (which a test that never tries a second source cannot distinguish from
+    /// "there was nothing else to reject").
+    #[tokio::test]
+    async fn mobile_loads_only_the_builtin_source() {
+        let tmp = tempfile::tempdir().expect("temp install dir");
+        let manager = build_manager(tmp.path());
+
+        // Positive control FIRST, so the "was anything rejected?" question is
+        // answered against a NON-EMPTY manager. Asserting "zero loaded" over a
+        // manager that never had anything in it cannot distinguish "the
+        // refusal registered nothing" from "there was nothing here anyway".
+        register_mobile_builtin_plugins(&manager)
+            .await
+            .expect("the real mobile builtin (source already BuiltIn) must register cleanly");
+        let builtin_id = mobile_builtin_plugin_id();
+        assert_eq!(
+            manager.loaded_plugin_ids().await,
+            vec![builtin_id],
+            "the door must ACCEPT a BuiltIn source — otherwise the refusals below \
+             would just be 'this door rejects everything'"
+        );
+
+        // Now the negatives: the SAME manifest shape mobile ships, under a
+        // DISTINCT id (so a smuggled-in plugin would ADD a state-map entry
+        // rather than silently overwrite the builtin's), with `source` swapped
+        // to each non-`BuiltIn` variant in turn — as if it had reached this
+        // call site via a network / local-path install arm instead of mobile's
+        // own verified-builtin construction. Two variants, not one, so a guard
+        // that ever narrowed to a single rejected variant is caught.
+        let rogue_sources = [
+            PluginSource::LocalPath {
+                path: std::path::PathBuf::from("/definitely-not-verified"),
+            },
+            PluginSource::OfficialMarketplace {
+                name: MOBILE_BUILTIN_PLUGIN_NAME.to_string(),
+            },
+        ];
+        let rogue_id =
+            protocol::PluginId::from_uuid(uuid::Uuid::from_u128(MOBILE_BUILTIN_PLUGIN_UUID + 1));
+        assert_ne!(
+            rogue_id, builtin_id,
+            "the rogue must carry an id of its own, or a successful smuggle \
+             would overwrite the builtin instead of showing up as an extra entry"
+        );
+        let mut refusals = 0_usize;
+        for rogue_source in rogue_sources {
+            refusals += 1;
+            let (_, mut manifest) = mobile_builtin_plugin_manifest();
+            manifest.source = rogue_source.clone();
+
+            let error = register_mobile_builtin_plugin(
+                &manager,
+                &rogue_id,
+                manifest,
+                tmp.path().to_path_buf(),
+            )
+            .await
+            .expect_err("a non-BuiltIn source must be refused, not silently loaded");
+            match error {
+                plugin::PluginManagerError::Io(msg) => assert!(
+                    msg.contains("BuiltIn") && msg.contains(MOBILE_BUILTIN_PLUGIN_NAME),
+                    "refusal must name both the required source and the refused plugin: {msg}"
+                ),
+                other => panic!("expected PluginManagerError::Io, got {other:?}"),
+            }
+
+            // The refusal must have changed nothing: the builtin is still the
+            // ONE Loaded plugin and the rogue id is absent. `register_verified_builtin`
+            // stamps `source = BuiltIn` unconditionally, so without the guard
+            // this rogue would land here re-labeled trusted and this comes back
+            // with two ids.
+            assert_eq!(
+                manager.loaded_plugin_ids().await,
+                vec![builtin_id],
+                "a refused {rogue_source:?} must leave the Loaded set exactly as it \
+                 was — only the compiled-in builtin"
+            );
+        }
+
+        // Probe-fired control: everything above lives inside a `for` over a
+        // fixture list, so an empty (or accidentally-emptied) `rogue_sources`
+        // would make this whole test pass having rejected nothing at all.
+        assert_eq!(
+            refusals, 2,
+            "the refusal body must actually have run, once per non-BuiltIn \
+             variant — a test that rejects nothing proves nothing"
+        );
+    }
+}
+
 /// Mobile engine knobs.
 #[derive(Clone, Debug)]
 pub struct MobileEngineConfig {

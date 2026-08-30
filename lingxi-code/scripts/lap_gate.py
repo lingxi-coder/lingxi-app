@@ -272,6 +272,25 @@ def cmd_green(args):
                 "--only names %s, which no baseline binary belongs to — packages the baseline knows: %s"
                 % (", ".join(repr(u) for u in unknown), ", ".join(sorted(set(attrib.values()))))
             )
+        # 一个任务**新增**测试二进制是正常的,而 baseline 的归属表是在它存在之前
+        # 生成的。所以运行里出现的、baseline 不认识的二进制,要现问 cargo,而不是
+        # 当成「范围外」。否则每一个新增测试目标的任务都会因为自己交付的东西而红。
+        #
+        # ⚠️ 只补 **run** 侧的归属,不补 baseline 侧:baseline 的二进制集合是判据 3
+        # 的分母,现场扩充它会让「baseline 有而本次没跑」这条恒真。
+        live = None
+        for k in run["binaries"]:
+            if k not in attrib:
+                if live is None:
+                    live = target_to_package(args.workspace_dir)
+                pkg = live.get(k.split("|", 1)[0])
+                if pkg is None:
+                    problems.append(
+                        "test binary %r is in neither the baseline attribution nor cargo metadata — "
+                        "an unattributable binary silently escapes the scope filter" % k
+                    )
+                else:
+                    attrib[k] = pkg
         kept = {k: v for k, v in base["binaries"].items() if attrib.get(k) in args.only}
         if not kept:
             fail(

@@ -307,6 +307,46 @@ pub struct LocalWorkflowTaskState {
     /// Terminal result/failure/usage payload for workflow notifications.
     #[serde(default)]
     pub outcome: traits::task_registry::WorkflowTerminalOutcome,
+    /// Typed Local App workflow authority for this run (design §18 Phase -1
+    /// step 8 / §8.1) -- which app this task may touch, and why. Read by the
+    /// workspace-lease and App-delete guards INSTEAD of `workflow_id`/`args`;
+    /// see [`crate::scope`]'s module docs for the whole design.
+    ///
+    /// Copied verbatim from
+    /// [`crate::task_trait::TaskSpawnInput::LocalWorkflow`]'s `scope` field by
+    /// `state_for_spawn`; see that field's doc comment for what a `Some`
+    /// proves and who is allowed to mint one. Nothing in this crate derives
+    /// it from `workflow_id` or `args`.
+    ///
+    /// `None` when no scope was minted for this task -- every workflow that
+    /// is not a Local App workflow, and any Local App launch the Host could
+    /// not fully validate. Both guards treat `None` as "no authority", not as
+    /// "assume the worst": a `None` row never takes the workspace lease and
+    /// never blocks an App's delete. The alternative -- granting authority to
+    /// an unscoped row -- is exactly the vulnerability this type exists to
+    /// close (a forged custom workflow reusing a real build workflow's name
+    /// is ALSO unscoped, and is indistinguishable from a legitimate one at
+    /// this layer), so denying by default is the only choice that does not
+    /// reopen it. See
+    /// `a_custom_workflow_with_the_same_name_gets_no_lease_and_does_not_block_delete`
+    /// and `a_spawned_workflows_scope_is_what_blocks_its_apps_delete` in
+    /// `registry_test.rs`.
+    ///
+    /// `#[serde(skip)]`, not `#[serde(default)]`: [`crate::scope::LocalAppWorkflowTaskScope`]
+    /// deliberately implements `Serialize` and NOT `Deserialize` (see its
+    /// module docs' `serde surface` section) -- so this field cannot be
+    /// read back from persisted bytes at all today, by construction, not by
+    /// omission. `#[serde(skip)]` (rather than `#[serde(skip_deserializing)]`,
+    /// which would still serialize it out) matches the FIRST of the two
+    /// acceptable shapes that module documents: nothing in this workspace
+    /// currently deserializes `TaskState` (this is a new seam, not an
+    /// existing one), so there is no reader for persisted scope bytes to
+    /// serve yet, and shipping a scope's bytes to disk before any reader
+    /// exists to validate provenance would be speculative. When a real
+    /// persistence seam is built, the Host should re-mint the scope from the
+    /// binding it resolves on load, not read it back from JSON.
+    #[serde(skip)]
+    pub scope: Option<crate::scope::LocalAppWorkflowTaskScope>,
 }
 
 /// State specific to an MCP monitor task.

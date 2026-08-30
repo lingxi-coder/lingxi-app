@@ -1174,15 +1174,27 @@ fn apply_materialized_local_app_collections_with_provenance(
         trusted_local_app_resume,
         None,
     )
+    // Both thin wrappers exist for callers that only care about the args
+    // rewrite; the minted scope is returned by the `_with_identity` form the
+    // launcher calls.
+    .map(|_scope| ())
 }
 
+/// Rewrite the launch args, and -- when this launch really is one of this
+/// Host's own Local App build workflows against an app this Host resolved --
+/// mint the [`tasks::scope::LocalAppWorkflowTaskScope`] that authorizes it.
+///
+/// `Ok(None)` is the answer for every launch that is not a Local App build:
+/// the function returns before the app lookup, and an unscoped task row is
+/// authority-free (no workspace lease, no App delete block). There is
+/// deliberately no path from a caller-supplied name to a `Some`.
 fn apply_materialized_local_app_collections_with_identity(
     app_data_root: &std::path::Path,
     spec: &mut tool_workflow::WorkflowLaunchSpec,
     script: &str,
     trusted_local_app_resume: bool,
     expected_workflow_id: Option<&str>,
-) -> Result<(), tool_workflow::WorkflowLaunchError> {
+) -> Result<Option<tasks::scope::LocalAppWorkflowTaskScope>, tool_workflow::WorkflowLaunchError> {
     if let Some(expected_workflow_id) = expected_workflow_id {
         let expected_script = tool_workflow::BUILTIN_WORKFLOWS
             .get(expected_workflow_id)
@@ -1212,7 +1224,12 @@ fn apply_materialized_local_app_collections_with_identity(
         ));
     }
     if !is_mobile_local_app_builtin(spec, script, trusted_local_app_resume) {
-        return Ok(());
+        // Not one of this Host's Local App build workflows: no args rewrite,
+        // and -- crucially -- no scope. A custom workflow that merely reuses a
+        // real workflow's `meta.name` lands here, because the predicate above
+        // identifies a built-in by its bundled BYTES (or by host-owned resume
+        // provenance), never by the caller's name.
+        return Ok(None);
     }
 
     let launched_workflow_id = expected_workflow_id
@@ -1291,6 +1308,35 @@ fn apply_materialized_local_app_collections_with_identity(
     let plugin_binding =
         crate::local_app_plugin_binding::LocalAppPluginBinding::resolve(build_target);
     plugin_binding.enforce(app_id, binding.family, &launched_workflow_id)?;
+    // Everything above is what makes this `app_id` trustworthy enough to mint
+    // authority from, and it is why the scope is minted HERE rather than at
+    // the spawn call below. By this line the Host has established, from state
+    // it owns rather than from anything the caller said:
+    //
+    // * the script really is this Host's bundled Local App build workflow --
+    //   `is_mobile_local_app_builtin` compares BYTES against
+    //   `tool_workflow::BUILTIN_WORKFLOWS`, or accepts a resume only on
+    //   host-owned provenance, so a forged `meta.name` never reaches here;
+    // * the app exists and is a real, fully scaffolded Local App --
+    //   `AppLayout::new` + `detect_build_target` check the record mirror's
+    //   `scaffolded` bit and resolve the manifest/binding pair against the
+    //   published catalog, and the manifest carries a verified dependency
+    //   snapshot;
+    // * this app is pinned to exactly this workflow -- `enforce` refuses any
+    //   other caller-selected workflow id for the resolved build target.
+    //
+    // The `app_id` string does originate in `args`, but it is not TAKEN from
+    // args: it is the key the whole resolution above succeeded on, so a forged
+    // value can only name an app that genuinely exists, is genuinely
+    // scaffolded, and is genuinely pinned to the workflow whose verbatim
+    // bundled bytes are running. Naming another app there does not hand the
+    // forger that app's authority; it hands them a build of that app, which is
+    // the same thing the tool would have done anyway.
+    let scope = tasks::scope::LocalAppWorkflowTaskScope::for_build(app_id).map_err(|error| {
+        tool_workflow::WorkflowLaunchError(format!(
+            "cannot authorize local-app build workflow: {error}"
+        ))
+    })?;
     object.insert(
         "runtime_profile".to_string(),
         serde_json::json!({
@@ -1308,7 +1354,7 @@ fn apply_materialized_local_app_collections_with_identity(
         "expected_writable_collections".to_string(),
         serde_json::Value::Array(collection_ids),
     );
-    Ok(())
+    Ok(Some(scope))
 }
 
 #[async_trait::async_trait]
@@ -1447,7 +1493,11 @@ impl tool_workflow::WorkflowLauncher for MobileWorkflowLauncher {
         let expected_workflow_id = resume_resolution
             .as_ref()
             .and_then(|resolution| resolution.workflow_id.as_deref());
-        apply_materialized_local_app_collections_with_identity(
+        // The Host's own answer to "is this a Local App build, and of which
+        // app": minted from the resolved app/binding, never from `spec.args`
+        // or the workflow name. `None` for every other launch, which leaves
+        // the task row authority-free (no workspace lease, no delete block).
+        let local_app_scope = apply_materialized_local_app_collections_with_identity(
             &self.app_data_root,
             &mut spec,
             &script,
@@ -1623,6 +1673,7 @@ impl tool_workflow::WorkflowLauncher for MobileWorkflowLauncher {
                             .creator_agent_id
                             .as_deref()
                             .and_then(protocol::AgentId::parse_prefixed),
+                        scope: local_app_scope,
                     },
                     task_description,
                 )
@@ -3560,6 +3611,337 @@ mod run_id_tests {
         )
         .await;
         assert_eq!(listener.workflow_progress.lock().await.len(), 1);
+    }
+
+    // ── P-1.7 R1: the Host mints the scope, and a genuine build blocks delete ──
+
+    /// A stub `LocalWorkflow` handler.
+    ///
+    /// `TaskRegistry::spawn` needs a handler to dispatch to, but nothing in
+    /// these two tests is about running JavaScript: the registry still builds
+    /// the real task row from the real spawn input (`state_for_spawn`), which
+    /// is where the launcher's `scope` lands. The stub never completes its
+    /// task, so the row stays non-terminal -- which IS the "build still in
+    /// flight" state the App delete guard exists for, held still instead of
+    /// raced against a real QuickJS run.
+    struct StubWorkflowHandler;
+
+    #[async_trait::async_trait]
+    impl tasks::task_trait::Task for StubWorkflowHandler {
+        fn name(&self) -> &str {
+            "stub_local_workflow"
+        }
+
+        fn task_type(&self) -> tasks::TaskType {
+            tasks::TaskType::LocalWorkflow
+        }
+
+        async fn spawn(
+            &self,
+            _input: tasks::TaskSpawnInput,
+            _ctx: tasks::task_trait::TaskContext,
+        ) -> Result<tasks::task_trait::TaskHandle, tasks::task_trait::TaskError> {
+            Ok(tasks::task_trait::TaskHandle::new(
+                tasks::generate_task_id(tasks::TaskType::LocalWorkflow),
+                None,
+            ))
+        }
+
+        async fn kill(
+            &self,
+            _task_id: &str,
+            _ctx: tasks::task_trait::TaskContext,
+        ) -> Result<(), tasks::task_trait::TaskError> {
+            Ok(())
+        }
+    }
+
+    /// Materialize a real, fully scaffolded Local App under `root` -- manifest
+    /// with a published runtime profile and a verified dependency snapshot,
+    /// plus the record mirror's `scaffolded` bit. This is the on-disk state
+    /// the launch seam resolves the app id against; without it the seam
+    /// refuses and mints nothing.
+    fn scaffold_local_app(
+        root: &std::path::Path,
+        app_id: &str,
+        family: local_apps::AppRuntimeProfile,
+    ) {
+        let layout = local_apps::AppLayout::new(root, app_id).expect("layout");
+        let mut manifest = local_apps::AppManifest::for_new_app(app_id, "Fixture");
+        stamp_profile(&mut manifest, family);
+        local_apps::save_manifest(&layout, &manifest).expect("manifest");
+        stamp_record_mirror(&layout, true);
+    }
+
+    fn scope_test_registry() -> Arc<tasks::registry::TaskRegistry> {
+        let output_dir = std::env::temp_dir().join(format!(
+            "lingxi-p17-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&output_dir).expect("task output dir");
+        let fs: Arc<dyn traits::FileSystem> = Arc::new(
+            platform_posix_minimal::PosixFileSystem::new(output_dir.clone()),
+        );
+        let mut registry = tasks::registry::TaskRegistry::new(
+            Arc::new(platform_posix_minimal::PosixRuntime::new()),
+            fs.clone(),
+            Arc::new(tasks::output_manager::TaskOutputManager::new(
+                output_dir, fs,
+            )),
+        );
+        registry.register_handler(
+            tasks::TaskType::LocalWorkflow,
+            Arc::new(StubWorkflowHandler),
+        );
+        Arc::new(registry)
+    }
+
+    fn scope_test_launcher(
+        root: &std::path::Path,
+        registry: Arc<tasks::registry::TaskRegistry>,
+    ) -> super::MobileWorkflowLauncher {
+        let lingxi_home = root.join(".claude");
+        let checkpoints = Arc::new(super::MobileWorkflowCheckpointStore::new(
+            lingxi_home.clone(),
+            root.to_path_buf(),
+        ));
+        let session_uuid = Arc::new(std::sync::Mutex::new("session-scope".to_string()));
+        let status_sink = Arc::new(super::MobileWorkflowStatusSink::new(
+            Arc::new(FakeListener::default()),
+            checkpoints.clone(),
+            session_uuid.clone(),
+        ));
+        status_sink.bind(registry.clone());
+        super::MobileWorkflowLauncher {
+            registry,
+            project_cwd: root.to_path_buf(),
+            app_data_root: root.to_path_buf(),
+            current_cwd: Arc::new(std::sync::Mutex::new(root.to_path_buf())),
+            lingxi_home,
+            session_uuid,
+            checkpoints,
+            status_sink,
+        }
+    }
+
+    /// THE REGRESSION. A genuine, in-flight Local App build must block its
+    /// app's delete, end to end: the Host resolves the app and mints a
+    /// `LocalAppWorkflowTaskScope` at the launch seam, the launcher puts it on
+    /// `TaskSpawnInput::LocalWorkflow`, `state_for_spawn` copies it onto the
+    /// task row, and `find_nonterminal_local_app_workflows` finds the row.
+    ///
+    /// Every link is production code; only the task HANDLER is a stub, and it
+    /// is a stub in the direction that cannot help the assertion (it neither
+    /// sees nor sets the scope -- the registry does).
+    ///
+    /// Delete `scope: local_app_scope` from the launcher's spawn input (i.e.
+    /// go back to a Host that mints nothing, which is the state this test was
+    /// written against) and this goes red with the app unprotected, while
+    /// every §8.1 forgery test stays green -- that asymmetry is the whole
+    /// point, and it is why "everything is `None`" is not a safe default.
+    #[tokio::test]
+    async fn a_genuine_in_flight_local_app_build_blocks_that_apps_delete() {
+        // BOTH build workflows, because they are siblings and only one of them
+        // is the routed default: keying the old delete guard on the routed
+        // name alone let a drawn-surface app be deleted mid-build, with
+        // nothing failing. The authority moved, so the sibling coverage has to
+        // move with it -- and running both also proves the mint is not
+        // hard-coded to one runtime family.
+        for (family, workflow_id, app_id) in [
+            (
+                local_apps::AppRuntimeProfile::ReactDom,
+                "local-app-build",
+                "demo1234",
+            ),
+            (
+                local_apps::AppRuntimeProfile::Canvas2d,
+                "local-canvas-build",
+                "canvas1234",
+            ),
+        ] {
+            let root = tempfile::tempdir().expect("tempdir");
+            scaffold_local_app(root.path(), app_id, family);
+
+            let registry = scope_test_registry();
+            let launcher = scope_test_launcher(root.path(), registry.clone());
+
+            let launched = {
+                use tool_workflow::WorkflowLauncher as _;
+                launcher
+                    .launch(tool_workflow::WorkflowLaunchSpec {
+                        name: Some(workflow_id.into()),
+                        args: Some(serde_json::json!({ "app_id": app_id })),
+                        session_uuid: Some("session-scope".into()),
+                        ..Default::default()
+                    })
+                    .await
+                    .unwrap_or_else(|error| panic!("{workflow_id} must launch: {error}"))
+            };
+
+            assert_eq!(
+                registry.find_nonterminal_local_app_workflows(app_id).await,
+                vec![launched.task_id.clone()],
+                "{workflow_id}: a genuine in-flight build must block its own app's delete"
+            );
+            assert!(
+                registry
+                    .find_nonterminal_local_app_workflows("some-other-app")
+                    .await
+                    .is_empty(),
+                "{workflow_id}: and must block ONLY its own app's delete"
+            );
+
+            // The Host's verdict itself, not only its consequence: the seam mints
+            // a scope for the app it RESOLVED, with the purpose the Host chose --
+            // so the same run also takes that app's exclusive workspace lease.
+            let mut genuine = tool_workflow::WorkflowLaunchSpec {
+                name: Some(workflow_id.into()),
+                args: Some(serde_json::json!({ "app_id": app_id })),
+                ..Default::default()
+            };
+            let minted = super::apply_materialized_local_app_collections_with_identity(
+                root.path(),
+                &mut genuine,
+                tool_workflow::BUILTIN_WORKFLOWS
+                    .get(workflow_id)
+                    .expect("bundled local-app built-in")
+                    .script,
+                false,
+                None,
+            )
+            .expect("the Host resolves this app")
+            .expect("a genuine local-app build gets a scope");
+            assert_eq!(minted.app_id(), app_id);
+            assert!(
+                minted.requires_workspace_lease(),
+                "{workflow_id}: a build scope is what takes the app's exclusive workspace lease"
+            );
+        }
+    }
+
+    /// §8.1's other half, which the fix above must not trade away: a CUSTOM
+    /// workflow that forges every caller-controlled input it has -- the
+    /// launch `name`, the script's own `meta.name`, and `args.app_id` --
+    /// still gets no scope, so it neither takes the workspace lease nor
+    /// blocks the victim's delete.
+    ///
+    /// Both forgery shapes are exercised: an inline body under a forged name
+    /// (an inline `script` beats the named built-in in `resolve_script_at`,
+    /// so the name buys the forger nothing), and a `scriptPath` file. The
+    /// assertion is deliberately NOT "the guard returned empty" alone -- an
+    /// empty result would also be produced by a launch that failed outright,
+    /// which would prove nothing. Each launch is asserted to have produced a
+    /// live, non-terminal task row FIRST; the row exists and is running, and
+    /// is still not allowed to block the victim.
+    #[tokio::test]
+    async fn a_forged_custom_workflow_gets_no_scope_and_cannot_block_the_victims_delete() {
+        use tool_workflow::WorkflowLauncher as _;
+
+        let root = tempfile::tempdir().expect("tempdir");
+        // The victim is a REAL, fully scaffolded app -- so the only thing
+        // missing from the forger's launch is the Host's own verdict, not the
+        // app.
+        scaffold_local_app(
+            root.path(),
+            "victim12",
+            local_apps::AppRuntimeProfile::ReactDom,
+        );
+
+        let registry = scope_test_registry();
+        let launcher = scope_test_launcher(root.path(), registry.clone());
+
+        let forged_body =
+            "export const meta = { name: 'local-app-build', description: 'not a build' }\n\
+             return 1\n";
+        let forged_path = root.path().join("forged.js");
+        std::fs::write(&forged_path, forged_body).expect("write forged script");
+
+        let inline = launcher
+            .launch(tool_workflow::WorkflowLaunchSpec {
+                // Forged launch name...
+                name: Some("local-app-build".into()),
+                // ...forged `meta.name` inside a body that is not the
+                // bundled built-in...
+                script: Some(forged_body.into()),
+                // ...and the victim's app id forged into caller args.
+                args: Some(serde_json::json!({ "app_id": "victim12" })),
+                session_uuid: Some("session-scope".into()),
+                ..Default::default()
+            })
+            .await
+            .expect("a custom workflow still launches; it just gets no authority");
+
+        let by_path = launcher
+            .launch(tool_workflow::WorkflowLaunchSpec {
+                script_path: Some(forged_path.to_string_lossy().into_owned()),
+                args: Some(serde_json::json!({ "app_id": "victim12" })),
+                session_uuid: Some("session-scope".into()),
+                ..Default::default()
+            })
+            .await
+            .expect("a custom scriptPath workflow still launches");
+
+        for launched in [&inline, &by_path] {
+            let row = registry
+                .get(&launched.task_id)
+                .await
+                .expect("the forged launch really did create a task row");
+            assert!(
+                !row.base().status.is_terminal(),
+                "the forged row must be live when the guard is asked, or an \
+                 empty guard result would prove nothing: {row:?}"
+            );
+        }
+
+        assert!(
+            registry
+                .find_nonterminal_local_app_workflows("victim12")
+                .await
+                .is_empty(),
+            "a forged custom workflow must not block the victim app's delete, \
+             however convincing its name and args are"
+        );
+
+        // And the same verdict read directly off the seam, which covers the
+        // OTHER half of "gets nothing": no scope at all means
+        // `requires_workspace_lease` is false too, not merely that the delete
+        // guard happened to skip it.
+        for (label, mut spec) in [
+            (
+                "inline body under a forged name",
+                tool_workflow::WorkflowLaunchSpec {
+                    name: Some("local-app-build".into()),
+                    script: Some(forged_body.into()),
+                    args: Some(serde_json::json!({ "app_id": "victim12" })),
+                    ..Default::default()
+                },
+            ),
+            (
+                "scriptPath body with a forged meta.name",
+                tool_workflow::WorkflowLaunchSpec {
+                    script_path: Some(forged_path.to_string_lossy().into_owned()),
+                    args: Some(serde_json::json!({ "app_id": "victim12" })),
+                    ..Default::default()
+                },
+            ),
+        ] {
+            let minted = super::apply_materialized_local_app_collections_with_identity(
+                root.path(),
+                &mut spec,
+                forged_body,
+                false,
+                None,
+            )
+            .expect("a custom workflow is not refused here, only left unscoped");
+            assert!(
+                minted.is_none(),
+                "{label}: a forged custom workflow must get NO scope -- no \
+                 workspace lease and no delete block"
+            );
+        }
     }
 }
 

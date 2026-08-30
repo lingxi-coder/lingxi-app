@@ -94,13 +94,18 @@ apps/engine-mobile/src/local_app_plugin_binding.rs:local-canvas-build:1
 
 # --- tasks/src -------------------------------------------------------------
 
-# lib.rs — `tasks::LOCAL_APP_BUILD_WORKFLOWS`, the lease/delete-guard twin of
-# `tool_workflow::LOCAL_APP_BUILD_WORKFLOWS`. One occurrence each in the const
-# itself plus one each in the doc comment that explains why it is a LIST.
-# §19.3/P-1.9 target exactly this pair of lists; the entries make the removal
-# visible when it happens (the count going to zero fails as a STALE ENTRY).
-tasks/src/lib.rs:local-app-build:2
-tasks/src/lib.rs:local-canvas-build:2
+# lib.rs — `tasks::LOCAL_APP_BUILD_WORKFLOWS`. As of P-1.7 this array is no
+# longer the lease/delete-guard authority (both now read a task's typed
+# `LocalAppWorkflowTaskScope` instead — see `tasks/src/scope.rs`); it survives
+# ONLY because `tool_workflow::LOCAL_APP_BUILD_WORKFLOWS` is its own separate
+# list for a different question (the `workflowModel` default, P-1.9) and
+# `engine-mobile`'s `local_app_build_workflow_sets_agree` test pins the two
+# equal. One occurrence each, in the const definition itself; the doc comment
+# no longer repeats either name in prose. §19.3/P-1.9 target this pair of
+# lists for real deletion; the entries make that removal visible when it
+# happens (the count going to zero fails as a STALE ENTRY).
+tasks/src/lib.rs:local-app-build:1
+tasks/src/lib.rs:local-canvas-build:1
 
 # --- tools/workflow/src ----------------------------------------------------
 

@@ -11675,6 +11675,8 @@ mod tests {
                         creator_teammate_name: None,
                         creator_team_name: None,
                         creator_agent_id: None,
+                        // Not a Local App workflow.
+                        scope: None,
                     },
                     "workflow".to_string(),
                 )

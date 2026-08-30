@@ -6642,6 +6642,7 @@ dependencies = [
  "futures",
  "hooks",
  "llm-client",
+ "local-apps",
  "mcp",
  "permission",
  "protocol",

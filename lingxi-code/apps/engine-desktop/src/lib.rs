@@ -1999,6 +1999,27 @@ impl tool_workflow::WorkflowLauncher for TaskRegistryWorkflowLauncher {
                             .creator_agent_id
                             .as_deref()
                             .and_then(protocol::AgentId::parse_prefixed),
+                        // Desktop hosts no Local Apps: no app store and no
+                        // delete guard, so there is nothing for a scope to
+                        // authorize. `None` rather than a purpose invented at
+                        // the call site.
+                        //
+                        // ⚠️ Desktop DOES have a workspace-lease registry —
+                        // `with_workspace_permission_leases` is wired further
+                        // down this file. `None` is still right, and strictly
+                        // safer: a lease is an ALLOW grant, so an unscoped
+                        // desktop workflow gets less than before, never more.
+                        //
+                        // Unremarked behaviour delta, recorded here because the
+                        // diff does not otherwise say it: before the scope was
+                        // threaded, a desktop launch named like a Local App
+                        // build workflow but carrying no `args.app_id` failed
+                        // hard with `requires a non-empty workflow args.app_id`.
+                        // It now runs silently unscoped. Nothing on desktop
+                        // relies on that refusal today — there is no app store
+                        // for it to protect — but a future reader looking for
+                        // where it went should find this.
+                        scope: None,
                     },
                     task_description,
                 )

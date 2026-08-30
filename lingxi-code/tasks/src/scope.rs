@@ -2,15 +2,17 @@
 //!
 //! # The problem this type replaces
 //!
-//! Today three things derive Local App authority from a workflow's NAME:
+//! Three things used to derive Local App authority from a workflow's NAME:
 //! `registry.rs`'s `find_nonterminal_local_app_workflows` (delete guard) and
-//! `handlers/local_workflow.rs`'s `requires_workspace_lease` both ask "is
+//! `handlers/local_workflow.rs`'s `requires_workspace_lease` both asked "is
 //! `workflow_id` a member of [`crate::LOCAL_APP_BUILD_WORKFLOWS`]?", and
 //! `tool-workflow` asks the same question of `meta.name` to pick a
 //! `workflowModel` default. A `workflow_id`/`meta.name` is a string a
 //! *caller* supplies when launching a workflow -- so any custom workflow
-//! that happens to reuse one of those names gets the same answer as the
-//! real one.
+//! that happens to reuse one of those names got the same answer as the
+//! real one. The first two now read a scope instead; `tool-workflow`'s
+//! `workflowModel` default is still keyed on the name (design §18 Phase -1
+//! step 9).
 //!
 //! [`LocalAppWorkflowTaskScope`] is the replacement authority token: the Host
 //! (the composition binding that just resolved a real `LocalAppPluginBinding`
@@ -43,11 +45,22 @@
 //! entitled to. Design §8.1 requires that a custom workflow get nothing
 //! "即使伪造 `meta.name` 或 `args.app_id`" -- the `meta.name` half is closed
 //! by construction (guarantee 1); the `args.app_id` half is the **Host's**
-//! obligation, and this type cannot discharge it. The Host MUST take the
-//! `app_id` from the `LocalAppPluginBinding` handle it just resolved, never
-//! from caller-supplied `args`. Passing `args.app_id` straight into a
-//! constructor hands a hostile app the victim's lease and delete guard, and
-//! nothing in this module will notice.
+//! obligation, and this type cannot discharge it. Passing `args.app_id`
+//! straight into a constructor hands a hostile app the victim's lease and
+//! delete guard, and nothing in this module will notice.
+//!
+//! What the Host owes is not "never let the string originate in `args`" --
+//! the app id has to be named somewhere, and a
+//! `LocalAppPluginBinding` handle names a WORKFLOW, not an app. What it owes
+//! is that the id be one it RESOLVED rather than one it was told: before
+//! minting, the Host must have established from its own state that the id
+//! names a real, fully scaffolded app whose materialized manifest and binding
+//! authorize exactly the workflow that is about to run, and that the script
+//! is that workflow rather than something wearing its name. `engine-mobile`'s
+//! `apply_materialized_local_app_collections_with_identity` is the seam that
+//! does this and the only production mint today; its comment at the
+//! constructor call enumerates the checks that stand between `args` and this
+//! type.
 //!
 //! It also does not guarantee the id names an app that exists, or that the
 //! app is in a state where the purpose makes sense. Those are lookups, and
@@ -87,23 +100,30 @@
 //!
 //! # MIRRORED GRAMMAR
 //!
-//! `local_apps::ids::is_valid_app_id` is the original. `tasks` does not
-//! depend on `local-apps` and this task does not add that edge: both crates
-//! classify as `engine` so `scripts/check_deps.py` would permit it, but
-//! `local-apps` pulls bundled SQLite, vendored libgit2 and two tree-sitter
-//! grammars into `tasks`, and `tasks` has five dependents (including `cron`
-//! and `coordinator`, which build none of that today) for what is a six-line
+//! `local_apps::ids::is_valid_app_id` is the original. `tasks` does not take
+//! a PRODUCTION dependency on `local-apps`: both crates classify as `engine`
+//! so `scripts/check_deps.py` would permit the edge, but `local-apps` pulls
+//! bundled SQLite, vendored libgit2 and two tree-sitter grammars into
+//! `tasks`, and `tasks` has five dependents (including `cron` and
+//! `coordinator`, which build none of that today) for what is a six-line
 //! predicate. The copy is pinned by the test
 //! `app_id_grammar_matches_the_local_apps_corpus` below, whose corpus is
-//! the one from `local_apps::ids`'s own tests; a real cross-crate agreement
-//! test would need a `local-apps` dev-dependency in `tasks/Cargo.toml`.
+//! the one from `local_apps::ids`'s own tests.
+//!
+//! A DEV-dependency is a different tradeoff: `check_deps.py` excludes
+//! dev-dependencies from its edge check, so it costs the five dependents
+//! nothing, and it lets `app_id_grammar_agrees_with_local_apps_ids` call the
+//! real `local_apps::ids::is_valid_app_id` directly instead of trusting that
+//! the copied corpus above was transcribed correctly -- so `tasks/Cargo.toml`
+//! carries that dev-dependency and both tests run.
 //!
 //! # Scope of this module
 //!
-//! This module only introduces the type. Migrating the two `tasks` call sites
-//! above (and `tool-workflow`'s `workflowModel` default) to read a scope
-//! instead of a name list is out of scope here -- see design §18 Phase -1
-//! step 8 items covered by later tasks.
+//! This module only introduces the type. The two `tasks` call sites above now
+//! read a scope, which reaches a task row through
+//! [`crate::task_trait::TaskSpawnInput::LocalWorkflow`]'s `scope` field;
+//! `tool-workflow`'s `workflowModel` default still keys on the name (design
+//! §18 Phase -1 step 9).
 
 use serde::{Deserialize, Serialize};
 
@@ -418,6 +438,49 @@ mod tests {
             "über",
             too_long.as_str(),
         ] {
+            assert!(!is_well_formed_app_id(id), "expected invalid: {id}");
+        }
+    }
+
+    /// Real cross-crate agreement, as a DEV-dependency (see module docs'
+    /// `MIRRORED GRAMMAR`): calls the ACTUAL `local_apps::ids::is_valid_app_id`
+    /// side by side with this module's mirrored `is_well_formed_app_id`
+    /// across one shared corpus, so a future edit to either grammar that
+    /// silently drifts from the other fails HERE, not by two independently
+    /// "passing" tests that quietly stopped agreeing.
+    #[test]
+    fn app_id_grammar_agrees_with_local_apps_ids() {
+        let max_len = "a".repeat(APP_ID_MAX_LEN);
+        let valid = ["a", "0", "abc-123", "9-", max_len.as_str()];
+        let too_long = "a".repeat(APP_ID_MAX_LEN + 1);
+        let invalid = [
+            "",
+            "-leading-dash",
+            "Upper",
+            "under_score",
+            "spa ce",
+            "..",
+            "../evil",
+            "a/b",
+            "a\\b",
+            "a.b",
+            "über",
+            too_long.as_str(),
+        ];
+        for id in valid {
+            assert_eq!(
+                is_well_formed_app_id(id),
+                local_apps::ids::is_valid_app_id(id),
+                "grammars disagree on {id:?} (expected both to accept)"
+            );
+            assert!(is_well_formed_app_id(id), "expected valid: {id}");
+        }
+        for id in invalid {
+            assert_eq!(
+                is_well_formed_app_id(id),
+                local_apps::ids::is_valid_app_id(id),
+                "grammars disagree on {id:?} (expected both to reject)"
+            );
             assert!(!is_well_formed_app_id(id), "expected invalid: {id}");
         }
     }

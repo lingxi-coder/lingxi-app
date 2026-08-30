@@ -381,6 +381,42 @@
         "P-1.9"
       ],
       "notes": "FOUND BY THE P-1.0 VERIFICATION PASS, outside the three scan roots, and confirmed by hand at lap/baseline.\n\nTHE DEFECT. skill-api/src/builtin/bundled.rs:43 gives the create-local-app SKILL the trigger array [\"create local app\", \"local app\", \"local-app-build\"]. The third entry is a WORKFLOW name used as a skill trigger phrase — a cross-component name binding, which is exactly the shape §19.3 exists to remove. It is genuine production code: there is no #[cfg(test)] above that line. Phase 4 merges the two workflows, at which point this trigger silently stops matching and nothing in the suite notices. The skill NAMES in the same file are the definition site and are legitimately unscannable; the trigger is not.\n\n⛔ THE LOOK-ALIKE THAT MUST NOT BE 'FIXED'. traits/src/mobile_linux.rs:46 declares LOCAL_APP_BUILD_ROOT = \"/var/lingxi/local-app-build\". That string coincides with a workflow name but is a FILESYSTEM MOUNT ROOT, not a reference to the workflow. It carries no name-derived authority, and renaming it to track a renamed workflow would silently move a path on real devices — the same class of silent data loss as renaming a SQLite table, which nothing in this repo would catch. Add it to the allowlist with this reasoning if traits/src ever enters the scan surface; do not touch the value.\n\nTEMPLATES, for the record. local-apps/templates/runtime-profiles/** is compiled into production wholesale by include_bytes! via the profile_file! macro, and the scanner cannot see it. Grepped at lap/baseline: it contains ZERO component-name needles today. That is a fact with a date on it, not a guarantee — it is the tree runtime-profile work touches, so the Phase 1 packer (P1.2) should carry the assertion rather than this scanner.\n\nSCOPE. Deliberately NOT solved by widening SCAN_ROOTS. Adding skill-api/src and traits/src would make the scanner red on landing for two occurrences of very different kinds, and the cheapest way to green that is an allowlist entry — which would preserve the defect while looking like it had been handled.\n\nRE-GROUNDED before the task starts. The must-name `bundled.rs` has zero hits as file CONTENT — expected, since it is a path, not a symbol. It can therefore only reach the output if the test PRINTS the path in its failure message. That is a real constraint on how the test must be written, not a free property: an assertion that fails with `assert!(!triggers.contains(...))` and no message would satisfy the gate's `failures:` requirement while never naming the file, and the gate would pass. Write the assertion with a message naming skill-api/src/builtin/bundled.rs.\nVerified still present at re-grounding time: bundled.rs contains the `local-app-build` trigger."
+    },
+    {
+      "id": "P-1.12",
+      "title": "Re-mint the Local App workflow scope at the restart-adoption seam",
+      "gate": "§19.3 a build in flight across an engine restart still blocks its App's delete",
+      "owns": [
+        "lingxi-code/tasks/src/registry.rs",
+        "lingxi-code/tasks/src/task_trait.rs",
+        "lingxi-code/apps/engine-mobile/src/workflow_support.rs",
+        "lingxi-code/apps/engine-mobile/src/host.rs"
+      ],
+      "crates": [
+        "tasks",
+        "engine-mobile"
+      ],
+      "testPackages": [
+        "tasks",
+        "engine-mobile"
+      ],
+      "exclusive": true,
+      "repeatRuns": 1,
+      "plantedFailure": {
+        "edit": "drop the re-minted scope at register_adopted_workflow so an adopted row carries scope: None",
+        "mustNameInOutput": [
+          "register_adopted_workflow",
+          "blocks"
+        ]
+      },
+      "addedTests": [
+        "an_adopted_in_flight_build_still_blocks_its_apps_delete",
+        "an_adopted_forged_workflow_still_gets_no_scope"
+      ],
+      "deps": [
+        "P-1.7"
+      ],
+      "notes": "DISCLOSED RESIDUAL from P-1.7's fix round, narrower than what it replaced but real. register_adopted_workflow (tasks/src/registry.rs:1078) sets scope: None, so a Local App build that was in flight across an engine restart comes back Paused — non-terminal — and does NOT block its app's delete. The pre-P-1.7 name-based guard DID block it.\n\nWindow: engine restart during a build, then the user deletes that app. Narrow, but a real loss of a protection that existed before.\n\n⛔ IT CANNOT BE CLOSED BY READING THE CHECKPOINT. The checkpoint records whatever the original caller supplied, so a custom workflow's checkpoint carries its forged args.app_id just as faithfully as a real build's — trusting it reopens exactly the vector P-1.7 closed. Closing it means RE-MINTING at the adoption seam from state the Host re-resolves on load: the app still exists, is still scaffolded, and is still pinned to the adopted workflow_id. AdoptedWorkflow has no way to express that today.\n\nThe framing to keep, corrected during P-1.7 (P-1.6's doc and my brief both had it wrong): the app_id must be one the Host RESOLVED, not one it was TOLD. The LocalAppPluginBinding handle names a WORKFLOW, not an app, so 'take the app_id from the binding handle' was impossible as written.\n\n🚨 A SECOND TRIPWIRE THIS TASK MUST CARRY, from P-1.7's verify pass. `TaskState` still derives `Deserialize`, and `#[serde(skip)]` on the scope field means it defaults to `None` on any future read-back — with NO compile error. So the day a persistence seam lands, the delete guard silently reverts to exactly today's adoption gap, and nothing fails. state.rs's doc says to re-mint at that seam; a doc is not a mechanism. Land a compile-time or test-time tripwire together with the seam.\n\nAlso recorded from that pass: only `for_build` is ever minted in production — `for_use_test` and `for_mcp_authoring` have no call sites outside tests. `blocks_delete()`'s 'every purpose blocks' contract is therefore UNEXERCISED in production. Not a regression (the old name-based guard covered strictly less), but the three-purpose surface is aspirational until the use-test and MCP-authoring workflows get their own mint."
     }
   ]
 }

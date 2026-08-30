@@ -901,13 +901,45 @@ impl TaskRegistry {
         })
     }
 
-    /// Return non-terminal local-app build tasks bound to `app_id`.
+    /// Return non-terminal local-app workflow tasks that hold authority over
+    /// `app_id`. Delete flows use this as a guard before removing the app
+    /// directory.
     ///
-    /// Delete flows use this as a guard before removing the app directory. The
-    /// workflow args are persisted as JSON by the launcher, so a malformed or
-    /// missing app id is deliberately not treated as belonging to a specific
-    /// app; the active workspace lease remains the second guard for running
-    /// tasks.
+    /// Reads each task's typed [`crate::scope::LocalAppWorkflowTaskScope`]
+    /// (design §18 Phase -1 step 8 / §8.1) instead of matching `workflow_id`
+    /// against [`crate::LOCAL_APP_BUILD_WORKFLOWS`] and then parsing `app_id`
+    /// out of caller-supplied `args` JSON. That used to be a genuine forgery
+    /// vector: a custom workflow could declare a `workflow_id` naming one of
+    /// this crate's two real build workflows and an `args.app_id` for
+    /// whichever app the forger chose, and this guard would block that
+    /// app's delete on the forger's say-so alone (§8.1: a custom workflow
+    /// must get nothing "即使伪造 `meta.name` 或 `args.app_id`"). `workflow_id`
+    /// and `args` are now IGNORED here entirely -- a task blocks `app_id`'s
+    /// delete iff it carries `Some(scope)` whose `scope.app_id() == app_id`
+    /// (`scope.blocks_delete()`, which every purpose satisfies -- see that
+    /// method's doc comment).
+    ///
+    /// A task with `scope: None` never blocks any app's delete. That is a
+    /// deliberate choice, not an oversight: an unscoped row is one the Host
+    /// never vouched for, and treating it as blocking would either (a) match
+    /// by `workflow_id`/`args` again -- reopening the exact forgery vector
+    /// above -- or (b) block deleting every app while any unscoped workflow
+    /// runs, which a forged workflow could trivially exploit as a
+    /// denial-of-service against unrelated apps. Denying by default is the
+    /// only option that does not reintroduce caller-controlled authority.
+    ///
+    /// A scope reaches a row through
+    /// [`crate::task_trait::TaskSpawnInput::LocalWorkflow`]'s `scope` field,
+    /// minted by the Host that resolved the app -- so a genuine in-flight
+    /// build DOES block its app's delete. See that field's doc comment for
+    /// what a `Some` proves.
+    /// The active workspace lease (checked independently by callers, e.g.
+    /// `engine-mobile`'s `handle_delete_app`) remains a second guard for a
+    /// `Build`-purpose task that has actually acquired it; this guard's job
+    /// is the wider one -- also covering `UseTest`/`McpAuthoring` scopes,
+    /// which never take that lease at all (see
+    /// `a_local_workflow_task_with_no_scope_still_blocks_delete` below for
+    /// why "no scope" there means "no *lease-requiring* scope", not `None`).
     pub async fn find_nonterminal_local_app_workflows(&self, app_id: &str) -> Vec<String> {
         let tasks = self.tasks.read().await;
         tasks
@@ -915,19 +947,9 @@ impl TaskRegistry {
             .filter_map(|(task_id, state)| match state {
                 TaskState::LocalWorkflow(workflow)
                     if !workflow.base.status.is_terminal()
-                        && crate::LOCAL_APP_BUILD_WORKFLOWS
-                            .contains(&workflow.workflow_id.as_str())
-                        && workflow
-                            .args
-                            .as_deref()
-                            .and_then(|args| serde_json::from_str::<serde_json::Value>(args).ok())
-                            .and_then(|value| {
-                                value
-                                    .get("app_id")
-                                    .and_then(serde_json::Value::as_str)
-                                    .map(str::to_string)
-                            })
-                            == Some(app_id.to_string()) =>
+                        && workflow.scope.as_ref().is_some_and(|scope| {
+                            scope.blocks_delete() && scope.app_id() == app_id
+                        }) =>
                 {
                     Some(task_id.clone())
                 }
@@ -1049,6 +1071,24 @@ impl TaskRegistry {
             transcript_dir: Some(std::path::PathBuf::from(adopted.transcript_dir)),
             current_step: 0,
             outcome: Default::default(),
+            // The resume-adoption record (`AdoptedWorkflow`) carries no scope
+            // -- scope is never persisted (see `LocalWorkflowTaskState::scope`'s
+            // doc comment) -- so an adopted row starts unscoped even though a
+            // freshly SPAWNED one now carries whatever the Host minted.
+            //
+            // ⚠️ KNOWN GAP, stated rather than papered over: adoption is how a
+            // workflow comes back after an engine restart, and an adopted row
+            // is Paused (non-terminal), so a Local App build that was in
+            // flight across a restart does not block its app's delete. Closing
+            // it means RE-MINTING at this seam from state the Host resolves on
+            // load -- the app must still exist, still be scaffolded, and still
+            // be pinned to the adopted `workflow_id` -- not reading `args` or
+            // `workflow_id` off the checkpoint, which records whatever the
+            // original caller supplied (a custom workflow's checkpoint carries
+            // its forged `args.app_id` just as faithfully as a real build's).
+            // `AdoptedWorkflow` has no way to express that today, and the
+            // Host, not this crate, owns the lookup.
+            scope: None,
         });
         tasks.insert(adopted.task_id, state);
         Ok(())
@@ -2011,6 +2051,7 @@ fn state_for_spawn(mut base: TaskStateBase, input: &TaskSpawnInput) -> TaskState
             creator_teammate_name: _,
             creator_team_name: _,
             creator_agent_id: _,
+            scope,
         } => TaskState::LocalWorkflow(crate::state::LocalWorkflowTaskState {
             base,
             session_uuid: session_uuid.clone(),
@@ -2025,6 +2066,12 @@ fn state_for_spawn(mut base: TaskStateBase, input: &TaskSpawnInput) -> TaskState
             transcript_dir: transcript_subdir.clone(),
             current_step: 0,
             outcome: Default::default(),
+            // The Host's minted authority, carried through verbatim. There is
+            // deliberately no derivation here from `workflow_id` or `args`:
+            // both are caller-supplied, and reading either would re-open the
+            // forgery vector `find_nonterminal_local_app_workflows`' doc
+            // comment describes. See `LocalWorkflowTaskState::scope`.
+            scope: scope.clone(),
         }),
         TaskSpawnInput::MonitorMcp { server_name, watch } => {
             TaskState::MonitorMcp(crate::state::MonitorMcpTaskState {

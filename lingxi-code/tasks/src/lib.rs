@@ -20,21 +20,29 @@ pub mod scope;
 pub mod state;
 pub mod task_trait;
 
-/// Every workflow that BUILDS a local app, and therefore must take the app's
-/// workspace lease and be seen by the delete guard.
+/// The two workflow names that build a local app.
 ///
-/// A LIST, not a single name: the drawn-surface workflow (`local-canvas-build`)
-/// is a sibling of the routed one, so keying either guard on `"local-app-build"`
-/// alone let a canvas app be DELETED WHILE ITS BUILD WAS RUNNING -- with
-/// nothing failing, because a guard that does not recognise the workflow simply
-/// finds no reason to object.
+/// ⚠️ **No longer the authority for the workspace lease or the App delete
+/// guard.** Both used to key off membership in this list (a caller-supplied
+/// `workflow_id` string), which let any custom workflow that happened to
+/// reuse one of these names collect the same authority as the real build --
+/// see design §8.1 and [`crate::scope::LocalAppWorkflowTaskScope`], which
+/// replaces that name check. [`crate::handlers::local_workflow`]'s `spawn`
+/// and [`crate::registry::TaskRegistry::find_nonterminal_local_app_workflows`]
+/// now read a task's typed `scope` field instead and no longer reference
+/// this array.
 ///
-/// ⚠️ `tool-workflow` keeps its own copy for a different question (which builds
-/// honour the configured `workflowModel`). The two crates share no natural home
-/// -- their only common dependencies are the QuickJS runtime and `traits` --
-/// so `engine-mobile`'s `local_app_build_workflow_sets_agree` test depends on
-/// both and pins them equal. Add a third build workflow and that test fails
-/// until BOTH lists know about it.
+/// **Still here, unused by this crate's own guards, for one reason:**
+/// `tool-workflow` keeps an independent copy of this same list for a
+/// different question (which builds honour the configured `workflowModel`
+/// default -- design §18 Phase -1 step 9, not yet migrated), and
+/// `engine-mobile`'s `local_app_build_workflow_sets_agree` test (outside
+/// this crate, outside this task's owned files) asserts the two arrays are
+/// byte-for-byte equal. Deleting this `pub const` is therefore a breaking
+/// change to a file this task does not own; closing it needs either that
+/// test's removal/rewrite or `tool-workflow`'s own migration (design §18
+/// Phase -1 step 9), neither of which belongs here. Do not read this array
+/// for lease/delete-guard purposes again -- read `scope` instead.
 pub const LOCAL_APP_BUILD_WORKFLOWS: &[&str] = &["local-app-build", "local-canvas-build"];
 
 pub use handlers::{

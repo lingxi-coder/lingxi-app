@@ -1,16 +1,33 @@
 //! `tengu_plugin_*` event schemas (2.1.251 byte-alignment §20c).
 //!
-//! The port's telemetry catalogue had no plugin module at all before this;
+//! # ⚠️ SUBSTRATE ONLY — none of these 14 events is emitted anywhere yet
+//!
+//! This module defines names and payload shapes. **It has no production
+//! emit site.** A repo-wide
+//! `grep -rn --include='*.rs' -e 'tengu::plugin' -e 'tengu_plugin'` matches
+//! only this file, `tengu/mod.rs`, and two test files: no crate outside
+//! `telemetry` references the module at all. `ALL_EVENT_NAMES` has no
+//! runtime consumer (only tests read it), so nothing misbehaves — but the
+//! registry advertises 14 plugin events that cannot appear in any telemetry
+//! stream, and §20c is therefore **OPEN, not closed**. Do not read the
+//! registered names, the count-lock test, or the parity fixture as evidence
+//! that plugin telemetry ships.
+//!
+//! The nearest miss is `tengu_plugin_uninstalled_cli`: the oracle's `LIn`
+//! (@166666396) emits it on the line immediately before `QWn(se.orphans,P)`,
+//! and `QWn` IS ported (as `uninstall_orphan_suffix`,
+//! `apps/cli/src/commands/plugin_install.rs`) — the emit two statements
+//! earlier was walked past. Wiring the emit sites is deliberately deferred
+//! to a task that owns those call sites rather than guessed at from here.
+//!
 //! `tengu_plugin_enabled_for_session` is the flagship event (fired once per
 //! loaded plugin, every session) and is fully traced against the oracle
 //! below. Its four siblings that are ALSO fully traced
 //! ([`NameCollisionPayload`], [`FolderShadowedPayload`], [`RenamedPayload`],
 //! [`LoadFailedPayload`]) get their own payload structs; the remaining CLI
-//! lifecycle events are registered by name only — their emit sites (in
-//! `apps/cli/src/commands/plugin*.rs`) are unwired substrate for the next
-//! task, and minting a payload shape from a guess rather than the actual
-//! call site risks locking in a wrong wire shape (the §20b lesson from
-//! `tengu::mcp`'s `ToolsListedPayload`).
+//! lifecycle events are registered by name only — minting a payload shape
+//! from a guess rather than the actual call site risks locking in a wrong
+//! wire shape (the §20b lesson from `tengu::mcp`'s `ToolsListedPayload`).
 //!
 //! ## The shared `_PROTO_*` / redacted identity fields
 //!
@@ -198,12 +215,18 @@ pub struct PluginEnabledForSessionPayload {
     pub has_hooks: bool,
     /// Whether the manifest declares `settings`.
     pub has_settings: bool,
-    /// Sessions elapsed since this plugin was last used, when tracked.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub sessions_since_last_use: Option<u32>,
-    /// Days elapsed since this plugin was last used, when tracked.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub days_since_last_use: Option<u32>,
+    /// Sessions elapsed since this plugin was last used.
+    ///
+    /// **Unconditional.** The oracle destructures
+    /// `{sessionsSinceLastUse:B,daysSinceLastUse:W}` from a lookup that
+    /// DEFAULTS to `{sessionsSinceLastUse:0,daysSinceLastUse:0}` when the
+    /// plugin has no last-use record, then spreads both keys flat. Modelling
+    /// them as `Option` + `skip_serializing_if` (as an earlier revision did)
+    /// omitted the keys entirely where the oracle emits `0`.
+    pub sessions_since_last_use: u32,
+    /// Days elapsed since this plugin was last used. Unconditional, for the
+    /// same reason as [`Self::sessions_since_last_use`].
+    pub days_since_last_use: u32,
     /// Whether the plugin is running under safe mode.
     pub safe_mode: bool,
     /// Sorted, comma-joined settings key list, when the plugin declares any.
@@ -212,6 +235,29 @@ pub struct PluginEnabledForSessionPayload {
     /// Normalized manifest version, when declared.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub version: Option<Verified>,
+    /// Number of skills this plugin contributes, by name.
+    ///
+    /// Oracle `T5t(e,t)` (@159542839), spread into this event:
+    /// ```text
+    /// function T5t(e,t){
+    ///   if(e===null)return{};
+    ///   let r=e.get(t)??[];
+    ///   return{ skill_name_hash_count:r.length,
+    ///           ...r.length>0&&{skill_name_hashes:Vo(r.map((o)=>HR(o)).sort().join(","))} }
+    /// }
+    /// ```
+    /// `e` is `null` only for a builtin/official plugin (`S5t(M)?null:o`), so
+    /// every OTHER plugin carries `skill_name_hash_count` — including the
+    /// zero case. `None` here models the builtin/official arm, where the
+    /// oracle spreads `{}` and neither key appears.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub skill_name_hash_count: Option<u32>,
+    /// Hash of the plugin's sorted, comma-joined skill names — present only
+    /// when [`Self::skill_name_hash_count`] is `Some(n)` with `n > 0`
+    /// (oracle: `...r.length>0&&{…}`). Independently corroborated as a real
+    /// payload key by the oracle's PII-strip key list (@156128816).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub skill_name_hashes: Option<Verified>,
 }
 
 /// Payload for [`NAME_COLLISION`]. Does NOT spread the `q1` identity block
@@ -294,9 +340,20 @@ pub struct RenamedPayload {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LoadFailedPayload {
-    /// Whitelisted failure category (`policy` / `network` / `not-found` /
-    /// `permission` / … — the port's classifier mirrors the oracle's regex
-    /// ladder).
+    /// The loader error record's `type` DISCRIMINANT — oracle
+    /// `s("tengu_plugin_load_failed",{error_category:c(o.type),…})` (`OWn`,
+    /// @159545727). Values are record kinds such as `generic-error`
+    /// (@162860362), `synced-plugin-shadowed` (@162862227) and
+    /// `marketplace-load-failed` (which `OWn` tests for on its very next
+    /// line, to decide the `untrustedReservedName` redaction branch).
+    ///
+    /// **NOT the `policy`/`network`/`not-found`/`permission`/`validation`/
+    /// `unknown` ladder.** An earlier revision documented that value set
+    /// here; it belongs to `G1(e)` (@159544700), a SEPARATE function feeding
+    /// a different event. Classifying with the ladder would make this
+    /// dimension uncomparable with the oracle's and would leave the
+    /// `untrustedReservedName` branch — which keys off
+    /// `o.type === "marketplace-load-failed"` — with no value to key on.
     pub error_category: Verified,
     /// Whether this failure was resolved from a cache-only lookup.
     pub cache_only: bool,

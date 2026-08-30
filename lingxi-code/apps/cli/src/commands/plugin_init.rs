@@ -346,6 +346,43 @@ fn scaffold_component(component: &str, plugin_root: &Path, name: &str) -> Result
 /// under (oracle `Zc`).
 const SKILLS_DIR_MARKETPLACE: &str = "skills-dir";
 
+/// Oracle `uc(e)` (@157117786): `e===Om||e===Zc||e===am` with `Om="inline"`,
+/// `Zc="skills-dir"`, `am="synced"` (@157117773). These are pseudo-marketplace
+/// KINDS, not real marketplaces — a plugin id qualified with one of them names
+/// a session `--plugin-dir` plugin, a skills-dir scaffold, or a claude.ai-synced
+/// plugin, none of which can be looked up in the marketplace cache. `builtin`
+/// (`Fh`) is filtered by the same oracle predicate chain, one term earlier.
+fn is_pseudo_marketplace(marketplace: &str) -> bool {
+    matches!(marketplace, "inline" | SKILLS_DIR_MARKETPLACE | "synced" | "builtin")
+}
+
+/// Oracle `bV(n)` (@156730127): `/^\w[\w.@-]*$/` — whether a plugin id can be
+/// pasted into a shell command line verbatim. `\w` is `[A-Za-z0-9_]`.
+fn is_shell_safe_plugin_id(id: &str) -> bool {
+    let mut chars = id.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if !(first.is_ascii_alphanumeric() || first == '_') {
+        return false;
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '@' | '-'))
+}
+
+/// Oracle `Ra(n,t,r)` (@156730171):
+/// `if(!bV(t))return null; return `claude ${n} ${t}${r?` ${r}`:""}``.
+/// `None` means "no runnable command for this id" — every caller then falls
+/// back to prose pointing at `/plugin`.
+///
+/// `plugin init`'s own name validation is much looser than `bV` (it only
+/// rejects path separators, `..`, `.` and control characters), so a name like
+/// `my plugin` reaches here and legitimately yields `None`. Both branches of
+/// every ternary below are reachable.
+fn plugin_cli_command(verb: &str, qualified_id: &str) -> Option<String> {
+    is_shell_safe_plugin_id(qualified_id)
+        .then(|| format!("lingxi-cli {verb} {qualified_id}"))
+}
+
 /// §22 — `plugin init`'s post-create name-collision line (oracle: the
 /// `if(j) … else if(I) … else if(A) … else …` chain in the `/plugin init`
 /// success handler). `None` when nothing conflicts, in which case the caller
@@ -375,27 +412,47 @@ fn name_collision_warning(name: &str, home: &Path, cwd: &Path) -> Option<String>
     // Merge the editable enabledPlugins scopes: user < project < local (a
     // later scope's value for the same key wins), matching this port's other
     // scope-precedence readers (e.g. `load_enabled_plugins`).
-    let mut merged: BTreeMap<String, bool> = BTreeMap::new();
+    //
+    // The VALUE is kept as `Option<bool>` rather than filtered down to
+    // `bool`: the oracle's collision scan reads `Object.keys(W)` and never
+    // consults `W[x]`, so an entry whose value is neither `true` nor `false`
+    // (a stray string/number in settings) still occupies the name. Only the
+    // separate disabled-setting check below reads a value.
+    let mut merged: BTreeMap<String, Option<bool>> = BTreeMap::new();
     for scope in plugin_settings::SCOPES {
         for (key, value) in plugin_settings::read_enabled(&scope.path(home, cwd)) {
-            if let Some(enabled) = value.as_bool() {
-                merged.insert(key, enabled);
-            }
+            merged.insert(key, value.as_bool());
         }
     }
 
-    let blocked = plugin_policy::blocked_marketplaces();
-    let conflict = merged.iter().find(|(key, &enabled)| {
-        enabled
-            && key.as_str() != qualified
+    // Oracle (@179549514):
+    // `I=Object.keys(W).find((x)=>{let U=Vt(x);
+    //   return U.name===o && U.marketplace!==void 0 && U.marketplace!==Fh
+    //          && !uc(U.marketplace) && X[U.marketplace]!==void 0})`
+    //
+    // Two corrections over the previous revision:
+    //  * There is NO `enabled &&` term. The predicate never reads the map
+    //    VALUE — only `A=W[H]===!1`, further down, does. A plugin the user
+    //    installed and then DISABLED still owns the name the moment they
+    //    re-enable it, which is exactly when the warning matters.
+    //  * `!uc(m)` is a PSEUDO-MARKETPLACE-KIND filter, not a policy
+    //    denylist: `uc(e){return e===Om||e===Zc||e===am}` with
+    //    `Om="inline"`, `Zc="skills-dir"`, `am="synced"` (@157117773), and
+    //    `Fh="builtin"` is excluded by the preceding term. The previous
+    //    revision substituted `plugin_policy::blocked_marketplaces()` (the
+    //    managed `blockedMarketplaces` setting) for it — a different set
+    //    entirely, which both let `builtin`/`inline`/`synced` entries raise
+    //    a false collision and suppressed real ones under a managed policy
+    //    the oracle does not consult here.
+    let conflict = merged.keys().find(|key| {
+        key.as_str() != qualified
             && key.split_once('@').is_some_and(|(other_name, marketplace)| {
                 other_name == name
-                    && marketplace != SKILLS_DIR_MARKETPLACE
-                    && !blocked.contains(marketplace)
+                    && !is_pseudo_marketplace(marketplace)
                     && plugin_settings::marketplace_source(home, marketplace).is_some()
             })
     });
-    if let Some((conflicting_id, _)) = conflict {
+    if let Some(conflicting_id) = conflict {
         return Some(format!(
             "  \u{26a0} The name \"{name}\" is already taken by {conflicting_id} \u{2014} when \
              that plugin loads, {qualified} won't. To load this copy, give it a different \
@@ -403,10 +460,18 @@ fn name_collision_warning(name: &str, home: &Path, cwd: &Path) -> Option<String>
         ));
     }
 
-    if merged.get(&qualified) == Some(&false) {
+    if merged.get(&qualified) == Some(&Some(false)) {
+        // Oracle: `let x=Ra("plugin enable",H);
+        //   `…re-enable it${x?`: ${x}`:" in /plugin"}``.
+        // The previous revision hardcoded the `" in /plugin"` fallback arm,
+        // which fires only when the id is not shell-safe — for every ordinary
+        // name the oracle prints the runnable command instead, and the user
+        // was losing that remediation.
+        let remediation = plugin_cli_command("plugin enable", &qualified)
+            .map_or_else(|| " in /plugin".to_string(), |cmd| format!(": {cmd}"));
         return Some(format!(
             "  \u{26a0} A disabled setting for {qualified} exists, so it won't load until you \
-             re-enable it in /plugin"
+             re-enable it{remediation}"
         ));
     }
 
@@ -903,6 +968,125 @@ mod tests {
 
     // --- §22: the post-create name-collision warnings ----------------------
 
+    /// ROUND-1 REGRESSION. The oracle's collision scan reads
+    /// `Object.keys(W)` and NEVER consults `W[x]` — only the separate
+    /// `A=W[H]===!1` disabled check reads a value. The previous revision
+    /// opened its predicate with `enabled &&`, so a name held by a
+    /// currently-DISABLED marketplace plugin looked free and `plugin init`
+    /// promised "It will auto-load next session" — a promise that becomes
+    /// false the instant the user re-enables the other plugin.
+    #[test]
+    fn init_warns_even_when_the_conflicting_plugin_is_currently_disabled() {
+        let e = env();
+        std::fs::create_dir_all(e.home.join("plugins")).unwrap();
+        std::fs::write(
+            e.home.join("plugins").join("known_marketplaces.json"),
+            serde_json::json!({
+                "othermkt": {"source": {"source": "directory", "path": "/tmp/othermkt"}}
+            })
+            .to_string(),
+        )
+        .unwrap();
+        std::fs::write(
+            e.home.join("settings.json"),
+            serde_json::json!({"enabledPlugins": {"foo@othermkt": false}}).to_string(),
+        )
+        .unwrap();
+
+        let msg = run_init(
+            "foo",
+            Some("A"),
+            Some("a@b"),
+            None,
+            false,
+            &[],
+            &e.home,
+            &e.cwd,
+        )
+        .unwrap();
+        assert!(
+            msg.contains(
+                "The name \"foo\" is already taken by foo@othermkt \u{2014} when that plugin \
+                 loads, foo@skills-dir won't."
+            ),
+            "a DISABLED entry still owns the name: {msg}"
+        );
+        assert!(
+            !msg.contains("It will auto-load next session"),
+            "must not promise auto-load while another plugin holds the name: {msg}"
+        );
+    }
+
+    /// ROUND-1 REGRESSION. `!uc(m)` filters PSEUDO-MARKETPLACE KINDS
+    /// (`inline`/`skills-dir`/`synced`, plus `builtin` one term earlier), not
+    /// a managed-policy denylist. The previous revision substituted
+    /// `plugin_policy::blocked_marketplaces()`, so a `foo@builtin` /
+    /// `foo@inline` / `foo@synced` entry — which the oracle skips — could
+    /// raise a false collision here.
+    #[test]
+    fn init_ignores_entries_qualified_with_a_pseudo_marketplace_kind() {
+        for pseudo in ["builtin", "inline", "synced"] {
+            let e = env();
+            std::fs::create_dir_all(e.home.join("plugins")).unwrap();
+            // Make the pseudo-kind resolvable as a marketplace source too, so
+            // the ONLY thing that can suppress the warning is the `uc` filter.
+            std::fs::write(
+                e.home.join("plugins").join("known_marketplaces.json"),
+                serde_json::json!({
+                    pseudo: {"source": {"source": "directory", "path": "/tmp/x"}}
+                })
+                .to_string(),
+            )
+            .unwrap();
+            std::fs::write(
+                e.home.join("settings.json"),
+                serde_json::json!({"enabledPlugins": {format!("bar@{pseudo}"): true}})
+                    .to_string(),
+            )
+            .unwrap();
+
+            let msg = run_init(
+                "bar",
+                Some("A"),
+                Some("a@b"),
+                None,
+                false,
+                &[],
+                &e.home,
+                &e.cwd,
+            )
+            .unwrap();
+            assert!(
+                !msg.contains("is already taken by"),
+                "`{pseudo}` is a pseudo-marketplace kind the oracle's `uc` filter skips: {msg}"
+            );
+            assert!(
+                msg.contains("It will auto-load next session as bar@skills-dir"),
+                "got: {msg}"
+            );
+        }
+    }
+
+    /// `bV(n)` is `/^\w[\w.@-]*$/`. `plugin init`'s own name validation is far
+    /// looser (path separators, `..`, `.`, control chars), so a name with a
+    /// space reaches the copy and the oracle's `Ra` returns null — the
+    /// `" in /plugin"` fallback arm. This is the branch the previous revision
+    /// hardcoded for EVERY name.
+    #[test]
+    fn a_name_that_is_not_shell_safe_falls_back_to_the_slash_plugin_wording() {
+        assert!(is_shell_safe_plugin_id("stale@skills-dir"));
+        assert!(is_shell_safe_plugin_id("_x.y-z@skills-dir"));
+        assert!(!is_shell_safe_plugin_id("my plugin@skills-dir"));
+        assert!(!is_shell_safe_plugin_id("-leading@skills-dir"));
+        assert!(!is_shell_safe_plugin_id(""));
+
+        assert_eq!(
+            plugin_cli_command("plugin enable", "stale@skills-dir").as_deref(),
+            Some("lingxi-cli plugin enable stale@skills-dir")
+        );
+        assert_eq!(plugin_cli_command("plugin enable", "my plugin@skills-dir"), None);
+    }
+
     /// An already-enabled, cache-known, non-skills-dir marketplace plugin
     /// with the same name wins — the freshly scaffolded copy is warned it
     /// will never load, with the `.lingxi-plugin/plugin.json` remediation.
@@ -997,12 +1181,21 @@ mod tests {
             &e.cwd,
         )
         .unwrap();
+        // Oracle: `let x=Ra("plugin enable",H); …re-enable it${x?`: ${x}`:" in /plugin"}`.
+        // `stale@skills-dir` satisfies `bV`'s /^\w[\w.@-]*$/, so `Ra` is
+        // NON-null and the runnable command is what prints. Pinning the
+        // `" in /plugin"` fallback here (as this test used to) locked in the
+        // one arm that never fires for a name `plugin init` accepts.
         assert!(
             msg.contains(
                 "A disabled setting for stale@skills-dir exists, so it won't load until you \
-                 re-enable it in /plugin"
+                 re-enable it: lingxi-cli plugin enable stale@skills-dir"
             ),
             "got: {msg}"
+        );
+        assert!(
+            !msg.contains("re-enable it in /plugin"),
+            "the /plugin fallback arm must not fire for a shell-safe id: {msg}"
         );
         assert!(!msg.contains("It will auto-load next session"));
     }

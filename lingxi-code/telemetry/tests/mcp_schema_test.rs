@@ -72,7 +72,7 @@ fn tools_listed_payload_round_trips() {
         tool_count: 7,
         always_load_count: 2,
         discovery_source: Verified::assert_safe("live".to_string()),
-        mcp_server_name: Verified::assert_safe("my-server".to_string()),
+        mcp_server_name: Some(Verified::assert_safe("my-server".to_string())),
     };
     let json = serde_json::to_value(&payload).expect("serialize");
     assert_eq!(
@@ -188,4 +188,100 @@ fn degraded_payload_rejects_unknown_fields() {
     });
     let result: Result<DegradedPayload, _> = serde_json::from_value(json);
     assert!(result.is_err(), "deny_unknown_fields must reject an unrecognized key");
+}
+
+
+// ── Round-1 review regressions ──────────────────────────────────────────────
+
+/// `mcpServerName` is `EA(ln(e.name),HT(e.name,e.config))` at the oracle:
+/// `EA(n,e){return e?Vo(n):void 0}`, and `undefined` is DROPPED by the
+/// object spread. For an ordinary user-configured server `HT` is false, so
+/// the key must not be in the payload at all. Modelling it as required and
+/// always-populated (the shipped shape before this fix) exfiltrated the
+/// user's private server name as an analytics dimension on every connect.
+#[test]
+fn tools_listed_omits_the_server_name_when_the_first_party_gate_is_off() {
+    let payload = ToolsListedPayload {
+        transport_type: Verified::assert_safe("stdio".to_string()),
+        list_duration_ms: 5,
+        tool_count: 1,
+        always_load_count: 0,
+        discovery_source: Verified::assert_safe("live".to_string()),
+        mcp_server_name: None,
+    };
+    let json = serde_json::to_value(&payload).expect("serialize");
+    assert_eq!(
+        json,
+        serde_json::json!({
+            "transport_type": "stdio",
+            "list_duration_ms": 5,
+            "tool_count": 1,
+            "always_load_count": 0,
+            "discovery_source": "live",
+        }),
+        "the mcp_server_name key must be ABSENT, not null/empty, when the gate is off"
+    );
+    // ...and the absence must be representable on the way back in, too:
+    // `deny_unknown_fields` plus a required field would make the oracle's own
+    // payload shape un-deserializable.
+    let back: ToolsListedPayload = serde_json::from_value(json).expect("deserialize");
+    assert!(back.mcp_server_name.is_none());
+}
+
+/// Oracle `HT` gates on FIRST-PARTY-ness only — every arm tests a built-in
+/// Anthropic server, a `claudeai-proxy` transport, or an Anthropic URL. No
+/// ordinary transport kind may open the gate.
+#[test]
+fn server_name_gate_is_closed_for_every_user_configurable_transport() {
+    for kind in [
+        "stdio",
+        "sse",
+        "http",
+        "websocket",
+        "inprocess",
+        "sse-ide",
+        "sdk-control",
+    ] {
+        assert!(
+            !mcp::server_name_gate(kind),
+            "{kind} is a user-configurable transport; the oracle's HT gate is false for it, \
+             so the raw server name must never be attached"
+        );
+    }
+    // The one `$M` arm this port can spell (`e === "claudeai-proxy"`).
+    assert!(mcp::server_name_gate("claudeai-proxy"));
+}
+
+/// `connected_zero_tools` is the FIRST statement of the oracle's `yn`
+/// (@182316780) — 20 lines above the seven tool-schema counters an earlier
+/// revision transcribed verbatim while calling that set complete. It is the
+/// single most common silent-MCP-failure signal.
+#[test]
+fn connected_zero_tools_is_a_modelled_degraded_reason() {
+    let parsed: DegradedReason = serde_json::from_value(serde_json::json!("connected_zero_tools"))
+        .expect("`connected_zero_tools` must be a modelled DegradedReason");
+    assert_eq!(parsed, DegradedReason::ConnectedZeroTools);
+    assert_eq!(parsed.wire_str(), "connected_zero_tools");
+    assert_eq!(
+        serde_json::to_value(parsed).unwrap(),
+        serde_json::json!("connected_zero_tools")
+    );
+}
+
+/// Oracle payload for that reason is `{reason,transportType,mcpServerName,..._}`
+/// — no count field of any kind.
+#[test]
+fn connected_zero_tools_payload_carries_no_count_field() {
+    let payload = DegradedPayload {
+        reason: DegradedReason::ConnectedZeroTools,
+        transport_type: Some(Verified::assert_safe("stdio".to_string())),
+        normalized_count: None,
+        skipped_count: None,
+        kept_count: None,
+        mcp_server_name: None,
+    };
+    assert_eq!(
+        serde_json::to_value(&payload).expect("serialize"),
+        serde_json::json!({ "reason": "connected_zero_tools", "transport_type": "stdio" })
+    );
 }

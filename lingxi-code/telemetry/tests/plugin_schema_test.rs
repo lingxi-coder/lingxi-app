@@ -77,11 +77,13 @@ fn sample_enabled_for_session() -> PluginEnabledForSessionPayload {
         has_lsp: false,
         has_hooks: true,
         has_settings: false,
-        sessions_since_last_use: Some(3),
-        days_since_last_use: Some(1),
+        sessions_since_last_use: 3,
+        days_since_last_use: 1,
         safe_mode: false,
         settings_keys: None,
         version: Some(Verified::assert_safe("1.2.3".to_string())),
+        skill_name_hash_count: Some(2),
+        skill_name_hashes: Some(Verified::assert_safe("h1,h2".to_string())),
     }
 }
 
@@ -178,4 +180,59 @@ fn load_failed_payload_rejects_unknown_fields() {
         .insert("unexpected".to_string(), serde_json::json!(1));
     let result: Result<LoadFailedPayload, _> = serde_json::from_value(json);
     assert!(result.is_err());
+}
+
+
+// ── Round-1 review regressions ──────────────────────────────────────────────
+
+/// Oracle `T5t(e,t)` (@159542839) is spread into every
+/// `tengu_plugin_enabled_for_session` for a non-builtin, non-official
+/// plugin: `{skill_name_hash_count:r.length, ...r.length>0&&{skill_name_hashes:…}}`.
+/// The struct is `deny_unknown_fields`, so omitting the pair (as an earlier
+/// revision did) made them un-addable later without a wire-shape change to an
+/// already-count-locked event.
+#[test]
+fn enabled_for_session_carries_the_skill_name_hash_pair() {
+    let json = serde_json::to_value(sample_enabled_for_session()).unwrap();
+    assert_eq!(json["skill_name_hash_count"], serde_json::json!(2));
+    assert_eq!(json["skill_name_hashes"], serde_json::json!("h1,h2"));
+}
+
+/// `skill_name_hashes` is gated on `r.length > 0`, but
+/// `skill_name_hash_count` is NOT — a plugin contributing zero skills still
+/// reports the count.
+#[test]
+fn a_plugin_with_no_skills_still_reports_a_zero_hash_count() {
+    let mut payload = sample_enabled_for_session();
+    payload.skill_name_hash_count = Some(0);
+    payload.skill_name_hashes = None;
+    let json = serde_json::to_value(&payload).unwrap();
+    assert_eq!(json["skill_name_hash_count"], serde_json::json!(0));
+    assert!(
+        json.get("skill_name_hashes").is_none(),
+        "the hashes key is gated on r.length>0"
+    );
+}
+
+/// The oracle destructures `sessionsSinceLastUse`/`daysSinceLastUse` from a
+/// lookup DEFAULTING to `{sessionsSinceLastUse:0,daysSinceLastUse:0}`, then
+/// spreads both flat — so both keys are always on the wire, `0` included.
+/// Modelling them `Option` + `skip_serializing_if` dropped the keys exactly
+/// where the oracle emits `0`.
+#[test]
+fn last_use_counters_are_emitted_even_when_zero() {
+    let mut payload = sample_enabled_for_session();
+    payload.sessions_since_last_use = 0;
+    payload.days_since_last_use = 0;
+    let json = serde_json::to_value(&payload).unwrap();
+    assert_eq!(
+        json["sessions_since_last_use"],
+        serde_json::json!(0),
+        "must be present as 0, not omitted"
+    );
+    assert_eq!(
+        json["days_since_last_use"],
+        serde_json::json!(0),
+        "must be present as 0, not omitted"
+    );
 }

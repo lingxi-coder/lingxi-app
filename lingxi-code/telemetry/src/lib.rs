@@ -521,7 +521,7 @@ pub fn emit_mcp_tools_listed(payload: &crate::tengu::mcp::ToolsListedPayload) {
         tool_count = payload.tool_count,
         always_load_count = payload.always_load_count,
         discovery_source = payload.discovery_source.as_str(),
-        mcp_server_name = payload.mcp_server_name.as_str(),
+        mcp_server_name = payload.mcp_server_name.as_ref().map(Verified::as_str),
     );
 }
 

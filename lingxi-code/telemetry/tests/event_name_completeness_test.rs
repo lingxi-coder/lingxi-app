@@ -82,13 +82,22 @@ fn registry_is_exactly_347_entries() {
     // 2.1.251 byte-alignment B8 (telemetry-modules) added two new
     // GLOBAL-TAIL blocks, appended after oauth::AWS_AUTH_NAMES:
     //   - mcp::NAMES (+2 — tengu_mcp_server_config_invalid,
-    //     tengu_mcp_tools_listed; the ONLY two confirmed real `tengu_mcp_*`
-    //     analytics events at the oracle — the ~100 other `tengu_mcp_*`
-    //     binary strings are Statsig feature-flag names, not events):
-    //     347 + 2 = 349.
+    //     tengu_mcp_tools_listed): 347 + 2 = 349.
+    //     ⚠️ RETRACTED CLAIM: this comment used to say these were "the ONLY
+    //     two confirmed real `tengu_mcp_*` analytics events at the oracle —
+    //     the ~100 other `tengu_mcp_*` binary strings are Statsig
+    //     feature-flag names, not events". The first half is FALSE. The
+    //     analytics-bus call shape `s("tengu_mcp_<name>"` matches 53 DISTINCT
+    //     event names in 2.1.251. Many `tengu_mcp_*` strings really are
+    //     Statsig flags — that is the true half — but the event set is 53,
+    //     not 2, and this block ports 3 of them. The other 50 are an OPEN
+    //     parity gap. Reading this count as "MCP telemetry is complete" is
+    //     exactly the error the retracted wording invited.
     //   - plugin::NAMES (+14 — tengu_plugin_enabled_for_session and its 13
     //     siblings; the port had NO plugin telemetry module before this):
     //     349 + 14 = 363.
+    //     ⚠️ SUBSTRATE ONLY: none of the 14 has a production emit site
+    //     anywhere in the repo, so §20c is OPEN. See plugin.rs's module doc.
     // 2.1.251 §20a/§20b wiring: mcp::NAMES +1 (tengu_mcp_degraded — traced
     // to `yn`'s per-server tool-schema-classification tail and `qr`'s
     // process-global validator-unavailable fallback; this closes the

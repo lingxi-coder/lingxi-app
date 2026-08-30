@@ -1082,14 +1082,22 @@ impl McpRegistry {
             }
         };
         // §20b — `tengu_mcp_tools_listed`'s `listDurationMs:Date.now()-o`.
-        // Timed around the WHOLE catalog fetch (tools + resources + prompts),
-        // not just the `tools/list` call in isolation — this port fetches
-        // all three in one sequential block, so a narrower timer would need
-        // new plumbing the oracle's own per-call timestamp doesn't require.
-        let catalog_started = std::time::Instant::now();
+        // Oracle `yt` (@182326900) opens the timer immediately BEFORE the
+        // `tools/list` round-trip and `yn` reads it immediately after, with
+        // no other RPC inside the window: `let d=Date.now(), …,
+        // h=await …"tools/list"…, _=yn(e,h,d,"live",r)`. Timing the whole
+        // catalog block instead (tools + resources + prompts, as an earlier
+        // revision did) turned this into a multiple-x overstatement of the
+        // operation the field is named for — a server answering `tools/list`
+        // in 40 ms but `resources/list`/`prompts/list` in 300 ms each
+        // reported ~640 ms. Stop the clock where the oracle stops it.
+        let mut tools_list_elapsed = std::time::Duration::ZERO;
         let catalog = async {
             let tools = if caps.tools {
-                self.transport.list_tools(&conn).await?
+                let started = std::time::Instant::now();
+                let listed = self.transport.list_tools(&conn).await?;
+                tools_list_elapsed = started.elapsed();
+                listed
             } else {
                 Vec::new()
             };
@@ -1153,11 +1161,34 @@ impl McpRegistry {
             telemetry::tengu::mcp::DegradedReason,
             u32,
         > = std::collections::HashMap::new();
+        // Oracle `yn`'s FIRST statement (@182316780), 20 lines above the
+        // seven counters below: `if(u.length===0&&r==="live")
+        // s("tengu_mcp_degraded",{reason:w("connected_zero_tools"),…})`.
+        // `u` is the RAW `tools/list` response, so this is measured BEFORE
+        // the §20a filter runs — a server whose every tool the filter dropped
+        // reports its drop reason, not zero-tools. `r==="live"` holds because
+        // this is the connect path (a fresh dial); the cached-row adoption
+        // path the oracle also feeds `yn` from does not exist in this port.
+        // Gated on `caps.tools` for the same reason `tools_listed` is: with
+        // no tools capability the oracle never reaches `yn` at all, so an
+        // empty list there is not a degraded signal.
+        if caps.tools && tools.is_empty() {
+            degraded_counts.insert(telemetry::tengu::mcp::DegradedReason::ConnectedZeroTools, 1);
+        }
         tools.retain_mut(|dto| {
             let decision = crate::tool_schema::decide_tool_schema(
                 gate_url.as_deref(),
                 &dto.input_schema,
             );
+            // The oracle's `x++` and its validity counters are INDEPENDENT
+            // (the `x++` arm falls through into the validity check), so a
+            // normalized-then-invalid tool increments TWO buckets and fires
+            // TWO events. See `tool_schema::ToolSchemaDecision::normalized`.
+            if decision.normalized {
+                *degraded_counts
+                    .entry(telemetry::tengu::mcp::DegradedReason::ToolSchemaNormalized)
+                    .or_insert(0) += 1;
+            }
             if let Some(reason) = decision.classification {
                 *degraded_counts.entry(reason).or_insert(0) += 1;
             }
@@ -1202,7 +1233,7 @@ impl McpRegistry {
         if caps.tools {
             telemetry::emit_mcp_tools_listed(&tools_listed_payload(
                 config.spec.kind(),
-                catalog_started.elapsed(),
+                tools_list_elapsed,
                 &tools,
                 &server_display,
             ));
@@ -3156,7 +3187,14 @@ fn tools_listed_payload(
         )
         .unwrap_or(u32::MAX),
         discovery_source: Verified::assert_safe("live".to_string()),
-        mcp_server_name: Verified::assert_safe(server_name.to_string()),
+        // Oracle: `mcpServerName:EA(ln(e.name),HT(e.name,e.config))` — `EA`
+        // returns `undefined` (the spread DROPS the key) unless the
+        // first-party gate holds. Emitting the raw name unconditionally, as
+        // an earlier revision did, made a user's private server name an
+        // analytics dimension on every connect. See
+        // `telemetry::tengu::mcp::server_name_gate`.
+        mcp_server_name: telemetry::tengu::mcp::server_name_gate(transport_kind)
+            .then(|| Verified::assert_safe(server_name.to_string())),
     }
 }
 
@@ -3203,10 +3241,16 @@ fn degraded_payloads_for_server(
         return Vec::new();
     }
     let transport_type = Verified::assert_safe(transport_kind.to_string());
-    let mcp_server_name = Verified::assert_safe(server_name.to_string());
+    // Same gate as `tools_listed_payload` — the oracle spreads the SAME `P`
+    // into every per-server `tengu_mcp_degraded`.
+    let mcp_server_name = telemetry::tengu::mcp::server_name_gate(transport_kind)
+        .then(|| Verified::assert_safe(server_name.to_string()));
     let mut out = Vec::with_capacity(counts.len());
     for (reason, count) in counts {
         let (normalized_count, skipped_count, kept_count) = match reason {
+            // Oracle's `connected_zero_tools` payload is
+            // `{reason,transportType,mcpServerName,..._}` — no count field.
+            DegradedReason::ConnectedZeroTools => (None, None, None),
             DegradedReason::ToolSchemaNormalized => (Some(*count), None, None),
             DegradedReason::ToolSchemaNormalizeGated
             | DegradedReason::ToolSchemaUnsupported
@@ -3228,7 +3272,7 @@ fn degraded_payloads_for_server(
             normalized_count,
             skipped_count,
             kept_count,
-            mcp_server_name: Some(mcp_server_name.clone()),
+            mcp_server_name: mcp_server_name.clone(),
         });
     }
     out
@@ -4310,8 +4354,19 @@ mod tests {
     /// schema the oracle drops is forwarded to the model verbatim, and the
     /// two `mock_mcp.rs` integration tests that cover `McpClient::list_tools`
     /// stay green throughout.
+    // Same rationale as `connect_resolves_the_schema_gate_from_the_servers_own_hostname`
+    // below: the §20a flags are PROCESS-global, so the guard must span the
+    // `connect` await — holding it across the await IS the point of the lock.
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn connect_applies_the_tool_schema_decision_to_the_model_facing_list() {
+        // This test asserts the DEFAULT (both gates off) behaviour by reading
+        // the PROCESS-GLOBAL §20a flags, so it must hold the same lock every
+        // other §20a test in this binary holds — see
+        // `tool_schema::flag_test_lock`. Without it a concurrently-running
+        // `tool_schema` test that sets `tengu_mcp_normalize_root_combinators`
+        // makes `combo_tool` survive here and this assertion fails at random.
+        let _g = crate::tool_schema::flag_test_lock();
         let mock = Arc::new(BridgeMock::with_tool_schemas(&[
             (
                 "plain_tool",
@@ -4437,7 +4492,10 @@ mod tests {
         );
         for p in &payloads {
             assert_eq!(p.transport_type.as_ref().map(Verified::as_str), Some("http"));
-            assert_eq!(p.mcp_server_name.as_ref().map(Verified::as_str), Some("srv"));
+            assert!(
+                p.mcp_server_name.is_none(),
+                "`http` is user-configurable; the oracle's HT gate drops the name"
+            );
         }
     }
 
@@ -4519,7 +4577,12 @@ mod tests {
         assert_eq!(payload.tool_count, 3);
         assert_eq!(payload.always_load_count, 1, "only the Some(true) tool counts");
         assert_eq!(payload.discovery_source.as_str(), "live");
-        assert_eq!(payload.mcp_server_name.as_str(), "srv");
+        // Gated: `http` is a user-configurable transport, so the oracle's
+        // `HT` gate is false and `EA` drops the key entirely.
+        assert!(
+            payload.mcp_server_name.is_none(),
+            "a user-configured server's raw name must never reach telemetry"
+        );
     }
 
     /// §20a's per-server gate resolves from the connected server's URL

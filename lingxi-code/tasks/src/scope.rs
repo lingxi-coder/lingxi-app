@@ -251,6 +251,18 @@ impl LocalAppWorkflowTaskScope {
     /// Design: "`tasks` 对所有三种 purpose 都让 App delete guard 按 app ID
     /// 阻塞" -- every purpose blocks deleting the app while the workflow is
     /// non-terminal, not just `Build`.
+    ///
+    /// Reachability, so nobody has to grep for it: [`Self::for_build`] is the
+    /// only constructor with a production call site today (see the module
+    /// docs' "the only production mint"). [`Self::for_use_test`] and
+    /// [`Self::for_mcp_authoring`] are called from tests only, because the
+    /// workflows that would mint them do not exist yet (design §18 Phase 4 /
+    /// Phase 6). So "every purpose blocks delete" is enforced for all three
+    /// and exercised in production by one; `registry.rs`'s
+    /// `find_nonterminal_local_app_workflows` carries the same note, and
+    /// `registry_test.rs` pins each purpose at that guard. This is a
+    /// statement about traffic, not a defect: minting a scope no workflow
+    /// needs would be the defect.
     pub fn blocks_delete(&self) -> bool {
         true
     }

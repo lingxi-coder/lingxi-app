@@ -937,9 +937,20 @@ impl TaskRegistry {
     /// `engine-mobile`'s `handle_delete_app`) remains a second guard for a
     /// `Build`-purpose task that has actually acquired it; this guard's job
     /// is the wider one -- also covering `UseTest`/`McpAuthoring` scopes,
-    /// which never take that lease at all (see
-    /// `a_local_workflow_task_with_no_scope_still_blocks_delete` below for
-    /// why "no scope" there means "no *lease-requiring* scope", not `None`).
+    /// which never take that lease at all. `registry_test.rs`'s
+    /// `a_build_purpose_blocks_delete_at_the_guard`,
+    /// `a_use_test_purpose_still_blocks_delete_at_the_guard` and
+    /// `an_mcp_authoring_purpose_still_blocks_delete_at_the_guard` pin one
+    /// purpose each HERE, at the guard, which is a stronger claim than
+    /// `scope.rs`'s `every_purpose_blocks_delete` (that one only proves the
+    /// predicate's answer, not that this function asks it).
+    ///
+    /// Only the `Build` arm is reachable in production today: `for_build` is
+    /// the sole scope constructor with a non-test call site, because the
+    /// `UseTest` and `McpAuthoring` workflows do not exist yet (design §18
+    /// Phase 4 / Phase 6). Those two arms are therefore live contract and
+    /// dead traffic -- correct, and exercised only by the tests named above,
+    /// until the workflows that mint them land.
     pub async fn find_nonterminal_local_app_workflows(&self, app_id: &str) -> Vec<String> {
         let tasks = self.tasks.read().await;
         tasks

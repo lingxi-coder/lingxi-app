@@ -2529,43 +2529,51 @@ async fn a_custom_workflow_with_the_same_name_gets_no_lease_and_does_not_block_d
 
 /// Design: `LocalAppWorkflowTaskScope::blocks_delete()` is `true` for ALL
 /// THREE purposes, not just `Build` -- a `UseTest`/`McpAuthoring` scope never
-/// takes the workspace lease (only `Build` does -- see
-/// `a_custom_workflow_with_the_same_name_gets_no_lease_and_does_not_block_delete`
-/// above and `scope.rs`'s `only_build_purpose_requires_a_workspace_lease`)
-/// but must still block the app's delete while it runs.
+/// takes the workspace lease (only `Build` does -- see `scope.rs`'s
+/// `only_build_purpose_requires_a_workspace_lease`) but must still block the
+/// app's delete while it runs.
 ///
-/// Read maximally literally, "a local workflow task with no scope" could
-/// mean either (a) `scope: None` -- covered by the sibling test above, which
-/// per §8.1 must NOT block -- or (b) a task whose scope does not carry the
-/// lease-granting authority (`Some` with a non-`Build` purpose). Only
-/// reading (b) is consistent with (a): `blocks_delete()`'s only decision
-/// axis is `scope.app_id() == app_id`, and nothing in this crate can
-/// determine which unscoped rows are "genuinely mid-build" versus "forged"
-/// -- they are the same shape (see this file's sibling test and
-/// `LocalWorkflowTaskState::scope`'s doc comment for why `None` cannot be
-/// treated as blocking without reopening §8.1). This test pins reading (b).
-#[tokio::test]
-async fn a_local_workflow_task_with_no_scope_still_blocks_delete() {
+/// The three tests below are GUARD-level, and that is the whole point:
+/// `scope.rs`'s `every_purpose_blocks_delete` proves the PREDICATE answers
+/// `true` for a purpose, which is a different claim from
+/// `find_nonterminal_local_app_workflows` actually CONSULTING it for that
+/// purpose. One test per purpose over this one shared body, so a guard that
+/// silently narrowed back to `Build` fails once per purpose it dropped and
+/// each failure names which purpose it was.
+///
+/// `Build` is the control: it stays green under exactly the narrowing that
+/// reddens the other two, so their red measures the guard rather than a
+/// shared body that never worked.
+///
+/// What is deliberately NOT covered here is `scope: None`. Per §8.1 an
+/// unscoped row must NOT block -- the sibling
+/// `a_custom_workflow_with_the_same_name_gets_no_lease_and_does_not_block_delete`
+/// pins that -- because nothing in this crate can distinguish a "genuinely
+/// mid-build but unscoped" row from a forged one: they are the same shape,
+/// so treating `None` as blocking would either match on `workflow_id`/`args`
+/// again or hand any caller a delete block on any app. See
+/// `LocalWorkflowTaskState::scope`'s doc comment.
+async fn assert_scope_blocks_delete_at_the_guard(
+    scope: crate::scope::LocalAppWorkflowTaskScope,
+    task_id: &str,
+) {
     use crate::state::{LocalWorkflowTaskState, TaskState, TaskStateBase};
 
-    let scope = crate::scope::LocalAppWorkflowTaskScope::for_use_test("app-1").expect("valid");
-    assert!(
-        !scope.requires_workspace_lease(),
-        "a use-test scope has no lease-granting -- i.e. no workspace-lease -- authority"
-    );
+    let app_id = scope.app_id().to_string();
+    let purpose = scope.purpose();
 
     let (_d, registry) = make_registry();
     let row = TaskState::LocalWorkflow(LocalWorkflowTaskState {
         base: TaskStateBase {
-            id: "wusetest1".into(),
+            id: task_id.into(),
             task_type: TaskType::LocalWorkflow,
             status: TaskStatus::Running,
-            description: "use-test".into(),
+            description: format!("{purpose:?} run"),
             tool_use_id: None,
             start_time: SystemTime::now(),
             end_time: None,
             total_paused_ms: 0,
-            output_file: std::path::PathBuf::from("/tmp/tasks/wusetest1.output"),
+            output_file: std::path::PathBuf::from(format!("/tmp/tasks/{task_id}.output")),
             output_offset: 0,
             notified: false,
             creator_teammate_name: None,
@@ -2573,11 +2581,14 @@ async fn a_local_workflow_task_with_no_scope_still_blocks_delete() {
             creator_agent_id: None,
         },
         session_uuid: None,
-        workflow_id: "local-app-use-test".into(),
+        // The guard ignores `workflow_id` and `args` entirely, so a name that
+        // matches nothing real is the honest input: the scope is the only
+        // thing that may produce the block.
+        workflow_id: "a-name-the-guard-must-not-read".into(),
         script: String::new(),
         resume_from_run_id: None,
         args: None,
-        run_id: Some("wf_usetest1".into()),
+        run_id: Some(format!("wf_{task_id}")),
         script_path: None,
         transcript_dir: None,
         current_step: 0,
@@ -2587,11 +2598,47 @@ async fn a_local_workflow_task_with_no_scope_still_blocks_delete() {
     registry.insert_state_for_test(row).await;
 
     assert_eq!(
-        registry.find_nonterminal_local_app_workflows("app-1").await,
-        vec!["wusetest1"],
-        "a use-test/mcp-authoring run has no workspace lease but must still \
-         block the app's delete while it is non-terminal"
+        registry.find_nonterminal_local_app_workflows(&app_id).await,
+        vec![task_id],
+        "find_nonterminal_local_app_workflows must report a non-terminal \
+         {purpose:?}-purpose run as blocking {app_id}'s delete"
     );
+}
+
+/// Guard-level coverage for `Build`, and the control for the two tests below:
+/// narrowing `blocks_delete()` to `Build` alone leaves THIS one green.
+#[tokio::test]
+async fn a_build_purpose_blocks_delete_at_the_guard() {
+    let scope = crate::scope::LocalAppWorkflowTaskScope::for_build("app-1").expect("valid");
+    assert!(
+        scope.requires_workspace_lease(),
+        "control: `Build` is the one purpose that also takes the workspace lease"
+    );
+    assert_scope_blocks_delete_at_the_guard(scope, "wbuildp01").await;
+}
+
+/// Guard-level coverage for `UseTest`: no workspace lease, still blocks.
+#[tokio::test]
+async fn a_use_test_purpose_still_blocks_delete_at_the_guard() {
+    let scope = crate::scope::LocalAppWorkflowTaskScope::for_use_test("app-1").expect("valid");
+    assert!(
+        !scope.requires_workspace_lease(),
+        "a use-test scope has no lease-granting -- i.e. no workspace-lease -- authority"
+    );
+    assert_scope_blocks_delete_at_the_guard(scope, "wusetest1").await;
+}
+
+/// Guard-level coverage for `McpAuthoring`: no workspace lease, still blocks.
+/// Before this test the purpose was pinned only by `scope.rs`'s predicate
+/// test, which cannot see whether the guard reads the predicate at all.
+#[tokio::test]
+async fn an_mcp_authoring_purpose_still_blocks_delete_at_the_guard() {
+    let scope = crate::scope::LocalAppWorkflowTaskScope::for_mcp_authoring("app-1").expect("valid");
+    assert!(
+        !scope.requires_workspace_lease(),
+        "an mcp-authoring scope has no lease-granting -- i.e. no workspace-lease -- authority"
+    );
+    assert_scope_blocks_delete_at_the_guard(scope, "wmcpauth1").await;
 }
 
 /// The `tasks` half of the P-1.7 R1 fix, pinned inside the crate that owns

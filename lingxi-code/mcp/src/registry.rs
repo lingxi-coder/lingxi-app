@@ -896,6 +896,7 @@ impl McpRegistry {
             ));
         }
         if let Some(err) = &config.config_error {
+            emit_server_config_invalid(&config, telemetry::tengu::mcp::ConfigInvalidSource::Loader);
             return Err(McpError::Connection(err.clone()));
         }
         // 3. §18 — the oracle's CONNECT-TIME `new URL(t.url)` re-check, run in
@@ -907,6 +908,7 @@ impl McpRegistry {
         //    unparseable (a bare hostname with no scheme, say). Same
         //    `errorCode:"INVALID_CONFIG"` as gate 2; also does not dial.
         if let Some(err) = config.connect_time_url_error() {
+            emit_server_config_invalid(&config, telemetry::tengu::mcp::ConfigInvalidSource::Connect);
             return Err(McpError::Connection(err.to_string()));
         }
 
@@ -1079,6 +1081,12 @@ impl McpRegistry {
                 ))
             }
         };
+        // §20b — `tengu_mcp_tools_listed`'s `listDurationMs:Date.now()-o`.
+        // Timed around the WHOLE catalog fetch (tools + resources + prompts),
+        // not just the `tools/list` call in isolation — this port fetches
+        // all three in one sequential block, so a narrower timer would need
+        // new plumbing the oracle's own per-call timestamp doesn't require.
+        let catalog_started = std::time::Instant::now();
         let catalog = async {
             let tools = if caps.tools {
                 self.transport.list_tools(&conn).await?
@@ -1187,6 +1195,18 @@ impl McpRegistry {
             );
             true
         });
+
+        // `tengu_mcp_tools_listed` — once per successful `tools/list`, not
+        // when the server had no `tools` capability at all (oracle only
+        // reaches this call site from inside the tools-listing branch).
+        if caps.tools {
+            telemetry::emit_mcp_tools_listed(&tools_listed_payload(
+                config.spec.kind(),
+                catalog_started.elapsed(),
+                &tools,
+                &server_display,
+            ));
+        }
 
         // Fire one `tengu_mcp_degraded` per nonzero classification bucket.
         // oracle: `c(e.config.type??"stdio")` — the RAW config `type`
@@ -3101,6 +3121,68 @@ fn is_format_char(c: char) -> bool {
     )
 }
 
+/// §20b — `tengu_mcp_server_config_invalid`: a server's config failed the
+/// loader-time or connect-time URL/shape re-validation. Oracle call site:
+/// `s("tengu_mcp_server_config_invalid",{transportType:c(t.type??"stdio"),
+/// field:w("url"),source:w(t.configError?"loader":"connect")})` — `field` is
+/// always the literal `"url"`, the sole re-validation target either gate
+/// checks (see [`McpServerConfig::config_error`] /
+/// [`McpServerConfig::connect_time_url_error`]'s docs for the two gates this
+/// fires from).
+/// §20b — build `tengu_mcp_tools_listed`'s payload. Pure: takes the already
+/// resolved/filtered tool list and elapsed duration rather than reaching
+/// into `self`/`conn`, so the field-mapping (`tool_count`/`always_load_count`
+/// off the FINAL post-§20a-filter list, not the raw transport response) is
+/// unit-testable without standing up a mock transport.
+///
+/// `discovery_source` is unconditionally `"live"` here — this is the
+/// CONNECT path (a fresh dial), never the cached-row-adoption path the
+/// oracle's `discoverySource` also covers (§18's deferred
+/// `cached-row adopt subscriber threw` item; this port has no cached-row
+/// adoption at all yet).
+fn tools_listed_payload(
+    transport_kind: &str,
+    elapsed: std::time::Duration,
+    tools: &[traits::McpToolDto],
+    server_name: &str,
+) -> telemetry::tengu::mcp::ToolsListedPayload {
+    use telemetry::pii::Verified;
+    telemetry::tengu::mcp::ToolsListedPayload {
+        transport_type: Verified::assert_safe(transport_kind.to_string()),
+        list_duration_ms: u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX),
+        tool_count: u32::try_from(tools.len()).unwrap_or(u32::MAX),
+        always_load_count: u32::try_from(
+            tools.iter().filter(|t| t.always_load == Some(true)).count(),
+        )
+        .unwrap_or(u32::MAX),
+        discovery_source: Verified::assert_safe("live".to_string()),
+        mcp_server_name: Verified::assert_safe(server_name.to_string()),
+    }
+}
+
+fn emit_server_config_invalid(
+    config: &McpServerConfig,
+    source: telemetry::tengu::mcp::ConfigInvalidSource,
+) {
+    telemetry::emit_mcp_server_config_invalid(&server_config_invalid_payload(config, source));
+}
+
+/// Pure payload-building half of [`emit_server_config_invalid`] — split out
+/// so the loader-vs-connect classification is unit-testable directly,
+/// without a tracing-capture race (see `degraded_payloads_for_server`'s doc
+/// for why that race is real in this shared test binary).
+fn server_config_invalid_payload(
+    config: &McpServerConfig,
+    source: telemetry::tengu::mcp::ConfigInvalidSource,
+) -> telemetry::tengu::mcp::ServerConfigInvalidPayload {
+    use telemetry::pii::Verified;
+    telemetry::tengu::mcp::ServerConfigInvalidPayload {
+        transport_type: Verified::assert_safe(config.spec.kind().to_string()),
+        field: Verified::assert_safe("url".to_string()),
+        source,
+    }
+}
+
 /// §20b — build the `tengu_mcp_degraded` payload for every NONZERO bucket in
 /// one server's tallied tool-schema classification counts. Pure and
 /// deterministic (no telemetry emission, no tracing) so the aggregation
@@ -4363,6 +4445,81 @@ mod tests {
     fn degraded_payloads_for_server_is_empty_when_no_bucket_is_nonzero() {
         assert!(degraded_payloads_for_server(&std::collections::HashMap::new(), "stdio", "srv")
             .is_empty());
+    }
+
+    /// §20b — `server_config_invalid_payload` carries the RAW config `type`
+    /// string (`McpTransportSpec::kind()`, not a `protocol_negotiation.rs`
+    /// `Wr`-mapped label), the fixed literal `"url"` field, and passes the
+    /// caller's loader-vs-connect classification straight through. Both
+    /// `connect()` gates (`config.config_error` / `connect_time_url_error()`)
+    /// funnel through this one function, so a test here covers both call
+    /// sites' payload shape without needing to race a tracing capture
+    /// against `connect()`'s own dial path.
+    #[test]
+    fn server_config_invalid_payload_carries_the_raw_transport_kind_and_fixed_field() {
+        use telemetry::tengu::mcp::ConfigInvalidSource;
+
+        let cfg = http_cfg("broken", "${MISSING:-}");
+
+        let loader = server_config_invalid_payload(&cfg, ConfigInvalidSource::Loader);
+        assert_eq!(loader.transport_type.as_str(), "http");
+        assert_eq!(loader.field.as_str(), "url");
+        assert_eq!(loader.source.wire_str(), "loader");
+
+        let connect = server_config_invalid_payload(&cfg, ConfigInvalidSource::Connect);
+        assert_eq!(connect.source.wire_str(), "connect");
+    }
+
+    /// §20b — `tools_listed_payload` counts off the FINAL (post-§20a-filter)
+    /// list, not a raw pre-filter count, and `always_load_count` only tallies
+    /// `Some(true)` (a `None`/`Some(false)` tool must NOT count). Reverting
+    /// either the length source or the filter predicate is caught here.
+    #[test]
+    fn tools_listed_payload_counts_off_the_final_list() {
+        let tools = vec![
+            McpToolDto {
+                tool_name: "a".into(),
+                full_name: "mcp__srv__a".into(),
+                server_name: "srv".into(),
+                description: String::new(),
+                input_schema: serde_json::json!({}),
+                search_hint: None,
+                always_load: Some(true),
+                requires_user_interaction: false,
+            },
+            McpToolDto {
+                tool_name: "b".into(),
+                full_name: "mcp__srv__b".into(),
+                server_name: "srv".into(),
+                description: String::new(),
+                input_schema: serde_json::json!({}),
+                search_hint: None,
+                always_load: Some(false),
+                requires_user_interaction: false,
+            },
+            McpToolDto {
+                tool_name: "c".into(),
+                full_name: "mcp__srv__c".into(),
+                server_name: "srv".into(),
+                description: String::new(),
+                input_schema: serde_json::json!({}),
+                search_hint: None,
+                always_load: None,
+                requires_user_interaction: false,
+            },
+        ];
+        let payload = tools_listed_payload(
+            "http",
+            std::time::Duration::from_millis(42),
+            &tools,
+            "srv",
+        );
+        assert_eq!(payload.transport_type.as_str(), "http");
+        assert_eq!(payload.list_duration_ms, 42);
+        assert_eq!(payload.tool_count, 3);
+        assert_eq!(payload.always_load_count, 1, "only the Some(true) tool counts");
+        assert_eq!(payload.discovery_source.as_str(), "live");
+        assert_eq!(payload.mcp_server_name.as_str(), "srv");
     }
 
     /// §20a's per-server gate resolves from the connected server's URL

@@ -500,6 +500,31 @@ pub fn emit_mcp_degraded(payload: &crate::tengu::mcp::DegradedPayload) {
     );
 }
 
+/// Emit [`crate::tengu::mcp::SERVER_CONFIG_INVALID`] — a server's config
+/// failed the loader-time or connect-time URL/shape re-validation.
+pub fn emit_mcp_server_config_invalid(payload: &crate::tengu::mcp::ServerConfigInvalidPayload) {
+    tracing::warn!(
+        event = crate::tengu::mcp::SERVER_CONFIG_INVALID,
+        transport_type = payload.transport_type.as_str(),
+        field = payload.field.as_str(),
+        source = payload.source.wire_str(),
+    );
+}
+
+/// Emit [`crate::tengu::mcp::TOOLS_LISTED`] — a `tools/list` round-trip
+/// completed and the tool set was bound.
+pub fn emit_mcp_tools_listed(payload: &crate::tengu::mcp::ToolsListedPayload) {
+    tracing::info!(
+        event = crate::tengu::mcp::TOOLS_LISTED,
+        transport_type = payload.transport_type.as_str(),
+        list_duration_ms = payload.list_duration_ms,
+        tool_count = payload.tool_count,
+        always_load_count = payload.always_load_count,
+        discovery_source = payload.discovery_source.as_str(),
+        mcp_server_name = payload.mcp_server_name.as_str(),
+    );
+}
+
 #[cfg(test)]
 mod mcp_degraded_tests {
     use super::*;

@@ -93,7 +93,7 @@ pub const NAMES: &[&str] = &[SERVER_CONFIG_INVALID, TOOLS_LISTED, DEGRADED];
 
 /// Where the invalid-config classification was raised. Oracle:
 /// `source:w(t.configError?"loader":"connect")`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum ConfigInvalidSource {
@@ -102,6 +102,19 @@ pub enum ConfigInvalidSource {
     Loader,
     /// Raised at connect time — a syntactically invalid, non-empty url.
     Connect,
+}
+
+impl ConfigInvalidSource {
+    /// The wire (snake_case) string this variant serializes to — used by
+    /// [`crate::emit_mcp_server_config_invalid`], which needs the bare
+    /// string for a `tracing` field rather than a `Debug`/JSON round-trip.
+    #[must_use]
+    pub fn wire_str(self) -> &'static str {
+        match self {
+            Self::Loader => "loader",
+            Self::Connect => "connect",
+        }
+    }
 }
 
 /// Payload for [`SERVER_CONFIG_INVALID`].

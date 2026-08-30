@@ -782,21 +782,12 @@ impl InProcessTeammateHandler {
                     agent::augment_teammate_tool_policy(registry, &mut definition);
                 let empty: Vec<String> = Vec::new();
                 let denied = self.tool_wide_deny_names.get().unwrap_or(&empty);
-                // §24b: an in-process teammate's own inline `mcpServers` are
-                // NOT yet wired to a live connector (out of scope for this
-                // fix — teammates spawn through a different handler than
-                // `agent::handle::PoolSubagentSpawner`, which owns the wired
-                // production path); `None` here is the exact pre-§24b
-                // behavior (a literal empty tool slice) for this call site.
                 agent::resolve_subagent_tools(
                     registry,
                     &definition,
                     denied,
                     self.default_model.as_deref(),
                     0,
-                    agent_id,
-                    false,
-                    None,
                 )
                 .await
                 .map_err(|e| TaskError::Internal(e.to_string()))?

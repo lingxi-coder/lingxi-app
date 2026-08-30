@@ -4,10 +4,22 @@
 //! [`registry::McpRegistry`] that drives transitions through a
 //! platform-supplied [`traits::McpTransport`], the OAuth 2.1
 //! handshake skeleton (`oauth.rs`), the per-project MCP-server enable/
-//! disable and project-`.mcp.json`-approval gate (`server_gate.rs`), the
-//! per-agent connection bookkeeping (`agent_scope.rs`), and the
+//! disable and project-`.mcp.json`-approval gate (`server_gate.rs`), and the
 //! `client::McpClient` JSON-RPC client built on top of `lingxi-jsonrpc`
 //! (M2-02b — see `docs/superpowers/plans/2026-05-23-m2-02b-mcp-client.md`).
+//!
+//! There used to be a separate `agent_scope.rs` holding an
+//! `AgentScopedConnections` table for a subagent's own inline
+//! `mcpServers` (§24b). Both the scaffolding and the connect/inject/
+//! teardown chain built on top of it were removed: the shared registry
+//! is keyed by server NAME and the model-facing tool FQN is
+//! `mcp__<name>__<tool>`, so the per-agent name mangling that kept two
+//! subagents from colliding also produced `mcp____agent_scope__<uuid>__
+//! <server>__<tool>` — an FQN whose server segment parses EMPTY, which
+//! `tools/mcp::parse_full_name` rejects outright, `servers_with_tools`
+//! drops, and no `mcp__<server>` permission rule can match. A working
+//! §24b needs the registry key and the FQN/OAuth-key name to be
+//! separable, plus a per-spawn dispatch overlay; see the revert commit.
 //!
 //! There used to be a separate `approval.rs` with its own
 //! `McpApprovalPolicy`/`ApprovalStatus`; it was a dead duplicate (zero
@@ -22,7 +34,6 @@
 
 #![forbid(unsafe_code)]
 
-pub mod agent_scope;
 pub mod capabilities;
 pub mod client;
 pub mod config_diagnostics;

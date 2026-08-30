@@ -338,6 +338,88 @@ fn validate_oauth_child(oauth: Option<McpOAuthConfigDto>) -> Option<Option<McpOA
     Some(Some(cfg))
 }
 
+// ── §11 — `discoveryCache` / `role` recognition ─────────────────────────────
+//
+// Both keys are recognized here at the raw-JSON level but are DELIBERATELY
+// NOT threaded onto `McpServerConfig`/`McpTransportSpec` — doing so would add
+// a field to types constructed as exhaustive struct literals (no `..`) in
+// `apps/cli/src/commands/mcp.rs`, which this batch must not edit (owned by
+// the parallel telemetry agent), plus several more files outside this
+// batch's ownership. See `crate::discovery_cache`'s module docs for the full
+// account and for the pure, parameter-based decision logic that consumes
+// these two recognized values once a future wave can wire them through.
+
+/// §11 — is `discoveryCache` a declared schema key for `type`? Oracle `OAn`/
+/// `sGt` (2.1.251 Mach-O @154584436/@154585104 — `sse` and `http`/
+/// `streamable-http`) declare `discoveryCache:q().optional()`; no other
+/// union member does. zod's non-`catchall` object schemas silently drop an
+/// UNKNOWN key without ever looking at its value, so on any other `type` the
+/// key (whatever its shape) can never affect validation.
+#[must_use]
+pub fn discovery_cache_is_schema_key_for(transport_type: Option<&str>) -> bool {
+    matches!(transport_type, Some("sse" | "http" | "streamable-http"))
+}
+
+/// [`discovery_cache_flag`]'s failure: `discoveryCache` was present, on a
+/// type that declares it, with a non-boolean value — the whole entry must be
+/// rejected. Carries no data (there is nothing to add beyond "reject this
+/// entry"); a named unit-like type reads better at a call site than `Err(())`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InvalidDiscoveryCacheFlag;
+
+/// §11 — decode `discoveryCache` against `type`'s schema: `q().optional()`,
+/// a plain boolean with NO `.catch`. On a type that declares the key
+/// ([`discovery_cache_is_schema_key_for`]), a PRESENT-but-non-boolean value
+/// fails that schema and the whole entry's `safeParse` — mirroring
+/// [`validate_oauth_child`]'s all-or-nothing child-object handling — so the
+/// caller must reject the entry outright ([`InvalidDiscoveryCacheFlag`]). On
+/// a type that doesn't declare the key, the raw value (of any shape) is
+/// schema-unknown and therefore inert: always `Ok(None)`.
+///
+/// # Errors
+/// [`InvalidDiscoveryCacheFlag`] when `type` declares the key and its raw
+/// value is present but not a JSON boolean.
+pub fn discovery_cache_flag(
+    transport_type: Option<&str>,
+    raw_entry: &serde_json::Value,
+) -> Result<Option<bool>, InvalidDiscoveryCacheFlag> {
+    if !discovery_cache_is_schema_key_for(transport_type) {
+        return Ok(None);
+    }
+    match raw_entry.get("discoveryCache") {
+        None => Ok(None),
+        Some(serde_json::Value::Bool(b)) => Ok(Some(*b)),
+        Some(_) => Err(InvalidDiscoveryCacheFlag),
+    }
+}
+
+/// §11 — is `role` a declared schema key for `type`? Oracle: present on
+/// `stdio`/`sse`/`sse-ide`/`ws-ide`/`http` (+ `streamable-http`)/`ws`;
+/// ABSENT from `sdk` (`MAn` @154585319) and `claudeai-proxy` (`NAn`
+/// @154585377) — the same pointed omission pattern already established for
+/// `request_timeout_ms`/`discoveryCache` on those two arms.
+#[must_use]
+pub fn role_is_schema_key_for(transport_type: Option<&str>) -> bool {
+    !matches!(transport_type, Some("sdk" | "claudeai-proxy"))
+}
+
+/// §11 — `role: N("comms").optional().catch(void 0)`: the ONLY schema-valid
+/// value is the literal string `"comms"`. Unlike [`discovery_cache_flag`]
+/// this schema HAS `.catch`, so a present-but-invalid value (wrong JSON
+/// type, or any string other than `"comms"`) is silently normalized to
+/// `None` — it can NEVER reject the entry. Returns `None` outright when
+/// `type` doesn't declare the key at all ([`role_is_schema_key_for`]).
+#[must_use]
+pub fn role_flag(transport_type: Option<&str>, raw_entry: &serde_json::Value) -> Option<String> {
+    if !role_is_schema_key_for(transport_type) {
+        return None;
+    }
+    match raw_entry.get("role") {
+        Some(serde_json::Value::String(s)) if s == "comms" => Some(s.clone()),
+        _ => None,
+    }
+}
+
 /// Parse a `.mcp.json` payload (raw file contents) into a list of configs.
 ///
 /// `scope` propagates onto every returned config so the approval policy can
@@ -612,6 +694,20 @@ fn build_entry(
         // non-oracle alias `"websocket"` used to silently default to
         // Http/WebSocket instead of being rejected.
         let ty = entry.transport_type.as_deref();
+        // §11 — `discoveryCache: q().optional()` (sse/http only, NO
+        // `.catch`): a present-but-non-boolean value on a type that declares
+        // the key fails the whole entry's `safeParse`, exactly like a
+        // malformed `oauth` child below. `role` (`.catch(void 0)`) never
+        // rejects, so it needs no analogous check here — see
+        // [`role_flag`]/[`discovery_cache_flag`]'s doc comments for why
+        // neither value is threaded any further than this validation.
+        if discovery_cache_flag(ty, raw_entry.as_ref()).is_err() {
+            tracing::warn!(
+                server = %name,
+                "mcp.json: invalid \"discoveryCache\" (must be a boolean); skipping entry"
+            );
+            return None;
+        }
         let is_stdio = matches!(ty, None | Some("stdio"));
         let spec = if ty == Some("sdk") {
             // Oracle `MAn` @154585319 (v2.1.251 Mach-O, minified `mcp-sdk.js`
@@ -2534,5 +2630,113 @@ mod tests {
             cfgs.is_empty(),
             "an over-cap .mcp.json must be rejected by the shape/size guard, not parsed"
         );
+    }
+
+    // ── §11 — discoveryCache / role recognition ────────────────────────────
+
+    #[test]
+    fn discovery_cache_is_a_schema_key_only_for_sse_and_http_family() {
+        for ty in ["sse", "http", "streamable-http"] {
+            assert!(
+                discovery_cache_is_schema_key_for(Some(ty)),
+                "{ty} should declare discoveryCache"
+            );
+        }
+        for ty in [None, Some("stdio"), Some("ws"), Some("sdk"), Some("claudeai-proxy"), Some("sse-ide"), Some("ws-ide")] {
+            assert!(
+                !discovery_cache_is_schema_key_for(ty),
+                "{ty:?} should NOT declare discoveryCache"
+            );
+        }
+    }
+
+    #[test]
+    fn discovery_cache_flag_reads_a_boolean_on_a_declaring_type() {
+        let raw = serde_json::json!({"type":"http","url":"https://x","discoveryCache":false});
+        assert_eq!(discovery_cache_flag(Some("http"), &raw), Ok(Some(false)));
+        let raw = serde_json::json!({"type":"sse","url":"https://x","discoveryCache":true});
+        assert_eq!(discovery_cache_flag(Some("sse"), &raw), Ok(Some(true)));
+        let raw = serde_json::json!({"type":"http","url":"https://x"});
+        assert_eq!(discovery_cache_flag(Some("http"), &raw), Ok(None));
+    }
+
+    #[test]
+    fn discovery_cache_flag_rejects_a_non_boolean_on_a_declaring_type() {
+        let raw = serde_json::json!({"type":"http","url":"https://x","discoveryCache":"nope"});
+        assert_eq!(discovery_cache_flag(Some("http"), &raw), Err(InvalidDiscoveryCacheFlag));
+    }
+
+    #[test]
+    fn discovery_cache_flag_ignores_any_value_on_a_non_declaring_type() {
+        // A bad-typed discoveryCache on stdio is a schema-unknown key: zod
+        // never looks at it, so it must NOT reject the entry.
+        let raw = serde_json::json!({"command":"c","discoveryCache":"nope"});
+        assert_eq!(discovery_cache_flag(None, &raw), Ok(None));
+        assert_eq!(discovery_cache_flag(Some("stdio"), &raw), Ok(None));
+    }
+
+    /// End-to-end: a `discoveryCache` of the wrong TYPE on an sse/http entry
+    /// must drop the WHOLE server, keeping any valid sibling.
+    #[test]
+    fn build_entry_rejects_a_non_boolean_discovery_cache_on_http() {
+        let raw = r#"{
+          "mcpServers": {
+            "bad":  { "type": "http", "url": "https://x.example", "discoveryCache": "nope" },
+            "good": { "type": "http", "url": "https://y.example" }
+          }
+        }"#;
+        let cfgs = parse_mcp_json_string(raw, ConfigScope::Project).unwrap();
+        assert_eq!(cfgs.len(), 1, "the malformed discoveryCache entry must be dropped alone");
+        assert_eq!(cfgs[0].name, "good");
+    }
+
+    /// The SAME bad-typed `discoveryCache` value on `stdio` is schema-unknown
+    /// there and must NOT reject the entry.
+    #[test]
+    fn build_entry_ignores_discovery_cache_on_stdio() {
+        let raw = r#"{
+          "mcpServers": {
+            "srv": { "command": "c", "discoveryCache": "nope" }
+          }
+        }"#;
+        let cfgs = parse_mcp_json_string(raw, ConfigScope::Project).unwrap();
+        assert_eq!(cfgs.len(), 1);
+        assert_eq!(cfgs[0].name, "srv");
+    }
+
+    #[test]
+    fn role_is_a_schema_key_for_every_transport_but_sdk_and_claudeai_proxy() {
+        for ty in [None, Some("stdio"), Some("sse"), Some("http"), Some("streamable-http"), Some("ws"), Some("sse-ide"), Some("ws-ide")] {
+            assert!(role_is_schema_key_for(ty), "{ty:?} should declare role");
+        }
+        for ty in [Some("sdk"), Some("claudeai-proxy")] {
+            assert!(!role_is_schema_key_for(ty), "{ty:?} should NOT declare role");
+        }
+    }
+
+    #[test]
+    fn role_flag_accepts_only_the_literal_comms_and_catches_everything_else() {
+        let comms = serde_json::json!({"role":"comms"});
+        assert_eq!(role_flag(Some("stdio"), &comms), Some("comms".to_string()));
+
+        for bad in [
+            serde_json::json!({"role":"other"}),
+            serde_json::json!({"role":123}),
+            serde_json::json!({"role":null}),
+            serde_json::json!({}),
+        ] {
+            assert_eq!(
+                role_flag(Some("stdio"), &bad),
+                None,
+                "an invalid role must be silently caught to None, never reject the entry"
+            );
+        }
+    }
+
+    #[test]
+    fn role_flag_is_none_for_sdk_and_claudeai_proxy_even_when_present() {
+        let raw = serde_json::json!({"role":"comms"});
+        assert_eq!(role_flag(Some("sdk"), &raw), None);
+        assert_eq!(role_flag(Some("claudeai-proxy"), &raw), None);
     }
 }

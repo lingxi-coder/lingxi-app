@@ -38,6 +38,7 @@ pub mod capabilities;
 pub mod client;
 pub mod config_diagnostics;
 pub mod connection;
+pub mod discovery_cache;
 pub mod enterprise_policy;
 pub mod env_expansion;
 pub mod headers_helper;
@@ -63,6 +64,11 @@ pub use client::{
     MAX_MCP_DIRECTORY_PAGES,
 };
 pub use connection::{ConfigScope, McpConnectionState, McpServerConfig};
+pub use discovery_cache::{
+    cache_gate, decide, feature_enabled as discovery_cache_feature_enabled, max_stale_ms,
+    miss_telemetry_value, strike_threshold, ttl_ms, CacheGateReason, Decision as DiscoveryCacheDecision,
+    DiscoveryCacheEntry, DiscoveryCacheStore, EntryLookup as DiscoveryCacheEntryLookup, MissReason,
+};
 pub use env_expansion::{
     expand_env_vars_in_string, expand_with_env, startup_env_snapshot, EnvExpansion,
 };
@@ -74,9 +80,10 @@ pub use identity::{
 pub use inbound::{new_shared_roots, ElicitationCreateHandler, RootsListHandler, SharedRoots};
 pub use initialize_params::{ClientCapabilities, InitializeParams};
 pub use json_config::{
-    build_server_from_json_entry, load_mcp_json_with_precedence, load_mcp_servers,
-    parse_global_config_mcp_servers, parse_local_config_mcp_servers, parse_mcp_json_string,
-    parse_plugin_mcp_json_string, server_entry_shape_is_valid, McpJsonError,
+    build_server_from_json_entry, discovery_cache_flag, discovery_cache_is_schema_key_for,
+    load_mcp_json_with_precedence, load_mcp_servers, parse_global_config_mcp_servers,
+    parse_local_config_mcp_servers, parse_mcp_json_string, parse_plugin_mcp_json_string,
+    role_flag, role_is_schema_key_for, server_entry_shape_is_valid, McpJsonError,
 };
 pub use mcp_output_storage::{
     binary_blob_saved_message, decode_base64, extension_for_mime_type, format_file_size,

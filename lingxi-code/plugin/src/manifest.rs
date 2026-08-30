@@ -179,7 +179,9 @@ impl MonitorTrigger {
     pub fn as_str(&self) -> std::borrow::Cow<'_, str> {
         match self {
             Self::Always => std::borrow::Cow::Borrowed("always"),
-            Self::OnSkillInvoke(skill) => std::borrow::Cow::Owned(format!("on-skill-invoke:{skill}")),
+            Self::OnSkillInvoke(skill) => {
+                std::borrow::Cow::Owned(format!("on-skill-invoke:{skill}"))
+            }
         }
     }
 }

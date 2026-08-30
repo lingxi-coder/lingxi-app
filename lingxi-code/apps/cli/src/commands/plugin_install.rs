@@ -438,7 +438,10 @@ fn resolve_external_plugin_source(
         }
         MarketplaceExternalSource::Unsupported { error } => Err(format!(
             "plugin source type unsupported{}",
-            error.as_deref().map(|e| format!(": {e}")).unwrap_or_default()
+            error
+                .as_deref()
+                .map(|e| format!(": {e}"))
+                .unwrap_or_default()
         )),
     }
 }
@@ -2199,7 +2202,9 @@ mod tests {
         let outside = e._tmp.path().join("outside");
         std::fs::create_dir_all(outside.join(branding::PLUGIN_MANIFEST_DIR)).unwrap();
         std::fs::write(
-            outside.join(branding::PLUGIN_MANIFEST_DIR).join("plugin.json"),
+            outside
+                .join(branding::PLUGIN_MANIFEST_DIR)
+                .join("plugin.json"),
             r#"{"name":"evil","version":"1.0.0"}"#,
         )
         .unwrap();
@@ -2219,10 +2224,7 @@ mod tests {
 
         let err = run_install("evil@mymkt", None, &[], &e.plugins, &e.home, &e.cwd)
             .expect_err("a symlinked catalog entry must be rejected, not followed");
-        assert!(
-            err.contains("not found in marketplace"),
-            "got: {err}"
-        );
+        assert!(err.contains("not found in marketplace"), "got: {err}");
         // Nothing was exfiltrated into the cache or source-cache.
         for root in [e.plugins.join("cache"), e.plugins.join("source-cache")] {
             if !root.exists() {
@@ -2418,7 +2420,11 @@ mod tests {
         let e = env();
         let repository = e._tmp.path().join("url-source-pinned");
         let (repository, head) = init_git_plugin_fixture(&repository);
-        let wrong_sha = if head.starts_with('f') { "0".repeat(40) } else { "f".repeat(40) };
+        let wrong_sha = if head.starts_with('f') {
+            "0".repeat(40)
+        } else {
+            "f".repeat(40)
+        };
 
         let source = plugin::marketplace::MarketplaceExternalSource::Url {
             url: format!("file://{}", repository.display()),
@@ -2998,8 +3004,8 @@ mod tests {
         )
         .unwrap();
 
-        let err = run_install("bad name@mymkt", None, &[], &e.plugins, &e.home, &e.cwd)
-            .unwrap_err();
+        let err =
+            run_install("bad name@mymkt", None, &[], &e.plugins, &e.home, &e.cwd).unwrap_err();
         assert_eq!(
             err,
             "Installing plugin \"bad name@mymkt\"...✘ Failed to install plugin \"bad name@mymkt\": \
@@ -3142,7 +3148,9 @@ mod tests {
         let dep_path = e.plugins.join("cache/mymkt/dep/1.0.0");
         std::fs::create_dir_all(dep_path.join(branding::PLUGIN_MANIFEST_DIR)).unwrap();
         std::fs::write(
-            dep_path.join(branding::PLUGIN_MANIFEST_DIR).join("plugin.json"),
+            dep_path
+                .join(branding::PLUGIN_MANIFEST_DIR)
+                .join("plugin.json"),
             r#"{"name":"dep","version":"1.0.0"}"#,
         )
         .unwrap();
@@ -3280,7 +3288,15 @@ mod tests {
             r#"{"name":"hello"}"#,
         )
         .unwrap();
-        run_install("hello@mymkt", Some("user"), &[], &e.plugins, &e.home, &e.cwd).unwrap();
+        run_install(
+            "hello@mymkt",
+            Some("user"),
+            &[],
+            &e.plugins,
+            &e.home,
+            &e.cwd,
+        )
+        .unwrap();
         run_install(
             "hello@mymkt",
             Some("project"),
@@ -3330,7 +3346,15 @@ mod tests {
     #[test]
     fn update_converges_for_a_second_scope_pointing_at_an_existing_version_cache() {
         let e = env();
-        run_install("hello@mymkt", Some("user"), &[], &e.plugins, &e.home, &e.cwd).unwrap();
+        run_install(
+            "hello@mymkt",
+            Some("user"),
+            &[],
+            &e.plugins,
+            &e.home,
+            &e.cwd,
+        )
+        .unwrap();
         run_install(
             "hello@mymkt",
             Some("project"),
@@ -3356,14 +3380,19 @@ mod tests {
             msg.contains("updated from 1.2.3 to 2.0.0"),
             "the project scope must converge too, got: {msg}"
         );
-        let expected = e.plugins.join("cache/mymkt/hello/2.0.0").display().to_string();
+        let expected = e
+            .plugins
+            .join("cache/mymkt/hello/2.0.0")
+            .display()
+            .to_string();
         let records = installed_db(&e)["plugins"]["hello@mymkt"]
             .as_array()
             .unwrap()
             .clone();
         assert!(
-            records.iter().all(|r| r["installPath"] == expected
-                && r["version"] == "2.0.0"),
+            records
+                .iter()
+                .all(|r| r["installPath"] == expected && r["version"] == "2.0.0"),
             "both records must land on the 2.0.0 cache: {records:?}"
         );
     }

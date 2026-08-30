@@ -938,9 +938,7 @@ mod tests {
     /// too, not just on the load path.
     #[test]
     fn name_control_bidi_validation_short_circuits() {
-        let r = repo_with(
-            "{ \"name\": \"evil\u{202E}reversed\", \"version\":\"1.0.0\" }",
-        );
+        let r = repo_with("{ \"name\": \"evil\u{202E}reversed\", \"version\":\"1.0.0\" }");
         let err = run_tag_from_cwd(&r.root, None, false, false, None, false, "origin").unwrap_err();
         assert!(err.starts_with("✘ Plugin validation failed for "), "{err}");
         assert!(

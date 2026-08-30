@@ -1335,7 +1335,10 @@ mod tests {
         ) -> Result<traits::ElicitResultDto, traits::McpError> {
             unreachable!()
         }
-        async fn disconnect(&self, _conn_id: protocol::McpConnectionId) -> Result<(), traits::McpError> {
+        async fn disconnect(
+            &self,
+            _conn_id: protocol::McpConnectionId,
+        ) -> Result<(), traits::McpError> {
             unreachable!()
         }
         fn supported_transports(&self) -> Vec<traits::McpTransportKind> {

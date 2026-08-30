@@ -186,7 +186,10 @@ mod tests {
         registry.unregister(&["acme:deploy".to_string(), "acme:rollback".to_string()]);
         assert_eq!(registry.resolve("acme:deploy"), None);
         assert_eq!(registry.resolve("acme:rollback"), None);
-        assert_eq!(registry.resolve("other:keep"), Some(PathBuf::from("/b/keep.js")));
+        assert_eq!(
+            registry.resolve("other:keep"),
+            Some(PathBuf::from("/b/keep.js"))
+        );
     }
 
     #[test]
@@ -202,6 +205,9 @@ mod tests {
                 script_path: PathBuf::from("/a.js"),
             },
         ]);
-        assert_eq!(registry.names(), vec!["alpha:a".to_string(), "zeta:z".to_string()]);
+        assert_eq!(
+            registry.names(),
+            vec!["alpha:a".to_string(), "zeta:z".to_string()]
+        );
     }
 }

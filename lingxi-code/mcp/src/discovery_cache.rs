@@ -253,9 +253,8 @@ pub fn cache_gate(
         return Some(CacheGateReason::FeatureDisabled);
     }
     let headers_helper = match spec {
-        McpTransportSpec::Sse { headers_helper, .. } | McpTransportSpec::Http { headers_helper, .. } => {
-            headers_helper
-        }
+        McpTransportSpec::Sse { headers_helper, .. }
+        | McpTransportSpec::Http { headers_helper, .. } => headers_helper,
         _ => return Some(CacheGateReason::Transport),
     };
     if discovery_cache_opt_out == Some(false) {
@@ -366,7 +365,12 @@ pub struct DiscoveryCacheEntry {
 impl DiscoveryCacheEntry {
     /// Build a fresh entry for `cache_key`, saved "now".
     #[must_use]
-    pub fn new(cache_key: String, saved_at_ms: u64, capabilities_tools: bool, tool_count: u32) -> Self {
+    pub fn new(
+        cache_key: String,
+        saved_at_ms: u64,
+        capabilities_tools: bool,
+        tool_count: u32,
+    ) -> Self {
         Self {
             version: CACHE_SCHEMA_VERSION,
             cache_key,
@@ -547,7 +551,8 @@ impl DiscoveryCacheStore {
     pub fn cache_key(name: &str, spec: &McpTransportSpec) -> String {
         use sha2::{Digest, Sha256};
         let (kind, url, headers_json) = match spec {
-            McpTransportSpec::Sse { url, headers, .. } | McpTransportSpec::Http { url, headers, .. } => (
+            McpTransportSpec::Sse { url, headers, .. }
+            | McpTransportSpec::Http { url, headers, .. } => (
                 spec.kind(),
                 url.as_str(),
                 serde_json::to_string(headers).unwrap_or_default(),
@@ -648,7 +653,12 @@ mod tests {
     }
 
     fn clear_env() {
-        for var in [ENV_ENABLED, ENV_TTL_SECONDS, ENV_MAX_STALE_SECONDS, ENV_STRIKES] {
+        for var in [
+            ENV_ENABLED,
+            ENV_TTL_SECONDS,
+            ENV_MAX_STALE_SECONDS,
+            ENV_STRIKES,
+        ] {
             std::env::remove_var(var);
         }
     }
@@ -708,7 +718,11 @@ mod tests {
     #[test]
     fn cache_gate_headers_helper_reason() {
         assert_eq!(
-            cache_gate(&http_spec("https://x.example", Some("./helper")), None, true),
+            cache_gate(
+                &http_spec("https://x.example", Some("./helper")),
+                None,
+                true
+            ),
             Some(CacheGateReason::HeadersHelper)
         );
     }
@@ -731,10 +745,19 @@ mod tests {
 
     #[test]
     fn every_disable_reason_but_transport_collapses_to_disabled() {
-        assert_eq!(CacheGateReason::Transport.miss_reason(), MissReason::Transport);
-        assert_eq!(CacheGateReason::FeatureDisabled.miss_reason(), MissReason::Disabled);
+        assert_eq!(
+            CacheGateReason::Transport.miss_reason(),
+            MissReason::Transport
+        );
+        assert_eq!(
+            CacheGateReason::FeatureDisabled.miss_reason(),
+            MissReason::Disabled
+        );
         assert_eq!(CacheGateReason::OptOut.miss_reason(), MissReason::Disabled);
-        assert_eq!(CacheGateReason::HeadersHelper.miss_reason(), MissReason::Disabled);
+        assert_eq!(
+            CacheGateReason::HeadersHelper.miss_reason(),
+            MissReason::Disabled
+        );
     }
 
     // ── miss_telemetry_value (oracle `as`) ────────────────────────────────
@@ -766,8 +789,18 @@ mod tests {
         DiscoveryCacheEntry::new("k".into(), saved_at_ms, true, 3)
     }
 
-    fn policy(now_ms: u64, ttl_ms: u64, max_stale_ms: u64, strike_threshold: u32) -> DiscoveryCachePolicy {
-        DiscoveryCachePolicy { now_ms, ttl_ms, max_stale_ms, strike_threshold }
+    fn policy(
+        now_ms: u64,
+        ttl_ms: u64,
+        max_stale_ms: u64,
+        strike_threshold: u32,
+    ) -> DiscoveryCachePolicy {
+        DiscoveryCachePolicy {
+            now_ms,
+            ttl_ms,
+            max_stale_ms,
+            strike_threshold,
+        }
     }
 
     #[test]
@@ -780,21 +813,48 @@ mod tests {
             EntryLookup::Found(entry_at(1_000)),
             policy(1_000, 900_000, 14_400_000, 1),
         );
-        assert_eq!(d, Decision::Miss { reason: MissReason::Disabled });
+        assert_eq!(
+            d,
+            Decision::Miss {
+                reason: MissReason::Disabled
+            }
+        );
     }
 
     #[test]
     fn decide_absent() {
         let spec = http_spec("https://x.example", None);
-        let d = decide(&spec, None, true, EntryLookup::Absent, policy(1_000, 900_000, 14_400_000, 1));
-        assert_eq!(d, Decision::Miss { reason: MissReason::Absent });
+        let d = decide(
+            &spec,
+            None,
+            true,
+            EntryLookup::Absent,
+            policy(1_000, 900_000, 14_400_000, 1),
+        );
+        assert_eq!(
+            d,
+            Decision::Miss {
+                reason: MissReason::Absent
+            }
+        );
     }
 
     #[test]
     fn decide_corrupt() {
         let spec = http_spec("https://x.example", None);
-        let d = decide(&spec, None, true, EntryLookup::Corrupt, policy(1_000, 900_000, 14_400_000, 1));
-        assert_eq!(d, Decision::Miss { reason: MissReason::Corrupt });
+        let d = decide(
+            &spec,
+            None,
+            true,
+            EntryLookup::Corrupt,
+            policy(1_000, 900_000, 14_400_000, 1),
+        );
+        assert_eq!(
+            d,
+            Decision::Miss {
+                reason: MissReason::Corrupt
+            }
+        );
     }
 
     #[test]
@@ -809,7 +869,12 @@ mod tests {
             EntryLookup::Found(entry),
             policy(1_000, 900_000, 14_400_000, 1), // threshold
         );
-        assert_eq!(d, Decision::Miss { reason: MissReason::Strike });
+        assert_eq!(
+            d,
+            Decision::Miss {
+                reason: MissReason::Strike
+            }
+        );
     }
 
     #[test]
@@ -838,7 +903,12 @@ mod tests {
             EntryLookup::Found(entry),
             policy(15_000, 5_000, 10_000, 1), // age 15s >= 10s max-stale
         );
-        assert_eq!(d, Decision::Miss { reason: MissReason::Expired });
+        assert_eq!(
+            d,
+            Decision::Miss {
+                reason: MissReason::Expired
+            }
+        );
     }
 
     #[test]
@@ -846,31 +916,72 @@ mod tests {
         let spec = http_spec("https://x.example", None);
         // saved_at is 20s AHEAD of "now" — implausible, treated as expired.
         let entry = entry_at(20_000);
-        let d = decide(&spec, None, true, EntryLookup::Found(entry), policy(1_000, 5_000, 10_000, 1));
-        assert_eq!(d, Decision::Miss { reason: MissReason::Expired });
+        let d = decide(
+            &spec,
+            None,
+            true,
+            EntryLookup::Found(entry),
+            policy(1_000, 5_000, 10_000, 1),
+        );
+        assert_eq!(
+            d,
+            Decision::Miss {
+                reason: MissReason::Expired
+            }
+        );
     }
 
     #[test]
     fn decide_fresh_within_ttl() {
         let spec = http_spec("https://x.example", None);
         let entry = entry_at(1_000);
-        let d = decide(&spec, None, true, EntryLookup::Found(entry.clone()), policy(2_000, 5_000, 10_000, 1));
-        assert_eq!(d, Decision::Fresh { entry, age_ms: 1_000 });
+        let d = decide(
+            &spec,
+            None,
+            true,
+            EntryLookup::Found(entry.clone()),
+            policy(2_000, 5_000, 10_000, 1),
+        );
+        assert_eq!(
+            d,
+            Decision::Fresh {
+                entry,
+                age_ms: 1_000
+            }
+        );
     }
 
     #[test]
     fn decide_stale_when_past_ttl_but_within_max_stale() {
         let spec = http_spec("https://x.example", None);
         let entry = entry_at(0);
-        let d = decide(&spec, None, true, EntryLookup::Found(entry.clone()), policy(6_000, 5_000, 10_000, 1));
-        assert_eq!(d, Decision::Stale { entry, age_ms: 6_000 });
+        let d = decide(
+            &spec,
+            None,
+            true,
+            EntryLookup::Found(entry.clone()),
+            policy(6_000, 5_000, 10_000, 1),
+        );
+        assert_eq!(
+            d,
+            Decision::Stale {
+                entry,
+                age_ms: 6_000
+            }
+        );
     }
 
     #[test]
     fn decide_degenerate_zero_tools_forces_stale_even_within_ttl() {
         let spec = http_spec("https://x.example", None);
         let entry = DiscoveryCacheEntry::new("k".into(), 1_000, true, 0);
-        let d = decide(&spec, None, true, EntryLookup::Found(entry.clone()), policy(1_500, 5_000, 10_000, 1));
+        let d = decide(
+            &spec,
+            None,
+            true,
+            EntryLookup::Found(entry.clone()),
+            policy(1_500, 5_000, 10_000, 1),
+        );
         assert_eq!(d, Decision::Stale { entry, age_ms: 500 });
     }
 
@@ -880,7 +991,13 @@ mod tests {
         // capabilities_tools=false, tool_count=0: the server never CLAIMED
         // tools, so an empty list is expected, not degenerate.
         let entry = DiscoveryCacheEntry::new("k".into(), 1_000, false, 0);
-        let d = decide(&spec, None, true, EntryLookup::Found(entry.clone()), policy(1_500, 5_000, 10_000, 1));
+        let d = decide(
+            &spec,
+            None,
+            true,
+            EntryLookup::Found(entry.clone()),
+            policy(1_500, 5_000, 10_000, 1),
+        );
         assert_eq!(d, Decision::Fresh { entry, age_ms: 500 });
     }
 
@@ -888,7 +1005,9 @@ mod tests {
 
     #[test]
     fn feature_enabled_matrix() {
-        let _guard = env_test_lock().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         clear_env();
         assert!(!feature_enabled(), "unset defaults off");
         std::env::set_var(ENV_ENABLED, "true");
@@ -902,7 +1021,9 @@ mod tests {
 
     #[test]
     fn ttl_and_max_stale_defaults() {
-        let _guard = env_test_lock().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         clear_env();
         assert_eq!(max_stale_ms(), 14_400_000);
         assert_eq!(ttl_ms(), 900_000);
@@ -912,7 +1033,9 @@ mod tests {
 
     #[test]
     fn max_stale_env_override_is_clamped_to_the_seven_day_ceiling() {
-        let _guard = env_test_lock().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         clear_env();
         std::env::set_var(ENV_MAX_STALE_SECONDS, "99999999");
         assert_eq!(max_stale_ms(), 604_800_000);
@@ -921,7 +1044,9 @@ mod tests {
 
     #[test]
     fn ttl_env_override_is_capped_by_max_stale() {
-        let _guard = env_test_lock().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         clear_env();
         std::env::set_var(ENV_TTL_SECONDS, "999999");
         std::env::set_var(ENV_MAX_STALE_SECONDS, "100");
@@ -932,7 +1057,9 @@ mod tests {
 
     #[test]
     fn strikes_env_override_and_non_positive_fallback() {
-        let _guard = env_test_lock().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         clear_env();
         std::env::set_var(ENV_STRIKES, "3");
         assert_eq!(strike_threshold(), 3);

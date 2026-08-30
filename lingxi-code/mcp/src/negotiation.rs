@@ -124,9 +124,7 @@ mod tests {
         McpTransportSpec::Http {
             url: "https://mcp.example".into(),
             headers: traits::McpHeaders::from_iter(
-                headers
-                    .iter()
-                    .map(|(k, v)| (k.to_string(), v.to_string())),
+                headers.iter().map(|(k, v)| (k.to_string(), v.to_string())),
             ),
             headers_helper: None,
             oauth: None,
@@ -194,9 +192,10 @@ mod tests {
         };
         let out = classify_auth_failure(e, true, true);
         match out {
-            McpError::Connection(m) => assert!(m.starts_with(
-                "Server rejected the configured Authorization header (HTTP 401)."
-            )),
+            McpError::Connection(m) => {
+                assert!(m
+                    .starts_with("Server rejected the configured Authorization header (HTTP 401)."))
+            }
             other => panic!("expected AUTH_HEADER_REJECTED copy, got {other:?}"),
         }
     }

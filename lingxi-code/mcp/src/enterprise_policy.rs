@@ -1572,7 +1572,8 @@ mod tests {
         );
         std::fs::write(&path, &padded).unwrap();
         assert!(
-            std::fs::metadata(&path).unwrap().len() > crate::config_diagnostics::MCP_CONFIG_MAX_BYTES,
+            std::fs::metadata(&path).unwrap().len()
+                > crate::config_diagnostics::MCP_CONFIG_MAX_BYTES,
             "fixture must actually cross the {cap}-byte threshold it names"
         );
         assert!(

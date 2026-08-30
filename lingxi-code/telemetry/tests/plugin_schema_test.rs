@@ -115,7 +115,10 @@ fn enabled_for_session_payload_rejects_unknown_fields() {
         .unwrap()
         .insert("unexpected".to_string(), serde_json::json!(1));
     let result: Result<PluginEnabledForSessionPayload, _> = serde_json::from_value(json);
-    assert!(result.is_err(), "deny_unknown_fields must reject `unexpected`");
+    assert!(
+        result.is_err(),
+        "deny_unknown_fields must reject `unexpected`"
+    );
 }
 
 #[test]
@@ -181,7 +184,6 @@ fn load_failed_payload_rejects_unknown_fields() {
     let result: Result<LoadFailedPayload, _> = serde_json::from_value(json);
     assert!(result.is_err());
 }
-
 
 // ── Round-1 review regressions ──────────────────────────────────────────────
 

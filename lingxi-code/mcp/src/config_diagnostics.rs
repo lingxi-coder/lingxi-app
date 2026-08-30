@@ -154,9 +154,7 @@ pub fn read_mcp_config_file(path: &Path, scope: ConfigScope) -> Result<String, M
                         scope = label,
                         "MCP config skipped for {file} (scope={label}): not a regular file or exceeds {MCP_CONFIG_MAX_BYTES} byte limit"
                     );
-                    telemetry::emit_mcp_config_parse_gate(Some(
-                        telemetry::MCP_CONFIG_SHAPE_GATE,
-                    ));
+                    telemetry::emit_mcp_config_parse_gate(Some(telemetry::MCP_CONFIG_SHAPE_GATE));
                     return Err(McpConfigWarning {
                         file: Some(file.clone()),
                         path: String::new(),
@@ -894,9 +892,8 @@ mod tests {
     /// string, received undefined" even though the loader accepts it.)
     #[test]
     fn sdk_entry_with_no_url_is_not_flagged_invalid() {
-        let w = only(
-            &json!({"mcpServers":{"claude-vscode":{"type":"sdk","name":"claude-vscode"}}}),
-        );
+        let w =
+            only(&json!({"mcpServers":{"claude-vscode":{"type":"sdk","name":"claude-vscode"}}}));
         assert!(w.is_empty(), "sdk entry without url must not warn: {w:?}");
     }
 
@@ -933,10 +930,12 @@ mod tests {
     /// loader fix) in total diagnostic silence.
     #[test]
     fn claudeai_proxy_entry_without_id_is_flagged_invalid() {
-        let w = only(
-            &json!({"mcpServers":{"x":{"type":"claudeai-proxy","url":"https://x.test"}}}),
+        let w = only(&json!({"mcpServers":{"x":{"type":"claudeai-proxy","url":"https://x.test"}}}));
+        assert_eq!(
+            w.len(),
+            1,
+            "an idless claudeai-proxy entry must warn: {w:?}"
         );
-        assert_eq!(w.len(), 1, "an idless claudeai-proxy entry must warn: {w:?}");
         assert_eq!(
             w[0].message,
             "Skipped \u{2014} invalid MCP server config for \"x\": id: expected string, received undefined"
@@ -1199,7 +1198,9 @@ mod tests {
         );
         assert_eq!(
             err.suggestion.as_deref(),
-            Some("Check that the path is a plain JSON file (not a device, FIFO, or symlink to one)")
+            Some(
+                "Check that the path is a plain JSON file (not a device, FIFO, or symlink to one)"
+            )
         );
     }
 
@@ -1220,7 +1221,9 @@ mod tests {
         // suggestion text describes for devices/FIFOs/symlinks-to-those.
         let dir = TempDir::new().unwrap();
         let err = read_mcp_config_file(dir.path(), ConfigScope::Project).unwrap_err();
-        assert!(err.message.starts_with("MCP config is not a regular file or exceeds"));
+        assert!(err
+            .message
+            .starts_with("MCP config is not a regular file or exceeds"));
         assert!(!err.is_not_found());
     }
 
@@ -1235,10 +1238,14 @@ mod tests {
             .expect("mkfifo");
         assert!(status.success());
         let err = read_mcp_config_file(&fifo, ConfigScope::Project).unwrap_err();
-        assert!(err.message.starts_with("MCP config is not a regular file or exceeds"));
+        assert!(err
+            .message
+            .starts_with("MCP config is not a regular file or exceeds"));
         assert_eq!(
             err.suggestion.as_deref(),
-            Some("Check that the path is a plain JSON file (not a device, FIFO, or symlink to one)")
+            Some(
+                "Check that the path is a plain JSON file (not a device, FIFO, or symlink to one)"
+            )
         );
     }
 
@@ -1418,11 +1425,8 @@ mod tests {
     #[test]
     fn missing_project_mcp_json_yields_no_warnings() {
         let dir = TempDir::new().unwrap();
-        let warnings = collect_all_mcp_config_warnings_at(
-            &dir.path().join(".mcp.json"),
-            dir.path(),
-            None,
-        );
+        let warnings =
+            collect_all_mcp_config_warnings_at(&dir.path().join(".mcp.json"), dir.path(), None);
         assert!(warnings.is_empty());
     }
 

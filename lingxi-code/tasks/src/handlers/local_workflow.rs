@@ -920,7 +920,10 @@ impl LocalWorkflowHandler {
     /// to `plugin::PluginManager::with_plugin_workflows` and
     /// `tool_workflow::WorkflowTool::with_plugin_workflows`).
     #[must_use]
-    pub fn with_plugin_workflows(mut self, registry: Arc<workflow::PluginWorkflowRegistry>) -> Self {
+    pub fn with_plugin_workflows(
+        mut self,
+        registry: Arc<workflow::PluginWorkflowRegistry>,
+    ) -> Self {
         self.plugin_workflows = Some(registry);
         self
     }

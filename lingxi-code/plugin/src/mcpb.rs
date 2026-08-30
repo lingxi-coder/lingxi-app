@@ -302,9 +302,9 @@ fn substitute(value: &serde_json::Value, vars: &HashMap<String, TemplateVar>) ->
                 if let serde_json::Value::String(s) = item {
                     if let Some(key) = as_whole_user_config_token(s) {
                         match vars.get(key) {
-                            Some(TemplateVar::Array(values)) => out.extend(
-                                values.iter().cloned().map(serde_json::Value::String),
-                            ),
+                            Some(TemplateVar::Array(values)) => {
+                                out.extend(values.iter().cloned().map(serde_json::Value::String))
+                            }
                             Some(TemplateVar::Scalar(v)) => {
                                 out.push(serde_json::Value::String(v.clone()));
                             }
@@ -502,7 +502,10 @@ pub fn generate_mcp_config(
     // Oracle hardcodes `pathSeparator:"/"` at the ONE call site
     // (`uct`→`MY`) regardless of host OS — MCPB bundles are authored
     // portably and always use `/` here, never `std::path::MAIN_SEPARATOR`.
-    vars.insert("pathSeparator".to_string(), TemplateVar::Scalar("/".to_string()));
+    vars.insert(
+        "pathSeparator".to_string(),
+        TemplateVar::Scalar("/".to_string()),
+    );
     vars.insert("/".to_string(), TemplateVar::Scalar("/".to_string()));
     // Oracle `p={__dirname:r,pathSeparator:t,"/":t,...n}` where `n` is the
     // `systemDirs` argument, and the one call site (`MY` @159485465) always

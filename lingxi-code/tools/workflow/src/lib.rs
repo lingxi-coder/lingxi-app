@@ -695,7 +695,10 @@ impl WorkflowTool {
     /// saved workflow becomes resolvable by name alongside built-in/project/
     /// user workflows.
     #[must_use]
-    pub fn with_plugin_workflows(mut self, registry: Arc<workflow::PluginWorkflowRegistry>) -> Self {
+    pub fn with_plugin_workflows(
+        mut self,
+        registry: Arc<workflow::PluginWorkflowRegistry>,
+    ) -> Self {
         self.plugin_workflows = Some(registry);
         self
     }
@@ -1348,11 +1351,7 @@ mod tests {
         );
         // The registry is consulted LAST — a built-in still wins.
         assert_eq!(
-            workflow_source_for_name(
-                std::path::Path::new("."),
-                "deep-research",
-                Some(&registry)
-            ),
+            workflow_source_for_name(std::path::Path::new("."), "deep-research", Some(&registry)),
             Some("built-in")
         );
         assert_eq!(
@@ -2070,7 +2069,8 @@ mod tests {
             .await
             .unwrap_err();
         assert!(
-            err.0.starts_with("Workflow \"no-such-workflow\" not found."),
+            err.0
+                .starts_with("Workflow \"no-such-workflow\" not found."),
             "unexpected error: {}",
             err.0
         );
@@ -2131,8 +2131,7 @@ mod tests {
         )
         .expect_err("without the registry the launch path must not resolve it");
         assert_eq!(
-            err.0,
-            "Workflow \"acme:deploy\" not found. Available: (none)",
+            err.0, "Workflow \"acme:deploy\" not found. Available: (none)",
             "byte-exact launch-path miss message"
         );
 

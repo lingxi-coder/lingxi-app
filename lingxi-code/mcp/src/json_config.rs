@@ -987,14 +987,12 @@ fn build_entry(
                 Some("sse-ide") => {
                     // `l` declares no `authToken`, so zod strips it here even
                     // when a ws-ide-shaped entry carries one.
-                    let Some((ide_name, _, ide_running_in_windows)) =
-                        ide_schema_fields(
-                            entry.ide_name.as_ref(),
-                            entry.auth_token.as_ref(),
-                            entry.ide_running_in_windows.as_ref(),
-                            false,
-                        )
-                    else {
+                    let Some((ide_name, _, ide_running_in_windows)) = ide_schema_fields(
+                        entry.ide_name.as_ref(),
+                        entry.auth_token.as_ref(),
+                        entry.ide_running_in_windows.as_ref(),
+                        false,
+                    ) else {
                         tracing::warn!(
                             server = %name,
                             "mcp.json: sse-ide server has a missing or malformed \"ideName\"/\"ideRunningInWindows\"; skipping entry"
@@ -1013,14 +1011,12 @@ fn build_entry(
                 // — same shape as `sse-ide` plus an optional `authToken`, and
                 // the same required-`ideName` skip rule.
                 Some("ws-ide") => {
-                    let Some((ide_name, auth_token, ide_running_in_windows)) =
-                        ide_schema_fields(
-                            entry.ide_name.as_ref(),
-                            entry.auth_token.as_ref(),
-                            entry.ide_running_in_windows.as_ref(),
-                            true,
-                        )
-                    else {
+                    let Some((ide_name, auth_token, ide_running_in_windows)) = ide_schema_fields(
+                        entry.ide_name.as_ref(),
+                        entry.auth_token.as_ref(),
+                        entry.ide_running_in_windows.as_ref(),
+                        true,
+                    ) else {
                         tracing::warn!(
                             server = %name,
                             "mcp.json: ws-ide server has a missing or malformed \"ideName\"/\"authToken\"/\"ideRunningInWindows\"; skipping entry"
@@ -1376,7 +1372,10 @@ mod tests {
     fn unknown_type_with_url_is_rejected_not_defaulted_to_http() {
         let raw = r#"{"mcpServers":{"remote":{"type":"bogus","url":"https://example.test/mcp"}}}"#;
         let cfgs = parse_mcp_json_string(raw, ConfigScope::User).unwrap();
-        assert!(cfgs.is_empty(), "an unrecognized type must reject the entry");
+        assert!(
+            cfgs.is_empty(),
+            "an unrecognized type must reject the entry"
+        );
     }
 
     /// §12 fix: `{"type":"http","command":"x"}` (no `url`) used to be parsed
@@ -1400,7 +1399,10 @@ mod tests {
     fn empty_stdio_command_is_rejected() {
         let raw = r#"{"mcpServers":{"s":{"command":""}}}"#;
         let cfgs = parse_mcp_json_string(raw, ConfigScope::Project).unwrap();
-        assert!(cfgs.is_empty(), "an empty stdio command must reject the entry");
+        assert!(
+            cfgs.is_empty(),
+            "an empty stdio command must reject the entry"
+        );
     }
 
     /// Oracle `MAn`: `{type:"sdk",name,timeout,alwaysLoad}` — NO `url` and NO
@@ -1507,7 +1509,8 @@ mod tests {
                 "{ty} is absent from ZGn; a .mcp.json entry naming it must be skipped, not dialled as HTTP"
             );
             // Every config entry point shares the table.
-            let global = format!(r#"{{"mcpServers":{{"ide":{{"type":"{ty}","url":"http://x/sse"}}}}}}"#);
+            let global =
+                format!(r#"{{"mcpServers":{{"ide":{{"type":"{ty}","url":"http://x/sse"}}}}}}"#);
             assert!(parse_global_config_mcp_servers(&global, ConfigScope::User)
                 .unwrap()
                 .is_empty());
@@ -1750,7 +1753,11 @@ mod tests {
                 r#"{{"mcpServers":{{"ide":{{"type":"{ty}","url":"http://127.0.0.1:9999/sse","ideName":"VS Code"}}}}}}"#
             );
             let cfgs = parse_plugin_mcp_json_string(&raw, ConfigScope::Dynamic).unwrap();
-            assert_eq!(cfgs.len(), 1, "{ty} is an arm of KY, which the plugin loader uses");
+            assert_eq!(
+                cfgs.len(),
+                1,
+                "{ty} is an arm of KY, which the plugin loader uses"
+            );
         }
         // The plugin layer is not a free-for-all: a type outside KY still fails.
         let raw = r#"{"mcpServers":{"x":{"type":"bogus","url":"http://x"}}}"#;
@@ -1833,9 +1840,8 @@ mod tests {
     #[test]
     fn sse_ide_and_ws_ide_without_ide_name_are_skipped() {
         for ty in ["sse-ide", "ws-ide"] {
-            let raw = format!(
-                r#"{{"mcpServers":{{"ide":{{"type":"{ty}","url":"http://x/sse"}}}}}}"#
-            );
+            let raw =
+                format!(r#"{{"mcpServers":{{"ide":{{"type":"{ty}","url":"http://x/sse"}}}}}}"#);
             let cfgs = parse_plugin_mcp_json_string(&raw, ConfigScope::Dynamic).unwrap();
             assert!(
                 cfgs.is_empty(),
@@ -2017,7 +2023,10 @@ mod tests {
                 serde_json::json!({"type": "http", "url": "https://x.test/mcp"}),
                 true,
             ),
-            (serde_json::json!({"type": "ws", "url": "wss://x.test"}), true),
+            (
+                serde_json::json!({"type": "ws", "url": "wss://x.test"}),
+                true,
+            ),
             (serde_json::json!({"type": "sdk"}), false),
             (serde_json::json!({"type": "sdk", "name": "n"}), true),
             (
@@ -2049,7 +2058,8 @@ mod tests {
         // internal-only IDE transports pass validation (the agent-level drop
         // happens later, in `agent::mcp_servers`, mirroring oracle `esn`) even
         // though the CONFIG-layer loader rejects them.
-        let ide = serde_json::json!({"type": "sse-ide", "url": "http://x/sse", "ideName": "VS Code"});
+        let ide =
+            serde_json::json!({"type": "sse-ide", "url": "http://x/sse", "ideName": "VS Code"});
         assert!(server_entry_shape_is_valid(&ide));
         assert!(build_server_from_json_entry("ide", &ide, ConfigScope::Agent).is_none());
     }
@@ -2116,7 +2126,10 @@ mod tests {
         // An arbitrary non-URL string must also reject (the `.url()` half).
         let raw = r#"{"mcpServers":{"remote":{"type":"http","url":"https://x.test","oauth":{"authServerMetadataUrl":"not-a-url"}}}}"#;
         let cfgs = parse_mcp_json_string(raw, ConfigScope::User).unwrap();
-        assert!(cfgs.is_empty(), "a non-URL authServerMetadataUrl must fail `.url()`");
+        assert!(
+            cfgs.is_empty(),
+            "a non-URL authServerMetadataUrl must fail `.url()`"
+        );
     }
 
     #[test]
@@ -2130,7 +2143,11 @@ mod tests {
     fn oauth_valid_https_metadata_url_is_kept() {
         let raw = r#"{"mcpServers":{"remote":{"type":"http","url":"https://x.test","oauth":{"authServerMetadataUrl":"https://auth.example/.well-known/oauth-authorization-server","callbackPort":8123,"scopes":"read"}}}}"#;
         let cfgs = parse_mcp_json_string(raw, ConfigScope::User).unwrap();
-        assert_eq!(cfgs.len(), 1, "a fully valid oauth child must keep the server");
+        assert_eq!(
+            cfgs.len(),
+            1,
+            "a fully valid oauth child must keep the server"
+        );
     }
 
     #[test]
@@ -2170,7 +2187,8 @@ mod tests {
     /// `McpTransportSpec::WebSocket`.
     #[test]
     fn non_oracle_websocket_alias_is_rejected() {
-        let raw = r#"{"mcpServers":{"remote":{"type":"websocket","url":"wss://example.test/mcp"}}}"#;
+        let raw =
+            r#"{"mcpServers":{"remote":{"type":"websocket","url":"wss://example.test/mcp"}}}"#;
         let cfgs = parse_mcp_json_string(raw, ConfigScope::User).unwrap();
         assert!(cfgs.is_empty(), "\"websocket\" is not an oracle-valid type");
     }
@@ -2180,7 +2198,8 @@ mod tests {
     /// into `timeout` for a `ws` transport.
     #[test]
     fn ws_ignores_request_timeout_ms() {
-        let raw = r#"{"mcpServers":{"r":{"type":"ws","url":"wss://x.test","request_timeout_ms":45000}}}"#;
+        let raw =
+            r#"{"mcpServers":{"r":{"type":"ws","url":"wss://x.test","request_timeout_ms":45000}}}"#;
         let cfgs = parse_mcp_json_string(raw, ConfigScope::User).unwrap();
         assert_eq!(cfgs.len(), 1);
         assert_eq!(
@@ -2281,7 +2300,10 @@ mod tests {
                 oauth,
                 ..
             } => {
-                assert!(headers.is_empty(), "`NAn` declares no `headers`: {headers:?}");
+                assert!(
+                    headers.is_empty(),
+                    "`NAn` declares no `headers`: {headers:?}"
+                );
                 assert_eq!(
                     headers_helper.as_deref(),
                     None,
@@ -2353,7 +2375,8 @@ mod tests {
             "`NAn.id` is required; an idless claudeai-proxy entry must be skipped"
         );
         // `i()` has no `.min(1)`, so an EMPTY id still satisfies the schema.
-        let raw = r#"{"mcpServers":{"x":{"type":"claudeai-proxy","url":"https://x.test","id":""}}}"#;
+        let raw =
+            r#"{"mcpServers":{"x":{"type":"claudeai-proxy","url":"https://x.test","id":""}}}"#;
         let cfgs = parse_mcp_json_string(raw, ConfigScope::User).unwrap();
         assert_eq!(cfgs.len(), 1, "an empty `id` still satisfies `i()`");
     }
@@ -2868,7 +2891,8 @@ mod tests {
         assert_eq!(cfgs[0].timeout_ms, None);
 
         // Non-positive alias is also coerced away (.positive()).
-        let raw = r#"{"mcpServers":{"r":{"type":"http","url":"https://x.test","request_timeout_ms":0}}}"#;
+        let raw =
+            r#"{"mcpServers":{"r":{"type":"http","url":"https://x.test","request_timeout_ms":0}}}"#;
         let cfgs = parse_mcp_json_string(raw, ConfigScope::User).unwrap();
         assert_eq!(cfgs[0].timeout_ms, None);
     }
@@ -2978,7 +3002,15 @@ mod tests {
                 "{ty} should declare discoveryCache"
             );
         }
-        for ty in [None, Some("stdio"), Some("ws"), Some("sdk"), Some("claudeai-proxy"), Some("sse-ide"), Some("ws-ide")] {
+        for ty in [
+            None,
+            Some("stdio"),
+            Some("ws"),
+            Some("sdk"),
+            Some("claudeai-proxy"),
+            Some("sse-ide"),
+            Some("ws-ide"),
+        ] {
             assert!(
                 !discovery_cache_is_schema_key_for(ty),
                 "{ty:?} should NOT declare discoveryCache"
@@ -2999,7 +3031,10 @@ mod tests {
     #[test]
     fn discovery_cache_flag_rejects_a_non_boolean_on_a_declaring_type() {
         let raw = serde_json::json!({"type":"http","url":"https://x","discoveryCache":"nope"});
-        assert_eq!(discovery_cache_flag(Some("http"), &raw), Err(InvalidDiscoveryCacheFlag));
+        assert_eq!(
+            discovery_cache_flag(Some("http"), &raw),
+            Err(InvalidDiscoveryCacheFlag)
+        );
     }
 
     #[test]
@@ -3022,7 +3057,11 @@ mod tests {
           }
         }"#;
         let cfgs = parse_mcp_json_string(raw, ConfigScope::Project).unwrap();
-        assert_eq!(cfgs.len(), 1, "the malformed discoveryCache entry must be dropped alone");
+        assert_eq!(
+            cfgs.len(),
+            1,
+            "the malformed discoveryCache entry must be dropped alone"
+        );
         assert_eq!(cfgs[0].name, "good");
     }
 
@@ -3042,7 +3081,16 @@ mod tests {
 
     #[test]
     fn role_is_a_schema_key_for_every_transport_but_sdk_and_claudeai_proxy() {
-        for ty in [None, Some("stdio"), Some("sse"), Some("http"), Some("streamable-http"), Some("ws"), Some("sse-ide"), Some("ws-ide")] {
+        for ty in [
+            None,
+            Some("stdio"),
+            Some("sse"),
+            Some("http"),
+            Some("streamable-http"),
+            Some("ws"),
+            Some("sse-ide"),
+            Some("ws-ide"),
+        ] {
             assert!(role_is_schema_key_for(ty), "{ty:?} should declare role");
         }
         // `sdk`/`claudeai-proxy` omit the key; a `type` the union has no arm
@@ -3054,7 +3102,10 @@ mod tests {
             Some("websocket"),
             Some(""),
         ] {
-            assert!(!role_is_schema_key_for(ty), "{ty:?} should NOT declare role");
+            assert!(
+                !role_is_schema_key_for(ty),
+                "{ty:?} should NOT declare role"
+            );
         }
     }
 

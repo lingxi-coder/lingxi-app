@@ -777,7 +777,9 @@ impl HttpTransport for ChallengeAwareAs {
             // names a URL — 404 it so a wrongly-used guess fails loudly
             // instead of silently degrading to some other working path.
             (404, String::new())
-        } else if req.url == "https://as-from-challenge.example.com/.well-known/oauth-authorization-server" {
+        } else if req.url
+            == "https://as-from-challenge.example.com/.well-known/oauth-authorization-server"
+        {
             (
                 200,
                 r#"{"authorization_endpoint":"https://as-from-challenge.example.com/authorize","token_endpoint":"https://as-from-challenge.example.com/token"}"#.to_string(),
@@ -919,7 +921,10 @@ async fn static_authorization_header_survives_oauth_bearer() {
     let (on_url, _rx) = url_capture();
 
     let mut headers = traits::McpHeaders::new();
-    headers.insert("Authorization".to_string(), "Bearer configured-static".into());
+    headers.insert(
+        "Authorization".to_string(),
+        "Bearer configured-static".into(),
+    );
     let config = McpServerConfig {
         name: "static-with-oauth".into(),
         spec: McpTransportSpec::Http {
@@ -967,7 +972,10 @@ async fn static_authorization_header_survives_oauth_bearer() {
 async fn static_authorization_header_rejection_is_classified() {
     let transport = RecordingTransport::new(usize::MAX);
     let mut headers = traits::McpHeaders::new();
-    headers.insert("Authorization".to_string(), "Bearer configured-static".into());
+    headers.insert(
+        "Authorization".to_string(),
+        "Bearer configured-static".into(),
+    );
     let config = McpServerConfig {
         name: "static-rejected".into(),
         spec: McpTransportSpec::Http {
@@ -984,7 +992,10 @@ async fn static_authorization_header_rejection_is_classified() {
     };
 
     let registry = McpRegistry::new(transport.clone() as Arc<dyn McpTransport>);
-    let err = registry.connect(config).await.expect_err("must be rejected");
+    let err = registry
+        .connect(config)
+        .await
+        .expect_err("must be rejected");
 
     assert_eq!(
         err.to_string(),
@@ -1011,9 +1022,7 @@ async fn headers_helper_minted_authorization_survives_oauth_bearer() {
         spec: McpTransportSpec::Http {
             url: "https://mcp.example.com/v1".into(),
             headers: traits::McpHeaders::new(),
-            headers_helper: Some(
-                r#"printf '{"Authorization":"Bearer helper-minted"}'"#.into(),
-            ),
+            headers_helper: Some(r#"printf '{"Authorization":"Bearer helper-minted"}'"#.into()),
             oauth: Some(oauth_block(Some("client-x"))),
         },
         // User scope so the headersHelper trust-dialog check is skipped.
@@ -1078,9 +1087,7 @@ async fn headers_helper_minted_authorization_rejection_is_classified() {
         spec: McpTransportSpec::Http {
             url: "https://mcp.example.com/v1".into(),
             headers: traits::McpHeaders::new(),
-            headers_helper: Some(
-                r#"printf '{"Authorization":"Bearer helper-minted"}'"#.into(),
-            ),
+            headers_helper: Some(r#"printf '{"Authorization":"Bearer helper-minted"}'"#.into()),
             oauth: None,
         },
         scope: ConfigScope::User,
@@ -1091,7 +1098,10 @@ async fn headers_helper_minted_authorization_rejection_is_classified() {
     };
 
     let registry = McpRegistry::new(transport.clone() as Arc<dyn McpTransport>);
-    let err = registry.connect(config).await.expect_err("must be rejected");
+    let err = registry
+        .connect(config)
+        .await
+        .expect_err("must be rejected");
 
     assert_eq!(
         err.to_string(),
@@ -1165,7 +1175,10 @@ async fn headers_helper_minting_other_header_does_not_suppress_oauth() {
         "OAuth must still inject its Bearer when the helper mints a DIFFERENT header"
     );
     if let McpTransportSpec::Http { headers, .. } = seen {
-        assert_eq!(headers.get("X-Api-Key").map(String::as_str), Some("helper-key"));
+        assert_eq!(
+            headers.get("X-Api-Key").map(String::as_str),
+            Some("helper-key")
+        );
     } else {
         panic!("expected Http spec");
     }
@@ -2298,6 +2311,9 @@ async fn xaa_stored_refresh_token_inside_300s_window_refreshes_proactively() {
             .iter()
             .any(|r| r.url == "https://as.example.com/token"),
         "the proactive refresh leg must actually be hit; got {:?}",
-        http.requests().iter().map(|r| r.url.clone()).collect::<Vec<_>>()
+        http.requests()
+            .iter()
+            .map(|r| r.url.clone())
+            .collect::<Vec<_>>()
     );
 }

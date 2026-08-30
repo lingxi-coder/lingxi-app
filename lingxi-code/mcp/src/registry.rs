@@ -908,7 +908,10 @@ impl McpRegistry {
         //    unparseable (a bare hostname with no scheme, say). Same
         //    `errorCode:"INVALID_CONFIG"` as gate 2; also does not dial.
         if let Some(err) = config.connect_time_url_error() {
-            emit_server_config_invalid(&config, telemetry::tengu::mcp::ConfigInvalidSource::Connect);
+            emit_server_config_invalid(
+                &config,
+                telemetry::tengu::mcp::ConfigInvalidSource::Connect,
+            );
             return Err(McpError::Connection(err.to_string()));
         }
 
@@ -3309,9 +3312,8 @@ fn degraded_payloads_for_server(
             | DegradedReason::ToolSchemaUnsupported
             | DegradedReason::ToolSchemaInvalid
             | DegradedReason::ToolPropertyKeyInvalid => (None, Some(*count), None),
-            DegradedReason::ToolSchemaInvalidGated | DegradedReason::ToolPropertyKeyInvalidGated => {
-                (None, None, Some(*count))
-            }
+            DegradedReason::ToolSchemaInvalidGated
+            | DegradedReason::ToolPropertyKeyInvalidGated => (None, None, Some(*count)),
             // `SchemaValidatorUnavailable` is process-global (fired from
             // `tool_schema::meta_validator`, never tallied into this
             // per-server map) and the enum is `#[non_exhaustive]` — a future
@@ -4475,7 +4477,10 @@ mod tests {
             resource_templates[0].description.as_deref(),
             Some("A file on disk")
         );
-        assert_eq!(resource_templates[0].mime_type.as_deref(), Some("text/plain"));
+        assert_eq!(
+            resource_templates[0].mime_type.as_deref(),
+            Some("text/plain")
+        );
     }
 
     /// The capability gate: without the `resources` capability the fetch must
@@ -4698,19 +4703,35 @@ mod tests {
                 )
             })
             .collect();
-        assert_eq!(payloads.len(), 7, "one payload per nonzero bucket: {payloads:?}");
+        assert_eq!(
+            payloads.len(),
+            7,
+            "one payload per nonzero bucket: {payloads:?}"
+        );
         assert_eq!(by_reason["tool_schema_normalized"], (Some(3), None, None));
-        assert_eq!(by_reason["tool_schema_normalize_gated"], (None, Some(2), None));
+        assert_eq!(
+            by_reason["tool_schema_normalize_gated"],
+            (None, Some(2), None)
+        );
         assert_eq!(by_reason["tool_schema_unsupported"], (None, Some(1), None));
         assert_eq!(by_reason["tool_schema_invalid"], (None, Some(4), None));
-        assert_eq!(by_reason["tool_property_key_invalid"], (None, Some(5), None));
-        assert_eq!(by_reason["tool_schema_invalid_gated"], (None, None, Some(6)));
+        assert_eq!(
+            by_reason["tool_property_key_invalid"],
+            (None, Some(5), None)
+        );
+        assert_eq!(
+            by_reason["tool_schema_invalid_gated"],
+            (None, None, Some(6))
+        );
         assert_eq!(
             by_reason["tool_property_key_invalid_gated"],
             (None, None, Some(7))
         );
         for p in &payloads {
-            assert_eq!(p.transport_type.as_ref().map(Verified::as_str), Some("http"));
+            assert_eq!(
+                p.transport_type.as_ref().map(Verified::as_str),
+                Some("http")
+            );
             assert!(
                 p.mcp_server_name.is_none(),
                 "`http` is user-configurable; the oracle's HT gate drops the name"
@@ -4766,15 +4787,19 @@ mod tests {
         assert!(p.skipped_count.is_none());
         assert!(p.kept_count.is_none());
         assert_eq!(
-            p.transport_type.as_ref().map(telemetry::pii::Verified::as_str),
+            p.transport_type
+                .as_ref()
+                .map(telemetry::pii::Verified::as_str),
             Some("stdio")
         );
     }
 
     #[test]
     fn degraded_payloads_for_server_is_empty_when_no_bucket_is_nonzero() {
-        assert!(degraded_payloads_for_server(&std::collections::HashMap::new(), "stdio", "srv")
-            .is_empty());
+        assert!(
+            degraded_payloads_for_server(&std::collections::HashMap::new(), "stdio", "srv")
+                .is_empty()
+        );
     }
 
     /// §20b — `server_config_invalid_payload` carries the RAW config `type`
@@ -4838,16 +4863,15 @@ mod tests {
                 requires_user_interaction: false,
             },
         ];
-        let payload = tools_listed_payload(
-            "http",
-            std::time::Duration::from_millis(42),
-            &tools,
-            "srv",
-        );
+        let payload =
+            tools_listed_payload("http", std::time::Duration::from_millis(42), &tools, "srv");
         assert_eq!(payload.transport_type.as_str(), "http");
         assert_eq!(payload.list_duration_ms, 42);
         assert_eq!(payload.tool_count, 3);
-        assert_eq!(payload.always_load_count, 1, "only the Some(true) tool counts");
+        assert_eq!(
+            payload.always_load_count, 1,
+            "only the Some(true) tool counts"
+        );
         assert_eq!(payload.discovery_source.as_str(), "live");
         // Gated: `http` is a user-configurable transport, so the oracle's
         // `HT` gate is false and `EA` drops the key entirely.
@@ -4903,7 +4927,10 @@ mod tests {
             1,
             "a server whose hostname is on the flag list must have its schema NORMALIZED, not dropped: {listed_tools:?}"
         );
-        assert_eq!(listed_tools[0].input_schema["type"], serde_json::json!("object"));
+        assert_eq!(
+            listed_tools[0].input_schema["type"],
+            serde_json::json!("object")
+        );
         assert!(listed_tools[0].description.starts_with("Input constraint:"));
 
         // An UNLISTED hostname takes the gate-off branch and is dropped.

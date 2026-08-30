@@ -390,7 +390,10 @@ mod tests {
 
     #[test]
     fn env_legacy_and_auto_parse_clean() {
-        assert_eq!(parse_env_mode(Some("legacy")), (Some(EnvMode::Legacy), None));
+        assert_eq!(
+            parse_env_mode(Some("legacy")),
+            (Some(EnvMode::Legacy), None)
+        );
         assert_eq!(parse_env_mode(Some("auto")), (Some(EnvMode::Auto), None));
     }
 
@@ -400,7 +403,9 @@ mod tests {
         assert_eq!(mode, None);
         assert_eq!(
             warning.as_deref(),
-            Some("MCP_PROTOCOL_NEGOTIATION=bogus is invalid; expected 'legacy' or 'auto' — ignoring")
+            Some(
+                "MCP_PROTOCOL_NEGOTIATION=bogus is invalid; expected 'legacy' or 'auto' — ignoring"
+            )
         );
     }
 
@@ -424,7 +429,10 @@ mod tests {
             assert!(env_auto_eligible(label), "{label} should be Kr-eligible");
         }
         for label in ["sse", "ws", "ide", "in-process", "sdk-control"] {
-            assert!(!env_auto_eligible(label), "{label} should NOT be Kr-eligible");
+            assert!(
+                !env_auto_eligible(label),
+                "{label} should NOT be Kr-eligible"
+            );
         }
     }
 

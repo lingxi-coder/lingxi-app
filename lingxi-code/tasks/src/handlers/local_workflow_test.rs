@@ -1625,11 +1625,7 @@ async fn workflow_runs_a_nested_name_from_plugin_workflow_registry() {
     let _g = ENV_LOCK.lock().unwrap();
     let script_dir = tempdir().unwrap();
     let script_path = script_dir.path().join("deploy.js");
-    std::fs::write(
-        &script_path,
-        "return { source: 'plugin', n: args.n };",
-    )
-    .unwrap();
+    std::fs::write(&script_path, "return { source: 'plugin', n: args.n };").unwrap();
 
     let registry = Arc::new(workflow::PluginWorkflowRegistry::new());
     registry.register(vec![workflow::PluginWorkflowEntry {

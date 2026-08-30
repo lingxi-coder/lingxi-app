@@ -209,7 +209,10 @@ impl PluginManager {
     /// name through the SAME `Workflow` tool call and `workflow()` nested-call
     /// path as a built-in/project/user workflow.
     #[must_use]
-    pub fn with_plugin_workflows(mut self, registry: Arc<workflow::PluginWorkflowRegistry>) -> Self {
+    pub fn with_plugin_workflows(
+        mut self,
+        registry: Arc<workflow::PluginWorkflowRegistry>,
+    ) -> Self {
         self.plugin_workflows = Some(registry);
         self
     }
@@ -321,13 +324,13 @@ impl PluginManager {
                  not yet wired — install a pre-fetched plugin directory via \
                  PluginSource::LocalPath"
             ))),
-            PluginSource::Marketplace { url, name } => Err(PluginManagerError::Marketplace(
-                format!(
+            PluginSource::Marketplace { url, name } => {
+                Err(PluginManagerError::Marketplace(format!(
                     "install of '{name}' from marketplace '{url}' is not supported by \
                      PluginManager::install; run the `plugin install` CLI command, which \
                      resolves marketplace sources through the production install pipeline"
-                ),
-            )),
+                )))
+            }
             PluginSource::Git { url, .. } => Err(PluginManagerError::Fetch(format!(
                 "install of a plugin from git repository '{url}' is not supported by \
                  PluginManager::install; run the `plugin install` CLI command, which \

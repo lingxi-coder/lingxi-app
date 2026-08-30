@@ -2098,7 +2098,9 @@ mod tests {
             false,
         );
         assert!(matches!(
-            plain.check_permissions(&serde_json::json!({}), &use_ctx).await,
+            plain
+                .check_permissions(&serde_json::json!({}), &use_ctx)
+                .await,
             PermissionResult::Allow { .. }
         ));
     }

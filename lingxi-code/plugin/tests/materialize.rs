@@ -919,7 +919,8 @@ async fn install_network_fetch_arms_return_guidance_error_not_panic() {
     use plugin::PluginSource;
 
     let tmp = tempfile::tempdir().unwrap();
-    let (manager, _cmd) = make_manager(&tmp.path().join("plugins"), &tmp.path().join("secrets")).await;
+    let (manager, _cmd) =
+        make_manager(&tmp.path().join("plugins"), &tmp.path().join("secrets")).await;
 
     let git_err = manager
         .install(PluginSource::Git {

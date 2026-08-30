@@ -65,9 +65,11 @@ impl<'de> Deserialize<'de> for MarketplacePluginSource {
         if let serde_json::Value::String(s) = &value {
             return Ok(MarketplacePluginSource::Relative(s.clone()));
         }
-        let structured = serde_json::from_value::<MarketplaceExternalSource>(value)
-            .unwrap_or_else(|error| MarketplaceExternalSource::Unsupported {
-                error: Some(error.to_string()),
+        let structured =
+            serde_json::from_value::<MarketplaceExternalSource>(value).unwrap_or_else(|error| {
+                MarketplaceExternalSource::Unsupported {
+                    error: Some(error.to_string()),
+                }
             });
         Ok(MarketplacePluginSource::Structured(structured))
     }
@@ -453,7 +455,10 @@ mod tests {
             Some(MarketplacePluginSource::Structured(MarketplaceExternalSource::Unsupported {
                 error,
             })) => {
-                assert!(error.is_some(), "the placeholder should carry the parse reason");
+                assert!(
+                    error.is_some(),
+                    "the placeholder should carry the parse reason"
+                );
             }
             other => panic!("expected an Unsupported placeholder, got {other:?}"),
         }
@@ -481,13 +486,12 @@ mod tests {
             other => panic!("expected Url, got {other:?}"),
         }
 
-        let archive_source: MarketplaceExternalSource =
-            serde_json::from_value(serde_json::json!({
-                "source": "archive",
-                "url": "https://example.test/plugin.zip",
-                "sha256": "b".repeat(64)
-            }))
-            .expect("parse archive source");
+        let archive_source: MarketplaceExternalSource = serde_json::from_value(serde_json::json!({
+            "source": "archive",
+            "url": "https://example.test/plugin.zip",
+            "sha256": "b".repeat(64)
+        }))
+        .expect("parse archive source");
         match archive_source {
             MarketplaceExternalSource::Archive { url, sha256 } => {
                 assert_eq!(url, "https://example.test/plugin.zip");

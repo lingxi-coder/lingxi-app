@@ -724,8 +724,9 @@ fn add_remote(
     }
 
     // From here the "Adding marketplace…" progress prefix is part of the line.
-    let (name, staged_clone) = clone_marketplace(plugins_dir, &clone_url, &hint, git_ref, sparse)
-        .map_err(|e| format!("Adding marketplace…✘ Failed to add marketplace: {e}"))?;
+    let (name, staged_clone) =
+        clone_marketplace(plugins_dir, &clone_url, &hint, git_ref, sparse)
+            .map_err(|e| format!("Adding marketplace…✘ Failed to add marketplace: {e}"))?;
     // §8: the cloned catalog's declared `name` is attacker-controlled the
     // moment `<source>` names a repo the caller doesn't own; validate it
     // before it can be registered.
@@ -2074,7 +2075,10 @@ mod tests {
             &e.cwd,
         )
         .unwrap_err();
-        assert_eq!(err, "✘ Invalid scope \'bogus\'. Use: user, project, or local");
+        assert_eq!(
+            err,
+            "✘ Invalid scope \'bogus\'. Use: user, project, or local"
+        );
     }
 
     /// `prune_to_sparse_paths` — the working-tree narrowing that stands in for
@@ -2093,16 +2097,16 @@ mod tests {
         std::fs::create_dir_all(root.join("unrelated-monorepo-package")).unwrap();
         std::fs::write(root.join("README.md"), "hi").unwrap();
 
-        prune_to_sparse_paths(
-            root,
-            &[".claude-plugin".to_string(), "plugins".to_string()],
-        )
-        .unwrap();
+        prune_to_sparse_paths(root, &[".claude-plugin".to_string(), "plugins".to_string()])
+            .unwrap();
 
         assert!(root.join(".git").is_dir(), ".git must survive pruning");
         assert!(root.join(".claude-plugin/marketplace.json").is_file());
         assert!(root.join("plugins/foo").is_dir());
-        assert!(root.join("README.md").is_file(), "top-level files always survive");
+        assert!(
+            root.join("README.md").is_file(),
+            "top-level files always survive"
+        );
         assert!(
             !root.join("unrelated-monorepo-package").exists(),
             "an un-listed top-level directory must be pruned"
@@ -2120,7 +2124,8 @@ mod tests {
         let repo = repo_root.path().join("repo");
         std::fs::create_dir_all(repo.join(branding::PLUGIN_MANIFEST_DIR)).unwrap();
         std::fs::write(
-            repo.join(branding::PLUGIN_MANIFEST_DIR).join("marketplace.json"),
+            repo.join(branding::PLUGIN_MANIFEST_DIR)
+                .join("marketplace.json"),
             r#"{"name":"sparse-mkt","owner":{"name":"me"},"plugins":[]}"#,
         )
         .unwrap();
@@ -2141,8 +2146,15 @@ mod tests {
                 "fixture",
             ],
         ] {
-            let output = std::process::Command::new("git").args(args).output().unwrap();
-            assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+            let output = std::process::Command::new("git")
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
         }
 
         let e = env();

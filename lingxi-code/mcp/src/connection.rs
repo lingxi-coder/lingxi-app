@@ -65,7 +65,8 @@ pub const UNCONFIGURED_ERROR: &str = "No URL configured for this server";
 /// [`UNCONFIGURED_ERROR`] (a blank url) this fires on a url that IS present
 /// but does not parse — e.g. a bare hostname with no scheme. See
 /// [`McpServerConfig::connect_time_url_error`].
-pub const INVALID_URL_ERROR: &str = "'url' is not a valid URL. Update the server's config and reconnect.";
+pub const INVALID_URL_ERROR: &str =
+    "'url' is not a valid URL. Update the server's config and reconnect.";
 
 impl McpServerConfig {
     /// claude `zar` (@231408681) — is this server *unconfigured* (nothing to

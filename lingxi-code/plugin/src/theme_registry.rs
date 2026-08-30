@@ -173,9 +173,8 @@ pub fn parse_theme_json(slug: &str, raw: &str) -> ThemeParseOutcome {
     })
 }
 
-static RGB_RE: LazyLock<regex::Regex> = LazyLock::new(|| {
-    regex::Regex::new(r"^rgb\(\s?\d{1,3},\s?\d{1,3},\s?\d{1,3}\s?\)$").unwrap()
-});
+static RGB_RE: LazyLock<regex::Regex> =
+    LazyLock::new(|| regex::Regex::new(r"^rgb\(\s?\d{1,3},\s?\d{1,3},\s?\d{1,3}\s?\)$").unwrap());
 static HEX6_RE: LazyLock<regex::Regex> =
     LazyLock::new(|| regex::Regex::new(r"^#[0-9a-fA-F]{6}$").unwrap());
 static HEX3_RE: LazyLock<regex::Regex> =
@@ -416,8 +415,7 @@ mod tests {
 
     #[test]
     fn unrecognized_base_falls_back_to_dark() {
-        let ThemeParseOutcome::Valid(theme) =
-            parse_theme_json("acme:x", r#"{"base":"solarized"}"#)
+        let ThemeParseOutcome::Valid(theme) = parse_theme_json("acme:x", r#"{"base":"solarized"}"#)
         else {
             panic!("expected Valid");
         };
@@ -514,7 +512,10 @@ mod tests {
     fn register_then_get_round_trips() {
         let registry = PluginThemeRegistry::new();
         registry.register(vec![entry("acme:dark-purple")]);
-        assert_eq!(registry.get("acme:dark-purple"), Some(entry("acme:dark-purple")));
+        assert_eq!(
+            registry.get("acme:dark-purple"),
+            Some(entry("acme:dark-purple"))
+        );
         assert_eq!(registry.get("acme:missing"), None);
     }
 
@@ -536,11 +537,13 @@ mod tests {
     fn slugs_are_sorted() {
         let registry = PluginThemeRegistry::new();
         registry.register(vec![entry("zeta:z"), entry("alpha:a")]);
-        assert_eq!(registry.slugs(), vec!["alpha:a".to_string(), "zeta:z".to_string()]);
+        assert_eq!(
+            registry.slugs(),
+            vec!["alpha:a".to_string(), "zeta:z".to_string()]
+        );
     }
 
     // ---------- resolve_theme (Aon precedence) ----------
-
 
     /// Loading must be LAZY: `register_paths` records the path and performs no
     /// filesystem access, so a file that does not exist at registration time is

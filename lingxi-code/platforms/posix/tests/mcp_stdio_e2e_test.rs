@@ -165,11 +165,7 @@ async fn full_mcp_surface_roundtrips_over_stdio() {
     .await
     .expect("list_resource_templates timed out")
     .expect("list_resource_templates failed");
-    assert_eq!(
-        templates.len(),
-        1,
-        "fixture exposes one resource template"
-    );
+    assert_eq!(templates.len(), 1, "fixture exposes one resource template");
     assert_eq!(templates[0].uri_template, "mock://files/{path}");
     assert_eq!(templates[0].name, "file-template");
     assert_eq!(

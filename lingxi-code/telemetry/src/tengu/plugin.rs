@@ -179,7 +179,10 @@ pub struct PluginEnabledForSessionPayload {
     #[serde(rename = "_PROTO_plugin_name")]
     pub proto_plugin_name: PiiTagged,
     /// Raw (un-redacted) marketplace name, when known.
-    #[serde(rename = "_PROTO_marketplace_name", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "_PROTO_marketplace_name",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub proto_marketplace_name: Option<PiiTagged>,
     /// Stable hash of `(plugin_name, marketplace_name)`.
     pub plugin_id_hash: Verified,
@@ -292,7 +295,10 @@ pub struct FolderShadowedPayload {
     #[serde(rename = "_PROTO_plugin_name")]
     pub proto_plugin_name: PiiTagged,
     /// Raw (un-redacted) marketplace name, when known.
-    #[serde(rename = "_PROTO_marketplace_name", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "_PROTO_marketplace_name",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub proto_marketplace_name: Option<PiiTagged>,
     /// Stable hash of `(plugin_name, marketplace_name)`.
     pub plugin_id_hash: Verified,
@@ -322,7 +328,10 @@ pub struct RenamedPayload {
     #[serde(rename = "_PROTO_plugin_name")]
     pub proto_plugin_name: PiiTagged,
     /// Raw (un-redacted) marketplace name, when known.
-    #[serde(rename = "_PROTO_marketplace_name", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "_PROTO_marketplace_name",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub proto_marketplace_name: Option<PiiTagged>,
     /// Stable hash of `(plugin_name, marketplace_name)`.
     pub plugin_id_hash: Verified,
@@ -367,7 +376,10 @@ pub struct LoadFailedPayload {
     #[serde(rename = "_PROTO_plugin_name")]
     pub proto_plugin_name: PiiTagged,
     /// Raw (un-redacted) marketplace name, when known.
-    #[serde(rename = "_PROTO_marketplace_name", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "_PROTO_marketplace_name",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub proto_marketplace_name: Option<PiiTagged>,
     /// Stable hash of `(plugin_name, marketplace_name)`.
     pub plugin_id_hash: Verified,

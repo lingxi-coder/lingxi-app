@@ -177,7 +177,11 @@ async fn preserves_metadata_fields_author_contact_and_channel_display_name() {
         vec!["weather".to_string(), "utility".to_string()],
         "keywords parsed and preserved"
     );
-    assert_eq!(manifest.license.as_deref(), Some("MIT"), "license preserved");
+    assert_eq!(
+        manifest.license.as_deref(),
+        Some("MIT"),
+        "license preserved"
+    );
     assert_eq!(
         manifest.repository.as_deref(),
         Some("https://github.com/example/richplugin"),

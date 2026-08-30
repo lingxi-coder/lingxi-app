@@ -246,7 +246,9 @@ mod tests {
     #[test]
     fn ordinary_urls_are_not_suspicious() {
         assert!(!is_suspicious_url("https://github.com/owner/repo.git"));
-        assert!(!is_suspicious_url("git+ssh://git@github.com/owner/repo.git"));
+        assert!(!is_suspicious_url(
+            "git+ssh://git@github.com/owner/repo.git"
+        ));
         assert!(!is_suspicious_url("git@github.com:owner/repo.git"));
         assert!(!is_suspicious_url("ssh://git@github.com:22/owner/repo.git"));
     }
@@ -256,7 +258,9 @@ mod tests {
         // oracle: /[%\x00-\x1f\x7f-\u{10FFFF}]/u applied to the hostname of
         // any scheme outside http/https/ws/wss/ftp.
         assert!(is_suspicious_url("ssh://evil%00host/owner/repo.git"));
-        assert!(is_suspicious_url("git+ssh://user@evil\u{0007}host/repo.git"));
+        assert!(is_suspicious_url(
+            "git+ssh://user@evil\u{0007}host/repo.git"
+        ));
     }
 
     #[test]
@@ -264,7 +268,9 @@ mod tests {
         // Oracle `pfe`'s FINAL test — `(r===-1?n:n.slice(0,r)).includes("\\")`
         // — runs for every scheme; the `http/https/ws/wss/ftp` set only gates
         // the separate leading-slash-run inspection above it.
-        assert!(is_suspicious_url(r"git://evil.example.com\@good.example.com/repo.git"));
+        assert!(is_suspicious_url(
+            r"git://evil.example.com\@good.example.com/repo.git"
+        ));
         assert!(is_suspicious_url(
             r"git+ssh://evil.example.com\@good.example.com/repo.git"
         ));
@@ -278,8 +284,12 @@ mod tests {
         // Oracle `pfe` opens with `t=t.replace(/^[\x00-\x20]+/,"")`; without
         // it the scheme reads as `"  https"`, misses the special set, and the
         // confusable authority slips through.
-        assert!(is_suspicious_url("  https://evil.example.com\\@good.example.com/"));
-        assert!(is_suspicious_url("\u{1}https://evil.example.com\\@good.example.com/"));
+        assert!(is_suspicious_url(
+            "  https://evil.example.com\\@good.example.com/"
+        ));
+        assert!(is_suspicious_url(
+            "\u{1}https://evil.example.com\\@good.example.com/"
+        ));
     }
 
     #[test]

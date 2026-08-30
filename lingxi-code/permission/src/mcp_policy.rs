@@ -515,11 +515,7 @@ mod tests {
     fn drift_warning_fires_only_when_nothing_matched() {
         let mut perms = HashMap::new();
         perms.insert("renamed_tool".to_string(), McpToolMaxPermission::Ask);
-        let warning = upstream_name_drift_warning(
-            "srv",
-            &perms,
-            &["current_tool".to_string()],
-        );
+        let warning = upstream_name_drift_warning("srv", &perms, &["current_tool".to_string()]);
         assert_eq!(
             warning.as_deref(),
             Some(

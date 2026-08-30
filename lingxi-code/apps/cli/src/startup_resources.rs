@@ -93,7 +93,8 @@ fn is_denied_download_host(host: &str) -> bool {
     if lower.is_empty() || lower == "localhost" || lower.ends_with(".localhost") {
         return true;
     }
-    host.parse::<std::net::IpAddr>().is_ok_and(is_denied_download_ip)
+    host.parse::<std::net::IpAddr>()
+        .is_ok_and(is_denied_download_ip)
 }
 
 fn is_denied_download_ip(ip: std::net::IpAddr) -> bool {
@@ -463,7 +464,7 @@ mod tests {
             "https://[::]/x",
             "https://[fd00:ec2::254]/x", // AWS IMDSv2 IPv6 alias
             "https://[fe80::1]/x",
-            "https://[::ffff:127.0.0.1]/x", // IPv4-mapped loopback
+            "https://[::ffff:127.0.0.1]/x",   // IPv4-mapped loopback
             "https://[::ffff:169.254.1.1]/x", // IPv4-mapped link-local
         ] {
             let url = reqwest::Url::parse(denied).unwrap();
@@ -616,9 +617,12 @@ mod tests {
         let target = dest.path().join("out");
 
         let wrong_sha256 = "0".repeat(64);
-        let result =
-            download_plugin_archive(&format!("http://{addr}/plugin.zip"), Some(&wrong_sha256), &target)
-                .await;
+        let result = download_plugin_archive(
+            &format!("http://{addr}/plugin.zip"),
+            Some(&wrong_sha256),
+            &target,
+        )
+        .await;
         server.await.unwrap();
 
         let error = result.expect_err("a sha256 mismatch must be refused");
@@ -649,9 +653,12 @@ mod tests {
         .unwrap();
         server.await.unwrap();
 
-        let manifest =
-            std::fs::read_to_string(plugin_root.join(branding::PLUGIN_MANIFEST_DIR).join("plugin.json"))
-                .unwrap();
+        let manifest = std::fs::read_to_string(
+            plugin_root
+                .join(branding::PLUGIN_MANIFEST_DIR)
+                .join("plugin.json"),
+        )
+        .unwrap();
         assert!(manifest.contains("archive-demo"));
     }
 
@@ -675,7 +682,10 @@ mod tests {
         {
             let mut writer = zip::ZipWriter::new(std::io::Cursor::new(&mut buf));
             writer
-                .start_file("__MACOSX/._plugin.json", zip::write::SimpleFileOptions::default())
+                .start_file(
+                    "__MACOSX/._plugin.json",
+                    zip::write::SimpleFileOptions::default(),
+                )
                 .unwrap();
             writer.write_all(b"resource fork junk").unwrap();
             writer

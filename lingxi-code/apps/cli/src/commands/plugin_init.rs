@@ -353,7 +353,10 @@ const SKILLS_DIR_MARKETPLACE: &str = "skills-dir";
 /// plugin, none of which can be looked up in the marketplace cache. `builtin`
 /// (`Fh`) is filtered by the same oracle predicate chain, one term earlier.
 fn is_pseudo_marketplace(marketplace: &str) -> bool {
-    matches!(marketplace, "inline" | SKILLS_DIR_MARKETPLACE | "synced" | "builtin")
+    matches!(
+        marketplace,
+        "inline" | SKILLS_DIR_MARKETPLACE | "synced" | "builtin"
+    )
 }
 
 /// Oracle `bV(n)` (@156730127): `/^\w[\w.@-]*$/` — whether a plugin id can be
@@ -379,8 +382,7 @@ fn is_shell_safe_plugin_id(id: &str) -> bool {
 /// `my plugin` reaches here and legitimately yields `None`. Both branches of
 /// every ternary below are reachable.
 fn plugin_cli_command(verb: &str, qualified_id: &str) -> Option<String> {
-    is_shell_safe_plugin_id(qualified_id)
-        .then(|| format!("lingxi-cli {verb} {qualified_id}"))
+    is_shell_safe_plugin_id(qualified_id).then(|| format!("lingxi-cli {verb} {qualified_id}"))
 }
 
 /// §22 — `plugin init`'s post-create name-collision line (oracle: the
@@ -446,11 +448,13 @@ fn name_collision_warning(name: &str, home: &Path, cwd: &Path) -> Option<String>
     //    the oracle does not consult here.
     let conflict = merged.keys().find(|key| {
         key.as_str() != qualified
-            && key.split_once('@').is_some_and(|(other_name, marketplace)| {
-                other_name == name
-                    && !is_pseudo_marketplace(marketplace)
-                    && plugin_settings::marketplace_source(home, marketplace).is_some()
-            })
+            && key
+                .split_once('@')
+                .is_some_and(|(other_name, marketplace)| {
+                    other_name == name
+                        && !is_pseudo_marketplace(marketplace)
+                        && plugin_settings::marketplace_source(home, marketplace).is_some()
+                })
     });
     if let Some(conflicting_id) = conflict {
         return Some(format!(
@@ -680,8 +684,28 @@ mod tests {
     #[test]
     fn init_duplicate_without_force_errors() {
         let e = env();
-        run_init("dup", Some("A"), Some("a@b"), None, false, &[], &e.home, &e.cwd).unwrap();
-        let err = run_init("dup", Some("A"), Some("a@b"), None, false, &[], &e.home, &e.cwd).unwrap_err();
+        run_init(
+            "dup",
+            Some("A"),
+            Some("a@b"),
+            None,
+            false,
+            &[],
+            &e.home,
+            &e.cwd,
+        )
+        .unwrap();
+        let err = run_init(
+            "dup",
+            Some("A"),
+            Some("a@b"),
+            None,
+            false,
+            &[],
+            &e.home,
+            &e.cwd,
+        )
+        .unwrap_err();
         assert!(
             err.ends_with(".lingxi-plugin already exists. Use --force to overwrite."),
             "got: {err}"
@@ -692,9 +716,29 @@ mod tests {
     #[test]
     fn init_force_overwrites() {
         let e = env();
-        run_init("f", Some("A"), Some("a@b"), None, false, &[], &e.home, &e.cwd).unwrap();
+        run_init(
+            "f",
+            Some("A"),
+            Some("a@b"),
+            None,
+            false,
+            &[],
+            &e.home,
+            &e.cwd,
+        )
+        .unwrap();
         // Second call with force succeeds.
-        let msg = run_init("f", Some("A"), Some("a@b"), None, true, &[], &e.home, &e.cwd).unwrap();
+        let msg = run_init(
+            "f",
+            Some("A"),
+            Some("a@b"),
+            None,
+            true,
+            &[],
+            &e.home,
+            &e.cwd,
+        )
+        .unwrap();
         assert!(msg.starts_with("✔ Created plugin \"f\""));
     }
 
@@ -711,7 +755,17 @@ mod tests {
     #[test]
     fn init_with_unknown_component_errors_and_writes_nothing() {
         let e = env();
-        let err = run_init("u", None, None, None, false, &with(&["bogus"]), &e.home, &e.cwd).unwrap_err();
+        let err = run_init(
+            "u",
+            None,
+            None,
+            None,
+            false,
+            &with(&["bogus"]),
+            &e.home,
+            &e.cwd,
+        )
+        .unwrap_err();
         assert_eq!(
             err,
             "✘ Unknown --with component \"bogus\". Valid: skills, agents, hooks, mcp, lsp, output-style, channel"
@@ -919,7 +973,17 @@ mod tests {
     #[test]
     fn init_default_manifest_has_no_channels() {
         let e = env();
-        run_init("plain", Some("A"), Some("a@b"), None, false, &[], &e.home, &e.cwd).unwrap();
+        run_init(
+            "plain",
+            Some("A"),
+            Some("a@b"),
+            None,
+            false,
+            &[],
+            &e.home,
+            &e.cwd,
+        )
+        .unwrap();
         let manifest =
             std::fs::read_to_string(root(&e, "plain").join(".lingxi-plugin/plugin.json")).unwrap();
         assert!(!manifest.contains("channels"));
@@ -929,7 +993,17 @@ mod tests {
     fn init_rejects_path_traversal_name() {
         let e = env();
         for bad in ["../pwned", "a/b", "..", "."] {
-            let err = run_init(bad, Some("A"), Some("a@b"), None, false, &[], &e.home, &e.cwd).unwrap_err();
+            let err = run_init(
+                bad,
+                Some("A"),
+                Some("a@b"),
+                None,
+                false,
+                &[],
+                &e.home,
+                &e.cwd,
+            )
+            .unwrap_err();
             assert!(
                 err.starts_with(&format!("✘ Invalid plugin name \"{bad}\":")),
                 "got: {err}"
@@ -946,7 +1020,17 @@ mod tests {
     fn init_rejects_bidi_formatting_name() {
         let e = env();
         let bad = "evil\u{202E}reversed";
-        let err = run_init(bad, Some("A"), Some("a@b"), None, false, &[], &e.home, &e.cwd).unwrap_err();
+        let err = run_init(
+            bad,
+            Some("A"),
+            Some("a@b"),
+            None,
+            false,
+            &[],
+            &e.home,
+            &e.cwd,
+        )
+        .unwrap_err();
         assert_eq!(
             err,
             format!(
@@ -960,7 +1044,17 @@ mod tests {
     #[test]
     fn init_plugin_json_has_trailing_newline() {
         let e = env();
-        run_init("p", Some("A"), Some("a@b"), None, false, &[], &e.home, &e.cwd).unwrap();
+        run_init(
+            "p",
+            Some("A"),
+            Some("a@b"),
+            None,
+            false,
+            &[],
+            &e.home,
+            &e.cwd,
+        )
+        .unwrap();
         let raw =
             std::fs::read_to_string(root(&e, "p").join(".lingxi-plugin/plugin.json")).unwrap();
         assert!(raw.ends_with("}\n"), "expected trailing newline");
@@ -1040,8 +1134,7 @@ mod tests {
             .unwrap();
             std::fs::write(
                 e.home.join("settings.json"),
-                serde_json::json!({"enabledPlugins": {format!("bar@{pseudo}"): true}})
-                    .to_string(),
+                serde_json::json!({"enabledPlugins": {format!("bar@{pseudo}"): true}}).to_string(),
             )
             .unwrap();
 
@@ -1084,7 +1177,10 @@ mod tests {
             plugin_cli_command("plugin enable", "stale@skills-dir").as_deref(),
             Some("lingxi-cli plugin enable stale@skills-dir")
         );
-        assert_eq!(plugin_cli_command("plugin enable", "my plugin@skills-dir"), None);
+        assert_eq!(
+            plugin_cli_command("plugin enable", "my plugin@skills-dir"),
+            None
+        );
     }
 
     /// An already-enabled, cache-known, non-skills-dir marketplace plugin
@@ -1219,7 +1315,20 @@ mod tests {
         )
         .unwrap();
 
-        let msg = run_init("p", Some("A"), Some("a@b"), None, false, &[], &e.home, &e.cwd).unwrap();
-        assert!(msg.contains("A disabled setting for p@skills-dir exists"), "got: {msg}");
+        let msg = run_init(
+            "p",
+            Some("A"),
+            Some("a@b"),
+            None,
+            false,
+            &[],
+            &e.home,
+            &e.cwd,
+        )
+        .unwrap();
+        assert!(
+            msg.contains("A disabled setting for p@skills-dir exists"),
+            "got: {msg}"
+        );
     }
 }

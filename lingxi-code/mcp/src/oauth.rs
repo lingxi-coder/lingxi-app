@@ -236,7 +236,8 @@ pub(crate) struct WwwAuthChallenge {
     /// Bearer-scheme gate above failed.
     pub resource_metadata_url: Option<String>,
     /// RFC 6750 `scope` — the scope the server says is required.
-    #[allow(dead_code)] // parsed for oracle parity; not consumed at this call site (see doc comment on the function below), same as the oracle's own `Be`/`H0e` callers.
+    #[allow(dead_code)]
+    // parsed for oracle parity; not consumed at this call site (see doc comment on the function below), same as the oracle's own `Be`/`H0e` callers.
     pub scope: Option<String>,
     /// RFC 6750 `error` (e.g. `invalid_token`, `insufficient_scope`).
     #[allow(dead_code)] // see `scope`.
@@ -261,8 +262,8 @@ pub(crate) fn parse_www_authenticate_challenge(header: &str) -> WwwAuthChallenge
     if !gate_ok {
         return WwwAuthChallenge::default();
     }
-    let resource_metadata_url = challenge_param(header, "resource_metadata")
-        .filter(|url| url::Url::parse(url).is_ok());
+    let resource_metadata_url =
+        challenge_param(header, "resource_metadata").filter(|url| url::Url::parse(url).is_ok());
     WwwAuthChallenge {
         resource_metadata_url,
         scope: challenge_param(header, "scope"),
@@ -294,9 +295,8 @@ fn challenge_param(header: &str, name: &str) -> Option<String> {
 /// while the offending side is the RAW `resource` string (oracle interpolates
 /// `r.resource` directly, never reparsed).
 fn validate_resource_indicator(server_url: &str, resource: &str) -> Result<(), OAuthError> {
-    let mut requested = url::Url::parse(server_url).map_err(|e| {
-        OAuthError::Discovery(format!("invalid server URL '{server_url}': {e}"))
-    })?;
+    let mut requested = url::Url::parse(server_url)
+        .map_err(|e| OAuthError::Discovery(format!("invalid server URL '{server_url}': {e}")))?;
     requested.set_fragment(None);
     let configured = url::Url::parse(resource).map_err(|e| {
         OAuthError::Discovery(format!(
@@ -2384,7 +2384,12 @@ mod tests {
             })
         }
         fn last(&self) -> protocol::HttpRequest {
-            self.seen.lock().unwrap().last().cloned().expect("a request")
+            self.seen
+                .lock()
+                .unwrap()
+                .last()
+                .cloned()
+                .expect("a request")
         }
     }
     #[async_trait::async_trait]
@@ -2474,7 +2479,7 @@ mod tests {
             token_endpoint_auth_methods_supported: Some(vec!["client_secret_post".into()]),
         };
 
-        refresh_tokens(&http_dyn, &clock, &meta, "cid", Some("sec+ret/=" ), "rt")
+        refresh_tokens(&http_dyn, &clock, &meta, "cid", Some("sec+ret/="), "rt")
             .await
             .expect("refresh ok");
 
@@ -2570,7 +2575,11 @@ mod tests {
             .headers
             .iter()
             .any(|(k, _)| k.eq_ignore_ascii_case("authorization")));
-        assert!(req.body.clone().unwrap_or_default().contains("client_id=cid"));
+        assert!(req
+            .body
+            .clone()
+            .unwrap_or_default()
+            .contains("client_id=cid"));
     }
 
     #[tokio::test]

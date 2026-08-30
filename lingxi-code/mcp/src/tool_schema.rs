@@ -627,7 +627,8 @@ pub fn decide_tool_schema(server_url: Option<&str>, schema: &Value) -> ToolSchem
 #[cfg(test)]
 pub(crate) fn flag_test_lock() -> std::sync::MutexGuard<'static, ()> {
     static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    LOCK.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 /// The oracle's `tengu_mcp_normalize_root_combinators` key, re-exported for the
@@ -753,7 +754,10 @@ mod tests {
             Some(telemetry::tengu::mcp::DegradedReason::ToolSchemaInvalidGated),
             "oracle `F++` — kept with a warning"
         );
-        assert!(decision.drop_reason.is_none(), "drop gate is OFF, tool kept");
+        assert!(
+            decision.drop_reason.is_none(),
+            "drop gate is OFF, tool kept"
+        );
         clear_flags();
     }
 
@@ -791,7 +795,8 @@ mod tests {
         let _g = lock();
         clear_flags();
         telemetry::test_clear_flag_list(ORACLE_NORMALIZE_FLAG);
-        let schema = json!({"anyOf": [{"type": "object", "properties": {"a": {"type": "string"}}}]});
+        let schema =
+            json!({"anyOf": [{"type": "object", "properties": {"a": {"type": "string"}}}]});
         assert!(
             decide_tool_schema(None, &schema).drop_reason.is_some(),
             "baseline: with the oracle flag unset the combinator schema is dropped"
@@ -811,7 +816,10 @@ mod tests {
     fn gate_default_empty_is_always_off() {
         let _g = lock();
         clear_flags();
-        assert!(!gate_enabled(FLAG_NORMALIZE_ROOT_COMBINATORS, Some("https://x.example.com/mcp")));
+        assert!(!gate_enabled(
+            FLAG_NORMALIZE_ROOT_COMBINATORS,
+            Some("https://x.example.com/mcp")
+        ));
         assert!(!gate_enabled(FLAG_NORMALIZE_ROOT_COMBINATORS, None));
     }
 
@@ -819,10 +827,7 @@ mod tests {
     fn gate_wildcard_enables_url_less_server_too() {
         let _g = lock();
         clear_flags();
-        telemetry::test_set_flag_list(
-            FLAG_NORMALIZE_ROOT_COMBINATORS,
-            vec!["*".to_string()],
-        );
+        telemetry::test_set_flag_list(FLAG_NORMALIZE_ROOT_COMBINATORS, vec!["*".to_string()]);
         assert!(gate_enabled(FLAG_NORMALIZE_ROOT_COMBINATORS, None));
         clear_flags();
     }
@@ -851,7 +856,10 @@ mod tests {
     #[test]
     fn unchanged_when_no_root_combinator() {
         let schema = json!({"type": "object", "properties": {"a": {"type": "string"}}});
-        assert_eq!(flatten_root_combinators(&schema), RootCombinatorOutcome::Unchanged);
+        assert_eq!(
+            flatten_root_combinators(&schema),
+            RootCombinatorOutcome::Unchanged
+        );
     }
 
     #[test]
@@ -862,8 +870,11 @@ mod tests {
                 {"type": "object", "properties": {"b": {"type": "number"}}}
             ]
         });
-        let RootCombinatorOutcome::Normalized { schema: flat, note, combinators } =
-            flatten_root_combinators(&schema)
+        let RootCombinatorOutcome::Normalized {
+            schema: flat,
+            note,
+            combinators,
+        } = flatten_root_combinators(&schema)
         else {
             panic!("expected Normalized");
         };
@@ -983,7 +994,8 @@ mod tests {
     fn combinator_schema_is_dropped_by_default_gate_off() {
         let _g = lock();
         clear_flags();
-        let schema = json!({"anyOf": [{"type": "object", "properties": {"a": {"type": "string"}}}]});
+        let schema =
+            json!({"anyOf": [{"type": "object", "properties": {"a": {"type": "string"}}}]});
         let d = decide_tool_schema(None, &schema);
         assert!(d.drop_reason.is_some(), "{d:?}");
         assert!(d.drop_reason.unwrap().contains("anyOf"));
@@ -994,7 +1006,8 @@ mod tests {
         let _g = lock();
         clear_flags();
         telemetry::test_set_flag_list(FLAG_NORMALIZE_ROOT_COMBINATORS, vec!["*".to_string()]);
-        let schema = json!({"anyOf": [{"type": "object", "properties": {"a": {"type": "string"}}}]});
+        let schema =
+            json!({"anyOf": [{"type": "object", "properties": {"a": {"type": "string"}}}]});
         let d = decide_tool_schema(None, &schema);
         assert!(d.drop_reason.is_none(), "{d:?}");
         assert!(d.description_note.is_some());

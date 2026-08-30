@@ -27,9 +27,9 @@ use tokio::io::AsyncReadExt;
 use tokio::sync::Mutex as AsyncMutex;
 use traits::{
     ElicitRequestDto, ElicitResultDto, McpError, McpNotificationDto, McpNotificationStream,
-    McpPromptDto, McpRawConnection, McpResourceContentDto, McpResourceDto,
-    McpResourceTemplateDto, McpToolDto, McpToolResultDto, McpTransport, McpTransportKind,
-    McpTransportSpec, ServerCapabilitiesDto,
+    McpPromptDto, McpRawConnection, McpResourceContentDto, McpResourceDto, McpResourceTemplateDto,
+    McpToolDto, McpToolResultDto, McpTransport, McpTransportKind, McpTransportSpec,
+    ServerCapabilitiesDto,
 };
 
 /// MCP protocol version this transport advertises in `initialize`.

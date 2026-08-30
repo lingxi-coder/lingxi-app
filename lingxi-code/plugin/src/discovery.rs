@@ -489,7 +489,9 @@ impl<'de> Deserialize<'de> for RawHljsLanguageList {
             )));
         }
         Ok(RawHljsLanguageList(
-            raw.into_iter().map(RawHljsLanguageEntry::into_entry).collect(),
+            raw.into_iter()
+                .map(RawHljsLanguageEntry::into_entry)
+                .collect(),
         ))
     }
 }
@@ -532,8 +534,9 @@ static HLJS_REMOTE_NPM_RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLo
 
 /// oracle `Ks.remote`'s `github:` alternative:
 /// `^github:[\w.-]+\/[\w.-]+@[\w./-]+#.+\.js$`.
-static HLJS_REMOTE_GITHUB_RE: std::sync::LazyLock<regex::Regex> =
-    std::sync::LazyLock::new(|| regex::Regex::new(r"^github:[\w.-]+/[\w.-]+@[\w./-]+#.+\.js$").unwrap());
+static HLJS_REMOTE_GITHUB_RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+    regex::Regex::new(r"^github:[\w.-]+/[\w.-]+@[\w./-]+#.+\.js$").unwrap()
+});
 
 /// oracle `Ks.integrity`: `^sha(256|384|512)-[A-Za-z0-9+/=]+$`.
 static HLJS_INTEGRITY_RE: std::sync::LazyLock<regex::Regex> =
@@ -631,8 +634,8 @@ impl<'de> Deserialize<'de> for RawMonitorsDecl {
                 }
             }
             Value::Array(items) => {
-                let entries: Vec<RawPluginMonitor> =
-                    serde_json::from_value(Value::Array(items)).map_err(serde::de::Error::custom)?;
+                let entries: Vec<RawPluginMonitor> = serde_json::from_value(Value::Array(items))
+                    .map_err(serde::de::Error::custom)?;
                 let mut seen = BTreeSet::new();
                 for entry in &entries {
                     if !seen.insert(entry.name.clone()) {
@@ -642,7 +645,10 @@ impl<'de> Deserialize<'de> for RawMonitorsDecl {
                     }
                 }
                 Ok(RawMonitorsDecl::Inline(
-                    entries.into_iter().map(RawPluginMonitor::into_monitor).collect(),
+                    entries
+                        .into_iter()
+                        .map(RawPluginMonitor::into_monitor)
+                        .collect(),
                 ))
             }
             _ => Err(serde::de::Error::custom(
@@ -688,7 +694,9 @@ impl<'de> Deserialize<'de> for RawPluginMonitor {
         }
         let raw = Raw::deserialize(deserializer)?;
         if raw.name.is_empty() {
-            return Err(serde::de::Error::custom("monitor \"name\" must not be empty"));
+            return Err(serde::de::Error::custom(
+                "monitor \"name\" must not be empty",
+            ));
         }
         if raw.command.is_empty() {
             return Err(serde::de::Error::custom(
@@ -810,8 +818,7 @@ pub fn validate_plugin_name(name: &str) -> Result<(), String> {
     }
     if control_or_bidi_regex().is_match(name) {
         return Err(
-            "Plugin name cannot contain control or bidirectional-formatting characters"
-                .to_string(),
+            "Plugin name cannot contain control or bidirectional-formatting characters".to_string(),
         );
     }
     Ok(())
@@ -923,7 +930,9 @@ pub fn validate_marketplace_name(name: &str) -> Result<(), String> {
     }
     let lower = name.to_ascii_lowercase();
     if let Some(kind) = reserved_internal_scope_description(&lower) {
-        return Err(format!("Marketplace name \"{lower}\" is reserved for {kind}"));
+        return Err(format!(
+            "Marketplace name \"{lower}\" is reserved for {kind}"
+        ));
     }
     Ok(())
 }
@@ -1006,8 +1015,10 @@ mod name_validation_tests {
         ] {
             assert_eq!(
                 validate_marketplace_name(bad),
-                Err("Marketplace name impersonates an official Anthropic/Claude marketplace"
-                    .to_string()),
+                Err(
+                    "Marketplace name impersonates an official Anthropic/Claude marketplace"
+                        .to_string()
+                ),
                 "expected {bad:?} to be rejected as impersonation"
             );
         }
@@ -1021,8 +1032,10 @@ mod name_validation_tests {
     fn marketplace_name_rejects_reserved_internal_scope_names() {
         assert_eq!(
             validate_marketplace_name("inline"),
-            Err("Marketplace name \"inline\" is reserved for --plugin-dir session plugins"
-                .to_string())
+            Err(
+                "Marketplace name \"inline\" is reserved for --plugin-dir session plugins"
+                    .to_string()
+            )
         );
         assert_eq!(
             validate_marketplace_name("SKILLS-DIR"),
@@ -1727,8 +1740,13 @@ async fn detect_components(
     let mut mcp_servers = default_mcp_servers;
     if !skip_mcp_discovery {
         mcp_servers.extend(
-            load_declared_mcp_servers(plugin_dir, parsed.mcp_servers.clone(), &parsed.name, confined)
-                .await,
+            load_declared_mcp_servers(
+                plugin_dir,
+                parsed.mcp_servers.clone(),
+                &parsed.name,
+                confined,
+            )
+            .await,
         );
     }
     let mut lsp_servers = default_lsp_servers;
@@ -1794,13 +1812,19 @@ fn is_valid_binary_basename(name: &str) -> bool {
     match bytes {
         [] => false,
         [only] => is_first(*only),
-        [first, .., last] => is_first(*first) && is_last(*last) && bytes[1..bytes.len() - 1].iter().all(|&b| is_mid(b)),
+        [first, .., last] => {
+            is_first(*first)
+                && is_last(*last)
+                && bytes[1..bytes.len() - 1].iter().all(|&b| is_mid(b))
+        }
     }
 }
 
 /// `^[0-9a-f]{64}$` (oracle `Yqt`) — lowercase hex only.
 fn is_valid_sha256_hex(s: &str) -> bool {
-    s.len() == 64 && s.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    s.len() == 64
+        && s.bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
 /// `binaries` (oracle `qs`/`n1e`): a LENIENT `.transform()`, never a parse
@@ -1855,7 +1879,12 @@ fn parse_monitor_array(raw: &str) -> Option<Vec<PluginMonitor>> {
             return None;
         }
     }
-    Some(entries.into_iter().map(RawPluginMonitor::into_monitor).collect())
+    Some(
+        entries
+            .into_iter()
+            .map(RawPluginMonitor::into_monitor)
+            .collect(),
+    )
 }
 
 /// Auto-scan `monitors/monitors.json` (oracle `mt`'s own description: "When
@@ -1882,10 +1911,7 @@ async fn load_default_monitors(plugin_dir: &Path) -> Vec<PluginMonitor> {
 /// validated ([`RawMonitorsDecl::Inline`]); a declared PATH is read + parsed
 /// here (warn + empty on any failure); an absent field falls back to the
 /// [`load_default_monitors`] auto-scan.
-async fn resolve_monitors(
-    plugin_dir: &Path,
-    decl: Option<&RawMonitorsDecl>,
-) -> Vec<PluginMonitor> {
+async fn resolve_monitors(plugin_dir: &Path, decl: Option<&RawMonitorsDecl>) -> Vec<PluginMonitor> {
     match decl {
         None => load_default_monitors(plugin_dir).await,
         Some(RawMonitorsDecl::Inline(monitors)) => monitors.clone(),
@@ -2602,8 +2628,14 @@ async fn load_declared_mcp_servers(
             for item in items {
                 match item {
                     Value::String(raw) => {
-                        merge_one_declared_mcp_source(plugin_dir, &raw, plugin_name, confined, &mut out)
-                            .await;
+                        merge_one_declared_mcp_source(
+                            plugin_dir,
+                            &raw,
+                            plugin_name,
+                            confined,
+                            &mut out,
+                        )
+                        .await;
                     }
                     other => {
                         if let Ok(parsed) = mcp::parse_plugin_mcp_json_string(
@@ -2770,7 +2802,8 @@ async fn load_mcpb_mcp_server(
         return None;
     }
     let generated = crate::mcpb::generate_mcp_config(&manifest, &cache_dir)?;
-    let cfg = mcp::build_server_from_json_entry(&manifest.name, &generated, mcp::ConfigScope::Dynamic)?;
+    let cfg =
+        mcp::build_server_from_json_entry(&manifest.name, &generated, mcp::ConfigScope::Dynamic)?;
     // Oracle: `Loaded MCP server "{name}" from MCPB (extracted to {extractedPath})`.
     tracing::info!(
         "Loaded MCP server \"{}\" from MCPB (extracted to {})",
@@ -4076,7 +4109,11 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let plugin = tmp.path();
         fs::create_dir_all(plugin.join("hooks")).unwrap();
-        fs::write(plugin.join("hooks/hooks.json"), r#"{"description": "empty"}"#).unwrap();
+        fs::write(
+            plugin.join("hooks/hooks.json"),
+            r#"{"description": "empty"}"#,
+        )
+        .unwrap();
         assert!(
             load_standard_hooks(plugin).await.is_empty(),
             "oracle: hooks.json must have `hooks` or `modules`, or both"
@@ -4178,8 +4215,14 @@ mod tests {
             .map(|i| serde_json::json!({"id": format!("lang{i}")}))
             .collect();
         for (label, bad) in [
-            ("invalid id", serde_json::json!({"hljsLanguages": [{"id": "Not-Valid"}]})),
-            ("unknown key", serde_json::json!({"hljsLanguages": [], "extra": true})),
+            (
+                "invalid id",
+                serde_json::json!({"hljsLanguages": [{"id": "Not-Valid"}]}),
+            ),
+            (
+                "unknown key",
+                serde_json::json!({"hljsLanguages": [], "extra": true}),
+            ),
             ("17 entries", serde_json::json!({"hljsLanguages": entries})),
         ] {
             let tmp = tempfile::tempdir().unwrap();
@@ -4234,9 +4277,18 @@ mod tests {
             .map(|i| serde_json::json!({"id": format!("lang{i}")}))
             .collect();
         for (label, bad) in [
-            ("an id violating ^[a-z][a-z0-9_-]*$", serde_json::json!({"hljsLanguages": [{"id": "Not-Valid"}]})),
-            ("an unknown sibling key (`.strict()`)", serde_json::json!({"hljsLanguages": [], "extra": true})),
-            ("17 entries (cap is 16)", serde_json::json!({"hljsLanguages": entries})),
+            (
+                "an id violating ^[a-z][a-z0-9_-]*$",
+                serde_json::json!({"hljsLanguages": [{"id": "Not-Valid"}]}),
+            ),
+            (
+                "an unknown sibling key (`.strict()`)",
+                serde_json::json!({"hljsLanguages": [], "extra": true}),
+            ),
+            (
+                "17 entries (cap is 16)",
+                serde_json::json!({"hljsLanguages": entries}),
+            ),
         ] {
             let tmp = tempfile::tempdir().unwrap();
             let plugin = tmp.path();
@@ -4272,9 +4324,9 @@ mod tests {
                 plugin,
                 &serde_json::json!({"name": "demo", "experimental": value}),
             );
-            let (_id, manifest) = load_plugin_from_path(plugin).await.unwrap_or_else(|| {
-                panic!("experimental = {value} must not sink the manifest")
-            });
+            let (_id, manifest) = load_plugin_from_path(plugin)
+                .await
+                .unwrap_or_else(|| panic!("experimental = {value} must not sink the manifest"));
             assert!(manifest.components.hljs_languages.is_empty());
         }
     }
@@ -4583,7 +4635,10 @@ mod tests {
 
         let (_id, manifest) = load_plugin_from_path(plugin).await.unwrap();
         assert!(
-            manifest.components.mcp_servers.contains_key("bundled-server"),
+            manifest
+                .components
+                .mcp_servers
+                .contains_key("bundled-server"),
             "a `--plugin-dir` plugin is not `pM(e)`, so its MCPB source must resolve, got {:?}",
             manifest.components.mcp_servers
         );
@@ -4676,7 +4731,10 @@ mod tests {
                 .await
                 .unwrap();
         assert!(
-            manifest.components.mcp_servers.contains_key("bundled-server"),
+            manifest
+                .components
+                .mcp_servers
+                .contains_key("bundled-server"),
             "an empty cache directory must be re-extracted into, not treated as a \
              completed extraction, got {:?}",
             manifest.components.mcp_servers

@@ -148,12 +148,18 @@ fn degraded_schema_validator_unavailable_carries_no_per_server_fields() {
 #[test]
 fn degraded_reason_values_are_snake_case() {
     for (variant, wire) in [
-        (DegradedReason::ToolSchemaNormalized, "tool_schema_normalized"),
+        (
+            DegradedReason::ToolSchemaNormalized,
+            "tool_schema_normalized",
+        ),
         (
             DegradedReason::ToolSchemaNormalizeGated,
             "tool_schema_normalize_gated",
         ),
-        (DegradedReason::ToolSchemaUnsupported, "tool_schema_unsupported"),
+        (
+            DegradedReason::ToolSchemaUnsupported,
+            "tool_schema_unsupported",
+        ),
         (DegradedReason::ToolSchemaInvalid, "tool_schema_invalid"),
         (
             DegradedReason::ToolPropertyKeyInvalid,
@@ -172,8 +178,15 @@ fn degraded_reason_values_are_snake_case() {
             "schema_validator_unavailable",
         ),
     ] {
-        assert_eq!(serde_json::to_value(variant).unwrap(), serde_json::json!(wire));
-        assert_eq!(variant.wire_str(), wire, "wire_str must match the serde rendering");
+        assert_eq!(
+            serde_json::to_value(variant).unwrap(),
+            serde_json::json!(wire)
+        );
+        assert_eq!(
+            variant.wire_str(),
+            wire,
+            "wire_str must match the serde rendering"
+        );
     }
 }
 
@@ -187,9 +200,11 @@ fn degraded_payload_rejects_unknown_fields() {
         "extra": true,
     });
     let result: Result<DegradedPayload, _> = serde_json::from_value(json);
-    assert!(result.is_err(), "deny_unknown_fields must reject an unrecognized key");
+    assert!(
+        result.is_err(),
+        "deny_unknown_fields must reject an unrecognized key"
+    );
 }
-
 
 // ── Round-1 review regressions ──────────────────────────────────────────────
 

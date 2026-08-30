@@ -441,7 +441,9 @@ impl MarketplacePolicy {
                 policy.strict_known = Some(
                     entries
                         .iter()
-                        .filter_map(|entry| MarketplaceRule::parse(entry, "strictKnownMarketplaces"))
+                        .filter_map(|entry| {
+                            MarketplaceRule::parse(entry, "strictKnownMarketplaces")
+                        })
                         .collect(),
                 );
             }
@@ -467,11 +469,11 @@ impl MarketplacePolicy {
         if self.blocked.iter().any(|rule| rule.matches(name, source)) {
             return Err(MarketplacePolicyBlockReason::Blocked);
         }
-        if self
-            .strict_known
-            .as_ref()
-            .is_some_and(|rules| !rules.iter().any(|rule| allow_rule_matches(rule, name, source)))
-        {
+        if self.strict_known.as_ref().is_some_and(|rules| {
+            !rules
+                .iter()
+                .any(|rule| allow_rule_matches(rule, name, source))
+        }) {
             return Err(MarketplacePolicyBlockReason::NotKnown);
         }
         Ok(())
@@ -693,7 +695,8 @@ mod tests {
         let local = MarketplaceSourceIdentity::Directory {
             path: "/opt/approved/mkt".to_string(),
         };
-        let policy = policy(r#"{"strictKnownMarketplaces":[{"source":"pathPattern","pathPattern":".*"}]}"#);
+        let policy =
+            policy(r#"{"strictKnownMarketplaces":[{"source":"pathPattern","pathPattern":".*"}]}"#);
         assert!(
             policy.check(None, Some(&remote)).is_err(),
             "\".*\" allows filesystem paths, not every host on the internet"
@@ -761,8 +764,9 @@ mod tests {
             git_ref: None,
             path: Some("catalog".to_string()),
         };
-        let policy =
-            policy(r#"{"strictKnownMarketplaces":[{"source":"hostPattern","hostPattern":"^github\\.com$"}]}"#);
+        let policy = policy(
+            r#"{"strictKnownMarketplaces":[{"source":"hostPattern","hostPattern":"^github\\.com$"}]}"#,
+        );
         assert!(policy.check(None, Some(&ordinary)).is_ok());
         assert!(policy.check(None, Some(&traversal)).is_err());
     }
@@ -831,8 +835,7 @@ mod tests {
             git_ref: None,
             path: None,
         };
-        let policy =
-            policy(r#"{"strictKnownMarketplaces":[{"source":"github","repo":"acme/*"}]}"#);
+        let policy = policy(r#"{"strictKnownMarketplaces":[{"source":"github","repo":"acme/*"}]}"#);
         assert!(policy.check(None, Some(&same_owner)).is_ok());
         assert!(policy.check(None, Some(&different_owner)).is_err());
     }

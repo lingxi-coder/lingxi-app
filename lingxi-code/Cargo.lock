@@ -1127,6 +1127,7 @@ dependencies = [
  "tui-core",
  "unicode-width 0.1.14",
  "uuid",
+ "zip",
 ]
 
 [[package]]

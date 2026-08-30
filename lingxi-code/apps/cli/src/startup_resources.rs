@@ -153,6 +153,34 @@ pub(crate) async fn download_plugin_urls(
     Ok(paths)
 }
 
+/// Download and unpack the oracle `archive` plugin-entry source: an HTTPS
+/// zip, optionally pinned by `sha256` — *"verified against every download and
+/// the install is refused on mismatch"*. `dest` must not already exist.
+pub(crate) async fn download_plugin_archive(
+    url: &str,
+    sha256: Option<&str>,
+    dest: &Path,
+) -> Result<PathBuf, String> {
+    let client = download_client(true)?;
+    let bytes = bounded_get(&client, url, &[]).await?;
+    if let Some(expected) = sha256 {
+        let actual = plugin::plugin_source_sha256(&bytes);
+        if !actual.eq_ignore_ascii_case(expected) {
+            return Err(format!(
+                "invalid plugin archive `{url}`: sha256 verification failed (expected {expected}, got {actual})"
+            ));
+        }
+    }
+    std::fs::create_dir_all(dest)
+        .map_err(|e| format!("create plugin extraction directory: {e}"))?;
+    plugin::unpack_plugin_archive(&bytes, dest)
+        .map_err(|e| format!("invalid plugin archive `{url}`: {e}"))?;
+    let plugin_root = unwrap_plugin_root(dest)?;
+    plugin::ensure_plugin_manifest(&plugin_root)
+        .map_err(|e| format!("invalid plugin manifest `{url}`: {e}"))?;
+    Ok(plugin_root)
+}
+
 fn has_plugin_manifest(root: &Path) -> bool {
     root.join(branding::PLUGIN_MANIFEST_DIR).is_dir() || root.join("manifest.json").is_file()
 }
@@ -359,5 +387,94 @@ mod tests {
             std::fs::read_to_string(root.join(branding::PLUGIN_MANIFEST_DIR).join("plugin.json"))
                 .unwrap();
         assert!(normalized.contains("session-plugin"));
+    }
+
+    fn build_plugin_zip() -> Vec<u8> {
+        use std::io::Write;
+        let mut buf = Vec::new();
+        {
+            let mut writer = zip::ZipWriter::new(std::io::Cursor::new(&mut buf));
+            writer
+                .start_file(
+                    format!("{}/plugin.json", branding::PLUGIN_MANIFEST_DIR),
+                    zip::write::SimpleFileOptions::default(),
+                )
+                .unwrap();
+            writer
+                .write_all(br#"{"name":"archive-demo","version":"1.0.0"}"#)
+                .unwrap();
+            writer.finish().unwrap();
+        }
+        buf
+    }
+
+    async fn respond_once(listener: tokio::net::TcpListener, body: Vec<u8>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let mut request = [0_u8; 2048];
+        let _ = stream.read(&mut request).await.unwrap();
+        stream
+            .write_all(
+                format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+        stream.write_all(&body).await.unwrap();
+    }
+
+    /// The `archive` plugin-entry source (oracle: *"verified against every
+    /// download and the install is refused on mismatch"*) — a wrong `sha256`
+    /// must refuse the install before anything is unpacked.
+    #[tokio::test]
+    async fn archive_source_rejects_sha256_mismatch() {
+        let body = b"not a zip; the sha check must fire before unpacking".to_vec();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(respond_once(listener, body));
+        let dest = tempfile::tempdir().unwrap();
+        let target = dest.path().join("out");
+
+        let wrong_sha256 = "0".repeat(64);
+        let result =
+            download_plugin_archive(&format!("http://{addr}/plugin.zip"), Some(&wrong_sha256), &target)
+                .await;
+        server.await.unwrap();
+
+        let error = result.expect_err("a sha256 mismatch must be refused");
+        assert!(
+            error.contains("sha256 verification failed"),
+            "expected a sha256 verification failure, got: {error}"
+        );
+        assert!(!target.exists(), "must not unpack before verification");
+    }
+
+    /// A matching `sha256` unpacks the archive and resolves the plugin root.
+    #[tokio::test]
+    async fn archive_source_unpacks_on_sha256_match() {
+        let zip_bytes = build_plugin_zip();
+        let expected_sha256 = plugin::plugin_source_sha256(&zip_bytes);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(respond_once(listener, zip_bytes));
+        let dest = tempfile::tempdir().unwrap();
+        let target = dest.path().join("out");
+
+        let plugin_root = download_plugin_archive(
+            &format!("http://{addr}/plugin.zip"),
+            Some(&expected_sha256),
+            &target,
+        )
+        .await
+        .unwrap();
+        server.await.unwrap();
+
+        let manifest =
+            std::fs::read_to_string(plugin_root.join(branding::PLUGIN_MANIFEST_DIR).join("plugin.json"))
+                .unwrap();
+        assert!(manifest.contains("archive-demo"));
     }
 }

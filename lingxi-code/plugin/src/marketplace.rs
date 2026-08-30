@@ -39,7 +39,15 @@ pub struct MarketplaceIndexMetadata {
 }
 
 /// Typed source of one plugin catalog entry.
-#[derive(Debug, Clone, Deserialize, Serialize)]
+///
+/// Deserialization is deliberately LENIENT at the `Structured` arm: the oracle
+/// union `ft` transforms each `plugins[]` entry independently and rewrites an
+/// unparseable `source` to `{source:"unsupported"}` rather than failing the
+/// whole catalog (`detectDelistedPlugins` must not read a schema casualty as a
+/// removal). A hard `#[serde(untagged)]`/tagged-enum derive here would instead
+/// fail the ENTIRE `Vec<MarketplacePluginEntry>` on one bad entry — seeing the
+/// manual `Deserialize` impl below.
+#[derive(Debug, Clone, Serialize)]
 #[serde(untagged)]
 pub enum MarketplacePluginSource {
     /// A path relative to the marketplace root.
@@ -48,7 +56,35 @@ pub enum MarketplacePluginSource {
     Structured(MarketplaceExternalSource),
 }
 
+impl<'de> Deserialize<'de> for MarketplacePluginSource {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        if let serde_json::Value::String(s) = &value {
+            return Ok(MarketplacePluginSource::Relative(s.clone()));
+        }
+        let structured = serde_json::from_value::<MarketplaceExternalSource>(value)
+            .unwrap_or_else(|error| MarketplaceExternalSource::Unsupported {
+                error: Some(error.to_string()),
+            });
+        Ok(MarketplacePluginSource::Structured(structured))
+    }
+}
+
 /// Structured source variants accepted by marketplace catalogs.
+///
+/// This models the **plugin-entry** union (`plugins[].source`, oracle `ft`),
+/// which is a DIFFERENT union from the marketplace-registration source
+/// (`extraKnownMarketplaces`/`known_marketplaces.json`, oracle `dYe`; see
+/// `apps/cli/src/commands/plugin_marketplace.rs`). Conflating those two was a
+/// prior round's biggest error: oracle `ft` has NO `file`/`directory` arm at
+/// all (those are registration-only) and its `github`/`url` arms carry `sha`,
+/// not `path` beyond what's modeled here. `File`/`Directory`/the `path` on
+/// `Github`/`Git` are a port-only superset kept for backward compatibility
+/// with existing local-only entries; a real oracle-authored `marketplace.json`
+/// never emits them, so accepting them is permissive, not incorrect.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(tag = "source", rename_all = "lowercase")]
 pub enum MarketplaceExternalSource {
@@ -59,23 +95,78 @@ pub enum MarketplaceExternalSource {
         git_ref: Option<String>,
         #[serde(default)]
         path: Option<String>,
+        /// Pin the checkout to this exact commit (40-hex); the checkout is
+        /// refused if HEAD does not match. Port-only superset field `path`
+        /// aside, this mirrors oracle `github`'s `sha`.
+        #[serde(default)]
+        sha: Option<String>,
     },
-    /// Arbitrary git repository source.
+    /// Arbitrary git repository source (port-only superset — the oracle's
+    /// `ft` union has no plain `git` tag; use `url` for a git-repo source).
     Git {
         url: String,
         #[serde(rename = "ref", default)]
         git_ref: Option<String>,
         #[serde(default)]
         path: Option<String>,
+        #[serde(default)]
+        sha: Option<String>,
     },
-    /// HTTPS archive source.
-    Url { url: String },
+    /// A git repository checked out at `ref`/`sha` — oracle: *"Full git
+    /// repository URL (https:// or git@)"*. NOT an archive download; that is
+    /// the separate `archive` arm below (a prior port version conflated the
+    /// two under this same `url` tag and downloaded-and-unpacked an archive
+    /// here, silently mis-handling every real oracle `source:"url"` entry).
+    Url {
+        url: String,
+        #[serde(rename = "ref", default)]
+        git_ref: Option<String>,
+        #[serde(default)]
+        sha: Option<String>,
+    },
+    /// A subdirectory of a larger repository (monorepo). The oracle partial-
+    /// clones (`--filter=tree:0`) to fetch only that subtree; this port does a
+    /// full clone and then confines to `path` (same result, more bandwidth).
+    #[serde(rename = "git-subdir")]
+    GitSubdir {
+        url: String,
+        path: String,
+        #[serde(rename = "ref", default)]
+        git_ref: Option<String>,
+        #[serde(default)]
+        sha: Option<String>,
+    },
+    /// A zip archive fetched over HTTPS — the plugin root may be at the
+    /// archive's top level or nested one directory deep.
+    Archive {
+        url: String,
+        /// SHA-256 digest (64-hex); when set every download is verified
+        /// against it and the install is refused on mismatch.
+        #[serde(default)]
+        sha256: Option<String>,
+    },
     /// npm package source.
-    Npm { package: String },
-    /// File source.
+    Npm {
+        package: String,
+        #[serde(default)]
+        version: Option<String>,
+        #[serde(default)]
+        registry: Option<String>,
+    },
+    /// File source (port-only superset; see the enum doc comment).
     File { path: String },
-    /// Directory source.
+    /// Directory source (port-only superset; see the enum doc comment).
     Directory { path: String },
+    /// Parse-time placeholder for a source type this port does not recognize,
+    /// or a known type whose fields failed validation. Never authored by
+    /// hand — `MarketplacePluginSource::deserialize` rewrites an unparseable
+    /// `source` to this so the entry stays listed (delisting detection must
+    /// not read a schema casualty as a removal). Install attempts on an
+    /// `unsupported` source fail with an actionable message.
+    Unsupported {
+        #[serde(default)]
+        error: Option<String>,
+    },
 }
 
 /// One plugin entry in a marketplace catalog.
@@ -214,6 +305,18 @@ impl MarketplaceManager {
                 MarketplaceExternalSource::Directory { path }
                 | MarketplaceExternalSource::File { path },
             )) => Some(path.as_str()),
+            Some(MarketplacePluginSource::Structured(MarketplaceExternalSource::Unsupported {
+                error,
+            })) => {
+                return Err(format!(
+                    "This plugin's marketplace entry is invalid: '{}'{}",
+                    entry.name,
+                    error
+                        .as_deref()
+                        .map(|e| format!(": {e}"))
+                        .unwrap_or_default()
+                ));
+            }
             Some(MarketplacePluginSource::Structured(_)) => {
                 return Err(format!(
                     "Plugin '{}' is hosted outside the marketplace repo",
@@ -328,5 +431,69 @@ mod tests {
             MarketplaceManager::plugin_dir_in_clone(Path::new("/tmp/clone"), &index.plugins[0])
                 .expect_err("unsafe source must still be rejected");
         assert!(err.contains("outside the cache directory"), "got: {err}");
+    }
+
+    /// The oracle: one entry with an unrecognized/invalid `source` becomes an
+    /// `unsupported` placeholder — it must NOT fail the whole catalog parse
+    /// (`Vec<MarketplacePluginEntry>` is not allowed to go strict on one bad
+    /// element; `detectDelistedPlugins` must not read this as a removal).
+    #[test]
+    fn unknown_plugin_entry_source_becomes_unsupported_placeholder_not_a_parse_failure() {
+        let index: MarketplaceIndex = serde_json::from_value(serde_json::json!({
+            "name": "demo-market",
+            "plugins": [
+                { "name": "good", "source": "./bundle" },
+                { "name": "bad", "source": { "source": "totally-unknown-type", "foo": "bar" } }
+            ]
+        }))
+        .expect("the whole index must still parse despite one bad entry");
+
+        assert_eq!(index.plugins.len(), 2, "the bad entry must stay listed");
+        match index.plugins[1].source.as_ref() {
+            Some(MarketplacePluginSource::Structured(MarketplaceExternalSource::Unsupported {
+                error,
+            })) => {
+                assert!(error.is_some(), "the placeholder should carry the parse reason");
+            }
+            other => panic!("expected an Unsupported placeholder, got {other:?}"),
+        }
+    }
+
+    /// Oracle `ft`: `source:"url"` on a plugin entry names a GIT REPOSITORY
+    /// ("Full git repository URL (https:// or git@)"), carrying `ref`/`sha` —
+    /// NOT the same shape as the separate `archive` (HTTPS zip + `sha256`)
+    /// arm. A prior port version conflated these under the same `url` tag.
+    #[test]
+    fn url_source_is_a_git_repo_shape_distinct_from_archive() {
+        let url_source: MarketplaceExternalSource = serde_json::from_value(serde_json::json!({
+            "source": "url",
+            "url": "https://example.test/repo.git",
+            "ref": "v1.0.0",
+            "sha": "a".repeat(40)
+        }))
+        .expect("parse url source");
+        match url_source {
+            MarketplaceExternalSource::Url { url, git_ref, sha } => {
+                assert_eq!(url, "https://example.test/repo.git");
+                assert_eq!(git_ref.as_deref(), Some("v1.0.0"));
+                assert_eq!(sha.as_deref(), Some("a".repeat(40)).as_deref());
+            }
+            other => panic!("expected Url, got {other:?}"),
+        }
+
+        let archive_source: MarketplaceExternalSource =
+            serde_json::from_value(serde_json::json!({
+                "source": "archive",
+                "url": "https://example.test/plugin.zip",
+                "sha256": "b".repeat(64)
+            }))
+            .expect("parse archive source");
+        match archive_source {
+            MarketplaceExternalSource::Archive { url, sha256 } => {
+                assert_eq!(url, "https://example.test/plugin.zip");
+                assert_eq!(sha256.as_deref(), Some("b".repeat(64)).as_deref());
+            }
+            other => panic!("expected Archive, got {other:?}"),
+        }
     }
 }

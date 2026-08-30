@@ -133,12 +133,23 @@ fn marketplace_entry_source_path(
             MarketplaceExternalSource::Github { .. }
             | MarketplaceExternalSource::Git { .. }
             | MarketplaceExternalSource::Url { .. }
+            | MarketplaceExternalSource::GitSubdir { .. }
+            | MarketplaceExternalSource::Archive { .. }
             | MarketplaceExternalSource::Npm { .. } => {
                 return materialize_external_plugin_source(plugins_dir, marketplace, name, source)
                     .map(Some);
             }
             MarketplaceExternalSource::File { .. }
             | MarketplaceExternalSource::Directory { .. } => {}
+            MarketplaceExternalSource::Unsupported { error } => {
+                return Err(format!(
+                    "This plugin's marketplace entry is invalid: '{name}'{}",
+                    error
+                        .as_deref()
+                        .map(|e| format!(": {e}"))
+                        .unwrap_or_default()
+                ));
+            }
         }
     }
     let candidate = match plugin::MarketplaceManager::plugin_dir_in_clone(market_root, &entry) {
@@ -197,24 +208,48 @@ fn confined_source_subdir(root: &Path, relative: Option<&str>) -> Result<PathBuf
     Ok(candidate)
 }
 
-fn download_external_plugin_url(url: &str, root: &Path) -> Result<PathBuf, String> {
+/// Materialize the oracle `archive` plugin-entry source: an HTTPS zip,
+/// optionally pinned by `sha256` (verified against every download; the
+/// install is refused on mismatch).
+fn download_external_plugin_archive(
+    url: &str,
+    sha256: Option<&str>,
+    root: &Path,
+) -> Result<PathBuf, String> {
     let url = url.to_string();
-    let root = root.to_path_buf();
+    let sha256 = sha256.map(ToOwned::to_owned);
+    let dest = root.join("archive");
     std::thread::spawn(move || {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .map_err(|error| format!("failed to initialize plugin download: {error}"))?;
-        let mut roots = runtime.block_on(crate::startup_resources::download_plugin_urls(
-            std::slice::from_ref(&url),
-            &root,
-        ))?;
-        roots
-            .pop()
-            .ok_or_else(|| "plugin URL produced no materialized source".to_string())
+        runtime.block_on(crate::startup_resources::download_plugin_archive(
+            &url,
+            sha256.as_deref(),
+            &dest,
+        ))
     })
     .join()
     .map_err(|_| "plugin download worker panicked".to_string())?
+}
+
+/// Verify a `sha`-pinned checkout's resolved HEAD commit against the entry's
+/// declared pin (oracle: *"SHA pin verification failed: expected HEAD to be
+/// … Refusing to install."*). `None` (no pin declared) always succeeds.
+fn verify_sha_pin(expected: Option<&str>, actual_head: &str) -> Result<(), String> {
+    let Some(expected) = expected else {
+        return Ok(());
+    };
+    if expected.eq_ignore_ascii_case(actual_head) {
+        Ok(())
+    } else {
+        Err(format!(
+            "SHA pin verification failed: expected HEAD to be {expected}, got {actual_head}. \
+             The pinned commit may have been removed upstream, or a ref with the same name \
+             exists. Refusing to install."
+        ))
+    }
 }
 
 fn npm_package_path(package: &str) -> Result<PathBuf, String> {
@@ -265,18 +300,35 @@ fn npm_package_path(package: &str) -> Result<PathBuf, String> {
     Ok(PathBuf::from(package_name))
 }
 
-fn materialize_npm_source(package: &str, root: &Path) -> Result<PathBuf, String> {
-    let package_path = npm_package_path(package)?;
-    let status = std::process::Command::new(if cfg!(windows) { "npm.cmd" } else { "npm" })
+fn materialize_npm_source(
+    package: &str,
+    version: Option<&str>,
+    registry: Option<&str>,
+    root: &Path,
+) -> Result<PathBuf, String> {
+    // A separate `version` field (oracle: "Specific version or version range")
+    // combines with `package` the same way an inline `name@version` already
+    // does, reusing every existing validation / lookup path unchanged.
+    let spec = match version {
+        Some(version) if !version.is_empty() => format!("{package}@{version}"),
+        _ => package.to_string(),
+    };
+    let package_path = npm_package_path(&spec)?;
+    let mut command = std::process::Command::new(if cfg!(windows) { "npm.cmd" } else { "npm" });
+    command
         .arg("install")
         .arg("--ignore-scripts")
         .arg("--no-audit")
         .arg("--no-fund")
         .arg("--package-lock=false")
         .arg("--prefix")
-        .arg(root)
+        .arg(root);
+    if let Some(registry) = registry {
+        command.arg("--registry").arg(registry);
+    }
+    let status = command
         .arg("--")
-        .arg(package)
+        .arg(&spec)
         .current_dir(root)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
@@ -292,14 +344,93 @@ fn materialize_npm_source(package: &str, root: &Path) -> Result<PathBuf, String>
     confined_source_subdir(&root.join("node_modules"), package_path.to_str())
 }
 
+/// Fetch/clone one external plugin-entry `source` into a scratch subdirectory
+/// of `work` and return the resolved plugin-root directory to copy from.
+fn resolve_external_plugin_source(
+    source: &plugin::marketplace::MarketplaceExternalSource,
+    work: &Path,
+) -> Result<PathBuf, String> {
+    use plugin::marketplace::MarketplaceExternalSource;
+
+    match source {
+        MarketplaceExternalSource::Github {
+            repo,
+            git_ref,
+            path,
+            sha,
+        } => {
+            let checkout = work.join("checkout");
+            let head = plugin::clone_plugin_git(
+                &format!("https://github.com/{repo}.git"),
+                git_ref.as_deref().unwrap_or_default(),
+                &checkout,
+            )?;
+            verify_sha_pin(sha.as_deref(), &head)?;
+            confined_source_subdir(&checkout, path.as_deref())
+        }
+        MarketplaceExternalSource::Git {
+            url,
+            git_ref,
+            path,
+            sha,
+        } => {
+            let checkout = work.join("checkout");
+            let head =
+                plugin::clone_plugin_git(url, git_ref.as_deref().unwrap_or_default(), &checkout)?;
+            verify_sha_pin(sha.as_deref(), &head)?;
+            confined_source_subdir(&checkout, path.as_deref())
+        }
+        // Oracle: `source:"url"` on a plugin entry names a GIT REPOSITORY
+        // ("Full git repository URL (https:// or git@)"), not an archive —
+        // that is the separate `archive` arm below. The whole checkout is
+        // the plugin root (this arm has no `path`).
+        MarketplaceExternalSource::Url { url, git_ref, sha } => {
+            let checkout = work.join("checkout");
+            let head =
+                plugin::clone_plugin_git(url, git_ref.as_deref().unwrap_or_default(), &checkout)?;
+            verify_sha_pin(sha.as_deref(), &head)?;
+            Ok(checkout)
+        }
+        // A subdirectory of a larger repository (monorepo). The oracle
+        // partial-clones (`--filter=tree:0`); this port does a full clone
+        // and confines to `path` (same result, more bandwidth — see the
+        // `GitSubdir` doc comment).
+        MarketplaceExternalSource::GitSubdir {
+            url,
+            path,
+            git_ref,
+            sha,
+        } => {
+            let checkout = work.join("checkout");
+            let head =
+                plugin::clone_plugin_git(url, git_ref.as_deref().unwrap_or_default(), &checkout)?;
+            verify_sha_pin(sha.as_deref(), &head)?;
+            confined_source_subdir(&checkout, Some(path.as_str()))
+        }
+        MarketplaceExternalSource::Archive { url, sha256 } => {
+            download_external_plugin_archive(url, sha256.as_deref(), work)
+        }
+        MarketplaceExternalSource::Npm {
+            package,
+            version,
+            registry,
+        } => materialize_npm_source(package, version.as_deref(), registry.as_deref(), work),
+        MarketplaceExternalSource::File { .. } | MarketplaceExternalSource::Directory { .. } => {
+            Err("local marketplace source must stay inside its catalog root".to_string())
+        }
+        MarketplaceExternalSource::Unsupported { error } => Err(format!(
+            "plugin source type unsupported{}",
+            error.as_deref().map(|e| format!(": {e}")).unwrap_or_default()
+        )),
+    }
+}
+
 fn materialize_external_plugin_source(
     plugins_dir: &Path,
     marketplace: &str,
     name: &str,
     source: &plugin::marketplace::MarketplaceExternalSource,
 ) -> Result<PathBuf, String> {
-    use plugin::marketplace::MarketplaceExternalSource;
-
     let cache_key = external_source_cache_key(source);
     let destination = plugins_dir
         .join("source-cache")
@@ -325,32 +456,7 @@ fn materialize_external_plugin_source(
         .map_err(|error| format!("failed to create plugin source staging: {error}"))?;
 
     let result = (|| -> Result<(), String> {
-        let resolved = match source {
-            MarketplaceExternalSource::Github {
-                repo,
-                git_ref,
-                path,
-            } => {
-                let checkout = work.join("checkout");
-                plugin::clone_plugin_git(
-                    &format!("https://github.com/{repo}.git"),
-                    git_ref.as_deref().unwrap_or_default(),
-                    &checkout,
-                )?;
-                confined_source_subdir(&checkout, path.as_deref())?
-            }
-            MarketplaceExternalSource::Git { url, git_ref, path } => {
-                let checkout = work.join("checkout");
-                plugin::clone_plugin_git(url, git_ref.as_deref().unwrap_or_default(), &checkout)?;
-                confined_source_subdir(&checkout, path.as_deref())?
-            }
-            MarketplaceExternalSource::Url { url } => download_external_plugin_url(url, &work)?,
-            MarketplaceExternalSource::Npm { package } => materialize_npm_source(package, &work)?,
-            MarketplaceExternalSource::File { .. }
-            | MarketplaceExternalSource::Directory { .. } => {
-                return Err("local marketplace source must stay inside its catalog root".to_string())
-            }
-        };
+        let resolved = resolve_external_plugin_source(source, &work)?;
         copy_dir(&resolved, &payload).map_err(|error| error.to_string())?;
         plugin::ensure_plugin_manifest(&payload)?;
         if let Err(error) = std::fs::rename(&payload, &destination) {
@@ -2182,6 +2288,7 @@ mod tests {
             url: format!("file://{}", repository.display()),
             git_ref: None,
             path: Some("nested/plugin".to_string()),
+            sha: None,
         };
 
         let materialized =
@@ -2193,6 +2300,103 @@ mod tests {
             .is_file());
         assert!(materialized
             .starts_with(std::fs::canonicalize(e.plugins.join("source-cache")).unwrap()));
+    }
+
+    /// A bare `git init`+commit fixture whose root IS the plugin (no subdir),
+    /// for the `url`-as-git-repo tests below. Returns `(repo path, HEAD sha)`.
+    #[cfg(unix)]
+    fn init_git_plugin_fixture(root: &Path) -> (PathBuf, String) {
+        std::fs::create_dir_all(root.join(branding::PLUGIN_MANIFEST_DIR)).unwrap();
+        std::fs::write(
+            root.join(branding::PLUGIN_MANIFEST_DIR).join("plugin.json"),
+            r#"{"name":"url-repo","version":"1.0.0"}"#,
+        )
+        .unwrap();
+        for args in [
+            vec!["init", root.to_str().unwrap()],
+            vec!["-C", root.to_str().unwrap(), "add", "."],
+            vec![
+                "-C",
+                root.to_str().unwrap(),
+                "-c",
+                "user.name=LingXi Test",
+                "-c",
+                "user.email=lingxi@example.invalid",
+                "commit",
+                "-m",
+                "fixture",
+            ],
+        ] {
+            let output = std::process::Command::new("git")
+                .args(args)
+                .output()
+                .expect("git is required by marketplace installation");
+            assert!(
+                output.status.success(),
+                "git fixture failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        let head = std::process::Command::new("git")
+            .args(["-C", root.to_str().unwrap(), "rev-parse", "HEAD"])
+            .output()
+            .expect("git rev-parse");
+        assert!(head.status.success());
+        (
+            root.to_path_buf(),
+            String::from_utf8_lossy(&head.stdout).trim().to_string(),
+        )
+    }
+
+    /// Oracle: `source:"url"` on a plugin entry names a GIT REPOSITORY, not an
+    /// archive — a prior port version conflated the two under the same `url`
+    /// tag and tried to download-and-unpack an archive here, which would fail
+    /// (or silently mis-handle) a real oracle `source:"url"` entry.
+    #[cfg(unix)]
+    #[test]
+    fn external_url_source_materializes_via_git_clone_not_archive_download() {
+        let e = env();
+        let repository = e._tmp.path().join("url-source");
+        let (repository, _head) = init_git_plugin_fixture(&repository);
+
+        let source = plugin::marketplace::MarketplaceExternalSource::Url {
+            url: format!("file://{}", repository.display()),
+            git_ref: None,
+            sha: None,
+        };
+
+        let materialized =
+            materialize_external_plugin_source(&e.plugins, "mymkt", "urlrepo", &source).unwrap();
+
+        assert!(materialized
+            .join(branding::PLUGIN_MANIFEST_DIR)
+            .join("plugin.json")
+            .is_file());
+    }
+
+    /// The oracle: *"SHA pin verification failed … Refusing to install."* — a
+    /// `sha` that does not match the resolved HEAD must refuse the install.
+    #[cfg(unix)]
+    #[test]
+    fn external_url_source_rejects_a_mismatched_sha_pin() {
+        let e = env();
+        let repository = e._tmp.path().join("url-source-pinned");
+        let (repository, head) = init_git_plugin_fixture(&repository);
+        let wrong_sha = if head.starts_with('f') { "0".repeat(40) } else { "f".repeat(40) };
+
+        let source = plugin::marketplace::MarketplaceExternalSource::Url {
+            url: format!("file://{}", repository.display()),
+            git_ref: None,
+            sha: Some(wrong_sha),
+        };
+
+        let error =
+            materialize_external_plugin_source(&e.plugins, "mymkt", "urlrepo-pinned", &source)
+                .expect_err("a mismatched sha pin must refuse the install");
+        assert!(
+            error.contains("SHA pin verification failed"),
+            "expected a SHA pin failure, got: {error}"
+        );
     }
 
     #[test]

@@ -24,6 +24,18 @@
 //! `projects.<project_key>` and is read via
 //! [`migrations::global_config::get_project_config`]. Only the `computer-use`
 //! server name is a wire/protocol identifier and stays verbatim (not branded).
+//!
+//! This module also implements the separate project-`.mcp.json` approval
+//! gate (`enabledMcpjsonServers` / `disabledMcpjsonServers` /
+//! `enableAllProjectMcpServers`, applied only to `ConfigScope::Project` in
+//! [`McpPolicyContext::decide`]). A now-deleted `mcp/src/approval.rs`
+//! (§25b) duplicated this with its own `McpApprovalPolicy`/`ApprovalStatus`
+//! and zero external callers; **do not revive it**. Its
+//! `ConfigScope::Dynamic -> PendingApproval` mapping would regress §27a,
+//! which made `--mcp-config` entries `Dynamic` specifically so they are
+//! NEVER approval-gated — `decide` below correctly gates only
+//! `ConfigScope::Project`, and `project_approval_is_scope_aware`'s
+//! `ConfigScope::Dynamic` case pins that.
 
 use crate::connection::{ConfigScope, McpServerConfig};
 use serde::{Deserialize, Serialize};

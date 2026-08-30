@@ -3,15 +3,26 @@
 //! Owns the per-connection state machine (`connection.rs`), the
 //! [`registry::McpRegistry`] that drives transitions through a
 //! platform-supplied [`traits::McpTransport`], the OAuth 2.1
-//! handshake skeleton (`oauth.rs`), the approval policy (`approval.rs`),
-//! the per-agent connection bookkeeping (`agent_scope.rs`), and the
+//! handshake skeleton (`oauth.rs`), the per-project MCP-server enable/
+//! disable and project-`.mcp.json`-approval gate (`server_gate.rs`), the
+//! per-agent connection bookkeeping (`agent_scope.rs`), and the
 //! `client::McpClient` JSON-RPC client built on top of `lingxi-jsonrpc`
 //! (M2-02b — see `docs/superpowers/plans/2026-05-23-m2-02b-mcp-client.md`).
+//!
+//! There used to be a separate `approval.rs` with its own
+//! `McpApprovalPolicy`/`ApprovalStatus`; it was a dead duplicate (zero
+//! external references, and its one config flag was written but never
+//! read) of the approval gate that `server_gate.rs`'s `McpPolicyContext::
+//! decide` actually implements, so it was deleted (§25b). If it is ever
+//! revived: its `ConfigScope::Dynamic -> PendingApproval` mapping would
+//! silently regress §27a, which made `--mcp-config` entries `Dynamic`
+//! specifically so they are NOT approval-gated — see
+//! `server_gate.rs`'s `decide` and its `project_approval_is_scope_aware`
+//! test's `ConfigScope::Dynamic` case.
 
 #![forbid(unsafe_code)]
 
 pub mod agent_scope;
-pub mod approval;
 pub mod capabilities;
 pub mod client;
 pub mod config_diagnostics;

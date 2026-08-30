@@ -908,6 +908,7 @@ G3	lingxi-code/apps/engine-desktop/src/settings_watch.rs	LINGXI.md
 G3	lingxi-code/apps/engine-desktop/tests/sandbox_startup_test.rs	.lingxi
 G3	lingxi-code/apps/engine-desktop/tests/settings_watch_spawn.rs	.lingxi
 G3	lingxi-code/apps/engine-mobile/src/host.rs	.lingxi
+G3	lingxi-code/apps/engine-mobile/src/host.rs	.lingxi-plugin
 G3	lingxi-code/apps/engine-mobile/src/host.rs	LINGXI.md
 G3	lingxi-code/apps/engine-mobile/src/local_app_runtime_profiles.rs	.lingxi
 G3	lingxi-code/apps/engine-mobile/src/local_apps_build.rs	.lingxi

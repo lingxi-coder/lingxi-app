@@ -445,6 +445,28 @@ pub struct MobileRuntime {
     /// registry must be observable, not re-derived by the test.
     #[cfg(test)]
     pub(crate) wired_skill_loader: Arc<dyn tool_skill::skill::SkillLoader>,
+    /// P1.8 (§19.2): the mobile `PluginManager` `build_mobile_inner` composed
+    /// and registered the compiled-in plugin through, retained so a test can
+    /// materialize a REAL fixture plugin via [`plugin::PluginManager::enable`]
+    /// (never `register_verified_builtin` — that symbol keeps its single
+    /// production call site in `lib.rs`) and observe the mutation through the
+    /// SAME live surfaces the model reads, rather than asserting against a
+    /// manager the test built itself.
+    #[cfg(test)]
+    pub(crate) wired_plugin_manager: Arc<plugin::PluginManager>,
+    /// P1.8: the VERY agent catalog `plugin_manager` was built
+    /// `.with_agent_catalog(..)` over. A plugin-declared agent lands here.
+    #[cfg(test)]
+    pub(crate) wired_agent_catalog: Arc<tokio::sync::RwLock<Vec<agent::AgentDefinition>>>,
+    /// P1.8: the subagent spawner's OWN set-once agent-catalog cell — the
+    /// object the real invocation path (`PoolSubagentSpawner::spawn`)
+    /// actually consults. Retained separately from
+    /// [`Self::wired_agent_catalog`] so a test can prove the two are
+    /// `Arc::ptr_eq` — i.e. the SAME allocation — rather than two catalogs
+    /// that merely started out holding equal builtin content.
+    #[cfg(test)]
+    pub(crate) wired_subagent_agent_catalog_cell:
+        Arc<std::sync::OnceLock<Arc<tokio::sync::RwLock<Vec<agent::AgentDefinition>>>>>,
     /// Auth handle for `/login` and `/logout`.
     pub auth: Arc<dyn AuthHandle>,
     /// Native mobile OAuth coordinator. It owns the provider-specific handles
@@ -3720,7 +3742,10 @@ async fn build_mobile_inner_with_ask(
         // `PermissionPolicy` built above (empty when no Read-deny rule ⇒
         // unchanged default).
         read_deny_exclude_globs,
-        fs,
+        // P1.8: kept a clone rather than a move — `build_mobile_inner` needs
+        // `fs` again below to compose the mobile `PluginManager` with the
+        // SAME filesystem handle the rest of the boot path uses.
+        fs: fs.clone(),
         bus: analytics_bus.clone(),
         process,
         sandbox,
@@ -3837,6 +3862,69 @@ async fn build_mobile_inner_with_ask(
     // listing all observe one live command set.
     let shared_command_registry: Arc<RwLock<command_api::CommandRegistry>> =
         Arc::new(RwLock::new(command_api::CommandRegistry::new()));
+    // P1.8 (§19.2): compose the mobile `PluginManager` — P1.6 registered the
+    // one compiled-in plugin through `register_verified_builtin`, but nothing
+    // called that composition from `build_mobile_inner` yet, and the manager
+    // was never handed the SAME live registries the rest of this function
+    // wires for listing/dispatch. Handing it a registry of its own here would
+    // leave a future plugin-declared command/skill invisible to the model's
+    // listing (or a plugin-declared agent unspawnable) while every existing
+    // test — none of which exercised `PluginManager` at all — stayed green.
+    // So every registry below is the EXACT live object this function already
+    // threads through the dispatcher / listing provider / subagent spawner,
+    // not a fresh stand-in:
+    //   - `command_registry` is `shared_command_registry` itself, the one
+    //     `CommandRegistry` the slash dispatcher, `wired_skill_listing_provider`,
+    //     and the Skill tool's loader all read below;
+    //   - `hook_registry` / `mcp_registry` are the real live hook + MCP
+    //     registries this connection already runs;
+    //   - `skill_registry` / `output_style_registry` / `lsp_registry` /
+    //     `tool_registry` have no mobile equivalent to share (mobile mirrors
+    //     plugin skills into `command_registry` instead, and starts no
+    //     output-style/LSP/second-tool-registry subsystem), so they stay
+    //     freshly constructed and inert — `PluginManager::new` still requires
+    //     them by signature (it does not re-export `LspRegistry`/
+    //     `OutputStyleRegistry`, hence this crate's direct `lsp`/`outputstyles`
+    //     deps).
+    // The compiled-in plugin's own manifest declares zero components today
+    // (`lib.rs`'s `mobile_builtin_plugin_manifest`), so registering it below
+    // is a no-op over live state — this wiring only matters the day that
+    // manifest grows a real command/skill/agent, and to the plugin-manager
+    // tests below that materialize a REAL fixture plugin through
+    // `wired_plugin_manager.enable(..)` to prove the registries are shared by
+    // identity, not merely seeded with equal content.
+    let plugin_agent_catalog: Arc<tokio::sync::RwLock<Vec<agent::AgentDefinition>>> = Arc::new(
+        tokio::sync::RwLock::new(agent::builtins::builtin_agent_definitions()),
+    );
+    let plugin_manager = Arc::new(
+        plugin::PluginManager::new(
+            cfg.lingxi_home.join("plugins"),
+            fs.clone(),
+            http.clone(),
+            Arc::new(platform_posix_minimal::PosixRuntime::new())
+                as Arc<dyn traits::RuntimeSpawner>,
+            credentials.clone(),
+            Arc::new(plugin::PluginBlocklist::new(String::new())),
+            Arc::new(plugin::StrictPluginOnlyPolicy::empty()),
+            shared_command_registry.clone(),
+            Arc::new(RwLock::new(skill_api::SkillRegistry::new())),
+            hook_registry.clone(),
+            Arc::new(RwLock::new(outputstyles::OutputStyleRegistry::new())),
+            mcp_registry.clone(),
+            Arc::new(lsp::LspRegistry::new(Arc::new(
+                platform_posix_minimal::PosixLsp::new(),
+            ))),
+            Arc::new(RwLock::new(ToolRegistry::new())),
+        )
+        .with_agent_catalog(plugin_agent_catalog.clone()),
+    );
+    if let Err(error) = crate::register_mobile_builtin_plugins(&plugin_manager).await {
+        tracing::warn!(
+            %error,
+            "failed to register the compiled-in mobile plugin; any commands/skills/agents \
+             it would have contributed are unavailable this boot"
+        );
+    }
     // Audit fix (#14): wire the mobile Skill tool to the SAME live registry the
     // slash dispatcher and listing provider use. The registry is filled below
     // once the orchestrator handle is available, and later `/reload-skills`
@@ -4025,10 +4113,17 @@ async fn build_mobile_inner_with_ask(
     // gate; the agent catalog serves the builtin definitions (incl.
     // `workflow-subagent`); the deferred workflow invoker + status sink bind
     // to their real targets.
+    //
+    // P1.8: this MUST be `plugin_agent_catalog` itself, not a fresh
+    // `Vec`-seeded catalog of equal starting content — `plugin_manager` above
+    // was built `.with_agent_catalog(plugin_agent_catalog.clone())`, so a
+    // plugin-declared agent lands in whichever catalog this cell is filled
+    // with. A second, separately-allocated catalog here would make the
+    // subagent spawner (the actual invocation path) permanently blind to
+    // anything `plugin_manager` ever registers, even though both catalogs
+    // start out holding the identical builtin definitions.
     let _ = subagent_tool_registry_cell.set(tools.clone());
-    let _ = subagent_agent_catalog_cell.set(Arc::new(tokio::sync::RwLock::new(
-        agent::builtins::builtin_agent_definitions(),
-    )));
+    let _ = subagent_agent_catalog_cell.set(plugin_agent_catalog.clone());
     let _ = subagent_hook_executor_cell.set(hooks.clone());
     let profile_first_party = profile_auto_mode_provider
         .iter()
@@ -4426,6 +4521,12 @@ async fn build_mobile_inner_with_ask(
         wired_skill_listing_provider,
         #[cfg(test)]
         wired_skill_loader,
+        #[cfg(test)]
+        wired_plugin_manager: plugin_manager,
+        #[cfg(test)]
+        wired_agent_catalog: plugin_agent_catalog,
+        #[cfg(test)]
+        wired_subagent_agent_catalog_cell: subagent_agent_catalog_cell,
         auth,
         oauth,
         permission_gate: adapter_gate,
@@ -10952,6 +11053,246 @@ mod tests {
             resolved_loop_after_delete.loaded_from.as_deref(),
             Some("bundled"),
             "loop must still resolve from bundled after repeated reloads"
+        );
+    }
+
+    /// Write a minimal fixture plugin directory `root/{plugin_name}` with one
+    /// namespaced command (`commands/{cmd_name}.md`) and one namespaced agent
+    /// (`agents/{agent_name}.md`), in the exact on-disk shape
+    /// `plugin::discovery::discover_installed_plugins` auto-detects (mirrors
+    /// `plugin::manager::agent_privilege_tests::write_single_agent_plugin`).
+    fn write_plugin_fixture(
+        root: &Path,
+        plugin_name: &str,
+        cmd_name: &str,
+        cmd_body: &str,
+        agent_name: &str,
+    ) {
+        let plugin_dir = root.join(plugin_name);
+        std::fs::create_dir_all(plugin_dir.join(".lingxi-plugin")).expect("plugin manifest dir");
+        std::fs::write(
+            plugin_dir.join(".lingxi-plugin").join("plugin.json"),
+            format!(r#"{{"name":"{plugin_name}","version":"1.0.0"}}"#),
+        )
+        .expect("write plugin.json");
+        std::fs::create_dir_all(plugin_dir.join("commands")).expect("commands dir");
+        std::fs::write(
+            plugin_dir.join("commands").join(format!("{cmd_name}.md")),
+            format!("---\ndescription: fixture command\n---\n{cmd_body}\n"),
+        )
+        .expect("write fixture command");
+        std::fs::create_dir_all(plugin_dir.join("agents")).expect("agents dir");
+        std::fs::write(
+            plugin_dir.join("agents").join(format!("{agent_name}.md")),
+            format!("---\nname: {agent_name}\ndescription: fixture agent\n---\nI am a fixture.\n"),
+        )
+        .expect("write fixture agent");
+    }
+
+    /// P1.8 (§19.2) — the required gate: the command, skill, and agent
+    /// surfaces `plugin::PluginManager` materializes into must be the SAME
+    /// live objects the model's listing and invocation paths already read —
+    /// not copies seeded with equal content — and the pre-existing workflow
+    /// task registry must remain the one object both the `Workflow` tool and
+    /// the `/workflows` listing command share.
+    ///
+    /// Every check below is discriminating, not merely descriptive: each one
+    /// is answered by mutating state through ONE named surface and observing
+    /// the change through a DIFFERENT, independently-retained handle. Two
+    /// registries seeded with identical starting content (see
+    /// `two_separately_allocated_catalogs_with_equal_content_are_not_the_same_registry`
+    /// below) would satisfy every assertion here UNTIL the mutation step,
+    /// where only genuine identity keeps them in sync.
+    #[tokio::test]
+    async fn listing_and_invocation_share_one_registry() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let plugin_name = "p18-fixture-plugin";
+        let cmd_name = "hello";
+        let agent_name = "helper";
+        write_plugin_fixture(
+            tmp.path(),
+            plugin_name,
+            cmd_name,
+            "FIXTURE COMMAND BODY",
+            agent_name,
+        );
+
+        let platform: Arc<dyn traits::Platform> =
+            Arc::new(HostFakePlatform::new(tmp.path().to_path_buf()));
+        let listener: Arc<dyn ClientEventListener> = Arc::new(FakeListener::default());
+        let perm_sink: Arc<dyn PermissionRequestSink> =
+            Arc::new(RecordingPermissionSink::default());
+        let rt = build_mobile(test_config(tmp.path()), platform, listener, perm_sink)
+            .await
+            .expect("build_mobile failed");
+
+        // --- Workflow leg: pre-existing sharing, asserted here so all four
+        // §19.2 surfaces are covered by one gate. `WorkflowsHandler` (the
+        // `/workflows` listing command) and `MobileWorkflowLauncher` (what the
+        // `Workflow` tool actually invokes through) must read the SAME
+        // `TaskRegistry`, or a run the tool starts could go unlisted, or a
+        // listed run could be unreachable to invoke against.
+        assert!(
+            Arc::ptr_eq(&rt.task_registry, &rt.workflow_launcher.registry),
+            "the Workflow tool's launcher and the /workflows listing command must \
+             share one live TaskRegistry, not two separately-constructed ones"
+        );
+
+        // --- Command/skill leg: materialize a REAL fixture plugin through the
+        // VERY `PluginManager` `build_mobile` composed (never a manager the
+        // test builds itself, and never `register_verified_builtin` — that
+        // symbol's one production call site stays in `lib.rs`).
+        let discovered = plugin::discovery::discover_installed_plugins(tmp.path()).await;
+        let (id, manifest, install_dir) = discovered
+            .into_iter()
+            .find(|(_, m, _)| m.name == plugin_name)
+            .expect("fixture plugin discovered on disk");
+        rt.wired_plugin_manager
+            .enable(&id, manifest, install_dir)
+            .await
+            .expect("fixture plugin must enable cleanly");
+
+        let namespaced_cmd = format!("{plugin_name}:{cmd_name}");
+        let namespaced_agent = format!("{plugin_name}:{agent_name}");
+
+        // Listing: the model's per-turn skill/command listing must now name
+        // the plugin's command — read through `wired_skill_listing_provider`,
+        // the VERY handle the orchestrator's per-turn prompt reads, not a
+        // provider the test builds fresh over `rt.slash_registry`.
+        let listed = rt.wired_skill_listing_provider.skill_entries().await;
+        assert!(
+            listed.iter().any(|entry| entry.name == namespaced_cmd),
+            "the plugin's command must appear in the live listing after \
+             PluginManager::enable: {:?}",
+            listed.iter().map(|e| e.name.as_str()).collect::<Vec<_>>()
+        );
+
+        // Invocation: the Skill tool's OWN loader — `wired_skill_loader` —
+        // must resolve the identical name to the identical body. If
+        // `PluginManager` had been handed a `CommandRegistry` of its own
+        // instead of `shared_command_registry`, the listing check above and
+        // this one could both still fail (or, worse, only one of them would),
+        // which is exactly the split §19.2 forbids.
+        let loaded = rt
+            .wired_skill_loader
+            .load(&namespaced_cmd)
+            .await
+            .expect("load ok")
+            .unwrap_or_else(|| panic!("plugin command {namespaced_cmd:?} must be invocable"));
+        assert!(
+            loaded.body.contains("FIXTURE COMMAND BODY"),
+            "invoked body must be the fixture plugin command's own content: {:?}",
+            loaded.body
+        );
+
+        // --- Agent leg: PluginManager's `agent_catalog` must be the exact
+        // object the real subagent spawner's set-once cell was filled with,
+        // not a second catalog that merely started with equal builtin
+        // content.
+        let via_spawner_cell = rt
+            .wired_subagent_agent_catalog_cell
+            .get()
+            .expect("subagent spawner's agent-catalog cell must be filled by boot")
+            .clone();
+        assert!(
+            Arc::ptr_eq(&via_spawner_cell, &rt.wired_agent_catalog),
+            "PluginManager's agent_catalog and the subagent spawner's live \
+             catalog must be the SAME Arc allocation, not two catalogs seeded \
+             with equal content"
+        );
+        // Listing surface: PluginManager's own catalog (mutated by `enable`
+        // above) must already show the fixture agent.
+        let listing_names: Vec<String> = rt
+            .wired_agent_catalog
+            .read()
+            .await
+            .iter()
+            .map(|def| def.agent_type.clone())
+            .collect();
+        assert!(
+            listing_names.contains(&namespaced_agent),
+            "the plugin's agent must be present in PluginManager's live catalog: \
+             {listing_names:?}"
+        );
+        // Invocation surface: read through the SPAWNER'S OWN cell — a
+        // genuinely independent handle from `wired_agent_catalog` above —
+        // proving the mutation `enable()` made is visible on the invocation
+        // path itself, not merely on the handle the test happened to mutate
+        // through.
+        let invocation_names: Vec<String> = via_spawner_cell
+            .read()
+            .await
+            .iter()
+            .map(|def| def.agent_type.clone())
+            .collect();
+        assert!(
+            invocation_names.contains(&namespaced_agent),
+            "the plugin's agent must be resolvable through the subagent \
+             spawner's own catalog handle: {invocation_names:?}"
+        );
+    }
+
+    /// House-defect guard for the test above: prove the discriminating
+    /// assertions above are actually discriminating. Two catalogs built from
+    /// the SAME seed content (`agent::builtins::builtin_agent_definitions()`)
+    /// are NOT `Arc::ptr_eq`, and mutating one is invisible through the
+    /// other — the exact failure shape `listing_and_invocation_share_one_registry`
+    /// exists to catch, reproduced here in isolation without booting a whole
+    /// `MobileRuntime`.
+    #[tokio::test]
+    async fn two_separately_allocated_catalogs_with_equal_content_are_not_the_same_registry() {
+        let listing: Arc<tokio::sync::RwLock<Vec<agent::AgentDefinition>>> = Arc::new(
+            tokio::sync::RwLock::new(agent::builtins::builtin_agent_definitions()),
+        );
+        let invocation: Arc<tokio::sync::RwLock<Vec<agent::AgentDefinition>>> = Arc::new(
+            tokio::sync::RwLock::new(agent::builtins::builtin_agent_definitions()),
+        );
+
+        // Equal content at construction — this is the trap: a value-equality
+        // assertion here would pass despite these being two independent
+        // allocations.
+        assert_eq!(
+            listing.read().await.len(),
+            invocation.read().await.len(),
+            "fixture setup: both catalogs must start with equal content"
+        );
+        assert!(
+            !Arc::ptr_eq(&listing, &invocation),
+            "two separately Arc::new-allocated catalogs must never be ptr_eq, \
+             even with identical content"
+        );
+
+        // Mutate ONLY `listing` (as `PluginManager::enable` would through
+        // whichever catalog it was actually wired to) and confirm the
+        // "invocation" surface never sees it — the discriminating behavior
+        // `listing_and_invocation_share_one_registry` depends on to fail loud
+        // if a future refactor re-splits the two catalogs.
+        let planted = agent::builtins::builtin_agent_definitions()
+            .into_iter()
+            .next()
+            .expect("at least one builtin agent definition exists")
+            .clone();
+        let mut planted = planted;
+        planted.agent_type = "planted:only-in-listing".to_string();
+        listing.write().await.push(planted.clone());
+
+        assert!(
+            listing
+                .read()
+                .await
+                .iter()
+                .any(|def| def.agent_type == planted.agent_type),
+            "the mutation must actually have landed in `listing`"
+        );
+        assert!(
+            !invocation
+                .read()
+                .await
+                .iter()
+                .any(|def| def.agent_type == planted.agent_type),
+            "a mutation through `listing` must NEVER appear in a separately-\
+             allocated `invocation` catalog — if it does, this fixture no \
+             longer demonstrates the failure shape the real gate depends on"
         );
     }
 

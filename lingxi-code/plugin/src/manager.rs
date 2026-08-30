@@ -505,6 +505,102 @@ impl PluginManager {
         Ok(())
     }
 
+    /// Register an engine-compiled-in plugin whose `(id, manifest,
+    /// install_dir)` triple is already resolved and trusted — the second,
+    /// narrow door §19.1 requires alongside [`Self::install`]'s continued
+    /// rejection of `PluginSource::BuiltIn`.
+    ///
+    /// [`Self::install`] cannot take a `BuiltIn` source itself: the variant
+    /// carries no path/URL for it to fetch from, and that arm keeps
+    /// returning [`PluginManagerError::Io`] unconditionally — this method
+    /// does not touch `install`'s match at all. Instead the caller (the
+    /// composition root, for a plugin compiled into or embedded in the
+    /// binary) supplies the manifest and the directory its component files
+    /// already live in directly, exactly as `install`'s own `LocalPath` arm
+    /// hands a caller-resolved directory straight to [`Self::enable`].
+    ///
+    /// This is a thin wrapper, not a parallel implementation: every
+    /// remaining invariant `enable`/`load_plugin` enforce for a network
+    /// install runs here too, unmodified —
+    ///   - the blocklist check (`PluginManagerError::Blocked`) — with the
+    ///     same caveat it carries on every other path:
+    ///     `PluginBlocklist::is_blocked` matches on `PluginId`, and
+    ///     `PluginId::new()` is a fresh v4 UUID per process, so the check
+    ///     runs but can only match an id the host minted and blocked
+    ///     within the same run,
+    ///   - the managed-marketplace-block check,
+    ///   - `userConfig` resolution (secrets + `pluginConfigs` substitution),
+    ///   - and full component materialization: privilege-stripped agents,
+    ///     commands, skills, output styles, hooks, MCP servers, LSP servers.
+    ///
+    /// Three things are stamped unconditionally, overwriting whatever the
+    /// caller's `manifest` already carried, so a mistakenly-populated field
+    /// on the way in can never survive into the live state:
+    ///   - `manifest.source` becomes [`PluginSource::BuiltIn`],
+    ///   - `manifest.trust_level` becomes the trust
+    ///     [`crate::trust::default_trust_for_source`] assigns `BuiltIn`
+    ///     (`AdminTrusted`) — mirroring [`Self::finalize_install`]'s
+    ///     stamp-then-`enable` pattern for the network arms, and
+    ///   - `manifest.id` becomes `*id`, the value the plugin state map is
+    ///     keyed by. Every `install` arm gets `(id, manifest)` from
+    ///     `discovery::load_plugin_from_path`, which mints one id and puts
+    ///     that same value in `manifest.id`; only this door takes the two
+    ///     from a caller that built the manifest by hand, so only here can
+    ///     they diverge — and a divergence silently makes the plugin
+    ///     impossible to unload (see the stamp's own comment below).
+    ///
+    /// What this path deliberately skips, because "verified" means the root
+    /// never passed through untrusted, attacker-influenced input in the
+    /// first place:
+    ///   - fetch/download (git clone, marketplace HTTP, `.mcpb` unzip) — the
+    ///     `BuiltIn` variant has nothing to fetch from,
+    ///   - the `.mcpb` sha256 integrity compare — no archive is unpacked,
+    ///   - the marketplace clone's symlink/path-traversal escape guard — the
+    ///     directory is not a freshly-cloned untrusted repo,
+    ///   - the `installed_plugins.json` durable record `copy_into_cache`
+    ///     writes — a compiled-in plugin is deterministically reconstructed
+    ///     by the host at every startup, so there is nothing to re-discover
+    ///     across a restart, and
+    ///   - the "`install_dir` is a real plugin root" check `install`'s
+    ///     `LocalPath` arm gets for free from
+    ///     `discovery::discover_installed_plugins` (a directory with no
+    ///     `plugin.json` yields `no plugin manifest found at ..`). A
+    ///     compiled-in plugin need not have a manifest file on disk at all —
+    ///     the caller supplies the parsed manifest — so requiring one here
+    ///     would defeat the purpose. The cost is that a host packaging bug
+    ///     (component files missing from `install_dir`) registers a plugin
+    ///     with zero components and returns `Ok`: `load_plugin` skips an
+    ///     unreadable component file rather than failing, on this path
+    ///     exactly as on every other.
+    ///
+    /// Not addressed by this method, and not unique to it: `enable`/
+    /// `load_plugin` perform no `depends_on`/`dependencies` resolution for
+    /// ANY install path today — a pre-existing gap this method inherits
+    /// rather than introduces.
+    pub async fn register_verified_builtin(
+        &self,
+        id: &PluginId,
+        mut manifest: PluginManifest,
+        install_dir: PathBuf,
+    ) -> Result<(), PluginManagerError> {
+        // `load_plugin` files every registry entry under `manifest.id`
+        // (`register_plugin_commands(manifest.id, ..)`, `plugin_mcp_names`,
+        // `plugin_agent_names`, …) while `disable`/`unload_plugin` remove
+        // them by the `id` argument this state map is keyed by. Every
+        // `install` arm gets both from `discovery::load_plugin_from_path`,
+        // which mints ONE id and stores that same value in `manifest.id`, so
+        // they cannot diverge there. Here the caller hand-builds the manifest
+        // and passes the id separately, so they can — and a divergence is
+        // silent: registration succeeds, then `disable` reports success while
+        // leaving the plugin's commands, hooks, agents, MCP and LSP servers
+        // live and permanently unreachable. Stamp it, exactly like `source`
+        // and `trust_level` below.
+        manifest.id = *id;
+        manifest.source = PluginSource::BuiltIn;
+        manifest.trust_level = crate::trust::default_trust_for_source(&PluginSource::BuiltIn);
+        self.enable(id, manifest, install_dir).await
+    }
+
     /// Transition `id` from `Loaded` to `Disabled` and remove every
     /// registry entry the plugin contributed.
     pub async fn disable(&self, id: &PluginId) -> Result<(), PluginManagerError> {
@@ -1803,5 +1899,269 @@ mod agent_privilege_tests {
                 "strict validation must fail for {label}"
             );
         }
+    }
+}
+
+/// §19.1 P0a.6 — `register_verified_builtin` is a second, narrow door into
+/// the registry alongside [`PluginManager::install`], which keeps rejecting
+/// `PluginSource::BuiltIn` unconditionally. The gate is the conjunction of
+/// all three facts below, never any one alone:
+///   1. `install(BuiltIn)` still rejects (`install_builtin_still_rejects`),
+///   2. `register_verified_builtin` performs REAL materialization — not a
+///      state insert that skips everything `enable()` would have done
+///      (pinned here by resolving a real command out of the live
+///      `CommandRegistry`, the same invariant `install`'s other arms would
+///      have enforced through `enable`), and
+///   3. what lands in the LIVE manifest is stamped `PluginSource::BuiltIn`,
+///      not the (deliberately different) source the caller's manifest
+///      carried in.
+///
+/// A fourth test guards the one invariant `install` enforces structurally
+/// that this hand-built-manifest door can lose: the registry id and
+/// `manifest.id` must be the same value, or `disable` silently leaves every
+/// materialized component live and unreachable
+/// (`register_verified_builtin_files_components_under_the_registry_id_so_disable_unloads_them`).
+#[cfg(test)]
+mod register_verified_builtin_tests {
+    use super::*;
+    use platform_posix::{
+        PlainTextSecureStorage, PosixClock, PosixFileSystem, PosixHttp, PosixLspTransport,
+        PosixMcpTransport, PosixRuntime,
+    };
+
+    /// A fully-wired `PluginManager` (every registry live, no mocks) rooted
+    /// at `install_dir` — the same shape `agent_privilege_tests::wired_manager`
+    /// builds, minus the agent-catalog wiring this module's tests don't need.
+    async fn build_manager(install_dir: &Path) -> PluginManager {
+        let storage = PlainTextSecureStorage::new(install_dir.join("secrets"))
+            .await
+            .unwrap();
+        let credentials = Arc::new(CredentialManager::new(
+            Arc::new(storage),
+            Arc::new(PosixClock::new()),
+            Arc::new(PosixHttp::new()),
+        ));
+        PluginManager::new(
+            install_dir.to_path_buf(),
+            Arc::new(PosixFileSystem::new(install_dir.to_path_buf())),
+            Arc::new(PosixHttp::new()),
+            Arc::new(PosixRuntime::new()),
+            credentials,
+            Arc::new(PluginBlocklist::new(String::new())),
+            Arc::new(StrictPluginOnlyPolicy::empty()),
+            Arc::new(RwLock::new(CommandRegistry::new())),
+            Arc::new(RwLock::new(SkillRegistry::new())),
+            Arc::new(RwLock::new(HookRegistry::new())),
+            Arc::new(RwLock::new(OutputStyleRegistry::new())),
+            Arc::new(McpRegistry::new(Arc::new(PosixMcpTransport::new()))),
+            Arc::new(LspRegistry::new(Arc::new(PosixLspTransport::new()))),
+            Arc::new(RwLock::new(ToolRegistry::new())),
+        )
+    }
+
+    /// Part 1 of the gate: `install(PluginSource::BuiltIn)` is ALREADY true
+    /// at HEAD (`manager.rs`'s first match arm rejects it unconditionally,
+    /// before this task's change) — asserted here so the conjunction with
+    /// parts 2/3 below is checked together, never left as a row that would
+    /// have passed identically before this change existed. Pins the actual
+    /// error text (an `is_err()`-only assertion would also pass if the
+    /// rejection came from some unrelated failure, e.g. a bad install_dir).
+    #[tokio::test]
+    async fn install_builtin_still_rejects() {
+        let tmp = tempfile::tempdir().unwrap();
+        let manager = build_manager(tmp.path()).await;
+
+        let err = manager
+            .install(PluginSource::BuiltIn)
+            .await
+            .expect_err("install(BuiltIn) must keep rejecting");
+
+        match err {
+            PluginManagerError::Io(msg) => assert!(
+                msg.contains("BuiltIn") && msg.contains("PluginManager::install"),
+                "rejection message should name the BuiltIn variant and the entry \
+                 point that refuses it, got: {msg}"
+            ),
+            other => panic!("expected PluginManagerError::Io, got {other:?}"),
+        }
+    }
+
+    /// A manifest fixture whose `source`/`trust_level` are deliberately NOT
+    /// `BuiltIn`/`AdminTrusted` — so a test that finds `BuiltIn`/
+    /// `AdminTrusted` on the live state afterward proves the method
+    /// overwrote the caller's input rather than merely echoing it back
+    /// (the tautology this file's task brief warns about by name).
+    fn manifest_with_command(id: PluginId, name: &str) -> PluginManifest {
+        PluginManifest {
+            id,
+            name: name.to_string(),
+            display_name: None,
+            default_enabled: true,
+            version: "1.0.0".into(),
+            description: String::new(),
+            author: None,
+            homepage: None,
+            source: PluginSource::LocalPath {
+                path: PathBuf::from("/definitely-not-the-real-root"),
+            },
+            components: crate::manifest::PluginComponents {
+                commands: vec![ComponentPath {
+                    path: PathBuf::from("commands/hello.md"),
+                    metadata: None,
+                }],
+                ..Default::default()
+            },
+            trust_level: crate::trust::PluginTrustLevel::Untrusted,
+            depends_on: Vec::new(),
+            dependencies: Vec::new(),
+            user_config: None,
+            channels: Vec::new(),
+            settings: HashMap::new(),
+        }
+    }
+
+    /// Parts 2 + 3 of the gate, together: `register_verified_builtin` both
+    /// performs REAL materialization (a positive control against the House
+    /// Defect — a version that just inserted `PluginState::Loaded` without
+    /// calling `load_plugin` would leave `resolve()` returning `None` here)
+    /// AND stamps the live manifest's source as `BuiltIn`, discarding the
+    /// caller-supplied `LocalPath` from the fixture above.
+    #[tokio::test]
+    async fn register_verified_builtin_stamps_the_live_manifest_source_as_builtin() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("commands")).unwrap();
+        std::fs::write(
+            tmp.path().join("commands").join("hello.md"),
+            "---\ndescription: says hi\n---\nHello from a verified builtin.\n",
+        )
+        .unwrap();
+
+        let id = PluginId::new();
+        let manifest = manifest_with_command(id, "sample-builtin");
+        let manager = build_manager(tmp.path()).await;
+
+        manager
+            .register_verified_builtin(&id, manifest, tmp.path().to_path_buf())
+            .await
+            .expect("a pre-verified builtin root must register cleanly");
+
+        // Invariant `install`'s other arms would have enforced through
+        // `enable`/`load_plugin`: the command is namespaced and live in the
+        // registry, not merely present in an unmaterialized manifest.
+        let registry = manager.command_registry.read().await;
+        assert!(
+            registry.resolve("sample-builtin:hello").is_some(),
+            "register_verified_builtin must materialize components exactly like \
+             enable() does, not record a manifest with everything else skipped"
+        );
+        drop(registry);
+
+        // The gate itself: the LIVE manifest is stamped BuiltIn, not the
+        // LocalPath the fixture's caller-supplied manifest carried in.
+        let plugins = manager.plugins.read().await;
+        match plugins.get(&id) {
+            Some(PluginState::Loaded { manifest, .. }) => {
+                assert!(
+                    matches!(manifest.source, PluginSource::BuiltIn),
+                    "live manifest source must be stamped BuiltIn regardless of \
+                     what the caller passed in, got {:?}",
+                    manifest.source
+                );
+                assert_eq!(
+                    manifest.trust_level,
+                    crate::trust::PluginTrustLevel::AdminTrusted,
+                    "live manifest trust_level must be stamped for BuiltIn too, \
+                     not left at the caller-supplied Untrusted"
+                );
+            }
+            other => panic!(
+                "expected PluginState::Loaded after register_verified_builtin, got {other:?}"
+            ),
+        }
+    }
+
+    /// The invariant `install` enforces structurally and this second door
+    /// must not lose: the `PluginId` the state map is keyed by and the
+    /// `manifest.id` every registry entry is filed under are the SAME value.
+    ///
+    /// `load_plugin` files commands/skills/hooks/styles/agents/MCP/LSP under
+    /// `manifest.id` (`register_plugin_commands(manifest.id, ..)`), while
+    /// `disable` → `unload_plugin` removes them by the `id` argument. If a
+    /// caller hand-builds a manifest carrying a second, freshly-minted
+    /// `PluginId` — two `PluginId::new()` calls in the composition root is
+    /// the obvious way to get there — the plugin registers fine and then can
+    /// NEVER be unloaded: `disable` reports success, the state flips to
+    /// `Disabled`, and the command, hooks and MCP servers stay live.
+    ///
+    /// Inverting `manifest.id = *id` in `register_verified_builtin` makes the
+    /// post-`disable` assertion below go red with the leaked command named.
+    #[tokio::test]
+    async fn register_verified_builtin_files_components_under_the_registry_id_so_disable_unloads_them(
+    ) {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("commands")).unwrap();
+        std::fs::write(
+            tmp.path().join("commands").join("hello.md"),
+            "---\ndescription: says hi\n---\nHello from a verified builtin.\n",
+        )
+        .unwrap();
+
+        // The registry key and the manifest's own id are two DISTINCT values.
+        let registry_id = PluginId::new();
+        let stale_manifest_id = PluginId::new();
+        assert_ne!(
+            registry_id, stale_manifest_id,
+            "fixture precondition: the two ids must differ or this test proves nothing"
+        );
+        // `install` cannot produce this shape: every one of its arms takes
+        // `(id, manifest)` from `discovery::load_plugin_from_path`, which mints
+        // one id and stores that same value in `manifest.id`.
+        let manifest = manifest_with_command(stale_manifest_id, "sample-builtin");
+        let manager = build_manager(tmp.path()).await;
+
+        manager
+            .register_verified_builtin(&registry_id, manifest, tmp.path().to_path_buf())
+            .await
+            .expect("a pre-verified builtin root must register cleanly");
+
+        // Positive control: the command really is live before the disable, so
+        // a `None` after it cannot be explained by the probe never firing.
+        assert!(
+            manager
+                .command_registry
+                .read()
+                .await
+                .resolve("sample-builtin:hello")
+                .is_some(),
+            "precondition: the command must be live before disable() is called"
+        );
+
+        // The live manifest must carry the registry's id, not the caller's.
+        match manager.plugins.read().await.get(&registry_id) {
+            Some(PluginState::Loaded { manifest, .. }) => assert_eq!(
+                manifest.id, registry_id,
+                "the live manifest's id must be stamped to the PluginId the state \
+                 map is keyed by, else unload_plugin can never find its components"
+            ),
+            other => panic!("expected PluginState::Loaded, got {other:?}"),
+        }
+
+        manager
+            .disable(&registry_id)
+            .await
+            .expect("disable() must find the state it was registered under");
+
+        assert!(
+            manager
+                .command_registry
+                .read()
+                .await
+                .resolve("sample-builtin:hello")
+                .is_none(),
+            "disable() must unload every component register_verified_builtin \
+             materialized; 'sample-builtin:hello' is still live, so the entry was \
+             filed under the caller's manifest.id instead of the registry id and \
+             is now unreachable by unload_plugin"
+        );
     }
 }

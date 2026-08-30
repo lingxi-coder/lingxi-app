@@ -1146,7 +1146,10 @@ async fn glob_md(dir: &Path) -> Vec<ComponentPath> {
 /// case-insensitive extension match, same missing-dir → empty-vec contract),
 /// sorted by path. `.mjs` / `.cjs` / `.ts` are deliberately NOT matched — only
 /// `.js` is a discoverable plugin workflow script (§19.1).
-async fn glob_js(dir: &Path) -> Vec<ComponentPath> {
+///
+/// `pub(crate)`: [`crate::workflow`]'s inventory builder (P0a.3) reuses this
+/// directly rather than re-implementing the `.js`-only gate a second time.
+pub(crate) async fn glob_js(dir: &Path) -> Vec<ComponentPath> {
     let mut out = Vec::new();
     let mut stack = vec![dir.to_path_buf()];
     while let Some(current) = stack.pop() {

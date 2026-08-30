@@ -27,6 +27,7 @@ mod mcpb;
 pub mod source;
 pub mod strict_policy;
 pub mod trust;
+pub mod workflow;
 /// `${user_config.KEY}` substitution + plugin-option env helpers.
 ///
 /// Re-exported from the `hooks` crate, which owns the single source of truth
@@ -63,3 +64,12 @@ pub use mcpb::unpack_mcpb as unpack_plugin_archive;
 pub use source::PluginSource;
 pub use strict_policy::{PluginComponent, StrictPluginOnlyPolicy};
 pub use trust::{default_trust_for_source, PluginTrustLevel};
+/// Plugin workflow inventory (parsed `meta.name` + namespaced FQN) and the
+/// named-workflow resolver (saved > plugin > builtin) — see [`workflow`]'s
+/// module doc for the full design-doc grounding (§5.5 / §19.1).
+pub use workflow::{
+    build_plugin_workflow_inventory, extract_meta_name, namespaced_workflow_name,
+    resolve_explicit_script_path, resolve_named_workflow, resolve_verified_handle,
+    scan_plugin_workflow_dir, ResolvedWorkflow, ResolvedWorkflowSource, SavedWorkflowCandidate,
+    VerifiedWorkflowHandle, WorkflowInventoryEntry,
+};

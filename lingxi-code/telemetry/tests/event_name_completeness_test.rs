@@ -89,10 +89,15 @@ fn registry_is_exactly_347_entries() {
     //   - plugin::NAMES (+14 — tengu_plugin_enabled_for_session and its 13
     //     siblings; the port had NO plugin telemetry module before this):
     //     349 + 14 = 363.
-    // Re-counted by hand against telemetry/src/tengu/mcp.rs::NAMES.len() (2)
+    // 2.1.251 §20a/§20b wiring: mcp::NAMES +1 (tengu_mcp_degraded — traced
+    // to `yn`'s per-server tool-schema-classification tail and `qr`'s
+    // process-global validator-unavailable fallback; this closes the
+    // `normalizedCount`/`keptCount` open question the mcp.rs module doc
+    // flagged when tengu_mcp_tools_listed was first wired): 363 + 1 = 364.
+    // Re-counted by hand against telemetry/src/tengu/mcp.rs::NAMES.len() (3)
     // and telemetry/src/tengu/plugin.rs::NAMES.len() (14), not pasted from a
     // failing assertion.
-    assert_eq!(ALL_EVENT_NAMES.len(), 363);
+    assert_eq!(ALL_EVENT_NAMES.len(), 364);
 }
 
 #[test]
@@ -333,19 +338,20 @@ fn category_ordering_preserved() {
         telemetry::tengu::oauth::AWS_AUTH_NAMES,
         "AWS auth-refresh trust-gate tail block",
     );
-    // MCP analytics-event block (2 events, 2.1.251 byte-alignment B8)
-    // appended after the AWS auth-refresh block — tengu_mcp_server_config_invalid,
-    // tengu_mcp_tools_listed. Positions 347..349.
+    // MCP analytics-event block (3 events, 2.1.251 byte-alignment B8/§20a/
+    // §20b) appended after the AWS auth-refresh block —
+    // tengu_mcp_server_config_invalid, tengu_mcp_tools_listed,
+    // tengu_mcp_degraded. Positions 347..350.
     assert_eq!(
-        &ALL_EVENT_NAMES[347..349],
+        &ALL_EVENT_NAMES[347..350],
         telemetry::tengu::mcp::NAMES,
         "MCP analytics-event tail block",
     );
     // Plugin event block (14 events, 2.1.251 byte-alignment B8) appended
     // after the MCP block — tengu_plugin_enabled_for_session and 13
-    // siblings. Positions 349..363.
+    // siblings. Positions 350..364.
     assert_eq!(
-        &ALL_EVENT_NAMES[349..363],
+        &ALL_EVENT_NAMES[350..364],
         telemetry::tengu::plugin::NAMES,
         "plugin event tail block",
     );
@@ -355,6 +361,7 @@ fn category_ordering_preserved() {
 fn mcp_events_registered() {
     assert!(ALL_EVENT_NAMES.contains(&"tengu_mcp_server_config_invalid"));
     assert!(ALL_EVENT_NAMES.contains(&"tengu_mcp_tools_listed"));
+    assert!(ALL_EVENT_NAMES.contains(&"tengu_mcp_degraded"));
 }
 
 #[test]

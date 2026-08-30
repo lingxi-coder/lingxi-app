@@ -481,6 +481,120 @@ pub fn emit_mcp_config_parse_gate(reason: Option<&'static str>) {
     }
 }
 
+// -- 2.1.251 §20a/§20b: tengu_mcp_degraded -----------------------------------
+
+/// Emit [`crate::tengu::mcp::DEGRADED`]. Unlike the config-parse gate above
+/// this IS a real `tengu_*` analytics event (see `tengu::mcp`'s module doc
+/// for the `yn`/`qr` oracle trace) — one call per nonzero per-server counter
+/// bucket, or once (process-global) for
+/// [`crate::tengu::mcp::DegradedReason::SchemaValidatorUnavailable`].
+pub fn emit_mcp_degraded(payload: &crate::tengu::mcp::DegradedPayload) {
+    tracing::info!(
+        event = crate::tengu::mcp::DEGRADED,
+        reason = payload.reason.wire_str(),
+        transport_type = payload.transport_type.as_ref().map(Verified::as_str),
+        normalized_count = payload.normalized_count,
+        skipped_count = payload.skipped_count,
+        kept_count = payload.kept_count,
+        mcp_server_name = payload.mcp_server_name.as_ref().map(Verified::as_str),
+    );
+}
+
+#[cfg(test)]
+mod mcp_degraded_tests {
+    use super::*;
+    use crate::tengu::mcp::{DegradedPayload, DegradedReason};
+    use std::sync::{Arc, Mutex as StdMutex};
+    use tracing::field::Field;
+    use tracing::Event;
+    use tracing::Subscriber;
+    use tracing_subscriber::layer::{Context, Layer};
+    use tracing_subscriber::prelude::*;
+    use tracing_subscriber::Registry;
+
+    type DegradedRow = (String, String, Option<i64>);
+
+    #[derive(Default, Clone)]
+    struct Capture {
+        rows: Arc<StdMutex<Vec<DegradedRow>>>,
+    }
+
+    impl<S: Subscriber> Layer<S> for Capture {
+        fn on_event(&self, event: &Event<'_>, _ctx: Context<'_, S>) {
+            struct V {
+                event: Option<String>,
+                reason: Option<String>,
+                skipped_count: Option<i64>,
+            }
+            impl tracing::field::Visit for V {
+                fn record_i64(&mut self, field: &Field, value: i64) {
+                    if field.name() == "skipped_count" {
+                        self.skipped_count = Some(value);
+                    }
+                }
+                fn record_u64(&mut self, field: &Field, value: u64) {
+                    if field.name() == "skipped_count" {
+                        self.skipped_count = Some(value as i64);
+                    }
+                }
+                fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+                    let rendered = format!("{value:?}").trim_matches('"').to_string();
+                    match field.name() {
+                        "event" => self.event = Some(rendered),
+                        "reason" => self.reason = Some(rendered),
+                        _ => {}
+                    }
+                }
+                fn record_str(&mut self, field: &Field, value: &str) {
+                    match field.name() {
+                        "event" => self.event = Some(value.to_string()),
+                        "reason" => self.reason = Some(value.to_string()),
+                        _ => {}
+                    }
+                }
+            }
+            let mut v = V {
+                event: None,
+                reason: None,
+                skipped_count: None,
+            };
+            event.record(&mut v);
+            if let (Some(e), Some(r)) = (v.event, v.reason) {
+                self.rows.lock().unwrap().push((e, r, v.skipped_count));
+            }
+        }
+    }
+
+    /// Reverting the classification-to-reason mapping (e.g. wiring
+    /// `ToolSchemaUnsupported` where `ToolSchemaInvalid` belongs) is caught
+    /// by this: the emitted `reason` field must match the payload's, not
+    /// some other constant.
+    #[test]
+    fn emits_the_configured_reason_and_count_field() {
+        let cap = Capture::default();
+        let _guard = tracing::subscriber::set_default(Registry::default().with(cap.clone()));
+
+        emit_mcp_degraded(&DegradedPayload {
+            reason: DegradedReason::ToolSchemaUnsupported,
+            transport_type: Some(Verified::assert_safe("stdio".to_string())),
+            normalized_count: None,
+            skipped_count: Some(2),
+            kept_count: None,
+            mcp_server_name: Some(Verified::assert_safe("srv".to_string())),
+        });
+
+        let rows = cap.rows.lock().unwrap().clone();
+        assert_eq!(
+            rows,
+            vec![(
+                crate::tengu::mcp::DEGRADED.to_string(),
+                "tool_schema_unsupported".to_string(),
+                Some(2)
+            )]
+        );
+    }
+}
+
 #[cfg(test)]
 mod mcp_config_parse_gate_tests {
     use super::*;
@@ -492,10 +606,12 @@ mod mcp_config_parse_gate_tests {
     use tracing_subscriber::prelude::*;
     use tracing_subscriber::Registry;
 
+    type GateRow = (String, Option<String>);
+
     /// Capture every event's `event`/`reason` fields as `(event, reason)`.
     #[derive(Default, Clone)]
     struct GateCapture {
-        rows: Arc<StdMutex<Vec<(String, Option<String>)>>>,
+        rows: Arc<StdMutex<Vec<GateRow>>>,
     }
 
     impl<S: Subscriber> Layer<S> for GateCapture {
@@ -534,7 +650,7 @@ mod mcp_config_parse_gate_tests {
 
     /// Every fatal outcome must fire the SAME gate name with its own reason —
     /// reverting the `reason` argument at any one call site (or dropping the
-    /// call entirely) is caught here, not just at the config_diagnostics.rs
+    /// call entirely) is caught here, not just at the `config_diagnostics.rs`
     /// layer, since this is the shared primitive every one of those sites
     /// funnels through.
     #[test]

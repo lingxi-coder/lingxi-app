@@ -414,10 +414,21 @@ fn meta_validator() -> Option<&'static (boon::Schemas, boon::SchemaIndex)> {
         let mut schemas = Schemas::new();
         let mut compiler = Compiler::new();
         let Ok(sch) = compiler.compile(META_SCHEMA_URL, &mut schemas) else {
-            // oracle `qr()`'s `M===null` arm, verbatim (@182172867).
+            // oracle `qr()`'s `M===null` arm, verbatim (@182172867):
+            // `n("MCP: draft 2020-12 meta-validator unavailable — tool
+            // schema checks fail open",{level:"warn"}),
+            // s("tengu_mcp_degraded",{reason:w("schema_validator_unavailable")})`.
             tracing::warn!(
                 "MCP: draft 2020-12 meta-validator unavailable \u{2014} tool schema checks fail open"
             );
+            telemetry::emit_mcp_degraded(&telemetry::tengu::mcp::DegradedPayload {
+                reason: telemetry::tengu::mcp::DegradedReason::SchemaValidatorUnavailable,
+                transport_type: None,
+                normalized_count: None,
+                skipped_count: None,
+                kept_count: None,
+                mcp_server_name: None,
+            });
             return None;
         };
         Some((schemas, sch))
@@ -473,6 +484,14 @@ pub struct ToolSchemaDecision {
     /// the Anthropic API; log a warning (oracle: "…would be rejected…;
     /// requests that include it may fail").
     pub warning: Option<String>,
+    /// The `tengu_mcp_degraded` classification this decision falls under, or
+    /// `None` for a healthy (`Unchanged` combinator, schema-valid) tool — the
+    /// oracle only tallies a counter for a NON-default outcome (see `yn`'s
+    /// `x`/`W`/`ue`/`_e`/`xe`/`F`/`X` counters, traced in
+    /// `telemetry::tengu::mcp`'s module doc). The caller aggregates this per
+    /// server and fires one [`telemetry::tengu::mcp::DEGRADED`] event per
+    /// nonzero bucket, NOT one per tool.
+    pub classification: Option<telemetry::tengu::mcp::DegradedReason>,
 }
 
 /// Process one tool's `inputSchema` (oracle's `M.flatMap` body inside `yn`,
@@ -488,6 +507,8 @@ pub struct ToolSchemaDecision {
 /// …"/"Tool … input schema …" wrapper text).
 #[must_use]
 pub fn decide_tool_schema(server_url: Option<&str>, schema: &Value) -> ToolSchemaDecision {
+    use telemetry::tengu::mcp::DegradedReason;
+
     let normalize_gate = gate_enabled(FLAG_NORMALIZE_ROOT_COMBINATORS, server_url);
     let drop_gate = gate_enabled(FLAG_DROP_INVALID_TOOL_SCHEMAS, server_url);
 
@@ -505,6 +526,7 @@ pub fn decide_tool_schema(server_url: Option<&str>, schema: &Value) -> ToolSchem
                     combinators.join("/")
                 )),
                 warning: None,
+                classification: Some(DegradedReason::ToolSchemaNormalizeGated),
             };
         }
         RootCombinatorOutcome::Drop(reason) => {
@@ -513,9 +535,15 @@ pub fn decide_tool_schema(server_url: Option<&str>, schema: &Value) -> ToolSchem
                 description_note: None,
                 drop_reason: Some(reason),
                 warning: None,
+                classification: Some(DegradedReason::ToolSchemaUnsupported),
             };
         }
     };
+    // Reaching here with `description_note.is_some()` means the flatten DID
+    // apply (the `Normalized { .. } if normalize_gate` arm above) — the
+    // oracle's `x++` counter (`ToolSchemaNormalized`) fires unconditionally
+    // for that arm, before the schema-validity check even runs.
+    let normalized = description_note.is_some();
 
     match check_schema_validity(&working_schema) {
         Ok(()) => ToolSchemaDecision {
@@ -523,8 +551,13 @@ pub fn decide_tool_schema(server_url: Option<&str>, schema: &Value) -> ToolSchem
             description_note,
             drop_reason: None,
             warning: None,
+            classification: normalized.then_some(DegradedReason::ToolSchemaNormalized),
         },
         Err(detail) => {
+            // oracle: `le.check==="meta"` (the meta-schema validator failed)
+            // vs. everything else (the property-key regex failed) — see
+            // `check_schema_validity`'s early-return shape.
+            let is_property_key = detail.starts_with("property key ");
             if drop_gate {
                 ToolSchemaDecision {
                     schema: working_schema,
@@ -533,11 +566,21 @@ pub fn decide_tool_schema(server_url: Option<&str>, schema: &Value) -> ToolSchem
                         "its input schema would be rejected by the Anthropic API ({detail})"
                     )),
                     warning: None,
+                    classification: Some(if is_property_key {
+                        DegradedReason::ToolPropertyKeyInvalid
+                    } else {
+                        DegradedReason::ToolSchemaInvalid
+                    }),
                 }
             } else {
                 ToolSchemaDecision {
                     schema: working_schema,
                     description_note,
+                    classification: Some(if is_property_key {
+                        DegradedReason::ToolPropertyKeyInvalidGated
+                    } else {
+                        DegradedReason::ToolSchemaInvalidGated
+                    }),
                     drop_reason: None,
                     warning: Some(format!(
                         "input schema would be rejected by the Anthropic API ({detail}); requests that include it may fail"

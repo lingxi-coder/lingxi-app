@@ -1,10 +1,13 @@
 use telemetry::pii::Verified;
-use telemetry::tengu::mcp::{self, ConfigInvalidSource, ServerConfigInvalidPayload, ToolsListedPayload};
+use telemetry::tengu::mcp::{
+    self, ConfigInvalidSource, DegradedPayload, DegradedReason, ServerConfigInvalidPayload,
+    ToolsListedPayload,
+};
 
 #[test]
-fn both_mcp_event_names_are_locked() {
-    let names: &[&str] = &[mcp::SERVER_CONFIG_INVALID, mcp::TOOLS_LISTED];
-    assert_eq!(names.len(), 2);
+fn all_three_mcp_event_names_are_locked() {
+    let names: &[&str] = &[mcp::SERVER_CONFIG_INVALID, mcp::TOOLS_LISTED, mcp::DEGRADED];
+    assert_eq!(names.len(), 3);
     for n in names {
         assert!(n.starts_with("tengu_mcp_"));
     }
@@ -13,6 +16,7 @@ fn both_mcp_event_names_are_locked() {
         "tengu_mcp_server_config_invalid"
     );
     assert_eq!(mcp::TOOLS_LISTED, "tengu_mcp_tools_listed");
+    assert_eq!(mcp::DEGRADED, "tengu_mcp_degraded");
     assert_eq!(mcp::NAMES, names);
 }
 
@@ -100,4 +104,88 @@ fn tools_listed_payload_rejects_unknown_fields() {
     });
     let result: Result<ToolsListedPayload, _> = serde_json::from_value(json);
     assert!(result.is_err(), "unconfirmed extra field must be rejected");
+}
+
+#[test]
+fn degraded_normalized_payload_carries_only_normalized_count() {
+    let payload = DegradedPayload {
+        reason: DegradedReason::ToolSchemaNormalized,
+        transport_type: Some(Verified::assert_safe("stdio".to_string())),
+        normalized_count: Some(3),
+        skipped_count: None,
+        kept_count: None,
+        mcp_server_name: Some(Verified::assert_safe("my-server".to_string())),
+    };
+    let json = serde_json::to_value(&payload).expect("serialize");
+    assert_eq!(
+        json,
+        serde_json::json!({
+            "reason": "tool_schema_normalized",
+            "transport_type": "stdio",
+            "normalized_count": 3,
+            "mcp_server_name": "my-server",
+        })
+    );
+}
+
+#[test]
+fn degraded_schema_validator_unavailable_carries_no_per_server_fields() {
+    let payload = DegradedPayload {
+        reason: DegradedReason::SchemaValidatorUnavailable,
+        transport_type: None,
+        normalized_count: None,
+        skipped_count: None,
+        kept_count: None,
+        mcp_server_name: None,
+    };
+    let json = serde_json::to_value(&payload).expect("serialize");
+    assert_eq!(
+        json,
+        serde_json::json!({"reason": "schema_validator_unavailable"})
+    );
+}
+
+#[test]
+fn degraded_reason_values_are_snake_case() {
+    for (variant, wire) in [
+        (DegradedReason::ToolSchemaNormalized, "tool_schema_normalized"),
+        (
+            DegradedReason::ToolSchemaNormalizeGated,
+            "tool_schema_normalize_gated",
+        ),
+        (DegradedReason::ToolSchemaUnsupported, "tool_schema_unsupported"),
+        (DegradedReason::ToolSchemaInvalid, "tool_schema_invalid"),
+        (
+            DegradedReason::ToolPropertyKeyInvalid,
+            "tool_property_key_invalid",
+        ),
+        (
+            DegradedReason::ToolSchemaInvalidGated,
+            "tool_schema_invalid_gated",
+        ),
+        (
+            DegradedReason::ToolPropertyKeyInvalidGated,
+            "tool_property_key_invalid_gated",
+        ),
+        (
+            DegradedReason::SchemaValidatorUnavailable,
+            "schema_validator_unavailable",
+        ),
+    ] {
+        assert_eq!(serde_json::to_value(variant).unwrap(), serde_json::json!(wire));
+        assert_eq!(variant.wire_str(), wire, "wire_str must match the serde rendering");
+    }
+}
+
+#[test]
+fn degraded_payload_rejects_unknown_fields() {
+    let json = serde_json::json!({
+        "reason": "tool_schema_normalized",
+        "transport_type": "stdio",
+        "normalized_count": 1,
+        "mcp_server_name": "s",
+        "extra": true,
+    });
+    let result: Result<DegradedPayload, _> = serde_json::from_value(json);
+    assert!(result.is_err(), "deny_unknown_fields must reject an unrecognized key");
 }

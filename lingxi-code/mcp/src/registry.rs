@@ -1136,11 +1136,23 @@ impl McpRegistry {
             (!u.is_empty()).then(|| u.to_string())
         };
         let server_display = config.name.clone();
+        // §20b — `yn`'s seven per-server tool-schema-classification counters
+        // (see `telemetry::tengu::mcp::DegradedReason`'s doc for the full
+        // `x`/`W`/`ue`/`_e`/`xe`/`F`/`X` trace). Tallied across the WHOLE
+        // tool list, then one `tengu_mcp_degraded` fires per nonzero bucket
+        // AFTER the loop — the oracle does not fire one event per tool.
+        let mut degraded_counts: std::collections::HashMap<
+            telemetry::tengu::mcp::DegradedReason,
+            u32,
+        > = std::collections::HashMap::new();
         tools.retain_mut(|dto| {
             let decision = crate::tool_schema::decide_tool_schema(
                 gate_url.as_deref(),
                 &dto.input_schema,
             );
+            if let Some(reason) = decision.classification {
+                *degraded_counts.entry(reason).or_insert(0) += 1;
+            }
             if let Some(reason) = decision.drop_reason {
                 tracing::warn!(
                     server = %server_display,
@@ -1175,6 +1187,25 @@ impl McpRegistry {
             );
             true
         });
+
+        // Fire one `tengu_mcp_degraded` per nonzero classification bucket.
+        // oracle: `c(e.config.type??"stdio")` — the RAW config `type`
+        // string, matching `McpTransportSpec::kind()` (NOT the `Wr`-mapped
+        // `ide`/`sdk-control` labels `protocol_negotiation.rs` uses
+        // elsewhere) — see `server_key`'s doc for why `kind()` itself must
+        // never change shape; this only READS it. The payload-BUILDING step
+        // is a pure, non-async, non-tracing function so the aggregation
+        // logic is unit-testable without a tracing-capture race against the
+        // other `#[tokio::test]`s sharing this binary (a real `tracing`
+        // pitfall: `subscriber::set_default` is thread-local, but callsite
+        // `Interest` caching is process-global, so a concurrently-running
+        // test's subscriber can race the cache and silently starve this
+        // one's events under `cargo test`'s default parallelism).
+        for payload in
+            degraded_payloads_for_server(&degraded_counts, config.spec.kind(), &server_display)
+        {
+            telemetry::emit_mcp_degraded(&payload);
+        }
 
         let connection_id = conn.connection_id;
         let server_name = config.name.clone();
@@ -3070,6 +3101,57 @@ fn is_format_char(c: char) -> bool {
     )
 }
 
+/// §20b — build the `tengu_mcp_degraded` payload for every NONZERO bucket in
+/// one server's tallied tool-schema classification counts. Pure and
+/// deterministic (no telemetry emission, no tracing) so the aggregation
+/// logic — which count-field a reason maps to, and that every nonzero
+/// bucket becomes exactly one payload — is unit-testable directly, without
+/// racing a concurrently-running test's `tracing` subscriber over the
+/// process-global callsite `Interest` cache (see the call site's doc for
+/// why that race is real, not hypothetical).
+fn degraded_payloads_for_server(
+    counts: &std::collections::HashMap<telemetry::tengu::mcp::DegradedReason, u32>,
+    transport_kind: &str,
+    server_name: &str,
+) -> Vec<telemetry::tengu::mcp::DegradedPayload> {
+    use telemetry::pii::Verified;
+    use telemetry::tengu::mcp::{DegradedPayload, DegradedReason};
+
+    if counts.is_empty() {
+        return Vec::new();
+    }
+    let transport_type = Verified::assert_safe(transport_kind.to_string());
+    let mcp_server_name = Verified::assert_safe(server_name.to_string());
+    let mut out = Vec::with_capacity(counts.len());
+    for (reason, count) in counts {
+        let (normalized_count, skipped_count, kept_count) = match reason {
+            DegradedReason::ToolSchemaNormalized => (Some(*count), None, None),
+            DegradedReason::ToolSchemaNormalizeGated
+            | DegradedReason::ToolSchemaUnsupported
+            | DegradedReason::ToolSchemaInvalid
+            | DegradedReason::ToolPropertyKeyInvalid => (None, Some(*count), None),
+            DegradedReason::ToolSchemaInvalidGated | DegradedReason::ToolPropertyKeyInvalidGated => {
+                (None, None, Some(*count))
+            }
+            // `SchemaValidatorUnavailable` is process-global (fired from
+            // `tool_schema::meta_validator`, never tallied into this
+            // per-server map) and the enum is `#[non_exhaustive]` — a future
+            // oracle-confirmed sibling with no known count-field mapping
+            // falls here too, skipped rather than guessed at.
+            _ => continue,
+        };
+        out.push(DegradedPayload {
+            reason: *reason,
+            transport_type: Some(transport_type.clone()),
+            normalized_count,
+            skipped_count,
+            kept_count,
+            mcp_server_name: Some(mcp_server_name.clone()),
+        });
+    }
+    out
+}
+
 /// Whether a state's config is flagged `disabled` (mid-reconnect guard).
 fn state_is_disabled(state: &McpConnectionState) -> bool {
     match state {
@@ -4179,6 +4261,108 @@ mod tests {
              (the normalize gate is off by default), leaving the plain tool: {tools:?}"
         );
         assert_eq!(tools[0].full_name, "mcp__combos__plain_tool");
+    }
+
+    /// §20b — connecting a server with two droppable tools must still leave
+    /// only the healthy tool in the model-facing list (the `retain_mut`
+    /// aggregation change must not perturb the KEEP/DROP decision itself).
+    /// The aggregated `tengu_mcp_degraded` payload-building itself is unit
+    /// tested directly on `degraded_payloads_for_server` below — NOT via a
+    /// tracing capture here, deliberately: `tracing::subscriber::set_default`
+    /// is thread-local, but callsite `Interest` caching is process-global, so
+    /// a concurrently-running test's subscriber can race the cache and
+    /// silently starve this one's captured events under `cargo test`'s
+    /// default parallelism (confirmed empirically: green alone under
+    /// `--test-threads=1`, flaky in the full suite).
+    #[tokio::test]
+    async fn connect_still_drops_both_anyof_tools_with_aggregation_wired() {
+        let mock = Arc::new(BridgeMock::with_tool_schemas(&[
+            (
+                "plain_tool",
+                serde_json::json!({"type": "object", "properties": {"a": {"type": "string"}}}),
+            ),
+            (
+                "combo_one",
+                serde_json::json!({"anyOf": [
+                    {"type": "object", "properties": {"a": {"type": "string"}}}
+                ]}),
+            ),
+            (
+                "combo_two",
+                serde_json::json!({"anyOf": [
+                    {"type": "object", "properties": {"b": {"type": "string"}}}
+                ]}),
+            ),
+        ]));
+        let registry = McpRegistry::with_raw_conn(
+            mock.clone() as Arc<dyn McpTransport>,
+            mock as Arc<dyn RawConnectionProvider>,
+        );
+        registry.connect(cfg("degraded_combos")).await.unwrap();
+
+        let conns = registry.connections.read().await;
+        let McpConnectionState::Connected { tools, .. } = conns.get("degraded_combos").unwrap()
+        else {
+            panic!("expected Connected state");
+        };
+        let names: Vec<&str> = tools.iter().map(|t| t.tool_name.as_str()).collect();
+        assert_eq!(names, vec!["plain_tool"]);
+    }
+
+    /// §20b — `degraded_payloads_for_server` (the pure aggregation step) maps
+    /// each nonzero classification bucket to exactly one payload, with the
+    /// right count field populated. Reverting the match arms (e.g. routing
+    /// `ToolSchemaUnsupported` to `normalized_count`, or emitting one payload
+    /// per tool instead of per bucket) is caught here with no tracing
+    /// dependency at all.
+    #[test]
+    fn degraded_payloads_for_server_maps_each_bucket_to_its_own_count_field() {
+        use std::collections::HashMap;
+        use telemetry::tengu::mcp::DegradedReason;
+        use telemetry::Verified;
+
+        let mut counts = HashMap::new();
+        counts.insert(DegradedReason::ToolSchemaNormalized, 3);
+        counts.insert(DegradedReason::ToolSchemaNormalizeGated, 2);
+        counts.insert(DegradedReason::ToolSchemaUnsupported, 1);
+        counts.insert(DegradedReason::ToolSchemaInvalid, 4);
+        counts.insert(DegradedReason::ToolPropertyKeyInvalid, 5);
+        counts.insert(DegradedReason::ToolSchemaInvalidGated, 6);
+        counts.insert(DegradedReason::ToolPropertyKeyInvalidGated, 7);
+
+        let mut payloads = degraded_payloads_for_server(&counts, "http", "srv");
+        payloads.sort_by_key(|p| p.reason.wire_str());
+
+        let by_reason: std::collections::HashMap<&'static str, _> = payloads
+            .iter()
+            .map(|p| {
+                (
+                    p.reason.wire_str(),
+                    (p.normalized_count, p.skipped_count, p.kept_count),
+                )
+            })
+            .collect();
+        assert_eq!(payloads.len(), 7, "one payload per nonzero bucket: {payloads:?}");
+        assert_eq!(by_reason["tool_schema_normalized"], (Some(3), None, None));
+        assert_eq!(by_reason["tool_schema_normalize_gated"], (None, Some(2), None));
+        assert_eq!(by_reason["tool_schema_unsupported"], (None, Some(1), None));
+        assert_eq!(by_reason["tool_schema_invalid"], (None, Some(4), None));
+        assert_eq!(by_reason["tool_property_key_invalid"], (None, Some(5), None));
+        assert_eq!(by_reason["tool_schema_invalid_gated"], (None, None, Some(6)));
+        assert_eq!(
+            by_reason["tool_property_key_invalid_gated"],
+            (None, None, Some(7))
+        );
+        for p in &payloads {
+            assert_eq!(p.transport_type.as_ref().map(Verified::as_str), Some("http"));
+            assert_eq!(p.mcp_server_name.as_ref().map(Verified::as_str), Some("srv"));
+        }
+    }
+
+    #[test]
+    fn degraded_payloads_for_server_is_empty_when_no_bucket_is_nonzero() {
+        assert!(degraded_payloads_for_server(&std::collections::HashMap::new(), "stdio", "srv")
+            .is_empty());
     }
 
     /// §20a's per-server gate resolves from the connected server's URL

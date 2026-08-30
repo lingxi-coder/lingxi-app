@@ -5,9 +5,7 @@
 //! Mirrors `orchestrator/tests/orchestrator_telemetry_test.rs`'s
 //! `EventNameCapture` layer, extended to also capture a `reason` field (the
 //! oracle's `p(gate, reason)` / `y(gate)` shape used throughout this crate's
-//! OTel log-gate emissions).
-
-#![cfg(test)]
+//! `OTel` log-gate emissions).
 
 use std::sync::{Arc, Mutex as StdMutex};
 use tracing::field::Field;
@@ -15,17 +13,22 @@ use tracing::Event;
 use tracing::Subscriber;
 use tracing_subscriber::layer::{Context, Layer};
 
-/// Captures every event's `event` and `reason` string fields, in order, as
-/// `(event, reason)` pairs. A row with `reason: None` means the field was
-/// absent (the oracle's `y(gate)` / success shape).
+/// One captured `(event, reason)` row. A `reason` of `None` means the field
+/// was absent (the oracle's `y(gate)` / success shape).
+type CapturedRow = (String, Option<String>);
+
+/// Captures every event's `event` and `reason` string fields, in order.
 #[derive(Default, Clone)]
 pub(crate) struct GateCapture {
-    rows: Arc<StdMutex<Vec<(String, Option<String>)>>>,
+    rows: Arc<StdMutex<Vec<CapturedRow>>>,
 }
 
 impl GateCapture {
-    pub(crate) fn rows(&self) -> Vec<(String, Option<String>)> {
-        self.rows.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    pub(crate) fn rows(&self) -> Vec<CapturedRow> {
+        self.rows
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
 }
 
@@ -60,7 +63,7 @@ impl<S: Subscriber> Layer<S> for GateCapture {
         if let Some(name) = v.event {
             self.rows
                 .lock()
-                .unwrap_or_else(|e| e.into_inner())
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .push((name, v.reason));
         }
     }

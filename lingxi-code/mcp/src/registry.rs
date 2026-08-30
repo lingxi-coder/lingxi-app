@@ -1180,11 +1180,39 @@ impl McpRegistry {
             } else {
                 Vec::new()
             };
-            // §26a — `resources/templates/list` is gated on the SAME
-            // `resources` capability as `resources/list` / `resources/read`
-            // (oracle: `case"resources/list":case"resources/templates/list":
-            // case"resources/read":if(!this._capabilities.resources)throw…`,
-            // @167690139), not a separate capability bit.
+            // §26a — `resources/templates/list` carries TWO gates, not one.
+            //
+            // The capability check quoted below (@167690139) is the SDK's
+            // `assertRequestHandlerCapability` — it proves the METHOD is
+            // capability-gated, but it is not the emission site and says
+            // nothing about whether discovery issues the call. The actual
+            // emission is the live-discovery `Promise.all` @182539595:
+            //
+            //   let[ae,de,Ee,Re,Ie]=await Promise.all([ …,
+            //     v&&JK(G.config) ? Qe(G) : Promise.resolve([]) ]);
+            //
+            // where `v = !!G.capabilities?.resources` AND `JK(config)`
+            // (@176260324, `me(e)===undefined`) requires the discovery cache
+            // to be eligible: enabled at all (`Sln()` @161529603 — env
+            // `MCP_DISCOVERY_CACHE` or the `tengu_mcp_discovery_cache_enable`
+            // gate, BOTH default off), on an `http`/`sse` transport, not
+            // cli-owned, no env placeholder, no ambient credential, not
+            // opted out. So with stock settings the oracle issues ZERO
+            // `resources/templates/list` RPCs, and never any for stdio.
+            //
+            // Templates are also absent from the live result — that path
+            // emits `resourceTemplates: void 0` (@182540366) and the fetched
+            // list feeds only the cache row (`Mt(G,{…templates:X…})`).
+            //
+            // `discovery_cache::cache_gate` is the port of `me()`; `None`
+            // means eligible. Gating here restores RPC parity and keeps the
+            // fetch ready for whenever the cache itself is wired.
+            let templates_eligible = crate::discovery_cache::cache_gate(
+                &config.spec,
+                None,
+                crate::discovery_cache::feature_enabled(),
+            )
+            .is_none();
             //
             // The fetch is NON-FATAL. Templates are optional in the MCP spec:
             // a server may declare `capabilities.resources` on the strength of
@@ -1199,7 +1227,7 @@ impl McpRegistry {
             // never fail a connection. Propagating it with `?` instead
             // disconnected the live transport below and dropped ALL of the
             // server's tools/resources/prompts.
-            let resource_templates = if caps.resources {
+            let resource_templates = if caps.resources && templates_eligible {
                 match self.transport.list_resource_templates(&conn).await {
                     Ok(templates) => templates,
                     Err(error) => {
@@ -3541,7 +3569,7 @@ mod tests {
     use protocol::McpConnectionId as ConnId;
     use serde_json::Value;
     use std::future::Future;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::Mutex as TestMutex;
     use std::task::{Context, Poll, Wake, Waker};
     use tokio::sync::{mpsc, Notify};
@@ -3595,6 +3623,11 @@ mod tests {
         resource_templates: Vec<traits::McpResourceTemplateDto>,
         resources_capability: AtomicBool,
         list_resource_templates_fails: AtomicBool,
+        /// How many times `resources/templates/list` was actually issued. The
+        /// parity claim is ZERO RPCs when the discovery cache is ineligible —
+        /// an empty `resource_templates` field would also pass if we fetched
+        /// and discarded, so the field alone cannot prove it.
+        templates_calls: AtomicUsize,
         conns: TestMutex<HashMap<ConnId, Arc<Connection>>>,
         list_tools_fails: AtomicBool,
         disconnect_fails: AtomicBool,
@@ -3625,6 +3658,7 @@ mod tests {
                 resource_templates: Vec::new(),
                 resources_capability: AtomicBool::new(false),
                 list_resource_templates_fails: AtomicBool::new(false),
+                templates_calls: AtomicUsize::new(0),
                 conns: TestMutex::new(HashMap::new()),
                 list_tools_fails: AtomicBool::new(false),
                 disconnect_fails: AtomicBool::new(false),
@@ -3689,6 +3723,7 @@ mod tests {
             &self,
             _c: &McpRawConnection,
         ) -> Result<Vec<traits::McpResourceTemplateDto>, McpError> {
+            self.templates_calls.fetch_add(1, Ordering::SeqCst);
             if self.list_resource_templates_fails.load(Ordering::SeqCst) {
                 // What a server with no `resources/templates/list` handler
                 // really replies: JSON-RPC -32601, which the posix transport
@@ -4575,9 +4610,22 @@ mod tests {
     /// `resources/list` (@167690139), not a separate template bit — this is
     /// the connect-time "catalog fetch" the audit found entirely absent
     /// (registry.rs's fetch was `list_tools`/`list_resources`/`list_prompts`
-    /// only).
+    /// A stdio server must NOT be asked for `resources/templates/list`, even
+    /// with the `resources` capability present.
+    ///
+    /// The oracle's live-discovery fetch (@182539595) is
+    /// `v && JK(G.config) ? Qe(G) : Promise.resolve([])` — the `resources`
+    /// capability AND cache eligibility. `JK` (@176260324) rejects any
+    /// transport that is not `http`/`sse` outright, and the cache itself is
+    /// off unless `MCP_DISCOVERY_CACHE` or the `tengu_mcp_discovery_cache_enable`
+    /// gate says otherwise (both default off). So with stock settings the
+    /// oracle issues ZERO of these RPCs, and never any for stdio.
+    ///
+    /// The assertion is the CALL COUNT, not the stored field: fetching and
+    /// discarding would leave `resource_templates` empty too, and would still
+    /// be the extra round trip this pins against.
     #[tokio::test]
-    async fn connect_fetches_resource_templates_when_resources_capability_is_present() {
+    async fn connect_does_not_issue_the_templates_rpc_when_the_cache_is_ineligible() {
         let mock = Arc::new(BridgeMock::with_resource_templates(vec![
             traits::McpResourceTemplateDto {
                 uri_template: "file:///{path}".into(),
@@ -4588,10 +4636,17 @@ mod tests {
         ]));
         let registry = McpRegistry::with_raw_conn(
             mock.clone() as Arc<dyn McpTransport>,
-            mock as Arc<dyn RawConnectionProvider>,
+            mock.clone() as Arc<dyn RawConnectionProvider>,
         );
+        // `cfg` builds a stdio spec, which `JK` rejects on transport alone.
         registry.connect(cfg("srv")).await.unwrap();
 
+        assert_eq!(
+            mock.templates_calls.load(Ordering::SeqCst),
+            0,
+            "a stdio server is cache-ineligible, so the oracle never issues \
+             resources/templates/list for it — the port must not either"
+        );
         let conns = registry.connections.read().await;
         let McpConnectionState::Connected {
             resource_templates, ..
@@ -4599,20 +4654,9 @@ mod tests {
         else {
             panic!("expected Connected state");
         };
-        assert_eq!(
-            resource_templates.len(),
-            1,
-            "connect must fetch resources/templates/list when resources capability is present"
-        );
-        assert_eq!(resource_templates[0].uri_template, "file:///{path}");
-        assert_eq!(resource_templates[0].name, "file-template");
-        assert_eq!(
-            resource_templates[0].description.as_deref(),
-            Some("A file on disk")
-        );
-        assert_eq!(
-            resource_templates[0].mime_type.as_deref(),
-            Some("text/plain")
+        assert!(
+            resource_templates.is_empty(),
+            "no fetch means no templates, got {resource_templates:?}"
         );
     }
 
@@ -4662,24 +4706,47 @@ mod tests {
     /// catalog block with `?` instead disconnected the live transport
     /// (registry.rs's `Err` arm) and returned `Err` from `connect`, so a
     /// server that connected fine before the fetch existed lost ALL of its
-    /// tools, resources and prompts.
+    /// A `-32601` on `resources/templates/list` must not fail the connection.
+    ///
+    /// This drives the ELIGIBLE path on purpose: an http spec with the
+    /// discovery cache enabled is the only shape for which the oracle issues
+    /// the RPC at all (`v && JK(G.config)`, @182539595), so it is the only
+    /// shape under which this failure mode can arise. Gating the fetch made
+    /// the previous stdio-based version of this test vacuous — the fetch
+    /// never ran, so `list_resource_templates_fails` had nothing to fail.
+    ///
+    /// Oracle `Qe` @182528544 wraps the whole fetch in a catch that returns
+    /// `[]` on EVERY error, so it can never fail a connection.
     #[tokio::test]
     async fn connect_survives_a_resource_templates_fetch_that_fails() {
+        let _guard = crate::discovery_cache::tests_env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        std::env::set_var(crate::discovery_cache::ENV_ENABLED, "true");
+
         let mock = Arc::new(BridgeMock::new(&["alpha"]));
         mock.resources_capability.store(true, Ordering::SeqCst);
         mock.list_resource_templates_fails
             .store(true, Ordering::SeqCst);
         let registry = McpRegistry::with_raw_conn(
             mock.clone() as Arc<dyn McpTransport>,
-            mock as Arc<dyn RawConnectionProvider>,
+            mock.clone() as Arc<dyn RawConnectionProvider>,
         );
-        let connected = registry.connect(cfg("srv")).await;
+        let connected = registry
+            .connect(http_cfg("srv", "https://mcp.example.com/v1"))
+            .await;
+        std::env::remove_var(crate::discovery_cache::ENV_ENABLED);
+
         assert!(
             connected.is_ok(),
             "a -32601 on resources/templates/list must NOT fail the connection, got {:?}",
             connected.err()
         );
-
+        assert_eq!(
+            mock.templates_calls.load(Ordering::SeqCst),
+            1,
+            "the eligible path must actually issue the RPC, or this test proves nothing"
+        );
         let conns = registry.connections.read().await;
         let McpConnectionState::Connected {
             tools,
@@ -4687,16 +4754,12 @@ mod tests {
             ..
         } = conns.get("srv").unwrap()
         else {
-            panic!("expected Connected state, got {:?}", conns.get("srv"));
+            panic!("expected Connected state");
         };
-        assert_eq!(
-            tools.len(),
-            1,
-            "the server's tools must survive a failed template fetch"
-        );
+        assert_eq!(tools.len(), 1, "the server's tools must survive");
         assert!(
             resource_templates.is_empty(),
-            "a failed template fetch yields an EMPTY list (oracle `Qe`'s catch), got {resource_templates:?}"
+            "a failed template fetch yields an empty list, not an error"
         );
     }
 

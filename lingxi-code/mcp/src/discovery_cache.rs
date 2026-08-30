@@ -123,6 +123,15 @@ pub const CACHE_SCHEMA_VERSION: u32 = 1;
 /// Reused here via [`traits::env::is_env_truthy`]/[`traits::env::is_env_defined_falsy`],
 /// this port's established idiom for a coerced-boolean env var.
 pub const ENV_ENABLED: &str = "MCP_DISCOVERY_CACHE";
+
+/// Shared serial guard for tests that mutate `ENV_ENABLED`. Env vars are
+/// process-global, so the registry's eligibility tests must take the same
+/// lock this module's own tests use or they race.
+#[cfg(test)]
+pub(crate) fn tests_env_lock() -> &'static std::sync::Mutex<()> {
+    static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| std::sync::Mutex::new(()))
+}
 /// Fresh-window override, in SECONDS (oracle `MCP_DISCOVERY_CACHE_TTL_S`).
 pub const ENV_TTL_SECONDS: &str = "MCP_DISCOVERY_CACHE_TTL_S";
 /// Max-stale override, in SECONDS (oracle `MCP_DISCOVERY_CACHE_MAX_STALE_S`).

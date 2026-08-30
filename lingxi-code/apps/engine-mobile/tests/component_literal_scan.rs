@@ -179,8 +179,8 @@ const SKIPPED_EXTENSIONS: &[&str] = &[
     // archives / compressed
     "zip", "gz", "tgz", "bz2", "xz", "zst", "7z", "tar", "rar", //
     // compiled artifacts
-    "so", "dylib", "dll", "a", "o", "rlib", "rmeta", "exe", "bin", "wasm", "class", "jar",
-    "pdb", "pyc", //
+    "so", "dylib", "dll", "a", "o", "rlib", "rmeta", "exe", "bin", "wasm", "class", "jar", "pdb",
+    "pyc", //
     // media
     "mp3", "mp4", "m4a", "mov", "wav", "ogg", "webm", "avi", "flac", //
     // documents / databases
@@ -437,7 +437,11 @@ fn code_view(src: &str) -> Vec<String> {
         i += 1;
     }
 
-    out.into_iter().collect::<String>().lines().map(str::to_owned).collect()
+    out.into_iter()
+        .collect::<String>()
+        .lines()
+        .map(str::to_owned)
+        .collect()
 }
 
 /// Compute the 1-based, INCLUSIVE line ranges this file's INLINE `#[cfg(test)]`
@@ -554,9 +558,7 @@ fn parse_out_of_line_mod(line: &str) -> Option<&str> {
     let rest = rest.trim();
     let name = rest.strip_suffix(';')?.trim();
     if name.is_empty()
-        || !name
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '_')
+        || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
         || name.chars().next().is_some_and(|c| c.is_ascii_digit())
     {
         return None;
@@ -579,7 +581,10 @@ fn mod_candidates(file: &Path, name: &str, path_attr: Option<&str>) -> Vec<PathB
     } else {
         dir.join(&stem)
     };
-    vec![base.join(format!("{name}.rs")), base.join(name).join("mod.rs")]
+    vec![
+        base.join(format!("{name}.rs")),
+        base.join(name).join("mod.rs"),
+    ]
 }
 
 /// Collect every out-of-line `mod` declaration in `src`, remembering whether it
@@ -664,8 +669,8 @@ fn cfg_test_only_module_files(files: &[PathBuf]) -> BTreeSet<PathBuf> {
 // ---------------------------------------------------------------------------
 
 fn collect_source_files(dir: &Path, out: &mut Vec<PathBuf>) {
-    let entries = fs::read_dir(dir)
-        .unwrap_or_else(|e| panic!("read_dir({}) failed: {e}", dir.display()));
+    let entries =
+        fs::read_dir(dir).unwrap_or_else(|e| panic!("read_dir({}) failed: {e}", dir.display()));
     let mut paths: Vec<PathBuf> = entries.map(|e| e.expect("dir entry").path()).collect();
     paths.sort();
     for path in paths {
@@ -698,7 +703,11 @@ struct Violation {
 
 impl std::fmt::Display for Violation {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}:{}: literal `{}`", self.rel_path, self.line, self.literal)?;
+        write!(
+            f,
+            "{}:{}: literal `{}`",
+            self.rel_path, self.line, self.literal
+        )?;
         if self.split {
             write!(
                 f,
@@ -733,7 +742,9 @@ fn keep_longest(mut spans: Vec<(usize, usize, String)>) -> Vec<(usize, usize, St
     spans.sort_by(|a, b| a.0.cmp(&b.0).then(b.1.cmp(&a.1)));
     let mut kept: Vec<(usize, usize, String)> = Vec::new();
     for span in spans {
-        let covered = kept.iter().any(|(ks, ke, _)| span.0 >= *ks && span.1 <= *ke);
+        let covered = kept
+            .iter()
+            .any(|(ks, ke, _)| span.0 >= *ks && span.1 <= *ke);
         if !covered {
             kept.push(span);
         }
@@ -993,9 +1004,10 @@ fn parse_allowlist(text: &str) -> Vec<AllowlistEntry> {
         let (literal, count) = rest
             .rsplit_once(':')
             .unwrap_or_else(|| panic!("allowlist line {no}: expected `path:literal:count`"));
-        let expected: usize = count.trim().parse().unwrap_or_else(|e| {
-            panic!("allowlist line {no}: bad expected_count `{count}`: {e}")
-        });
+        let expected: usize = count
+            .trim()
+            .parse()
+            .unwrap_or_else(|e| panic!("allowlist line {no}: bad expected_count `{count}`: {e}"));
         assert!(
             !path.is_empty() && !literal.is_empty(),
             "allowlist line {no}: empty path or literal in `{line}`"
@@ -1284,9 +1296,7 @@ fn a_literal_in_an_unknown_extension_is_reported() {
         );
     }
     assert!(
-        !reported
-            .iter()
-            .any(|(path, _)| path == "logo.png"),
+        !reported.iter().any(|(path, _)| path == "logo.png"),
         "a known-binary extension must stay out of the walk, got {violations:?}"
     );
 }
@@ -1298,8 +1308,7 @@ fn a_literal_in_an_unknown_extension_is_reported() {
 #[test]
 fn scanner_rejects_namespaced_fqn_not_just_basename() {
     let tmp = tempfile::tempdir().expect("tempdir");
-    let planted =
-        format!("pub const PLANTED: &str = \"{PLUGIN_NAMESPACE}:local-app-build\";\n");
+    let planted = format!("pub const PLANTED: &str = \"{PLUGIN_NAMESPACE}:local-app-build\";\n");
     fs::write(tmp.path().join("planted.rs"), planted).expect("write planted fixture");
 
     let needles = production_needle_set();
@@ -1437,8 +1446,10 @@ fn scanner_needle_comes_from_discovery_not_from_a_static_array() {
     skill_api::register_mobile(&mut fresh);
     let fresh_skills = skill_basenames(&fresh);
     let workflows = local_app_workflow_basenames();
-    let fresh_only_skills: Vec<&String> =
-        fresh_skills.iter().filter(|n| !workflows.contains(*n)).collect();
+    let fresh_only_skills: Vec<&String> = fresh_skills
+        .iter()
+        .filter(|n| !workflows.contains(*n))
+        .collect();
     assert!(
         !fresh_only_skills.is_empty(),
         "`register_mobile` must contribute at least one skill basename that is \
@@ -1583,7 +1594,12 @@ impl Thing {
     /// between vanished from the scan.
     #[test]
     fn cfg_test_on_a_non_brace_item_skips_only_the_attribute_line() {
-        for item in ["use std::io;", "mod helpers;", "const X: u8 = 1;", "type T = u8;"] {
+        for item in [
+            "use std::io;",
+            "mod helpers;",
+            "const X: u8 = 1;",
+            "type T = u8;",
+        ] {
             let src = format!(
                 "\
 #[cfg(test)]
@@ -1611,7 +1627,8 @@ fn production() {{
     /// dropped into a file must not hide a literal that follows them.
     #[test]
     fn a_planted_cfg_test_use_cannot_hide_a_literal_below_it() {
-        let needles: BTreeSet<String> = ["local-app-build"].into_iter().map(str::to_owned).collect();
+        let needles: BTreeSet<String> =
+            ["local-app-build"].into_iter().map(str::to_owned).collect();
         let src = "\
 fn a() {}
 
@@ -1672,7 +1689,11 @@ fn also_production() {}
             "pub mod real;\n#[cfg(test)]\n#[path = \"only_test.rs\"]\nmod only_test;\n",
         )
         .unwrap();
-        fs::write(root.join("real.rs"), "pub const N: &str = \"local-app-build\";\n").unwrap();
+        fs::write(
+            root.join("real.rs"),
+            "pub const N: &str = \"local-app-build\";\n",
+        )
+        .unwrap();
         fs::write(
             root.join("only_test.rs"),
             "const T: &str = \"local-canvas-build\";\n",
@@ -1733,7 +1754,10 @@ fn also_production() {}
         );
         assert_eq!(
             found,
-            vec!["local-canvas-build".to_string(), "local-app-build".to_string()]
+            vec![
+                "local-canvas-build".to_string(),
+                "local-app-build".to_string()
+            ]
         );
     }
 
@@ -1771,7 +1795,10 @@ fn also_production() {}
             expected: 1,
         };
         let findings = reconcile(&[], std::slice::from_ref(&entry));
-        assert!(matches!(findings.as_slice(), [Finding::Stale(_)]), "{findings:?}");
+        assert!(
+            matches!(findings.as_slice(), [Finding::Stale(_)]),
+            "{findings:?}"
+        );
         assert!(format!("{}", findings[0]).contains("gone.rs"));
     }
 
@@ -1812,14 +1839,15 @@ pub fn b() -> String {
                 panic!("`\"local-app\".to_string() + \"-build\"` was not caught: {found:?}")
             });
         assert_eq!(a.line, 2);
-        assert!(a.split, "a `+`-assembled name must be flagged as a split literal");
+        assert!(
+            a.split,
+            "a `+`-assembled name must be flagged as a split literal"
+        );
 
         let b = found
             .iter()
             .find(|v| v.literal == "local-canvas-build")
-            .unwrap_or_else(|| {
-                panic!("`String::from(..) + \"-build\"` was not caught: {found:?}")
-            });
+            .unwrap_or_else(|| panic!("`String::from(..) + \"-build\"` was not caught: {found:?}"));
         assert_eq!(b.line, 5);
         assert!(b.split);
     }
@@ -1830,7 +1858,8 @@ pub fn b() -> String {
     /// has to be rewritten instead of quietly going stale.
     #[test]
     fn normalization_has_exactly_these_two_documented_limits() {
-        let needles: BTreeSet<String> = ["local-app-build"].into_iter().map(str::to_owned).collect();
+        let needles: BTreeSet<String> =
+            ["local-app-build"].into_iter().map(str::to_owned).collect();
 
         // Limit 1 — placeholder substitution.
         assert!(
@@ -1870,7 +1899,8 @@ pub fn b() -> String {
     /// the detector on non-Rust files at all removes the class.
     #[test]
     fn a_js_template_literal_cannot_open_a_cfg_test_skip_range() {
-        let needles: BTreeSet<String> = ["local-app-build"].into_iter().map(str::to_owned).collect();
+        let needles: BTreeSet<String> =
+            ["local-app-build"].into_iter().map(str::to_owned).collect();
         let src = "\
 export const meta = { name: 'demo' };
 const help = `

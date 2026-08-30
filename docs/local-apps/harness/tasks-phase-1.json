@@ -317,6 +317,95 @@
         "P1.8"
       ],
       "notes": "Touches client-protocol, which is exclusive. BEFORE adding any ClientCommand variant, read the UniFFI metadata budget note in the harness README: the enum's metadata buffer is 14,137 of 16,384 bytes at lap/baseline (86.3% consumed, 2,247 free), doc comments are copied verbatim into it, and overflow is an error[E0080] at const-eval that breaks BOTH mobile builds while cargo build --workspace and the whole test suite stay green."
+    },
+    {
+      "id": "P1.10",
+      "title": "Wire the bundle chain: packer -> materializer -> PluginManager",
+      "gate": "clean-sweep review finding, severity high",
+      "owns": [
+        "lingxi-code/apps/engine-mobile/src/host.rs",
+        "lingxi-code/apps/engine-mobile/src/builtin_bundle.rs",
+        "lingxi-code/local-apps/src/packer.rs"
+      ],
+      "crates": [
+        "engine-mobile"
+      ],
+      "testPackages": [
+        "engine-mobile"
+      ],
+      "exclusive": false,
+      "repeatRuns": 1,
+      "plantedFailure": {
+        "edit": "break the production call from host boot into materialization and show a test naming it goes red",
+        "mustNameInOutput": [
+          "builtin_bundle",
+          "materializ"
+        ]
+      },
+      "addedTests": [
+        "mobile_boot_materializes_the_builtin_bundle",
+        "the_packer_output_is_what_the_materializer_consumes"
+      ],
+      "deps": [],
+      "notes": "🚨 CONFIRMED BY THE CLEAN-SWEEP REVIEW AND BY DIRECT GREP. `builtin_bundle::` has ZERO callers outside its own file. P1.1-P1.5 built the packer, the deterministic archive, the rejection rules, atomic materialization and the idempotent short-circuit — and nothing in production invokes any of it. P1.6/P1.8 wired PluginManager, but the chain that produces and installs the bundle it manages is not connected at either end.\n\nThis is the same 'implemented but not wired' class this branch kept finding in EXISTING code — confirm_runtime_profile, the threshold validator, plugin workflows — and has now reproduced in its own work. Every one of those tasks is individually green and collectively inert.\n\n⚠️ The gate must be a PRODUCTION path assertion, not another unit test. The existing tests all pass today with zero production callers, which is exactly the proof that they cannot detect this."
+    },
+    {
+      "id": "P1.11",
+      "title": "Route ClientCommand::PluginCommand and emit PluginStatusChanged",
+      "gate": "clean-sweep review finding, severity high",
+      "owns": [
+        "lingxi-code/apps/engine-mobile/src/host.rs",
+        "lingxi-code/apps/engine-mobile/src/lib.rs"
+      ],
+      "crates": [
+        "engine-mobile"
+      ],
+      "testPackages": [
+        "engine-mobile"
+      ],
+      "exclusive": false,
+      "repeatRuns": 1,
+      "plantedFailure": {
+        "edit": "remove the PluginCommand match arm and show a test naming the unrouted command goes red",
+        "mustNameInOutput": [
+          "PluginCommand",
+          "plugin_status_changed"
+        ]
+      },
+      "addedTests": [
+        "a_plugin_command_reaches_the_manager",
+        "toggling_enabled_emits_plugin_status_changed"
+      ],
+      "deps": [],
+      "notes": "🚨 CONFIRMED BY GREP. `ClientCommand::PluginCommand` has ZERO match arms outside client-protocol, and `PluginStatusChanged` has ZERO emitters. P1.9 landed the wire contract, hand-written goldens on both sides, and the TypeScript mirror — and no engine handles the command or produces the event.\n\nSo the three-way enabledPlugins behaviour §19.2 specifies is pinned by DTO round-trip tests and reachable by nobody. A client can send the command and will be answered by nothing."
+    },
+    {
+      "id": "P1.12",
+      "title": "Give the four script gates an execution trigger",
+      "gate": "clean-sweep review finding, severity high",
+      "owns": [
+        "lingxi-code/scripts/",
+        "..github/workflows/ci.yml"
+      ],
+      "crates": [
+        "engine-mobile"
+      ],
+      "testPackages": [
+        "engine-mobile"
+      ],
+      "exclusive": false,
+      "repeatRuns": 1,
+      "plantedFailure": {
+        "edit": "introduce a known leak and show the trigger surfaces it without anyone invoking the gate by hand",
+        "mustNameInOutput": [
+          "check-brand-leaks"
+        ]
+      },
+      "addedTests": [
+        "every_checked_in_gate_has_an_execution_trigger"
+      ],
+      "deps": [],
+      "notes": "CONFIRMED: no reference to check-brand-leaks / check-skill-frontmatter / check-i18n-pairing / lap-gate in .github/workflows, and `git remote -v` is EMPTY — there is no CI to run them.\n\nThis was known at pre-flight and recorded then ('every §19 gate must be a checked-in script invoked by name, not \"CI executes X\"'), which is why the gates are scripts rather than workflow steps. But nothing closed the loop: they run when a human or an agent remembers. This session already lost one round to exactly that — the brand gate went unrun after three content commits and eight legitimate entries sat red until an unrelated question surfaced them.\n\n⚠️ Registering them in ci.yml buys nothing until a remote exists. A local pre-commit hook or a make-style entry point is the reachable version. Decide deliberately; do not add a CI step that never fires and call it done."
     }
   ]
 }

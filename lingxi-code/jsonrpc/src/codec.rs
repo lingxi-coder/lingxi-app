@@ -27,10 +27,11 @@ pub enum CodecError {
     Io(#[from] std::io::Error),
 }
 
-/// Default maximum frame size — 16 MiB. Generous enough for LSP `completion`
-/// responses (which can be megabytes for large codebases) but bounded to keep
-/// a runaway peer from exhausting memory.
-pub const DEFAULT_MAX_FRAME_SIZE: usize = 16 * 1024 * 1024;
+/// Default maximum header size — matches Claude Code's 64 KiB LSP framing cap.
+pub const DEFAULT_MAX_HEADER_SIZE: usize = 64 * 1024;
+
+/// Default maximum frame size — matches Claude Code's 32 MiB LSP body cap.
+pub const DEFAULT_MAX_FRAME_SIZE: usize = 32 * 1024 * 1024;
 
 /// `Content-Length: N\r\n\r\n<json>` codec — LSP and modern MCP framing.
 ///
@@ -40,12 +41,12 @@ pub const DEFAULT_MAX_FRAME_SIZE: usize = 16 * 1024 * 1024;
 /// ```
 /// No `Content-Type` header. No other headers.
 ///
-/// On decode accepts the literal header `Content-Length` (case-sensitive)
-/// followed by optional whitespace, an integer byte count, `\r\n`, then a
-/// blank `\r\n` line, then exactly N bytes of JSON. Any unrecognized header
-/// produces `CodecError::MalformedHeader`.
+/// On decode accepts `Content-Length` and optional `Content-Type`
+/// case-insensitively, with RFC token header names. Any other header is treated
+/// as stdout desynchronization and rejected.
 #[derive(Debug)]
 pub struct LspCodec {
+    max_header_size: usize,
     max_frame_size: usize,
     /// Parser state — if we've parsed the header but not yet seen the full
     /// body, remember the body length so the next decode call can pick up.
@@ -55,6 +56,7 @@ pub struct LspCodec {
 impl Default for LspCodec {
     fn default() -> Self {
         Self {
+            max_header_size: DEFAULT_MAX_HEADER_SIZE,
             max_frame_size: DEFAULT_MAX_FRAME_SIZE,
             pending_body_len: None,
         }
@@ -66,6 +68,7 @@ impl LspCodec {
     #[must_use]
     pub fn with_max_frame_size(max_frame_size: usize) -> Self {
         Self {
+            max_header_size: DEFAULT_MAX_HEADER_SIZE,
             max_frame_size,
             pending_body_len: None,
         }
@@ -98,36 +101,79 @@ impl Decoder for LspCodec {
                 }
                 let body = src.split_to(body_len);
                 self.pending_body_len = None;
-                let v: Value = serde_json::from_slice(&body)?;
-                let msg: Message = serde_json::from_value(v)?;
-                return Ok(Some(msg));
+                let v: Value = match serde_json::from_slice(&body) {
+                    Ok(value) => value,
+                    Err(error) => {
+                        tracing::warn!(%error, "LSP: dropped unparseable message body");
+                        continue;
+                    }
+                };
+                if !v.is_object() {
+                    tracing::warn!("LSP: dropped message body that is not an object");
+                    continue;
+                }
+                match serde_json::from_value(v) {
+                    Ok(message) => return Ok(Some(message)),
+                    Err(error) => {
+                        tracing::warn!(%error, "LSP: dropped unrecognized JSON-RPC message body");
+                        continue;
+                    }
+                }
             }
 
             // Locate `\r\n\r\n` separator.
             let Some(sep_pos) = find_crlf_crlf(src) else {
+                if src.len() > self.max_header_size {
+                    return Err(CodecError::FrameTooLarge(src.len(), self.max_header_size));
+                }
                 return Ok(None);
             };
+            if sep_pos + 4 > self.max_header_size {
+                return Err(CodecError::FrameTooLarge(sep_pos + 4, self.max_header_size));
+            }
             let header_bytes = &src[..sep_pos];
-            let header_str = std::str::from_utf8(header_bytes).map_err(|_| {
-                CodecError::MalformedHeader("non-UTF-8 bytes in framing header".into())
-            })?;
+            let header_str: String = header_bytes.iter().map(|byte| char::from(*byte)).collect();
 
             let mut body_len: Option<usize> = None;
             for line in header_str.split("\r\n") {
                 if line.is_empty() {
                     continue;
                 }
-                // Case-sensitive `Content-Length` per LSP spec.
-                let Some(rest) = line.strip_prefix("Content-Length:") else {
+                let Some((name, value)) = line.split_once(':') else {
                     return Err(CodecError::MalformedHeader(format!(
-                        "unrecognized header line: {line:?}"
+                        "missing ':' in header line: {line:?}"
                     )));
                 };
-                let n: usize = rest
-                    .trim()
-                    .parse()
-                    .map_err(|e| CodecError::MalformedHeader(format!("Content-Length: {e}")))?;
-                body_len = Some(n);
+                let name = name.trim_end_matches([' ', '\t']);
+                if !is_header_name_token(name) {
+                    return Err(CodecError::MalformedHeader(format!(
+                        "invalid header name: {name:?}"
+                    )));
+                }
+
+                if name.eq_ignore_ascii_case("Content-Length") {
+                    let value = value.trim();
+                    if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+                        return Err(CodecError::MalformedHeader(
+                            "Content-Length is not a number".into(),
+                        ));
+                    }
+                    let n: usize = value
+                        .parse()
+                        .map_err(|e| CodecError::MalformedHeader(format!("Content-Length: {e}")))?;
+                    // vscode-jsonrpc/Claude Code accepts duplicate protocol
+                    // headers and uses the final Content-Length value.
+                    body_len = Some(n);
+                    continue;
+                }
+
+                if name.eq_ignore_ascii_case("Content-Type") {
+                    continue;
+                }
+
+                return Err(CodecError::MalformedHeader(format!(
+                    "unrecognized header line: {line:?}"
+                )));
             }
 
             let body_len = body_len.ok_or_else(|| {
@@ -153,6 +199,30 @@ fn find_crlf_crlf(buf: &BytesMut) -> Option<usize> {
         return None;
     }
     buf.windows(needle.len()).position(|w| w == needle)
+}
+
+fn is_header_name_token(name: &str) -> bool {
+    !name.is_empty()
+        && name.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric()
+                || matches!(
+                    byte,
+                    b'!' | b'#'
+                        | b'$'
+                        | b'%'
+                        | b'&'
+                        | b'\''
+                        | b'*'
+                        | b'+'
+                        | b'-'
+                        | b'.'
+                        | b'^'
+                        | b'_'
+                        | b'`'
+                        | b'|'
+                        | b'~'
+                )
+        })
 }
 
 /// NDJSON / `\n`-delimited JSON codec — older MCP servers and IDE bridge JSON-text frames.
@@ -357,15 +427,62 @@ mod lsp_codec_tests {
     }
 
     #[test]
-    fn header_name_is_case_sensitive_per_lsp_spec() {
-        // vscode-jsonrpc sends `Content-Length` (capital C, capital L). We
-        // emit the same. On receive we ALSO accept the literal `Content-Length`
-        // only — lowercased variants are non-LSP and should be rejected to
-        // surface misframed peers loudly.
+    fn decode_accepts_content_headers_case_insensitively() {
         let mut codec = LspCodec::default();
-        let mut buf = BytesMut::from(&b"content-length: 2\r\n\r\n{}"[..]);
+        let mut buf = BytesMut::from(
+            &b"content-length: 37\r\nCoNtEnT-TyPe: application/vscode-jsonrpc; charset=utf-8\r\n\r\n{\"jsonrpc\":\"2.0\",\"method\":\"m\",\"id\":1}"[..],
+        );
+        let msg = codec.decode(&mut buf).unwrap().expect("frame");
+        assert!(matches!(msg, Message::Request(_)));
+    }
+
+    #[test]
+    fn decode_rejects_unknown_headers() {
+        let mut codec = LspCodec::default();
+        let mut buf = BytesMut::from(&b"Content-Length: 2\r\nX-Foo: bar\r\n\r\n{}"[..]);
         let err = codec.decode(&mut buf).unwrap_err();
         assert!(matches!(err, CodecError::MalformedHeader(_)));
+    }
+
+    #[test]
+    fn decode_rejects_invalid_header_name_token() {
+        let mut codec = LspCodec::default();
+        let mut buf = BytesMut::from(&b"Content Length: 2\r\n\r\n{}"[..]);
+        let err = codec.decode(&mut buf).unwrap_err();
+        assert!(matches!(err, CodecError::MalformedHeader(_)));
+    }
+
+    #[test]
+    fn decode_requires_crlfcrlf_separator() {
+        let mut codec = LspCodec::default();
+        let mut buf = BytesMut::from(&b"Content-Length: 2\n\n{}"[..]);
+        assert!(codec.decode(&mut buf).unwrap().is_none());
+    }
+
+    #[test]
+    fn decode_rejects_header_over_default_cap() {
+        let mut codec = LspCodec::default();
+        let oversized = vec![b'a'; DEFAULT_MAX_HEADER_SIZE + 1];
+        let mut buf = BytesMut::from(&oversized[..]);
+        let err = codec.decode(&mut buf).unwrap_err();
+        assert!(matches!(
+            err,
+            CodecError::FrameTooLarge(actual, DEFAULT_MAX_HEADER_SIZE)
+                if actual == DEFAULT_MAX_HEADER_SIZE + 1
+        ));
+    }
+
+    #[test]
+    fn decode_rejects_body_over_default_cap() {
+        let mut codec = LspCodec::default();
+        let oversized = DEFAULT_MAX_FRAME_SIZE + 1;
+        let frame = format!("Content-Length: {oversized}\r\n\r\n");
+        let mut buf = BytesMut::from(frame.as_bytes());
+        let err = codec.decode(&mut buf).unwrap_err();
+        assert!(matches!(
+            err,
+            CodecError::FrameTooLarge(n, DEFAULT_MAX_FRAME_SIZE) if n == oversized
+        ));
     }
 }
 

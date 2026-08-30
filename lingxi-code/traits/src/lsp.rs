@@ -14,27 +14,91 @@ use thiserror::Error;
 
 /// Configuration describing one LSP server the engine knows how to start.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct LspServerConfig {
     /// Logical server name (used as registry key).
+    ///
+    /// Claude Code's public `.lsp.json` shape keys configurations by name and
+    /// does not repeat it inside the value.  The plugin loader stamps the map
+    /// key here after deserialization.
+    #[serde(default)]
     pub name: String,
     /// Executable to spawn (e.g. `rust-analyzer`).
     pub command: String,
     /// CLI arguments for the server.
+    #[serde(default)]
     pub args: Vec<String>,
     /// Extra environment variables.
+    #[serde(default)]
     pub env: std::collections::HashMap<String, String>,
     /// Languages this server handles (e.g. `["rust"]`).
+    #[serde(default, alias = "trigger_languages")]
     pub trigger_languages: Vec<String>,
     /// Markers used to detect the project root (e.g. `["Cargo.toml"]`).
+    #[serde(default, alias = "root_dir_markers")]
     pub root_dir_markers: Vec<String>,
     /// Optional server-specific initialization payload.
+    #[serde(default, alias = "initialization_options")]
     pub initialization_options: Option<Value>,
     /// File-extension → `languageId` mapping for `textDocument/didOpen`.
     /// Mirrors claude-code's `LSPServerConfig.extensionToLanguage`. The keys
     /// must include the leading dot (`.rs`, `.ts`) and are case-folded to
     /// lowercase before lookup.
-    #[serde(default)]
+    #[serde(default, alias = "extension_to_language")]
     pub extension_to_language: std::collections::HashMap<String, String>,
+    /// Accepted public transport selector. Claude Code 2.1.251 accepts
+    /// `"stdio" | "socket"`; its current launcher still uses stdio for both.
+    #[serde(default = "default_lsp_transport")]
+    pub transport: String,
+    /// Server settings exposed through `workspace/configuration` and pushed
+    /// once through `workspace/didChangeConfiguration` after initialization.
+    #[serde(default)]
+    pub settings: Option<Value>,
+    /// Workspace folder override. Missing means the live process workspace.
+    #[serde(default)]
+    pub workspace_folder: Option<String>,
+    /// Initialization deadline in milliseconds.
+    #[serde(default)]
+    pub startup_timeout: Option<u64>,
+    /// Graceful shutdown deadline in milliseconds.
+    #[serde(default)]
+    pub shutdown_timeout: Option<u64>,
+    /// Whether a crashed server may be started again. Missing means true.
+    #[serde(default)]
+    pub restart_on_crash: Option<bool>,
+    /// Maximum crash-recovery starts. Missing means three.
+    #[serde(default)]
+    pub max_restarts: Option<u32>,
+    /// Whether passive diagnostics are injected. Missing means true.
+    #[serde(default)]
+    pub diagnostics: Option<bool>,
+}
+
+fn default_lsp_transport() -> String {
+    "stdio".to_string()
+}
+
+impl Default for LspServerConfig {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            command: String::new(),
+            args: Vec::new(),
+            env: std::collections::HashMap::new(),
+            trigger_languages: Vec::new(),
+            root_dir_markers: Vec::new(),
+            initialization_options: None,
+            extension_to_language: std::collections::HashMap::new(),
+            transport: default_lsp_transport(),
+            settings: None,
+            workspace_folder: None,
+            startup_timeout: None,
+            shutdown_timeout: None,
+            restart_on_crash: None,
+            max_restarts: None,
+            diagnostics: None,
+        }
+    }
 }
 
 /// Handle returned by a successful [`LspTransport::start_server`].
@@ -144,12 +208,28 @@ pub trait LspTransport: Send + Sync {
         Err(LspError::Unavailable)
     }
 
+    /// Whether the child/connection is still alive. Transports that cannot
+    /// observe process state conservatively return true.
+    async fn is_alive(&self, _conn_id: protocol::McpConnectionId) -> bool {
+        true
+    }
+
     /// Shutdown and tear down the server identified by `conn_id`.
     ///
     /// # Errors
     /// Returns [`LspError::Transport`] when the shutdown cannot be
     /// completed gracefully.
     async fn shutdown(&self, conn_id: protocol::McpConnectionId) -> Result<(), LspError>;
+
+    /// Immediately discard a connection that failed before initialization
+    /// completed. Platform implementations should remove their connection
+    /// entry so dropping the owned child terminates it without another LSP
+    /// handshake.
+    ///
+    /// The default keeps test and minimal transports source-compatible.
+    async fn terminate(&self, conn_id: protocol::McpConnectionId) -> Result<(), LspError> {
+        self.shutdown(conn_id).await
+    }
 
     /// Whether this transport can carry LSP traffic on the current platform.
     fn is_available(&self) -> bool;
@@ -174,9 +254,9 @@ pub enum LspError {
     #[error("unavailable")]
     Unavailable,
     /// Underlying transport (stdio / TCP) failed.
-    #[error("transport error: {0}")]
+    #[error("{0}")]
     Transport(String),
     /// Server returned a JSON-RPC error response.
-    #[error("server response: {0}")]
+    #[error("{0}")]
     ServerError(String),
 }

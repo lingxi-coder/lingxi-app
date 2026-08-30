@@ -1046,9 +1046,10 @@ pub(crate) fn confined_plugin_data_path(plugins_dir: &Path, id: &str) -> Option<
     {
         return None;
     }
+    let data_key = sanitize(id, false);
     confined_existing_child(
         &plugins_dir.join("data"),
-        &plugins_dir.join("data").join(id),
+        &plugins_dir.join("data").join(data_key),
     )
 }
 
@@ -2623,6 +2624,18 @@ mod tests {
         ] {
             assert!(confined_plugin_data_path(&e.plugins, id).is_none());
         }
+    }
+
+    #[test]
+    fn plugin_data_path_uses_the_materialized_sanitized_identity() {
+        let e = env();
+        let expected = e.plugins.join("data/hello-mymkt");
+        std::fs::create_dir_all(&expected).unwrap();
+
+        assert_eq!(
+            confined_plugin_data_path(&e.plugins, "hello@mymkt"),
+            Some(expected.canonicalize().unwrap())
+        );
     }
 
     #[test]

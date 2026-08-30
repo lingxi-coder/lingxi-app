@@ -55,6 +55,7 @@ async fn test_start_server_with_bogus_binary_returns_error<T: LspTransport>(t: &
         root_dir_markers: vec![],
         initialization_options: None,
         extension_to_language: HashMap::new(),
+        ..Default::default()
     };
     let r = t.start_server(&config).await;
     assert!(

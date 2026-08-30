@@ -69,6 +69,7 @@ fn rust_config() -> LspServerConfig {
         root_dir_markers: vec!["Cargo.toml".to_string()],
         initialization_options: None,
         extension_to_language: map,
+        ..Default::default()
     }
 }
 
@@ -179,6 +180,67 @@ async fn hover_sends_did_open_then_hover_with_zero_based_position() {
     );
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_first_requests_queue_did_open_before_both_operations() {
+    let temp = tempfile::NamedTempFile::with_suffix(".rs").unwrap();
+    tokio::fs::write(temp.path(), b"fn main() {}\n")
+        .await
+        .unwrap();
+    let file_path = temp.path().to_path_buf();
+
+    let (client_io, mut peer_io) = duplex(FRAME_BUFFER);
+    let (client_read, client_write) = tokio::io::split(client_io);
+    let client = Arc::new(LspClient::new(
+        "rust-analyzer".to_string(),
+        Connection::new_lsp(client_read, client_write),
+    ));
+    let tracker = OpenFileTracker::new();
+    let config = rust_config();
+    let barrier = Arc::new(tokio::sync::Barrier::new(3));
+
+    let peer = tokio::spawn(async move {
+        let first = read_one_frame(&mut peer_io).await;
+        assert_eq!(
+            first["method"], "textDocument/didOpen",
+            "no concurrent operation may overtake the first didOpen"
+        );
+        for _ in 0..2 {
+            let request = read_one_frame(&mut peer_io).await;
+            assert_eq!(request["method"], "textDocument/hover");
+            write_frame(
+                &mut peer_io,
+                &json!({
+                    "jsonrpc": "2.0",
+                    "id": request["id"],
+                    "result": {"contents": "ok"}
+                }),
+            )
+            .await;
+        }
+    });
+
+    let mut requests = Vec::new();
+    for _ in 0..2 {
+        let client = Arc::clone(&client);
+        let tracker = tracker.clone();
+        let config = config.clone();
+        let path = file_path.clone();
+        let barrier = Arc::clone(&barrier);
+        requests.push(tokio::spawn(async move {
+            barrier.wait().await;
+            hover(&client, &tracker, &config, &path, 1, 1).await
+        }));
+    }
+    barrier.wait().await;
+    for request in requests {
+        request
+            .await
+            .expect("request task")
+            .expect("hover succeeds");
+    }
+    peer.await.expect("peer task");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn did_open_lru_sends_did_close_for_evicted_document() {
     let dir = tempfile::tempdir().unwrap();
@@ -242,6 +304,88 @@ async fn did_open_lru_sends_did_close_for_evicted_document() {
     peer.await.expect("peer ok");
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn global_lru_closes_an_eviction_on_its_owning_server() {
+    let dir = tempfile::tempdir().unwrap();
+    let oldest = dir.path().join("oldest.rs");
+    tokio::fs::write(&oldest, "fn oldest() {}\n").await.unwrap();
+    let mut newer = Vec::new();
+    for idx in 0..MAX_OPEN_DOCUMENTS {
+        let path = dir.path().join(format!("newer-{idx}.rs"));
+        tokio::fs::write(&path, format!("fn newer_{idx}() {{}}\n"))
+            .await
+            .unwrap();
+        newer.push(path);
+    }
+
+    let tracker = OpenFileTracker::new();
+    let (owner_io, mut owner_peer) = duplex(FRAME_BUFFER);
+    let (owner_read, owner_write) = tokio::io::split(owner_io);
+    let owner = Arc::new(LspClient::new(
+        "owner-server".to_string(),
+        Connection::new_lsp(owner_read, owner_write),
+    ));
+    let mut owner_config = rust_config();
+    owner_config.name = "owner-server".to_string();
+
+    let (current_io, mut current_peer) = duplex(FRAME_BUFFER);
+    let (current_read, current_write) = tokio::io::split(current_io);
+    let current = Arc::new(LspClient::new(
+        "current-server".to_string(),
+        Connection::new_lsp(current_read, current_write),
+    ));
+    let mut current_config = rust_config();
+    current_config.name = "current-server".to_string();
+
+    let expected_oldest = lsp_types::Url::from_file_path(&oldest).unwrap().to_string();
+    let owner_task = tokio::spawn(async move {
+        let did_open = read_one_frame(&mut owner_peer).await;
+        assert_eq!(did_open["method"], "textDocument/didOpen");
+        let request = read_one_frame(&mut owner_peer).await;
+        write_frame(
+            &mut owner_peer,
+            &json!({"jsonrpc":"2.0", "id":request["id"], "result":{}}),
+        )
+        .await;
+
+        let did_close = read_one_frame(&mut owner_peer).await;
+        assert_eq!(did_close["method"], "textDocument/didClose");
+        assert_eq!(did_close["params"]["textDocument"]["uri"], expected_oldest);
+    });
+    let current_task = tokio::spawn(async move {
+        for _ in 0..MAX_OPEN_DOCUMENTS {
+            let did_open = read_one_frame(&mut current_peer).await;
+            assert_eq!(did_open["method"], "textDocument/didOpen");
+            let request = read_one_frame(&mut current_peer).await;
+            write_frame(
+                &mut current_peer,
+                &json!({"jsonrpc":"2.0", "id":request["id"], "result":{}}),
+            )
+            .await;
+        }
+    });
+
+    hover(&owner, &tracker, &owner_config, &oldest, 1, 1)
+        .await
+        .expect("oldest file opens on owner server");
+    for path in &newer {
+        hover(&current, &tracker, &current_config, path, 1, 1)
+            .await
+            .expect("newer file opens on current server");
+    }
+
+    owner_task.await.expect("owner peer");
+    current_task.await.expect("current peer");
+    assert!(
+        !tracker
+            .is_open(
+                "owner-server",
+                &lsp_types::Url::from_file_path(&oldest).unwrap()
+            )
+            .await
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn hover_skips_did_open_when_already_tracked() {
     let temp = tempfile::NamedTempFile::with_suffix(".rs").unwrap();
@@ -273,6 +417,116 @@ async fn hover_skips_did_open_when_already_tracked() {
     let _ = hover(&client, &tracker, &cfg, &file_path, 1, 1)
         .await
         .expect("hover ok");
+    peer.await.expect("peer ok");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hover_rejects_a_stale_client_after_server_clear() {
+    let temp = tempfile::NamedTempFile::with_suffix(".rs").unwrap();
+    tokio::fs::write(temp.path(), b"fn main() {}\n")
+        .await
+        .unwrap();
+    let file_path = temp.path().to_path_buf();
+    let uri = lsp_types::Url::from_file_path(&file_path).unwrap();
+
+    let (client_io, _peer_io) = duplex(FRAME_BUFFER);
+    let (client_read, client_write) = tokio::io::split(client_io);
+    let client = Arc::new(LspClient::new(
+        "rust-analyzer".to_string(),
+        Connection::new_lsp(client_read, client_write),
+    ));
+    let tracker = OpenFileTracker::new();
+    let cfg = rust_config();
+
+    let (bootstrap_io, mut bootstrap_peer) = duplex(FRAME_BUFFER);
+    let (bootstrap_read, bootstrap_write) = tokio::io::split(bootstrap_io);
+    let bootstrap_client = Arc::new(LspClient::new(
+        "rust-analyzer".to_string(),
+        Connection::new_lsp(bootstrap_read, bootstrap_write),
+    ));
+    let bootstrap_peer_task = tokio::spawn(async move {
+        let did_open = read_one_frame(&mut bootstrap_peer).await;
+        assert_eq!(did_open["method"], "textDocument/didOpen");
+        let request = read_one_frame(&mut bootstrap_peer).await;
+        assert_eq!(request["method"], "textDocument/hover");
+        write_frame(
+            &mut bootstrap_peer,
+            &json!({
+                "jsonrpc": "2.0",
+                "id": request["id"],
+                "result": {"contents": "ok"}
+            }),
+        )
+        .await;
+    });
+    hover(&bootstrap_client, &tracker, &cfg, &file_path, 1, 1)
+        .await
+        .expect("first hover installs the active connection");
+    bootstrap_peer_task.await.expect("bootstrap peer");
+    tracker.clear_server("rust-analyzer").await;
+
+    let error = hover(&client, &tracker, &cfg, &file_path, 1, 1)
+        .await
+        .expect_err("stale client must not recreate tracker state after clear");
+    assert!(matches!(
+        error,
+        LspOperationError::Lsp(traits::LspError::Unavailable)
+    ));
+    assert!(!tracker.is_open("rust-analyzer", &uri).await);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn changed_open_file_sends_full_did_change_and_did_save_with_next_version() {
+    let temp = tempfile::NamedTempFile::with_suffix(".rs").unwrap();
+    tokio::fs::write(temp.path(), b"fn before() {}\n")
+        .await
+        .unwrap();
+    let file_path = temp.path().to_path_buf();
+
+    let (client_io, mut peer_io) = duplex(FRAME_BUFFER);
+    let (client_read, client_write) = tokio::io::split(client_io);
+    let connection = Connection::new_lsp(client_read, client_write);
+    let client = Arc::new(LspClient::new("rust-analyzer".to_string(), connection));
+    let tracker = OpenFileTracker::new();
+    let cfg = rust_config();
+
+    let peer = tokio::spawn(async move {
+        let did_open = read_one_frame(&mut peer_io).await;
+        assert_eq!(did_open["method"], "textDocument/didOpen");
+        assert_eq!(did_open["params"]["textDocument"]["version"], 1);
+        let first = read_one_frame(&mut peer_io).await;
+        write_frame(
+            &mut peer_io,
+            &json!({"jsonrpc":"2.0","id":first["id"],"result":{"contents":"one"}}),
+        )
+        .await;
+
+        let did_change = read_one_frame(&mut peer_io).await;
+        assert_eq!(did_change["method"], "textDocument/didChange");
+        assert_eq!(did_change["params"]["textDocument"]["version"], 2);
+        assert_eq!(
+            did_change["params"]["contentChanges"],
+            json!([{ "text": "fn after() {}\n" }])
+        );
+        let did_save = read_one_frame(&mut peer_io).await;
+        assert_eq!(did_save["method"], "textDocument/didSave");
+        let second = read_one_frame(&mut peer_io).await;
+        write_frame(
+            &mut peer_io,
+            &json!({"jsonrpc":"2.0","id":second["id"],"result":{"contents":"two"}}),
+        )
+        .await;
+    });
+
+    hover(&client, &tracker, &cfg, &file_path, 1, 1)
+        .await
+        .expect("initial hover");
+    tokio::fs::write(&file_path, b"fn after() {}\n")
+        .await
+        .unwrap();
+    hover(&client, &tracker, &cfg, &file_path, 1, 1)
+        .await
+        .expect("hover after edit");
     peer.await.expect("peer ok");
 }
 

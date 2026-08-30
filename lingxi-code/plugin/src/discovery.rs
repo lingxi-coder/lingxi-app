@@ -48,6 +48,7 @@ use crate::trust::default_trust_for_source;
 
 use hooks::loader::parse_hooks_from_settings_json;
 use hooks::HookSource;
+use indexmap::IndexMap;
 use protocol::PluginId;
 use serde::Deserialize;
 use serde_json::Value;
@@ -2313,28 +2314,20 @@ async fn load_mcp_servers(plugin_dir: &Path) -> HashMap<String, mcp::McpServerCo
 /// registry keys by `config.name`). A missing / malformed file yields an empty
 /// map. Manifest-declared `lspServers` is merged separately by
 /// [`load_declared_lsp_servers`].
-async fn load_lsp_servers(plugin_dir: &Path) -> HashMap<String, traits::LspServerConfig> {
+async fn load_lsp_servers(plugin_dir: &Path) -> IndexMap<String, traits::LspServerConfig> {
     let path = plugin_dir.join(".lsp.json");
     let Ok(raw) = tokio::fs::read_to_string(&path).await else {
-        return HashMap::new();
+        return IndexMap::new();
     };
     let raw = raw.strip_prefix(UTF8_BOM).unwrap_or(raw.as_str());
-    let parsed: HashMap<String, traits::LspServerConfig> = match serde_json::from_str(raw) {
+    let parsed: IndexMap<String, Value> = match serde_json::from_str(raw) {
         Ok(m) => m,
         Err(e) => {
             tracing::warn!(error = %e, path = %path.display(), "skipping malformed plugin .lsp.json");
-            return HashMap::new();
+            return IndexMap::new();
         }
     };
-    parsed
-        .into_iter()
-        .map(|(key, mut cfg)| {
-            if cfg.name.is_empty() {
-                cfg.name.clone_from(&key);
-            }
-            (cfg.name.clone(), cfg)
-        })
-        .collect()
+    parse_lsp_records(parsed)
 }
 
 /// Collect every `*.md` file under `dir` **recursively** as a [`ComponentPath`],
@@ -2816,21 +2809,72 @@ async fn load_mcpb_mcp_server(
 async fn load_declared_lsp_servers(
     plugin_dir: &Path,
     value: Option<Value>,
-) -> HashMap<String, traits::LspServerConfig> {
-    load_declared_json_records(plugin_dir, value, |raw| {
-        serde_json::from_str::<HashMap<String, traits::LspServerConfig>>(raw).map(|parsed| {
-            parsed
-                .into_iter()
-                .map(|(key, mut cfg)| {
-                    if cfg.name.is_empty() {
-                        cfg.name.clone_from(&key);
-                    }
-                    (cfg.name.clone(), cfg)
-                })
-                .collect::<HashMap<_, _>>()
+) -> IndexMap<String, traits::LspServerConfig> {
+    let Some(value) = value else {
+        return IndexMap::new();
+    };
+    let items = match value {
+        Value::Array(items) => items,
+        one => vec![one],
+    };
+    let mut out = IndexMap::new();
+    for item in items {
+        let parsed = match item {
+            Value::String(raw_path) => {
+                let Some(path) = resolve_declared_relative_path(plugin_dir, &raw_path) else {
+                    tracing::warn!(path = %raw_path, "skipping invalid plugin manifest json path");
+                    continue;
+                };
+                let Ok(raw) = tokio::fs::read_to_string(&path).await else {
+                    continue;
+                };
+                serde_json::from_str::<IndexMap<String, Value>>(&raw)
+            }
+            inline @ Value::Object(_) => serde_json::from_value::<IndexMap<String, Value>>(inline),
+            _ => continue,
+        };
+        if let Ok(parsed) = parsed {
+            out.extend(parse_lsp_records(parsed));
+        }
+    }
+    out
+}
+
+fn parse_lsp_records(
+    records: IndexMap<String, Value>,
+) -> IndexMap<String, traits::LspServerConfig> {
+    records
+        .into_iter()
+        .filter_map(|(key, value)| {
+            let mut config = match serde_json::from_value::<traits::LspServerConfig>(value) {
+                Ok(config) => config,
+                Err(error) => {
+                    tracing::warn!(server = %key, %error, "skipping malformed plugin LSP server configuration");
+                    return None;
+                }
+            };
+            // The record key is authoritative in Claude Code's public shape;
+            // an extra legacy `name` field must not rename or collide with a
+            // sibling server.
+            config.name.clone_from(&key);
+            validate_lsp_config(&config).then(|| (config.name.clone(), config))
         })
-    })
-    .await
+        .collect()
+}
+
+fn validate_lsp_config(config: &traits::LspServerConfig) -> bool {
+    let valid = !config.command.trim().is_empty()
+        && !config.extension_to_language.is_empty()
+        && matches!(config.transport.as_str(), "stdio" | "socket")
+        && config.startup_timeout.is_none_or(|timeout| timeout > 0)
+        && config.shutdown_timeout.is_none_or(|timeout| timeout > 0);
+    if !valid {
+        tracing::warn!(
+            server = %config.name,
+            "skipping invalid plugin LSP server configuration"
+        );
+    }
+    valid
 }
 
 async fn load_declared_json_records<T, E>(
@@ -3439,6 +3483,84 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn public_lsp_schema_loads_without_redundant_internal_fields() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::write(
+            tmp.path().join(".lsp.json"),
+            r#"{
+                "typescript": {
+                    "command": "typescript-language-server",
+                    "args": ["--stdio"],
+                    "extensionToLanguage": {".ts": "typescript"},
+                    "transport": "socket",
+                    "initializationOptions": {"hostInfo": "claude"},
+                    "settings": {"typescript": {"format": {"enable": true}}},
+                    "workspaceFolder": "./workspace",
+                    "startupTimeout": 1234,
+                    "shutdownTimeout": 4321,
+                    "restartOnCrash": false,
+                    "maxRestarts": 7,
+                    "diagnostics": false
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let configs = load_lsp_servers(tmp.path()).await;
+        let cfg = configs.get("typescript").expect("public config loads");
+        assert_eq!(cfg.name, "typescript");
+        assert_eq!(cfg.transport, "socket");
+        assert_eq!(cfg.extension_to_language[".ts"], "typescript");
+        assert_eq!(cfg.workspace_folder.as_deref(), Some("./workspace"));
+        assert_eq!(cfg.startup_timeout, Some(1234));
+        assert_eq!(cfg.shutdown_timeout, Some(4321));
+        assert_eq!(cfg.restart_on_crash, Some(false));
+        assert_eq!(cfg.max_restarts, Some(7));
+        assert_eq!(cfg.diagnostics, Some(false));
+    }
+
+    #[tokio::test]
+    async fn declared_lsp_array_preserves_path_and_inline_order() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::write(
+            tmp.path().join("from-file.json"),
+            r#"{"first":{"command":"one","extensionToLanguage":{".a":"a"}}}"#,
+        )
+        .unwrap();
+        let configs = load_declared_lsp_servers(
+            tmp.path(),
+            Some(serde_json::json!([
+                "./from-file.json",
+                {"second":{"command":"two","extensionToLanguage":{".b":"b"}}}
+            ])),
+        )
+        .await;
+        assert_eq!(
+            configs.keys().map(String::as_str).collect::<Vec<_>>(),
+            vec!["first", "second"]
+        );
+    }
+
+    #[tokio::test]
+    async fn malformed_lsp_server_does_not_hide_valid_sibling() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::write(
+            tmp.path().join(".lsp.json"),
+            r#"{
+                "broken": {"args": ["--stdio"], "extensionToLanguage": {".bad": "bad"}},
+                "working": {"name": "spoofed", "command": "good-lsp", "extensionToLanguage": {".ok": "ok"}}
+            }"#,
+        )
+        .unwrap();
+
+        let configs = load_lsp_servers(tmp.path()).await;
+        assert!(!configs.contains_key("broken"));
+        assert!(!configs.contains_key("spoofed"));
+        assert_eq!(configs["working"].name, "working");
+        assert_eq!(configs["working"].command, "good-lsp");
+    }
+
+    #[tokio::test]
     async fn declared_relative_paths_are_confined_and_inline_mcp_lsp_are_loaded() {
         let tmp = tempfile::tempdir().unwrap();
         let plugin = tmp.path();
@@ -3449,7 +3571,7 @@ mod tests {
                 "name":"demo",
                 "commands":"../escape",
                 "mcpServers":{"inline":{"type":"stdio","command":"echo"}},
-                "lspServers":{"rust":{"name":"rust","command":"rust-analyzer","args":[],"env":{},"trigger_languages":["rust"],"root_dir_markers":["Cargo.toml"],"initialization_options":null,"extension_to_language":{}}}
+                "lspServers":{"rust":{"command":"rust-analyzer","extensionToLanguage":{".rs":"rust"}}}
             }"#,
         )
         .unwrap();

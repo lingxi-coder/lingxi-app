@@ -22,6 +22,7 @@ fn mock_config() -> LspServerConfig {
         root_dir_markers: vec![],
         initialization_options: None,
         extension_to_language: ext,
+        ..Default::default()
     }
 }
 
@@ -58,9 +59,9 @@ async fn posix_spawn_and_initialize_round_trip() {
     assert!(caps.definition, "mock advertises definition");
 
     transport
-        .shutdown(conn.connection_id)
+        .terminate(conn.connection_id)
         .await
-        .expect("shutdown ok");
+        .expect("terminate ok");
 }
 
 /// Verifies the ENOENT-guard: spawning a non-existent binary surfaces a
@@ -86,4 +87,57 @@ async fn posix_spawn_enoent_is_clean_error() {
             || msg.contains("os error"),
         "ENOENT surfaces as Transport error, got: {msg}"
     );
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[tokio::test]
+async fn posix_spawn_uses_absolute_workspace_folder_as_child_cwd() {
+    use platform_posix::lsp::PosixLspTransport;
+    use tempfile::tempdir;
+    use tokio::time::{sleep, timeout, Duration};
+    use traits::LspTransport;
+
+    let workspace = tempdir().expect("workspace tempdir");
+    let witness = tempdir().expect("witness tempdir");
+    let witness_path = witness.path().join("cwd.txt");
+
+    let mut env = HashMap::new();
+    env.insert("OUT".into(), witness_path.to_string_lossy().into_owned());
+
+    let workspace_folder = workspace
+        .path()
+        .canonicalize()
+        .expect("canonical workspace path");
+    let config = LspServerConfig {
+        name: "cwd-witness".into(),
+        command: "/bin/sh".into(),
+        args: vec!["-c".into(), "pwd -P > \"$OUT\"".into()],
+        env,
+        workspace_folder: Some(workspace_folder.to_string_lossy().into_owned()),
+        ..Default::default()
+    };
+
+    let transport = PosixLspTransport::new();
+    let conn = transport
+        .start_server(&config)
+        .await
+        .expect("spawn succeeded");
+
+    let observed = timeout(Duration::from_secs(2), async {
+        loop {
+            if let Ok(contents) = std::fs::read_to_string(&witness_path) {
+                break contents;
+            }
+            sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("child wrote cwd witness");
+
+    transport
+        .terminate(conn.connection_id)
+        .await
+        .expect("terminate ok");
+
+    assert_eq!(observed.trim_end(), workspace_folder.to_string_lossy());
 }

@@ -124,18 +124,15 @@ pub fn file_tool_kind(tool_name: &str) -> FileToolKind {
 /// writes another — the gate would then silently evaluate an untranslated
 /// path with no error anywhere.
 ///
-/// NOTE on `LSP`: claude-code's `LSPTool.getPath` reads `filePath` (camel-case),
-/// but THIS port's `LSPTool` declares its field as `file_path` (snake-case,
-/// `tools/lsp/src/lsp_tool.rs`). We deliberately track the port's own schema —
-/// so `file_path` here is correct for the port. If the LSP tool is ever
-/// re-aligned to `filePath`, this mapping must follow it (else `Read(...)`
-/// rules silently stop covering `LSP`).
+/// `LSP` is the one file tool whose public schema uses camel-case `filePath`,
+/// matching Claude Code's `LSPTool.getPath`.
 #[must_use]
 pub(crate) fn input_path_field_for_tool(tool_name: &str) -> &'static str {
     match tool_name {
         "NotebookEdit" => "notebook_path",
         "Glob" | "Grep" => "path",
-        // Read / Edit / Write / MultiEdit / LSP
+        "LSP" => "filePath",
+        // Read / Edit / Write / MultiEdit
         _ => "file_path",
     }
 }
@@ -1051,6 +1048,11 @@ mod tests {
         assert_eq!(
             input_path_for_tool("Grep", &grep, &r).as_deref(),
             Some("/proj/sub")
+        );
+        let lsp = serde_json::json!({ "filePath": "/proj/src/lib.rs" });
+        assert_eq!(
+            input_path_for_tool("LSP", &lsp, &r).as_deref(),
+            Some("/proj/src/lib.rs")
         );
         // Glob/Grep default to cwd when `path` is absent.
         let grep_no_path = serde_json::json!({ "pattern": "x" });

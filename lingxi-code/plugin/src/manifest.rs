@@ -12,6 +12,7 @@ use crate::source::PluginSource;
 use crate::trust::PluginTrustLevel;
 use crate::PluginDependency;
 use hooks::HookDefinition;
+use indexmap::IndexMap;
 use mcp::McpServerConfig;
 use protocol::PluginId;
 use serde::{Deserialize, Serialize};
@@ -296,7 +297,7 @@ pub struct PluginComponents {
     /// empty when [`Self::skip_mcp_discovery`] is `true`.
     pub mcp_servers: HashMap<String, McpServerConfig>,
     /// LSP servers contributed by this plugin, keyed by logical name.
-    pub lsp_servers: HashMap<String, LspServerConfig>,
+    pub lsp_servers: IndexMap<String, LspServerConfig>,
     /// Whether this load suppressed MCP server discovery for this plugin —
     /// neither the plugin-root `.mcp.json` nor the manifest's declared
     /// `mcpServers` was read, so [`Self::mcp_servers`] is empty regardless of

@@ -827,6 +827,12 @@ impl Tool for FileEditTool {
             },
         );
 
+        // Keep an installed language server synchronized immediately after a
+        // successful edit so passive diagnostics can arrive before the next
+        // model turn. Missing/unhealthy servers are best-effort and never turn
+        // a completed file edit into a failure.
+        self.ctx.sync_lsp_after_file_write(&canon, &after).await;
+
         let structured_patch = crate::structured_patch::build_structured_patch(&before, &after);
         let (lines_added, lines_removed) = count_patch_lines(&structured_patch);
         if lines_added > 0 || lines_removed > 0 {

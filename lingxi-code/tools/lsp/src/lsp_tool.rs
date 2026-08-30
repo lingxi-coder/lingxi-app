@@ -37,7 +37,6 @@ use std::time::Instant;
 use async_trait::async_trait;
 use lsp::registry::LspRegistry;
 use lsp::tool_operations as ops;
-use lsp::OpenFileTracker;
 use once_cell::sync::Lazy;
 use permission::result::PermissionMetadata;
 use permission::{PermissionDecisionReason, PermissionResult};
@@ -1106,15 +1105,14 @@ impl LSPTool {
     fn cwd_now(&self) -> PathBuf {
         self.live_cwd
             .as_ref()
-            .map(|c| c.lock().unwrap().clone())
-            .unwrap_or_else(current_cwd)
+            .map_or_else(current_cwd, |c| c.lock().unwrap().clone())
     }
 
     fn lsp_registry(&self) -> Option<&Arc<LspRegistry>> {
         self.ctx.lsp_registry.as_ref()
     }
 
-    fn input_file_path<'a>(input: &'a Value) -> Option<&'a str> {
+    fn input_file_path(input: &Value) -> Option<&str> {
         input
             .get("filePath")
             .and_then(Value::as_str)
@@ -1130,7 +1128,7 @@ static LSP_TOOL_SCHEMA: Lazy<Value> = Lazy::new(|| {
         "type": "object",
         "properties": {
             "operation":   { "type": "string", "enum": ["goToDefinition", "findReferences", "hover", "documentSymbol", "workspaceSymbol", "goToImplementation", "prepareCallHierarchy", "incomingCalls", "outgoingCalls"], "description": "The LSP operation to perform" },
-            "filePath":    { "type": "string", "minLength": 1, "description": "The absolute or relative path to the file" },
+            "filePath":    { "type": "string", "description": "The absolute or relative path to the file" },
             "line":        { "type": "integer", "minimum": 1, "description": "The line number (1-based, as shown in editors)" },
             "character":   { "type": "integer", "minimum": 1, "description": "The character offset (1-based, as shown in editors)" },
             "query":       { "type": "string", "description": "The symbol name or partial name to search for (workspaceSymbol only). Most language servers return no results for an empty query, so always provide it when using workspaceSymbol." }
@@ -1152,7 +1150,8 @@ impl Tool for LSPTool {
         &LSP_TOOL_SCHEMA
     }
     fn is_enabled(&self, _: &ToolStaticContext) -> bool {
-        true
+        self.lsp_registry()
+            .is_some_and(|registry| registry.is_tool_available())
     }
     fn is_lsp(&self) -> bool {
         true
@@ -1281,8 +1280,12 @@ impl Tool for LSPTool {
                     ],
                 )
                 .await;
-                return Err(ToolError::Internal(
-                    "LSPTool: LSP registry not configured on this host".into(),
+                return Ok(lsp_tool_result(
+                    &operation,
+                    &file_path,
+                    "LSP server manager not initialized. This may indicate a startup issue."
+                        .to_string(),
+                    None,
                 ));
             }
         };
@@ -1300,8 +1303,24 @@ impl Tool for LSPTool {
         // claude-code routes by filePath, never a model-supplied server name.
         // A file with no configured server yields the documented "no server
         // available" error.
-        let (server_name, client, config) = match registry.ensure_client_for_file(path).await {
+        let (server_name, client, config) = match registry
+            .ensure_client_for_file_in_workspace(path, &cwd)
+            .await
+        {
             Ok(triple) => triple,
+            Err(traits::LspError::Unavailable) => {
+                let extension = path
+                    .extension()
+                    .and_then(|extension| extension.to_str())
+                    .map(|extension| format!(".{extension}"))
+                    .unwrap_or_default();
+                return Ok(lsp_tool_result(
+                    &operation,
+                    &file_path,
+                    format!("No LSP server available for file type: {extension}"),
+                    None,
+                ));
+            }
             Err(e) => {
                 emit(
                     bus,
@@ -1312,13 +1331,16 @@ impl Tool for LSPTool {
                     ],
                 )
                 .await;
-                return Err(ToolError::InvalidInput(format!(
-                    "No LSP server is available for {file_path}: {e}"
-                )));
+                return Ok(lsp_tool_result(
+                    &operation,
+                    &file_path,
+                    format!("Error performing {operation}: {e}"),
+                    None,
+                ));
             }
         };
 
-        let tracker = OpenFileTracker::new();
+        let tracker = registry.open_file_tracker();
 
         // `LSPTool.ts:427-` `getMethodAndParams` — per-operation dispatch. Position-
         // based ops use `line`/`character`; `documentSymbol` is file-level;
@@ -1376,22 +1398,12 @@ impl Tool for LSPTool {
                 // `Output.result` field for the UI.
                 let (formatted, result_count, file_count) =
                     format_result(&operation, &filtered, &cwd);
-                Ok(ToolCallResult {
-                    data: json!({
-                        "operation": operation,
-                        "server_name": server_name,
-                        "file_path": file_path,
-                        "result": formatted,
-                        "result_count": result_count,
-                        "file_count": file_count,
-                        "model_content": formatted,
-                    }),
-                    model_content: None,
-                    new_messages: vec![],
-                    context_modifier: None,
-                    is_error: false,
-                    mcp_meta: None,
-                })
+                Ok(lsp_tool_result(
+                    &operation,
+                    &file_path,
+                    formatted,
+                    Some((result_count, file_count)),
+                ))
             }
             // `LSPTool.ts:265-272` — a file over the 10 MB cap is NOT an error;
             // it returns a graceful success whose `result` states the size in
@@ -1414,20 +1426,7 @@ impl Tool for LSPTool {
                 // `result`; the model sees it via `model_content` (no
                 // `resultCount`/`fileCount`, matching the TS `Output`).
                 let result = file_too_large_message(size);
-                Ok(ToolCallResult {
-                    data: json!({
-                        "operation": operation,
-                        "server_name": server_name,
-                        "file_path": file_path,
-                        "result": result,
-                        "model_content": result,
-                    }),
-                    model_content: None,
-                    new_messages: vec![],
-                    context_modifier: None,
-                    is_error: false,
-                    mcp_meta: None,
-                })
+                Ok(lsp_tool_result(&operation, &file_path, result, None))
             }
             Err(e) => {
                 emit(
@@ -1440,11 +1439,41 @@ impl Tool for LSPTool {
                     ],
                 )
                 .await;
-                Err(ToolError::Io(format!(
-                    "LSPTool: {server_name} {operation}: {e}"
-                )))
+                Ok(lsp_tool_result(
+                    &operation,
+                    &file_path,
+                    format!("Error performing {operation}: {e}"),
+                    None,
+                ))
             }
         }
+    }
+}
+
+fn lsp_tool_result(
+    operation: &str,
+    file_path: &str,
+    result: String,
+    counts: Option<(u64, u64)>,
+) -> ToolCallResult {
+    let mut data = serde_json::Map::new();
+    data.insert(
+        "operation".to_string(),
+        Value::String(operation.to_string()),
+    );
+    data.insert("result".to_string(), Value::String(result.clone()));
+    data.insert("filePath".to_string(), Value::String(file_path.to_string()));
+    if let Some((result_count, file_count)) = counts {
+        data.insert("resultCount".to_string(), json!(result_count));
+        data.insert("fileCount".to_string(), json!(file_count));
+    }
+    ToolCallResult {
+        data: Value::Object(data),
+        model_content: Some(result),
+        new_messages: vec![],
+        context_modifier: None,
+        is_error: false,
+        mcp_meta: None,
     }
 }
 
@@ -1455,6 +1484,23 @@ mod tests {
     #[test]
     fn lsp_name_locked() {
         assert_eq!(LSP_TOOL_NAME, "LSP");
+    }
+
+    #[test]
+    fn output_shape_and_key_order_match_claude_code_2_1_251() {
+        let result = lsp_tool_result("hover", "src/lib.rs", "details".to_string(), Some((1, 1)));
+        assert_eq!(
+            serde_json::to_string(&result.data).unwrap(),
+            r#"{"operation":"hover","result":"details","filePath":"src/lib.rs","resultCount":1,"fileCount":1}"#
+        );
+        assert_eq!(result.model_content.as_deref(), Some("details"));
+    }
+
+    #[test]
+    fn public_schema_does_not_add_a_port_only_file_path_constraint() {
+        assert!(LSP_TOOL_SCHEMA["properties"]["filePath"]
+            .get("minLength")
+            .is_none());
     }
 
     #[test]

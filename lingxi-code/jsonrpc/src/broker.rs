@@ -56,6 +56,15 @@ pub struct BrokerHandle {
 }
 
 impl BrokerHandle {
+    /// Whether either broker half has terminated.
+    ///
+    /// A finished reader means the peer disconnected or framing failed even
+    /// when the underlying child process is still alive.
+    #[must_use]
+    pub fn is_finished(&self) -> bool {
+        self.reader.is_finished() || self.writer.is_finished()
+    }
+
     /// Await both halves to a graceful stop. Returns each half's terminal
     /// result. Useful in tests; in production callers usually spawn the
     /// handle's `join()` future and propagate any error from either side.
@@ -103,15 +112,29 @@ where
     // writer task through this internal channel.
     let (responder_tx, responder_rx) = mpsc::unbounded_channel::<Message>();
 
-    let reader = tokio::spawn(typed_reader_loop(
-        inbound,
-        router,
-        dispatcher,
-        notif_tx.clone(),
-        responder_tx,
-    ));
+    let reader_router = router.clone();
+    let reader_close = router.close_handle();
+    let reader_notif = notif_tx.clone();
+    let reader = tokio::spawn(async move {
+        let result = typed_reader_loop(
+            inbound,
+            reader_router,
+            dispatcher,
+            reader_notif,
+            responder_tx,
+        )
+        .await;
+        reader_close.close();
+        result
+    });
 
-    let writer = tokio::spawn(typed_writer_loop(outbound, outbound_rx, responder_rx));
+    let writer_close = router.close_handle();
+    drop(router);
+    let writer = tokio::spawn(async move {
+        let result = typed_writer_loop(outbound, outbound_rx, responder_rx).await;
+        writer_close.close();
+        result
+    });
 
     drop(notif_tx);
 
@@ -236,22 +259,31 @@ where
     let (responder_tx, responder_rx) = mpsc::unbounded_channel::<Message>();
 
     let reader_codec = codec.clone();
-    let reader = tokio::spawn(reader_loop(
-        inbound_bytes,
-        reader_codec,
-        router,
-        dispatcher,
-        notif_tx.clone(),
-        responder_tx,
-    ));
+    let reader_router = router.clone();
+    let reader_close = router.close_handle();
+    let reader_notif = notif_tx.clone();
+    let reader = tokio::spawn(async move {
+        let result = reader_loop(
+            inbound_bytes,
+            reader_codec,
+            reader_router,
+            dispatcher,
+            reader_notif,
+            responder_tx,
+        )
+        .await;
+        reader_close.close();
+        result
+    });
 
     let writer_codec = codec;
-    let writer = tokio::spawn(writer_loop(
-        outbound_bytes,
-        writer_codec,
-        outbound_rx,
-        responder_rx,
-    ));
+    let writer_close = router.close_handle();
+    drop(router);
+    let writer = tokio::spawn(async move {
+        let result = writer_loop(outbound_bytes, writer_codec, outbound_rx, responder_rx).await;
+        writer_close.close();
+        result
+    });
 
     // `notif_tx` is dropped at the end of this function; the reader holds its
     // own clone. When the reader exits the channel closes on the consumer

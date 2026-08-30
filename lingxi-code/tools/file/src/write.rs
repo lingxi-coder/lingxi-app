@@ -435,6 +435,10 @@ impl Tool for FileWriteTool {
             },
         );
 
+        // Mirror Claude Code's automatic post-edit diagnostics path by
+        // updating the matching LSP document before the next model turn.
+        self.ctx.sync_lsp_after_file_write(&canon, content).await;
+
         // Model-facing result string is byte-faithful to claude-code
         // (`FileWriteTool.ts:418-433`); it echoes the ORIGINAL `file_path` arg,
         // not the canonicalized path. claude derives the model text from the

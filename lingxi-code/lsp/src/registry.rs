@@ -18,10 +18,12 @@
 use crate::client::LspClient;
 use crate::connection::LspConnectionState;
 use crate::diagnostic_registry::LspDiagnosticRegistry;
+use crate::open_file_tracker::OpenFileTracker;
 use crate::passive_feedback::PassiveDiagnosticSubscriber;
 use protocol::{McpConnectionId, PluginId};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::SystemTime;
 use tokio::sync::{watch, RwLock};
@@ -30,9 +32,8 @@ use traits::{LspError, LspServerConfig, LspTransport};
 /// Crash-recovery cap: a server whose start keeps failing is retried until
 /// its failure count EXCEEDS this bound, then every further request returns
 /// the recorded error without another spawn. Mirrors claude-code's
-/// `t.maxRestarts ?? 3` (the config field is not plumbed into
-/// `LspServerConfig` yet, so the default IS the behavior).
-const MAX_RESTARTS: u32 = 3;
+/// `t.maxRestarts ?? 3`; an explicit `maxRestarts` overrides this default.
+const DEFAULT_MAX_RESTARTS: u32 = 3;
 
 /// Per-host LSP registry.
 ///
@@ -73,6 +74,12 @@ pub struct LspRegistry {
     /// Live diagnostic subscribers, kept alive (drop aborts the task) keyed by
     /// server name.
     subscribers: RwLock<HashMap<String, PassiveDiagnosticSubscriber>>,
+    /// Manager-wide open-document/LRU/version state. The LSP tool must reuse
+    /// this across calls; a per-call tracker would resend `didOpen` forever.
+    open_files: OpenFileTracker,
+    /// Synchronous tool-availability bit: true once at least one plugin LSP
+    /// config is registered.
+    has_registered_servers: AtomicBool,
     /// In-flight start claims, keyed by server name (2.1.207 P2-09).
     ///
     /// claude-code's per-server start fn early-returns while the state is
@@ -87,28 +94,69 @@ pub struct LspRegistry {
     /// section (never held across `await`), and it lets [`StartClaimGuard`]
     /// release the claim in `Drop` even when the starting task is cancelled
     /// mid-flight.
-    starting: std::sync::Mutex<HashMap<String, watch::Sender<()>>>,
+    starting: Arc<std::sync::Mutex<HashMap<String, watch::Sender<()>>>>,
 }
 
 /// Releases an in-flight start claim on drop.
 ///
 /// Removing (and thereby dropping) the `watch::Sender` wakes every waiter
-/// subscribed to it (`Receiver::changed` resolves once the sender is gone),
-/// whether the start resolved normally or the starting task was cancelled.
-/// On cancellation the server is left `Starting` with no claim registered —
-/// the next caller detects that stale state and reclaims it.
-struct StartClaimGuard<'a> {
-    registry: &'a LspRegistry,
+/// subscribed to it (`Receiver::changed` resolves once the sender is gone).
+/// When cancellation happens after spawn, the guard keeps the claim registered
+/// until `transport.terminate(...)` completes, so a waiter cannot start a
+/// replacement while the abandoned child is still alive.
+struct StartClaimGuard {
+    starting: Arc<std::sync::Mutex<HashMap<String, watch::Sender<()>>>>,
     name: String,
+    transport: Arc<dyn LspTransport>,
+    owned_connection: Option<McpConnectionId>,
 }
 
-impl Drop for StartClaimGuard<'_> {
+impl StartClaimGuard {
+    fn own_connection(&mut self, connection_id: McpConnectionId) {
+        self.owned_connection = Some(connection_id);
+    }
+
+    fn owned_connection(&self) -> Option<McpConnectionId> {
+        self.owned_connection
+    }
+
+    fn release_connection(&mut self) {
+        self.owned_connection = None;
+    }
+}
+
+impl Drop for StartClaimGuard {
     fn drop(&mut self) {
-        self.registry
-            .starting
-            .lock()
-            .expect("lsp start-claim lock poisoned")
-            .remove(&self.name);
+        let starting = Arc::clone(&self.starting);
+        let name = self.name.clone();
+        let Some(connection_id) = self.owned_connection.take() else {
+            starting
+                .lock()
+                .expect("lsp start-claim lock poisoned")
+                .remove(&name);
+            return;
+        };
+        let transport = Arc::clone(&self.transport);
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(async move {
+                if let Err(cleanup_error) = transport.terminate(connection_id).await {
+                    tracing::warn!(
+                        target: "lingxi_lsp::registry",
+                        %cleanup_error,
+                        "failed to terminate LSP server after cancelled startup"
+                    );
+                }
+                starting
+                    .lock()
+                    .expect("lsp start-claim lock poisoned")
+                    .remove(&name);
+            });
+        } else {
+            starting
+                .lock()
+                .expect("lsp start-claim lock poisoned")
+                .remove(&name);
+        }
     }
 }
 
@@ -125,7 +173,9 @@ impl LspRegistry {
             plugin_servers: RwLock::new(HashMap::new()),
             diagnostics: None,
             subscribers: RwLock::new(HashMap::new()),
-            starting: std::sync::Mutex::new(HashMap::new()),
+            open_files: OpenFileTracker::new(),
+            has_registered_servers: AtomicBool::new(false),
+            starting: Arc::new(std::sync::Mutex::new(HashMap::new())),
         }
     }
 
@@ -135,6 +185,27 @@ impl LspRegistry {
     pub fn with_diagnostics(mut self, diagnostics: LspDiagnosticRegistry) -> Self {
         self.diagnostics = Some(diagnostics);
         self
+    }
+
+    /// Shared document tracker used by every LSP tool call.
+    #[must_use]
+    pub fn open_file_tracker(&self) -> OpenFileTracker {
+        self.open_files.clone()
+    }
+
+    /// Whether the manager has any plugin-provided server configuration.
+    #[must_use]
+    pub fn has_registered_servers(&self) -> bool {
+        self.has_registered_servers.load(Ordering::Acquire)
+    }
+
+    /// Whether the LSP tool should be exposed on this host.
+    ///
+    /// Claude Code keeps the tool inactive both without plugin configuration
+    /// and on surfaces that cannot launch plugin language servers.
+    #[must_use]
+    pub fn is_tool_available(&self) -> bool {
+        self.has_registered_servers() && self.transport.is_available()
     }
 
     /// Cache an `Arc<LspClient>` for `name` (M4-07).
@@ -172,7 +243,11 @@ impl LspRegistry {
             .write()
             .await
             .insert(name.into(), LspConnectionState::Disconnected { config });
+        self.open_files
+            .activate_server(name, client.connection())
+            .await;
         self.clients.write().await.insert(name.into(), client);
+        self.has_registered_servers.store(true, Ordering::Release);
     }
 
     /// Register a server configuration in the `Disconnected` state.
@@ -185,6 +260,7 @@ impl LspRegistry {
             config.name.clone(),
             LspConnectionState::Disconnected { config },
         );
+        self.has_registered_servers.store(true, Ordering::Release);
     }
 
     /// Record `config`'s extensions in the registration-order routing table.
@@ -242,6 +318,23 @@ impl LspRegistry {
     /// fails.
     #[allow(clippy::too_many_lines)] // candidate loop + lifecycle helper
     pub async fn ensure_server_for_file(&self, path: &Path) -> Result<McpConnectionId, LspError> {
+        let workspace_cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        self.ensure_server_for_file_in_workspace(path, &workspace_cwd)
+            .await
+    }
+
+    /// Return (or start) the server for `path`, resolving its initialization
+    /// workspace against the caller's current session directory.
+    ///
+    /// Claude Code's LSP manager reads the async-local session cwd at startup;
+    /// callers with a live cwd must use this entry point instead of relying on
+    /// the host process cwd.
+    #[allow(clippy::too_many_lines)] // candidate loop + lifecycle helper
+    pub async fn ensure_server_for_file_in_workspace(
+        &self,
+        path: &Path,
+        workspace_cwd: &Path,
+    ) -> Result<McpConnectionId, LspError> {
         let names = {
             let Some(ext) = file_extension(path) else {
                 return Err(LspError::Unavailable);
@@ -255,7 +348,10 @@ impl LspRegistry {
         };
         let mut last_err = None;
         for name in names {
-            match self.ensure_named_server_for_file(path, name).await {
+            match self
+                .ensure_named_server_for_file(path, name, workspace_cwd)
+                .await
+            {
                 Ok(connection_id) => return Ok(connection_id),
                 Err(err) => {
                     last_err = Some(err);
@@ -270,6 +366,7 @@ impl LspRegistry {
         &self,
         path: &Path,
         name: String,
+        workspace_cwd: &Path,
     ) -> Result<McpConnectionId, LspError> {
         enum Claim {
             /// Already initialized → reuse its connection.
@@ -281,6 +378,8 @@ impl LspRegistry {
             /// Terminal for this request (recorded failure / crash-recovery cap).
             Fail(LspError),
         }
+
+        self.record_dead_connection(&name).await;
 
         // Whether we already awaited an in-flight attempt: a waiter that then
         // observes `Failed` returns the recorded error instead of claiming an
@@ -311,14 +410,18 @@ impl LspRegistry {
                             // Stale `Starting` — the previous starting task
                             // was cancelled mid-flight. Reclaim it.
                             let config = state.config().clone();
-                            self.claim_start(&mut servers, &name, config.clone());
-                            Claim::Start(Box::new(config), 0)
+                            let restarts = match state {
+                                LspConnectionState::Starting { restarts, .. } => *restarts,
+                                _ => 0,
+                            };
+                            self.claim_start(&mut servers, &name, config.clone(), restarts);
+                            Claim::Start(Box::new(config), restarts)
                         }
                     }
                     LspConnectionState::Disconnected { config }
                     | LspConnectionState::Stopped { config } => {
                         let config = config.clone();
-                        self.claim_start(&mut servers, &name, config.clone());
+                        self.claim_start(&mut servers, &name, config.clone(), 0);
                         Claim::Start(Box::new(config), 0)
                     }
                     LspConnectionState::Failed {
@@ -327,9 +430,9 @@ impl LspRegistry {
                         restarts,
                         max_recovery_reported,
                     } => {
-                        if waited {
+                        if waited || (config.restart_on_crash == Some(false) && *restarts > 0) {
                             Claim::Fail(LspError::ServerError(error.clone()))
-                        } else if *restarts > MAX_RESTARTS {
+                        } else if *restarts > config.max_restarts.unwrap_or(DEFAULT_MAX_RESTARTS) {
                             // claude-code: `if (state === "error" && restartCount
                             // > maxRestarts)` — report ONCE (error log +
                             // tengu_feature_bad lsp_server_start /
@@ -338,9 +441,11 @@ impl LspRegistry {
                             if *max_recovery_reported {
                                 Claim::Fail(LspError::ServerError(error.clone()))
                             } else {
+                                let max_restarts =
+                                    config.max_restarts.unwrap_or(DEFAULT_MAX_RESTARTS);
                                 let (config, restarts) = (config.clone(), *restarts);
                                 let msg = format!(
-                                    "LSP server '{name}' exceeded max crash recovery attempts ({MAX_RESTARTS})"
+                                    "LSP server '{name}' exceeded max crash recovery attempts ({max_restarts})"
                                 );
                                 tracing::error!(target: "lingxi_lsp::registry", "{msg}");
                                 servers.insert(
@@ -356,7 +461,7 @@ impl LspRegistry {
                             }
                         } else {
                             let (config, restarts) = (config.clone(), *restarts);
-                            self.claim_start(&mut servers, &name, config.clone());
+                            self.claim_start(&mut servers, &name, config.clone(), restarts);
                             Claim::Start(Box::new(config), restarts)
                         }
                     }
@@ -386,15 +491,20 @@ impl LspRegistry {
 
         // We own the exclusive start claim: spawn + initialize with no lock
         // held. The guard wakes waiters (and releases the claim) even if this
-        // task is cancelled mid-flight, so a stale `Starting` is reclaimable.
-        let claim_guard = StartClaimGuard {
-            registry: self,
+        // task is cancelled mid-flight, so a stale `Starting` is reclaimable
+        // and an already-spawned child is not leaked.
+        let mut claim_guard = StartClaimGuard {
+            starting: Arc::clone(&self.starting),
             name: name.clone(),
+            transport: Arc::clone(&self.transport),
+            owned_connection: None,
         };
         tracing::debug!(target: "lingxi_lsp::registry", "Starting LSP server instance: {name}");
+        let startup_config = startup_config_for_workspace(&config, workspace_cwd);
         let started = async {
-            let raw = self.transport.start_server(&config).await?;
-            let root_uri = project_root_uri(path, &config.root_dir_markers);
+            let raw = self.transport.start_server(&startup_config).await?;
+            claim_guard.own_connection(raw.connection_id);
+            let root_uri = workspace_root_uri(&startup_config, workspace_cwd);
             let caps = self.transport.initialize(&raw, &root_uri).await?;
             // Bridge the transport's live connection into a registry-side
             // client over the SAME shared connection, so the LSP tool can
@@ -413,23 +523,34 @@ impl LspRegistry {
                 let mut servers = self.servers.write().await;
                 if !servers.contains_key(&name) {
                     drop(servers);
-                    drop(claim_guard);
-                    if let Err(e) = self.transport.shutdown(raw.connection_id).await {
-                        tracing::error!(
-                            target: "lingxi_lsp::registry",
-                            "Failed to stop LSP server '{name}': {e}"
-                        );
+                    if let Some(connection_id) = claim_guard.owned_connection() {
+                        match self.transport.shutdown(connection_id).await {
+                            Ok(()) => claim_guard.release_connection(),
+                            Err(e) => tracing::error!(
+                                target: "lingxi_lsp::registry",
+                                "Failed to stop LSP server '{name}': {e}"
+                            ),
+                        }
                     }
+                    drop(claim_guard);
                     return Err(LspError::Unavailable);
                 }
                 let client = Arc::new(LspClient::with_shared(name.clone(), connection.clone()));
+                self.open_files
+                    .activate_server(&name, connection.clone())
+                    .await;
                 self.clients.write().await.insert(name.clone(), client);
                 // Start the passive diagnostics subscriber (kept alive in
                 // `subscribers`).
-                if let Some(diag) = &self.diagnostics {
-                    let sub =
-                        PassiveDiagnosticSubscriber::spawn(&connection, name.clone(), diag.clone());
-                    self.subscribers.write().await.insert(name.clone(), sub);
+                if config.diagnostics.unwrap_or(true) {
+                    if let Some(diag) = &self.diagnostics {
+                        let sub = PassiveDiagnosticSubscriber::spawn(
+                            &connection,
+                            name.clone(),
+                            diag.clone(),
+                        );
+                        self.subscribers.write().await.insert(name.clone(), sub);
+                    }
                 }
                 servers.insert(
                     name.clone(),
@@ -438,9 +559,11 @@ impl LspRegistry {
                         connection_id: raw.connection_id,
                         server_capabilities: caps,
                         pid: 0,
+                        restarts: 0,
                     },
                 );
                 drop(servers);
+                claim_guard.release_connection();
                 // Release the claim only AFTER the resolved state is visible,
                 // so woken waiters observe `Initialized`, never a stale
                 // `Starting`.
@@ -456,6 +579,18 @@ impl LspRegistry {
                 Ok(raw.connection_id)
             }
             Err(e) => {
+                if let Some(connection_id) = claim_guard.owned_connection() {
+                    if let Err(cleanup_error) = self.transport.terminate(connection_id).await {
+                        tracing::warn!(
+                            target: "lingxi_lsp::registry",
+                            server = %name,
+                            %cleanup_error,
+                            "failed to terminate LSP server after startup error"
+                        );
+                    } else {
+                        claim_guard.release_connection();
+                    }
+                }
                 // claude-code: `Failed to start LSP server '${name}': ...` +
                 // tengu_feature_bad(lsp_server_start / lsp_server_start_failed).
                 tracing::error!(
@@ -482,6 +617,49 @@ impl LspRegistry {
         }
     }
 
+    async fn record_dead_connection(&self, name: &str) {
+        let observed = {
+            let servers = self.servers.read().await;
+            match servers.get(name) {
+                Some(LspConnectionState::Initialized {
+                    config,
+                    connection_id,
+                    restarts,
+                    ..
+                }) => Some((config.clone(), *connection_id, *restarts)),
+                _ => None,
+            }
+        };
+        let Some((config, connection_id, restarts)) = observed else {
+            return;
+        };
+        if self.transport.is_alive(connection_id).await {
+            return;
+        }
+        let mut servers = self.servers.write().await;
+        if !matches!(
+            servers.get(name),
+            Some(LspConnectionState::Initialized { connection_id: current, .. })
+                if *current == connection_id
+        ) {
+            return;
+        }
+        let error = format!("LSP server {name} crashed");
+        servers.insert(
+            name.to_string(),
+            LspConnectionState::Failed {
+                config,
+                error,
+                restarts: restarts.saturating_add(1),
+                max_recovery_reported: false,
+            },
+        );
+        drop(servers);
+        self.clients.write().await.remove(name);
+        self.subscribers.write().await.remove(name);
+        self.open_files.clear_server(name).await;
+    }
+
     /// Transition `name` to `Starting` and register the in-flight claim's
     /// watch sender, both under the caller's `servers` write lock — the
     /// atomic "I own this start attempt" step of
@@ -491,6 +669,7 @@ impl LspRegistry {
         servers: &mut HashMap<String, LspConnectionState>,
         name: &str,
         config: LspServerConfig,
+        restarts: u32,
     ) {
         self.starting
             .lock()
@@ -502,6 +681,7 @@ impl LspRegistry {
                 config,
                 started_at: SystemTime::now(),
                 pid: 0,
+                restarts,
             },
         );
     }
@@ -519,7 +699,20 @@ impl LspRegistry {
         &self,
         path: &Path,
     ) -> Result<(String, Arc<LspClient>, LspServerConfig), LspError> {
-        self.ensure_server_for_file(path).await?;
+        let workspace_cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        self.ensure_client_for_file_in_workspace(path, &workspace_cwd)
+            .await
+    }
+
+    /// Resolve the client for `path` using the caller's live session cwd for
+    /// any first-time server initialization.
+    pub async fn ensure_client_for_file_in_workspace(
+        &self,
+        path: &Path,
+        workspace_cwd: &Path,
+    ) -> Result<(String, Arc<LspClient>, LspServerConfig), LspError> {
+        self.ensure_server_for_file_in_workspace(path, workspace_cwd)
+            .await?;
         let name = self
             .file_route_cache
             .read()
@@ -530,6 +723,50 @@ impl LspRegistry {
         let client = self.get_client(&name).await.ok_or(LspError::Unavailable)?;
         let config = self.get_config(&name).await.ok_or(LspError::Unavailable)?;
         Ok((name, client, config))
+    }
+
+    /// Push a successful file-tool edit into the matching language server.
+    ///
+    /// The first edit opens the current text; later edits send a full-text
+    /// `didChange` followed by `didSave`. Callers intentionally treat errors as
+    /// best-effort so code changes never fail merely because an optional LSP
+    /// server is missing or unhealthy.
+    pub async fn sync_file_after_edit(&self, path: &Path, text: &str) -> Result<(), LspError> {
+        let workspace_cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        self.sync_file_after_edit_in_workspace(path, text, &workspace_cwd)
+            .await
+    }
+
+    /// Push a successful edit while resolving a newly started server against
+    /// the caller's live session cwd.
+    pub async fn sync_file_after_edit_in_workspace(
+        &self,
+        path: &Path,
+        text: &str,
+        workspace_cwd: &Path,
+    ) -> Result<(), LspError> {
+        if text.len() as u64 > crate::tool_operations::MAX_LSP_FILE_SIZE_BYTES {
+            return Ok(());
+        }
+        let (_, client, config) = self
+            .ensure_client_for_file_in_workspace(path, workspace_cwd)
+            .await?;
+        let uri = lsp_types::Url::from_file_path(path).map_err(|()| {
+            LspError::Transport(format!(
+                "cannot convert path to file URI: {}",
+                path.display()
+            ))
+        })?;
+        crate::tool_operations::sync_document_text(
+            &client,
+            &self.open_files,
+            &config,
+            path,
+            &uri,
+            text,
+        )
+        .await
+        .map_err(|error| LspError::Transport(error.to_string()))
     }
 
     /// Bulk-register server configurations contributed by `plugin_id`.
@@ -590,6 +827,9 @@ impl LspRegistry {
                     subs.remove(n); // drop aborts the subscriber task
                 }
             }
+            for name in &names {
+                self.open_files.clear_server(name).await;
+            }
             {
                 let mut routes = self.ext_routes.write().await;
                 for list in routes.values_mut() {
@@ -613,6 +853,8 @@ impl LspRegistry {
                     ),
                 }
             }
+            self.has_registered_servers
+                .store(!self.servers.read().await.is_empty(), Ordering::Release);
         }
         names
     }
@@ -625,6 +867,7 @@ mod routing_tests {
     use jsonrpc::Connection;
     use serde_json::Value;
     use std::collections::HashSet;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use traits::{LspRawConnection, LspServerCapabilities};
 
     fn caps() -> LspServerCapabilities {
@@ -649,36 +892,76 @@ mod routing_tests {
         conn: Arc<Connection>,
         id: McpConnectionId,
         started: std::sync::Mutex<Vec<String>>,
+        started_workspace_folders: std::sync::Mutex<Vec<Option<String>>>,
+        initialized_roots: std::sync::Mutex<Vec<String>>,
         shutdowns: std::sync::Mutex<Vec<McpConnectionId>>,
+        terminated: std::sync::Mutex<Vec<McpConnectionId>>,
         /// When set, `start_server` parks until a permit is added — lets the
         /// race tests hold an attempt in-flight; entry is signaled via
         /// `entered`.
-        gate: Option<Arc<tokio::sync::Semaphore>>,
-        entered: tokio::sync::Notify,
+        start_gate: Option<Arc<tokio::sync::Semaphore>>,
+        start_entered: tokio::sync::Notify,
+        /// When set, `initialize` parks until a permit is added — lets tests
+        /// abort after the child exists but before startup publishes.
+        initialize_gate: Option<Arc<tokio::sync::Semaphore>>,
+        initialize_entered: tokio::sync::Notify,
+        /// When set, `shutdown` parks until a permit is added — lets tests
+        /// abort while the registry is trying to stop a child whose
+        /// registration disappeared mid-start.
+        shutdown_gate: Option<Arc<tokio::sync::Semaphore>>,
+        shutdown_entered: tokio::sync::Notify,
         /// When true, `start_server` fails after passing the gate.
         fail_start: bool,
+        /// When true, initialization fails after a child/connection id exists.
+        fail_initialize: bool,
         fail_names: HashSet<String>,
+        alive: AtomicBool,
     }
     impl MockTransport {
         fn new() -> Self {
-            Self::build(None, false, HashSet::new())
+            Self::build(None, None, None, false, false, HashSet::new())
         }
         fn failing() -> Self {
-            Self::build(None, true, HashSet::new())
+            Self::build(None, None, None, true, false, HashSet::new())
+        }
+        fn initialization_failing() -> Self {
+            Self::build(None, None, None, false, true, HashSet::new())
         }
         fn failing_names(names: &[&str]) -> Self {
             Self::build(
                 None,
+                None,
+                None,
+                false,
                 false,
                 names.iter().map(|name| (*name).to_string()).collect(),
             )
         }
-        fn gated(gate: Arc<tokio::sync::Semaphore>, fail_start: bool) -> Self {
-            Self::build(Some(gate), fail_start, HashSet::new())
+        fn gated_start(gate: Arc<tokio::sync::Semaphore>, fail_start: bool) -> Self {
+            Self::build(Some(gate), None, None, fail_start, false, HashSet::new())
+        }
+        fn gated_initialize(gate: Arc<tokio::sync::Semaphore>) -> Self {
+            Self::build(None, Some(gate), None, false, false, HashSet::new())
+        }
+        fn gated_initialize_and_shutdown(
+            initialize_gate: Arc<tokio::sync::Semaphore>,
+            shutdown_gate: Arc<tokio::sync::Semaphore>,
+        ) -> Self {
+            Self::build(
+                None,
+                Some(initialize_gate),
+                Some(shutdown_gate),
+                false,
+                false,
+                HashSet::new(),
+            )
         }
         fn build(
-            gate: Option<Arc<tokio::sync::Semaphore>>,
+            start_gate: Option<Arc<tokio::sync::Semaphore>>,
+            initialize_gate: Option<Arc<tokio::sync::Semaphore>>,
+            shutdown_gate: Option<Arc<tokio::sync::Semaphore>>,
             fail_start: bool,
+            fail_initialize: bool,
             fail_names: HashSet<String>,
         ) -> Self {
             let (a, _b) = tokio::io::duplex(256);
@@ -687,12 +970,25 @@ mod routing_tests {
                 conn: Arc::new(Connection::new_line_delimited(r, w)),
                 id: McpConnectionId::new(),
                 started: std::sync::Mutex::new(Vec::new()),
+                started_workspace_folders: std::sync::Mutex::new(Vec::new()),
+                initialized_roots: std::sync::Mutex::new(Vec::new()),
                 shutdowns: std::sync::Mutex::new(Vec::new()),
-                gate,
-                entered: tokio::sync::Notify::new(),
+                terminated: std::sync::Mutex::new(Vec::new()),
+                start_gate,
+                start_entered: tokio::sync::Notify::new(),
+                initialize_gate,
+                initialize_entered: tokio::sync::Notify::new(),
+                shutdown_gate,
+                shutdown_entered: tokio::sync::Notify::new(),
                 fail_start,
+                fail_initialize,
                 fail_names,
+                alive: AtomicBool::new(true),
             }
+        }
+
+        fn mark_crashed(&self) {
+            self.alive.store(false, Ordering::Release);
         }
     }
     #[async_trait]
@@ -701,17 +997,22 @@ mod routing_tests {
             &self,
             config: &LspServerConfig,
         ) -> Result<LspRawConnection, LspError> {
-            self.entered.notify_one();
-            if let Some(gate) = &self.gate {
+            self.start_entered.notify_one();
+            if let Some(gate) = &self.start_gate {
                 gate.acquire().await.expect("gate closed").forget();
             }
             self.started.lock().unwrap().push(config.name.clone());
+            self.started_workspace_folders
+                .lock()
+                .unwrap()
+                .push(config.workspace_folder.clone());
             if self.fail_start || self.fail_names.contains(&config.name) {
                 return Err(LspError::Transport(format!(
                     "spawn {}: mock failure",
                     config.command
                 )));
             }
+            self.alive.store(true, Ordering::Release);
             Ok(LspRawConnection {
                 connection_id: self.id,
             })
@@ -719,9 +1020,21 @@ mod routing_tests {
         async fn initialize(
             &self,
             _conn: &LspRawConnection,
-            _root_uri: &str,
+            root_uri: &str,
         ) -> Result<LspServerCapabilities, LspError> {
-            Ok(caps())
+            self.initialize_entered.notify_one();
+            if let Some(gate) = &self.initialize_gate {
+                gate.acquire().await.expect("gate closed").forget();
+            }
+            self.initialized_roots
+                .lock()
+                .unwrap()
+                .push(root_uri.to_string());
+            if self.fail_initialize {
+                Err(LspError::Transport("mock initialize failure".into()))
+            } else {
+                Ok(caps())
+            }
         }
         async fn connection(&self, _conn_id: McpConnectionId) -> Result<Arc<Connection>, LspError> {
             Ok(self.conn.clone())
@@ -738,8 +1051,20 @@ mod routing_tests {
             Ok(())
         }
         async fn shutdown(&self, id: McpConnectionId) -> Result<(), LspError> {
+            self.shutdown_entered.notify_one();
+            if let Some(gate) = &self.shutdown_gate {
+                gate.acquire().await.expect("gate closed").forget();
+            }
             self.shutdowns.lock().unwrap().push(id);
             Ok(())
+        }
+        async fn terminate(&self, id: McpConnectionId) -> Result<(), LspError> {
+            self.terminated.lock().unwrap().push(id);
+            self.alive.store(false, Ordering::Release);
+            Ok(())
+        }
+        async fn is_alive(&self, _conn_id: McpConnectionId) -> bool {
+            self.alive.load(Ordering::Acquire)
         }
         fn is_available(&self) -> bool {
             true
@@ -760,6 +1085,7 @@ mod routing_tests {
             root_dir_markers: vec!["Cargo.toml".into()],
             initialization_options: None,
             extension_to_language: HashMap::from([(".rs".to_string(), "rust".to_string())]),
+            ..Default::default()
         }
     }
 
@@ -792,6 +1118,71 @@ mod routing_tests {
             .await
             .expect("reuses running server");
         assert_eq!(id, id2, "already-initialized server is reused");
+    }
+
+    #[tokio::test]
+    async fn first_start_uses_the_callers_live_workspace_cwd() {
+        let transport = Arc::new(MockTransport::new());
+        let reg = LspRegistry::new(transport.clone());
+        reg.register_config(rust_config()).await;
+        let temp = tempfile::tempdir().expect("temp workspace");
+        let live_cwd = temp.path().join("after-cd");
+
+        reg.ensure_server_for_file_in_workspace(&live_cwd.join("src/main.rs"), &live_cwd)
+            .await
+            .expect("server starts from live session cwd");
+
+        let expected = lsp_types::Url::from_file_path(&live_cwd)
+            .expect("absolute live cwd")
+            .to_string();
+        assert_eq!(
+            *transport.initialized_roots.lock().unwrap(),
+            vec![expected],
+            "initialize root must not fall back to the host process cwd"
+        );
+    }
+
+    #[tokio::test]
+    async fn relative_workspace_folder_is_resolved_against_live_cwd() {
+        let transport = Arc::new(MockTransport::new());
+        let reg = LspRegistry::new(transport.clone());
+        let temp = tempfile::tempdir().expect("temp workspace");
+        let live_cwd = temp.path().join("after-cd");
+        let mut config = rust_config();
+        config.workspace_folder = Some("servers/rust".to_string());
+        reg.register_config(config).await;
+
+        reg.ensure_server_for_file_in_workspace(&live_cwd.join("src/main.rs"), &live_cwd)
+            .await
+            .expect("relative workspaceFolder resolves from live cwd");
+
+        let expected = lsp_types::Url::from_file_path(live_cwd.join("servers/rust"))
+            .expect("absolute workspace folder")
+            .to_string();
+        assert_eq!(*transport.initialized_roots.lock().unwrap(), vec![expected]);
+    }
+
+    #[tokio::test]
+    async fn relative_workspace_folder_is_resolved_before_spawn() {
+        let transport = Arc::new(MockTransport::new());
+        let reg = LspRegistry::new(transport.clone());
+        let temp = tempfile::tempdir().expect("temp workspace");
+        let live_cwd = temp.path().join("after-cd");
+        let mut config = rust_config();
+        config.workspace_folder = Some("servers/rust".to_string());
+        reg.register_config(config).await;
+
+        reg.ensure_server_for_file_in_workspace(&live_cwd.join("src/main.rs"), &live_cwd)
+            .await
+            .expect("relative workspaceFolder resolves before spawn");
+
+        assert_eq!(
+            *transport.started_workspace_folders.lock().unwrap(),
+            vec![Some(
+                live_cwd.join("servers/rust").to_string_lossy().into_owned()
+            )],
+            "spawn should receive the resolved workspace folder so the child cwd matches Claude"
+        );
     }
 
     /// Regression (2.1.207 P1-09): the already-initialized hit path skipped
@@ -890,7 +1281,7 @@ mod routing_tests {
     #[tokio::test]
     async fn concurrent_first_requests_start_the_server_once() {
         let gate = Arc::new(tokio::sync::Semaphore::new(0));
-        let transport = Arc::new(MockTransport::gated(gate.clone(), false));
+        let transport = Arc::new(MockTransport::gated_start(gate.clone(), false));
         let reg = Arc::new(LspRegistry::new(transport.clone()));
         reg.register_config(rust_config()).await;
 
@@ -899,7 +1290,7 @@ mod routing_tests {
             async move { reg.ensure_server_for_file(Path::new("/p/a.rs")).await }
         });
         // Task A is parked inside start_server, holding the start claim…
-        transport.entered.notified().await;
+        transport.start_entered.notified().await;
         let b = tokio::spawn({
             let reg = reg.clone();
             async move { reg.ensure_server_for_file(Path::new("/p/b.rs")).await }
@@ -930,7 +1321,7 @@ mod routing_tests {
         let reg = LspRegistry::new(transport.clone());
         reg.register_config(rust_config()).await;
 
-        for attempt in 1..=(MAX_RESTARTS + 1) {
+        for attempt in 1..=(DEFAULT_MAX_RESTARTS + 1) {
             let err = reg
                 .ensure_server_for_file(Path::new("/p/a.rs"))
                 .await
@@ -959,14 +1350,200 @@ mod routing_tests {
                 .expect_err("capped server refuses to start");
             assert_eq!(
                 err.to_string(),
-                "server response: LSP server 'rust-analyzer' exceeded max crash recovery attempts (3)"
+                "LSP server 'rust-analyzer' exceeded max crash recovery attempts (3)"
             );
             assert_eq!(
                 transport.started.lock().unwrap().len(),
-                (MAX_RESTARTS + 1) as usize,
+                (DEFAULT_MAX_RESTARTS + 1) as usize,
                 "capped server is never spawned again"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn successful_restart_resets_crash_recovery_budget() {
+        let transport = Arc::new(MockTransport::new());
+        let reg = LspRegistry::new(transport.clone());
+        let mut config = rust_config();
+        config.max_restarts = Some(2);
+        reg.register_config(config).await;
+
+        reg.ensure_server_for_file(Path::new("/p/a.rs"))
+            .await
+            .expect("initial start");
+        for _ in 0..2 {
+            transport.mark_crashed();
+            reg.ensure_server_for_file(Path::new("/p/a.rs"))
+                .await
+                .expect("successful restart should reset crash recovery budget");
+        }
+
+        assert_eq!(
+            transport.started.lock().unwrap().len(),
+            3,
+            "initial start plus exactly two successful restarts"
+        );
+        assert!(
+            matches!(
+                reg.servers.read().await.get("rust-analyzer"),
+                Some(LspConnectionState::Initialized { restarts: 0, .. })
+            ),
+            "successful startup must reset the restart counter"
+        );
+    }
+
+    #[tokio::test]
+    async fn initialize_failure_terminates_the_spawned_connection() {
+        let transport = Arc::new(MockTransport::initialization_failing());
+        let reg = LspRegistry::new(transport.clone());
+        reg.register_config(rust_config()).await;
+
+        let error = reg
+            .ensure_server_for_file(Path::new("/p/a.rs"))
+            .await
+            .expect_err("mock initialize fails");
+        assert!(matches!(
+            error,
+            LspError::Transport(message) if message == "mock initialize failure"
+        ));
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            loop {
+                if *transport.terminated.lock().unwrap() == vec![transport.id] {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("post-spawn initialize failure must discard the owned child");
+    }
+
+    #[tokio::test]
+    async fn cancelled_startup_terminates_spawned_connection_and_resets_restarts_after_recovery() {
+        let gate = Arc::new(tokio::sync::Semaphore::new(0));
+        let transport = Arc::new(MockTransport::gated_initialize(gate.clone()));
+        let reg = Arc::new(LspRegistry::new(transport.clone()));
+        let config = rust_config();
+        reg.register_config(config.clone()).await;
+        reg.servers.write().await.insert(
+            "rust-analyzer".to_string(),
+            LspConnectionState::Failed {
+                config,
+                error: "prior crash".into(),
+                restarts: 2,
+                max_recovery_reported: false,
+            },
+        );
+
+        let task = tokio::spawn({
+            let reg = reg.clone();
+            async move { reg.ensure_server_for_file(Path::new("/p/a.rs")).await }
+        });
+        transport.initialize_entered.notified().await;
+        task.abort();
+        let join = task.await.expect_err("startup task should be cancelled");
+        assert!(join.is_cancelled(), "task abort must cancel startup");
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            loop {
+                if transport.terminated.lock().unwrap().len() == 1
+                    && !reg
+                        .starting
+                        .lock()
+                        .expect("lsp start-claim lock poisoned")
+                        .contains_key("rust-analyzer")
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("cancelled startup should terminate and release its claim");
+
+        gate.add_permits(1);
+        let id = reg
+            .ensure_server_for_file(Path::new("/p/a.rs"))
+            .await
+            .expect("next request should reclaim the stale startup");
+        assert_eq!(id, transport.id);
+        assert_eq!(
+            transport.started.lock().unwrap().len(),
+            2,
+            "recovery request should own the next start"
+        );
+        assert_eq!(
+            *transport.terminated.lock().unwrap(),
+            vec![transport.id],
+            "cancelled startup should discard the orphaned child exactly once"
+        );
+        assert!(
+            matches!(
+                reg.servers.read().await.get("rust-analyzer"),
+                Some(LspConnectionState::Initialized { restarts: 0, .. })
+            ),
+            "successful recovery must reset the restart counter"
+        );
+    }
+
+    #[tokio::test]
+    async fn cancelled_unregister_cleanup_keeps_claim_until_drop_terminates_child() {
+        let initialize_gate = Arc::new(tokio::sync::Semaphore::new(0));
+        let shutdown_gate = Arc::new(tokio::sync::Semaphore::new(0));
+        let transport = Arc::new(MockTransport::gated_initialize_and_shutdown(
+            initialize_gate.clone(),
+            shutdown_gate,
+        ));
+        let reg = Arc::new(LspRegistry::new(transport.clone()));
+        let plugin = PluginId::new();
+        reg.register_plugin_servers(plugin, vec![rust_config()])
+            .await;
+
+        let task = tokio::spawn({
+            let reg = reg.clone();
+            async move { reg.ensure_server_for_file(Path::new("/p/a.rs")).await }
+        });
+        transport.initialize_entered.notified().await;
+        assert_eq!(
+            reg.unregister_plugin(&plugin).await,
+            vec!["rust-analyzer".to_string()]
+        );
+
+        initialize_gate.add_permits(1);
+        transport.shutdown_entered.notified().await;
+        assert!(
+            reg.starting
+                .lock()
+                .expect("lsp start-claim lock poisoned")
+                .contains_key("rust-analyzer"),
+            "cleanup must retain the start claim while shutdown is still blocked"
+        );
+        task.abort();
+        let join = task.await.expect_err("startup task should be cancelled");
+        assert!(
+            join.is_cancelled(),
+            "task abort must cancel shutdown cleanup"
+        );
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            loop {
+                if *transport.terminated.lock().unwrap() == vec![transport.id]
+                    && !reg
+                        .starting
+                        .lock()
+                        .expect("lsp start-claim lock poisoned")
+                        .contains_key("rust-analyzer")
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("drop should terminate the unregistered child before releasing the claim");
+        assert!(
+            transport.shutdowns.lock().unwrap().is_empty(),
+            "cancelled shutdown must not report a completed graceful stop"
+        );
     }
 
     /// Regression (2.1.207 P2-09): a caller that awaited another task's
@@ -976,7 +1553,7 @@ mod routing_tests {
     #[tokio::test]
     async fn waiter_on_failed_start_gets_recorded_error_without_respawn() {
         let gate = Arc::new(tokio::sync::Semaphore::new(0));
-        let transport = Arc::new(MockTransport::gated(gate.clone(), true));
+        let transport = Arc::new(MockTransport::gated_start(gate.clone(), true));
         let reg = Arc::new(LspRegistry::new(transport.clone()));
         reg.register_config(rust_config()).await;
 
@@ -984,7 +1561,7 @@ mod routing_tests {
             let reg = reg.clone();
             async move { reg.ensure_server_for_file(Path::new("/p/a.rs")).await }
         });
-        transport.entered.notified().await;
+        transport.start_entered.notified().await;
         let b = tokio::spawn({
             let reg = reg.clone();
             async move { reg.ensure_server_for_file(Path::new("/p/b.rs")).await }
@@ -1044,19 +1621,37 @@ fn file_extension(path: &Path) -> Option<String> {
         .map(|e| format!(".{}", e.to_string_lossy().to_ascii_lowercase()))
 }
 
-/// The `file://` URI of the project root for `path`: the nearest ancestor
-/// directory containing any of `markers` (e.g. `Cargo.toml`), or the file's own
-/// parent directory when no marker is found.
-fn project_root_uri(path: &Path, markers: &[String]) -> String {
-    let start = path.parent().unwrap_or(path);
-    let mut dir = Some(start);
-    let mut root = start;
-    while let Some(d) = dir {
-        if markers.iter().any(|m| d.join(m).exists()) {
-            root = d;
-            break;
-        }
-        dir = d.parent();
-    }
-    format!("file://{}", root.to_string_lossy())
+/// The `file://` URI used to initialize a server. An explicit
+/// `workspaceFolder` overrides the live session cwd; relative overrides are
+/// resolved against that cwd.
+fn workspace_root_uri(config: &LspServerConfig, workspace_cwd: &Path) -> String {
+    let root = config.workspace_folder.as_deref().map_or_else(
+        || workspace_cwd.to_path_buf(),
+        |workspace_folder| {
+            let path = PathBuf::from(workspace_folder);
+            if path.is_absolute() {
+                path
+            } else {
+                workspace_cwd.join(path)
+            }
+        },
+    );
+    lsp_types::Url::from_file_path(&root).map_or_else(
+        |()| format!("file://{}", root.to_string_lossy()),
+        |uri| uri.to_string(),
+    )
+}
+
+fn startup_config_for_workspace(config: &LspServerConfig, workspace_cwd: &Path) -> LspServerConfig {
+    let mut startup = config.clone();
+    startup.workspace_folder = config.workspace_folder.as_deref().map(|workspace_folder| {
+        let path = PathBuf::from(workspace_folder);
+        let resolved = if path.is_absolute() {
+            path
+        } else {
+            workspace_cwd.join(path)
+        };
+        resolved.to_string_lossy().into_owned()
+    });
+    startup
 }

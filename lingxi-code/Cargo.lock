@@ -4948,6 +4948,7 @@ dependencies = [
  "command-api",
  "git2",
  "hooks",
+ "indexmap 2.7.1",
  "lsp",
  "mcp",
  "outputstyles",

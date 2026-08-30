@@ -8,18 +8,24 @@
 //! The `Connection` itself is produced by the platform layer (it owns the
 //! child process and the stdio pipes); the client does not spawn anything.
 
+use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
 
 use jsonrpc::{Connection, ConnectionError};
 use lsp_types::{
-    ClientCapabilities, InitializeParams, InitializeResult, ServerCapabilities,
-    WorkspaceClientCapabilities,
+    InitializeResult, ServerCapabilities, TextDocumentSyncCapability, TextDocumentSyncKind,
 };
 use serde::{de::DeserializeOwned, Serialize};
 use serde_json::{json, Value};
 use tokio::sync::RwLock;
 use tracing::{debug, warn};
-use traits::LspError;
+use traits::{LspError, LspServerConfig};
+
+const CONTENT_MODIFIED: i32 = -32801;
+const CONTENT_MODIFIED_RETRIES: u32 = 3;
+const CONTENT_MODIFIED_BASE_DELAY_MS: u64 = 500;
+const LSP_CLIENT_VERSION: &str = "2.1.251";
 
 /// Typed client over a JSON-RPC connection to one LSP server.
 pub struct LspClient {
@@ -74,6 +80,17 @@ impl LspClient {
         self.capabilities.read().await.clone()
     }
 
+    /// Register Claude Code's always-present `workspace/configuration`
+    /// request handler before the initialize handshake starts.
+    pub async fn register_workspace_configuration(&self, settings: Option<Value>) {
+        self.connection
+            .register_handler(
+                "workspace/configuration",
+                Arc::new(WorkspaceConfigurationHandler { settings }),
+            )
+            .await;
+    }
+
     /// Perform the LSP `initialize` handshake.
     ///
     /// Sends an `initialize` request followed by the `initialized`
@@ -83,60 +100,89 @@ impl LspClient {
     /// # Errors
     /// Returns [`LspError::Transport`] when the request cannot be delivered,
     /// or [`LspError::ServerError`] when the server returns a JSON-RPC error.
-    pub async fn initialize(&self, root_uri: &str) -> Result<ServerCapabilities, LspError> {
-        // The LSP spec is permissive about which client capabilities we
-        // declare; we send a minimal-but-not-empty shape so servers like
-        // `rust-analyzer` and `gopls` don't disable optional features.
+    pub async fn initialize(
+        &self,
+        root_uri: &str,
+        config: &LspServerConfig,
+    ) -> Result<ServerCapabilities, LspError> {
         let parsed_root = lsp_types::Url::parse(root_uri)
             .map_err(|e| LspError::Transport(format!("invalid root_uri: {e}")))?;
-        // `root_uri` was deprecated in LSP 3.6 in favor of `workspaceFolders`,
-        // but rust-analyzer / gopls / pyright still consult it during
-        // `initialize`, so we populate both. The allow-block scopes the
-        // `deprecated` lint to the deprecated field assignment only.
-        let params = {
-            #[allow(deprecated)]
-            InitializeParams {
-                process_id: Some(std::process::id()),
-                root_uri: Some(parsed_root),
-                // NOT A GAP — `workspace/didChangeWatchedFiles`. A 2.1.220
-                // whole-binary census finds the string exactly ONCE, at offset
-                // 254097974, inside the VENDORED
-                // `vscode-languageserver-protocol` bundle:
-                //   (function(oe){oe.method="workspace/didChangeWatchedFiles",…})
-                //     (de||(e.DidChangeWatchedFilesNotification=de={}))
-                // i.e. a library constant declaration with zero call sites.
-                // claude-code's OWN LSP client (@232392199) declares only
-                // `workspace = {configuration, workspaceFolders}` and sends
-                // exactly one workspace notification —
-                // `workspace/didChangeConfiguration`, and only when the server
-                // config carries `settings`. It never registers a file watcher
-                // and never sends `didChangeWatchedFiles`, so emitting one here
-                // would be ANTI-parity: real language servers act on it.
-                //
-                // STILL A GAP (separate cluster, not fixed here): LingXi sends
-                // no `workspace/didChangeConfiguration` at all —
-                // `traits::LspServerConfig` has no `settings` field to source
-                // the payload from — and the capability shape below diverges
-                // from the oracle's (`configuration: settings!=null`,
-                // `workspaceFolders:!1`, plus a large `textDocument` block and
-                // `general.positionEncodings:["utf-16"]`).
-                capabilities: ClientCapabilities {
-                    workspace: Some(WorkspaceClientCapabilities {
-                        workspace_folders: Some(true),
-                        configuration: Some(true),
-                        ..Default::default()
-                    }),
-                    ..Default::default()
+        let root_path = parsed_root
+            .to_file_path()
+            .map_err(|()| LspError::Transport(format!("root_uri is not a file URL: {root_uri}")))?;
+        let workspace_name = root_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or_default();
+        let params = json!({
+            "processId": std::process::id(),
+            "clientInfo": {
+                "name": "Claude Code",
+                "version": LSP_CLIENT_VERSION,
+            },
+            "initializationOptions": config.initialization_options.clone().unwrap_or_else(|| json!({})),
+            "workspaceFolders": [{
+                "uri": root_uri,
+                "name": workspace_name,
+            }],
+            "rootPath": path_wire_string(&root_path),
+            "rootUri": root_uri,
+            "capabilities": {
+                "workspace": {
+                    "configuration": config.settings.is_some(),
+                    "workspaceFolders": false,
                 },
-                ..Default::default()
-            }
-        };
+                "textDocument": {
+                    "synchronization": {
+                        "dynamicRegistration": false,
+                        "willSave": false,
+                        "willSaveWaitUntil": false,
+                        "didSave": true,
+                    },
+                    "publishDiagnostics": {
+                        "relatedInformation": true,
+                        "tagSupport": { "valueSet": [1, 2] },
+                        "versionSupport": false,
+                        "codeDescriptionSupport": true,
+                        "dataSupport": false,
+                    },
+                    "hover": {
+                        "dynamicRegistration": false,
+                        "contentFormat": ["markdown", "plaintext"],
+                    },
+                    "definition": {
+                        "dynamicRegistration": false,
+                        "linkSupport": true,
+                    },
+                    "references": { "dynamicRegistration": false },
+                    "documentSymbol": {
+                        "dynamicRegistration": false,
+                        "hierarchicalDocumentSymbolSupport": true,
+                    },
+                    "callHierarchy": { "dynamicRegistration": false },
+                },
+                "general": { "positionEncodings": ["utf-16"] },
+            },
+        });
 
-        let result: InitializeResult = self.request("initialize", params).await?;
+        let result_value = if let Some(timeout_ms) = config.startup_timeout {
+            self.connection
+                .call_with_timeout("initialize", params, Duration::from_millis(timeout_ms))
+                .await
+        } else {
+            self.connection.call_unbounded("initialize", params).await
+        }
+        .map_err(|e| self.map_connection_error("initialize", e))?;
+        let result: InitializeResult = serde_json::from_value(result_value)
+            .map_err(|e| LspError::Transport(format!("decode initialize result: {e}")))?;
 
         // Cache capabilities then send the `initialized` notification.
         *self.capabilities.write().await = Some(result.capabilities.clone());
         self.notify("initialized", json!({})).await?;
+        if let Some(settings) = &config.settings {
+            self.notify_did_change_configuration_best_effort(settings)
+                .await;
+        }
         debug!(
             target: "lingxi_lsp::client",
             server = %self.name,
@@ -162,11 +208,29 @@ impl LspClient {
     ) -> Result<R, LspError> {
         let params_value = serde_json::to_value(params)
             .map_err(|e| LspError::Transport(format!("serialize {method} params: {e}")))?;
-        let result_value: Value = self
-            .connection
-            .call(method, params_value)
-            .await
-            .map_err(|e| map_connection_error(method, e))?;
+        let mut attempt = 0;
+        let result_value: Value = loop {
+            match self.connection.call(method, params_value.clone()).await {
+                Ok(value) => break value,
+                Err(ConnectionError::Router(jsonrpc::router::RouterError::Remote(remote)))
+                    if remote.code == CONTENT_MODIFIED && attempt < CONTENT_MODIFIED_RETRIES =>
+                {
+                    let delay_ms = CONTENT_MODIFIED_BASE_DELAY_MS << attempt;
+                    attempt += 1;
+                    debug!(
+                        target: "lingxi_lsp::client",
+                        server = %self.name,
+                        method,
+                        delay_ms,
+                        attempt,
+                        max_attempts = CONTENT_MODIFIED_RETRIES,
+                        "ContentModified; retrying LSP request"
+                    );
+                    tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+                }
+                Err(error) => return Err(self.map_connection_error(method, error)),
+            }
+        };
         serde_json::from_value(result_value)
             .map_err(|e| LspError::Transport(format!("decode {method} result: {e}")))
     }
@@ -179,62 +243,204 @@ impl LspClient {
     /// if the underlying router ever needs to await backpressure.
     ///
     /// # Errors
-    /// Returns [`LspError::Transport`] when the writer task has terminated
-    /// (e.g. the LSP server crashed). Notifications never produce
-    /// `ServerError` because no response is expected.
+    /// Returns [`LspError::Transport`] on parameter serialization or delivery
+    /// failure.
     #[allow(clippy::unused_async)]
     pub async fn notify<P: Serialize>(&self, method: &str, params: P) -> Result<(), LspError> {
         let params_value = serde_json::to_value(params)
             .map_err(|e| LspError::Transport(format!("serialize {method} notify: {e}")))?;
         self.connection
             .notify(method, params_value)
-            .map_err(|e| map_connection_error(method, e))
+            .map_err(|error| self.map_notification_error(method, &error))
     }
 
     /// LSP shutdown sequence — `shutdown` request followed by `exit`
     /// notification, per LSP 3.17 `§Lifecycle Messages`.
     ///
-    /// Some servers don't respond cleanly to `shutdown`; we treat
-    /// shutdown-request failures as warnings (debug-logged) and still send
-    /// `exit` so the server process knows to terminate.
+    /// Some servers don't respond cleanly to `shutdown`; we log those
+    /// failures and let the transport layer tear the process down instead of
+    /// sending a misleading `exit` after the protocol failed.
     ///
     /// # Errors
-    /// Returns [`LspError::Transport`] only if `exit` itself cannot be
-    /// delivered (which usually means the connection is already dead).
+    /// Returns request / decode errors directly. After a successful `shutdown`
+    /// response, failure to deliver `exit` also propagates.
     pub async fn shutdown(&self) -> Result<(), LspError> {
-        match self
-            .request::<_, Option<Value>>("shutdown", json!(null))
+        self.shutdown_with_timeout(None).await
+    }
+
+    /// Claude Code-compatible shutdown with an optional server-configured
+    /// deadline.
+    pub async fn shutdown_with_timeout(&self, timeout_ms: Option<u64>) -> Result<(), LspError> {
+        let request = async {
+            let raw = if let Some(timeout_ms) = timeout_ms {
+                self.connection
+                    .call_with_timeout("shutdown", json!({}), Duration::from_millis(timeout_ms))
+                    .await
+            } else {
+                self.connection.call_unbounded("shutdown", json!({})).await
+            }
+            .map_err(|error| self.map_connection_error("shutdown", error))?;
+            serde_json::from_value::<Option<Value>>(raw)
+                .map_err(|error| LspError::Transport(format!("decode shutdown result: {error}")))
+        };
+        match request.await {
+            Ok(_) => {
+                debug!(
+                    target: "lingxi_lsp::client",
+                    server = %self.name,
+                    "shutdown ack"
+                );
+                self.notify("exit", json!({})).await
+            }
+            Err(error) => {
+                warn!(
+                    target: "lingxi_lsp::client",
+                    server = %self.name,
+                    error = %error,
+                    "shutdown errored; skipping exit"
+                );
+                Err(error)
+            }
+        }
+    }
+
+    fn map_connection_error(&self, method: &str, err: ConnectionError) -> LspError {
+        use jsonrpc::router::RouterError;
+        match err {
+            ConnectionError::Router(RouterError::Remote(remote)) => LspError::ServerError(format!(
+                "LSP request '{method}' failed for server '{}': {}",
+                self.name, remote.message
+            )),
+            other => LspError::Transport(format!(
+                "LSP request '{method}' failed for server '{}': {other}",
+                self.name
+            )),
+        }
+    }
+
+    fn map_notification_error(&self, method: &str, err: &ConnectionError) -> LspError {
+        LspError::Transport(format!(
+            "LSP notification '{method}' failed for server '{}': {err}",
+            self.name
+        ))
+    }
+
+    async fn notify_did_change_configuration_best_effort(&self, settings: &Value) {
+        if let Err(error) = self
+            .notify(
+                "workspace/didChangeConfiguration",
+                json!({ "settings": settings }),
+            )
             .await
         {
-            Ok(_) => debug!(
+            warn!(
                 target: "lingxi_lsp::client",
                 server = %self.name,
-                "shutdown ack"
-            ),
-            Err(e) => warn!(
-                target: "lingxi_lsp::client",
-                server = %self.name,
-                error = %e,
-                "shutdown errored; continuing to exit"
-            ),
+                method = "workspace/didChangeConfiguration",
+                error = %error,
+                "LSP notification failed; continuing"
+            );
         }
-        self.notify("exit", json!(null)).await
     }
 }
 
-/// Map a `jsonrpc::ConnectionError` to the trait-level `LspError`.
-///
-/// Server-returned JSON-RPC errors (`RouterError::Remote`) become
-/// `LspError::ServerError`; every other failure mode (timeout, writer
-/// closed, serde, broker) is reported as `LspError::Transport` with the
-/// method name prefixed for diagnostics.
-fn map_connection_error(method: &str, err: ConnectionError) -> LspError {
-    use jsonrpc::router::RouterError;
-    match err {
-        ConnectionError::Router(RouterError::Remote(remote)) => LspError::ServerError(format!(
-            "{method} returned code {}: {}",
-            remote.code, remote.message
-        )),
-        other => LspError::Transport(format!("{method}: {other}")),
+fn path_wire_string(path: &Path) -> String {
+    path.to_string_lossy().into_owned()
+}
+
+/// Stable label for the server's advertised text-document synchronization
+/// mode, preserving `none`/`full`/`incremental` instead of collapsing every
+/// capability to full sync.
+#[must_use]
+pub fn text_document_sync_label(capability: Option<&TextDocumentSyncCapability>) -> Option<String> {
+    let kind = match capability? {
+        TextDocumentSyncCapability::Kind(kind) => Some(*kind),
+        TextDocumentSyncCapability::Options(options) => options.change,
+    }?;
+    Some(
+        if kind == TextDocumentSyncKind::NONE {
+            "none"
+        } else if kind == TextDocumentSyncKind::FULL {
+            "full"
+        } else if kind == TextDocumentSyncKind::INCREMENTAL {
+            "incremental"
+        } else {
+            "unknown"
+        }
+        .to_string(),
+    )
+}
+
+struct WorkspaceConfigurationHandler {
+    settings: Option<Value>,
+}
+
+#[async_trait::async_trait]
+impl jsonrpc::InboundHandler for WorkspaceConfigurationHandler {
+    async fn handle(&self, request: jsonrpc::Request) -> jsonrpc::Response {
+        let values = request
+            .params
+            .as_ref()
+            .and_then(|params| params.get("items"))
+            .and_then(Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .map(|item| {
+                        let section = item.get("section").and_then(Value::as_str);
+                        configuration_section(self.settings.as_ref(), section)
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        jsonrpc::Response::success(request.id, Value::Array(values))
+    }
+}
+
+fn configuration_section(settings: Option<&Value>, section: Option<&str>) -> Value {
+    let Some(mut current) = settings else {
+        return Value::Null;
+    };
+    let Some(section) = section.filter(|section| !section.is_empty()) else {
+        return current.clone();
+    };
+    for part in section.split('.') {
+        let Some(next) = current.as_object().and_then(|object| object.get(part)) else {
+            return Value::Null;
+        };
+        current = next;
+    }
+    current.clone()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    use tokio::io::duplex;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn did_change_configuration_remains_best_effort() {
+        let (client_io, _peer_io) = duplex(1024);
+        let (client_read, client_write) = tokio::io::split(client_io);
+        let connection = Connection::new_lsp(client_read, client_write);
+        let client = LspClient::new("test-server".to_string(), connection);
+        client.connection().close();
+
+        let error = client
+            .notify(
+                "workspace/didChangeConfiguration",
+                json!({ "settings": {} }),
+            )
+            .await
+            .expect_err("ordinary notifications should surface delivery errors");
+        assert!(
+            matches!(error, LspError::Transport(ref message) if message.contains("workspace/didChangeConfiguration")),
+            "expected didChangeConfiguration notify error, got {error:?}"
+        );
+
+        client
+            .notify_did_change_configuration_best_effort(&json!({ "test-server": true }))
+            .await;
     }
 }

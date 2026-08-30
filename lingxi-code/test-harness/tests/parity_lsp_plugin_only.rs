@@ -107,6 +107,7 @@ async fn lsp_plugin_only_public_path_works_from_external_crate() {
         root_dir_markers: vec!["Cargo.toml".into()],
         initialization_options: None,
         extension_to_language: HashMap::new(),
+        ..Default::default()
     };
     // Only public registration entry point: register_plugin_servers.
     // Calling `registry.register_config(...)` here would not compile.

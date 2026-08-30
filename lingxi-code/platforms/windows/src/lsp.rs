@@ -27,6 +27,7 @@ struct ConnectionEntry {
     #[allow(dead_code)]
     child: Child,
     client: Arc<LspClient>,
+    config: LspServerConfig,
 }
 
 /// Windows LSP transport — spawns LSP server processes via `tokio::process`
@@ -50,6 +51,17 @@ impl WindowsLspTransport {
             .get(&id)
             .map(|e| Arc::clone(&e.client))
     }
+
+    async fn lookup_client_and_config(
+        &self,
+        id: McpConnectionId,
+    ) -> Option<(Arc<LspClient>, LspServerConfig)> {
+        self.connections
+            .lock()
+            .await
+            .get(&id)
+            .map(|entry| (Arc::clone(&entry.client), entry.config.clone()))
+    }
 }
 
 #[async_trait]
@@ -59,6 +71,9 @@ impl LspTransport for WindowsLspTransport {
         cmd.args(&config.args);
         for (k, v) in &config.env {
             cmd.env(k, v);
+        }
+        if let Some(workspace_folder) = config.workspace_folder.as_deref() {
+            cmd.current_dir(std::path::Path::new(workspace_folder));
         }
         cmd.stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -106,10 +121,14 @@ impl LspTransport for WindowsLspTransport {
         ));
 
         let id = McpConnectionId::new();
-        self.connections
-            .lock()
-            .await
-            .insert(id, ConnectionEntry { child, client });
+        self.connections.lock().await.insert(
+            id,
+            ConnectionEntry {
+                child,
+                client,
+                config: config.clone(),
+            },
+        );
         Ok(LspRawConnection { connection_id: id })
     }
 
@@ -118,18 +137,23 @@ impl LspTransport for WindowsLspTransport {
         conn: &LspRawConnection,
         root_uri: &str,
     ) -> Result<LspServerCapabilities, LspError> {
-        let client = self
-            .lookup_client(conn.connection_id)
+        let (client, config) = self
+            .lookup_client_and_config(conn.connection_id)
             .await
             .ok_or_else(|| LspError::Transport("connection not found".into()))?;
-        let caps = client.initialize(root_uri).await?;
+        client
+            .register_workspace_configuration(config.settings.clone())
+            .await;
+        let caps = client.initialize(root_uri, &config).await?;
         Ok(LspServerCapabilities {
-            text_document_sync: caps.text_document_sync.map(|_| "Full".to_string()),
+            text_document_sync: lsp::client::text_document_sync_label(
+                caps.text_document_sync.as_ref(),
+            ),
             completion: caps.completion_provider.is_some(),
             hover: caps.hover_provider.is_some(),
             definition: caps.definition_provider.is_some(),
             references: caps.references_provider.is_some(),
-            diagnostics: true,
+            diagnostics: config.diagnostics.unwrap_or(true),
             symbols: caps.document_symbol_provider.is_some(),
             formatting: caps.document_formatting_provider.is_some(),
             rename: caps.rename_provider.is_some(),
@@ -163,14 +187,44 @@ impl LspTransport for WindowsLspTransport {
         client.notify(method, params).await
     }
 
+    async fn connection(&self, conn_id: McpConnectionId) -> Result<Arc<Connection>, LspError> {
+        let client = self
+            .lookup_client(conn_id)
+            .await
+            .ok_or_else(|| LspError::Transport("connection not found".into()))?;
+        Ok(client.connection())
+    }
+
+    async fn is_alive(&self, conn_id: McpConnectionId) -> bool {
+        let mut connections = self.connections.lock().await;
+        let Some(entry) = connections.get_mut(&conn_id) else {
+            return false;
+        };
+        let alive =
+            !entry.client.connection().is_closed() && matches!(entry.child.try_wait(), Ok(None));
+        if !alive {
+            connections.remove(&conn_id);
+        }
+        alive
+    }
+
     async fn shutdown(&self, conn_id: McpConnectionId) -> Result<(), LspError> {
         let removed = self.connections.lock().await.remove(&conn_id);
         if let Some(entry) = removed {
-            if let Err(e) = entry.client.shutdown().await {
+            if let Err(e) = entry
+                .client
+                .shutdown_with_timeout(entry.config.shutdown_timeout)
+                .await
+            {
                 warn!(target: "lingxi_lsp::windows", error = %e, "polite shutdown failed; killing child");
             }
             drop(entry);
         }
+        Ok(())
+    }
+
+    async fn terminate(&self, conn_id: McpConnectionId) -> Result<(), LspError> {
+        self.connections.lock().await.remove(&conn_id);
         Ok(())
     }
 

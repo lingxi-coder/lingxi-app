@@ -6,7 +6,7 @@
 //! field presence (`id`+`method` → Request, `id`+`result`/`error` →
 //! Response, `method` only → Notification).
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 
 /// Literal `"2.0"` — the only valid value for the `jsonrpc` field per spec.
@@ -47,13 +47,13 @@ pub enum Id {
 pub struct Request {
     /// MUST equal `"2.0"`.
     pub jsonrpc: String,
+    /// Request id.
+    pub id: Id,
     /// Method name (e.g. `"initialize"`, `"tools/list"`).
     pub method: String,
     /// Optional parameters — serialized as either an object or an array.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub params: Option<Value>,
-    /// Request id.
-    pub id: Id,
 }
 
 /// JSON-RPC 2.0 Notification — has `method` but NO `id`.
@@ -83,7 +83,11 @@ pub struct Response {
     /// Echoed request id, or `null` if id was unrecoverable.
     pub id: Option<Id>,
     /// Result on success.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_response_result"
+    )]
     pub result: Option<Value>,
     /// Error on failure.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -100,6 +104,13 @@ pub struct ResponseError {
     /// Optional structured data.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub data: Option<Value>,
+}
+
+fn deserialize_response_result<'de, D>(deserializer: D) -> Result<Option<Value>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Value::deserialize(deserializer).map(Some)
 }
 
 /// Inbound message envelope — used by codecs to deliver one of three shapes.
@@ -124,9 +135,9 @@ impl Request {
     pub fn new(method: impl Into<String>, params: Option<Value>, id: Id) -> Self {
         Self {
             jsonrpc: JSONRPC_VERSION.into(),
+            id,
             method: method.into(),
             params,
-            id,
         }
     }
 }
@@ -204,18 +215,21 @@ mod tests {
     }
 
     #[test]
-    fn request_wire_shape_has_jsonrpc_method_id_params() {
+    fn request_wire_shape_has_jsonrpc_id_method_params() {
         let req = Request {
             jsonrpc: JSONRPC_VERSION.into(),
+            id: Id::Number(1),
             method: "initialize".into(),
             params: Some(json!({"clientInfo": {"name": "lingxi"}})),
-            id: Id::Number(1),
         };
-        let v = serde_json::to_value(&req).unwrap();
-        assert_eq!(v["jsonrpc"], "2.0");
-        assert_eq!(v["method"], "initialize");
-        assert_eq!(v["id"], 1);
-        assert_eq!(v["params"]["clientInfo"]["name"], "lingxi");
+        let s = serde_json::to_string(&req).unwrap();
+        assert!(s.contains("\"jsonrpc\":\"2.0\""));
+        assert!(s.contains("\"id\":1"));
+        assert!(s.contains("\"method\":\"initialize\""));
+        assert!(s.contains("\"params\":{\"clientInfo\":{\"name\":\"lingxi\"}}"));
+        assert!(s.find("\"jsonrpc\"").unwrap() < s.find("\"id\"").unwrap());
+        assert!(s.find("\"id\"").unwrap() < s.find("\"method\"").unwrap());
+        assert!(s.find("\"method\"").unwrap() < s.find("\"params\"").unwrap());
     }
 
     #[test]
@@ -272,6 +286,22 @@ mod tests {
     }
 
     #[test]
+    fn response_with_null_result_preserves_field_presence_on_decode() {
+        let response: Response = serde_json::from_value(json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": null
+        }))
+        .unwrap();
+        assert_eq!(response.result, Some(Value::Null));
+        assert!(response.error.is_none());
+
+        let wire = serde_json::to_value(&response).unwrap();
+        assert!(wire.get("result").is_some());
+        assert!(wire["result"].is_null());
+    }
+
+    #[test]
     fn response_null_id_when_id_unknown() {
         let r = Response {
             jsonrpc: JSONRPC_VERSION.into(),
@@ -291,14 +321,17 @@ mod tests {
     fn message_envelope_disambiguates_request_response_notification() {
         let req_v = json!({"jsonrpc":"2.0", "method":"m", "id": 1, "params": {}});
         let resp_v = json!({"jsonrpc":"2.0", "id": 1, "result": {"ok": true}});
+        let null_resp_v = json!({"jsonrpc":"2.0", "id": 2, "result": null});
         let noti_v = json!({"jsonrpc":"2.0", "method":"n", "params": {}});
 
         let req: Message = serde_json::from_value(req_v).unwrap();
         let resp: Message = serde_json::from_value(resp_v).unwrap();
+        let null_resp: Message = serde_json::from_value(null_resp_v).unwrap();
         let noti: Message = serde_json::from_value(noti_v).unwrap();
 
         assert!(matches!(req, Message::Request(_)));
         assert!(matches!(resp, Message::Response(_)));
+        assert!(matches!(null_resp, Message::Response(_)));
         assert!(matches!(noti, Message::Notification(_)));
     }
 

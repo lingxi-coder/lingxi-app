@@ -12,6 +12,7 @@
 //! 3. (External) consumers wrap one of the above for their transport's
 //!    quirks (e.g. WebSocket text frames → `from_message_streams`).
 
+use std::any::TypeId;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -26,7 +27,7 @@ use crate::broker::{spawn as spawn_broker, BrokerError, BrokerHandle};
 use crate::codec::CodecError;
 use crate::inbound::{BoxedHandler, Dispatcher};
 use crate::messages::{Message, Notification};
-use crate::router::{Router, RouterError};
+use crate::router::{Router, RouterError, DEFAULT_STARTING_REQUEST_ID};
 
 /// Connection-level error variants — surfaces the broker, router, codec, and
 /// I/O error types through a single enum the public API can return.
@@ -61,6 +62,7 @@ pub type ConnectionMode = Mode;
 pub struct ConnectionBuilder<C> {
     codec: C,
     default_timeout: Duration,
+    initial_request_id: i64,
 }
 
 impl<C> ConnectionBuilder<C> {
@@ -83,7 +85,9 @@ impl<C> ConnectionBuilder<C> {
             + 'static,
     {
         let (outbound_tx, outbound_rx) = mpsc::unbounded_channel();
-        let router = Router::new(outbound_tx).with_default_timeout(self.default_timeout);
+        let router = Router::new(outbound_tx)
+            .with_initial_request_id(self.initial_request_id)
+            .with_default_timeout(self.default_timeout);
         let dispatcher = Dispatcher::new();
         let (broker, notif_rx) = spawn_broker(
             inbound,
@@ -114,10 +118,15 @@ pub struct Connection {
 
 impl Connection {
     /// Start a builder. Provide a codec — there is no default.
-    pub fn builder<C>(codec: C) -> ConnectionBuilder<C> {
+    pub fn builder<C: 'static>(codec: C) -> ConnectionBuilder<C> {
         ConnectionBuilder {
             codec,
             default_timeout: crate::router::DEFAULT_TIMEOUT,
+            initial_request_id: if TypeId::of::<C>() == TypeId::of::<crate::codec::LspCodec>() {
+                0
+            } else {
+                DEFAULT_STARTING_REQUEST_ID
+            },
         }
     }
 
@@ -232,6 +241,15 @@ impl Connection {
         Ok(self.router.call(method, params).await?)
     }
 
+    /// Send an outbound request without applying a local timeout.
+    pub async fn call_unbounded<P: Serialize, R: DeserializeOwned>(
+        &self,
+        method: &str,
+        params: P,
+    ) -> Result<R, ConnectionError> {
+        Ok(self.router.call_unbounded(method, params).await?)
+    }
+
     /// Send an outbound request with an explicit per-call timeout.
     pub async fn call_with_timeout<P: Serialize, R: DeserializeOwned>(
         &self,
@@ -265,9 +283,17 @@ impl Connection {
         self.notifications.resubscribe()
     }
 
+    /// Whether the connection broker has terminated because the peer closed,
+    /// I/O failed, or a framing/codec error disconnected it.
+    #[must_use]
+    pub fn is_closed(&self) -> bool {
+        self.broker.is_finished()
+    }
+
     /// Abort the broker tasks. After this, all outbound calls fail with
     /// `RouterError::WriterClosed`.
     pub fn close(&self) {
+        self.router.close();
         self.broker.abort();
     }
 }

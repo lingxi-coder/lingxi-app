@@ -1273,5 +1273,15 @@ G6	lingxi-code/branding/src/lib.rs	MANAGED_DIR_UNIX not in NAMESPACE_VALUES
 G6	lingxi-code/branding/src/lib.rs	MANAGED_DIR_WINDOWS not in NAMESPACE_VALUES
 G6	lingxi-code/branding/src/lib.rs	MEMORY_FILE not in NAMESPACE_VALUES
 G6	lingxi-code/branding/src/lib.rs	MEMORY_LOCAL_FILE not in NAMESPACE_VALUES
+G6	lingxi-code/branding/src/lib.rs	PLUGIN_DATA_ENV not in NAMESPACE_VALUES
 G6	lingxi-code/branding/src/lib.rs	PLUGIN_MANIFEST_DIR not in NAMESPACE_VALUES
+G6	lingxi-code/branding/src/lib.rs	PLUGIN_ROOT_ENV not in NAMESPACE_VALUES
 G6	lingxi-code/branding/src/lib.rs	PRODUCT_NAME not in NAMESPACE_VALUES
+G6	lingxi-code/branding/src/lib.rs	PROJECT_DIR_ENV not in NAMESPACE_VALUES
+G7	lingxi-code/apps/cli/src/commands/plugin_eval.rs	CLAUDE_PLUGIN_
+G7	lingxi-code/apps/cli/src/commands/plugin_eval.rs	\.claude-plugin
+G7	lingxi-code/apps/cli/src/commands/plugin_init.rs	CLAUDE_PLUGIN_
+G7	lingxi-code/plugin/src/manager.rs	CLAUDE_PLUGIN_
+G7	lingxi-code/plugin/src/manager.rs	CLAUDE_PROJECT_DIR
+G7	lingxi-code/plugin/tests/materialize.rs	CLAUDE_PLUGIN_
+G7	lingxi-code/plugin/tests/materialize.rs	CLAUDE_PROJECT_DIR

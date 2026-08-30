@@ -13,12 +13,14 @@
   G4  注释自称 claude-code 源码引用却拼作 LINGXI_*（假引用）
   G5  冻结清单里存在目标已消失的条目（死豁免 = 清单在腐烂）
   G6  branding 里存在未被 NAMESPACE_VALUES 覆盖的 pub const（清单覆盖对账）
+  G7  Claude 侧 plugin 标识符**到达**本仓库（整行判据，不要求字符串字面量）
 
 用法:
   check_brand_leaks.py                      # 与 baseline 比对，有差异则 exit 1
   check_brand_leaks.py --list               # 打印当前违规集合（含行号，给人看）
   check_brand_leaks.py --update-baseline    # 把当前集合写回 baseline
   check_brand_leaks.py --root DIR           # 针对合成树运行（自测用）
+  check_brand_leaks.py --selftest           # 每规则正/负对照（合成树，不碰真仓库）
 
 **baseline 的键是文件粒度的，不含行号。** `--list` 的输出仍然带行号——那是
 给人定位用的——但写进 baseline 并参与比对的键只有 `(rule, path, needle)`。
@@ -32,9 +34,18 @@
 
 去掉行号并不削弱「集合也能发现消失」这一原始理由：一个正则退化成零匹配
 时，它命中过的每个文件都会从集合里消失，比对照样报红。丢掉的只是「同一
-文件内命中从 7 处降到 1 处」这种粒度——而那一类退化由
+文件内命中从 7 处降到 1 处」这种粒度。
+
+⚠️ **这段话原先把那一类退化的兜底记在
 `branding/tests/brand_gate_test.rs::gate_still_finds_the_classes_that_must_exist_today`
-的每规则非空断言兜底。
+头上 —— 那个文件和那个测试在本仓库里不存在**（`git ls-files | grep brand_gate`
+零命中；那个名字只活在 `docs/superpowers/plans/2026-08-23-…` 这份从未落地的
+计划里）。一条正确的规则配一个不存在的理由，比没有理由更危险：读的人会以为
+已经有东西看着了。真实状态是：
+  * 「某条规则整体退化成零匹配」由集合比对兜底（条目消失 => removed => exit 1）；
+  * 「同一文件内命中数下降」**今天没有任何东西兜底**，这是已知残余；
+  * 每条规则「至少能开火一次」由本文件的 `--selftest` 在合成树上兜底 ——
+    它不依赖真实仓库恰好含有某类内容，所以「绿」不会与「探针根本没跑」混淆。
 
 本门自身的三个产出物（引擎源码、baseline、frozen 清单）被排除在扫描之外
 （见 SELF_ARTIFACTS）。这不是降噪，是正确性：引擎源码里的品牌 token 是
@@ -163,6 +174,67 @@ CLAUDE_NEEDLES = [
     r"CLAUDE\.local\.md",
     r"CLAUDE\.md",
 ]
+
+# G7 —— Claude 侧 plugin 标识符**到达**本仓库（P0a.0）。
+#
+# 本分支（local-app plugin）引入的方向与 G3 相反：不是 LingXi 值漏出去，而是
+# oracle 的 plugin 标识符进来 —— `.claude-plugin` 目录名、`${CLAUDE_PLUGIN_ROOT}`
+# / `${CLAUDE_PLUGIN_DATA}` / `${CLAUDE_PLUGIN_OPTION_<KEY>}` 插值语法、
+# `${CLAUDE_PROJECT_DIR}`。实测：改动前这四类全部 exit 0 静默（G1 的 needle 表
+# 里没有它们，G2 只认 `env::var(...)` 的**调用**形状，G3 是 LingXi 侧的值）。
+#
+# ⚠️ **为什么不是把它们塞进 CLAUDE_NEEDLES/G1 就完事**——G1 的判据是「代码行的
+# **字符串字面量内**出现 needle」。那个判据对本族是错的，因为这些标识符到达时
+# 的主要形态根本不在引号里：
+#     hooks/*.sh          `exec $CLAUDE_PLUGIN_ROOT/bin/run`      裸 shell 变量
+#     skills/*/SKILL.md   `读 .claude-plugin/plugin.json`          markdown 正文
+#     workflows/*.js      `process.env.CLAUDE_PLUGIN_ROOT`         成员访问
+#     *.rs                `const CLAUDE_PLUGIN_MANIFEST_DIR`       裸标识符
+# 全部实测确认过：只加进 G1 时，上面四种形状**一条都不报**，而带引号的
+# `"${CLAUDE_PLUGIN_ROOT}"` 报。也就是说「往 plugins/ 里种一个带引号的字面量
+# 看它变红」这个验收动作，验的是引号而不是 needle —— 而 plugin 生态里
+# `${CLAUDE_PLUGIN_ROOT}` 恰恰主要出现在 hook 脚本和 SKILL.md 正文里。
+# 所以本族自成一条规则：判据是**整行**（仍然跳过注释行，理由同 G1——oracle
+# 出处引用只合法地存在于注释里，仓库里有大量 `/// claude CLAUDE_PLUGIN_OPTION_…`
+# 这类正确的映射注释）。
+#
+#   `\.claude-plugin`      与 L1 的 `\.lingxi-plugin` 同构。**必须带前导点。**
+#                          去掉点的 `claude-plugin` 会命中
+#                          `anthropics/claude-plugins-official`（plugin_marketplace.rs
+#                          的 4 处），那是上游 GitHub 仓库名 —— 与 Bedrock model id
+#                          同类的不可改协议值。
+#   `CLAUDE_PLUGIN_`       族 needle，裸前缀（与 CLIENT_NEEDLES 里的 `LINGXI_`
+#                          同一种写法）。覆盖 CLAUDE_PLUGIN_ROOT / _DATA /
+#                          _OPTION_<KEY> / 日后新增的任何变体，不必每加一个就
+#                          回来改这份文件。
+#   `CLAUDE_PROJECT_DIR`   精确字面量，插值模板里的第四个 oracle 占位符。
+#
+# 与 KEEP_CLAUDE_ENV 核对过——而且**核对本身是可执行的**（见下面的
+# `_ARRIVING_VS_KEEP` 判据，不是一句注释）：七个保留名没有一个会被本族命中，
+# G7 不会推翻 G2 已裁决的合法例外。
+# 不加进 L1_PATTERNS/G3：G3 管的是 LingXi 值反向出现在 branding 之外，方向相反。
+ARRIVING_PLUGIN_NEEDLES = [
+    r"\.claude-plugin",
+    r"CLAUDE_PLUGIN_",
+    r"CLAUDE_PROJECT_DIR",
+]
+ARRIVING_COMPILED = [(re.compile(p), p) for p in ARRIVING_PLUGIN_NEEDLES]
+
+# G2 的保留清单与 G7 的 needle 必须不相交，否则一个名字会同时「被 G2 明确
+# 放行」和「被 G7 报红」。这不是注释，是启动时就跑的判据 —— 有人往
+# KEEP_CLAUDE_ENV 里加一个 `CLAUDE_PLUGIN_*` 名字时，门会当场炸而不是
+# 沉默地自相矛盾。
+_ARRIVING_VS_KEEP = sorted(
+    name for name in KEEP_CLAUDE_ENV
+    if any(rx.search(name) for rx, _ in ARRIVING_COMPILED)
+)
+if _ARRIVING_VS_KEEP:
+    # 用 raise 而不是 `assert`：`python3 -O` 会把 assert 整条剥掉，而一道门的
+    # 自洽性判据不该随解释器开关消失。
+    raise SystemExit(
+        "check_brand_leaks: KEEP_CLAUDE_ENV 与 ARRIVING_PLUGIN_NEEDLES 相交于 "
+        f"{_ARRIVING_VS_KEEP} —— G2 放行的名字会被 G7 报红，先裁决归谁管"
+    )
 
 # G1 的 needle 集合按区域不同。一张全局表会立刻淹没在按 spec §1.1 判定为
 # 保留的东西上（clients/ 的 336 处 LingXi、1335 处 com.lingxi、483 处 灵犀），
@@ -357,7 +429,9 @@ def text_lines(text):
        要求字面量跨度所以仍开火，但 G1 独有的 needle（`LingXi`、`Lingxi`、
        `X-LingXi-Ide-Authorization`）就此无人接管。
 
-    钉住它的是 `gate_counts_lines_and_keeps_g1_across_unicode_line_separators`。
+    钉住它的是 `--selftest` 的 `u2028` 用例。（此处原先引的 Rust 测试
+    `gate_counts_lines_and_keeps_g1_across_unicode_line_separators` 在本仓库
+    里同样不存在 —— 见模块 docstring 里的同一条更正。）
     """
     lines = text.split("\n")
     if lines and lines[-1] == "":
@@ -514,6 +588,16 @@ def scan(root, exempt=None):
                         findings.add(("G3", path, i, label))
                         break
 
+            # G7 — Claude 侧 plugin 标识符到达（整行判据，见 ARRIVING_PLUGIN_NEEDLES）
+            if not comment:
+                for rx, needle in ARRIVING_COMPILED:
+                    # 同 G1/G3：遍历全部匹配，首匹配被豁免不等于本行干净。
+                    for m in rx.finditer(line):
+                        if frozen_here and span_is_exempt(line, m.start(), m.end(), frozen_here):
+                            continue
+                        findings.add(("G7", path, i, needle))
+                        break
+
             # G4 — 假 oracle 引用（LINGXI_ 出现在被呈现为 TS 源码的表达式里）
             if comment:
                 fake = FAKE_ORACLE_CITATION.search(line)
@@ -590,6 +674,174 @@ def fmt_key(findings):
     return sorted({"\t".join((r, p, needle)) for r, p, _, needle in findings})
 
 
+def line_index(findings):
+    """(rule, path, needle) 键 -> 命中过的行号排序列表。
+
+    baseline 的键必须不含行号（见模块 docstring 的理由），但 §19.3 要求
+    **报红时**输出点名文件与行号，给人一个可以直接跳转的位置。用同一批
+    `findings`（4 元组，含行号）反查，不需要重新扫描。一个键可能对应多个
+    行——同一 needle 在同一文件命中多次很常见（实测：G7 的 CLAUDE_PLUGIN_ 在
+    plugin/src/manager.rs 命中 1113/1115/1132/1138 四行）——全部列出而不是只取
+    第一个，
+    否则会看起来像「只有一处」而误导排查范围。
+    """
+    idx = {}
+    for r, p, ln, needle in findings:
+        idx.setdefault("\t".join((r, p, needle)), []).append(ln)
+    for key in idx:
+        idx[key].sort()
+    return idx
+
+
+# --- 自测：合成树上的每规则正对照 ---------------------------------------
+#
+# 为什么必须是**合成树**而不是「在真仓库上跑一遍看它非空」：后者的绿分不清
+# 「规则会开火」和「真仓库恰好含有这类内容」两件事，规则退化成零匹配时，只要
+# baseline 同步更新过一次就再也看不出来。合成树把每条规则的输入自己写死，
+# 于是「绿」只可能来自规则真的开火。
+#
+# 每个用例同时声明**必须出现**和**必须不出现**。只有前者的用例会被一条过宽的
+# 规则轻易满足 —— 本仓库反复吃亏的形状正是「探针没跑也算绿」。
+SELFTEST_FILES = {
+    # (path, content)
+    "lingxi-code/st/g1.rs": 'fn f() { let p = ".claude"; }\n',
+    "lingxi-code/st/g2.rs": (
+        'fn f() { let a = std::env::var("CLAUDE_CODE_UNKEPT_NAME");\n'
+        '         let b = std::env::var("CLAUDE_CODE_ENTRYPOINT"); }\n'
+    ),
+    "lingxi-code/st/g3.rs": 'fn f() { let p = ".lingxi/state"; }\n',
+    "lingxi-code/st/g4.rs": '// upstream: process.env.LINGXI_FAKE_CITATION\n',
+    "lingxi-code/branding/src/lib.rs": (
+        'pub const ST_UNLISTED: &str = "x";\n'
+        'pub const NAMESPACE_VALUES: &[&str] = &[\n];\n'
+    ),
+    # G7 的四种**不带引号**的到达形态。这四条正是 P0a.0 写作阶段漏掉的洞：
+    # 只把 needle 加进 G1（判据 = 字符串字面量内）时，它们一条都不报。
+    "lingxi-code/st/hook.sh": '#!/bin/sh\nexec $CLAUDE_PLUGIN_ROOT/bin/run\n',
+    "lingxi-code/st/SKILL.md": 'Read .claude-plugin/plugin.json first.\n',
+    "lingxi-code/st/wf.js": 'const r = process.env.CLAUDE_PROJECT_DIR;\n',
+    "lingxi-code/st/ident.rs": 'const CLAUDE_PLUGIN_MANIFEST_DIR: &str = "manifest";\n',
+    # G7 的两个**必须静默**的对照。
+    "lingxi-code/st/neg_comment.rs": '// oracle spells it CLAUDE_PLUGIN_ROOT / CLAUDE_PROJECT_DIR\n',
+    "lingxi-code/st/neg_reponame.rs": 'fn f() { let r = "anthropics/claude-plugins-official"; }\n',
+    # text_lines 的 U+2028 用例：若换回 str.splitlines()，这一行会被切成两半,
+    # 后面那行的行号会偏移 1，且 G1 需要的完整引号跨度会断掉。
+    "lingxi-code/st/u2028.rs": (
+        'fn a() { let s = "seg sep"; }\n'
+        'fn b() { let p = ".claude"; }\n'
+    ),
+}
+
+SELFTEST_CASES = [
+    # (用例名, 必须出现的 (rule, path, needle-substring[, 行号]), 必须不出现的同形项)
+    # 第四个元素是**可选的行号**。凡是规则真正守的东西是位置而不是存在性的
+    # 用例，必须填它——见 U+2028 那一条的说明。
+    ("G1 fires on a .claude string literal",
+     [("G1", "lingxi-code/st/g1.rs", r"\.claude(?!")], []),
+    ("G2 fires on a non-KEEP CLAUDE_* read, and KEEP is honoured",
+     [("G2", "lingxi-code/st/g2.rs", "CLAUDE_CODE_UNKEPT_NAME")],
+     [("G2", "lingxi-code/st/g2.rs", "CLAUDE_CODE_ENTRYPOINT")]),
+    ("G3 fires on a LingXi namespace value outside branding",
+     [("G3", "lingxi-code/st/g3.rs", ".lingxi")], []),
+    ("G4 fires on a fake oracle citation",
+     [("G4", "lingxi-code/st/g4.rs", "LINGXI_FAKE_CITATION")], []),
+    ("G6 fires on a branding const missing from NAMESPACE_VALUES",
+     [("G6", "lingxi-code/branding/src/lib.rs", "ST_UNLISTED")], []),
+    ("G7 fires on a BARE $CLAUDE_PLUGIN_ROOT in a hook script",
+     [("G7", "lingxi-code/st/hook.sh", "CLAUDE_PLUGIN_")], []),
+    ("G7 fires on .claude-plugin in markdown prose (no quotes)",
+     [("G7", "lingxi-code/st/SKILL.md", r"\.claude-plugin")], []),
+    ("G7 fires on process.env.CLAUDE_PROJECT_DIR in a workflow",
+     [("G7", "lingxi-code/st/wf.js", "CLAUDE_PROJECT_DIR")], []),
+    ("G7 fires on a bare CLAUDE_PLUGIN_* Rust identifier",
+     [("G7", "lingxi-code/st/ident.rs", "CLAUDE_PLUGIN_")], []),
+    ("G7 stays silent on comment-line oracle citations",
+     [], [("G7", "lingxi-code/st/neg_comment.rs", "")]),
+    ("G7 stays silent on anthropics/claude-plugins-official (no leading dot)",
+     [], [("G7", "lingxi-code/st/neg_reponame.rs", "")]),
+    # ⚠️ 这一条**必须钉行号**。只断言「命中存在」的版本对 splitlines() 的回退
+    # 完全不敏感：切成三行之后命中仍然存在，只是行号从 2 变成 3——实测确认过
+    # 那个版本的 mutant 全绿。行号才是这条规则真正守的东西。
+    ("text_lines does not split on U+2028 (G1 still spans the quotes, line 2)",
+     [("G1", "lingxi-code/st/u2028.rs", r"\.claude(?!", 2)], []),
+]
+
+
+def _selftest_matches(findings, rule, path, needle_sub, lineno=None):
+    return [
+        f for f in findings
+        if f[0] == rule and f[1] == path and needle_sub in f[3]
+        and (lineno is None or f[2] == lineno)
+    ]
+
+
+def run_selftest():
+    """在合成树上跑每规则正对照 + 负对照。返回 0/1。"""
+    import shutil
+    import tempfile
+
+    tmp = tempfile.mkdtemp(prefix="brandgate-selftest-")
+    try:
+        for rel, content in SELFTEST_FILES.items():
+            full = os.path.join(tmp, rel)
+            os.makedirs(os.path.dirname(full), exist_ok=True)
+            with open(full, "w", encoding="utf-8") as fh:
+                fh.write(content)
+        frozen = os.path.join(tmp, "frozen.txt")
+        with open(frozen, "w", encoding="utf-8") as fh:
+            fh.write("lingxi-code/st/vanished.rs:.lingxi  # 目标文件不存在 => G5\n")
+
+        for cmd in (["init", "-q"], ["add", "-A"]):
+            subprocess.run(["git", "-C", tmp] + cmd, check=True,
+                           capture_output=True, text=True)
+
+        entries = parse_frozen(frozen)
+        findings = scan(tmp, exemptions_by_path(entries))
+        findings |= check_frozen(tmp, frozen, entries)
+        findings |= check_namespace_coverage(tmp)
+
+        cases = list(SELFTEST_CASES) + [
+            ("G5 fires on a frozen entry whose target file is gone",
+             [("G5", "frozen.txt", "missing file")], []),
+        ]
+
+        failures = []
+        # 「探针根本没跑」的守卫：合成树按构造必然产出命中，一个空集合意味着
+        # 枚举/读取那一层坏了，而不是「没有违规」。
+        if not findings:
+            failures.append("selftest produced ZERO findings — the scanner never fired")
+
+        for name, must, must_not in cases:
+            for spec in must:
+                rule, path, needle = spec[0], spec[1], spec[2]
+                lineno = spec[3] if len(spec) > 3 else None
+                if not _selftest_matches(findings, rule, path, needle, lineno):
+                    at = f"{path}:{lineno}" if lineno is not None else path
+                    near = sorted(_selftest_matches(findings, rule, path, needle))
+                    failures.append(
+                        f"{name}: expected {rule} at {at} matching {needle!r}, got none"
+                        + (f" (same needle seen at lines {[f[2] for f in near]})" if near else "")
+                    )
+            for spec in must_not:
+                rule, path, needle = spec[0], spec[1], spec[2]
+                lineno = spec[3] if len(spec) > 3 else None
+                hit = _selftest_matches(findings, rule, path, needle, lineno)
+                if hit:
+                    failures.append(f"{name}: expected NO {rule} at {path}, got {sorted(hit)}")
+            if not failures or not any(f.startswith(name) for f in failures):
+                print(f"  ok   {name}")
+
+        for f in failures:
+            print(f"  FAIL {f}")
+        if failures:
+            print(f"selftest: {len(failures)} failure(s)")
+            return 1
+        print(f"selftest: {len(cases)} cases ok ({len(findings)} findings on the synthetic tree)")
+        return 0
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--root")
@@ -597,7 +849,11 @@ def main():
     ap.add_argument("--frozen")
     ap.add_argument("--update-baseline", action="store_true")
     ap.add_argument("--list", action="store_true")
+    ap.add_argument("--selftest", action="store_true")
     args = ap.parse_args()
+
+    if args.selftest:
+        return run_selftest()
 
     here = os.path.dirname(os.path.abspath(__file__))
     root = os.path.abspath(args.root if args.root else os.path.join(here, "..", ".."))
@@ -648,9 +904,13 @@ def main():
 
     if added or removed:
         if added:
+            locations = line_index(findings)
             print(f"NEW brand leaks ({len(added)}):")
             for line in added:
-                print(f"  + {line}")
+                rule, path, needle = line.split("\t", 2)
+                lns = locations.get(line)
+                loc = f"{path}:" + ",".join(str(n) for n in lns) if lns else path
+                print(f"  + {rule}\t{loc}\t{needle}")
         if removed:
             print(f"baseline entries no longer found ({len(removed)}):")
             print("  这可能是修好了（好事，跑 --update-baseline），")

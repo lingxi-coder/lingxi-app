@@ -458,6 +458,17 @@ final class ConversationModel: ObservableObject {
     /// True while a turn is in flight (drives the streaming dots row + gates
     /// overlapping sends and the Send→Stop swap, PR-4 items 1 & 2).
     @Published var streaming: Bool = false
+    /// True when the correlated durable turn is inactive in the UI (for example
+    /// `WaitingForUser` after a foreground recovery). The Composer uses this
+    /// only to expose an explicit Stop/Discard action; background execution and
+    /// voice policy continue to derive from `streaming`.
+    @Published var hasInactiveDurableRecovery: Bool = false
+    /// True while the correlated turn is in a non-terminal durable recovery
+    /// state, including an executor-backed live WaitingForUser question. Root
+    /// navigation uses this to avoid changing session selection before New or
+    /// Resume is accepted; the Composer uses the more specific inactive flag
+    /// for its visible Discard affordance.
+    @Published var hasUnresolvedTurnRecovery: Bool = false
     /// True after Stop is requested and until the engine confirms that the
     /// matching turn released its owner slot. The composer remains editable but
     /// cannot submit another turn during this interval.
@@ -467,6 +478,10 @@ final class ConversationModel: ObservableObject {
     /// last AI message is insufficient because session switches and late events
     /// can otherwise replay stale content.
     @Published var turnCompletion: ConversationTurnCompletion? = nil
+    /// The client-owned turn currently in flight, when any. Exposed so
+    /// background execution and notification surfaces can deep-link back to the
+    /// exact conversation turn without peeking into source-private state.
+    @Published var activeTurnToken: ConversationTurnToken? = nil
     /// Lossless token-scoped assistant-delta stream. A subject is used instead
     /// of an `@Published` latest-value slot because SwiftUI may coalesce several
     /// assignments in one render transaction and silently drop middle deltas.
@@ -912,9 +927,10 @@ protocol ConversationSource: AnyObject {
     /// and keeps ownership until the engine confirms safe completion. A no-op
     /// when nothing is streaming.
     func cancel()
-    /// Cancel the in-flight turn and return only after the engine has released
-    /// its single-turn slot. Engine/configuration swaps use this barrier so an
-    /// old Block-behavior tool cannot overlap a replacement engine.
+    /// Cancel the in-flight turn (or an inactive durable recovery) and return
+    /// only after the engine has released its single-turn slot.
+    /// Engine/configuration swaps use this barrier so an old Block-behavior
+    /// tool cannot overlap a replacement engine.
     func cancelAndWait() async throws
     /// Dismiss the persistent error banner (PR-4 item 4).
     func dismissError()
@@ -944,6 +960,10 @@ protocol ConversationSource: AnyObject {
     /// its streaming bookkeeping. UIKit owns suspension; backgrounding is not a
     /// user Stop action.
     func handleBackground()
+    /// Record a background lease expiration as recoverable, never cancelled.
+    /// Returns only after the engine acknowledges `PausedRecoverable`; callers
+    /// must not announce the pause or unlock the composer before then.
+    func markActiveTurnPausedRecoverable(_ token: ConversationTurnToken?) async throws
     /// Lifecycle: the app returned to the foreground (`scenePhase == .active`). A
     /// hook to restore/refresh state; the default is a no-op.
     func handleForeground()
@@ -1032,6 +1052,7 @@ extension ConversationSource {
     func prepare() async throws {}
     func cancelAndWait() async throws { cancel() }
     func handleBackground() {}
+    func markActiveTurnPausedRecoverable(_ token: ConversationTurnToken?) async throws {}
     func handleForeground() {}
     /// Default session ops for sources with no engine catalog (the mock): no-ops,
     /// so the mock keeps its canned drawer lists and ignores resume requests.
@@ -1484,6 +1505,7 @@ final class MockConversationSource: ConversationSource {
         model.isNew = false
         model.notice = nil
         model.turnCompletion = nil
+        model.activeTurnToken = nil
         turnSpeechSequence = 0
         let message = Message(role: .user, text: text, images: uiImages(from: images))
         model.messages.append(message)
@@ -1498,6 +1520,7 @@ final class MockConversationSource: ConversationSource {
         )
         nextTurnId &+= 1
         activeTurnToken = token
+        model.activeTurnToken = token
         DispatchQueue.main.asyncAfter(deadline: .now() + cannedReplyDelay) { [weak self] in
             guard let self,
                   self.turnToken == generation,
@@ -1520,6 +1543,7 @@ final class MockConversationSource: ConversationSource {
                 finalAssistantText: reply.text.trimmingCharacters(in: .whitespacesAndNewlines)
             )
             self.activeTurnToken = nil
+            self.model.activeTurnToken = nil
         }
         return token
     }
@@ -1539,6 +1563,7 @@ final class MockConversationSource: ConversationSource {
             )
         }
         activeTurnToken = nil
+        model.activeTurnToken = nil
     }
 
     func dismissError() { model.error = nil }
@@ -1585,6 +1610,7 @@ final class MockConversationSource: ConversationSource {
         model.messageDetails = [:]
         model.streaming = false
         model.turnCompletion = nil
+        model.activeTurnToken = nil
         model.isNew = false
         model.statusLine = nil
         model.error = nil
@@ -1658,6 +1684,76 @@ final class MockConversationSource: ConversationSource {
         }
     }
 
+    private struct DurableConversationTurnRecord: Codable, Equatable {
+        let scope: String
+        let sessionID: String
+        let turnID: UInt64
+        var lastSequence: UInt64
+    }
+
+    private final class DurableConversationTurnClientStore {
+        private let scope: String
+        private let url: URL
+        private var liveAckSequences: [UInt64: UInt64] = [:]
+
+        init(config: EngineConfig) {
+            scope = config.projectCwd ?? "__global__"
+            url = URL(fileURLWithPath: config.appSandboxRoot, isDirectory: true)
+                .appendingPathComponent("durable-conversation-turn.json")
+        }
+
+        func begin(sessionID: String, turnID: UInt64) {
+            guard !sessionID.isEmpty else { return }
+            liveAckSequences[turnID] = 0
+            write(DurableConversationTurnRecord(
+                scope: scope,
+                sessionID: sessionID,
+                turnID: turnID,
+                lastSequence: 0
+            ))
+        }
+
+        func load() -> DurableConversationTurnRecord? {
+            guard
+                let record = loadPersistedRecord(),
+                record.scope == scope
+            else { return nil }
+            var attachRecord = record
+            // The UI projection is not durably persisted event-by-event, so a
+            // fresh source/process must replay from the retained suffix again.
+            attachRecord.lastSequence = liveAckSequences[record.turnID] ?? 0
+            return attachRecord
+        }
+
+        func updateSequence(turnID: UInt64, sequence: UInt64) {
+            liveAckSequences[turnID] = max(liveAckSequences[turnID] ?? 0, sequence)
+        }
+
+        func clear(turnID: UInt64? = nil) {
+            guard let record = loadPersistedRecord() else { return }
+            guard turnID == nil || record.turnID == turnID else { return }
+            liveAckSequences.removeValue(forKey: record.turnID)
+            try? FileManager.default.removeItem(at: url)
+        }
+
+        private func write(_ record: DurableConversationTurnRecord) {
+            guard let data = try? JSONEncoder().encode(record) else { return }
+            try? FileManager.default.createDirectory(
+                at: url.deletingLastPathComponent(),
+                withIntermediateDirectories: true
+            )
+            try? data.write(to: url, options: .atomic)
+        }
+
+        private func loadPersistedRecord() -> DurableConversationTurnRecord? {
+            guard
+                let data = try? Data(contentsOf: url),
+                let record = try? JSONDecoder().decode(DurableConversationTurnRecord.self, from: data)
+            else { return nil }
+            return record
+        }
+    }
+
     private final class OAuthPresentationContextProvider: NSObject, ASWebAuthenticationPresentationContextProviding {
         func presentationAnchor(for session: ASWebAuthenticationSession) -> ASPresentationAnchor {
             let windows = UIApplication.shared.connectedScenes
@@ -1721,14 +1817,21 @@ final class MockConversationSource: ConversationSource {
         /// rows; MessageComplete reconciles its structured payload back onto
         /// these stable identities instead of replacing only the last fragment.
         private var currentResponseMessageIDs: [UUID] = []
-        /// Monotonic per-turn correlator, also passed as the engine `turnId` so a
-        /// `cancel` narrows to the exact in-flight turn. `nil` between turns.
+        /// Process-unique monotonic correlator, also passed as the engine
+        /// `turnId` so durable checkpoints cannot collide after a cold launch.
+        /// `nil` between turns.
         private var currentTurnId: UInt64?
-        private var nextTurnId: UInt64 = 1
+        private var nextTurnId: UInt64 = UInt64.random(in: 1..<UInt64.max)
         /// Session-scoped event guard. Increment whenever the visible session
         /// changes so late events from an abandoned session/turn are ignored.
         private var sessionEpoch: UInt64 = 1
         private var activeTurnEpoch: UInt64?
+        /// The executor that owns the visible turn while it is live. A
+        /// `WaitingForUser` snapshot can therefore mean either an ordinary
+        /// in-foreground question (the executor is still attached) or an
+        /// executor-less durable recovery after reattach. Keep those states
+        /// distinct so only the latter gets the inactive Discard affordance.
+        private var executorOwnedTurnID: UInt64?
         private var turnSpeechSequence: UInt64 = 0
         private var activeRunItemIndex: Int?
         /// Original user spelling for a slash command awaiting dispatch.
@@ -1740,6 +1843,41 @@ final class MockConversationSource: ConversationSource {
         private var nextCancellationOperationID: UInt64 = 1
         private var activeSessionTransitionOperationID: UInt64?
         private var nextSessionTransitionOperationID: UInt64 = 1
+        private let durableTurns: DurableConversationTurnClientStore
+        private var reattachedTurnIDs = Set<UInt64>()
+        /// A non-terminal durable recovery owns the single turn slot even when
+        /// the UI is no longer streaming. Keep this id until ResumeTurn reports
+        /// Running or a terminal state so a new prompt cannot overwrite the
+        /// sole durable checkpoint.
+        private var unresolvedRecoveryTurnID: UInt64?
+        /// Set only when a foreground attach is required for a paused turn.
+        /// WaitingForUser can also be emitted for an ordinary in-foreground
+        /// question and must not trigger an unsolicited attach/resume cycle.
+        private var needsDurableForegroundRecoveryTurnID: UInt64?
+        /// One AttachTurn/ResumeTurn chain may be in flight at a time. The
+        /// source can receive duplicate foreground callbacks while SwiftUI
+        /// rebuilds its scene; the task is the idempotency barrier for those
+        /// callbacks.
+        private var durableRecoveryTask: Task<Void, Never>?
+        private var replayingTurnID: UInt64?
+        /// AttachTurn and ResumeTurn both emit recovery snapshots. A Running
+        /// snapshot from Attach is not a Resume acknowledgement: the source
+        /// still has to submit ResumeTurn before it can expose an active
+        /// executor to the composer.
+        private enum DurableRecoveryPhase {
+            case attaching(turnID: UInt64)
+            case resuming(turnID: UInt64)
+        }
+        private var durableRecoveryPhase: DurableRecoveryPhase?
+        /// The recovery state received for the currently attached durable turn.
+        /// A terminal SessionResumed transcript is authoritative; retained
+        /// envelopes are only a projection source while recovery is nonterminal.
+        private var replayProjectionState: TurnRecoveryStateDto?
+        private var pauseAcknowledgements: [ConversationTurnToken: [CheckedContinuation<Void, Error>]] = [:]
+        /// Cancel's command acknowledgement only means the host accepted the
+        /// request. Keep ownership until the FIFO listener observes a terminal
+        /// recovery snapshot for the same session/turn.
+        private var terminalRecoveryStates: [UInt64: TurnRecoveryStateDto] = [:]
 
         private enum PendingSessionTransition: Equatable {
             case new
@@ -1777,6 +1915,7 @@ final class MockConversationSource: ConversationSource {
             permissionModeRepository: PermissionModeConfigurationRepository? = nil
         ) {
             self.config = config
+            self.durableTurns = DurableConversationTurnClientStore(config: config)
             self.handleBuilder = handleBuilder
             self.permissionModeRepository = permissionModeRepository
                 ?? PermissionModeConfigurationRepository()
@@ -1798,6 +1937,14 @@ final class MockConversationSource: ConversationSource {
         // MARK: ConversationSource
 
         func startNewConversation() {
+            // A paused/waiting durable turn is still owned by the engine even
+            // though `model.streaming` is false. Do not clear its checkpoint or
+            // replace the session until recovery reaches Running or a terminal
+            // state.
+            guard unresolvedRecoveryTurnID == nil,
+                  pauseAcknowledgements.isEmpty
+            else { return }
+            durableTurns.clear()
             let turnIdToCancel = inFlightTurnForSessionSwitch()
             model.sessionRestoreRecovery = nil
             model.sessionTransitionFailure = nil
@@ -2007,6 +2154,7 @@ final class MockConversationSource: ConversationSource {
         /// authoritative `SessionResumed` replay replaces it.
         private func resetTranscriptForSessionSwitch(isNew: Bool) {
             invalidateTurnContext()
+            replayProjectionState = nil
             hasConfirmedSessionState = false
             model.clearAgentState()
             if isNew {
@@ -2018,6 +2166,7 @@ final class MockConversationSource: ConversationSource {
             model.isCancelling = false
             model.slashCommandPending = false
             model.turnCompletion = nil
+            model.activeTurnToken = nil
             model.isNew = isNew
             model.statusLine = nil
             model.error = nil
@@ -2035,12 +2184,30 @@ final class MockConversationSource: ConversationSource {
         }
 
         private func invalidateTurnContext() {
+            durableRecoveryTask?.cancel()
+            durableRecoveryTask = nil
+            durableRecoveryPhase = nil
+            terminalRecoveryStates.removeAll()
+            unresolvedRecoveryTurnID = nil
+            needsDurableForegroundRecoveryTurnID = nil
+            reattachedTurnIDs.removeAll()
+            model.hasInactiveDurableRecovery = false
+            model.hasUnresolvedTurnRecovery = false
+            let pendingPauses = pauseAcknowledgements
+            pauseAcknowledgements.removeAll()
+            for continuations in pendingPauses.values {
+                for continuation in continuations {
+                    continuation.resume(throwing: PauseAcknowledgementError.invalidated)
+                }
+            }
             sessionEpoch &+= 1
             streamingIndex = nil
             streamingItemIndex = nil
             currentResponseMessageIDs = []
             currentTurnId = nil
+            executorOwnedTurnID = nil
             activeTurnEpoch = nil
+            model.activeTurnToken = nil
             activeRunItemIndex = nil
             pendingSlashRaw = nil
             model.slashCommandPending = false
@@ -2051,7 +2218,11 @@ final class MockConversationSource: ConversationSource {
             streamingItemIndex = nil
             currentResponseMessageIDs = []
             currentTurnId = nil
+            executorOwnedTurnID = nil
             activeTurnEpoch = keepEpoch ? activeTurnEpoch : nil
+            if !keepEpoch {
+                model.activeTurnToken = nil
+            }
             activeRunItemIndex = nil
             pendingSlashRaw = nil
             model.slashCommandPending = false
@@ -2336,6 +2507,28 @@ final class MockConversationSource: ConversationSource {
             // preserving the user → activity → assistant ordering.
         }
 
+        /// Settle only the main run correlated with the durable recovery. A
+        /// replay can contain tool/run envelopes from another workflow task;
+        /// those rows and their background lease must remain untouched. The
+        /// guard is also important because `finishActiveRun` would otherwise
+        /// create a synthetic run while a recovery snapshot has no main run.
+        private func settleCorrelatedMainRun() {
+            guard let itemIndex = activeRunItemIndex,
+                  model.items.indices.contains(itemIndex),
+                  case var .run(run) = model.items[itemIndex]
+            else { return }
+            run.status = .restored
+            for index in run.tools.indices where run.tools[index].status == .running {
+                run.tools[index].status = .completed
+            }
+            for index in run.shellCards.indices where run.shellCards[index].status == .running {
+                run.shellCards[index].status = .completed
+            }
+            model.withIndexRebuildSuppressed {
+                model.items[itemIndex] = .run(run)
+            }
+        }
+
         private func updateCoordinatorStatus(activeWorkers: UInt32, team: String?) {
             if activeWorkers == 0 {
                 // CoordinatorStatus is a global snapshot, not a turn-scoped
@@ -2461,6 +2654,7 @@ final class MockConversationSource: ConversationSource {
         ) {
             guard cancellationOperation?.id == operation.id else { return }
             cancellationOperation = nil
+            terminalRecoveryStates.removeValue(forKey: operation.turnId)
 
             let stillOwnsVisibleTurn = currentTurnId == operation.turnId
                 && activeTurnEpoch == operation.epoch
@@ -2471,7 +2665,9 @@ final class MockConversationSource: ConversationSource {
                 if stillOwnsVisibleTurn {
                     // Delivery failed before the engine confirmed release. Keep
                     // the original turn live so Stop can be retried safely.
-                    model.streaming = true
+                    if !model.hasInactiveDurableRecovery {
+                        model.streaming = true
+                    }
                     model.statusLine = nil
                     model.error = ConversationError(kind: .host, message: String(localized: "chat_cancel_failed \(error)"))
                 } else if model.statusLine == String(localized: "chat_stopping") {
@@ -2484,6 +2680,13 @@ final class MockConversationSource: ConversationSource {
             }
 
             if stillOwnsVisibleTurn {
+                durableTurns.clear(turnID: operation.turnId)
+                if unresolvedRecoveryTurnID == operation.turnId {
+                    unresolvedRecoveryTurnID = nil
+                    needsDurableForegroundRecoveryTurnID = nil
+                    reattachedTurnIDs.remove(operation.turnId)
+                    model.hasInactiveDurableRecovery = false
+                }
                 // The host only returns after all event producers have joined and
                 // the single-turn slot is released. This is also a fallback for a
                 // transport that failed to deliver its terminal event.
@@ -2506,6 +2709,11 @@ final class MockConversationSource: ConversationSource {
             let operation = operationForCancelling(turnId: turnId)
             do {
                 try await operation.task.value
+                // Command Ok is only submission acknowledgement. First drain
+                // the listener FIFO, then wait for the correlated terminal
+                // TurnRecoveryState before releasing any visible ownership.
+                await listener?.waitUntilIdle()
+                try await waitForCancellationAcknowledgement(turnID: operation.turnId)
                 finishCancellation(operation, error: nil)
             } catch {
                 finishCancellation(operation, error: error)
@@ -2516,6 +2724,8 @@ final class MockConversationSource: ConversationSource {
         private func startPrompt(_ prompt: TurnPrompt) -> ConversationTurnToken {
             model.notice = nil
             model.streaming = true
+            model.hasInactiveDurableRecovery = false
+            model.hasUnresolvedTurnRecovery = false
             model.isCancelling = false
             model.slashCommandPending = false
             model.turnCompletion = nil
@@ -2524,12 +2734,16 @@ final class MockConversationSource: ConversationSource {
             streamingIndex = nil
             streamingItemIndex = nil
             currentResponseMessageIDs = []
+            replayProjectionState = nil
             currentTurnId = prompt.turnId
+            executorOwnedTurnID = prompt.turnId
             activeTurnEpoch = sessionEpoch
             let token = ConversationTurnToken(
                 clientTurnId: prompt.turnId,
                 sessionEpoch: sessionEpoch
             )
+            model.activeTurnToken = token
+            durableTurns.begin(sessionID: model.activeSessionId, turnID: prompt.turnId)
             Self.turnLog.debug(
                 "prompt submit turn=\(prompt.turnId, privacy: .public) epoch=\(self.sessionEpoch, privacy: .public)"
             )
@@ -2561,10 +2775,12 @@ final class MockConversationSource: ConversationSource {
             streamingIndex = nil
             streamingItemIndex = nil
             currentResponseMessageIDs = []
+            replayProjectionState = nil
             currentTurnId = turnId
             activeTurnEpoch = sessionEpoch
             pendingSlashRaw = raw
             let token = ConversationTurnToken(clientTurnId: turnId, sessionEpoch: sessionEpoch)
+            model.activeTurnToken = token
 
             Task { [weak self] in
                 guard let self else { return }
@@ -2604,6 +2820,8 @@ final class MockConversationSource: ConversationSource {
                 !model.isCancelling,
                 !model.slashCommandPending,
                 !model.sessionTransitionPending,
+                pauseAcknowledgements.isEmpty,
+                unresolvedRecoveryTurnID == nil,
                 !model.isSelectedAgentReadOnly
             else { return nil }
 
@@ -2619,7 +2837,7 @@ final class MockConversationSource: ConversationSource {
             appendMessage(Message(role: .user, text: text, images: uiImages(from: images)))
 
             let turnId = nextTurnId
-            nextTurnId &+= 1
+            nextTurnId = nextTurnId == UInt64.max ? 1 : nextTurnId + 1
             if model.slashCommandsLoaded,
                SlashCommandMatcher.exactCommand(in: trimmed, catalog: model.slashCommands) != nil {
                 return startSlashCommand(raw: trimmed, turnId: turnId)
@@ -2632,8 +2850,14 @@ final class MockConversationSource: ConversationSource {
             if let currentOperation = cancellationOperation {
                 operation = currentOperation
             } else {
-                // PR-4 item 2: nothing in flight — no-op.
-                guard model.streaming, let turnId = currentTurnId else { return }
+                // A WaitingForUser recovery is inactive in the UI (`streaming`
+                // is false), but its durable checkpoint still owns the host's
+                // single-turn slot. Stop/Discard must be able to terminalize
+                // that exact correlated turn; unrelated idle sources remain a
+                // no-op.
+                guard let turnId = currentTurnId,
+                      model.streaming || unresolvedRecoveryTurnID == turnId
+                else { return }
                 operation = operationForCancelling(turnId: turnId)
             }
             Self.turnLog.debug(
@@ -2643,6 +2867,12 @@ final class MockConversationSource: ConversationSource {
             model.statusLine = String(localized: "chat_stopping")
             do {
                 try await operation.task.value
+                // Do not treat a successful Cancel command as terminal. The
+                // host may return Ok for a stale/missing turn; only the
+                // listener's matching terminal recovery snapshot proves that
+                // this source may clear its durable checkpoint and gates.
+                await listener?.waitUntilIdle()
+                try await waitForCancellationAcknowledgement(turnID: operation.turnId)
                 finishCancellation(operation, error: nil)
             } catch {
                 finishCancellation(operation, error: error)
@@ -2661,6 +2891,41 @@ final class MockConversationSource: ConversationSource {
 
         func submitEngineCommand(_ command: ClientCommand) async throws {
             try await submitCommand(command)
+        }
+
+        func markActiveTurnPausedRecoverable(_ token: ConversationTurnToken?) async throws {
+            guard let token, activeConversationTurnToken == token else { return }
+            guard model.streaming || pauseAcknowledgements[token] != nil else { return }
+
+            let shouldSubmit = pauseAcknowledgements[token] == nil
+            try await withCheckedThrowingContinuation { continuation in
+                pauseAcknowledgements[token, default: []].append(continuation)
+                guard shouldSubmit else { return }
+                Task { [weak self] in
+                    guard let self else { return }
+                    do {
+                        try await self.submitCommand(.pauseTurn(
+                            turnId: token.clientTurnId,
+                            reason: "background_time_expired"
+                        ))
+                    } catch {
+                        if self.activeConversationTurnToken == token {
+                            // A failed pause leaves ownership unresolved. Keep
+                            // the turn non-sendable and expose the host failure
+                            // rather than converting an unknown state into
+                            // Cancelled.
+                            self.model.error = ConversationError(
+                                kind: .host,
+                                message: String(describing: error)
+                            )
+                        }
+                        self.resolvePauseAcknowledgements(
+                            token: token,
+                            result: .failure(error)
+                        )
+                    }
+                }
+            }
         }
 
         func resumeWorkflow(_ taskID: String) {
@@ -2684,6 +2949,18 @@ final class MockConversationSource: ConversationSource {
         func handleForeground() {
             refreshBackgroundTasks()
             listSessionAgents()
+            // A warm source keeps the durable checkpoint and listener alive,
+            // but the engine may have parked the turn when the background lease
+            // expired. Reattach from the latest in-memory client cursor before
+            // asking the engine to resume it. Cold sources enter this same path
+            // from SessionResumed below.
+            guard let recoveryTurnID = needsDurableForegroundRecoveryTurnID,
+                  unresolvedRecoveryTurnID == recoveryTurnID,
+                  let record = durableTurns.load(),
+                  record.turnID == recoveryTurnID,
+                  record.sessionID == model.activeSessionId
+            else { return }
+            reattachDurableTurnIfNeeded(sessionID: record.sessionID)
         }
 
         func testProviderConnection(
@@ -3828,6 +4105,68 @@ final class MockConversationSource: ConversationSource {
             upsertWorkflowProgress(taskId: taskId, runId: runId, progress: payload)
         }
 
+        private static func isTerminalRecoveryState(_ state: TurnRecoveryStateDto) -> Bool {
+            switch state {
+            case .completed, .failed, .cancelled:
+                return true
+            case .running, .waitingForUser, .pausedRecoverable:
+                return false
+            @unknown default:
+                return false
+            }
+        }
+
+        private enum PauseAcknowledgementError: LocalizedError {
+            case invalidated
+            case recoveryState(TurnRecoveryStateDto)
+
+            var errorDescription: String? {
+                switch self {
+                case .invalidated:
+                    return "PauseTurn was invalidated by a session transition"
+                case let .recoveryState(state):
+                    return "PauseTurn was not acknowledged: \(String(describing: state))"
+                }
+            }
+        }
+
+        private enum CancellationAcknowledgementError: LocalizedError {
+            case timedOut(turnID: UInt64)
+
+            var errorDescription: String? {
+                switch self {
+                case let .timedOut(turnID):
+                    return "Cancel was not terminally acknowledged for turn \(turnID)"
+                }
+            }
+        }
+
+        private func resolvePauseAcknowledgements(
+            token: ConversationTurnToken,
+            result: Result<Void, Error>
+        ) {
+            guard let continuations = pauseAcknowledgements.removeValue(forKey: token) else {
+                return
+            }
+            for continuation in continuations {
+                continuation.resume(with: result)
+            }
+        }
+
+        private func waitForCancellationAcknowledgement(turnID: UInt64) async throws {
+            if terminalRecoveryStates[turnID].map(Self.isTerminalRecoveryState) == true {
+                return
+            }
+            let deadline = Date().addingTimeInterval(5)
+            while Date() < deadline {
+                try await Task.sleep(nanoseconds: 10_000_000)
+                if terminalRecoveryStates[turnID].map(Self.isTerminalRecoveryState) == true {
+                    return
+                }
+            }
+            throw CancellationAcknowledgementError.timedOut(turnID: turnID)
+        }
+
         private static func reasoningID(_ selection: ReasoningSelectionDto) -> String {
             switch selection {
             case .automatic: return "automatic"
@@ -3900,6 +4239,9 @@ final class MockConversationSource: ConversationSource {
             switch event {
             case .turnStarted:
                 guard acceptTurnEvent(event) else { return }
+                if let currentTurnId {
+                    executorOwnedTurnID = currentTurnId
+                }
                 model.slashCommandPending = false
                 pendingSlashRaw = nil
                 model.streaming = true
@@ -3981,6 +4323,13 @@ final class MockConversationSource: ConversationSource {
                 let question = Self.pendingQuestion(from: request)
                 guard !model.pendingQuestions.contains(where: { $0.requestId == question.requestId }) else {
                     return
+                }
+                // A broker replay can arrive after the visible source has
+                // reconnected, but a live question is still owned by this
+                // executor. The WaitingForUser recovery projection below uses
+                // this bit to keep the normal active Stop affordance.
+                if let currentTurnId {
+                    executorOwnedTurnID = currentTurnId
                 }
                 model.pendingQuestions.append(question)
 
@@ -4335,11 +4684,35 @@ final class MockConversationSource: ConversationSource {
                     "turn ended turn=\(self.currentTurnId ?? 0, privacy: .public) outcome=\(String(describing: outcome), privacy: .public) accepted=\(accepted, privacy: .public)"
                 )
                 guard accepted else { return }
+                let awaitingCancellationTerminal = cancellationOperation.map {
+                    $0.turnId == currentTurnId
+                } ?? false
+                if let currentTurnId {
+                    if !awaitingCancellationTerminal {
+                        durableTurns.clear(turnID: currentTurnId)
+                        if unresolvedRecoveryTurnID == currentTurnId {
+                            unresolvedRecoveryTurnID = nil
+                            needsDurableForegroundRecoveryTurnID = nil
+                            model.hasUnresolvedTurnRecovery = false
+                        }
+                        reattachedTurnIDs.remove(currentTurnId)
+                        model.hasInactiveDurableRecovery = false
+                    }
+                }
                 // PR-4 item 3: don't treat every outcome as a clean end. A normal
                 // `endTurn` just stops streaming; `maxTurns` / `cancelled` surface
                 // a distinct notice so the user knows the turn was interrupted.
                 model.streaming = false
                 if !model.isCancelling { model.statusLine = nil }
+                if awaitingCancellationTerminal {
+                    // TurnEnded is not the cancellation proof. Settle the
+                    // correlated run for rendering, but retain its durable
+                    // owner, pointers, and cancellation gate until the FIFO
+                    // observes TurnRecoveryState.cancelled.
+                    finishActiveRun(.cancelled)
+                    model.updateMainAgent(status: "cancelling", latestActivity: String(localized: "chat_stopping"))
+                    return
+                }
                 switch outcome {
                 case .endTurn:
                     model.notice = nil
@@ -4367,6 +4740,230 @@ final class MockConversationSource: ConversationSource {
                 )
                 clearTurnPointers(keepEpoch: false)
                 requestSessionCatalogRefreshAfterSettledTurn()
+
+            case let .turnRecoveryState(snapshot):
+                guard snapshot.sessionId == model.activeSessionId else { return }
+                let isCorrelated = snapshot.turnId == currentTurnId
+                    || snapshot.turnId == unresolvedRecoveryTurnID
+                    || snapshot.turnId == replayingTurnID
+                if isCorrelated {
+                    replayProjectionState = snapshot.state
+                    if Self.isTerminalRecoveryState(snapshot.state) {
+                        model.hasUnresolvedTurnRecovery = false
+                    }
+                }
+                switch snapshot.state {
+                case .running:
+                    // ResumeTurn's acknowledgement is the point at which the
+                    // durable slot is live again. Clear the recovery gate only
+                    // for the correlated turn; a delayed state from an older
+                    // session must not unlock the composer.
+                    guard isCorrelated else { return }
+                    let isAttachSnapshot: Bool = {
+                        guard case let .attaching(turnID) = durableRecoveryPhase else {
+                            return false
+                        }
+                        return turnID == snapshot.turnId
+                    }()
+                    if isAttachSnapshot {
+                        // AttachTurn can report Running while the executor is
+                        // merely reconnected. ResumeTurn is still required;
+                        // exposing this as active would let a send overwrite
+                        // the sole durable checkpoint if ResumeTurn fails.
+                        unresolvedRecoveryTurnID = snapshot.turnId
+                        model.hasUnresolvedTurnRecovery = true
+                        model.hasInactiveDurableRecovery = true
+                        executorOwnedTurnID = nil
+                        model.streaming = false
+                        return
+                    }
+                    if case let .resuming(turnID) = durableRecoveryPhase,
+                       turnID == snapshot.turnId {
+                        durableRecoveryPhase = nil
+                    }
+                    if snapshot.turnId == currentTurnId || snapshot.turnId == replayingTurnID {
+                        unresolvedRecoveryTurnID = nil
+                        needsDurableForegroundRecoveryTurnID = nil
+                        model.hasInactiveDurableRecovery = false
+                        model.hasUnresolvedTurnRecovery = false
+                    }
+                    executorOwnedTurnID = snapshot.turnId
+                    currentTurnId = snapshot.turnId
+                    activeTurnEpoch = sessionEpoch
+                    model.activeTurnToken = ConversationTurnToken(
+                        clientTurnId: snapshot.turnId,
+                        sessionEpoch: sessionEpoch
+                    )
+                    model.streaming = true
+                case .waitingForUser:
+                    // WaitingForUser is still a live durable checkpoint. Keep
+                    // it correlated and non-sendable until the engine reports
+                    // Running after the user resolves its question/permission.
+                    // A live executor-backed question remains an ordinary
+                    // active turn (Stop, not Discard). Only a post-reattach
+                    // executor-less checkpoint is inactive in the UI.
+                    guard isCorrelated else { return }
+                    if snapshot.turnId == currentTurnId || snapshot.turnId == replayingTurnID {
+                        unresolvedRecoveryTurnID = snapshot.turnId
+                        model.hasUnresolvedTurnRecovery = true
+                        let hasLiveExecutor = executorOwnedTurnID == snapshot.turnId
+                            && replayingTurnID != snapshot.turnId
+                            && durableRecoveryTask == nil
+                        model.hasInactiveDurableRecovery = !hasLiveExecutor
+                        if durableRecoveryTask != nil {
+                            // The attach chain has already attempted ResumeTurn;
+                            // a returned WaitingForUser now needs explicit user
+                            // input and must not be retried on every foreground.
+                            needsDurableForegroundRecoveryTurnID = nil
+                        }
+                        if let token = activeConversationTurnToken {
+                            resolvePauseAcknowledgements(
+                                token: token,
+                                result: .failure(PauseAcknowledgementError.recoveryState(snapshot.state))
+                            )
+                        }
+                        if !hasLiveExecutor {
+                            settleCorrelatedMainRun()
+                        }
+                        model.streaming = hasLiveExecutor
+                    }
+                    model.statusLine = String(localized: "chat_background_waiting_text")
+                case .pausedRecoverable:
+                    guard isCorrelated else { return }
+                    if snapshot.turnId == currentTurnId || snapshot.turnId == replayingTurnID {
+                        unresolvedRecoveryTurnID = snapshot.turnId
+                        model.hasUnresolvedTurnRecovery = true
+                        executorOwnedTurnID = nil
+                        model.hasInactiveDurableRecovery = true
+                        // If this is the warm-source pause acknowledgement there
+                        // is no recovery chain yet, so allow the next foreground
+                        // callback to issue one AttachTurn. An already-running
+                        // attach keeps its id in the set until its ResumeTurn
+                        // acknowledgement, preventing duplicate submissions.
+                        if durableRecoveryTask == nil {
+                            needsDurableForegroundRecoveryTurnID = snapshot.turnId
+                            reattachedTurnIDs.remove(snapshot.turnId)
+                        }
+                        settleCorrelatedMainRun()
+                    }
+                    model.streaming = false
+                    model.statusLine = String(localized: "chat_background_paused_text")
+                    if let token = activeConversationTurnToken,
+                       token.clientTurnId == snapshot.turnId {
+                        resolvePauseAcknowledgements(token: token, result: .success(()))
+                    }
+                case .completed:
+                    guard isCorrelated else { return }
+                    if cancellationOperation?.turnId == snapshot.turnId {
+                        terminalRecoveryStates[snapshot.turnId] = snapshot.state
+                    }
+                    if snapshot.turnId == unresolvedRecoveryTurnID
+                        || snapshot.turnId == currentTurnId
+                        || snapshot.turnId == replayingTurnID {
+                        model.hasInactiveDurableRecovery = false
+                    }
+                    executorOwnedTurnID = nil
+                    if let token = activeConversationTurnToken,
+                       token.clientTurnId == snapshot.turnId {
+                        resolvePauseAcknowledgements(
+                            token: token,
+                            result: .failure(PauseAcknowledgementError.recoveryState(snapshot.state))
+                        )
+                    }
+                    if snapshot.turnId == unresolvedRecoveryTurnID {
+                        unresolvedRecoveryTurnID = nil
+                        needsDurableForegroundRecoveryTurnID = nil
+                        model.hasUnresolvedTurnRecovery = false
+                    }
+                    model.streaming = false
+                    durableTurns.clear(turnID: snapshot.turnId)
+                    reattachedTurnIDs.remove(snapshot.turnId)
+                    if snapshot.turnId == currentTurnId || snapshot.turnId == replayingTurnID {
+                        clearTurnPointers(keepEpoch: false)
+                    }
+                case .failed:
+                    guard isCorrelated else { return }
+                    if cancellationOperation?.turnId == snapshot.turnId {
+                        terminalRecoveryStates[snapshot.turnId] = snapshot.state
+                    }
+                    if snapshot.turnId == unresolvedRecoveryTurnID
+                        || snapshot.turnId == currentTurnId
+                        || snapshot.turnId == replayingTurnID {
+                        model.hasInactiveDurableRecovery = false
+                    }
+                    executorOwnedTurnID = nil
+                    if let token = activeConversationTurnToken,
+                       token.clientTurnId == snapshot.turnId {
+                        resolvePauseAcknowledgements(
+                            token: token,
+                            result: .failure(PauseAcknowledgementError.recoveryState(snapshot.state))
+                        )
+                    }
+                    if snapshot.turnId == unresolvedRecoveryTurnID {
+                        unresolvedRecoveryTurnID = nil
+                        needsDurableForegroundRecoveryTurnID = nil
+                        model.hasUnresolvedTurnRecovery = false
+                    }
+                    model.streaming = false
+                    durableTurns.clear(turnID: snapshot.turnId)
+                    reattachedTurnIDs.remove(snapshot.turnId)
+                    model.error = ConversationError(
+                        kind: .host,
+                        message: snapshot.reason ?? String(localized: "chat_background_failed_text")
+                    )
+                    if snapshot.turnId == currentTurnId || snapshot.turnId == replayingTurnID {
+                        clearTurnPointers(keepEpoch: false)
+                    }
+                case .cancelled:
+                    guard isCorrelated else { return }
+                    if cancellationOperation?.turnId == snapshot.turnId {
+                        terminalRecoveryStates[snapshot.turnId] = snapshot.state
+                    }
+                    if snapshot.turnId == unresolvedRecoveryTurnID
+                        || snapshot.turnId == currentTurnId
+                        || snapshot.turnId == replayingTurnID {
+                        model.hasInactiveDurableRecovery = false
+                    }
+                    executorOwnedTurnID = nil
+                    if let token = activeConversationTurnToken,
+                       token.clientTurnId == snapshot.turnId {
+                        resolvePauseAcknowledgements(
+                            token: token,
+                            result: .failure(PauseAcknowledgementError.recoveryState(snapshot.state))
+                        )
+                    }
+                    if snapshot.turnId == unresolvedRecoveryTurnID {
+                        unresolvedRecoveryTurnID = nil
+                        needsDurableForegroundRecoveryTurnID = nil
+                        model.hasUnresolvedTurnRecovery = false
+                    }
+                    model.streaming = false
+                    model.notice = .cancelled
+                    if snapshot.turnId == currentTurnId || snapshot.turnId == replayingTurnID {
+                        finishActiveRun(.cancelled)
+                        publishActiveTurnCompletion(.cancelled)
+                    }
+                    durableTurns.clear(turnID: snapshot.turnId)
+                    reattachedTurnIDs.remove(snapshot.turnId)
+                    if snapshot.turnId == currentTurnId || snapshot.turnId == replayingTurnID {
+                        clearTurnPointers(keepEpoch: false)
+                    }
+                @unknown default:
+                    break
+                }
+
+            case let .turnEventReplay(sessionId, turnId, sequence, eventJson):
+                guard sessionId == model.activeSessionId else { return }
+                // SessionResumed carries the authoritative terminal transcript.
+                // Attach still replays from cursor zero after a cold launch, but
+                // terminal envelopes must not project that same assistant/tool
+                // content a second time. Nonterminal recovery keeps the retained
+                // suffix so partial work remains visible.
+                if replayingTurnID == turnId,
+                   replayProjectionState.map({ !Self.isTerminalRecoveryState($0) }) ?? true {
+                    applyRetainedTurnEvent(eventJson, turnID: turnId)
+                }
+                durableTurns.updateSequence(turnID: turnId, sequence: sequence)
 
             case let .error(kind, message):
                 let accepted = acceptTurnEvent(event)
@@ -4511,6 +5108,7 @@ final class MockConversationSource: ConversationSource {
                 // session-state sibling of `SessionList` / `SessionStarted`.
                 guard pendingSessionTransition == .resume(sessionId) else { return }
                 invalidateTurnContext()
+                replayProjectionState = nil
                 model.clearAgentState()
                 model.activeSessionId = sessionId
                 hasConfirmedSessionState = true
@@ -4546,6 +5144,7 @@ final class MockConversationSource: ConversationSource {
                 model.sessionRefreshRevision &+= 1
                 refreshSessionAgentsAfterTransition()
                 refreshBackgroundTasks()
+                reattachDurableTurnIfNeeded(sessionID: sessionId)
 
             case .sessionEnded:
                 // The current session ended (e.g. cleared). Drop the active id;
@@ -4603,6 +5202,12 @@ final class MockConversationSource: ConversationSource {
         /// path still goes through `apply` directly.
         func applyForTesting(_ event: ClientEvent) {
             apply(event)
+        }
+
+        /// Construct the real callback adapter for ordering tests without
+        /// building a MobileEngineHandle.
+        func makeEventListenerForTesting() -> EngineListener {
+            EngineListener(source: self)
         }
 
         /// Establish the same correlation guard as a submitted ResumeSession
@@ -4675,10 +5280,27 @@ final class MockConversationSource: ConversationSource {
             model.activeSessionId = sessionId
             model.streaming = true
             model.turnCompletion = nil
+            model.activeTurnToken = ConversationTurnToken(
+                clientTurnId: turnId,
+                sessionEpoch: sessionEpoch
+            )
             turnSpeechSequence = 0
             currentTurnId = turnId
+            executorOwnedTurnID = turnId
             activeTurnEpoch = sessionEpoch
-            nextTurnId = max(nextTurnId, turnId &+ 1)
+            nextTurnId = turnId == UInt64.max ? 1 : turnId + 1
+        }
+
+        func beginDurableTurnForTesting(turnId: UInt64, sessionId: String) {
+            durableTurns.begin(sessionID: sessionId, turnID: turnId)
+        }
+
+        func recordDurableSequenceForTesting(turnId: UInt64, sequence: UInt64) {
+            durableTurns.updateSequence(turnID: turnId, sequence: sequence)
+        }
+
+        func durableAttachCursorForTesting() -> UInt64? {
+            durableTurns.load()?.lastSequence
         }
 
         func cancelForTesting() {
@@ -5440,7 +6062,31 @@ final class MockConversationSource: ConversationSource {
         }
 
         private func fail(_ kind: ConversationError.Kind, _ message: String) {
+            if let cancellationOperation,
+               cancellationOperation.turnId == currentTurnId {
+                // An engine error racing Cancel is not terminal ownership
+                // proof. Keep the durable record and correlator so the caller
+                // can retry Stop (or receive the later matching recovery
+                // snapshot) instead of silently opening a second turn.
+                model.error = ConversationError(kind: kind, message: message)
+                if unresolvedRecoveryTurnID != cancellationOperation.turnId {
+                    model.streaming = true
+                }
+                model.statusLine = nil
+                return
+            }
             let settledTurn = currentTurnId != nil
+            if let currentTurnId {
+                durableTurns.clear(turnID: currentTurnId)
+                if unresolvedRecoveryTurnID == currentTurnId {
+                    unresolvedRecoveryTurnID = nil
+                    needsDurableForegroundRecoveryTurnID = nil
+                }
+                reattachedTurnIDs.remove(currentTurnId)
+                model.hasInactiveDurableRecovery = false
+                model.hasUnresolvedTurnRecovery = false
+                executorOwnedTurnID = nil
+            }
             model.error = ConversationError(kind: kind, message: message)
             model.streaming = false
             model.statusLine = nil
@@ -5581,6 +6227,9 @@ final class MockConversationSource: ConversationSource {
         /// retaining the old transcript and correlator until the host confirms
         /// release. Only then is the transcript reset for the selected session.
         func openSession(_ session: SessionRef) {
+            guard unresolvedRecoveryTurnID == nil,
+                  pauseAcknowledgements.isEmpty
+            else { return }
             let turnIdToCancel = inFlightTurnForSessionSwitch()
             submitSessionCancellation(turnIdToCancel, isNew: false)
         }
@@ -5600,7 +6249,13 @@ final class MockConversationSource: ConversationSource {
         /// overlay). Process restoration still re-requests the active id when the
         /// model has no committed transcript to display.
         func resumeSession(_ uuid: String, emptySessionTitle: String?) {
-            guard !uuid.isEmpty else { return }
+            guard !uuid.isEmpty,
+                  unresolvedRecoveryTurnID == nil,
+                  pauseAcknowledgements.isEmpty
+            else { return }
+            if let record = durableTurns.load(), record.sessionID != uuid {
+                durableTurns.clear()
+            }
             if uuid == model.activeSessionId,
                pendingSessionTransition == nil,
                (!model.items.isEmpty || !model.messages.isEmpty || hasConfirmedSessionState) {
@@ -5626,6 +6281,137 @@ final class MockConversationSource: ConversationSource {
                 allowsMissingSessionReplacement: emptySessionTitle == nil,
                 isNew: false
             )
+        }
+
+        private func reattachDurableTurnIfNeeded(sessionID: String) {
+            guard
+                durableRecoveryTask == nil,
+                let record = durableTurns.load(),
+                record.sessionID == sessionID,
+                reattachedTurnIDs.insert(record.turnID).inserted
+            else { return }
+            currentTurnId = record.turnID
+            activeTurnEpoch = sessionEpoch
+            unresolvedRecoveryTurnID = record.turnID
+            model.hasUnresolvedTurnRecovery = true
+            model.hasInactiveDurableRecovery = true
+            executorOwnedTurnID = nil
+            let token = ConversationTurnToken(
+                clientTurnId: record.turnID,
+                sessionEpoch: sessionEpoch
+            )
+            model.activeTurnToken = token
+            model.streaming = false
+            let recoveryTask = Task { @MainActor [weak self] in
+                defer {
+                    self?.replayingTurnID = nil
+                    self?.durableRecoveryPhase = nil
+                    self?.durableRecoveryTask = nil
+                }
+                guard let self else { return }
+                do {
+                    self.replayingTurnID = record.turnID
+                    self.durableRecoveryPhase = .attaching(turnID: record.turnID)
+                    self.replayProjectionState = nil
+                    try await self.submitCommand(.attachTurn(
+                        turnId: record.turnID,
+                        afterSequence: record.lastSequence
+                    ))
+                    // `onEvent` must return before the engine constructor or
+                    // command submission can continue, so the callback only
+                    // enqueues. Wait until the single listener pump has applied
+                    // the recovery snapshot and every retained envelope before
+                    // allowing live ResumeTurn events to be projected.
+                    await self.listener?.waitUntilIdle()
+                    self.durableRecoveryPhase = .resuming(turnID: record.turnID)
+                    try await self.submitCommand(.resumeTurn(turnId: record.turnID))
+                    // ResumeTurn emits its own recovery state before any new
+                    // live envelopes. Drain that FIFO as well so a foreground
+                    // call cannot race the first resumed delta.
+                    await self.listener?.waitUntilIdle()
+                } catch {
+                    self.restoreFailedDurableRecovery(record: record, error: error)
+                }
+            }
+            durableRecoveryTask = recoveryTask
+        }
+
+        private func restoreFailedDurableRecovery(
+            record: DurableConversationTurnRecord,
+            error: Error
+        ) {
+            durableRecoveryPhase = nil
+            reattachedTurnIDs.remove(record.turnID)
+            guard model.activeSessionId == record.sessionID else { return }
+            currentTurnId = record.turnID
+            activeTurnEpoch = sessionEpoch
+            unresolvedRecoveryTurnID = record.turnID
+            needsDurableForegroundRecoveryTurnID = record.turnID
+            model.activeTurnToken = ConversationTurnToken(
+                clientTurnId: record.turnID,
+                sessionEpoch: sessionEpoch
+            )
+            model.hasUnresolvedTurnRecovery = true
+            model.hasInactiveDurableRecovery = true
+            executorOwnedTurnID = nil
+            settleCorrelatedMainRun()
+            model.streaming = false
+            model.statusLine = nil
+            model.error = ConversationError(
+                kind: .host,
+                message: String(describing: error)
+            )
+        }
+
+        private func applyRetainedTurnEvent(_ eventJSON: String, turnID: UInt64) {
+            guard
+                currentTurnId == turnID,
+                let data = eventJSON.data(using: .utf8),
+                let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                let type = object["type"] as? String
+            else { return }
+            switch type {
+            case "text_delta":
+                if let text = object["text"] as? String {
+                    apply(.textDelta(text: text))
+                }
+            case "tool_use_started":
+                if let id = object["id"] as? String,
+                   let tool = object["tool"] as? String,
+                   let inputJSON = object["input_json"] as? String {
+                    apply(.toolUseStarted(
+                        id: id,
+                        tool: tool,
+                        inputJson: inputJSON,
+                        header: nil
+                    ))
+                }
+            case "tool_heartbeat":
+                if let id = object["id"] as? String,
+                   let tool = object["tool"] as? String,
+                   let elapsed = object["elapsed_ms"] as? NSNumber {
+                    apply(.toolHeartbeat(
+                        id: id,
+                        tool: tool,
+                        elapsedMs: elapsed.uint64Value
+                    ))
+                }
+            case "tool_use_result":
+                if let id = object["id"] as? String,
+                   let tool = object["tool"] as? String,
+                   let resultJSON = object["result_json"] as? String,
+                   let isError = object["is_error"] as? Bool {
+                    apply(.toolUseResult(
+                        id: id,
+                        tool: tool,
+                        resultJson: resultJSON,
+                        isError: isError,
+                        display: nil
+                    ))
+                }
+            default:
+                break
+            }
         }
 
         // MARK: permission gating (SHIP-BLOCKER #3)
@@ -5711,19 +6497,44 @@ final class MockConversationSource: ConversationSource {
     /// and forward to the source so all state mutation is main-actor-confined.
     final class EngineListener: IosEventListener {
         private weak var source: EngineConversationSource?
+        private static let drainBatchSize = 256
+        private enum PendingItem {
+            case event(ClientEvent)
+            case workflowProgress(
+                originSessionId: String,
+                taskId: String,
+                runId: String,
+                progress: WorkflowProgressDto
+            )
+        }
+
+        /// Callbacks can arrive from the engine runtime while the main actor is
+        /// synchronously constructing the handle. Keep the callback fire-and-
+        /// return, but serialize all later projection through one FIFO pump.
+        /// The lock protects enqueueing from concurrent runtime callbacks; the
+        /// pump itself only touches the source on MainActor.
+        private let queueLock = NSLock()
+        private var queue: [PendingItem] = []
+        private var queueHead = 0
+        private var pumpScheduled = false
+        private var idleWaiters: [CheckedContinuation<Void, Never>] = []
+        /// Test-only counters make the batch/yield contract deterministic to
+        /// assert without exposing scheduling hooks to production callers.
+        private(set) var pumpInvocationsForTesting = 0
+        private(set) var pumpYieldCountForTesting = 0
+
+        var isIdleForTesting: Bool {
+            queueLock.lock()
+            defer { queueLock.unlock() }
+            return queueHead == queue.count && !pumpScheduled
+        }
 
         init(source: EngineConversationSource) {
             self.source = source
         }
 
         func onEvent(event: ClientEvent) async {
-            // The callback must be fire-and-return. `buildIosEngineWithConfig`
-            // drives the Rust runtime synchronously and can emit bootstrap
-            // events before it returns. Waiting for `MainActor.run` here would
-            // deadlock when the constructor itself was invoked on MainActor.
-            Task { @MainActor [weak source] in
-                source?.apply(event)
-            }
+            enqueue(.event(event))
         }
 
         func onWorkflowProgress(
@@ -5732,14 +6543,12 @@ final class MockConversationSource: ConversationSource {
             runId: String,
             progress: WorkflowProgressDto
         ) async {
-            Task { @MainActor [weak source] in
-                source?.applyWorkflowProgress(
-                    originSessionId: originSessionId,
-                    taskId: taskId,
-                    runId: runId,
-                    progress: progress
-                )
-            }
+            enqueue(.workflowProgress(
+                originSessionId: originSessionId,
+                taskId: taskId,
+                runId: runId,
+                progress: progress
+            ))
         }
 
         /// Compatibility with an older generated callback. It intentionally
@@ -5749,6 +6558,108 @@ final class MockConversationSource: ConversationSource {
             runId _: String,
             progress _: WorkflowProgressDto
         ) async {}
+
+        /// Wait for all callbacks enqueued before this call to be applied. This
+        /// is also used by durable reattach so terminal recovery state is seen
+        /// before replay envelopes can project onto the restored transcript.
+        func waitUntilIdle() async {
+            await withCheckedContinuation { continuation in
+                queueLock.lock()
+                if queueHead == queue.count, !pumpScheduled {
+                    queueLock.unlock()
+                    continuation.resume()
+                } else {
+                    idleWaiters.append(continuation)
+                    queueLock.unlock()
+                }
+            }
+        }
+
+        /// Test seam for asserting that event order is preserved without
+        /// constructing the Rust engine.
+        func enqueueForTesting(_ event: ClientEvent) {
+            enqueue(.event(event))
+        }
+
+        private func enqueue(_ item: PendingItem) {
+            queueLock.lock()
+            queue.append(item)
+            let shouldSchedulePump = !pumpScheduled
+            if shouldSchedulePump {
+                pumpScheduled = true
+            }
+            queueLock.unlock()
+
+            guard shouldSchedulePump else { return }
+            Task { @MainActor [weak self] in
+                self?.drain()
+            }
+        }
+
+        @MainActor
+        private func drain() {
+            pumpInvocationsForTesting += 1
+            var processed = 0
+            while processed < Self.drainBatchSize {
+                queueLock.lock()
+                guard queueHead < queue.count else {
+                    queue.removeAll(keepingCapacity: true)
+                    queueHead = 0
+                    pumpScheduled = false
+                    let waiters = idleWaiters
+                    idleWaiters.removeAll(keepingCapacity: true)
+                    queueLock.unlock()
+                    for waiter in waiters {
+                        waiter.resume()
+                    }
+                    return
+                }
+                let item = queue[queueHead]
+                queueHead += 1
+                if queueHead > 256, queueHead * 2 > queue.count {
+                    queue.removeFirst(queueHead)
+                    queueHead = 0
+                }
+                queueLock.unlock()
+
+                processed += 1
+                guard let source else { continue }
+                switch item {
+                case let .event(event):
+                    source.apply(event)
+                case let .workflowProgress(originSessionId, taskId, runId, progress):
+                    source.applyWorkflowProgress(
+                        originSessionId: originSessionId,
+                        taskId: taskId,
+                        runId: runId,
+                        progress: progress
+                    )
+                }
+            }
+
+            // Keep the lock-held `pumpScheduled` bit set while handing off to
+            // exactly one next MainActor task. Producers therefore append to
+            // this same FIFO without starting a parallel pump, and the actor
+            // gets a scheduling point between bounded batches.
+            queueLock.lock()
+            guard queueHead < queue.count else {
+                queue.removeAll(keepingCapacity: true)
+                queueHead = 0
+                pumpScheduled = false
+                let waiters = idleWaiters
+                idleWaiters.removeAll(keepingCapacity: true)
+                queueLock.unlock()
+                for waiter in waiters {
+                    waiter.resume()
+                }
+                return
+            }
+            pumpYieldCountForTesting += 1
+            queueLock.unlock()
+            Task { @MainActor [weak self] in
+                self?.drain()
+            }
+        }
     }
 
 #endif

@@ -1,0 +1,184 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+
+const root = join(import.meta.dirname, '../../..');
+
+function hits(needle: string): string[] {
+  try {
+    return execFileSync('git', ['grep', '-l', '-F', needle, '--', 'clients/electron/src'],
+      { cwd: root, encoding: 'utf8' }).trim().split('\n').filter(Boolean);
+  } catch {
+    return [];   // git grep 无命中时退出码为 1
+  }
+}
+
+test('the grep guard can actually find something', () => {
+  assert.ok(
+    hits('SettingsScreen').length > 0,
+    'if a known-present symbol returns zero hits, every zero below proves nothing',
+  );
+});
+
+test('the mock settings pages are gone', () => {
+  assert.deepEqual(hits('SettingsGenericPage'), []);
+  assert.deepEqual(hits('SettingsBillingPage'), []);
+  assert.deepEqual(hits('SettingsUsagePage'), []);
+  assert.deepEqual(hits('SettingsAccountPage'), []);
+  assert.deepEqual(hits('SettingsPrivacyPage'), []);
+  assert.deepEqual(hits('SettingsCodePage'), []);
+  assert.deepEqual(hits('SettingsGeneralPage'), []);
+  assert.deepEqual(hits('SettingsPage'), []);
+});
+
+test('BetaSettings is gone', () => {
+  assert.deepEqual(hits('BetaSettings'), []);
+});
+
+// ---------------------------------------------------------------------------
+// Final review, Minor: `Projects.tsx` carried a native `title=` tooltip on a
+// DISABLED button — the exact pattern `SettingsScreen.tsx:456` and `:483`
+// carry comments explaining is wrong (Chromium does not dispatch the pointer
+// events a native tooltip needs on a disabled control, and a tooltip is
+// invisible to keyboard/AT users regardless), so its reason text never
+// showed. This is a structural guard rather than an assertion about one
+// string: any `<button>` in the settings surface that grows a `title=` prop
+// is making the same mistake.
+// ---------------------------------------------------------------------------
+
+function buttonElements(source: string): string[] {
+  const elements: string[] = [];
+  for (let index = source.indexOf('<button'); index !== -1; index = source.indexOf('<button', index + 1)) {
+    const end = source.indexOf('>', index);
+    if (end !== -1) elements.push(source.slice(index, end + 1));
+  }
+  return elements;
+}
+
+function settingsSources(): { path: string; source: string }[] {
+  const paths = execFileSync('git', ['ls-files', '--', 'clients/electron/src/renderer/components/settings'],
+    { cwd: root, encoding: 'utf8' }).trim().split('\n').filter((p) => p.endsWith('.tsx'));
+  return paths.map((path) => ({ path, source: readFileSync(join(root, path), 'utf8') }));
+}
+
+test('the button scanner can actually find buttons with attributes', () => {
+  const withAttributes = settingsSources()
+    .flatMap(({ source }) => buttonElements(source))
+    .filter((element) => element.includes('disabled='));
+  assert.ok(
+    withAttributes.length > 5,
+    `if the scanner finds no attributed <button>, every zero below proves nothing (found ${withAttributes.length})`,
+  );
+});
+
+test('no settings button explains itself with a native title tooltip', () => {
+  const offenders = settingsSources().flatMap(({ path, source }) =>
+    buttonElements(source).filter((element) => /\stitle=/.test(element)).map(() => path));
+  assert.deepEqual(
+    offenders, [],
+    'a disabled button never dispatches the pointer events a native tooltip needs, and a '
+    + 'tooltip is invisible to keyboard/AT users — use visible text plus `aria-describedby`, '
+    + 'the way SettingsScreen.tsx does for the layer switcher and the restart button',
+  );
+});
+
+// ---------------------------------------------------------------------------
+// Final review, Minor: `PublicSettings` was declared independently in the
+// main process, the preload bridge and the renderer's `window.lingxi`
+// declaration, and the three had already drifted —
+// `bypassPermissionsModeAccepted` reached two of them and not preload's. This
+// branch consolidated `AllowedClientCommand` into `src/shared` for exactly
+// this reason; the settings shape now lives in `src/shared/settings.ts` and
+// this guard is what keeps a fourth copy from appearing.
+// ---------------------------------------------------------------------------
+
+function declarationSites(name: string): string[] {
+  try {
+    return execFileSync(
+      'git',
+      ['grep', '-l', '-E', `^export (interface|type) ${name}[ <={]`, '--', 'clients/electron/src'],
+      { cwd: root, encoding: 'utf8' },
+    ).trim().split('\n').filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
+test('the declaration-site grep can actually find a declaration', () => {
+  assert.deepEqual(
+    declarationSites('PersistedSettings'),
+    ['clients/electron/src/main/host-utils.ts'],
+    'if a known single-site type returns nothing, every count below proves nothing',
+  );
+});
+
+test('the device settings shape is declared exactly once, in src/shared', () => {
+  for (const name of ['PublicSettings', 'SessionPinInput', 'PinnedSessionRecord']) {
+    assert.deepEqual(
+      declarationSites(name),
+      ['clients/electron/src/shared/settings.ts'],
+      `${name} must have one home; a second declaration is free to drift the way the `
+      + 'preload copy drifted on bypassPermissionsModeAccepted',
+    );
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Task 7 follow-up: the desktop-audio-capability plan added
+// VoicePreferences/VoiceOption/VoicePlatformSnapshot with no equivalent
+// tripwire — flagged in the Task 4+5 review as an open gap. VoicePreferences
+// crosses the main/renderer boundary the same way PublicSettings does (see
+// shared/voicePreferences.ts's own doc comment), so it lives in src/shared;
+// VoiceOption/VoicePlatformSnapshot are the capability probe's own
+// vocabulary and belong to renderer/audio/capabilities.ts. No duplicate
+// exists today — this only guards against one appearing later.
+// ---------------------------------------------------------------------------
+
+test('the voice preference and capability shapes are declared exactly once', () => {
+  const expectedHomes: Record<string, string> = {
+    VoicePreferences: 'clients/electron/src/shared/voicePreferences.ts',
+    VoiceOption: 'clients/electron/src/renderer/audio/capabilities.ts',
+    VoicePlatformSnapshot: 'clients/electron/src/renderer/audio/capabilities.ts',
+  };
+  for (const [name, home] of Object.entries(expectedHomes)) {
+    assert.deepEqual(
+      declarationSites(name),
+      [home],
+      `${name} must have one home; a second declaration is free to drift the way the `
+      + 'preload copy drifted on bypassPermissionsModeAccepted',
+    );
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Final review, Defects 5 and 10: the 「自动朗读回复」 toggle asserted
+// 「收到回复后自动朗读，无需手动点击播放。」 and did neither. `setAutoPlayReplies`
+// persisted the flag through `bridge.setVoicePreferences` →
+// `host.updateSettings({voice})` → the device settings file, and NO code
+// anywhere read it back: the renderer speaks only when the ENGINE sends
+// `AudioOpDto::Synthesize`, and `useBridge`'s `playback()` passes only
+// `{voiceSelection, rate}`. There is no manual play control either, so the
+// second clause was false too.
+//
+// Implementing auto-playback is a feature, not a review fix (it needs a stop
+// control for a queue `speechSynthesis` shares across sessions, a decision
+// about speaking markdown and code blocks aloud, and per-session scoping) —
+// so the promise was withdrawn instead. This guards the withdrawal: a
+// persisted setting nothing reads is a landmine, because the next reader
+// assumes it works.
+// ---------------------------------------------------------------------------
+
+test('the auto-play-replies setting is gone, not merely disconnected', () => {
+  assert.deepEqual(
+    hits('autoPlayReplies'),
+    [],
+    'a preference that is written and never read tells the next person it works',
+  );
+});
+
+test('no settings copy promises automatic reply playback', () => {
+  assert.deepEqual(hits('自动朗读'), []);
+  assert.deepEqual(hits('无需手动点击播放'), []);
+});

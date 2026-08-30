@@ -171,7 +171,8 @@ pub use orchestrator::{
     OrchestratorHandle, OutputEvent, OutputStream, PermissionControlState,
     PermissionModeAvailability, PlanSnapshot, RateLimitSnapshot, ReasoningBudgetRange,
     ReasoningControlSpec, ReasoningSelection, RecapOutcome, RegisterRepoRootOutcome,
-    RegisterRepoRootRequest, ResumeRuntimeSnapshot, RewindRowData, StatusSnapshot, TurnOutcome,
+    RegisterRepoRootRequest, ResumeRuntimeSnapshot, RewindRowData, SkillInfo, StatusSnapshot,
+    TurnOutcome,
 };
 pub use permission_gate::{PermissionDecision, PermissionGate};
 pub use platform::Platform;

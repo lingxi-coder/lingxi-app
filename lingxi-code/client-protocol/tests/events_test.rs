@@ -14,7 +14,7 @@ use client_protocol::controls::{
     PermissionModeOptionDto, ReasoningControlSpecDto, ReasoningControlStateDto, ReasoningOptionDto,
     ReasoningSelectionDto,
 };
-use client_protocol::events::{ClientEvent, CostDto, TurnOutcomeDto};
+use client_protocol::events::{AudioOpDto, ClientEvent, CostDto, TurnOutcomeDto};
 use client_protocol::listings::SessionAgentSummaryDto;
 use client_protocol::local_apps::{
     AppBridgeResponseDto, AppCapabilityKindDto, AppCapabilityRequestDto, AppCheckpointDto,
@@ -860,5 +860,63 @@ fn end_turn_outcome_variants() {
         let back: TurnOutcomeDto =
             serde_json::from_value(json).expect("deserialize TurnOutcomeDto");
         assert_eq!(back, outcome);
+    }
+}
+
+/// `ClientEvent::AudioRequest` round trip — the engine asking a client to
+/// perform one audio operation, correlated by `request_id`. Mirrors the
+/// `ComputerAccessRequestDto` engine->client shape (module doc,
+/// `client_protocol::computer_access`), but the request/response ride on
+/// `ClientEvent`/`ClientCommand` directly rather than a bespoke DTO pair.
+#[test]
+fn audio_request_round_trips_on_the_wire() {
+    let request = ClientEvent::AudioRequest {
+        request_id: 7,
+        op: AudioOpDto::Transcribe {
+            language: Some("zh-CN".to_string()),
+        },
+    };
+    let json = serde_json::to_value(&request).expect("serialize AudioRequest");
+    assert_eq!(json["type"], "audio_request");
+    assert_eq!(json["request_id"], 7);
+    assert_eq!(json["op"]["type"], "transcribe");
+    assert_eq!(json["op"]["language"], "zh-CN");
+    assert_eq!(
+        serde_json::from_value::<ClientEvent>(json).expect("deserialize AudioRequest"),
+        request
+    );
+}
+
+/// Enumerate every `AudioOpDto` variant and assert the `snake_case` wire tag
+/// plus a byte-stable round trip. These mirror
+/// `traits::{VoiceRecorder, SpeechToText, TextToSpeech}`'s argument shapes:
+/// `StartRecording`/`StopRecording`/`IsRecording` <- `VoiceRecordingOpts` /
+/// bare calls; `Transcribe` <- `SttOpts`; `Synthesize` <- `TtsOpts`.
+#[test]
+fn audio_op_variants_round_trip_with_expected_tags() {
+    let cases = [
+        (
+            AudioOpDto::StartRecording {
+                sample_rate_hz: 16_000,
+                format: "wav".to_string(),
+            },
+            "start_recording",
+        ),
+        (AudioOpDto::StopRecording, "stop_recording"),
+        (AudioOpDto::IsRecording, "is_recording"),
+        (AudioOpDto::Transcribe { language: None }, "transcribe"),
+        (
+            AudioOpDto::Synthesize {
+                text: "hello".to_string(),
+                voice: Some("en-US-default".to_string()),
+            },
+            "synthesize",
+        ),
+    ];
+    for (op, tag) in cases {
+        let json = serde_json::to_value(&op).expect("serialize AudioOpDto");
+        assert_eq!(json["type"], tag, "AudioOpDto::{op:?} tag mismatch");
+        let back: AudioOpDto = serde_json::from_value(json).expect("deserialize AudioOpDto");
+        assert_eq!(back, op);
     }
 }

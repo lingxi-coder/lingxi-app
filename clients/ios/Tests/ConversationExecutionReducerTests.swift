@@ -21,19 +21,30 @@ import SwiftUI
         )
 
         private func makeSource(
-            permissionModeRepository: PermissionModeConfigurationRepository? = nil
+            permissionModeRepository: PermissionModeConfigurationRepository? = nil,
+            appSandboxRoot: String = NSTemporaryDirectory()
         ) -> EngineConversationSource {
             let config = EngineConfig(
                 apiBase: "https://api.anthropic.com",
                 apiKey: "",
                 model: "",
-                appSandboxRoot: NSTemporaryDirectory(),
+                appSandboxRoot: appSandboxRoot,
                 projectCwd: nil,
                 visionDelegationEnabled: true)
             return EngineConversationSource(
                 config: config,
                 permissionModeRepository: permissionModeRepository
             )
+        }
+
+        private func makeSandboxRoot() throws -> String {
+            let root = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+                .appendingPathComponent(UUID().uuidString, isDirectory: true)
+            try FileManager.default.createDirectory(
+                at: root,
+                withIntermediateDirectories: true
+            )
+            return root.path
         }
 
         func testBypassPermissionsIsSelectableBeforeRiskConfirmation() {
@@ -529,6 +540,15 @@ import SwiftUI
 
             releaseCancellation?.resume()
             releaseCancellation = nil
+            source.applyForTesting(.turnRecoveryState(snapshot: TurnRecoverySnapshotDto(
+                sessionId: "session-a",
+                turnId: 1,
+                state: .cancelled,
+                firstSequence: 0,
+                lastSequence: 0,
+                safeToResume: false,
+                reason: "user_cancelled"
+            )))
             await flushTasks(8)
 
             XCTAssertFalse(source.model.isCancelling)
@@ -757,6 +777,117 @@ import SwiftUI
             XCTAssertFalse(source.model.sessionTransitionPending)
             XCTAssertEqual(source.model.messages, [visibleMessage])
             XCTAssertEqual(source.model.items, [.message(visibleMessage)])
+        }
+
+        func testDurableTurnAttachCursorStaysInMemoryWithinOneSource() throws {
+            let sandboxRoot = try makeSandboxRoot()
+            let source = makeSource(appSandboxRoot: sandboxRoot)
+
+            source.beginDurableTurnForTesting(turnId: 700, sessionId: "session-a")
+            source.recordDurableSequenceForTesting(turnId: 700, sequence: 9)
+
+            XCTAssertEqual(source.durableAttachCursorForTesting(), 9)
+        }
+
+        func testDurableTurnColdAttachResetsPersistedCursorToReplayFromRetainedEvents() throws {
+            let sandboxRoot = try makeSandboxRoot()
+            let source = makeSource(appSandboxRoot: sandboxRoot)
+
+            source.beginDurableTurnForTesting(turnId: 701, sessionId: "session-a")
+            source.recordDurableSequenceForTesting(turnId: 701, sequence: 11)
+
+            let resumedSource = makeSource(appSandboxRoot: sandboxRoot)
+            XCTAssertEqual(
+                resumedSource.durableAttachCursorForTesting(),
+                0,
+                "a fresh source must not trust a cursor whose UI projection was never durably persisted"
+            )
+        }
+
+        func testColdRestoreKeepsAuthoritativeTerminalTranscriptWhenRetainedEventsReplay() async throws {
+            let sandboxRoot = try makeSandboxRoot()
+            let firstSource = makeSource(appSandboxRoot: sandboxRoot)
+            firstSource.beginDurableTurnForTesting(turnId: 702, sessionId: "session-a")
+
+            let source = makeSource(appSandboxRoot: sandboxRoot)
+            var submitted: [ClientCommand] = []
+            source.setCommandSubmitterForTesting { command in
+                submitted.append(command)
+                switch command {
+                case .attachTurn:
+                    // A terminal checkpoint is delivered before its retained
+                    // envelopes. The transcript from SessionResumed is the
+                    // authoritative rendering in this crash window.
+                    source.applyForTesting(.turnRecoveryState(snapshot: TurnRecoverySnapshotDto(
+                        sessionId: "session-a",
+                        turnId: 702,
+                        state: .completed,
+                        firstSequence: 1,
+                        lastSequence: 3,
+                        safeToResume: false,
+                        reason: nil
+                    )))
+                    source.applyForTesting(.turnEventReplay(
+                        sessionId: "session-a",
+                        turnId: 702,
+                        sequence: 1,
+                        eventJson: #"{"type":"text_delta","text":"terminal answer"}"#
+                    ))
+                    source.applyForTesting(.turnEventReplay(
+                        sessionId: "session-a",
+                        turnId: 702,
+                        sequence: 2,
+                        eventJson: #"{"type":"tool_use_started","id":"tool-702","tool":"Read","input_json":"{}"}"#
+                    ))
+                case .resumeTurn:
+                    break
+                default:
+                    break
+                }
+            }
+
+            source.expectSessionResumeForTesting("session-a")
+            source.applyForTesting(.sessionResumed(
+                sessionId: "session-a",
+                messages: [
+                    MessageDto(role: "user", blocks: [.text(text: "run")]),
+                    MessageDto(role: "assistant", blocks: [
+                        .text(text: "terminal answer"),
+                        .toolUse(id: "tool-702", tool: "Read", inputJson: "{}", header: nil),
+                    ]),
+                    MessageDto(role: "user", blocks: [
+                        .toolResult(
+                            id: "tool-702",
+                            tool: "Read",
+                            resultJson: #"{"result":"ok"}"#,
+                            isError: false,
+                            oldString: nil,
+                            newString: nil,
+                            filePath: nil,
+                            display: nil
+                        ),
+                    ]),
+                ]
+            ))
+            await flushTasks(12)
+
+            XCTAssertEqual(submitted.compactMap { command -> String? in
+                switch command {
+                case .attachTurn: return "attach"
+                case .resumeTurn: return "resume"
+                default: return nil
+                }
+            }, ["attach", "resume"])
+            XCTAssertEqual(source.model.messages.map(\.text), ["run", "terminal answer"])
+            XCTAssertEqual(
+                source.model.items.filter {
+                    if case .run = $0 { return true }
+                    return false
+                }.count,
+                1,
+                "retained terminal tool events must not duplicate the restored run"
+            )
+            XCTAssertFalse(source.model.streaming)
         }
 
         func testEmptyUnconfirmedActiveSessionStillRequestsProcessRestoreReplay() async {
@@ -988,6 +1119,15 @@ import SwiftUI
                 stopReason: "cancelled",
                 cost: zeroCost
             ))
+            source.applyForTesting(.turnRecoveryState(snapshot: TurnRecoverySnapshotDto(
+                sessionId: "session-a",
+                turnId: 47,
+                state: .cancelled,
+                firstSequence: 0,
+                lastSequence: 0,
+                safeToResume: false,
+                reason: "user_cancelled"
+            )))
             releaseCancellation?.resume()
             releaseCancellation = nil
             await flushTasks(8)
@@ -1043,6 +1183,17 @@ import SwiftUI
             var submittedCommands: [ClientCommand] = []
             source.setCommandSubmitterForTesting { command in
                 await MainActor.run { submittedCommands.append(command) }
+                if case let .cancel(turnId?) = command {
+                    source.applyForTesting(.turnRecoveryState(snapshot: TurnRecoverySnapshotDto(
+                        sessionId: "session-a",
+                        turnId: turnId,
+                        state: .cancelled,
+                        firstSequence: 0,
+                        lastSequence: 0,
+                        safeToResume: false,
+                        reason: "user_cancelled"
+                    )))
+                }
             }
             source.beginTurnForTesting(turnId: 17, sessionId: "session-a")
 
@@ -1073,6 +1224,17 @@ import SwiftUI
                 if case .cancel = command {
                     await withCheckedContinuation { continuation in
                         releaseCancellation = continuation
+                    }
+                    if case let .cancel(turnId?) = command {
+                        source.applyForTesting(.turnRecoveryState(snapshot: TurnRecoverySnapshotDto(
+                            sessionId: "session-a",
+                            turnId: turnId,
+                            state: .cancelled,
+                            firstSequence: 0,
+                            lastSequence: 0,
+                            safeToResume: false,
+                            reason: "user_cancelled"
+                        )))
                     }
                 }
             }
@@ -1107,6 +1269,17 @@ import SwiftUI
             var submittedCommands: [ClientCommand] = []
             source.setCommandSubmitterForTesting { command in
                 await MainActor.run { submittedCommands.append(command) }
+                if case let .cancel(turnId?) = command {
+                    source.applyForTesting(.turnRecoveryState(snapshot: TurnRecoverySnapshotDto(
+                        sessionId: "session-a",
+                        turnId: turnId,
+                        state: .cancelled,
+                        firstSequence: 0,
+                        lastSequence: 0,
+                        safeToResume: false,
+                        reason: "user_cancelled"
+                    )))
+                }
             }
             source.beginTurnForTesting(turnId: 23, sessionId: "session-a")
 

@@ -1,0 +1,8 @@
+{
+  "type": "audio_request",
+  "request_id": 7,
+  "op": {
+    "type": "transcribe",
+    "language": "zh-CN"
+  }
+}

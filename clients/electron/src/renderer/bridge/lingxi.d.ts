@@ -1,6 +1,5 @@
 import type {
   AskUserQuestionRequestDto,
-  ClientCommand,
   ClientEvent,
   ComputerAccessRequestDto,
   ComputerAccessResponseDto,
@@ -9,6 +8,17 @@ import type {
   PermissionResponseDto,
   SessionRowDto,
 } from '@lingxi/bridge-client';
+import type { AllowedClientCommand } from '../../shared/clientCommands.js';
+import type { PinnedSessionRecord, PublicSettings, SessionRef } from '../../shared/settings.js';
+import type { MicrophonePermissionStatus } from '../../shared/microphoneAccess.js';
+
+export type { AllowedClientCommand } from '../../shared/clientCommands.js';
+export type {
+  PinnedSessionRecord,
+  PublicSettings,
+  SessionPinInput,
+  SessionRef,
+} from '../../shared/settings.js';
 
 export type ConnectionState =
   | { status: 'idle' }
@@ -19,25 +29,6 @@ export type ConnectionState =
   | { status: 'disconnected'; reason?: string }
   | { status: 'error'; message: string };
 
-export type AllowedClientCommand = Extract<ClientCommand, {
-  type: 'set_model' | 'list_models' | 'new_session' | 'resume_session' | 'list_sessions' |
-    'task_list' | 'task_output' | 'task_stop' | 'set_permission_mode' | 'run_slash_command' |
-    'get_conversation_controls' | 'set_reasoning_selection' | 'set_fast_mode';
-}> | { type: 'refresh_listings'; which: Array<{ type: 'status' | 'doctor' | 'slash_commands' }> };
-export interface PublicSettings {
-  version: 1;
-  theme?: 'dark' | 'light';
-  model?: string;
-  apiBaseUrl?: string;
-  activeProject?: string;
-  activeSession?: SessionRef;
-  projects: string[];
-  pinnedSessions: PinnedSessionRecord[];
-}
-export interface SessionRef {
-  projectPath: string;
-  sessionId: string;
-}
 export interface RuntimeEventEnvelope<T = unknown> {
   sessionId: string;
   event: T;
@@ -55,13 +46,6 @@ export interface ProjectSessionCatalogState {
   sessions: SessionRowDto[];
   error?: string;
 }
-export interface PinnedSessionRecord {
-  projectPath: string;
-  sessionId: string;
-  title: string;
-  pinnedAt: string;
-}
-export type SessionPinInput = Omit<PinnedSessionRecord, 'pinnedAt'>;
 export interface WorkspaceMetadata {
   path?: string;
   trusted: boolean;
@@ -91,19 +75,21 @@ export interface BootstrapState {
   pendingAskUserQuestions?: AskUserQuestionRequestDto[];
   connection: ConnectionState;
   diagnostics: DiagnosticEntry[];
+  /** The three numbers the About page shows. `engine` is absent until a bridge runtime has connected at least once. */
+  versions: { app: string; electron: string; engine?: { serverName: string; serverProtocol: string; clientProtocol: string } };
 }
 export interface WorkspaceFileSearchResult { files: string[]; truncated: boolean }
 export type Unsubscribe = () => void;
 
-/** The two macOS System Settings deep links the computer-access TCC panel opens. */
-export type SystemSettingsPane = 'accessibility' | 'screen_recording';
+/** The macOS System Settings deep links this app opens: the computer-access TCC panel's two panes, plus the voice settings page's `microphone` row. */
+export type SystemSettingsPane = 'accessibility' | 'screen_recording' | 'microphone';
 
 export interface LingxiApi {
   platform: NodeJS.Platform;
   isElectron: true;
   bootstrap(): Promise<BootstrapState>;
   settings(): Promise<PublicSettings>;
-  updateSettings(patch: { theme?: 'dark' | 'light'; model?: string | null; apiBaseUrl?: string | null }): Promise<PublicSettings>;
+  updateSettings(patch: { theme?: 'dark' | 'light' | 'system'; model?: string | null; apiBaseUrl?: string | null; voice?: unknown }): Promise<PublicSettings>;
   pickWorkspace(): Promise<WorkspaceMetadata | null>;
   setWorkspace(path: string): Promise<WorkspaceMetadata>;
   removeProject(path: string): Promise<BootstrapState>;
@@ -128,6 +114,8 @@ export interface LingxiApi {
   answerAskUserQuestion(sessionId: string, requestId: number, answers: Record<string, string>): Promise<void>;
   cancelAskUserQuestion(sessionId: string, requestId: number): Promise<void>;
   openSystemSettings(pane: SystemSettingsPane): Promise<void>;
+  /** The OS microphone grant, read in the main process — see `shared/microphoneAccess.ts` for why the renderer cannot read it itself. */
+  microphoneAccess(): Promise<MicrophonePermissionStatus>;
   cancel(sessionId: string, turnId?: number): Promise<void>;
   command(sessionId: string, command: AllowedClientCommand): Promise<void>;
   connectionState(sessionId: string): Promise<ConnectionState>;

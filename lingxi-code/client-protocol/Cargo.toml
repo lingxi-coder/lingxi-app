@@ -26,6 +26,14 @@ uniffi = { workspace = true, optional = true }
 # enter the contract itself (§0.4). Keeping it under `[dev-dependencies]` honors
 # "no new prod dep — dev-only" (plan F1-08).
 serde_json.workspace = true
+# DEV-ONLY: the audio contract test (`commands_test.rs`) pins that
+# `AudioErrorKindDto` totally covers `traits::{SttError, VoiceError,
+# TtsError}` via an exhaustive `match` with no wildcard arm, so a real trait
+# error type is needed to make that totality check load-bearing (a hand-copied
+# stand-in enum could drift from the real one without ever failing). The
+# actual engine->DTO lowering is a `client-adapter` (Task 2) concern, not a
+# prod dependency of this crate.
+traits = { path = "../traits" }
 
 [features]
 default = []

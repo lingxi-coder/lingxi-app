@@ -2,7 +2,21 @@ import { createHash } from 'node:crypto';
 import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, readlinkSync, realpathSync, renameSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, isAbsolute, join, normalize, resolve } from 'node:path';
 
-export const SETTINGS_VERSION = 1 as const;
+import { SETTINGS_VERSION } from '../shared/settings.js';
+import type { PinnedSessionRecord, PublicSettings, SessionRef } from '../shared/settings.js';
+import { parseVoicePreferences } from '../shared/voicePreferences.js';
+import type { VoicePreferences } from '../shared/voicePreferences.js';
+
+export { SETTINGS_VERSION } from '../shared/settings.js';
+export type {
+  PinnedSessionRecord,
+  PublicSettings,
+  SessionPinInput,
+  SessionRef,
+} from '../shared/settings.js';
+export type { VoicePreferences } from '../shared/voicePreferences.js';
+export { parseVoicePreferences } from '../shared/voicePreferences.js';
+
 export const MAX_PROJECTS = 50;
 export const MAX_PINNED_SESSIONS = 100;
 export const MAX_DIAGNOSTICS = 200;
@@ -42,21 +56,9 @@ export interface TrustRecord {
   trustedAt: string;
 }
 
-export interface PinnedSessionRecord {
-  projectPath: string;
-  sessionId: string;
-  title: string;
-  pinnedAt: string;
-}
-
-export interface SessionRef {
-  projectPath: string;
-  sessionId: string;
-}
-
 export interface PersistedSettings {
   version: typeof SETTINGS_VERSION;
-  theme?: 'dark' | 'light';
+  theme?: 'dark' | 'light' | 'system';
   model?: string;
   apiBaseUrl?: string;
   activeProject?: string;
@@ -68,17 +70,9 @@ export interface PersistedSettings {
    * (oracle `bypassPermissionsModeAccepted`). Persisted so the blocking
    * acceptance dialog is shown ONCE, not on every activation. */
   bypassPermissionsModeAccepted?: boolean;
-}
-
-export interface PublicSettings {
-  version: typeof SETTINGS_VERSION;
-  theme?: 'dark' | 'light';
-  model?: string;
-  apiBaseUrl?: string;
-  activeProject?: string;
-  activeSession?: SessionRef;
-  projects: string[];
-  pinnedSessions: PinnedSessionRecord[];
+  /** Voice recognition/synthesis preferences — see `shared/voicePreferences.ts`.
+   * Omitted (not defaulted) until the first `SettingsStore.update({ voice })` call. */
+  voice?: VoicePreferences;
 }
 
 export interface DiagnosticEntry {
@@ -129,11 +123,17 @@ export function parseSettings(value: unknown): PersistedSettings {
   }
 
   const settings = defaultSettings();
-  settings.theme = value['theme'] === 'dark' || value['theme'] === 'light' ? value['theme'] : undefined;
+  settings.theme =
+    value['theme'] === 'dark' || value['theme'] === 'light' || value['theme'] === 'system'
+      ? value['theme']
+      : undefined;
   settings.model = boundedString(value['model'], 256);
   settings.apiBaseUrl = boundedString(value['apiBaseUrl'], 2_048);
   if (value['bypassPermissionsModeAccepted'] === true) {
     settings.bypassPermissionsModeAccepted = true;
+  }
+  if (value['voice'] !== undefined) {
+    settings.voice = parseVoicePreferences(value['voice']);
   }
 
   const legacyActive = boundedString(value['lastWorkspace'], 32_768);
@@ -186,7 +186,10 @@ export function parseSettings(value: unknown): PersistedSettings {
 }
 
 export function publicSettings(settings: PersistedSettings): PublicSettings {
-  const { version, theme, model, apiBaseUrl, activeProject, activeSession, projects, pinnedSessions } = settings;
+  const {
+    version, theme, model, apiBaseUrl, activeProject, activeSession, projects, pinnedSessions,
+    bypassPermissionsModeAccepted, voice,
+  } = settings;
   return {
     version,
     theme,
@@ -196,6 +199,8 @@ export function publicSettings(settings: PersistedSettings): PublicSettings {
     activeSession: activeSession ? { ...activeSession } : undefined,
     projects: [...projects],
     pinnedSessions: pinnedSessions.map((session) => ({ ...session })),
+    ...(bypassPermissionsModeAccepted ? { bypassPermissionsModeAccepted: true } : {}),
+    ...(voice ? { voice: { ...voice } } : {}),
   };
 }
 

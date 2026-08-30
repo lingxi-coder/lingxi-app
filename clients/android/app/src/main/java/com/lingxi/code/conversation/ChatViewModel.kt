@@ -14,6 +14,7 @@ import com.lingxi.code.bindings.MobileLinuxEventKindFfi
 import com.lingxi.code.bindings.MobileLinuxTaskSnapshotFfi
 import com.lingxi.code.bindings.MobileLinuxTaskStateFfi
 import com.lingxi.code.bindings.TaskStatusDto
+import com.lingxi.code.bindings.TurnRecoveryStateDto
 import com.lingxi.code.model.ConversationScope
 import com.lingxi.code.model.EngineModelCatalog
 import com.lingxi.code.model.EngineModelState
@@ -41,7 +42,9 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import java.security.SecureRandom
 import java.util.Locale
+import java.util.concurrent.atomic.AtomicLong
 
 /**
  * Immutable UI state for the conversation surface. Hoisted out of the
@@ -128,6 +131,14 @@ data class ChatState(
     /** Whether the plan panel shows every row instead of the capped window. */
     val planExpanded: Boolean = false,
     /**
+     * A recovered durable turn is parked at WaitingForUser without a local
+     * executor. The composer exposes Stop/Discard while this is true, but it
+     * must not count as active work for the foreground-service lease.
+     */
+    val durableRecoveryBlocked: Boolean = false,
+    /** A live local executor is parked at WaitingForUser; Stop still cancels it. */
+    val liveTurnWaitingForUser: Boolean = false,
+    /**
      * Tool-use ids whose result body/diff the user expanded.
      *
      * This lives in the MODEL layer on purpose. Both surfaces that render a tool
@@ -138,12 +149,13 @@ data class ChatState(
      */
     val expandedToolCalls: Set<String> = emptySet(),
 ) {
-    /** True while a turn is in flight — gates the composer (Stop vs Send). */
-    val isStreaming: Boolean get() = streaming
+    /** True while a turn is in flight or a live executor is waiting for input. */
+    val isStreaming: Boolean get() = streaming || liveTurnWaitingForUser
 
     /** Every engine workload that needs the Android foreground-service lease. */
     val requiresBackgroundExecution: Boolean
         get() = streaming ||
+            liveTurnWaitingForUser ||
             activeBackgroundTaskIds.isNotEmpty() ||
             shellTools.any { it.status == ShellToolStatus.Running } ||
             agentRun?.activeWorkers?.let { it > 0 } == true ||
@@ -178,6 +190,16 @@ enum class ChatErrorKind {
 }
 
 private const val ANDROID_COMPUTER_USE_TOOL = "android_use"
+
+private object DurableConversationTurnIds {
+    private val next = AtomicLong(
+        SecureRandom().nextLong().and(Long.MAX_VALUE).coerceAtLeast(1L),
+    )
+
+    fun next(): Long = next.updateAndGet { current ->
+        if (current == Long.MAX_VALUE) 1L else current + 1L
+    }
+}
 
 enum class ConversationTurnOrigin {
     Ordinary,
@@ -353,6 +375,33 @@ class ChatViewModel(
 
     /** Monotonic reply-stream generation used to reject stale turn events. */
     private var turnToken: Long = 0L
+    private var durableTurnId: Long? = null
+    /** Token used when a durable turn is attached without a local submit collector. */
+    private var recoveredTurnToken: Long? = null
+    /** Non-null only while AttachTurn is replaying retained history. */
+    private var recoveryReplayTurnId: Long? = null
+    /** UI-owner-local durable replay cursor. */
+    private var durableTurnUiSequence: Long = 0L
+    /** A recovered live event has rendered and awaits its replay envelope. */
+    private var pendingRecoveredReplayAckTurnId: Long? = null
+    /** Session whose SessionResumed transcript is currently authoritative. */
+    private var restoredTranscriptSessionId: String? = null
+    /**
+     * A recovered checkpoint parked for user input while no local executor owns
+     * it. Keep its durable identity until the host confirms a terminal state;
+     * otherwise Send/NewSession can overwrite the only cancellation handle.
+     */
+    private var inactiveWaitingTurnId: Long? = null
+    /** Durable id of a live local turn whose executor is parked for user input. */
+    private var liveWaitingTurnId: Long? = null
+    private var durableDiscardInFlightTurnId: Long? = null
+    /**
+     * A cold SessionResumed transcript already contains the terminal turn
+     * result.  Retained envelopes for that turn are checkpoint history, not
+     * new output; remember the id until ResumeTurn's terminal confirmation so
+     * an envelope that races past the source-side gate is still ignored here.
+     */
+    private var authoritativeTerminalTranscriptTurnId: Long? = null
     private var lastRuntimeEventSequence: ULong = 0u
 
     /** Monotonic session-operation generation used to reject stale failures. */
@@ -419,7 +468,12 @@ class ChatViewModel(
             launch {
                 boundSource.activeSessionState.collect { activated ->
                     if (sourceGeneration == generation) {
-                        activated?.let { applyActivatedSession(it) }
+                        activated?.let {
+                            applyActivatedSession(it)
+                            runCatching {
+                                boundSource.attachDurableTurnForUi(afterSequence = durableTurnUiSequence)
+                            }.onFailure(::preserveDurableRecoveryAfterAttachFailure)
+                        }
                     }
                 }
             }
@@ -473,11 +527,28 @@ class ChatViewModel(
             return
         }
         when (event) {
-            is ClientEvent.AskUserQuestion -> _state.update { s ->
-                if (s.pendingQuestions.any { it.requestId == event.request.requestId }) {
-                    s
-                } else {
-                    s.copy(pendingQuestions = s.pendingQuestions + event.request)
+            is ClientEvent.AskUserQuestion -> {
+                var inserted = false
+                _state.update { s ->
+                    if (s.pendingQuestions.any { it.requestId == event.request.requestId }) {
+                        s
+                    } else {
+                        inserted = true
+                        s.copy(pendingQuestions = s.pendingQuestions + event.request)
+                    }
+                }
+                if (inserted) {
+                    val sessionId = _state.value.session.id
+                    if (sessionId.isNotBlank() && sessionId != "new") {
+                        backgroundExecution.notifyWaitingForUser(
+                            ConversationBackgroundSnapshot(
+                                sessionId = sessionId,
+                                turnId = durableTurnId,
+                                statusText = null,
+                                recoverySpec = source.recoverySpec,
+                            ),
+                        )
+                    }
                 }
             }
             is ClientEvent.AskUserQuestionResolved -> _state.update { s ->
@@ -552,7 +623,301 @@ class ChatViewModel(
                 event.activeWorkers.toInt(),
                 event.team,
             )
+            is ClientEvent.TurnRecoveryState -> {
+                val snapshot = event.snapshot
+                if (
+                    canonicalSessionId(snapshot.sessionId) !=
+                        canonicalSessionId(_state.value.session.id)
+                ) {
+                    return
+                }
+                val recoveredId = snapshot.turnId.toLong()
+                // Capture this before assigning the event's id below.  A
+                // failed cold Resume clears the render token but deliberately
+                // keeps the durable id/blocked marker so a matching terminal
+                // can still release the checkpoint.
+                val hadMatchingDurableIdentity = durableTurnId == recoveredId ||
+                    inactiveWaitingTurnId == recoveredId ||
+                    liveWaitingTurnId == recoveredId
+                val isLiveTurn = turnJob != null &&
+                    recoveredTurnToken == null &&
+                    durableTurnId == recoveredId
+                val startsRecoveredAttach = recoveredTurnToken == null &&
+                    turnJob == null &&
+                    !_state.value.streaming &&
+                    durableTurnId != recoveredId
+                if (startsRecoveredAttach) {
+                    turnToken++
+                    recoveredTurnToken = turnToken
+                    recoveryReplayTurnId = recoveredId
+                    durableTurnUiSequence = 0L
+                    pendingRecoveredReplayAckTurnId = null
+                    currentTurnOrigin = ConversationTurnOrigin.Ordinary
+                } else if (
+                    recoveredTurnToken != null &&
+                    recoveryReplayTurnId == recoveredId
+                ) {
+                    // AttachTurn has returned and ResumeTurn has now emitted its
+                    // own state. Subsequent sequenced envelopes are live copies;
+                    // the following raw event is what the reducer should render.
+                    recoveryReplayTurnId = null
+                }
+                durableTurnId = recoveredId
+
+                val terminal = snapshot.state in setOf(
+                    TurnRecoveryStateDto.COMPLETED,
+                    TurnRecoveryStateDto.FAILED,
+                    TurnRecoveryStateDto.CANCELLED,
+                )
+                val hasAuthoritativeRestoredTranscript =
+                    restoredTranscriptSessionId == canonicalSessionId(snapshot.sessionId)
+                val isInactiveRecoveredCheckpoint = recoveredTurnToken != null &&
+                    turnJob == null &&
+                    !_state.value.streaming
+                // On the first attach snapshot, terminal history is replayed
+                // immediately afterwards. Defer settling until ResumeTurn emits
+                // the authoritative terminal state a second time.
+                if (startsRecoveredAttach && terminal) {
+                    if (hasAuthoritativeRestoredTranscript) {
+                        // SessionResumed is the complete, persisted transcript
+                        // for a terminal turn.  Do not create a synthetic live
+                        // assistant row just to project the same checkpoints a
+                        // second time.  Keep a marker for an event that was
+                        // already queued before the source gate observed this
+                        // terminal snapshot.
+                        authoritativeTerminalTranscriptTurnId = recoveredId
+                        recoveredTurnToken = null
+                        recoveryReplayTurnId = null
+                        pendingRecoveredReplayAckTurnId = null
+                    }
+                    return
+                }
+
+                if (authoritativeTerminalTranscriptTurnId == recoveredId && terminal) {
+                    // ResumeTurn's second terminal snapshot confirms the
+                    // restored transcript.  No reducer work is necessary.
+                    authoritativeTerminalTranscriptTurnId = null
+                    clearDurableRecoveryAfterTerminal(
+                        recoveredId = recoveredId,
+                        hadMatchingDurableIdentity = hadMatchingDurableIdentity,
+                    )
+                    return
+                }
+
+                if (terminal && liveWaitingTurnId == recoveredId) {
+                    liveWaitingTurnId = null
+                    _state.update { state -> state.copy(liveTurnWaitingForUser = false) }
+                }
+
+                val token = recoveredTurnToken
+                when (snapshot.state) {
+                    TurnRecoveryStateDto.RUNNING -> when {
+                        isLiveTurn -> {
+                            liveWaitingTurnId = null
+                            _state.update {
+                                it.copy(
+                                    streaming = true,
+                                    liveTurnWaitingForUser = false,
+                                    durableRecoveryBlocked = false,
+                                    statusLine = null,
+                                )
+                            }
+                        }
+                        token != null -> {
+                            if (inactiveWaitingTurnId == recoveredId) {
+                                inactiveWaitingTurnId = null
+                                durableDiscardInFlightTurnId = null
+                            }
+                            _state.update {
+                                it.copy(
+                                    streaming = true,
+                                    liveTurnWaitingForUser = false,
+                                    durableRecoveryBlocked = false,
+                                    statusLine = null,
+                                    agentRun = it.agentRun ?: AgentRunState(turnId = token),
+                                )
+                            }
+                        }
+                    }
+                    TurnRecoveryStateDto.WAITING_FOR_USER -> {
+                        if (isInactiveRecoveredCheckpoint) {
+                            inactiveWaitingTurnId = recoveredId
+                        } else if (isLiveTurn) {
+                            liveWaitingTurnId = recoveredId
+                        }
+                        _state.update { current ->
+                            val settled = if (isInactiveRecoveredCheckpoint) {
+                                settleInactiveRecoveredTurn(current, token)
+                            } else {
+                                current
+                            }
+                            settled.copy(
+                                streaming = false,
+                                durableRecoveryBlocked = isInactiveRecoveredCheckpoint,
+                                liveTurnWaitingForUser = isLiveTurn,
+                                statusLine = strings.resolve(
+                                    R.string.chat_background_waiting_text,
+                                    "后台对话需要你的输入才能继续",
+                                ),
+                            )
+                        }
+                        backgroundExecution.notifyWaitingForUser(
+                            ConversationBackgroundSnapshot(
+                                sessionId = snapshot.sessionId,
+                                turnId = recoveredId,
+                                statusText = null,
+                                recoverySpec = source.recoverySpec,
+                            ),
+                        )
+                    }
+                    TurnRecoveryStateDto.PAUSED_RECOVERABLE -> {
+                        val keepInactiveRecovery = isInactiveRecoveredCheckpoint ||
+                            inactiveWaitingTurnId == recoveredId
+                        if (keepInactiveRecovery) {
+                            inactiveWaitingTurnId = recoveredId
+                        }
+                        if (liveWaitingTurnId == recoveredId) liveWaitingTurnId = null
+                        _state.update { current ->
+                            settleInactiveRecoveredTurn(current, token).copy(
+                                streaming = false,
+                                durableRecoveryBlocked = keepInactiveRecovery,
+                                liveTurnWaitingForUser = false,
+                                statusLine = strings.resolve(
+                                    R.string.chat_background_paused_text,
+                                    "后台时间已结束，打开对话即可安全恢复",
+                                ),
+                            )
+                        }
+                    }
+                    TurnRecoveryStateDto.COMPLETED -> {
+                        token?.let {
+                            reduce(ReplyEvent.End, it)
+                            _state.update { state -> state.copy(durableRecoveryBlocked = false) }
+                        }
+                        clearDurableRecoveryAfterTerminal(
+                            recoveredId = recoveredId,
+                            hadMatchingDurableIdentity = hadMatchingDurableIdentity,
+                        )
+                        recoveredTurnToken = null
+                        recoveryReplayTurnId = null
+                    }
+                    TurnRecoveryStateDto.FAILED -> {
+                        token?.let {
+                            reduce(
+                                ReplyEvent.Error(
+                                    snapshot.reason ?: strings.resolve(
+                                        R.string.chat_background_failed_text,
+                                        "点按返回对话查看并重试",
+                                    ),
+                                ),
+                                it,
+                            )
+                            _state.update { state -> state.copy(durableRecoveryBlocked = false) }
+                        }
+                        clearDurableRecoveryAfterTerminal(
+                            recoveredId = recoveredId,
+                            hadMatchingDurableIdentity = hadMatchingDurableIdentity,
+                        )
+                        recoveredTurnToken = null
+                        recoveryReplayTurnId = null
+                    }
+                    TurnRecoveryStateDto.CANCELLED -> {
+                        token?.let {
+                            _state.update { state ->
+                                val settled = state.settleTurn(
+                                    run = (state.agentRun ?: AgentRunState(turnId = it))
+                                        .finish(AgentRunOutcome.Cancelled),
+                                    settling = state.streamingMessage,
+                                )
+                                state.copy(
+                                    streaming = false,
+                                    durableRecoveryBlocked = false,
+                                    messages = settled.messages,
+                                    streamingMessage = null,
+                                    statusLine = null,
+                                    agentRun = settled.run,
+                                    agentRunsByMessageId = settled.agentRunsByMessageId,
+                                )
+                            }
+                        }
+                        clearDurableRecoveryAfterTerminal(
+                            recoveredId = recoveredId,
+                            hadMatchingDurableIdentity = hadMatchingDurableIdentity,
+                        )
+                        recoveredTurnToken = null
+                        recoveryReplayTurnId = null
+                    }
+                }
+            }
+            is ClientEvent.TurnEventReplay -> {
+                if (authoritativeTerminalTranscriptTurnId == event.turnId.toLong()) {
+                    // The terminal SessionResumed transcript is authoritative;
+                    // retained checkpoint projection would duplicate assistant
+                    // prose and tool blocks.
+                    return
+                }
+                if (
+                    canonicalSessionId(event.sessionId) ==
+                        canonicalSessionId(_state.value.session.id) &&
+                    recoveryReplayTurnId == event.turnId.toLong()
+                ) {
+                    val token = recoveredTurnToken ?: return
+                    retainedTurnEventToReply(event.eventJson, strings)?.let {
+                        reduce(it, token)
+                        durableTurnUiSequence = maxOf(durableTurnUiSequence, event.sequence.toLong())
+                        if (inactiveWaitingTurnId == event.turnId.toLong()) {
+                            _state.update { state ->
+                                settleInactiveRecoveredTurn(state, token).copy(
+                                    streaming = false,
+                                    durableRecoveryBlocked = true,
+                                    liveTurnWaitingForUser = false,
+                                )
+                            }
+                        }
+                    }
+                } else if (pendingRecoveredReplayAckTurnId == event.turnId.toLong()) {
+                    durableTurnUiSequence = maxOf(durableTurnUiSequence, event.sequence.toLong())
+                    pendingRecoveredReplayAckTurnId = null
+                }
+            }
             else -> Unit
+        }
+
+        // A reattached turn has no `source.submit(...).collect` coroutine. Its
+        // live raw events therefore arrive only on the shared client event path.
+        // Sequenced envelopes update the durable cursor; render each following
+        // raw event exactly once through the ordinary reducer.
+        val recoveredToken = recoveredTurnToken
+        if (
+            recoveredToken != null &&
+            event !is ClientEvent.TurnRecoveryState &&
+            event !is ClientEvent.TurnEventReplay
+        ) {
+            clientEventToReply(event, strings)?.let { reply ->
+                reduce(reply, recoveredToken)
+                if (
+                    reply !is ReplyEvent.End &&
+                    reply !is ReplyEvent.Error &&
+                    reply !is ReplyEvent.Completed &&
+                    durableTurnId != null
+                ) {
+                    pendingRecoveredReplayAckTurnId = durableTurnId
+                }
+                if (reply is ReplyEvent.End || reply is ReplyEvent.Error) {
+                    recoveredTurnToken = null
+                    recoveryReplayTurnId = null
+                    pendingRecoveredReplayAckTurnId = null
+                }
+            }
+        }
+        if (inactiveWaitingTurnId != null && recoveredToken != null) {
+            _state.update { state ->
+                settleInactiveRecoveredTurn(state, recoveredToken).copy(
+                    streaming = false,
+                    durableRecoveryBlocked = true,
+                    liveTurnWaitingForUser = false,
+                )
+            }
         }
     }
 
@@ -571,6 +936,113 @@ class ChatViewModel(
             _state.update { it.copy(workflowRuns = nextRuns) }
         }
     }
+
+    /** Keep a failed cold resume actionable instead of reopening the composer. */
+    private fun preserveDurableRecoveryAfterAttachFailure(error: Throwable) {
+        val failure = error as? DurableAttachFailure ?: return
+        durableTurnId = failure.turnId
+        recoveredTurnToken = null
+        recoveryReplayTurnId = null
+        pendingRecoveredReplayAckTurnId = null
+        inactiveWaitingTurnId = failure.turnId
+        durableDiscardInFlightTurnId = null
+        _state.update {
+            it.copy(
+                streaming = false,
+                liveTurnWaitingForUser = false,
+                durableRecoveryBlocked = true,
+                statusLine = strings.resolve(
+                    R.string.chat_background_paused_text,
+                    "后台时间已暂停，打开对话即可安全恢复",
+                ),
+                error = ChatError(
+                    strings.resolve(
+                        R.string.chat_error_session_switch_failed,
+                        "后台对话恢复失败：%1\$s",
+                        failure.cause?.message ?: failure.phase,
+                    ),
+                    classifyError(failure.cause?.message.orEmpty()),
+                ),
+            )
+        }
+    }
+
+    /**
+     * A recovered checkpoint has no local executor. Retained envelopes can
+     * still arrive after its WaitingForUser/Paused state and leave the main
+     * run or shell cards looking active. Settle only rows correlated through
+     * this recovered run's token; workflow/background-task state has separate
+     * ownership and must remain untouched.
+     */
+    private fun settleInactiveRecoveredTurn(
+        state: ChatState,
+        token: Long?,
+    ): ChatState {
+        if (token == null) return state
+        val mainRun = state.agentRun?.takeIf { it.turnId == token }
+        val correlatedShellIds = mainRun?.tools?.map { it.id }?.toSet().orEmpty()
+        val settledRun = mainRun
+            ?.finish(AgentRunOutcome.Finished)
+            ?.updateWorkers(0, mainRun.teamName)
+        val settledShellTools = if (correlatedShellIds.isEmpty()) {
+            state.shellTools
+        } else {
+            state.shellTools.map { shell ->
+                if (
+                    shell.sessionId == state.session.id &&
+                        shell.taskId in correlatedShellIds &&
+                        shell.status == ShellToolStatus.Running
+                ) {
+                    shell.copy(status = ShellToolStatus.Cancelled)
+                } else {
+                    shell
+                }
+            }
+        }
+        val settledRuns = state.agentRunsByMessageId.mapValues { (_, run) ->
+            if (run.turnId == token) {
+                run.finish(AgentRunOutcome.Finished).updateWorkers(0, run.teamName)
+            } else {
+                run
+            }
+        }
+        return state.copy(
+            agentRun = settledRun ?: state.agentRun,
+            agentRunsByMessageId = settledRuns,
+            shellTools = settledShellTools,
+        )
+    }
+
+    /**
+     * Release durable recovery ownership after a terminal event even when a
+     * failed Attach/Resume left no render token. The event id is correlated
+     * against the identity captured before the reducer assigned its snapshot
+     * id, so an unrelated terminal cannot reopen the composer.
+     */
+    private fun clearDurableRecoveryAfterTerminal(
+        recoveredId: Long,
+        hadMatchingDurableIdentity: Boolean,
+    ) {
+        if (!hadMatchingDurableIdentity) return
+        val clearsInactive = inactiveWaitingTurnId == recoveredId
+        val clearsLive = liveWaitingTurnId == recoveredId
+        if (clearsInactive) {
+            inactiveWaitingTurnId = null
+            durableDiscardInFlightTurnId = null
+        }
+        if (clearsLive) liveWaitingTurnId = null
+        if (durableTurnId == recoveredId) durableTurnId = null
+        _state.update { state ->
+            state.copy(
+                streaming = if (clearsLive) false else state.streaming,
+                durableRecoveryBlocked = false,
+                liveTurnWaitingForUser = if (clearsLive) false else state.liveTurnWaitingForUser,
+                statusLine = if (clearsInactive || clearsLive) null else state.statusLine,
+            )
+        }
+    }
+
+    internal fun durableReplayCursorForTesting(): Long = durableTurnUiSequence
 
     private fun updateWorkflowTaskStatus(
         originSessionId: String,
@@ -633,6 +1105,49 @@ class ChatViewModel(
             runCatching {
                 source.submitClientCommand(ClientCommand.CancelAskUserQuestion(requestId))
             }.onFailure { reportHostError(it.message ?: it::class.simpleName.orEmpty()) }
+        }
+    }
+
+    /**
+     * Discard an inactive recovered checkpoint by its durable turn id. The
+     * identity remains guarded until the source delivers the correlated
+     * terminal TurnRecoveryState; command acceptance alone is not terminal.
+     */
+    fun discardRecoveredTurn() {
+        val turnId = inactiveWaitingTurnId ?: return
+        if (durableDiscardInFlightTurnId == turnId) return
+        durableDiscardInFlightTurnId = turnId
+        _state.update {
+            it.copy(
+                statusLine = strings.resolve(
+                    R.string.chat_stopping,
+                    "正在丢弃…",
+                ),
+            )
+        }
+        viewModelScope.launch {
+            runCatching { source.discardDurableTurn(turnId) }
+                .onFailure { error ->
+                    if (inactiveWaitingTurnId == turnId) {
+                        durableDiscardInFlightTurnId = null
+                        _state.update {
+                            it.copy(
+                                statusLine = strings.resolve(
+                                    R.string.chat_background_waiting_text,
+                                    "后台对话需要你的输入才能继续",
+                                ),
+                                error = ChatError(
+                                    strings.resolve(
+                                        R.string.chat_error_cancel_generation_failed,
+                                        "丢弃后台对话失败：%1\$s",
+                                        "${error.message ?: error::class.simpleName}",
+                                    ),
+                                    classifyError(error.message.orEmpty()),
+                                ),
+                            )
+                        }
+                    }
+                }
         }
     }
 
@@ -723,6 +1238,7 @@ class ChatViewModel(
                 sessionAgents = emptyList(),
                 workflowResumeState = WorkflowResumeUiState.Idle,
                 workflowRuns = emptyMap(),
+                liveTurnWaitingForUser = false,
             )
         }
         bindSource()
@@ -738,6 +1254,7 @@ class ChatViewModel(
             } else {
                 strings.resolve(R.string.chat_status_resuming_session, "正在恢复会话…")
             },
+            allowInactiveWaitingRecovery = true,
         )
     }
 
@@ -766,6 +1283,7 @@ class ChatViewModel(
         persistSelection: suspend () -> Unit = {},
         onCommitted: () -> Unit = {},
     ): Boolean = workspaceSwitchMutex.withLock {
+        if (inactiveWaitingTurnId != null || liveWaitingTurnId != null) return@withLock false
         if (_state.value.streaming ||
             (_state.value.sessionTransitioning && !replacePendingTransition)
         ) {
@@ -957,6 +1475,14 @@ class ChatViewModel(
         abandonLocalTurn()
         pendingResumeId = null
         pendingNewSession = false
+        // The previous local/recovered turn belongs to the session being
+        // replaced.  Let the next recovery checkpoint establish its own id;
+        // otherwise a reconnect that resumes the same session could be
+        // mistaken for the already-attached turn and skip replay setup.
+        durableTurnId = null
+        restoredTranscriptSessionId = restored.sessionId
+            .takeIf { restored.kind == SessionActivationKind.Resumed }
+            ?.let(::canonicalSessionId)
         val title = _state.value.session.takeIf { it.id == restored.sessionId }?.title
             ?: _sessions.value.rows.firstOrNull { it.uuid == restored.sessionId }?.title
             ?: _state.value.session.title
@@ -967,6 +1493,7 @@ class ChatViewModel(
                 streamingMessage = null,
                 isNew = restored.kind == SessionActivationKind.Started && restored.transcript.isEmpty(),
                 streaming = false,
+                liveTurnWaitingForUser = false,
                 sessionTransitioning = false,
                 sessionReady = true,
                 statusLine = null,
@@ -987,10 +1514,12 @@ class ChatViewModel(
                 workflowRuns = workflowRunsBySession[canonicalSessionId(restored.sessionId)].orEmpty(),
             )
         }
+        reportBackgroundTurnState()
     }
 
     /** Switch to another session through the real engine. */
     fun openSession(ref: SessionRef, empty: Boolean = false) {
+        if (inactiveWaitingTurnId != null || liveWaitingTurnId != null) return
         val canonicalRef = ref.copy(id = canonicalSessionId(ref.id))
         if (canonicalRef.id.isBlank() || canonicalRef.id == "new") return
         if (_state.value.sessionReady && _state.value.session.id == canonicalRef.id) return
@@ -1004,6 +1533,7 @@ class ChatViewModel(
 
     /** Start a fresh chat through the real engine. */
     fun newChat() {
+        if (inactiveWaitingTurnId != null || liveWaitingTurnId != null) return
         beginSessionTransition(
             target = SessionRef(id = "new", title = strings.resolve(R.string.chat_new_conversation, "新对话")),
             newSession = true,
@@ -1017,6 +1547,12 @@ class ChatViewModel(
      */
     private fun abandonLocalTurn(): Job? {
         turnToken++
+        recoveredTurnToken = null
+        recoveryReplayTurnId = null
+        durableTurnUiSequence = 0L
+        pendingRecoveredReplayAckTurnId = null
+        authoritativeTerminalTranscriptTurnId = null
+        liveWaitingTurnId = null
         val job = turnJob
         turnJob = null
         return job
@@ -1028,12 +1564,12 @@ class ChatViewModel(
      * unsubscribing first could hide the terminal event while the engine keeps
      * running.
      */
-    private suspend fun cancelEngineTurn(job: Job?) {
-        if (job == null) return
+    private suspend fun cancelEngineTurn(job: Job?, turnId: Long? = null) {
+        if (job == null && turnId == null) return
         try {
-            source.cancel()
+            source.cancel(turnId)
         } finally {
-            job.cancelAndJoin()
+            job?.cancelAndJoin()
         }
     }
 
@@ -1048,7 +1584,12 @@ class ChatViewModel(
         newSession: Boolean,
         resumeEmpty: Boolean = false,
         status: String,
+        allowInactiveWaitingRecovery: Boolean = false,
     ) {
+        if (
+            (inactiveWaitingTurnId != null || liveWaitingTurnId != null) &&
+                !allowInactiveWaitingRecovery
+        ) return
         // Do not enqueue a second ambiguous Resume/New while the first command
         // is accepted but its SessionResumed/SessionStarted event is still in
         // flight. Those events do not carry a client operation id.
@@ -1065,6 +1606,7 @@ class ChatViewModel(
                 streamingMessage = null,
                 isNew = newSession || resumeEmpty,
                 streaming = false,
+                liveTurnWaitingForUser = false,
                 sessionTransitioning = true,
                 sessionReady = false,
                 statusLine = status,
@@ -1181,6 +1723,7 @@ class ChatViewModel(
         val trimmed = text.trim()
         if (trimmed.isEmpty()) return
         if (_state.value.streaming) return // ignore overlapping submit while streaming
+        if (inactiveWaitingTurnId != null || liveWaitingTurnId != null) return
         if (!_state.value.sessionReady || _state.value.sessionTransitioning) return
         if (explicitCancellation?.isActive == true) return
 
@@ -1189,6 +1732,12 @@ class ChatViewModel(
         // capture this turn's token so its own events are accepted.
         turnToken++
         val token = turnToken
+        val submittedTurnId = DurableConversationTurnIds.next()
+        durableTurnId = submittedTurnId
+        recoveredTurnToken = null
+        recoveryReplayTurnId = null
+        durableTurnUiSequence = 0L
+        pendingRecoveredReplayAckTurnId = null
         currentTurnOrigin = origin
         if (_sourceScope.value !is ConversationScope.LocalApp) {
             // The draft was just sent — clear the persisted copy. App scopes
@@ -1202,30 +1751,44 @@ class ChatViewModel(
                 statusLine = null,
                 error = null, // a fresh turn clears the prior turn's error banner
                 streaming = true, // gate the composer immediately, before the first event
+                liveTurnWaitingForUser = false,
                 messages = it.messages + Message(role = Role.User, text = trimmed, images = images),
                 streamingMessage = null,
                 agentRun = AgentRunState(turnId = token),
             )
         }
+        reportBackgroundTurnState()
         // Start while this user action still has a visible Activity. Android 12+
         // generally rejects foreground-service starts attempted only after the
         // process has already crossed into the background.
         setBackgroundTurnActive(true)
 
         turnJob = viewModelScope.launch {
-            source.submit(trimmed, images).collect { event -> reduce(event, token) }
+            source.submit(trimmed, images, submittedTurnId).collect { event ->
+                reduce(event, token)
+                if (
+                    event is ReplyEvent.DurableTurnReplayAcknowledged &&
+                    token == turnToken &&
+                    durableTurnId == submittedTurnId
+                ) {
+                    durableTurnUiSequence = maxOf(durableTurnUiSequence, event.sequence)
+                }
+            }
         }
     }
 
     /**
-     * Cancel the in-flight turn (the composer's Stop affordance). Fires the
-     * engine's `Cancel` command, stops collecting the local reply stream, and
-     * resets streaming state immediately so the composer flips back to Send
-     * without waiting for the engine's `TurnEnded` to round-trip. A no-op when no
-     * turn is in flight.
+     * Cancel the in-flight turn (or discard a recovered parked checkpoint) from
+     * the composer's Stop affordance. A recovered WaitingForUser checkpoint is
+     * not active execution, so it remains blocked until its correlated terminal
+     * TurnRecoveryState arrives from the host.
      */
     fun cancel() {
-        if (!_state.value.streaming) return
+        if (inactiveWaitingTurnId != null) {
+            discardRecoveredTurn()
+            return
+        }
+        if (!_state.value.streaming && !_state.value.liveTurnWaitingForUser) return
         val cancelledToken = turnToken
         val cancelledText = _state.value.streamingMessage?.text.orEmpty()
         // Supersede the turn: a late event arriving after the engine's Cancel
@@ -1238,6 +1801,7 @@ class ChatViewModel(
             )
             it.copy(
                 streaming = false,
+                liveTurnWaitingForUser = false,
                 messages = settled.messages,
                 streamingMessage = null,
                 statusLine = strings.resolve(R.string.chat_stopping, "正在停止…"),
@@ -1247,7 +1811,7 @@ class ChatViewModel(
         }
         emitTurnCompletion(cancelledToken, ConversationTurnOutcome.Cancelled, cancelledText)
         val cancellation = viewModelScope.async {
-            runCatching { cancelEngineTurn(job) }
+            runCatching { cancelEngineTurn(job, durableTurnId) }
         }
         explicitCancellation = cancellation
         viewModelScope.launch {
@@ -1517,6 +2081,8 @@ class ChatViewModel(
                 updateCoordinatorWorkers(event.activeWorkers, event.team)
             }
 
+            is ReplyEvent.DurableTurnReplayAcknowledged -> Unit
+
             is ReplyEvent.Error -> {
                 turnJob = null
                 emitTurnCompletion(
@@ -1611,6 +2177,7 @@ class ChatViewModel(
                 }
             }
         }
+        reportBackgroundTurnState()
     }
 
     /**
@@ -1689,6 +2256,21 @@ class ChatViewModel(
     }
 
     override fun onCleared() {
+        val retained = currentBackgroundSnapshot()
+            .takeIf { _state.value.requiresBackgroundExecution }
+            ?.let { snapshot ->
+                backgroundExecution.retainAfterUiDestroyed(source, snapshot)
+            } == true
+        if (retained) {
+            // Drop only UI collectors. The process coordinator and foreground
+            // service now own the source until terminal/attention state.
+            turnJob?.cancel()
+            turnJob = null
+            sessionTransitionJob?.cancel()
+            sourceBindingJob?.cancel()
+            super.onCleared()
+            return
+        }
         setBackgroundTurnActive(false)
         abandonLocalTurn()?.cancel()
         sessionTransitionJob?.cancel()
@@ -1700,7 +2282,40 @@ class ChatViewModel(
     private fun setBackgroundTurnActive(active: Boolean) {
         if (backgroundTurnActive == active) return
         backgroundTurnActive = active
+        if (!active) {
+            backgroundExecution.updateTurn(null)
+        } else {
+            reportBackgroundTurnState()
+        }
         backgroundExecution.setTurnActive(active)
+    }
+
+    private fun reportBackgroundTurnState() {
+        backgroundExecution.updateTurn(currentBackgroundSnapshot())
+    }
+
+    private fun currentBackgroundSnapshot(): ConversationBackgroundSnapshot? {
+        val state = _state.value
+        val sessionId = state.session.id
+            .takeIf { it.isNotBlank() && it != "new" }
+        val turnId = durableTurnId
+        val snapshot = if (
+            state.requiresBackgroundExecution &&
+                sessionId != null &&
+                (turnId != null || state.streaming || state.activeBackgroundTaskIds.isNotEmpty())
+        ) {
+            ConversationBackgroundSnapshot(
+                sessionId = sessionId,
+                turnId = turnId,
+                statusText = state.statusLine,
+                recoverySpec = source.recoverySpec,
+                activeTaskIds = state.activeBackgroundTaskIds,
+                executorActive = state.streaming || state.liveTurnWaitingForUser,
+            )
+        } else {
+            null
+        }
+        return snapshot
     }
 
     private fun emitTurnCompletion(
@@ -1710,6 +2325,21 @@ class ChatViewModel(
     ) {
         if (lastTurnCompletionToken == token) return
         lastTurnCompletionToken = token
+        if (outcome != ConversationTurnOutcome.Cancelled) {
+            val sessionId = _state.value.session.id
+            val turnId = durableTurnId
+            if (sessionId.isNotBlank() && sessionId != "new" && turnId != null) {
+                backgroundExecution.finishTurn(
+                    ConversationBackgroundSnapshot(
+                        sessionId = sessionId,
+                        turnId = turnId,
+                        statusText = null,
+                        recoverySpec = source.recoverySpec,
+                    ),
+                    outcome,
+                )
+            }
+        }
         _turnCompletions.tryEmit(
             ConversationTurnCompletion(
                 token = token,
@@ -1718,6 +2348,27 @@ class ChatViewModel(
                 finalAssistantText = finalAssistantText,
             ),
         )
+    }
+
+    /** Stop action from the ongoing notification, including after UI reattachment. */
+    fun cancelFromSystem(turnId: Long?) {
+        if (
+            inactiveWaitingTurnId != null &&
+                (turnId == null || turnId == inactiveWaitingTurnId)
+        ) {
+            discardRecoveredTurn()
+            return
+        }
+        if (
+            (_state.value.streaming || _state.value.liveTurnWaitingForUser) &&
+                (turnId == null || turnId == durableTurnId)
+        ) {
+            cancel()
+            return
+        }
+        viewModelScope.launch {
+            runCatching { source.cancel(turnId) }
+        }
     }
 
     private companion object {

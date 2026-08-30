@@ -49,6 +49,8 @@ mod skill_loader;
 // v3 Phase 1: workflow-on-mobile composition pieces (launcher + deferred
 // invoker), consumed by the `host` build path.
 #[cfg(feature = "uniffi")]
+mod turn_durability;
+#[cfg(feature = "uniffi")]
 mod workflow_support;
 
 // First-party local-app host operations as ORDINARY builtin tools (they used

@@ -4,6 +4,7 @@ import { dirname, join } from 'node:path';
 import {
   defaultSettings,
   parseSettings,
+  parseVoicePreferences,
   publicSettings,
   setWorkspaceTrust,
   withActiveProject,
@@ -93,9 +94,16 @@ export class SettingsStore {
     return this.getPublic();
   }
 
-  update(patch: { theme?: 'dark' | 'light'; model?: string | null; apiBaseUrl?: string | null }): PublicSettings {
+  update(patch: {
+    theme?: 'dark' | 'light' | 'system';
+    model?: string | null;
+    apiBaseUrl?: string | null;
+    voice?: unknown;
+  }): PublicSettings {
     if ('theme' in patch) {
-      if (patch.theme !== 'dark' && patch.theme !== 'light') throw new Error('invalid theme');
+      if (patch.theme !== 'dark' && patch.theme !== 'light' && patch.theme !== 'system') {
+        throw new Error('invalid theme');
+      }
       this.settings.theme = patch.theme;
     }
     if ('model' in patch) {
@@ -105,6 +113,13 @@ export class SettingsStore {
     if ('apiBaseUrl' in patch) {
       if (patch.apiBaseUrl === null || patch.apiBaseUrl === '') delete this.settings.apiBaseUrl;
       else this.settings.apiBaseUrl = validateApiBaseUrl(patch.apiBaseUrl);
+    }
+    if ('voice' in patch) {
+      // Whole-object replace, normalized leniently — matches how both
+      // mobile platforms persist voice preferences (iOS's `persist()`,
+      // Android's `save()` each write the full snapshot at once, never a
+      // partial merge of individual fields).
+      this.settings.voice = parseVoicePreferences(patch.voice);
     }
     this.persist();
     return this.getPublic();

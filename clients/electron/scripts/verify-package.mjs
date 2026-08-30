@@ -10,6 +10,7 @@ import { execFileSync } from 'node:child_process';
 import {
   APP_NAME,
   BUNDLE_ID,
+  NS_MICROPHONE_USAGE_DESCRIPTION,
   artifactPaths,
   assertArm64Executable,
   commandAvailable,
@@ -91,7 +92,7 @@ export function verifyPackage(root = packageRoot) {
     CFBundleName: APP_NAME,
     CFBundleShortVersionString: metadata.version,
     CFBundleVersion: metadata.version,
-    NSMicrophoneUsageDescription: 'LingXi uses your microphone only when you start voice input in the composer.',
+    NSMicrophoneUsageDescription: NS_MICROPHONE_USAGE_DESCRIPTION,
   };
   for (const [key, value] of Object.entries(expectedPlist)) {
     const actual = plistValue(plistPath, key);

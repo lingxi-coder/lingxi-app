@@ -27,6 +27,7 @@ import type {
   PermissionRequest,
   PermissionResolved,
 } from '../src/protocol.js';
+import { ALL_CLIENT_COMMAND_TYPES, ALL_CLIENT_EVENT_TYPES } from '../src/protocolCoverage.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const SNAP_ROOT = join(
@@ -48,6 +49,22 @@ function listSnapshots(category: string): string[] {
   return readdirSync(join(SNAP_ROOT, category))
     .filter((f) => f.endsWith('.json'))
     .sort();
+}
+
+/**
+ * The distinct `type` tag values actually carried by every golden under
+ * `category` — read from each file's JSON CONTENT, never its filename:
+ * several `event/` goldens share the `app_event` tag but are named after
+ * their inner `AppEventDto` variant instead (e.g. `app_details_changed.json`
+ * holds `{"type":"app_event","event":{"type":"app_details_changed",...}}`).
+ */
+function typeTagsOnDisk(category: string): Set<string> {
+  const tags = new Set<string>();
+  for (const file of listSnapshots(category)) {
+    const { type } = loadSnapshot<{ type: string }>(category, file);
+    tags.add(type);
+  }
+  return tags;
 }
 
 // ── Generic structural helpers ───────────────────────────────────────────────
@@ -83,6 +100,7 @@ function validateListingKind(v: unknown): void {
       'sessions',
       'models',
       'mcp',
+      'skills',
       'hooks',
       'agents',
       'slash_commands',
@@ -99,6 +117,23 @@ function validateListingKind(v: unknown): void {
 function validatePermissionResponse(v: unknown): void {
   const o = rec(v);
   assert.ok(['allow_once', 'allow_always', 'deny'].includes(o['type'] as string));
+}
+
+function validateSettingsDestination(v: unknown): void {
+  assert.ok(['user', 'project', 'local'].includes(v as string), `unknown SettingsDestinationDto "${String(v)}"`);
+}
+
+function validatePermissionBehavior(v: unknown): void {
+  assert.ok(['allow', 'deny', 'ask'].includes(v as string), `unknown PermissionBehaviorDto "${String(v)}"`);
+}
+
+function validateMcpScope(v: unknown): void {
+  assert.ok(['user', 'local', 'project'].includes(v as string), `unknown McpScopeDto "${String(v)}"`);
+}
+
+function validateStringArray(v: unknown): void {
+  assert.ok(Array.isArray(v));
+  for (const item of v as unknown[]) assert.ok(isString(item));
 }
 
 function validateTaskStatus(v: unknown): void {
@@ -301,6 +336,16 @@ function validateCost(v: unknown): void {
       isNumber(o['api_calls']) &&
       isNumber(o['session_duration_secs']) &&
       isString(o['formatted']),
+  );
+}
+
+function validateTurnRecoveryState(v: unknown): void {
+  const o = rec(v);
+  assert.ok(
+    ['running', 'waiting_for_user', 'paused_recoverable', 'completed', 'failed', 'cancelled'].includes(
+      o['type'] as string,
+    ),
+    `unknown TurnRecoveryStateDto "${String(o['type'])}"`,
   );
 }
 
@@ -832,6 +877,75 @@ function validateAttachment(v: unknown): void {
   }
 }
 
+// ── Audio (events.rs `AudioOpDto`, commands.rs `AudioResultDto`/`AudioErrorKindDto`) ──
+
+function validateAudioOp(v: unknown): void {
+  const o = rec(v);
+  switch (o['type']) {
+    case 'start_recording':
+      assert.ok(isNumber(o['sample_rate_hz']) && isString(o['format']));
+      break;
+    case 'stop_recording':
+    case 'is_recording':
+      break;
+    case 'transcribe':
+      if ('language' in o) assert.ok(isString(o['language']));
+      break;
+    case 'synthesize':
+      assert.ok(isString(o['text']));
+      if ('voice' in o) assert.ok(isString(o['voice']));
+      break;
+    default:
+      assert.fail(`unknown AudioOpDto type: ${String(o['type'])}`);
+  }
+}
+
+// The 8 kinds exist specifically so `SttError`/`VoiceError`/`TtsError` round-trip
+// without losing distinctions (client-protocol/src/commands.rs `AudioErrorKindDto`).
+function validateAudioErrorKind(v: unknown): void {
+  assert.ok(
+    [
+      'permission_denied',
+      'no_speech',
+      'not_recording',
+      'unavailable',
+      'busy',
+      'retriable',
+      'synthesis_failed',
+      'other',
+    ].includes(v as string),
+    `unknown AudioErrorKindDto "${String(v)}"`,
+  );
+}
+
+function validateAudioResult(v: unknown): void {
+  const o = rec(v);
+  switch (o['type']) {
+    case 'ok':
+      break;
+    case 'recording_state':
+      assert.ok(isBool(o['recording']));
+      break;
+    case 'recording':
+      assert.ok(isString(o['audio_base64']) && isString(o['mime_type']));
+      break;
+    case 'transcript':
+      assert.ok(isString(o['text']));
+      if ('language' in o) assert.ok(isString(o['language']));
+      if ('confidence' in o) assert.ok(isNumber(o['confidence']));
+      break;
+    case 'audio':
+      assert.ok(isString(o['pcm_base64']) && isNumber(o['sample_rate_hz']));
+      break;
+    case 'failed':
+      validateAudioErrorKind(o['kind']);
+      assert.ok(isString(o['message']));
+      break;
+    default:
+      assert.fail(`unknown AudioResultDto type: ${String(o['type'])}`);
+  }
+}
+
 // ── ClientCommand ─────────────────────────────────────────────────────────────
 
 function validateCommand(name: string, v: unknown): void {
@@ -850,6 +964,16 @@ function validateCommand(name: string, v: unknown): void {
       break;
     case 'cancel':
       if ('turn_id' in o) assert.ok(isNumber(o['turn_id']));
+      break;
+    case 'attach_turn':
+      assert.ok(isNumber(o['turn_id']));
+      if ('after_sequence' in o) assert.ok(isNumber(o['after_sequence']));
+      break;
+    case 'resume_turn':
+      assert.ok(isNumber(o['turn_id']));
+      break;
+    case 'pause_turn':
+      assert.ok(isNumber(o['turn_id']) && isString(o['reason']));
       break;
     case 'approve_permission':
       assert.ok(isNumber(o['request_id']));
@@ -1014,6 +1138,37 @@ function validateCommand(name: string, v: unknown): void {
     case 'restore_app_checkpoint':
       assert.ok(isString(o['app_id']) && isString(o['checkpoint_id']));
       break;
+    case 'update_settings':
+      validateSettingsDestination(o['destination']);
+      assert.ok(isString(o['patch_json']));
+      break;
+    case 'update_permission_rules':
+      validateSettingsDestination(o['destination']);
+      validatePermissionBehavior(o['behavior']);
+      validateStringArray(o['add']);
+      validateStringArray(o['remove']);
+      break;
+    case 'set_default_permission_mode':
+      validateSettingsDestination(o['destination']);
+      assert.ok(isString(o['mode']));
+      break;
+    case 'update_workspace_directories':
+      validateSettingsDestination(o['destination']);
+      validateStringArray(o['add']);
+      validateStringArray(o['remove']);
+      break;
+    case 'upsert_mcp_server':
+      validateMcpScope(o['scope']);
+      assert.ok(isString(o['name']) && isString(o['config_json']));
+      break;
+    case 'remove_mcp_server':
+      validateMcpScope(o['scope']);
+      assert.ok(isString(o['name']));
+      break;
+    case 'audio_response':
+      assert.ok(isNumber(o['request_id']));
+      validateAudioResult(o['result']);
+      break;
     default:
       assert.fail(`snapshot ${name}: unknown ClientCommand type "${String(o['type'])}"`);
   }
@@ -1088,6 +1243,27 @@ function validateEvent(name: string, v: unknown): void {
       break;
     case 'turn_started':
       if ('turn_id' in o) assert.ok(isNumber(o['turn_id']));
+      break;
+    case 'turn_recovery_state': {
+      const snapshot = rec(o['snapshot']);
+      assert.ok(
+        isString(snapshot['session_id']) &&
+          isNumber(snapshot['turn_id']) &&
+          isNumber(snapshot['first_sequence']) &&
+          isNumber(snapshot['last_sequence']) &&
+          isBool(snapshot['safe_to_resume']),
+      );
+      validateTurnRecoveryState(snapshot['state']);
+      if ('reason' in snapshot) assert.ok(isString(snapshot['reason']));
+      break;
+    }
+    case 'turn_event_replay':
+      assert.ok(
+        isString(o['session_id']) &&
+          isNumber(o['turn_id']) &&
+          isNumber(o['sequence']) &&
+          isString(o['event_json']),
+      );
       break;
     case 'turn_ended':
       assert.ok(['end_turn', 'max_turns', 'cancelled'].includes(rec(o['outcome'])['type'] as string));
@@ -1190,6 +1366,13 @@ function validateEvent(name: string, v: unknown): void {
         if (status['type'] === 'error') assert.ok(isString(status['reason']));
       }
       break;
+    case 'skills':
+      assert.ok(Array.isArray(o['skills']));
+      for (const s of o['skills'] as unknown[]) {
+        const r = rec(s);
+        assert.ok(isString(r['name']) && isString(r['source_dir']));
+      }
+      break;
     case 'hooks':
       assert.ok(Array.isArray(o['hooks']));
       for (const h of o['hooks'] as unknown[]) {
@@ -1255,6 +1438,10 @@ function validateEvent(name: string, v: unknown): void {
     }
     case 'settings_snapshot':
       assert.ok(isString(o['effective_json']) && isString(o['provenance_json']));
+      if ('files_json' in o) assert.ok(isString(o['files_json']));
+      if ('active_json' in o) assert.ok(isString(o['active_json']));
+      if ('locked' in o) validateStringArray(o['locked']);
+      if ('layers_json' in o) assert.ok(isString(o['layers_json']));
       break;
     case 'auth_state': {
       const st = rec(o['state']);
@@ -1368,6 +1555,10 @@ function validateEvent(name: string, v: unknown): void {
           isNumber(o['delay_ms']),
       );
       break;
+    case 'audio_request':
+      assert.ok(isNumber(o['request_id']));
+      validateAudioOp(o['op']);
+      break;
     default:
       assert.fail(`snapshot ${name}: unknown ClientEvent type "${String(o['type'])}"`);
   }
@@ -1431,7 +1622,7 @@ function validateError(v: unknown): void {
 
 test('every command snapshot parses as ClientCommand', () => {
   const files = listSnapshots('command');
-  assert.equal(files.length, 50, `expected 50 command snapshots, found ${files.length}`);
+  assert.equal(files.length, 60, `expected 60 command snapshots, found ${files.length}`);
   for (const file of files) {
     validateCommand(file, loadSnapshot('command', file));
   }
@@ -1469,10 +1660,338 @@ test('workflow model metadata and paused task status pass the wire guards', () =
 
 test('every event snapshot parses as ClientEvent', () => {
   const files = listSnapshots('event');
-  assert.equal(files.length, 65, `expected 65 event snapshots, found ${files.length}`);
+  assert.equal(files.length, 69, `expected 69 event snapshots, found ${files.length}`);
   for (const file of files) {
     validateEvent(file, loadSnapshot('event', file));
   }
+});
+
+// The two tests above only prove every golden's `type` tag is HANDLED by the
+// hand-written `switch` in validateCommand/validateEvent — they cast the
+// loaded JSON `as ClientCommand`/`as ClientEvent` and never check that tag
+// against the actual TS union. That is exactly how `attach_turn`/
+// `resume_turn`/`pause_turn` and `turn_recovery_state`/`turn_event_replay`
+// went missing from the unions while staying fully validated and
+// snapshotted: nothing tied the switch to the union. `ALL_CLIENT_COMMAND_TYPES`
+// / `ALL_CLIENT_EVENT_TYPES` (src/protocolCoverage.ts) close that at COMPILE
+// time — a `Record<Union['type'], true>` can only type-check when its key set
+// is exactly the union's `type` values. These two tests close the remaining
+// runtime direction: the record's keys must also match what the goldens
+// actually carry, so a golden with no union member (or a union member with no
+// golden) fails HERE, by name, instead of staying silent.
+test('ALL_CLIENT_COMMAND_TYPES matches the `type` tags on disk exactly', () => {
+  const onDisk = [...typeTagsOnDisk('command')].sort();
+  const declared = Object.keys(ALL_CLIENT_COMMAND_TYPES).sort();
+  assert.deepEqual(
+    declared,
+    onDisk,
+    'ALL_CLIENT_COMMAND_TYPES (src/protocolCoverage.ts) must declare exactly the `type` tags carried by the command goldens — no more, no fewer',
+  );
+});
+
+test('ALL_CLIENT_EVENT_TYPES matches the `type` tags on disk exactly', () => {
+  const onDisk = [...typeTagsOnDisk('event')].sort();
+  const declared = Object.keys(ALL_CLIENT_EVENT_TYPES).sort();
+  assert.deepEqual(
+    declared,
+    onDisk,
+    'ALL_CLIENT_EVENT_TYPES (src/protocolCoverage.ts) must declare exactly the `type` tags carried by the event goldens — no more, no fewer',
+  );
+});
+
+// `turn_recovery_state`'s golden only exercises `paused_recoverable` — this
+// test both proves `state` is checked against the real 6-kind
+// TurnRecoveryStateDto (until now that field wasn't checked at all: the
+// switch case validated every other field but never `state`'s tag) and that
+// an unrecognized kind is rejected rather than silently accepted.
+test('turn_recovery_state validates its `state` kind, not just the surrounding fields', () => {
+  const base = {
+    session_id: '11111111-1111-4111-8111-111111111111',
+    turn_id: 1,
+    first_sequence: 1,
+    last_sequence: 7,
+    safe_to_resume: true,
+  };
+  for (const kind of ['running', 'waiting_for_user', 'paused_recoverable', 'completed', 'failed', 'cancelled']) {
+    validateEvent(`turn_recovery_state(${kind})`, {
+      type: 'turn_recovery_state',
+      snapshot: { ...base, state: { type: kind } },
+    });
+  }
+  assert.throws(
+    () =>
+      validateEvent('turn_recovery_state(bogus-state)', {
+        type: 'turn_recovery_state',
+        snapshot: { ...base, state: { type: 'bogus_state' } },
+      }),
+    'an unknown TurnRecoveryStateDto kind must be rejected',
+  );
+});
+
+// The on-disk goldens only exercise `AudioOpDto::Transcribe` and
+// `AudioResultDto::Transcript` — every other op/result shape (including all
+// 8 `AudioErrorKindDto` kinds, which exist specifically so `SttError`/
+// `VoiceError`/`TtsError` round-trip without losing distinctions) has no
+// golden, so without this test those branches are dead code that always
+// "passes".
+test('audio_request covers every AudioOpDto variant', () => {
+  validateEvent('audio_request(start_recording)', {
+    type: 'audio_request',
+    request_id: 1,
+    op: { type: 'start_recording', sample_rate_hz: 16_000, format: 'wav' },
+  });
+  validateEvent('audio_request(stop_recording)', {
+    type: 'audio_request',
+    request_id: 2,
+    op: { type: 'stop_recording' },
+  });
+  validateEvent('audio_request(is_recording)', {
+    type: 'audio_request',
+    request_id: 3,
+    op: { type: 'is_recording' },
+  });
+  validateEvent('audio_request(transcribe-no-language)', {
+    type: 'audio_request',
+    request_id: 4,
+    op: { type: 'transcribe' },
+  });
+  validateEvent('audio_request(synthesize)', {
+    type: 'audio_request',
+    request_id: 5,
+    op: { type: 'synthesize', text: 'hello', voice: 'default' },
+  });
+  validateEvent('audio_request(synthesize-no-voice)', {
+    type: 'audio_request',
+    request_id: 6,
+    op: { type: 'synthesize', text: 'hello' },
+  });
+
+  // `request_id`/`op` are required on the envelope itself.
+  assert.throws(
+    () => validateEvent('audio_request(missing-request_id)', { type: 'audio_request', op: { type: 'is_recording' } }),
+    'a missing `request_id` must be rejected',
+  );
+  assert.throws(
+    () => validateEvent('audio_request(missing-op)', { type: 'audio_request', request_id: 1 }),
+    'a missing `op` must be rejected',
+  );
+
+  // `start_recording` requires both `sample_rate_hz` and `format`.
+  assert.throws(
+    () =>
+      validateEvent('audio_request(start_recording-no-rate)', {
+        type: 'audio_request',
+        request_id: 1,
+        op: { type: 'start_recording', format: 'wav' },
+      }),
+    'a `start_recording` missing `sample_rate_hz` must be rejected',
+  );
+  assert.throws(
+    () =>
+      validateEvent('audio_request(start_recording-no-format)', {
+        type: 'audio_request',
+        request_id: 1,
+        op: { type: 'start_recording', sample_rate_hz: 16_000 },
+      }),
+    'a `start_recording` missing `format` must be rejected',
+  );
+
+  // `synthesize` requires `text` (`voice` is optional).
+  assert.throws(
+    () =>
+      validateEvent('audio_request(synthesize-no-text)', {
+        type: 'audio_request',
+        request_id: 1,
+        op: { type: 'synthesize', voice: 'default' },
+      }),
+    'a `synthesize` missing `text` must be rejected',
+  );
+});
+
+test('audio_response covers every AudioResultDto variant, including all 8 AudioErrorKindDto kinds', () => {
+  validateCommand('audio_response(ok)', { type: 'audio_response', request_id: 1, result: { type: 'ok' } });
+  validateCommand('audio_response(recording_state)', {
+    type: 'audio_response',
+    request_id: 2,
+    result: { type: 'recording_state', recording: true },
+  });
+  validateCommand('audio_response(recording)', {
+    type: 'audio_response',
+    request_id: 3,
+    result: { type: 'recording', audio_base64: 'YWJj', mime_type: 'audio/m4a' },
+  });
+  validateCommand('audio_response(audio)', {
+    type: 'audio_response',
+    request_id: 4,
+    result: { type: 'audio', pcm_base64: 'YWJj', sample_rate_hz: 22_050 },
+  });
+
+  const AUDIO_ERROR_KINDS = [
+    'permission_denied',
+    'no_speech',
+    'not_recording',
+    'unavailable',
+    'busy',
+    'retriable',
+    'synthesis_failed',
+    'other',
+  ];
+  assert.equal(AUDIO_ERROR_KINDS.length, 8);
+  for (const kind of AUDIO_ERROR_KINDS) {
+    validateCommand(`audio_response(failed-${kind})`, {
+      type: 'audio_response',
+      request_id: 5,
+      result: { type: 'failed', kind, message: `${kind} happened` },
+    });
+  }
+  assert.throws(
+    () =>
+      validateCommand('audio_response(failed-unknown-kind)', {
+        type: 'audio_response',
+        request_id: 5,
+        result: { type: 'failed', kind: 'bogus_kind', message: 'nope' },
+      }),
+    'an unknown AudioErrorKindDto must be rejected',
+  );
+
+  // `request_id`/`result` are required on the envelope itself.
+  assert.throws(
+    () =>
+      validateCommand('audio_response(missing-request_id)', {
+        type: 'audio_response',
+        result: { type: 'ok' },
+      }),
+    'a missing `request_id` must be rejected',
+  );
+  assert.throws(
+    () => validateCommand('audio_response(missing-result)', { type: 'audio_response', request_id: 1 }),
+    'a missing `result` must be rejected',
+  );
+
+  // `recording_state` requires `recording`.
+  assert.throws(
+    () =>
+      validateCommand('audio_response(recording_state-no-flag)', {
+        type: 'audio_response',
+        request_id: 1,
+        result: { type: 'recording_state' },
+      }),
+    'a `recording_state` missing `recording` must be rejected',
+  );
+
+  // `recording` requires both `audio_base64` and `mime_type`.
+  assert.throws(
+    () =>
+      validateCommand('audio_response(recording-no-audio)', {
+        type: 'audio_response',
+        request_id: 1,
+        result: { type: 'recording', mime_type: 'audio/m4a' },
+      }),
+    'a `recording` missing `audio_base64` must be rejected',
+  );
+  assert.throws(
+    () =>
+      validateCommand('audio_response(recording-no-mime)', {
+        type: 'audio_response',
+        request_id: 1,
+        result: { type: 'recording', audio_base64: 'YWJj' },
+      }),
+    'a `recording` missing `mime_type` must be rejected',
+  );
+
+  // `audio` requires both `pcm_base64` and `sample_rate_hz`.
+  assert.throws(
+    () =>
+      validateCommand('audio_response(audio-no-pcm)', {
+        type: 'audio_response',
+        request_id: 1,
+        result: { type: 'audio', sample_rate_hz: 22_050 },
+      }),
+    'an `audio` missing `pcm_base64` must be rejected',
+  );
+  assert.throws(
+    () =>
+      validateCommand('audio_response(audio-no-rate)', {
+        type: 'audio_response',
+        request_id: 1,
+        result: { type: 'audio', pcm_base64: 'YWJj' },
+      }),
+    'an `audio` missing `sample_rate_hz` must be rejected',
+  );
+
+  // `transcript` requires `text` (`language`/`confidence` are optional).
+  assert.throws(
+    () =>
+      validateCommand('audio_response(transcript-no-text)', {
+        type: 'audio_response',
+        request_id: 1,
+        result: { type: 'transcript', language: 'en-US' },
+      }),
+    'a `transcript` missing `text` must be rejected',
+  );
+
+  // `failed` requires both `kind` and `message`.
+  assert.throws(
+    () =>
+      validateCommand('audio_response(failed-no-kind)', {
+        type: 'audio_response',
+        request_id: 1,
+        result: { type: 'failed', message: 'nope' },
+      }),
+    'a `failed` missing `kind` must be rejected',
+  );
+  assert.throws(
+    () =>
+      validateCommand('audio_response(failed-no-message)', {
+        type: 'audio_response',
+        request_id: 1,
+        result: { type: 'failed', kind: 'other' },
+      }),
+    'a `failed` missing `message` must be rejected',
+  );
+});
+
+// `settings_snapshot`'s four widened fields (files_json/active_json/locked/
+// layers_json) have no golden that exercises them — the on-disk snapshot
+// predates the widening. Without this test the four `if (...)` checks in the
+// `settings_snapshot` case are dead code that always "passes".
+test('a widened settings_snapshot validates its four new optional fields, and rejects a malformed one', () => {
+  validateEvent('settings_snapshot(widened)', {
+    type: 'settings_snapshot',
+    effective_json: '{"model":"claude-opus-4-7"}',
+    provenance_json: '{"model":"user-settings"}',
+    files_json: '[{"layer":"user","path":"/home/user/.lingxi/settings.json","exists":true,"parsed":true}]',
+    active_json: '{"model":"claude-opus-4-7"}',
+    locked: ['model'],
+    layers_json: '{"user":{"model":"claude-opus-4-7"}}',
+  });
+  assert.throws(
+    () => validateEvent('settings_snapshot(bad-locked)', {
+      type: 'settings_snapshot',
+      effective_json: '{}',
+      provenance_json: '{}',
+      locked: [42],
+    }),
+    'a non-string entry in `locked` must be rejected',
+  );
+  assert.throws(
+    () => validateEvent('settings_snapshot(bad-files_json)', {
+      type: 'settings_snapshot',
+      effective_json: '{}',
+      provenance_json: '{}',
+      files_json: 123,
+    }),
+    'a non-string `files_json` must be rejected',
+  );
+  assert.throws(
+    () => validateEvent('settings_snapshot(bad-layers_json)', {
+      type: 'settings_snapshot',
+      effective_json: '{}',
+      provenance_json: '{}',
+      layers_json: 123,
+    }),
+    'a non-string `layers_json` must be rejected',
+  );
 });
 
 test('background task app events mirror the Rust wire contract', () => {

@@ -8,6 +8,9 @@ import {
   claimSlashTurn,
   clearCancellationRuntime,
   clearSlashTurnClaim,
+  discardAudioBindings,
+  pruneAudioBindings,
+  sessionAudioBindings,
   displayedSession,
   isLatestOperation,
   isLatestProjectCatalogRequest,
@@ -18,12 +21,17 @@ import {
   reconcilePendingCount,
   recoverLatestNavigationFailure,
   removeRuntimeFromMaps,
+  dialogFocusTarget,
   resetBridgeRuntimeState,
+  restartBridgePreconditionError,
+  restartBridgeSingleFlight,
+  restartBridgeWithTimeout,
   shouldApplyBootstrapSnapshot,
   shouldClearPendingPermissions,
   shouldReleaseSlashTurn,
   shouldResetBridgeRuntime,
 } from '../src/renderer/bridge/useBridge';
+import type { AudioRequestDeps } from '../src/renderer/audio/requests';
 import { emptyConversation } from '../src/renderer/bridge/conversation';
 import { emptyDesktopState } from '../src/renderer/bridge/desktopState';
 
@@ -449,4 +457,145 @@ test('a connection reset that clears turnActiveRefs also clears the outstanding 
     'a connection reset clears turnActiveRefs but not slashPendingRefs -- a stale slash claim from before the '
       + 'reset can survive into the next session/turn and mislabel an unrelated error as a slash release.',
   );
+});
+
+test('restart helper rejects a hung IPC call within its caller-provided bound', async () => {
+  let invoked = false;
+  await assert.rejects(
+    restartBridgeWithTimeout(async () => {
+      invoked = true;
+      await new Promise<void>(() => undefined);
+    }, 5),
+    /Timed out waiting for the engine to restart/,
+  );
+  assert.equal(invoked, true);
+});
+
+test('restart preconditions turn loading, missing host, and missing session into failures', () => {
+  assert.match(restartBridgePreconditionError(true, true, 'session')?.message ?? '', /session is loading/);
+  assert.match(restartBridgePreconditionError(false, false, 'session')?.message ?? '', /host unavailable/);
+  assert.match(restartBridgePreconditionError(false, true, null)?.message ?? '', /Open a session/);
+  assert.equal(restartBridgePreconditionError(false, true, 'session'), null);
+});
+
+test('restart helper preserves successful and failed IPC results', async () => {
+  await assert.doesNotReject(() => restartBridgeWithTimeout(async () => undefined, 25));
+  await assert.rejects(
+    restartBridgeWithTimeout(async () => { throw new Error('restart failed'); }, 25),
+    /restart failed/,
+  );
+});
+
+test('restart single-flight reuses a pending session operation, then allows a later restart', async () => {
+  const inFlight = new Map<string, Promise<void>>();
+  const first = deferred<void>();
+  let hostCalls = 0;
+  const restart = () => restartBridgeSingleFlight(inFlight, 'session-1', async () => {
+    hostCalls += 1;
+    await first.promise;
+  });
+
+  // The first renderer caller times out, but that only ends its wait. The
+  // underlying session restart remains in-flight for the retry to join.
+  const initial = restartBridgeWithTimeout(restart, 5);
+  await assert.rejects(initial, /Timed out waiting for the engine to restart/);
+  assert.equal(hostCalls, 1);
+  const retry = restartBridgeWithTimeout(restart, 50);
+  await Promise.resolve();
+  assert.equal(hostCalls, 1);
+  first.resolve(undefined);
+  await retry;
+  assert.equal(inFlight.has('session-1'), false);
+
+  await restartBridgeWithTimeout(restart, 50);
+  assert.equal(hostCalls, 2);
+});
+
+test('dialog focus helper wraps both directions and captures focus that escaped', () => {
+  const focusable = ['first', 'middle', 'last'] as const;
+  assert.equal(dialogFocusTarget(focusable, 'last', false), 'first');
+  assert.equal(dialogFocusTarget(focusable, 'first', true), 'last');
+  assert.equal(dialogFocusTarget(focusable, 'outside', false), 'first');
+  assert.equal(dialogFocusTarget(focusable, 'outside', true), 'last');
+  assert.equal(dialogFocusTarget(focusable, 'middle', false), undefined);
+  assert.equal(dialogFocusTarget([], null, false), undefined);
+});
+
+// ---------------------------------------------------------------------------
+// The microphone belongs to a SESSION, not to the hook.
+//
+// `useBridge()` is instantiated once (App.tsx) while `SessionRuntimeManager`
+// runs a Map of concurrent runtimes, each with its own engine, its own
+// `AudioBridge` and its own registered `voice` tool. One recorder shared across
+// all of them is not a tidiness problem: it hands one session's captured audio
+// to a different session's model.
+// ---------------------------------------------------------------------------
+
+function fakeRecorder(): AudioRequestDeps['recorder'] & { stopped: number } {
+  let recording = false;
+  return {
+    stopped: 0,
+    isRecording: () => recording,
+    async start() { recording = true; },
+    async stop() {
+      recording = false;
+      (this as { stopped: number }).stopped += 1;
+      return { audioBase64: '', mimeType: 'audio/webm' };
+    },
+  };
+}
+
+function fakeBindings(): AudioRequestDeps {
+  return {
+    recorder: fakeRecorder(),
+    async synthesize() { return { pcmBase64: '', sampleRateHz: 0 }; },
+    playback: () => ({ voiceSelection: 'system:default', rate: 1 }),
+  };
+}
+
+test('each session gets its own recorder, so one session cannot answer with another session\'s audio', () => {
+  const bindings = new Map<string, AudioRequestDeps>();
+  const a = sessionAudioBindings(bindings, 'session-a', fakeBindings);
+  const b = sessionAudioBindings(bindings, 'session-b', fakeBindings);
+
+  assert.notEqual(
+    a.recorder,
+    b.recorder,
+    'two concurrent sessions sharing one recorder means B\'s stop_recording finalizes A\'s clip into B\'s transcript',
+  );
+
+  void a.recorder.start({ sampleRateHz: 16000, format: 'webm' });
+  assert.equal(a.recorder.isRecording(), true);
+  assert.equal(
+    b.recorder.isRecording(),
+    false,
+    'a session that never started a capture must answer is_recording with false',
+  );
+
+  assert.equal(
+    sessionAudioBindings(bindings, 'session-a', fakeBindings),
+    a,
+    'a start/stop PAIR spans two engine requests, so one session must keep one recorder',
+  );
+});
+
+test('discarding a session releases a microphone it was still holding', async () => {
+  const bindings = new Map<string, AudioRequestDeps>();
+  const deps = sessionAudioBindings(bindings, 'session-a', fakeBindings);
+  await deps.recorder.start({ sampleRateHz: 16000, format: 'webm' });
+
+  discardAudioBindings(bindings, 'session-a');
+
+  assert.equal(bindings.has('session-a'), false);
+  assert.equal(deps.recorder.isRecording(), false, 'nothing else holds this recorder, so the mic would stay open');
+});
+
+test('an authoritative runtime snapshot prunes the audio bindings of sessions that are gone', () => {
+  const bindings = new Map<string, AudioRequestDeps>();
+  sessionAudioBindings(bindings, 'live', fakeBindings);
+  sessionAudioBindings(bindings, 'gone', fakeBindings);
+
+  pruneAudioBindings(bindings, ['live']);
+
+  assert.deepEqual([...bindings.keys()], ['live']);
 });

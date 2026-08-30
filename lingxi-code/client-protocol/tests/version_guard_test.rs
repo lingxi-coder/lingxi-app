@@ -292,6 +292,18 @@ fn current_contract_index() -> ContractIndex {
     put("ClientEvent::TurnEnded.stop_reason", "Option<String>");
     put("ClientEvent::TurnEnded.cost", "CostDto");
 
+    put("ClientEvent::TurnRecoveryState", "turn_recovery_state");
+    put(
+        "ClientEvent::TurnRecoveryState.snapshot",
+        "TurnRecoverySnapshotDto",
+    );
+
+    put("ClientEvent::TurnEventReplay", "turn_event_replay");
+    put("ClientEvent::TurnEventReplay.session_id", "String");
+    put("ClientEvent::TurnEventReplay.turn_id", "u64");
+    put("ClientEvent::TurnEventReplay.sequence", "u64");
+    put("ClientEvent::TurnEventReplay.event_json", "String");
+
     put("ClientEvent::CostUpdate", "cost_update");
     put("ClientEvent::CostUpdate.total_usd", "f64");
     put("ClientEvent::CostUpdate.input_tokens", "u64");
@@ -401,6 +413,9 @@ fn current_contract_index() -> ContractIndex {
     put("ClientEvent::McpServers", "mcp_servers");
     put("ClientEvent::McpServers.servers", "Vec<McpServerDto>");
 
+    put("ClientEvent::Skills", "skills");
+    put("ClientEvent::Skills.skills", "Vec<SkillDto>");
+
     put("ClientEvent::Hooks", "hooks");
     put("ClientEvent::Hooks.hooks", "Vec<HookDto>");
 
@@ -426,6 +441,24 @@ fn current_contract_index() -> ContractIndex {
     put("ClientEvent::SettingsSnapshot", "settings_snapshot");
     put("ClientEvent::SettingsSnapshot.effective_json", "String");
     put("ClientEvent::SettingsSnapshot.provenance_json", "String");
+    // ADDED (additive — new optional fields need no major bump, §0.10).
+    put("ClientEvent::SettingsSnapshot.files_json", "Option<String>");
+    put(
+        "ClientEvent::SettingsSnapshot.active_json",
+        "Option<String>",
+    );
+    put(
+        "ClientEvent::SettingsSnapshot.locked",
+        "Option<Vec<String>>",
+    );
+    put(
+        "ClientEvent::SettingsSnapshot.layers_json",
+        "Option<String>",
+    );
+    put(
+        "ClientEvent::SettingsSnapshot.merged_keys",
+        "Option<Vec<String>>",
+    );
 
     put("ClientEvent::AuthState", "auth_state");
     put("ClientEvent::AuthState.state", "AuthStateDto");
@@ -527,6 +560,22 @@ fn current_contract_index() -> ContractIndex {
     put("ClientEvent::ApiRetry.max_retries", "u32");
     put("ClientEvent::ApiRetry.delay_ms", "u64");
 
+    put("ClientEvent::AudioRequest", "audio_request");
+    put("ClientEvent::AudioRequest.request_id", "u64");
+    put("ClientEvent::AudioRequest.op", "AudioOpDto");
+
+    // ── AudioOpDto (events.rs) ────────────────────────────────────────────
+    put("AudioOpDto::StartRecording", "start_recording");
+    put("AudioOpDto::StartRecording.sample_rate_hz", "u32");
+    put("AudioOpDto::StartRecording.format", "String");
+    put("AudioOpDto::StopRecording", "stop_recording");
+    put("AudioOpDto::IsRecording", "is_recording");
+    put("AudioOpDto::Transcribe", "transcribe");
+    put("AudioOpDto::Transcribe.language", "Option<String>");
+    put("AudioOpDto::Synthesize", "synthesize");
+    put("AudioOpDto::Synthesize.text", "String");
+    put("AudioOpDto::Synthesize.voice", "Option<String>");
+
     // ── ErrorKindDto (events.rs) ──────────────────────────────────────────
     put("ErrorKindDto::Transport", "transport");
     put("ErrorKindDto::Protocol", "protocol");
@@ -539,6 +588,24 @@ fn current_contract_index() -> ContractIndex {
     put("TurnOutcomeDto::EndTurn", "end_turn");
     put("TurnOutcomeDto::MaxTurns", "max_turns");
     put("TurnOutcomeDto::Cancelled", "cancelled");
+
+    // ── TurnRecoveryStateDto / TurnRecoverySnapshotDto (events.rs) ───────
+    put("TurnRecoveryStateDto::Running", "running");
+    put("TurnRecoveryStateDto::WaitingForUser", "waiting_for_user");
+    put(
+        "TurnRecoveryStateDto::PausedRecoverable",
+        "paused_recoverable",
+    );
+    put("TurnRecoveryStateDto::Completed", "completed");
+    put("TurnRecoveryStateDto::Failed", "failed");
+    put("TurnRecoveryStateDto::Cancelled", "cancelled");
+    put("TurnRecoverySnapshotDto.session_id", "String");
+    put("TurnRecoverySnapshotDto.turn_id", "u64");
+    put("TurnRecoverySnapshotDto.state", "TurnRecoveryStateDto");
+    put("TurnRecoverySnapshotDto.first_sequence", "u64");
+    put("TurnRecoverySnapshotDto.last_sequence", "u64");
+    put("TurnRecoverySnapshotDto.safe_to_resume", "bool");
+    put("TurnRecoverySnapshotDto.reason", "Option<String>");
 
     // ── CostDto (events.rs) ───────────────────────────────────────────────
     put("CostDto.total_usd", "f64");
@@ -560,6 +627,17 @@ fn current_contract_index() -> ContractIndex {
 
     put("ClientCommand::Cancel", "cancel");
     put("ClientCommand::Cancel.turn_id", "Option<u64>");
+
+    put("ClientCommand::AttachTurn", "attach_turn");
+    put("ClientCommand::AttachTurn.turn_id", "u64");
+    put("ClientCommand::AttachTurn.after_sequence", "Option<u64>");
+
+    put("ClientCommand::ResumeTurn", "resume_turn");
+    put("ClientCommand::ResumeTurn.turn_id", "u64");
+
+    put("ClientCommand::PauseTurn", "pause_turn");
+    put("ClientCommand::PauseTurn.turn_id", "u64");
+    put("ClientCommand::PauseTurn.reason", "String");
 
     put("ClientCommand::ApprovePermission", "approve_permission");
     put("ClientCommand::ApprovePermission.request_id", "u64");
@@ -808,6 +886,101 @@ fn current_contract_index() -> ContractIndex {
 
     put("ClientCommand::RequestExit", "request_exit");
 
+    put("ClientCommand::UpdateSettings", "update_settings");
+    put(
+        "ClientCommand::UpdateSettings.destination",
+        "SettingsDestinationDto",
+    );
+    put("ClientCommand::UpdateSettings.patch_json", "String");
+
+    put(
+        "ClientCommand::UpdatePermissionRules",
+        "update_permission_rules",
+    );
+    put(
+        "ClientCommand::UpdatePermissionRules.destination",
+        "SettingsDestinationDto",
+    );
+    put(
+        "ClientCommand::UpdatePermissionRules.behavior",
+        "PermissionBehaviorDto",
+    );
+    put("ClientCommand::UpdatePermissionRules.add", "Vec<String>");
+    put("ClientCommand::UpdatePermissionRules.remove", "Vec<String>");
+
+    put(
+        "ClientCommand::SetDefaultPermissionMode",
+        "set_default_permission_mode",
+    );
+    put(
+        "ClientCommand::SetDefaultPermissionMode.destination",
+        "SettingsDestinationDto",
+    );
+    put("ClientCommand::SetDefaultPermissionMode.mode", "String");
+
+    put(
+        "ClientCommand::UpdateWorkspaceDirectories",
+        "update_workspace_directories",
+    );
+    put(
+        "ClientCommand::UpdateWorkspaceDirectories.destination",
+        "SettingsDestinationDto",
+    );
+    put(
+        "ClientCommand::UpdateWorkspaceDirectories.add",
+        "Vec<String>",
+    );
+    put(
+        "ClientCommand::UpdateWorkspaceDirectories.remove",
+        "Vec<String>",
+    );
+
+    put("ClientCommand::UpsertMcpServer", "upsert_mcp_server");
+    put("ClientCommand::UpsertMcpServer.scope", "McpScopeDto");
+    put("ClientCommand::UpsertMcpServer.name", "String");
+    put("ClientCommand::UpsertMcpServer.config_json", "String");
+
+    put("ClientCommand::RemoveMcpServer", "remove_mcp_server");
+    put("ClientCommand::RemoveMcpServer.scope", "McpScopeDto");
+    put("ClientCommand::RemoveMcpServer.name", "String");
+
+    put("ClientCommand::AudioResponse", "audio_response");
+    put("ClientCommand::AudioResponse.request_id", "u64");
+    put("ClientCommand::AudioResponse.result", "AudioResultDto");
+
+    // ── AudioErrorKindDto (commands.rs) ────────────────────────────────────
+    put("AudioErrorKindDto::PermissionDenied", "permission_denied");
+    put("AudioErrorKindDto::NoSpeech", "no_speech");
+    put("AudioErrorKindDto::NotRecording", "not_recording");
+    put("AudioErrorKindDto::Unavailable", "unavailable");
+    put("AudioErrorKindDto::Busy", "busy");
+    put("AudioErrorKindDto::Retriable", "retriable");
+    put("AudioErrorKindDto::SynthesisFailed", "synthesis_failed");
+    put("AudioErrorKindDto::Other", "other");
+
+    // ── AudioResultDto (commands.rs) ───────────────────────────────────────
+    put("AudioResultDto::Ok", "ok");
+    put("AudioResultDto::RecordingState", "recording_state");
+    put("AudioResultDto::RecordingState.recording", "bool");
+    put("AudioResultDto::Recording", "recording");
+    put("AudioResultDto::Recording.audio_base64", "String");
+    put("AudioResultDto::Recording.mime_type", "String");
+    put("AudioResultDto::Transcript", "transcript");
+    put("AudioResultDto::Transcript.text", "String");
+    put("AudioResultDto::Transcript.language", "Option<String>");
+    put("AudioResultDto::Transcript.confidence", "Option<f32>");
+    put("AudioResultDto::Audio", "audio");
+    put("AudioResultDto::Audio.pcm_base64", "String");
+    put("AudioResultDto::Audio.sample_rate_hz", "u32");
+    put("AudioResultDto::Failed", "failed");
+    put("AudioResultDto::Failed.kind", "AudioErrorKindDto");
+    put("AudioResultDto::Failed.message", "String");
+
+    // ── McpScopeDto (commands.rs) ─────────────────────────────────────────
+    put("McpScopeDto::User", "user");
+    put("McpScopeDto::Local", "local");
+    put("McpScopeDto::Project", "project");
+
     // ── PromptModeDto (commands.rs) ───────────────────────────────────────
     put("PromptModeDto::Normal", "normal");
     put("PromptModeDto::Bash", "bash");
@@ -826,6 +999,7 @@ fn current_contract_index() -> ContractIndex {
     put("ListingKindDto::Sessions", "sessions");
     put("ListingKindDto::Models", "models");
     put("ListingKindDto::Mcp", "mcp");
+    put("ListingKindDto::Skills", "skills");
     put("ListingKindDto::Hooks", "hooks");
     put("ListingKindDto::Agents", "agents");
     put("ListingKindDto::SlashCommands", "slash_commands");
@@ -836,6 +1010,16 @@ fn current_contract_index() -> ContractIndex {
     put("ListingKindDto::Doctor", "doctor");
     put("ListingKindDto::Tasks", "tasks");
     put("ListingKindDto::Coordinator", "coordinator");
+
+    // ── SettingsDestinationDto (commands.rs) ──────────────────────────────
+    put("SettingsDestinationDto::User", "user");
+    put("SettingsDestinationDto::Project", "project");
+    put("SettingsDestinationDto::Local", "local");
+
+    // ── PermissionBehaviorDto (commands.rs) ───────────────────────────────
+    put("PermissionBehaviorDto::Allow", "allow");
+    put("PermissionBehaviorDto::Deny", "deny");
+    put("PermissionBehaviorDto::Ask", "ask");
 
     // ── MessageDto / MessageBlockDto (message.rs) ─────────────────────────
     put("MessageDto.role", "String");
@@ -1194,6 +1378,9 @@ fn current_contract_index() -> ContractIndex {
     put("McpServerDto.name", "String");
     put("McpServerDto.status", "McpStatusDto");
     put("McpServerDto.transport", "String");
+
+    put("SkillDto.name", "String");
+    put("SkillDto.source_dir", "String");
 
     put("McpStatusDto::Connected", "connected");
     put("McpStatusDto::Disconnected", "disconnected");
@@ -2027,8 +2214,9 @@ fn current_contract_matches_index_or_version_bumped() {
 #[allow(clippy::too_many_lines, clippy::no_effect_underscore_binding)]
 fn contract_index_covers_every_dto() {
     use client_protocol::commands::{
-        AppCreateModeDto, ClientCommand, CommandResultDto, ImageRefDto, ListingKindDto,
-        PromptModeDto, ProviderCredentialSecretDto,
+        AppCreateModeDto, AudioErrorKindDto, AudioResultDto, ClientCommand, CommandResultDto,
+        ImageRefDto, ListingKindDto, McpScopeDto, PermissionBehaviorDto, PromptModeDto,
+        ProviderCredentialSecretDto, SettingsDestinationDto,
     };
     use client_protocol::computer_access::{
         AccessTierDto, ComputerAccessRequestDto, ComputerAccessResponseDto, RequestedAppDto,
@@ -2040,12 +2228,15 @@ fn contract_index_covers_every_dto() {
         ReasoningControlStateDto, ReasoningOptionDto, ReasoningSelectionDto,
     };
     use client_protocol::error::ClientError;
-    use client_protocol::events::{ClientEvent, CostDto, ErrorKindDto, TurnOutcomeDto};
+    use client_protocol::events::{
+        AudioOpDto, ClientEvent, CostDto, ErrorKindDto, TurnOutcomeDto, TurnRecoverySnapshotDto,
+        TurnRecoveryStateDto,
+    };
     use client_protocol::listings::{
         AgentDto, AuthStateDto, CheckStatusDto, CoordinatorWorkerDto, DoctorCheckDto,
         DoctorReportDto, DoctorSummaryDto, HookDto, McpServerDto, McpStatusDto, MemoryEntryDto,
-        MemoryTierDto, SessionAgentSummaryDto, SessionRowDto, SlashCommandDto, StatusSnapshotDto,
-        TaskRowDto, TaskStatusDto,
+        MemoryTierDto, SessionAgentSummaryDto, SessionRowDto, SkillDto, SlashCommandDto,
+        StatusSnapshotDto, TaskRowDto, TaskStatusDto,
     };
     use client_protocol::local_apps::{
         AppAuthorizationDecisionDto, AppBridgeOperationDto, AppBridgeRequestDto,
@@ -2125,8 +2316,43 @@ fn contract_index_covers_every_dto() {
             },
         },
         ClientEvent::SessionEnded,
+        ClientEvent::TurnRecoveryState {
+            snapshot: TurnRecoverySnapshotDto {
+                session_id: String::new(),
+                turn_id: 0,
+                state: TurnRecoveryStateDto::Running,
+                first_sequence: 0,
+                last_sequence: 0,
+                safe_to_resume: true,
+                reason: None,
+            },
+        },
+        ClientEvent::TurnEventReplay {
+            session_id: String::new(),
+            turn_id: 0,
+            sequence: 0,
+            event_json: String::new(),
+        },
+        ClientEvent::AudioRequest {
+            request_id: 0,
+            op: AudioOpDto::IsRecording,
+        },
     ];
     let _outcome = TurnOutcomeDto::EndTurn;
+    // Every `AudioOpDto` variant, so a removed op fails THIS compile.
+    let _audio_ops: Vec<AudioOpDto> = vec![
+        AudioOpDto::StartRecording {
+            sample_rate_hz: 16_000,
+            format: String::new(),
+        },
+        AudioOpDto::StopRecording,
+        AudioOpDto::IsRecording,
+        AudioOpDto::Transcribe { language: None },
+        AudioOpDto::Synthesize {
+            text: String::new(),
+            voice: None,
+        },
+    ];
 
     // tool_display.rs — the pre-derived render model.
     let _verb = ToolVerbDto::Update;
@@ -2223,7 +2449,89 @@ fn contract_index_covers_every_dto() {
             response: ComputerAccessResponseDto::default(),
         },
         ClientCommand::DenyComputerAccess { request_id: 0 },
+        ClientCommand::AttachTurn {
+            turn_id: 0,
+            after_sequence: None,
+        },
+        ClientCommand::ResumeTurn { turn_id: 0 },
+        ClientCommand::PauseTurn {
+            turn_id: 0,
+            reason: String::new(),
+        },
+        ClientCommand::ResolveAppDependencyChangeConfirmation {
+            request_id: String::new(),
+            approved: false,
+        },
+        ClientCommand::UpdateSettings {
+            destination: SettingsDestinationDto::User,
+            patch_json: String::new(),
+        },
+        ClientCommand::UpdatePermissionRules {
+            destination: SettingsDestinationDto::User,
+            behavior: PermissionBehaviorDto::Allow,
+            add: Vec::new(),
+            remove: Vec::new(),
+        },
+        ClientCommand::SetDefaultPermissionMode {
+            destination: SettingsDestinationDto::User,
+            mode: String::new(),
+        },
+        ClientCommand::UpdateWorkspaceDirectories {
+            destination: SettingsDestinationDto::User,
+            add: Vec::new(),
+            remove: Vec::new(),
+        },
+        ClientCommand::UpsertMcpServer {
+            scope: McpScopeDto::Project,
+            name: String::new(),
+            config_json: String::new(),
+        },
+        ClientCommand::RemoveMcpServer {
+            scope: McpScopeDto::Project,
+            name: String::new(),
+        },
+        ClientCommand::AudioResponse {
+            request_id: 0,
+            result: AudioResultDto::Ok,
+        },
     ];
+    // Every `AudioResultDto` variant, so a removed outcome fails THIS compile.
+    let _audio_results: Vec<AudioResultDto> = vec![
+        AudioResultDto::Ok,
+        AudioResultDto::RecordingState { recording: false },
+        AudioResultDto::Recording {
+            audio_base64: String::new(),
+            mime_type: String::new(),
+        },
+        AudioResultDto::Transcript {
+            text: String::new(),
+            language: None,
+            confidence: None,
+        },
+        AudioResultDto::Audio {
+            pcm_base64: String::new(),
+            sample_rate_hz: 0,
+        },
+        AudioResultDto::Failed {
+            kind: AudioErrorKindDto::Other,
+            message: String::new(),
+        },
+    ];
+    // Every `AudioErrorKindDto` variant, so a removed kind fails THIS compile.
+    let _audio_error_kinds: Vec<AudioErrorKindDto> = vec![
+        AudioErrorKindDto::PermissionDenied,
+        AudioErrorKindDto::NoSpeech,
+        AudioErrorKindDto::NotRecording,
+        AudioErrorKindDto::Unavailable,
+        AudioErrorKindDto::Busy,
+        AudioErrorKindDto::Retriable,
+        AudioErrorKindDto::SynthesisFailed,
+        AudioErrorKindDto::Other,
+    ];
+    let _mcp_scope = McpScopeDto::User;
+    let _settings_destination = SettingsDestinationDto::User;
+    let _permission_behavior = PermissionBehaviorDto::Allow;
+    let _recovery_state = TurnRecoveryStateDto::PausedRecoverable;
     let _mode = PromptModeDto::Normal;
     let _img = ImageRefDto {
         media_type: String::new(),
@@ -2285,6 +2593,10 @@ fn contract_index_covers_every_dto() {
             name: String::new(),
             status: McpStatusDto::Connected,
             transport: String::new(),
+        },
+        SkillDto {
+            name: String::new(),
+            source_dir: String::new(),
         },
         HookDto {
             name: String::new(),

@@ -55,6 +55,10 @@ struct Composer: View {
     // PR-4 items 1 & 2: while a turn is in flight the send affordance becomes a
     // Stop button (interrupt the turn), and we never start an overlapping turn.
     var streaming: Bool = false
+    /// True when a durable turn is inactive while waiting for explicit user
+    /// resolution. This changes only the trailing affordance; the source's
+    /// actual streaming state remains separate for background/voice policy.
+    var showDiscardRecovery: Bool = false
     var isCancelling: Bool = false
     /// Session transitions and cancellation can temporarily make a draft
     /// non-submittable even though the text field remains editable.
@@ -116,6 +120,7 @@ struct Composer: View {
         slashCommandsLoaded: Bool = false,
         slashCommandPending: Bool = false,
         streaming: Bool = false,
+        showDiscardRecovery: Bool = false,
         isCancelling: Bool = false,
         sendEnabled: Bool = true,
         onStop: @escaping () -> Void = {},
@@ -158,6 +163,7 @@ struct Composer: View {
         self.slashCommandsLoaded = slashCommandsLoaded
         self.slashCommandPending = slashCommandPending
         self.streaming = streaming
+        self.showDiscardRecovery = showDiscardRecovery
         self.isCancelling = isCancelling
         self.sendEnabled = sendEnabled
         self.onStop = onStop
@@ -239,9 +245,12 @@ struct Composer: View {
                             .tint(t.text3)
                             .frame(width: 40, height: 40)
                             .accessibilityLabel(isCancelling ? "composer_stopping" : "slash_command_running")
-                    } else if streaming {
+                    } else if streaming || showDiscardRecovery {
                         // PR-4 item 2: the Stop button replaces Send while a turn
-                        // is in flight — tapping it cancels the in-flight turn.
+                        // is in flight. An inactive durable recovery uses the
+                        // same explicit action as Stop, labeled Discard, so the
+                        // user can release its host-owned slot without making it
+                        // look like active LLM streaming.
                         Button(action: onStop) {
                             ComposerTurnActionIcon(
                                 systemName: "stop.fill",
@@ -250,8 +259,8 @@ struct Composer: View {
                             )
                         }
                         .buttonStyle(ComposerActionButtonStyle())
-                        .accessibilityLabel("composer_stop")
-                        .accessibilityIdentifier("composer.stop")
+                        .accessibilityLabel(showDiscardRecovery ? "composer_discard_recovery" : "composer_stop")
+                        .accessibilityIdentifier(showDiscardRecovery ? "composer.discard-recovery" : "composer.stop")
                     } else if draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                         // Match Android: ordinary recording and Flow Mode are
                         // distinct controls instead of overloading one tap.
@@ -540,7 +549,7 @@ struct Composer: View {
     }
 
     private var canSubmitDraft: Bool {
-        sendEnabled && !isWaitingForSlashCatalog
+        sendEnabled && !showDiscardRecovery && !isWaitingForSlashCatalog
     }
 
     private func acceptSlashCommand(_ command: ConversationSlashCommand) {
@@ -554,6 +563,7 @@ struct Composer: View {
         let trimmed = draft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty,
               !streaming,
+              !showDiscardRecovery,
               !isCancelling,
               !slashCommandPending,
               canSubmitDraft

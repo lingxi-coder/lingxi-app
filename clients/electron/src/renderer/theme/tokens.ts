@@ -147,3 +147,62 @@ export const tokens = (dark: boolean): Tokens =>
       };
 
 export type ThemeMode = 'dark' | 'light';
+
+/**
+ * The persisted preference, which is one entry wider than `ThemeMode`:
+ * `'system'` is not a third palette (there are only two — see `tokens`
+ * above) but a request to resolve to whichever of the two matches the OS at
+ * render time, and to keep following the OS while mounted.
+ */
+export type ThemePreference = ThemeMode | 'system';
+
+/** Resolves a preference to an actual palette, given the OS's current pick. */
+export function resolveThemeMode(preference: ThemePreference | undefined, prefersDark: boolean): ThemeMode {
+  if (preference === 'dark' || preference === 'light') return preference;
+  return prefersDark ? 'dark' : 'light';
+}
+
+/**
+ * The slice of `MediaQueryList` `watchThemePreference` needs — narrow enough
+ * to fake in a unit test without a real DOM.
+ */
+export interface SystemColorSchemeQuery {
+  readonly matches: boolean;
+  addEventListener(type: 'change', listener: () => void): void;
+  removeEventListener(type: 'change', listener: () => void): void;
+}
+
+/**
+ * Resolves `preference` to a `ThemeMode` and reports it via `onChange`. For
+ * `'system'` — and for an ABSENT preference, which means the same thing —
+ * this also subscribes to the OS query's `change` event, so a user flipping
+ * their OS appearance while the app is open is followed live; resolving once
+ * at mount and never again would pass a cursory look but silently stop
+ * tracking the OS. Returns a cleanup function that removes any listener it
+ * attached (a no-op for an explicit `'dark'`/`'light'`).
+ *
+ * An absent preference is `'system'`, not "do nothing". `Appearance.tsx`
+ * renders `settings.theme ?? 'system'` as the selected pill, and
+ * `resolveThemeMode` already reads `undefined` as "ask the OS" — an early
+ * return here was the one place in that chain that disagreed, and it
+ * disagreed silently. On a fresh install with no persisted preference, the
+ * app kept `App.tsx`'s `useState<ThemeMode>('dark')` seed no matter what the
+ * OS said, while Settings → 外观 highlighted 跟随系统 and flipping the OS
+ * theme changed nothing; clicking the already-selected 跟随系统 pill was the
+ * only way out, and it fixed it permanently, which is the signature of a
+ * default that was never resolved rather than of a preference.
+ */
+export function watchThemePreference(
+  preference: ThemePreference | undefined,
+  query: SystemColorSchemeQuery,
+  onChange: (mode: ThemeMode) => void,
+): () => void {
+  if (preference === 'dark' || preference === 'light') {
+    onChange(preference);
+    return () => {};
+  }
+  const applySystemTheme = () => onChange(resolveThemeMode(preference, query.matches));
+  applySystemTheme();
+  query.addEventListener('change', applySystemTheme);
+  return () => query.removeEventListener('change', applySystemTheme);
+}

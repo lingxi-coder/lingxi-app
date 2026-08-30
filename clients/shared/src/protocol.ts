@@ -36,6 +36,26 @@ export const BRIDGE_PROTOCOL_VERSION = '0.2.0';
 /** `client-protocol` DTO contract version this SDK speaks. */
 export const CLIENT_PROTOCOL_VERSION = '9.0.0';
 
+/**
+ * The largest single WebSocket frame the engine will read
+ * (`MAX_INBOUND_FRAME_BYTES` in `bridge/src/mcp_endpoint.rs`).
+ *
+ * This is a HARD ceiling, not a validation bound: a `ClientCommand` is sent as
+ * one unfragmented text frame ({@link BridgeClient} does `ws.send(JSON.stringify(frame))`,
+ * and `ws` does not fragment), and a frame over this limit is not a rejected
+ * command — tungstenite yields `Err(Capacity(MessageTooLong))`, `run_frame_pump`
+ * breaks, and `BridgeConnection::close_connection` aborts the turn and drains
+ * every broker. The user loses the whole session rather than the one operation.
+ *
+ * So every payload bound a client applies has to be derived from THIS number
+ * rather than chosen next to it — `clients/electron/src/shared/audioResponse.ts`
+ * derives its base64 bound here, and `audio-engine-bounds.test.ts` pins this
+ * constant against the engine's own source so the two cannot drift apart
+ * silently. A bound that merely looks generous is how a 24 MiB audio limit came
+ * to sit above a 16 MiB transport.
+ */
+export const MAX_BRIDGE_FRAME_BYTES = 16 * 1024 * 1024;
+
 // ─────────────────────────────────────────────────────────────────────────────
 // commands.rs
 // ─────────────────────────────────────────────────────────────────────────────
@@ -86,6 +106,7 @@ export type ListingKindDto =
   | { type: 'sessions' }
   | { type: 'models' }
   | { type: 'mcp' }
+  | { type: 'skills' }
   | { type: 'hooks' }
   | { type: 'agents' }
   | { type: 'slash_commands' }
@@ -95,6 +116,62 @@ export type ListingKindDto =
   | { type: 'auth' }
   | { type: 'doctor' }
   | { type: 'tasks' };
+
+/**
+ * A writable settings layer, as named on the wire (commands.rs
+ * `SettingsDestinationDto`). Deliberately narrower than the engine's full
+ * `SettingsLayer` (which also has `defaults`/`cli`/`managed`/`env`): those
+ * layers cannot be user-written. A bare wire string.
+ */
+export type SettingsDestinationDto = 'user' | 'project' | 'local';
+
+/**
+ * The behavior bucket a permission rule belongs to
+ * (`permissions.{allow,deny,ask}`), as named on the wire (commands.rs
+ * `PermissionBehaviorDto`). A bare wire string.
+ */
+export type PermissionBehaviorDto = 'allow' | 'deny' | 'ask';
+
+/**
+ * A writable MCP server-definition scope, as named on the wire (commands.rs
+ * `McpScopeDto`). Deliberately narrower than the full `ConfigScope` (which
+ * also has read-only `dynamic`/`enterprise`). A bare wire string.
+ */
+export type McpScopeDto = 'user' | 'local' | 'project';
+
+/**
+ * Coarse, branchable failure class for {@link AudioResultDto}'s `failed`
+ * variant — the union of `SttError`/`VoiceError`/`TtsError`'s failure modes,
+ * collapsed to a shared tag so a caller can branch on the same kind whichever
+ * trait produced it (commands.rs `AudioErrorKindDto`). A bare wire string.
+ * `#[non_exhaustive]` on the Rust side ⇒ a future kind is additive.
+ */
+export type AudioErrorKindDto =
+  | 'permission_denied'
+  | 'no_speech'
+  | 'not_recording'
+  | 'unavailable'
+  | 'busy'
+  | 'retriable'
+  | 'synthesis_failed'
+  | 'other';
+
+/**
+ * A finished microphone/speaker operation, or a typed failure — the wire
+ * lowering of `VoiceRecording`/`SttTranscript`/`TtsAudio` plus the unioned
+ * failure kind from `SttError`/`VoiceError`/`TtsError` (commands.rs
+ * `AudioResultDto`). Carried by {@link ClientCommand} `audio_response`.
+ * Internally tagged on `type`, `snake_case`. Binary payloads travel as
+ * base64 strings, the same convention as {@link ImageRefDto}.
+ * `#[non_exhaustive]` on the Rust side ⇒ a future outcome is additive.
+ */
+export type AudioResultDto =
+  | { type: 'ok' }
+  | { type: 'recording_state'; recording: boolean }
+  | { type: 'recording'; audio_base64: string; mime_type: string }
+  | { type: 'transcript'; text: string; language?: string; confidence?: number }
+  | { type: 'audio'; pcm_base64: string; sample_rate_hz: number }
+  | { type: 'failed'; kind: AudioErrorKindDto; message: string };
 
 /**
  * The inbound command envelope a client sends to the engine
@@ -113,6 +190,21 @@ export type ClientCommand =
       turn_id?: number;
     }
   | { type: 'cancel'; turn_id?: number }
+  /**
+   * Reattach a mobile client to a durable turn on the connection's active
+   * session; the engine emits the current recovery snapshot and replays
+   * events whose sequence is greater than `after_sequence`
+   * (commands.rs `ClientCommand::AttachTurn`).
+   */
+  | { type: 'attach_turn'; turn_id: number; after_sequence?: number }
+  /** Resume a checkpointed durable turn when its recovery policy allows it (commands.rs `ClientCommand::ResumeTurn`). */
+  | { type: 'resume_turn'; turn_id: number }
+  /**
+   * Persist a platform-lease expiration without converting it to cancel.
+   * `reason` is a machine-readable platform reason such as
+   * `background_time_expired` (commands.rs `ClientCommand::PauseTurn`).
+   */
+  | { type: 'pause_turn'; turn_id: number; reason: string }
   // ── Permission resolution ───────────────────────────────────────────────────
   | { type: 'approve_permission'; request_id: number; response: PermissionResponseDto }
   | { type: 'deny_permission'; request_id: number }
@@ -225,7 +317,35 @@ export type ClientCommand =
   | { type: 'restore_app_checkpoint'; app_id: string; checkpoint_id: string }
   | { type: 'delete_app'; app_id: string }
   // ── Lifecycle ───────────────────────────────────────────────────────────────
-  | { type: 'request_exit' };
+  | { type: 'request_exit' }
+  // ── Settings (persisted) ─────────────────────────────────────────────────────
+  | { type: 'update_settings'; destination: SettingsDestinationDto; patch_json: string }
+  // ── Permissions (persisted) ──────────────────────────────────────────────────
+  | {
+      type: 'update_permission_rules';
+      destination: SettingsDestinationDto;
+      behavior: PermissionBehaviorDto;
+      add: string[];
+      remove: string[];
+    }
+  | { type: 'set_default_permission_mode'; destination: SettingsDestinationDto; mode: string }
+  | {
+      type: 'update_workspace_directories';
+      destination: SettingsDestinationDto;
+      add: string[];
+      remove: string[];
+    }
+  // ── MCP servers (persisted) ──────────────────────────────────────────────────
+  | { type: 'upsert_mcp_server'; scope: McpScopeDto; name: string; config_json: string }
+  | { type: 'remove_mcp_server'; scope: McpScopeDto; name: string }
+  // ── Audio (engine -> client mic/speaker requests) ─────────────────────────────
+  /**
+   * Answer to an engine `audio_request`, correlated by `request_id`. Mirrors
+   * the {@link ComputerAccessRequestDto} engine->client request/response
+   * shape, but as a single typed reply rather than an approve/deny split
+   * (commands.rs `ClientCommand::AudioResponse`).
+   */
+  | { type: 'audio_response'; request_id: number; result: AudioResultDto };
 
 // ─────────────────────────────────────────────────────────────────────────────
 // tool_display.rs — the pre-derived render model for one tool call
@@ -678,6 +798,14 @@ export interface McpServerDto {
   name: string;
   status: McpStatusDto;
   transport: string;
+}
+
+/** One discovered skill entry (listings.rs `SkillDto`). */
+export interface SkillDto {
+  /** Skill display name (matches its directory name, not frontmatter). */
+  name: string;
+  /** The skill's own directory on disk, as a display string. */
+  source_dir: string;
 }
 
 /** One hook entry (listings.rs `HookDto`). */
@@ -1391,6 +1519,36 @@ export type TurnOutcomeDto =
   | { type: 'max_turns' }
   | { type: 'cancelled' };
 
+/**
+ * Durable execution state for a mobile turn. Backgrounding itself never
+ * changes this state; only execution, a recovery gate, or an explicit cancel
+ * does (events.rs `TurnRecoveryStateDto`). Internally tagged on `type`,
+ * `snake_case`. `#[non_exhaustive]` on the Rust side ⇒ a future state is
+ * additive.
+ */
+export type TurnRecoveryStateDto =
+  | { type: 'running' }
+  | { type: 'waiting_for_user' }
+  | { type: 'paused_recoverable' }
+  | { type: 'completed' }
+  | { type: 'failed' }
+  | { type: 'cancelled' };
+
+/**
+ * Snapshot clients use to decide whether a durable turn can be reattached or
+ * needs explicit user intervention (events.rs `TurnRecoverySnapshotDto`).
+ * Carried by {@link ClientEvent} `turn_recovery_state`.
+ */
+export interface TurnRecoverySnapshotDto {
+  session_id: string;
+  turn_id: number;
+  state: TurnRecoveryStateDto;
+  first_sequence: number;
+  last_sequence: number;
+  safe_to_resume: boolean;
+  reason?: string;
+}
+
 /** Cumulative cost snapshot carried by `turn_ended` (events.rs `CostDto`). */
 export interface CostDto {
   total_usd: number;
@@ -1400,6 +1558,19 @@ export interface CostDto {
   session_duration_secs: number;
   formatted: string;
 }
+
+/**
+ * One audio operation the engine asks a client to perform on its device
+ * microphone/speaker (events.rs `AudioOpDto`). Carried by {@link ClientEvent}
+ * `audio_request`. Internally tagged on `type`, `snake_case`.
+ * `#[non_exhaustive]` on the Rust side ⇒ a future op is additive.
+ */
+export type AudioOpDto =
+  | { type: 'start_recording'; sample_rate_hz: number; format: string }
+  | { type: 'stop_recording' }
+  | { type: 'is_recording' }
+  | { type: 'transcribe'; language?: string }
+  | { type: 'synthesize'; text: string; voice?: string };
 
 /**
  * Outbound events the engine streams to a client (events.rs `ClientEvent`).
@@ -1440,6 +1611,19 @@ export type ClientEvent =
   | { type: 'message_complete'; stop_reason?: string; message?: MessageDto }
   | { type: 'turn_started'; turn_id?: number }
   | { type: 'turn_ended'; outcome: TurnOutcomeDto; stop_reason?: string; cost: CostDto }
+  /**
+   * Authoritative durable state for one mobile turn. Emitted on attach,
+   * resume, recovery gating, and every terminal transition
+   * (events.rs `ClientEvent::TurnRecoveryState`).
+   */
+  | { type: 'turn_recovery_state'; snapshot: TurnRecoverySnapshotDto }
+  /**
+   * Sequenced retained copy of a turn event, emitted beside live delivery and
+   * replayed after `attach_turn`. `event_json` is the original serialized
+   * {@link ClientEvent}, kept as a string to avoid a recursive shape
+   * (events.rs `ClientEvent::TurnEventReplay`).
+   */
+  | { type: 'turn_event_replay'; session_id: string; turn_id: number; sequence: number; event_json: string }
   | {
       type: 'cost_update';
       total_usd: number;
@@ -1492,13 +1676,63 @@ export type ClientEvent =
       error?: string;
     }
   | { type: 'mcp_servers'; servers: McpServerDto[] }
+  | { type: 'skills'; skills: SkillDto[] }
   | { type: 'hooks'; hooks: HookDto[] }
   | { type: 'agents'; agents: AgentDto[] }
   | { type: 'slash_command_catalog'; commands: SlashCommandDto[] }
   | { type: 'slash_command_result'; turn_id?: number; display: string; is_error?: boolean }
   | { type: 'memory_entries'; entries: MemoryEntryDto[] }
   | { type: 'status_snapshot'; snapshot: StatusSnapshotDto }
-  | { type: 'settings_snapshot'; effective_json: string; provenance_json: string }
+  | {
+      type: 'settings_snapshot';
+      effective_json: string;
+      provenance_json: string;
+      /**
+       * `[{layer, path, exists, parsed, parse_error?}]` — the on-disk state
+       * of every settings file layer, so the UI can show which file backs a
+       * layer and whether it parsed. `parsed` reports JSON validity only; it
+       * says nothing about OS write permission.
+       */
+      files_json?: string;
+      /**
+       * `{key: value}` — the FILE-LAYER values as read at session start. NOT
+       * the session's live configuration: no `cli`/`managed`/`env` overlay is
+       * applied, so this can differ from `effective_json` both because of an
+       * on-disk edit not yet picked up and because `effective_json` carries
+       * the managed overlay that this field does not.
+       */
+      active_json?: string;
+      /** Top-level keys the managed layer locks; editable elsewhere is refused. */
+      locked?: string[];
+      /**
+       * `{layer: {key: value}}` — each FILE layer's OWN raw settings map,
+       * unmerged. `effective_json` is a cross-layer merge and `active_json`
+       * is the file-layer merge without the managed overlay; neither can
+       * stand in for "what does layer L's file itself say", which a layered
+       * editor needs before writing back to one layer: `update_settings`
+       * replaces a key WHOLESALE in one layer's file, so pre-merging a write
+       * against `effective_json` (which can carry another layer's entries
+       * for an object-valued key like `providers`) would silently fork that
+       * other layer's data into whichever layer gets saved.
+       */
+      layers_json?: string;
+      /**
+       * The keys in `effective_json` whose value is a CROSS-LAYER union
+       * rather than any one layer's value. The engine deep-merges or
+       * concat-dedups a specific set of keys (`hooks`, `permissions`,
+       * `providers`, `enabledPlugins`, `trustedDirectories`, … — its
+       * `settings::schema::MERGE_STRATEGIES` table), so once more than one
+       * layer contributes, the effective value belongs to no single layer and
+       * `provenance_json` names only the highest-priority CONTRIBUTOR. The UI
+       * must therefore not draw a single-layer provenance badge for a key
+       * listed here — it says the value is merged across layers instead.
+       *
+       * Only keys the merge actually unioned appear: a deep-merge key whose
+       * entries the winning layer entirely redefines is absent, because there
+       * the winning layer's badge is honest.
+       */
+      merged_keys?: string[];
+    }
   | { type: 'auth_state'; state: AuthStateDto }
   | { type: 'doctor_report'; report: DoctorReportDto }
   | { type: 'task_row'; task: TaskRowDto }
@@ -1570,7 +1804,16 @@ export type ClientEvent =
       attempt: number;
       max_retries: number;
       delay_ms: number;
-    };
+    }
+  // ── Audio (engine -> client mic/speaker requests) ─────────────────────────────
+  /**
+   * Ask a client to perform one microphone/speaker operation. Mirrors the
+   * {@link ComputerAccessRequestDto} engine->client request/response shape:
+   * correlated by `request_id`, and the client's outcome round-trips back as
+   * an {@link AudioResultDto} on {@link ClientCommand} `audio_response`
+   * (events.rs `ClientEvent::AudioRequest`).
+   */
+  | { type: 'audio_request'; request_id: number; op: AudioOpDto };
 
 // ─────────────────────────────────────────────────────────────────────────────
 // error.rs

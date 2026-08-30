@@ -575,6 +575,26 @@ pub struct McpServerInfo {
     pub transport: String,
 }
 
+/// One skill entry returned by [`OrchestratorHandle::list_skills`].
+///
+/// Skills are discovered from `skills/` directories, not configured
+/// key-by-key — this is a VIEW of what the loader found on disk, not an
+/// editable settings row.
+///
+/// Deliberately carries no `plugin` field: nothing on any LIVE path can
+/// populate one today (the file-based scan has no plugin provenance, and the
+/// only Rust-side thing that models plugins — the composition root's
+/// `SkillRegistry` — is a residual always-empty instance with no turn-loop
+/// consumer). Add the field back when a real producer exists; that is
+/// additive and needs no wire-version bump.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SkillInfo {
+    /// Skill display name (matches its directory name, not frontmatter).
+    pub name: String,
+    /// The skill's own directory on disk (e.g. `<root>/skills/<name>`).
+    pub source_dir: std::path::PathBuf,
+}
+
 /// Connection status for an MCP server in [`McpServerInfo`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum McpStatus {
@@ -1974,6 +1994,34 @@ pub trait OrchestratorHandle: Send + Sync {
     /// Used by `/mcp` and `/status`. Returns an empty vector when no MCP
     /// servers are configured.
     async fn list_mcp_servers(&self) -> Vec<McpServerInfo>;
+
+    /// Enumerate skills discovered from `skills/` directories, scanning
+    /// exactly three tiers: the project tier, the user tier, and the
+    /// managed (org-policy) directory.
+    ///
+    /// Additional skill roots (multi-root `/add-dir` workspaces) are
+    /// deliberately NOT scanned. This is not an oversight to widen later —
+    /// it is parity with what the desktop's own sibling slash commands
+    /// currently scan: `SkillsHandler` (`/skills`) is constructed with
+    /// `additional_skill_dirs: Vec::new()` HARDCODED
+    /// (`apps/engine-desktop/src/lib.rs:3351-3354`), and its
+    /// `ReloadSkillsHandler` counterpart (`/reload-skills`) is wired to
+    /// `DesktopRepoRootReloader.registered_roots`
+    /// (`apps/engine-desktop/src/lib.rs:4919`, `:4964-4977`), which starts
+    /// empty and has no desktop-side call site that ever grows it. If either
+    /// of those two construction sites starts supplying real roots, this
+    /// method's tiers must be revisited alongside them — until then, do NOT
+    /// widen this to any other source of "additional directories" (e.g. the
+    /// live session's trusted-directory set), which is a materially larger
+    /// set and would make this listing show skills neither sibling command
+    /// reports.
+    ///
+    /// Used by the desktop Skills settings view, which is a view over what
+    /// the loader found — not an editor — plus a reload action
+    /// (`/reload-skills`, routed as an ordinary slash command; no dedicated
+    /// command exists for reloading). Returns an empty vector when no config
+    /// home is wired, mirroring `list_mcp_servers`'s "no registry" default.
+    async fn list_skills(&self) -> Vec<SkillInfo>;
 
     /// Reconnect MCP servers (`/mcp reconnect [<server>|all]`). `name = None`
     /// (or `"all"`) reconnects every registered server; otherwise just the

@@ -39,7 +39,7 @@ use client_protocol::listings::{
     AgentDto, CheckStatusDto, CoordinatorWorkerDto, DoctorCheckDto, DoctorReportDto,
     DoctorSummaryDto, HookDto, McpServerDto, McpStatusDto, ModelBillingModeDto,
     ModelCapabilitiesDto, ModelDetailsDto, ModelPricingDto, ModelPricingTierDto, SessionRowDto,
-    StatusSnapshotDto, TaskRowDto, TaskStatusDto,
+    SkillDto, StatusSnapshotDto, TaskRowDto, TaskStatusDto,
 };
 use client_protocol::message::{MessageBlockDto, MessageDto, MessageImageDto};
 
@@ -49,7 +49,7 @@ use permission::PromptDefault;
 use session::jsonl::loader::SessionMetadata;
 use traits::orchestrator::{
     AgentInfo, CheckStatus, CostSnapshot, DoctorCheck, DoctorReport, DoctorSummary, HookInfo,
-    McpServerInfo, McpStatus, StatusSnapshot,
+    McpServerInfo, McpStatus, SkillInfo, StatusSnapshot,
 };
 use traits::task_registry::{TaskOutputChunk, TaskRecord};
 use traits::team_registry::WorkerInfo;
@@ -321,6 +321,17 @@ pub fn lower_mcp_server_info(info: &McpServerInfo) -> McpServerDto {
         name: info.name.clone(),
         status: lower_mcp_status(&info.status),
         transport: info.transport.clone(),
+    }
+}
+
+/// Lower a `SkillInfo` to a [`SkillDto`]. `source_dir` (a `PathBuf`) is
+/// rendered as a display string, matching `lower_session_metadata`'s
+/// `path` handling — not synthesized, the engine field mapped directly.
+#[must_use]
+pub fn lower_skill_info(info: &SkillInfo) -> SkillDto {
+    SkillDto {
+        name: info.name.clone(),
+        source_dir: info.source_dir.to_string_lossy().into_owned(),
     }
 }
 

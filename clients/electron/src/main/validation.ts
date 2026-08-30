@@ -1,4 +1,6 @@
 import type {
+  AudioErrorKindDto,
+  AudioResultDto,
   ClientCommand,
   ComputerAccessResponseDto,
   ImageRefDto,
@@ -6,23 +8,56 @@ import type {
   ReasoningSelectionDto,
 } from '@lingxi/bridge-client';
 import { detectImageMediaType, isSupportedImageMediaType, MAX_IMAGE_ATTACHMENTS, MAX_IMAGE_BYTES } from '../shared/imageInput.js';
+import { ALLOWED_CLIENT_COMMAND_TYPES, ALLOWED_REFRESH_LISTING_KINDS } from '../shared/clientCommands.js';
+import { isBase64 } from '../shared/base64.js';
+import {
+  isSendableAudioBase64,
+  isSendableAudioSampleRate,
+  isSendableAudioText,
+  MAX_AUDIO_FAILURE_MESSAGE_LENGTH,
+  MAX_AUDIO_MIME_TYPE_LENGTH,
+} from '../shared/audioResponse.js';
 
 const MAX_PROMPT_LENGTH = 256 * 1024;
 const MAX_ID_LENGTH = 512;
-const ALLOWED_COMMANDS = new Set([
-  'set_model',
-  'set_permission_mode',
-  'get_conversation_controls',
-  'set_reasoning_selection',
-  'set_fast_mode',
-  'list_models',
-  'run_slash_command',
-  'list_sessions',
-  'task_list',
-  'task_output',
-  'task_stop',
-  'refresh_listings',
-]);
+const MAX_JSON_PAYLOAD_LENGTH = 64 * 1024;
+const MAX_LIST_ITEMS = 128;
+const MAX_RULE_LENGTH = 4096;
+const MAX_PATH_LENGTH = 4096;
+const SETTINGS_DESTINATIONS = ['user', 'project', 'local'] as const;
+const PERMISSION_BEHAVIORS = ['allow', 'deny', 'ask'] as const;
+const MCP_SCOPES = ['user', 'local', 'project'] as const;
+/**
+ * Every failure class `AudioResultDto`'s `failed` variant may carry. Listed
+ * in full, not narrowed: the kinds exist precisely so `permission_denied` /
+ * `unavailable` / `not_recording` stay distinguishable end to end
+ * (`audio_bridge.rs`'s `voice_error`/`stt_error`/`tts_error` branch on each),
+ * and a kind dropped here does not degrade to `other` — it makes the engine
+ * wait out its deadline instead.
+ */
+const AUDIO_ERROR_KINDS: readonly AudioErrorKindDto[] = [
+  'permission_denied',
+  'no_speech',
+  'not_recording',
+  'unavailable',
+  'busy',
+  'retriable',
+  'synthesis_failed',
+  'other',
+];
+
+
+/**
+ * The runtime membership check for the Desktop command surface, built from
+ * `../shared/clientCommands.ts`'s `ALLOWED_CLIENT_COMMAND_TYPES` — the same
+ * array `AllowedClientCommand` (the compile-time gate) derives its union
+ * from — plus `refresh_listings` itself, which is a separate envelope shape
+ * rather than a member of that array. Restating the list here, instead of
+ * importing it, is exactly how it drifted before: this file's allowlist
+ * never accepted `new_session` / `resume_session` while the type claimed
+ * both were part of the surface.
+ */
+const ALLOWED_COMMANDS: ReadonlySet<string> = new Set<string>([...ALLOWED_CLIENT_COMMAND_TYPES, 'refresh_listings']);
 
 function object(value: unknown): Record<string, unknown> {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) throw new Error('invalid payload');
@@ -47,6 +82,41 @@ function integer(value: unknown, name: string, min = 0, max = Number.MAX_SAFE_IN
   return value as number;
 }
 
+/** A bounded string restricted to a fixed set of wire values. */
+function enumValue<T extends string>(value: unknown, name: string, allowed: readonly T[]): T {
+  const raw = string(value, name, 64);
+  if (!allowed.includes(raw as T)) throw new Error(`invalid ${name}`);
+  return raw as T;
+}
+
+/** A bounded array of bounded strings, e.g. permission rules or directory paths. */
+function stringArray(value: unknown, name: string, maxItems: number, maxItemLength: number): string[] {
+  if (!Array.isArray(value) || value.length > maxItems) throw new Error(`invalid ${name} list`);
+  return value.map((item) => string(item, name, maxItemLength));
+}
+
+/**
+ * A bounded string that must itself decode to a JSON object (never an array,
+ * primitive, or `null`) — matching what the engine's own decoders
+ * (`parse_settings_patch` / the `UpsertMcpServer.config_json` decoder in
+ * `bridge-server::router`) require of `patch_json` / `config_json`. Rejecting
+ * the wrong shape here gives the renderer an immediate, local error instead
+ * of a round trip to learn the same thing.
+ */
+function jsonObjectString(value: unknown, name: string, max: number): string {
+  const text = string(value, name, max);
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    throw new Error(`invalid ${name}`);
+  }
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+    throw new Error(`invalid ${name}`);
+  }
+  return text;
+}
+
 export function validatePrompt(value: unknown): string {
   if (typeof value !== 'string' || value.length === 0 || value.length > MAX_PROMPT_LENGTH || value.trim().length === 0) {
     throw new Error('invalid prompt');
@@ -54,7 +124,6 @@ export function validatePrompt(value: unknown): string {
   return value;
 }
 
-const BASE64_PATTERN = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
 const MAX_IMAGE_BASE64_LENGTH = Math.ceil(MAX_IMAGE_BYTES / 3) * 4;
 
 function decodeImageBase64(value: unknown): Uint8Array {
@@ -63,8 +132,11 @@ function decodeImageBase64(value: unknown): Uint8Array {
     || value.length === 0
     || value.length > MAX_IMAGE_BASE64_LENGTH
     || value.startsWith('data:')
-    || value.length % 4 !== 0
-    || !BASE64_PATTERN.test(value)
+    // `isBase64` rather than a grouped regex: the obvious pattern throws
+    // `RangeError: Maximum call stack size exceeded` past ~4 MB, so a 4.5 MB
+    // pasted image used to fail the whole prompt with a stack overflow
+    // instead of being validated. See `shared/base64.ts`.
+    || !isBase64(value)
   ) {
     throw new Error('invalid image base64');
   }
@@ -73,6 +145,95 @@ function decodeImageBase64(value: unknown): Uint8Array {
     throw new Error('invalid image base64');
   }
   return new Uint8Array(bytes);
+}
+
+/**
+ * A base64 audio payload. Unlike {@link decodeImageBase64} this deliberately
+ * ACCEPTS the empty string and does not decode-and-re-encode:
+ *
+ * - `''` is the desktop's "already played in place" synthesis answer
+ *   (`renderer/audio/synthesis.ts`; pinned on the Rust side by
+ *   `audio_bridge.rs`'s `synthesize_treats_empty_pcm_as_played_in_place_not_a_failure`).
+ *   `string()` rejects empty strings, so this cannot reuse it.
+ * - A clip may be tens of megabytes; round-tripping it through `Buffer` just
+ *   to compare it with itself would double the copy for no extra safety.
+ *
+ * The RULE itself lives in `shared/audioResponse.ts`, because the renderer
+ * has to obey the same one — see that file's header for why a second
+ * statement of it here would reintroduce a stall rather than a validation
+ * error. Same for {@link audioText} and {@link audioSampleRate} below.
+ */
+function audioBase64(value: unknown, name: string): string {
+  if (!isSendableAudioBase64(value)) throw new Error(`invalid ${name}`);
+  return value;
+}
+
+/** A wire string field of an audio result. */
+function audioText(value: unknown, maxLength: number, name: string): string {
+  if (!isSendableAudioText(value, maxLength)) throw new Error(`invalid ${name}`);
+  return value;
+}
+
+/** A sample rate. `0` is legal — it is half of the played-in-place pair. */
+function audioSampleRate(value: unknown): number {
+  if (!isSendableAudioSampleRate(value)) throw new Error('invalid audio sample rate');
+  return value;
+}
+
+/**
+ * One `AudioResultDto`, narrowed to the outcomes this renderer can honestly
+ * produce.
+ *
+ * `transcript` is deliberately ABSENT. Desktop has no speech recognizer, and
+ * the renderer cannot reach a provider transcription API either — `host.ts`
+ * forwards a provider credential straight to the engine and keeps nothing,
+ * so there is no key here to call one with. `renderer/audio/requests.ts`
+ * therefore answers `AudioOpDto::Transcribe` with `failed`/`unavailable`,
+ * and leaving `transcript` off this gate means a fabricated transcript
+ * cannot leave the renderer even if some future code tried to send one. Wire
+ * real transcription first, then widen this — the same bounded-surface
+ * discipline that keeps `new_session`/`resume_session` off
+ * `ALLOWED_CLIENT_COMMAND_TYPES`.
+ */
+function validateAudioResult(value: unknown): AudioResultDto {
+  const input = object(value);
+  const type = string(input['type'], 'audio result type', 64);
+  switch (type) {
+    case 'ok':
+      exactKeys(input, ['type']);
+      return { type };
+    case 'recording_state':
+      exactKeys(input, ['type', 'recording']);
+      if (typeof input['recording'] !== 'boolean') throw new Error('invalid audio recording state');
+      return { type, recording: input['recording'] };
+    case 'recording':
+      exactKeys(input, ['type', 'audio_base64', 'mime_type']);
+      return {
+        type,
+        audio_base64: audioBase64(input['audio_base64'], 'audio base64'),
+        // The mime type the recorder actually used. It travels verbatim into
+        // `VoiceRecording.mime_type`, so a wrong value is a lie that reaches
+        // whatever decodes the bytes — bounded here, never rewritten.
+        mime_type: audioText(input['mime_type'], MAX_AUDIO_MIME_TYPE_LENGTH, 'audio mime type'),
+      };
+    case 'audio':
+      exactKeys(input, ['type', 'pcm_base64', 'sample_rate_hz']);
+      return {
+        type,
+        pcm_base64: audioBase64(input['pcm_base64'], 'audio pcm base64'),
+        // `0` is legal, and required: it is half of the played-in-place pair.
+        sample_rate_hz: audioSampleRate(input['sample_rate_hz']),
+      };
+    case 'failed':
+      exactKeys(input, ['type', 'kind', 'message']);
+      return {
+        type,
+        kind: enumValue(input['kind'], 'audio error kind', AUDIO_ERROR_KINDS),
+        message: audioText(input['message'], MAX_AUDIO_FAILURE_MESSAGE_LENGTH, 'audio error message'),
+      };
+    default:
+      throw new Error('invalid audio result');
+  }
 }
 
 export function validateImageRefs(value: unknown): ImageRefDto[] {
@@ -241,15 +402,65 @@ export function validateClientCommand(value: unknown, workspace?: string): Clien
       const which = input['which'].map((value) => {
         const listing = object(value);
         exactKeys(listing, ['type']);
-        if (
-          listing['type'] !== 'status'
-          && listing['type'] !== 'doctor'
-          && listing['type'] !== 'slash_commands'
-        ) throw new Error('listing is not allowed');
-        return { type: listing['type'] } as const;
+        const kind = listing['type'] as (typeof ALLOWED_REFRESH_LISTING_KINDS)[number];
+        if (!ALLOWED_REFRESH_LISTING_KINDS.includes(kind)) throw new Error('listing is not allowed');
+        return { type: kind };
       });
       return { type, which };
     }
+    case 'update_settings':
+      exactKeys(input, ['type', 'destination', 'patch_json']);
+      return {
+        type,
+        destination: enumValue(input['destination'], 'settings destination', SETTINGS_DESTINATIONS),
+        patch_json: jsonObjectString(input['patch_json'], 'settings patch', MAX_JSON_PAYLOAD_LENGTH),
+      };
+    case 'update_permission_rules':
+      exactKeys(input, ['type', 'destination', 'behavior', 'add', 'remove']);
+      return {
+        type,
+        destination: enumValue(input['destination'], 'settings destination', SETTINGS_DESTINATIONS),
+        behavior: enumValue(input['behavior'], 'permission behavior', PERMISSION_BEHAVIORS),
+        add: stringArray(input['add'], 'permission rule', MAX_LIST_ITEMS, MAX_RULE_LENGTH),
+        remove: stringArray(input['remove'], 'permission rule', MAX_LIST_ITEMS, MAX_RULE_LENGTH),
+      };
+    case 'set_default_permission_mode':
+      exactKeys(input, ['type', 'destination', 'mode']);
+      return {
+        type,
+        destination: enumValue(input['destination'], 'settings destination', SETTINGS_DESTINATIONS),
+        mode: string(input['mode'], 'default permission mode', 64),
+      };
+    case 'update_workspace_directories':
+      exactKeys(input, ['type', 'destination', 'add', 'remove']);
+      return {
+        type,
+        destination: enumValue(input['destination'], 'settings destination', SETTINGS_DESTINATIONS),
+        add: stringArray(input['add'], 'workspace directory', MAX_LIST_ITEMS, MAX_PATH_LENGTH),
+        remove: stringArray(input['remove'], 'workspace directory', MAX_LIST_ITEMS, MAX_PATH_LENGTH),
+      };
+    case 'upsert_mcp_server':
+      exactKeys(input, ['type', 'scope', 'name', 'config_json']);
+      return {
+        type,
+        scope: enumValue(input['scope'], 'mcp scope', MCP_SCOPES),
+        name: string(input['name'], 'mcp server name', 256),
+        config_json: jsonObjectString(input['config_json'], 'mcp server config', MAX_JSON_PAYLOAD_LENGTH),
+      };
+    case 'remove_mcp_server':
+      exactKeys(input, ['type', 'scope', 'name']);
+      return {
+        type,
+        scope: enumValue(input['scope'], 'mcp scope', MCP_SCOPES),
+        name: string(input['name'], 'mcp server name', 256),
+      };
+    case 'audio_response':
+      exactKeys(input, ['type', 'request_id', 'result']);
+      return {
+        type,
+        request_id: integer(input['request_id'], 'audio request id', 0),
+        result: validateAudioResult(input['result']),
+      };
     default:
       throw new Error('command is not allowed');
   }

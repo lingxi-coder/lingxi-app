@@ -1,0 +1,10 @@
+{
+  "type": "audio_response",
+  "request_id": 7,
+  "result": {
+    "type": "transcript",
+    "text": "你好",
+    "language": "zh-CN",
+    "confidence": 0.9
+  }
+}

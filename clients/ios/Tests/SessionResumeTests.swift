@@ -788,6 +788,37 @@ import XCTest
             )
         }
 
+        func testSessionMutationPolicyKeepsSelectionStableDuringRecoveryOrCancel() {
+            XCTAssertFalse(
+                ConversationSessionMutationPolicy.allowsCallerMutation(
+                    hasInactiveDurableRecovery: true,
+                    hasUnresolvedTurnRecovery: true,
+                    isCancelling: false
+                )
+            )
+            XCTAssertFalse(
+                ConversationSessionMutationPolicy.allowsCallerMutation(
+                    hasInactiveDurableRecovery: false,
+                    hasUnresolvedTurnRecovery: true,
+                    isCancelling: false
+                )
+            )
+            XCTAssertFalse(
+                ConversationSessionMutationPolicy.allowsCallerMutation(
+                    hasInactiveDurableRecovery: false,
+                    hasUnresolvedTurnRecovery: false,
+                    isCancelling: true
+                )
+            )
+            XCTAssertTrue(
+                ConversationSessionMutationPolicy.allowsCallerMutation(
+                    hasInactiveDurableRecovery: false,
+                    hasUnresolvedTurnRecovery: false,
+                    isCancelling: false
+                )
+            )
+        }
+
         func testMissingResumeCreatesReplacementWithoutShowingEngineError() async {
             let source = makeSource()
             let recorder = SessionTransitionRecorder(failure: .missing)

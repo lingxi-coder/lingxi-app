@@ -6,7 +6,7 @@
 //! [`crate::settings::schema::strategy_for`] — Task 5 wires up
 //! [`MergeStrategy::ConcatDedup`]; Task 6 adds `DeepMerge` + `Override`.
 
-use crate::settings::schema::SettingsJson;
+use crate::settings::schema::{strategy_for, MergeStrategy, SettingsJson};
 
 /// Merge two settings layers — `next` overlays `prev` per field strategy.
 ///
@@ -186,14 +186,101 @@ pub fn merge(prev: SettingsJson, next: SettingsJson) -> SettingsJson {
     }
 }
 
+/// Fold one RAW settings layer over `prev`, applying the SAME per-field merge
+/// strategies [`merge`] applies to the typed [`SettingsJson`].
+///
+/// Exists because a consumer can need the merged view of a settings map it
+/// must not round-trip through [`SettingsJson`]: the desktop settings snapshot
+/// (`bridge-server`'s `settings_bridge::build_snapshot`) shows the user every
+/// key their settings files contain, while `SettingsJson` tolerates-and-
+/// IGNORES keys it does not declare, so a typed round-trip would silently drop
+/// them. Without this function that consumer had to re-derive the merge rules,
+/// and the re-derivation was a flat last-layer-wins overwrite — a value the
+/// running engine never resolves.
+///
+/// One source of truth, twice over: which strategy a key takes comes from
+/// [`crate::settings::schema::strategy_for`] (the same table `merge`'s
+/// field-by-field code follows — the two are pinned together by
+/// `tests::raw_layer_merge_agrees_with_the_typed_merge`), and the combining is
+/// done by the very [`concat_dedup`] / [`deep_merge_value`] the typed merge
+/// calls.
+///
+/// A key absent from the strategy table takes [`MergeStrategy::Override`] —
+/// `next` wins — which is both what `merge` does for every scalar field and
+/// what the schema documents as the default for an unregistered key.
+///
+/// A `next` value of JSON `null` is treated as ABSENT, not as a value. Every
+/// field of [`SettingsJson`] is an `Option`, so `"model": null` deserializes
+/// to `None` and the typed merge's `next.or(prev)` keeps the lower layer;
+/// writing the null through instead would put a value in the result that the
+/// engine never resolves, under this layer's name.
+///
+/// # Returns
+///
+/// The keys whose merged value is a genuine CROSS-LAYER union: the result
+/// differs from `next`'s own value, so no single layer's value is what the
+/// merge produced, and a caller reporting provenance must not name one layer
+/// for them. Keys that collapse to `next` — every `Override` key, and a deep
+/// merge whose entries `next` all redefines — are NOT listed: for those the
+/// value shown really is that one layer's, and naming it is honest.
+#[must_use]
+pub fn merge_raw_layer(
+    prev: &mut std::collections::BTreeMap<String, serde_json::Value>,
+    next: std::collections::BTreeMap<String, serde_json::Value>,
+) -> Vec<String> {
+    use serde_json::Value;
+
+    let mut unioned = Vec::new();
+    for (key, v_next) in next {
+        if v_next.is_null() {
+            // Absent, not a value — see this function's doc. `null` shadows
+            // nothing, so `prev` keeps whatever it had and a null no layer
+            // overrides simply leaves the key unset.
+            continue;
+        }
+        let Some(v_prev) = prev.remove(&key) else {
+            // Only one layer defines it — nothing to merge, nothing to report.
+            prev.insert(key, v_next);
+            continue;
+        };
+        let merged = match strategy_for(&key).unwrap_or(MergeStrategy::Override) {
+            MergeStrategy::Override => v_next.clone(),
+            MergeStrategy::ConcatDedup => match (v_prev, v_next.clone()) {
+                (Value::Array(p), Value::Array(n)) => {
+                    // `unwrap_or_default` is unreachable: both sides are
+                    // `Some`, so `concat_dedup` always returns `Some`.
+                    Value::Array(concat_dedup(Some(p), Some(n)).unwrap_or_default())
+                }
+                // A non-array on either side cannot be concatenated, and the
+                // typed merge would not even have parsed it. `next` wins, as it
+                // does for every shape mismatch in `deep_merge_value`.
+                (_, n) => n,
+            },
+            // Non-objects fall through `deep_merge_value`'s own mismatch arm to
+            // `next`, matching `deep_merge_object` / `deep_merge_value_opt`.
+            MergeStrategy::DeepMerge => deep_merge_value(v_prev, v_next.clone()),
+        };
+        if merged != v_next {
+            unioned.push(key.clone());
+        }
+        prev.insert(key, merged);
+    }
+    unioned
+}
+
 /// Concatenate `prev` then append from `next`, dropping duplicates while
 /// preserving first-seen order. Matches spec §7 `ConcatDedup` semantics.
-fn concat_dedup(prev: Option<Vec<String>>, next: Option<Vec<String>>) -> Option<Vec<String>> {
+///
+/// Generic over the element type so the typed merge above (`Vec<String>`) and
+/// [`merge_raw_layer`] (`Vec<serde_json::Value>`) run the SAME concatenation,
+/// rather than one of them growing a look-alike copy that can drift.
+/// `PartialEq` is all the dedup needs.
+fn concat_dedup<T: PartialEq>(prev: Option<Vec<T>>, next: Option<Vec<T>>) -> Option<Vec<T>> {
     match (prev, next) {
         (None, None) => None,
         (Some(v), None) | (None, Some(v)) => Some(v),
         (Some(p), Some(n)) => {
-            let mut out: Vec<String> = Vec::with_capacity(p.len() + n.len());
+            let mut out: Vec<T> = Vec::with_capacity(p.len() + n.len());
             for s in p.into_iter().chain(n.into_iter()) {
                 if !out.contains(&s) {
                     out.push(s);
@@ -721,5 +808,425 @@ mod tests {
         assert!(serde_json::to_string(&merged)
             .unwrap()
             .contains("\"visionDelegationEnabled\":false"));
+    }
+
+    /// (key, lower layer's value, upper layer's value) for every key the
+    /// strategy table registers, plus a few `Override` keys as the contrast.
+    ///
+    /// Every pair DIFFERS between the two layers on purpose: a fixture where
+    /// both layers say the same thing agrees under every strategy and proves
+    /// nothing. Shared by the two tests below so "is this key covered" has one
+    /// answer for both directions of the drift check.
+    fn merge_fixture_cases() -> Vec<(&'static str, serde_json::Value, serde_json::Value)> {
+        use serde_json::json;
+
+        vec![
+            ("trustedDirectories", json!(["/a"]), json!(["/b"])),
+            ("additionalDirectories", json!(["/c"]), json!(["/d"])),
+            ("enabledTools", json!(["Bash"]), json!(["Read"])),
+            ("additionalIncludes", json!(["a.md"]), json!(["b.md"])),
+            ("lingxiMdExcludes", json!(["x/**"]), json!(["y/**"])),
+            ("companyAnnouncements", json!(["one"]), json!(["two"])),
+            (
+                "allowedHttpHookUrls",
+                json!(["https://a"]),
+                json!(["https://b"]),
+            ),
+            ("httpHookAllowedEnvVars", json!(["A"]), json!(["B"])),
+            ("sandbox", json!({"lower": 1}), json!({"upper": 2})),
+            (
+                "hooks",
+                json!({"PreToolUse": {"Bash": "lower"}}),
+                json!({"PostToolUse": {"Read": "upper"}}),
+            ),
+            (
+                "permissions",
+                json!({"allow": ["Bash(ls)"]}),
+                json!({"deny": ["Bash(rm)"]}),
+            ),
+            (
+                "policyHelpers",
+                json!({"macos": "l"}),
+                json!({"linux": "u"}),
+            ),
+            (
+                "spellcheck",
+                json!({"lower": true}),
+                json!({"upper": false}),
+            ),
+            (
+                "additionalMarketplaces",
+                json!({"lower": {"source": "l"}}),
+                json!({"upper": {"source": "u"}}),
+            ),
+            (
+                "enabledPlugins",
+                json!({"lower@m": true}),
+                json!({"upper@m": true}),
+            ),
+            ("pluginConfigs", json!({"lower": {}}), json!({"upper": {}})),
+            (
+                "extraKnownMarketplaces",
+                json!({"lower": {"source": {"source": "github"}}}),
+                json!({"upper": {"source": {"source": "github"}}}),
+            ),
+            (
+                "providers",
+                json!({"lowerProfile": {"type": "openai"}}),
+                json!({"upperProfile": {"type": "openai"}}),
+            ),
+            (
+                "routing",
+                json!({"aliases": {"lower": "a"}}),
+                json!({"retry": {"maxAttempts": 3}}),
+            ),
+            (
+                "modelOverrides",
+                json!({"lower": "m1"}),
+                json!({"upper": "m2"}),
+            ),
+            (
+                "vimInsertModeRemaps",
+                json!({"jj": "Escape"}),
+                json!({"kk": "Escape"}),
+            ),
+            // Not in the table — the default `Override` must survive the
+            // round trip too, or "everything unions" would pass this test.
+            ("outputStyle", json!("lower"), json!("upper")),
+            ("model", json!("m-lower"), json!("m-upper")),
+            ("availableModels", json!(["lower"]), json!(["upper"])),
+        ]
+    }
+
+    /// The strategy TABLE (`schema::MERGE_STRATEGIES`) and the field-by-field
+    /// typed `merge` above are two spellings of one set of rules, and
+    /// [`merge_raw_layer`] reads the table. If they disagree, every consumer
+    /// of the table reports a merge the engine does not perform, silently.
+    /// `merge_raw_layer` (and so the desktop settings snapshot) is wrong for
+    /// ANY disagreement; `tracer` collapses `DeepMerge` and `Override` into
+    /// the same branch, so only a `ConcatDedup` disagreement reaches it.
+    ///
+    /// This is the TABLE ⇒ FIXTURE direction only: a registered key with no
+    /// fixture fails here. The MERGE ⇒ TABLE direction — the one the
+    /// `vimInsertModeRemaps` drift actually travelled, a field `merge`
+    /// combines with NO table entry — is
+    /// `every_field_merge_combines_is_registered_and_fixtured`. Neither
+    /// direction alone catches both, and this one alone would have gone green
+    /// on the very drift it was written after.
+    #[test]
+    fn raw_layer_merge_agrees_with_the_typed_merge() {
+        use crate::settings::schema::MERGE_STRATEGIES;
+
+        let cases = merge_fixture_cases();
+
+        for (key, _) in MERGE_STRATEGIES {
+            assert!(
+                cases.iter().any(|(k, _, _)| k == key),
+                "MERGE_STRATEGIES entry {key:?} has no case in `merge_fixture_cases`, so this \
+                 test does not check it — add a (lower, upper) pair for it"
+            );
+        }
+
+        let lower: std::collections::BTreeMap<String, serde_json::Value> = cases
+            .iter()
+            .map(|(k, l, _)| ((*k).to_string(), l.clone()))
+            .collect();
+        let upper: std::collections::BTreeMap<String, serde_json::Value> = cases
+            .iter()
+            .map(|(k, _, u)| ((*k).to_string(), u.clone()))
+            .collect();
+
+        // The typed path: exactly what `Settings::load` does per layer.
+        let typed_lower: SettingsJson =
+            serde_json::from_value(serde_json::to_value(&lower).unwrap())
+                .expect("the fixture must parse as SettingsJson, or it is not testing `merge`");
+        let typed_upper: SettingsJson =
+            serde_json::from_value(serde_json::to_value(&upper).unwrap())
+                .expect("the fixture must parse as SettingsJson, or it is not testing `merge`");
+        let typed_merged: std::collections::BTreeMap<String, serde_json::Value> =
+            serde_json::from_value(serde_json::to_value(merge(typed_lower, typed_upper)).unwrap())
+                .unwrap();
+
+        // The raw path: what a consumer that must keep unknown keys does.
+        // BOTH layers go through `merge_raw_layer`, starting from an EMPTY
+        // accumulator, because that is what `build_snapshot` does — seeding
+        // the accumulator with `lower` directly would skip the function under
+        // test for the first layer and hide whatever it does on the way in.
+        let mut raw_merged = std::collections::BTreeMap::new();
+        // The first layer's union report is not what this case asserts on —
+        // `unioned` below (the SECOND layer's) is. Discard it explicitly so
+        // the `#[must_use]` is answered rather than warned about.
+        let _first_layer_union = merge_raw_layer(&mut raw_merged, lower.clone());
+        let unioned = merge_raw_layer(&mut raw_merged, upper.clone());
+
+        for (key, _, _) in &cases {
+            assert_eq!(
+                raw_merged.get(*key),
+                typed_merged.get(*key),
+                "`merge_raw_layer` and `merge` disagree on {key:?}"
+            );
+        }
+
+        // The union report must name the merged keys and ONLY them: a report
+        // that listed every key would satisfy any "is it in there" assertion
+        // while telling a caller nothing.
+        assert!(
+            unioned.contains(&"hooks".to_string()),
+            "a deep-merged key defined in both layers is a cross-layer union, got {unioned:?}"
+        );
+        assert!(
+            unioned.contains(&"trustedDirectories".to_string()),
+            "a concat-dedup key defined in both layers is a cross-layer union, got {unioned:?}"
+        );
+        assert!(
+            unioned.contains(&"vimInsertModeRemaps".to_string()),
+            "the drift this test was written to catch: `vimInsertModeRemaps` unions, got {unioned:?}"
+        );
+        for key in ["outputStyle", "model", "availableModels"] {
+            assert!(
+                !unioned.contains(&key.to_string()),
+                "{key:?} is scalar-override — its value IS the upper layer's, so reporting it \
+                 as merged would be the same lie in the other direction, got {unioned:?}"
+            );
+        }
+    }
+
+    /// The MERGE ⇒ TABLE direction, and the reason this file carries two
+    /// drift tests rather than one.
+    ///
+    /// `raw_layer_merge_agrees_with_the_typed_merge` asserts "every TABLE
+    /// entry has a fixture". That is not the direction the
+    /// `vimInsertModeRemaps` drift travelled: the field was combined by
+    /// `merge` with NO table entry at all, so it was absent from the table and
+    /// from the fixture alike, and a table-driven loop had nothing to iterate
+    /// over. Had the fixture case not been hand-added at the same time, that
+    /// test would have passed with the bug sitting in place — a guard green
+    /// for precisely the thing it was built to catch.
+    ///
+    /// So this test walks the other way. Its key set is derived from
+    /// `SettingsJson` itself — the schemars property names, which carry the
+    /// `rename_all = "camelCase"` serde spelling — and for every field it
+    /// MEASURES whether `merge` combines the two layers or just takes `next`.
+    /// A field that combines must be registered in `MERGE_STRATEGIES` with a
+    /// non-`Override` strategy AND covered by `merge_fixture_cases`. Adding a
+    /// `deep_merge_object(...)` / `concat_dedup(...)` field to `merge` and
+    /// forgetting the table entry turns this red.
+    ///
+    /// "Combines" is measured, never declared: the probe pair for a field is
+    /// found by trying candidate shapes until one round-trips through
+    /// `SettingsJson`, and the field counts as combining when
+    /// `merge(lower, upper)` yields something other than `upper`. No list of
+    /// which fields deep-merge appears anywhere in this test — such a list
+    /// would have to be kept in sync by hand, which is the same decoration in
+    /// a new place.
+    #[test]
+    fn every_field_merge_combines_is_registered_and_fixtured() {
+        use crate::settings::schema::{strategy_for, MERGE_STRATEGIES};
+        use serde_json::{json, Value};
+
+        // Probe shapes, UNION-CAPABLE ones first: an object or an array can
+        // reveal a deep merge or a concat; a scalar cannot. Order matters —
+        // `routing` is `Option<Value>` and accepts every shape, so trying a
+        // scalar first would make a genuinely deep-merged field look trivial.
+        // The two sides always differ, and never by being absent: `true`/
+        // `false` rather than `false`/`true`, so an `Override` field's result
+        // is `Some(false)` and not confusable with "field unset".
+        let candidates: Vec<(Value, Value)> = vec![
+            (json!({"lowerEntry": "l"}), json!({"upperEntry": "u"})),
+            (json!(["lower"]), json!(["upper"])),
+            (json!("lower"), json!("upper")),
+            (json!(true), json!(false)),
+            (json!(1), json!(2)),
+        ];
+
+        // Whether `{field: value}` survives a `SettingsJson` round trip
+        // unchanged — i.e. whether this probe shape is the field's real type.
+        // A wrong-typed known field fails to parse; an unknown field parses
+        // but vanishes from the re-serialization, so both are rejected.
+        let round_trips = |field: &str, value: &Value| -> bool {
+            let Ok(parsed) = serde_json::from_value::<SettingsJson>(json!({ field: value })) else {
+                return false;
+            };
+            serde_json::to_value(&parsed)
+                .ok()
+                .and_then(|doc| doc.get(field).cloned())
+                .as_ref()
+                == Some(value)
+        };
+
+        let schema = serde_json::to_value(schemars::schema_for!(SettingsJson))
+            .expect("the derived JSON schema must serialize");
+        let properties = schema
+            .get("properties")
+            .and_then(Value::as_object)
+            .expect("SettingsJson's derived schema must list its properties");
+        // A zero-length or truncated loop is the classic false green: it would
+        // pass this test while checking nothing. `merge` handles ~70 fields.
+        assert!(
+            properties.len() > 60,
+            "expected the whole settings schema, got {} properties — the enumeration broke and \
+             this test is checking almost nothing",
+            properties.len()
+        );
+
+        let cases = merge_fixture_cases();
+        let mut combining = Vec::new();
+        for field in properties.keys() {
+            let Some((lower, upper)) = candidates
+                .iter()
+                .find(|(l, u)| round_trips(field, l) && round_trips(field, u))
+            else {
+                panic!(
+                    "no candidate probe shape round-trips through SettingsJson for {field:?}, so \
+                     this test cannot tell whether `merge` combines it — add a probe shape that \
+                     matches its type"
+                );
+            };
+
+            let typed_lower: SettingsJson =
+                serde_json::from_value(json!({ field: lower })).expect("probe must parse");
+            let typed_upper: SettingsJson =
+                serde_json::from_value(json!({ field: upper })).expect("probe must parse");
+            let merged = serde_json::to_value(merge(typed_lower, typed_upper))
+                .expect("a merged SettingsJson must serialize");
+            let merged_field = merged.get(field);
+
+            if merged_field == Some(upper) {
+                continue; // Plain Override: `next` won outright.
+            }
+            combining.push(field.clone());
+
+            assert!(
+                strategy_for(field).is_some_and(|s| s != MergeStrategy::Override),
+                "`merge` COMBINES {field:?} across layers (probe merged to {merged_field:?}, not \
+                 to the upper layer's {upper:?}), but MERGE_STRATEGIES has \
+                 {:?} for it. Every table reader — `merge_raw_layer`, and so the desktop \
+                 settings snapshot — will resolve this field the wrong way. Register it.",
+                strategy_for(field)
+            );
+            assert!(
+                cases.iter().any(|(k, _, _)| k == field),
+                "`merge` combines {field:?}, but `merge_fixture_cases` has no pair for it, so \
+                 `raw_layer_merge_agrees_with_the_typed_merge` never compares the two paths on \
+                 it — add one"
+            );
+        }
+
+        // The scan must actually have FOUND the combining fields; if the probe
+        // shapes stopped matching, every field would look like a plain
+        // Override and the loop above would assert nothing at all.
+        assert_eq!(
+            combining.len(),
+            MERGE_STRATEGIES.len(),
+            "the probe found {} combining fields but the table registers {} — either a probe \
+             shape stopped fitting its field (so this test silently checks less than it claims) \
+             or the table registers a key `merge` does not actually combine. Found: {combining:?}",
+            combining.len(),
+            MERGE_STRATEGIES.len()
+        );
+    }
+
+    /// A JSON `null` is "unset", not "set to null" — and the authority for
+    /// that is `merge` itself, which this test compares against rather than
+    /// asserting what I believe the answer should be.
+    ///
+    /// Every `SettingsJson` field is an `Option`, so `"model": null` parses to
+    /// `None` and `next.or(prev)` keeps the lower layer. A raw path that wrote
+    /// the null through would put a value in `effective` the engine never
+    /// resolves — and, in the snapshot, name the layer that "set" it. Both
+    /// shapes are checked: a null over a value, and a null nobody shadows.
+    #[test]
+    fn a_null_layer_value_is_absent_to_the_raw_path_exactly_as_it_is_to_merge() {
+        use serde_json::json;
+
+        let typed_merge_of = |lower: serde_json::Value, upper: serde_json::Value| {
+            let l: SettingsJson = serde_json::from_value(lower).expect("lower parses");
+            let u: SettingsJson = serde_json::from_value(upper).expect("upper parses");
+            serde_json::to_value(merge(l, u)).expect("merged serializes")
+        };
+        let raw_merge_of = |lower: serde_json::Value, upper: serde_json::Value| {
+            let mut acc = std::collections::BTreeMap::new();
+            // This helper asserts on the ACCUMULATOR, not on the union
+            // report; discard both reports explicitly so `#[must_use]` is
+            // answered rather than warned about.
+            let _lower_union = merge_raw_layer(
+                &mut acc,
+                serde_json::from_value(lower).expect("lower is an object"),
+            );
+            let _upper_union = merge_raw_layer(
+                &mut acc,
+                serde_json::from_value(upper).expect("upper is an object"),
+            );
+            serde_json::to_value(acc).expect("accumulator serializes")
+        };
+
+        // A null in the upper layer must not erase the lower layer's value.
+        let lower = json!({"model": "from-lower"});
+        let upper = json!({"model": null});
+        assert_eq!(
+            raw_merge_of(lower.clone(), upper.clone())["model"],
+            json!("from-lower"),
+            "a null upper layer must leave the lower layer's value standing"
+        );
+        assert_eq!(
+            raw_merge_of(lower.clone(), upper.clone()),
+            typed_merge_of(lower, upper),
+            "the raw path must agree with `merge` on a shadowing null"
+        );
+
+        // A null no layer shadows leaves the key unset, not set-to-null.
+        let only_null = json!({"model": null});
+        let merged = raw_merge_of(json!({}), only_null.clone());
+        assert_eq!(
+            merged.get("model"),
+            None,
+            "an unshadowed null must leave the key absent, not present-and-null, got {merged}"
+        );
+        assert_eq!(
+            merged,
+            typed_merge_of(json!({}), only_null),
+            "the raw path must agree with `merge` on an unshadowed null"
+        );
+
+        // Deep-merge keys take the same rule — the null check runs before the
+        // strategy dispatch, so `hooks: null` cannot wipe a lower layer's hooks.
+        let lower = json!({"hooks": {"PreToolUse": {"Bash": "l"}}});
+        let upper = json!({"hooks": null});
+        assert_eq!(
+            raw_merge_of(lower.clone(), upper.clone()),
+            typed_merge_of(lower, upper),
+            "the raw path must agree with `merge` on a null over a deep-merge key"
+        );
+    }
+
+    /// A deep-merge key whose entries the upper layer entirely redefines is
+    /// NOT a cross-layer union: the merged value IS the upper layer's own
+    /// value, so naming that layer is honest and the key must not be reported
+    /// as merged. Without this, `merged_keys` would degrade into "both layers
+    /// mentioned the key", which is not the question the UI asks.
+    #[test]
+    fn a_fully_shadowed_deep_merge_key_is_not_reported_as_a_union() {
+        let mut prev: std::collections::BTreeMap<String, serde_json::Value> =
+            std::collections::BTreeMap::new();
+        prev.insert(
+            "hooks".to_string(),
+            serde_json::json!({"PreToolUse": {"Bash": "lower"}}),
+        );
+        let mut next = std::collections::BTreeMap::new();
+        next.insert(
+            "hooks".to_string(),
+            serde_json::json!({"PreToolUse": {"Bash": "upper"}}),
+        );
+
+        let unioned = merge_raw_layer(&mut prev, next);
+
+        assert_eq!(
+            prev.get("hooks"),
+            Some(&serde_json::json!({"PreToolUse": {"Bash": "upper"}})),
+        );
+        assert!(
+            unioned.is_empty(),
+            "the merged value is exactly the upper layer's, so it is not a union, got {unioned:?}"
+        );
     }
 }

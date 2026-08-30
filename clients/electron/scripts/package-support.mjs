@@ -30,6 +30,33 @@ export const APP_NAME = 'LingXi Code';
 export const BUNDLE_ID = 'com.lingxi.code';
 export const TARGET_ARCH = 'arm64';
 export const DEFAULT_SECRET_CANARY = 'LINGXI_SECRET_CANARY_DO_NOT_PACKAGE';
+
+/**
+ * macOS shows this string verbatim in the microphone permission dialog, so
+ * it has to be concrete about what the app actually does — vague copy
+ * ("this app needs microphone access") is both bad UX and a common App
+ * Store rejection reason.
+ *
+ * It deliberately does NOT claim speech recognition/dictation happens:
+ * desktop speech recognition is unconditionally unavailable in this build
+ * (`renderer/audio/requests.ts`'s `serviceAudioOp` answers every
+ * `AudioOpDto::Transcribe` with `failed`/`unavailable` regardless of
+ * microphone permission or which provider is configured — see that file's
+ * `DESKTOP_TRANSCRIPTION_UNAVAILABLE_MESSAGE` and `Voice.tsx`'s
+ * `RECOGNITION_UNAVAILABLE_NOTICE`, which says the same thing in the
+ * settings UI). Recording and speech OUTPUT (synthesis) both really work;
+ * this string only has to be honest about recording, since synthesis does
+ * not touch the microphone.
+ *
+ * Exported (rather than inlined into `rewriteInfoPlist`'s replacement map)
+ * so `verify-package.mjs`'s static check on the ACTUAL packaged
+ * `Info.plist` asserts against this same constant instead of a second,
+ * independently-typed copy that could silently drift from it.
+ */
+export const NS_MICROPHONE_USAGE_DESCRIPTION =
+  'LingXi Code only uses the microphone to record a short audio clip when you choose to start recording, '
+  + 'for example by pressing the microphone button in the composer. It never listens in the background, '
+  + 'and this build does not transcribe the recording into text, whether on this device or on a server.';
 export const FIXED_MTIME_SECONDS = Number(process.env['SOURCE_DATE_EPOCH'] ?? 946684800);
 export const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 export const repoRoot = resolve(packageRoot, '..', '..');
@@ -248,7 +275,7 @@ export function rewriteInfoPlist(plistPath, version) {
     CFBundleName: APP_NAME,
     CFBundleShortVersionString: version,
     CFBundleVersion: version,
-    NSMicrophoneUsageDescription: 'LingXi uses your microphone only when you start voice input in the composer.',
+    NSMicrophoneUsageDescription: NS_MICROPHONE_USAGE_DESCRIPTION,
   };
   for (const [key, value] of Object.entries(replacements)) {
     execFileSync('/usr/bin/plutil', ['-replace', key, '-string', value, plistPath], { stdio: 'pipe' });

@@ -33,10 +33,15 @@ use std::time::Duration;
 use async_trait::async_trait;
 use bridge::wire::Frame;
 use bridge::{BridgeRequest, Capabilities, ClientHello, McpEndpoint, BRIDGE_PROTOCOL_VERSION};
+use bridge_server::mcp_bridge::McpPaths;
 use bridge_server::router::{CommandRouter, EngineCommandRouter, SessionStoreContext};
 use bridge_server::server::BridgeConnection;
+use bridge_server::settings_bridge::{SettingsContext, SettingsPaths};
 use client_adapter::{AdapterPermissionGate, ClientEventSink, PermissionRequestSink};
-use client_protocol::commands::{ClientCommand, ListingKindDto, ProviderCredentialSecretDto};
+use client_protocol::commands::{
+    ClientCommand, ListingKindDto, McpScopeDto, PermissionBehaviorDto, ProviderCredentialSecretDto,
+    SettingsDestinationDto,
+};
 use client_protocol::events::{ClientEvent, ErrorKindDto};
 use client_protocol::permission::PermissionRequest;
 use futures_util::{SinkExt, StreamExt};
@@ -48,7 +53,7 @@ use tokio_tungstenite::tungstenite::Message;
 use traits::auth::{AuthError, AuthHandle, LoginInfo};
 use traits::orchestrator::{
     AgentInfo, CompactionSummary, CostSnapshot, DoctorReport, HandleError, HookInfo, McpServerInfo,
-    McpStatus, MemoryEditorOutcome, StatusSnapshot,
+    McpStatus, MemoryEditorOutcome, SkillInfo, StatusSnapshot,
 };
 use traits::task_registry::{
     TaskCreateInput, TaskListFilter, TaskOutputChunk, TaskRecord, TaskRegistryError,
@@ -272,6 +277,9 @@ impl traits::OrchestratorHandle for ResumingHandle {
         Err(HandleError::Unimplemented("test".into()))
     }
     async fn list_mcp_servers(&self) -> Vec<McpServerInfo> {
+        Vec::new()
+    }
+    async fn list_skills(&self) -> Vec<SkillInfo> {
         Vec::new()
     }
     async fn list_hooks(&self) -> Vec<HookInfo> {
@@ -1085,6 +1093,44 @@ async fn list_mcp_routes() {
             assert_eq!(servers[0].transport, "stdio");
         }
         other => panic!("expected McpServers, got {other:?}"),
+    }
+}
+
+/// Router-level plumbing for the Skills listing: proves `ListingKindDto::Skills`
+/// dispatches through `OrchestratorHandle::list_skills`, the `SkillInfo` →
+/// `SkillDto` lowering runs (a `PathBuf` becomes a display string), and the
+/// result reaches the wire as `ClientEvent::Skills`. Real discovery-from-disk
+/// coverage lives in `orchestrator/tests/list_skills_real.rs`; this test
+/// instead proves the router ARM itself is wired — an unwired/forgotten arm
+/// (the `_ => debug!(...)` catch-all) would leave `events` empty here.
+#[tokio::test]
+async fn list_skills_routes() {
+    let handle = Arc::new(MockOrchestratorHandle::new());
+    handle.set_skills(vec![SkillInfo {
+        name: "greet".into(),
+        source_dir: std::path::PathBuf::from("/home/user/.lingxi/skills/greet"),
+    }]);
+    let router = router_with(handle, Arc::new(MockTaskRegistry { rows: vec![] }));
+    let sink = CapturingSink::arc();
+
+    router
+        .route(
+            ClientCommand::RefreshListings {
+                which: vec![ListingKindDto::Skills],
+            },
+            sink.clone(),
+        )
+        .await;
+
+    let events = sink.events().await;
+    assert_eq!(events.len(), 1);
+    match &events[0] {
+        ClientEvent::Skills { skills } => {
+            assert_eq!(skills.len(), 1);
+            assert_eq!(skills[0].name, "greet");
+            assert_eq!(skills[0].source_dir, "/home/user/.lingxi/skills/greet");
+        }
+        other => panic!("expected Skills, got {other:?}"),
     }
 }
 
@@ -2118,4 +2164,995 @@ async fn force_compact_completion_routes_over_ws_without_an_active_turn() {
     }
 
     endpoint.shutdown().await;
+}
+
+// ── Settings listing ─────────────────────────────────────────────────────────
+
+/// Build a router carrying a settings context, over the same mock engine
+/// handles every other routing test uses.
+fn router_with_settings(settings: SettingsContext) -> EngineCommandRouter {
+    router_with(
+        Arc::new(MockOrchestratorHandle::new()),
+        Arc::new(MockTaskRegistry { rows: vec![] }),
+    )
+    .with_settings_context(settings)
+}
+
+/// `RefreshListings{Settings}` was defined in the protocol from the start and
+/// never routed — `router.rs` matched it alongside `Memory` and emitted a
+/// `tracing::debug!` line and nothing else. This pins that it must emit a real
+/// snapshot.
+///
+/// The provenance assertion is not a restatement of a constant: the user layer
+/// also defines `outputStyle`, so `"project"` is only correct because the merge
+/// actually ranked project above user. Reverse the precedence and it fails.
+#[tokio::test]
+async fn the_settings_listing_emits_a_snapshot_instead_of_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("home");
+    let project = dir.path().join("repo");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(project.join(branding::DOT_DIR)).unwrap();
+    std::fs::write(home.join("settings.json"), r#"{"outputStyle":"from-user"}"#).unwrap();
+    std::fs::write(
+        project.join(branding::DOT_DIR).join("settings.json"),
+        r#"{"outputStyle":"from-project"}"#,
+    )
+    .unwrap();
+
+    let mut managed = std::collections::BTreeMap::new();
+    managed.insert(
+        "telemetryEnabled".to_string(),
+        serde_json::Value::from(false),
+    );
+    let router = router_with_settings(SettingsContext {
+        paths: SettingsPaths {
+            lingxi_home: home,
+            project_dir: project.clone(),
+        },
+        active: std::collections::BTreeMap::new(),
+        managed,
+    });
+    let sink = CapturingSink::arc();
+
+    router
+        .route(
+            ClientCommand::RefreshListings {
+                which: vec![ListingKindDto::Settings],
+            },
+            sink.clone(),
+        )
+        .await;
+
+    let events = sink.events().await;
+    let (effective_json, provenance_json, files_json, locked) = events
+        .iter()
+        .find_map(|e| match e {
+            ClientEvent::SettingsSnapshot {
+                effective_json,
+                provenance_json,
+                files_json,
+                locked,
+                ..
+            } => Some((
+                effective_json.clone(),
+                provenance_json.clone(),
+                files_json.clone(),
+                locked.clone(),
+            )),
+            _ => None,
+        })
+        .expect("the settings listing must emit a SettingsSnapshot, not just a debug log");
+
+    let effective: serde_json::Value = serde_json::from_str(&effective_json).unwrap();
+    assert_eq!(
+        effective["outputStyle"], "from-project",
+        "project must beat user in the merged effective settings"
+    );
+    let provenance: serde_json::Value = serde_json::from_str(&provenance_json).unwrap();
+    assert_eq!(
+        provenance["outputStyle"], "project",
+        "provenance must name the layer the winning value came from"
+    );
+    assert_eq!(
+        locked.as_deref(),
+        Some(&["telemetryEnabled".to_string()][..]),
+        "locked must carry through from the settings context's managed overlay, not be dropped"
+    );
+
+    // The per-file layer states ride along so the UI can show which files back
+    // each layer and which of them exist.
+    let files: serde_json::Value =
+        serde_json::from_str(&files_json.expect("files_json must be populated")).unwrap();
+    let project_file = files
+        .as_array()
+        .expect("files_json is an array")
+        .iter()
+        .find(|f| f["layer"] == "project")
+        .expect("the project layer must be reported");
+    assert_eq!(project_file["exists"], true);
+    assert_eq!(
+        project_file["path"],
+        serde_json::Value::String(
+            project
+                .join(branding::DOT_DIR)
+                .join("settings.json")
+                .to_string_lossy()
+                .into_owned()
+        ),
+        "each file layer must report its real on-disk path"
+    );
+}
+
+/// Without a settings context the listing must say so. Silently emitting
+/// nothing is what this whole task exists to remove; falling back to silence in
+/// the un-wired case would reintroduce it.
+#[tokio::test]
+async fn the_settings_listing_reports_a_missing_context_instead_of_staying_silent() {
+    let router = router_with(
+        Arc::new(MockOrchestratorHandle::new()),
+        Arc::new(MockTaskRegistry { rows: vec![] }),
+    );
+    let sink = CapturingSink::arc();
+
+    router
+        .route(
+            ClientCommand::RefreshListings {
+                which: vec![ListingKindDto::Settings],
+            },
+            sink.clone(),
+        )
+        .await;
+
+    let events = sink.events().await;
+    let message = events
+        .iter()
+        .find_map(|e| match e {
+            ClientEvent::Error { message, .. } => Some(message.clone()),
+            _ => None,
+        })
+        .expect("a missing settings context must be reported, not swallowed");
+    assert!(
+        message.contains("settings context"),
+        "the error must name what is missing, got: {message}"
+    );
+    // Reporting the gap must REPLACE the snapshot, not accompany it: an empty
+    // `SettingsSnapshot` alongside the error would tell a client that the user
+    // has no settings at all.
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, ClientEvent::SettingsSnapshot { .. })),
+        "no SettingsSnapshot may be emitted without a settings context, got {events:?}"
+    );
+}
+
+/// `UpdateSettings` decodes `patch_json` (`bridge_server::router::parse_settings_patch`
+/// is unit-tested directly for the decode step in isolation), but only an
+/// end-to-end route through a real settings context proves the wire-level
+/// `null` actually reaches disk as a DELETE rather than a stored JSON `null` —
+/// asserting on the file's parsed content, not on the intermediate `Vec` shape.
+#[tokio::test]
+async fn update_settings_with_a_null_value_deletes_the_key_on_disk() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("home");
+    let project = dir.path().join("repo");
+    std::fs::create_dir_all(&home).unwrap();
+    let user_settings_path = home.join("settings.json");
+    std::fs::write(
+        &user_settings_path,
+        r#"{"outputStyle":"terse","model":"opus"}"#,
+    )
+    .unwrap();
+
+    let router = router_with_settings(SettingsContext {
+        paths: SettingsPaths {
+            lingxi_home: home,
+            project_dir: project,
+        },
+        active: std::collections::BTreeMap::new(),
+        managed: std::collections::BTreeMap::new(),
+    });
+    let sink = CapturingSink::arc();
+
+    router
+        .route(
+            ClientCommand::UpdateSettings {
+                destination: SettingsDestinationDto::User,
+                patch_json: r#"{"outputStyle": null}"#.to_string(),
+            },
+            sink.clone(),
+        )
+        .await;
+
+    let on_disk: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&user_settings_path).unwrap()).unwrap();
+    assert!(
+        !on_disk.as_object().unwrap().contains_key("outputStyle"),
+        "a null patch value must DELETE the key from the file, not write it as \
+         JSON null; got {on_disk}"
+    );
+    assert_eq!(
+        on_disk["model"], "opus",
+        "an untouched key must survive the patch"
+    );
+
+    let events = sink.events().await;
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, ClientEvent::SettingsSnapshot { .. })),
+        "a successful update must resend the settings snapshot (I3), got {events:?}"
+    );
+}
+
+/// A patch that parses as JSON but is not an OBJECT (here, an array) must be
+/// rejected with a `Protocol`-kind error naming the shape problem, not
+/// silently coerced or treated as an internal write failure.
+#[tokio::test]
+async fn update_settings_rejects_a_non_object_patch_with_protocol_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("home");
+    let project = dir.path().join("repo");
+    std::fs::create_dir_all(&home).unwrap();
+
+    let router = router_with_settings(SettingsContext {
+        paths: SettingsPaths {
+            lingxi_home: home,
+            project_dir: project,
+        },
+        active: std::collections::BTreeMap::new(),
+        managed: std::collections::BTreeMap::new(),
+    });
+    let sink = CapturingSink::arc();
+
+    router
+        .route(
+            ClientCommand::UpdateSettings {
+                destination: SettingsDestinationDto::User,
+                patch_json: r#"["outputStyle"]"#.to_string(),
+            },
+            sink.clone(),
+        )
+        .await;
+
+    let events = sink.events().await;
+    let (kind, message) = events
+        .iter()
+        .find_map(|e| match e {
+            ClientEvent::Error { kind, message } => Some((kind.clone(), message.clone())),
+            _ => None,
+        })
+        .expect("a non-object patch must be reported, not swallowed");
+    assert_eq!(
+        kind,
+        ErrorKindDto::Protocol,
+        "a malformed wire patch is a protocol violation, not an internal failure"
+    );
+    assert!(
+        message.contains("object"),
+        "the message must say what shape was expected, got: {message}"
+    );
+}
+
+/// Syntactically invalid JSON in `patch_json` must be rejected the same way —
+/// `Protocol`-kind, with an actionable message — never a panic and never
+/// silently treated as an empty patch.
+#[tokio::test]
+async fn update_settings_rejects_invalid_json_with_protocol_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("home");
+    let project = dir.path().join("repo");
+    std::fs::create_dir_all(&home).unwrap();
+
+    let router = router_with_settings(SettingsContext {
+        paths: SettingsPaths {
+            lingxi_home: home,
+            project_dir: project,
+        },
+        active: std::collections::BTreeMap::new(),
+        managed: std::collections::BTreeMap::new(),
+    });
+    let sink = CapturingSink::arc();
+
+    router
+        .route(
+            ClientCommand::UpdateSettings {
+                destination: SettingsDestinationDto::User,
+                patch_json: "{ not json".to_string(),
+            },
+            sink.clone(),
+        )
+        .await;
+
+    let events = sink.events().await;
+    let (kind, message) = events
+        .iter()
+        .find_map(|e| match e {
+            ClientEvent::Error { kind, message } => Some((kind.clone(), message.clone())),
+            _ => None,
+        })
+        .expect("invalid JSON must be reported, not swallowed");
+    assert_eq!(kind, ErrorKindDto::Protocol);
+    assert!(
+        message.contains("JSON"),
+        "the message must say the patch is not valid JSON, got: {message}"
+    );
+}
+
+/// `Memory` shared the do-nothing arm with `Settings`. Splitting `Settings` out
+/// must not start emitting anything for `Memory`.
+#[tokio::test]
+async fn the_memory_listing_stays_unrouted() {
+    let router = router_with(
+        Arc::new(MockOrchestratorHandle::new()),
+        Arc::new(MockTaskRegistry { rows: vec![] }),
+    );
+    let sink = CapturingSink::arc();
+
+    router
+        .route(
+            ClientCommand::RefreshListings {
+                which: vec![ListingKindDto::Memory],
+            },
+            sink.clone(),
+        )
+        .await;
+
+    assert!(
+        sink.events().await.is_empty(),
+        "Memory has no engine handle in the foundation and must stay silent"
+    );
+}
+
+// ── Permissions (persisted) ──────────────────────────────────────────────
+//
+// These three commands route to `permission::persist` (per-destination
+// exclusive locks, atomic root-confined replacement, alias-normalizing
+// de-duplication, unknown-key preservation) rather than through
+// `UpdateSettings`, which refuses the `permissions` key precisely to avoid a
+// second write path to it. Each positive test below asserts BOTH that the
+// change landed in the right file AND that an unrelated key in that same
+// file survived — the second half is what proves the write went through
+// `persist.rs` rather than a hand-rolled overwrite that could pass the first
+// half alone.
+
+/// The rule must land in the project layer's `permissions.allow`, and an
+/// unrelated key already in that file must survive untouched.
+#[tokio::test]
+async fn update_permission_rules_writes_the_named_layer_and_preserves_other_keys() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("home");
+    let project = dir.path().join("repo");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(project.join(branding::DOT_DIR)).unwrap();
+    let target = project.join(branding::DOT_DIR).join("settings.json");
+    std::fs::write(&target, r#"{"outputStyle":"terse"}"#).unwrap();
+
+    let router = router_with_settings(SettingsContext {
+        paths: SettingsPaths {
+            lingxi_home: home,
+            project_dir: project,
+        },
+        active: std::collections::BTreeMap::new(),
+        managed: std::collections::BTreeMap::new(),
+    });
+    let sink = CapturingSink::arc();
+
+    router
+        .route(
+            ClientCommand::UpdatePermissionRules {
+                destination: SettingsDestinationDto::Project,
+                behavior: PermissionBehaviorDto::Allow,
+                add: vec!["Bash(ls:*)".to_string()],
+                remove: vec![],
+            },
+            sink.clone(),
+        )
+        .await;
+
+    let written: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&target).unwrap()).unwrap();
+    assert_eq!(
+        written["permissions"]["allow"][0], "Bash(ls:*)",
+        "the rule must land in the project layer's permissions.allow"
+    );
+    assert_eq!(
+        written["outputStyle"], "terse",
+        "unrelated keys must survive verbatim"
+    );
+
+    let events = sink.events().await;
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, ClientEvent::SettingsSnapshot { .. })),
+        "a successful update must resend the settings snapshot, got {events:?}"
+    );
+}
+
+/// A request whose `add`/`remove` are both empty changes nothing on disk —
+/// the router must say so rather than silently resending an unchanged
+/// snapshot that looks identical to a successful write.
+#[tokio::test]
+async fn update_permission_rules_reports_when_nothing_was_requested() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("home");
+    let project = dir.path().join("repo");
+    std::fs::create_dir_all(&home).unwrap();
+
+    let router = router_with_settings(SettingsContext {
+        paths: SettingsPaths {
+            lingxi_home: home,
+            project_dir: project,
+        },
+        active: std::collections::BTreeMap::new(),
+        managed: std::collections::BTreeMap::new(),
+    });
+    let sink = CapturingSink::arc();
+
+    router
+        .route(
+            ClientCommand::UpdatePermissionRules {
+                destination: SettingsDestinationDto::User,
+                behavior: PermissionBehaviorDto::Allow,
+                add: vec![],
+                remove: vec![],
+            },
+            sink.clone(),
+        )
+        .await;
+
+    let events = sink.events().await;
+    let (kind, message) = events
+        .iter()
+        .find_map(|e| match e {
+            ClientEvent::Error { kind, message } => Some((kind.clone(), message.clone())),
+            _ => None,
+        })
+        .expect("a no-op request must be reported, not silently resent as a snapshot");
+    assert_eq!(kind, ErrorKindDto::Rejected);
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, ClientEvent::SettingsSnapshot { .. })),
+        "a no-op must not also emit a snapshot, got {events:?}: {message}"
+    );
+}
+
+/// Complements the "partial write" fix below: when NOTHING had changed yet
+/// at the point a persist call errors (here, `add` is empty so only `remove`
+/// runs, against a file with broken JSON), the router must report ONLY the
+/// error — no snapshot. This pins the `if changed { snapshot }` branch's
+/// FALSE side, so the fix for partial writes cannot regress into always
+/// emitting a snapshot on top of an error regardless of whether anything
+/// actually landed.
+#[tokio::test]
+async fn update_permission_rules_reports_only_the_error_when_nothing_changed_before_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("home");
+    let project = dir.path().join("repo");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::write(home.join("settings.json"), "{ not json").unwrap();
+
+    let router = router_with_settings(SettingsContext {
+        paths: SettingsPaths {
+            lingxi_home: home,
+            project_dir: project,
+        },
+        active: std::collections::BTreeMap::new(),
+        managed: std::collections::BTreeMap::new(),
+    });
+    let sink = CapturingSink::arc();
+
+    router
+        .route(
+            ClientCommand::UpdatePermissionRules {
+                destination: SettingsDestinationDto::User,
+                behavior: PermissionBehaviorDto::Allow,
+                add: vec![],
+                remove: vec!["Bash".to_string()],
+            },
+            sink.clone(),
+        )
+        .await;
+
+    let events = sink.events().await;
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            ClientEvent::Error {
+                kind: ErrorKindDto::Internal,
+                ..
+            }
+        )),
+        "a broken destination file must be reported as an internal failure, got {events:?}"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, ClientEvent::SettingsSnapshot { .. })),
+        "nothing changed before the error, so no snapshot may be emitted, got {events:?}"
+    );
+}
+
+/// The default mode must land in the user layer's `defaultMode`, and an
+/// unrelated key in that file must survive.
+#[tokio::test]
+async fn set_default_permission_mode_writes_the_named_layer_and_preserves_other_keys() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("home");
+    let project = dir.path().join("repo");
+    std::fs::create_dir_all(&home).unwrap();
+    let target = home.join("settings.json");
+    std::fs::write(&target, r#"{"outputStyle":"terse"}"#).unwrap();
+
+    let router = router_with_settings(SettingsContext {
+        paths: SettingsPaths {
+            lingxi_home: home,
+            project_dir: project,
+        },
+        active: std::collections::BTreeMap::new(),
+        managed: std::collections::BTreeMap::new(),
+    });
+    let sink = CapturingSink::arc();
+
+    router
+        .route(
+            ClientCommand::SetDefaultPermissionMode {
+                destination: SettingsDestinationDto::User,
+                mode: "acceptEdits".to_string(),
+            },
+            sink.clone(),
+        )
+        .await;
+
+    let written: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&target).unwrap()).unwrap();
+    assert_eq!(written["permissions"]["defaultMode"], "acceptEdits");
+    assert_eq!(
+        written["outputStyle"], "terse",
+        "unrelated keys must survive verbatim"
+    );
+
+    let events = sink.events().await;
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, ClientEvent::SettingsSnapshot { .. })),
+        "a successful update must resend the settings snapshot, got {events:?}"
+    );
+}
+
+/// `persist_permission_mode` deliberately refuses to persist
+/// `"bypassPermissions"` (a security property: persisting it would silently
+/// re-enter bypass mode on the next session load). The refusal must be
+/// reported honestly — the caller must NOT see a `SettingsSnapshot` that
+/// looks like the write happened, and the file must be left untouched.
+#[tokio::test]
+async fn set_default_permission_mode_reports_the_bypass_permissions_refusal() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("home");
+    let project = dir.path().join("repo");
+    std::fs::create_dir_all(&home).unwrap();
+    let target = home.join("settings.json");
+    std::fs::write(&target, r#"{"outputStyle":"terse"}"#).unwrap();
+
+    let router = router_with_settings(SettingsContext {
+        paths: SettingsPaths {
+            lingxi_home: home,
+            project_dir: project,
+        },
+        active: std::collections::BTreeMap::new(),
+        managed: std::collections::BTreeMap::new(),
+    });
+    let sink = CapturingSink::arc();
+
+    router
+        .route(
+            ClientCommand::SetDefaultPermissionMode {
+                destination: SettingsDestinationDto::User,
+                mode: "bypassPermissions".to_string(),
+            },
+            sink.clone(),
+        )
+        .await;
+
+    let on_disk: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&target).unwrap()).unwrap();
+    assert!(
+        on_disk
+            .get("permissions")
+            .and_then(|p| p.get("defaultMode"))
+            .is_none(),
+        "bypassPermissions must never be written to disk, got {on_disk}"
+    );
+
+    let events = sink.events().await;
+    let (kind, message) = events
+        .iter()
+        .find_map(|e| match e {
+            ClientEvent::Error { kind, message } => Some((kind.clone(), message.clone())),
+            _ => None,
+        })
+        .expect("the refusal must be reported, not swallowed");
+    assert_eq!(kind, ErrorKindDto::Rejected);
+    assert!(
+        message.contains("bypassPermissions") || message.contains("session-scoped"),
+        "the message must name what happened, got: {message}"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, ClientEvent::SettingsSnapshot { .. })),
+        "a refused persist must not also claim success via a snapshot, got {events:?}"
+    );
+}
+
+/// The directory must land in the local layer's
+/// `permissions.additionalDirectories`, and an unrelated key in that file
+/// must survive.
+#[tokio::test]
+async fn update_workspace_directories_writes_the_named_layer_and_preserves_other_keys() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("home");
+    let project = dir.path().join("repo");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(project.join(branding::DOT_DIR)).unwrap();
+    let target = project.join(branding::DOT_DIR).join("settings.local.json");
+    std::fs::write(&target, r#"{"outputStyle":"terse"}"#).unwrap();
+
+    let router = router_with_settings(SettingsContext {
+        paths: SettingsPaths {
+            lingxi_home: home,
+            project_dir: project,
+        },
+        active: std::collections::BTreeMap::new(),
+        managed: std::collections::BTreeMap::new(),
+    });
+    let sink = CapturingSink::arc();
+
+    router
+        .route(
+            ClientCommand::UpdateWorkspaceDirectories {
+                destination: SettingsDestinationDto::Local,
+                add: vec!["/tmp/extra".to_string()],
+                remove: vec![],
+            },
+            sink.clone(),
+        )
+        .await;
+
+    let written: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&target).unwrap()).unwrap();
+    assert_eq!(
+        written["permissions"]["additionalDirectories"][0], "/tmp/extra",
+        "the directory must land in the local layer's additionalDirectories"
+    );
+    assert_eq!(
+        written["outputStyle"], "terse",
+        "unrelated keys must survive verbatim"
+    );
+
+    let events = sink.events().await;
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, ClientEvent::SettingsSnapshot { .. })),
+        "a successful update must resend the settings snapshot, got {events:?}"
+    );
+}
+
+/// Without a settings context, all three permission commands must report the
+/// gap instead of panicking or staying silent — the same contract
+/// `apply_settings_patch` already honors for `UpdateSettings`.
+#[tokio::test]
+async fn update_permission_rules_reports_a_missing_context_instead_of_staying_silent() {
+    let router = router_with(
+        Arc::new(MockOrchestratorHandle::new()),
+        Arc::new(MockTaskRegistry { rows: vec![] }),
+    );
+    let sink = CapturingSink::arc();
+
+    router
+        .route(
+            ClientCommand::UpdatePermissionRules {
+                destination: SettingsDestinationDto::User,
+                behavior: PermissionBehaviorDto::Allow,
+                add: vec!["Bash".to_string()],
+                remove: vec![],
+            },
+            sink.clone(),
+        )
+        .await;
+
+    let events = sink.events().await;
+    let message = events
+        .iter()
+        .find_map(|e| match e {
+            ClientEvent::Error { message, .. } => Some(message.clone()),
+            _ => None,
+        })
+        .expect("a missing settings context must be reported, not swallowed");
+    assert!(
+        message.contains("settings context"),
+        "the error must name what is missing, got: {message}"
+    );
+}
+
+/// Same contract as above, for `SetDefaultPermissionMode` — the shared
+/// `require_permission_paths` preflight is exercised by all three handlers,
+/// but only pinning it through one caller would miss a mis-wiring of this
+/// one to a different (or missing) guard.
+#[tokio::test]
+async fn set_default_permission_mode_reports_a_missing_context_instead_of_staying_silent() {
+    let router = router_with(
+        Arc::new(MockOrchestratorHandle::new()),
+        Arc::new(MockTaskRegistry { rows: vec![] }),
+    );
+    let sink = CapturingSink::arc();
+
+    router
+        .route(
+            ClientCommand::SetDefaultPermissionMode {
+                destination: SettingsDestinationDto::User,
+                mode: "acceptEdits".to_string(),
+            },
+            sink.clone(),
+        )
+        .await;
+
+    let events = sink.events().await;
+    let message = events
+        .iter()
+        .find_map(|e| match e {
+            ClientEvent::Error { message, .. } => Some(message.clone()),
+            _ => None,
+        })
+        .expect("a missing settings context must be reported, not swallowed");
+    assert!(
+        message.contains("settings context"),
+        "the error must name what is missing, got: {message}"
+    );
+}
+
+/// Same contract as above, for `UpdateWorkspaceDirectories`.
+#[tokio::test]
+async fn update_workspace_directories_reports_a_missing_context_instead_of_staying_silent() {
+    let router = router_with(
+        Arc::new(MockOrchestratorHandle::new()),
+        Arc::new(MockTaskRegistry { rows: vec![] }),
+    );
+    let sink = CapturingSink::arc();
+
+    router
+        .route(
+            ClientCommand::UpdateWorkspaceDirectories {
+                destination: SettingsDestinationDto::User,
+                add: vec!["/tmp/extra".to_string()],
+                remove: vec![],
+            },
+            sink.clone(),
+        )
+        .await;
+
+    let events = sink.events().await;
+    let message = events
+        .iter()
+        .find_map(|e| match e {
+            ClientEvent::Error { message, .. } => Some(message.clone()),
+            _ => None,
+        })
+        .expect("a missing settings context must be reported, not swallowed");
+    assert!(
+        message.contains("settings context"),
+        "the error must name what is missing, got: {message}"
+    );
+}
+
+// ── MCP server writes ─────────────────────────────────────────────────────────
+//
+// `mcp_bridge`'s own unit tests (in `apps/bridge-server/src/mcp_bridge.rs`)
+// already cover the scope-to-storage-location mapping across all three
+// scopes against the real `mcp::json_config` parser. What is genuinely new
+// HERE — the router's translation from the wire (`config_json` string,
+// missing-context handling, error-kind selection) into that call — gets its
+// own coverage below, the same way `update_settings_*` covers
+// `apply_settings_patch` end-to-end rather than trusting the unit-tested
+// `parse_settings_patch` decode step alone.
+
+/// Build a router carrying an MCP context, over the same mock engine handles
+/// every other routing test uses.
+fn router_with_mcp(mcp: McpPaths) -> EngineCommandRouter {
+    router_with(
+        Arc::new(MockOrchestratorHandle::new()),
+        Arc::new(MockTaskRegistry { rows: vec![] }),
+    )
+    .with_mcp_paths(mcp)
+}
+
+/// End-to-end: `UpsertMcpServer` routed through a real MCP context actually
+/// lands on disk at `<project>/.mcp.json`, and a second `RemoveMcpServer`
+/// deletes it — mirroring `update_settings_with_a_null_value_deletes_the_key_on_disk`'s
+/// "assert on disk, not on an intermediate value" shape.
+#[tokio::test]
+async fn upsert_then_remove_mcp_server_round_trips_through_the_router() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = dir.path().join("repo");
+    std::fs::create_dir_all(&project).unwrap();
+    let router = router_with_mcp(McpPaths {
+        project_dir: project.clone(),
+        global_config_path: dir.path().join(".lingxi.json"),
+    });
+    let sink = CapturingSink::arc();
+
+    router
+        .route(
+            ClientCommand::UpsertMcpServer {
+                scope: McpScopeDto::Project,
+                name: "linear".to_string(),
+                config_json: r#"{"command":"npx","args":["-y","linear-mcp"]}"#.to_string(),
+            },
+            sink.clone(),
+        )
+        .await;
+
+    let events = sink.events().await;
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, ClientEvent::Error { .. })),
+        "a successful upsert must not emit an Error, got {events:?}"
+    );
+    let raw = std::fs::read_to_string(project.join(".mcp.json")).unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    assert_eq!(parsed["mcpServers"]["linear"]["command"], "npx");
+
+    router
+        .route(
+            ClientCommand::RemoveMcpServer {
+                scope: McpScopeDto::Project,
+                name: "linear".to_string(),
+            },
+            sink.clone(),
+        )
+        .await;
+
+    let raw = std::fs::read_to_string(project.join(".mcp.json")).unwrap();
+    let after: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    assert!(
+        after["mcpServers"].get("linear").is_none(),
+        "removal routed through the router must delete the entry, got: {after}"
+    );
+}
+
+/// A `config_json` that is syntactically valid JSON but not an OBJECT
+/// (`.mcp.json` entries are always object-shaped) must be rejected as a
+/// PROTOCOL violation — the router's own decode step, not `mcp_bridge`'s
+/// file-safety checks.
+#[tokio::test]
+async fn upsert_mcp_server_rejects_a_non_object_config_with_protocol_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let router = router_with_mcp(McpPaths {
+        project_dir: dir.path().to_path_buf(),
+        global_config_path: dir.path().join(".lingxi.json"),
+    });
+    let sink = CapturingSink::arc();
+
+    router
+        .route(
+            ClientCommand::UpsertMcpServer {
+                scope: McpScopeDto::Project,
+                name: "linear".to_string(),
+                config_json: r#"["npx"]"#.to_string(),
+            },
+            sink.clone(),
+        )
+        .await;
+
+    let events = sink.events().await;
+    let (kind, message) = events
+        .iter()
+        .find_map(|e| match e {
+            ClientEvent::Error { kind, message } => Some((kind.clone(), message.clone())),
+            _ => None,
+        })
+        .expect("a non-object config must be reported, not swallowed");
+    assert_eq!(
+        kind,
+        ErrorKindDto::Protocol,
+        "a malformed wire config is a protocol violation, not an internal failure"
+    );
+    assert!(
+        message.contains("object"),
+        "the message must say what shape was expected, got: {message}"
+    );
+    assert!(
+        !dir.path().join(".mcp.json").exists(),
+        "a rejected config must never create the target file"
+    );
+}
+
+/// Without an MCP context, both commands must say so rather than silently
+/// doing nothing — the same contract `apply_settings_patch` /
+/// `require_permission_paths` already hold for their own missing-context case.
+#[tokio::test]
+async fn mcp_commands_report_a_missing_context_instead_of_staying_silent() {
+    let router = router_with(
+        Arc::new(MockOrchestratorHandle::new()),
+        Arc::new(MockTaskRegistry { rows: vec![] }),
+    );
+
+    for command in [
+        ClientCommand::UpsertMcpServer {
+            scope: McpScopeDto::Project,
+            name: "x".to_string(),
+            config_json: r#"{"command":"x"}"#.to_string(),
+        },
+        ClientCommand::RemoveMcpServer {
+            scope: McpScopeDto::Project,
+            name: "x".to_string(),
+        },
+    ] {
+        let sink = CapturingSink::arc();
+        router.route(command, sink.clone()).await;
+        let events = sink.events().await;
+        let message = events
+            .iter()
+            .find_map(|e| match e {
+                ClientEvent::Error { message, .. } => Some(message.clone()),
+                _ => None,
+            })
+            .expect("a missing MCP context must be reported, not swallowed");
+        assert!(
+            message.contains("MCP context"),
+            "the error must name what is missing, got: {message}"
+        );
+    }
+}
+
+/// Fix round 1 / Minor 3: an empty or whitespace-only name must be rejected
+/// at the wire boundary with a Protocol error, never written — the storage
+/// layer (`mcp_bridge`) has no name validation of its own, so this is the
+/// only place that stops `mcp::json_config::build_servers_from_map` from
+/// ever seeing a `""` map key.
+#[tokio::test]
+async fn upsert_mcp_server_rejects_an_empty_name_with_protocol_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let router = router_with_mcp(McpPaths {
+        project_dir: dir.path().to_path_buf(),
+        global_config_path: dir.path().join(".lingxi.json"),
+    });
+
+    for empty_name in ["", "   "] {
+        let sink = CapturingSink::arc();
+        router
+            .route(
+                ClientCommand::UpsertMcpServer {
+                    scope: McpScopeDto::Project,
+                    name: empty_name.to_string(),
+                    config_json: r#"{"command":"npx"}"#.to_string(),
+                },
+                sink.clone(),
+            )
+            .await;
+
+        let events = sink.events().await;
+        let (kind, message) = events
+            .iter()
+            .find_map(|e| match e {
+                ClientEvent::Error { kind, message } => Some((kind.clone(), message.clone())),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("an empty name ({empty_name:?}) must be reported"));
+        assert_eq!(kind, ErrorKindDto::Protocol);
+        assert!(
+            message.to_lowercase().contains("name"),
+            "the message must say what's wrong, got: {message}"
+        );
+    }
+    assert!(
+        !dir.path().join(".mcp.json").exists(),
+        "a rejected empty name must never create the target file"
+    );
 }

@@ -19,8 +19,8 @@ use crate::ask_user_question::AskUserQuestionRequestDto;
 use crate::controls::ConversationControlsDto;
 use crate::listings::{
     AgentDto, AuthStateDto, CoordinatorWorkerDto, DoctorReportDto, HookDto, McpServerDto,
-    MemoryEntryDto, ModelDetailsDto, SessionAgentSummaryDto, SessionRowDto, SlashCommandDto,
-    StatusSnapshotDto, TaskRowDto, TaskStatusDto,
+    MemoryEntryDto, ModelDetailsDto, SessionAgentSummaryDto, SessionRowDto, SkillDto,
+    SlashCommandDto, StatusSnapshotDto, TaskRowDto, TaskStatusDto,
 };
 use crate::local_apps::{
     AppCheckpointDto, AppErrorCodeDto, AppEventDto, AppRecordDto, AppRuntimeDetailsDto,
@@ -122,6 +122,25 @@ pub enum ClientEvent {
         cost: CostDto,
     },
 
+    /// Authoritative durable state for one mobile turn. Emitted on attach,
+    /// resume, recovery gating, and every terminal transition.
+    TurnRecoveryState {
+        snapshot: TurnRecoverySnapshotDto,
+    },
+
+    /// Sequenced retained copy of a turn event. It is emitted beside live
+    /// delivery and replayed after
+    /// [`ClientCommand::AttachTurn`](crate::commands::ClientCommand::AttachTurn).
+    /// `event_json` is the original serialized `ClientEvent`; keeping it a
+    /// string avoids a recursive UniFFI enum while preserving the exact wire
+    /// payload for future SSE/WebSocket transports.
+    TurnEventReplay {
+        session_id: String,
+        turn_id: u64,
+        sequence: u64,
+        event_json: String,
+    },
+
     CostUpdate {
         total_usd: f64,
         input_tokens: u64,
@@ -212,6 +231,10 @@ pub enum ClientEvent {
         servers: Vec<McpServerDto>,
     },
 
+    Skills {
+        skills: Vec<SkillDto>,
+    },
+
     Hooks {
         hooks: Vec<HookDto>,
     },
@@ -240,9 +263,75 @@ pub enum ClientEvent {
         snapshot: StatusSnapshotDto,
     },
 
+    /// The layered settings read path (`RefreshListings{Settings}`).
+    ///
+    /// Every structured payload here is a JSON **String**, not a nested
+    /// object: `serde_json::Value` must never enter this crate (decision
+    /// §0.4 — `Value` is not UniFFI-representable), so the bridge lowers
+    /// each map to a string exactly the way `ToolUseStarted.input_json`
+    /// does.
+    ///
+    /// `effective_json` is `{key: value}` after the merge; `provenance_json`
+    /// is `{key: layer}` naming which layer each merged value came from.
+    /// The three optional fields were ADDED to this variant (additive under
+    /// decision §0.10 — no major bump): a client that predates them keeps
+    /// reading the two required payloads unchanged.
     SettingsSnapshot {
+        /// `{key: value}` — the merged effective settings.
         effective_json: String,
+        /// `{key: layer}` — which layer each effective value came from.
         provenance_json: String,
+        /// `[{layer, path, exists, parsed, parse_error?}]` — the on-disk
+        /// state of every settings file layer, so the UI can show which file
+        /// backs a layer and whether it parsed. `parsed` reports JSON
+        /// validity only; it says nothing about OS write permission.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        files_json: Option<String>,
+        /// `{key: value}` — the FILE-LAYER values as read at session start.
+        /// NOT the session's live configuration: no `cli` / `managed` / `env`
+        /// overlay is applied, so this is strictly "what the settings files
+        /// said at boot" and can differ from `effective_json` both because of
+        /// an on-disk edit not yet picked up AND because `effective_json`
+        /// carries the managed overlay that this field does not.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        active_json: Option<String>,
+        /// Keys an administrator pinned through the managed-settings layer;
+        /// the UI must not offer to edit these.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        locked: Option<Vec<String>>,
+        /// `{layer: {key: value}}` — each FILE layer's OWN raw settings map,
+        /// unmerged. `effective_json` is a cross-layer merge and `active_json`
+        /// is the file-layer merge without the managed overlay; NEITHER can
+        /// stand in for "what does layer L's file itself say", which a
+        /// layered editor needs before it writes back to one layer: the
+        /// generic `update_settings` command replaces a key WHOLESALE in one
+        /// layer's file (`migrations/src/settings_update.rs`'s "top-level
+        /// REPLACE, not deep-merge" contract), so pre-merging a write against
+        /// the cross-layer `effective_json` view — which can carry another
+        /// layer's entries for an object-valued key like `providers` — would
+        /// silently fork that other layer's data into the one being saved.
+        /// Additive under decision §0.10 — no major bump.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        layers_json: Option<String>,
+        /// The keys in `effective_json` whose value is a CROSS-LAYER union
+        /// rather than one layer's value. The engine deep-merges or
+        /// concat-dedups a specific set of keys (`hooks`, `permissions`,
+        /// `providers`, `enabledPlugins`, `trustedDirectories`, … — its
+        /// `settings::schema::MERGE_STRATEGIES` table), so when more than one
+        /// layer contributes, the effective value belongs to no single layer
+        /// and `provenance_json`'s entry for that key names only the
+        /// highest-priority CONTRIBUTOR. A client must therefore not render a
+        /// single-layer provenance badge for a key listed here; it says the
+        /// value is merged across layers instead.
+        ///
+        /// Only keys the merge actually unioned are listed: a deep-merge key
+        /// whose entries the winning layer entirely redefines is absent,
+        /// because for that key the winning layer's badge is honest. A list
+        /// of every key both layers mention would be useless.
+        ///
+        /// Additive under decision §0.10 — no major bump.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        merged_keys: Option<Vec<String>>,
     },
 
     AuthState {
@@ -393,6 +482,20 @@ pub enum ClientEvent {
     FastModeChanged {
         enabled: bool,
     },
+
+    /// Ask a client to perform one microphone/speaker operation. Mirrors the
+    /// [`ComputerAccessRequestDto`](crate::computer_access::ComputerAccessRequestDto)
+    /// engine->client request/response shape: correlated by `request_id`, and
+    /// the client's outcome round-trips back as an
+    /// [`AudioResultDto`](crate::commands::AudioResultDto) on
+    /// [`ClientCommand::AudioResponse`](crate::commands::ClientCommand::AudioResponse).
+    AudioRequest {
+        /// Connection-scoped correlator; echoed back verbatim on the matching
+        /// `AudioResponse`.
+        request_id: u64,
+        /// The operation the client should perform.
+        op: AudioOpDto,
+    },
 }
 
 #[allow(clippy::trivially_copy_pass_by_ref)]
@@ -451,6 +554,58 @@ pub enum TurnOutcomeDto {
     Cancelled,
 }
 
+/// Durable execution state for a mobile turn. Backgrounding itself never
+/// changes this state; only execution, a recovery gate, or an explicit cancel
+/// does.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
+#[serde(tag = "type", rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum TurnRecoveryStateDto {
+    /// The turn is currently executing or attached to a live executor.
+    Running,
+    /// Execution is parked until the user supplies permission or input.
+    WaitingForUser,
+    /// The platform lease expired, but the checkpoint may be resumed safely.
+    PausedRecoverable,
+    /// The turn produced its normal final outcome.
+    Completed,
+    /// The turn ended with an execution failure.
+    Failed,
+    /// The user explicitly cancelled the turn; it must never be resumed.
+    Cancelled,
+}
+
+impl TurnRecoveryStateDto {
+    /// Terminal durable states must never be resurrected by attach/resume.
+    #[must_use]
+    pub fn is_terminal(&self) -> bool {
+        matches!(self, Self::Completed | Self::Failed | Self::Cancelled)
+    }
+}
+
+/// Snapshot clients use to decide whether a durable turn can be reattached or
+/// needs explicit user intervention.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct TurnRecoverySnapshotDto {
+    /// Stable session owning the turn.
+    pub session_id: String,
+    /// Stable client-provided turn identity.
+    pub turn_id: u64,
+    /// Current durable lifecycle state.
+    pub state: TurnRecoveryStateDto,
+    /// First event sequence still retained for replay.
+    pub first_sequence: u64,
+    /// Last committed event sequence, or zero when no events were committed.
+    pub last_sequence: u64,
+    /// Whether replaying from the persisted boundary is known to be safe.
+    pub safe_to_resume: bool,
+    /// Optional machine-readable explanation for a paused or terminal state.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
 /// Cumulative cost snapshot — the lowered analog of `traits::CostSnapshot`
 /// (`Duration` → whole seconds; only the display-relevant fields, decision
 /// §0.4). Carried by [`ClientEvent::TurnEnded`].
@@ -469,4 +624,57 @@ pub struct CostDto {
     pub session_duration_secs: u64,
     /// Pre-formatted display string (e.g. `"$0.0123"`).
     pub formatted: String,
+}
+
+/// One audio operation the engine asks a client to perform on its device
+/// microphone/speaker. Carried by [`ClientEvent::AudioRequest`]. Internally
+/// tagged on `type`, `snake_case`. `#[non_exhaustive]` so a future op is
+/// additive.
+///
+/// Mirrors the argument shapes of `traits::{VoiceRecorder, SpeechToText,
+/// TextToSpeech}` one-to-one, so this contract can carry every call those
+/// traits make without loss: `StartRecording`/`StopRecording`/`IsRecording`
+/// lower `VoiceRecorder::{start_recording, stop_recording, is_recording}`
+/// (`StartRecording`'s fields are `traits::VoiceRecordingOpts`); `Transcribe`
+/// lowers `SpeechToText::transcribe`'s `SttOpts`; `Synthesize` lowers
+/// `TextToSpeech::synthesize`'s `TtsOpts`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
+#[serde(tag = "type", rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum AudioOpDto {
+    /// Begin a recording session — `VoiceRecordingOpts`.
+    StartRecording {
+        /// Target sample rate in Hz (e.g. `16_000` for speech).
+        sample_rate_hz: u32,
+        /// Container/codec hint (e.g. `"m4a"`, `"wav"`).
+        format: String,
+    },
+    /// Stop the active recording session and return the captured audio.
+    /// Answered by
+    /// [`AudioResultDto::Recording`](crate::commands::AudioResultDto::Recording).
+    StopRecording,
+    /// Query whether a recording session is currently active. Answered by
+    /// [`AudioResultDto::RecordingState`](crate::commands::AudioResultDto::RecordingState).
+    /// `VoiceRecorder::is_recording` returns a bare `bool` with no error
+    /// channel, so this op has no engine-defined `Failed` outcome to carry —
+    /// only a transport-level failure could prevent an answer, and handling
+    /// that is a proxy (Task 2) concern, not part of this contract.
+    IsRecording,
+    /// Open the microphone, listen for a single utterance, and return the
+    /// final transcript — `SttOpts`.
+    Transcribe {
+        /// BCP-47 language hint (e.g. `"en-US"`, `"zh-CN"`). `None` = device
+        /// default.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        language: Option<String>,
+    },
+    /// Synthesize text to speech — `TtsOpts`.
+    Synthesize {
+        /// Text to speak.
+        text: String,
+        /// Provider-specific voice id (`None` = the system default voice).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        voice: Option<String>,
+    },
 }

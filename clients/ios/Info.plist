@@ -6,6 +6,7 @@
 	<array>
 		<string>com.lingxi.code.cron.reconcile</string>
 		<string>com.lingxi.code.localapps.background</string>
+		<string>com.lingxi.code.conversation.continued.*</string>
 	</array>
 	<key>CFBundleDevelopmentRegion</key>
 	<string>zh-Hans</string>
@@ -64,6 +65,8 @@
 	<string>灵犀在你使用本地应用时获取一次当前位置，供你授权过的应用使用。</string>
 	<key>NSSpeechRecognitionUsageDescription</key>
 	<string>灵犀使用语音识别将你的语音转写为文本。</string>
+	<key>NSSupportsLiveActivities</key>
+	<true/>
 	<key>UIApplicationSupportsIndirectInputEvents</key>
 	<true/>
 	<key>UIBackgroundModes</key>

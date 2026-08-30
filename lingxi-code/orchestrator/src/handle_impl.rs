@@ -31,7 +31,7 @@ use tokio::process::Command;
 use traits::{
     ActiveGoalSnapshot, AgentInfo, CompactionSummary, CostSnapshot, DoctorReport, ForkOutcome,
     HandleError, HookInfo, McpServerInfo, MemoryEditorOutcome, OrchestratorHandle, RecapOutcome,
-    StatusSnapshot,
+    SkillInfo, StatusSnapshot,
 };
 
 /// Keep the session's provider-local wire model separate from the
@@ -867,6 +867,66 @@ impl OrchestratorHandle for ConversationOrchestrator {
             return Vec::new();
         };
         reg.snapshot().await
+    }
+
+    async fn list_skills(&self) -> Vec<SkillInfo> {
+        // Desktop Skills settings view (Task 7): re-scan the project, user,
+        // and managed tiers via `skill_api::load_file_skill_sections_with_roots`,
+        // rather than a Rust-side `SkillRegistry` — the composition root's
+        // registry is a residual empty instance with no turn-loop consumer,
+        // so it would report zero skills unconditionally.
+        //
+        // `managed_dir` mirrors the composition root's
+        // `SkillsHandler::with_all_roots(.., Some(managed_settings_dir()), ..)`
+        // (`apps/engine-desktop/src/lib.rs:3351-3354`) exactly — it is the
+        // SAME pure, env/platform-derived function (`traits::live_sessions::
+        // managed_settings_dir`), not a second computation; the loader
+        // treats a non-existent managed dir as an empty tier, so this is
+        // harmless when no managed policy is installed.
+        //
+        // `additional_skill_dirs` is deliberately `&[]` (fix round 2): a
+        // first attempt read it from `self.session_cwd.trusted_dirs()`, but
+        // that set is seeded at boot with `cwd` plus every settings-tier
+        // `permissions.additionalDirectories` entry plus `--add-dir`
+        // (`apps/engine-desktop/src/lib.rs:7538-7568`, `:8666-8688`) — a much
+        // wider set than what the sibling slash commands actually scan. The
+        // desktop's own `SkillsHandler` (`/skills`,
+        // `apps/engine-desktop/src/lib.rs:3351-3354`) is constructed with
+        // `additional_skill_dirs: Vec::new()` HARDCODED — it never sees any
+        // additional directory. Its `ReloadSkillsHandler` counterpart
+        // (`/reload-skills`) is wired to `DesktopRepoRootReloader
+        // .registered_roots` (`apps/engine-desktop/src/lib.rs:4919`,
+        // `:4964-4977`), which starts empty and grows only through a live
+        // `register_repo_root` call with no desktop-side call site outside
+        // `apps/cli/src/run.rs` — so on the desktop it is always empty too.
+        // Using `trusted_dirs()` therefore made this listing show skills
+        // NEITHER sibling command reports for any project configuring
+        // `additionalDirectories` — the mirror image of the defect this
+        // parameter previously had. If either construction site above ever
+        // starts supplying real roots, this must be revisited together with
+        // them; until then, pass `&[]` here, not `trusted_dirs()` or any
+        // other implicit "additional directories" source.
+        //
+        // Falls back to `vec![]` when no config home is wired, mirroring
+        // `list_mcp_servers`'s "no registry" default.
+        let Some(config_home) = self.config_home.as_ref() else {
+            return Vec::new();
+        };
+        let managed_dir = traits::live_sessions::managed_settings_dir();
+        skill_api::load_file_skill_sections_with_roots(
+            &self.cwd,
+            config_home,
+            Some(&managed_dir),
+            &[],
+        )
+        .into_iter()
+        .flat_map(|section| {
+            section.rows.into_iter().map(|row| SkillInfo {
+                name: row.name,
+                source_dir: row.source_dir,
+            })
+        })
+        .collect()
     }
 
     async fn reconnect_mcp_servers(

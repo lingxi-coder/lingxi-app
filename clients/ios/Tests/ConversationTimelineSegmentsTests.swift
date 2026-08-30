@@ -39,4 +39,76 @@ final class ConversationTimelineSegmentsTests: XCTestCase {
 
         XCTAssertNotEqual(first, second)
     }
+
+    func testTimelineChevronKeepsATouchVisibleRestingAffordance() {
+        XCTAssertGreaterThan(ConversationTimelineChevronPresentation.opacity(isHighlighted: false), 0)
+        XCTAssertGreaterThan(ConversationTimelineChevronPresentation.scale(isHighlighted: false), 0)
+    }
+
+    func testTimelineChevronHighlightOnlyStrengthensTheAffordance() {
+        XCTAssertGreaterThan(
+            ConversationTimelineChevronPresentation.opacity(isHighlighted: true),
+            ConversationTimelineChevronPresentation.opacity(isHighlighted: false)
+        )
+        XCTAssertGreaterThan(
+            ConversationTimelineChevronPresentation.scale(isHighlighted: true),
+            ConversationTimelineChevronPresentation.scale(isHighlighted: false)
+        )
+    }
+
+    func testRuntimeFooterMotionPolicyHasAnExactTruthTable() {
+        XCTAssertEqual(
+            RuntimeFooterMotionPolicy.indicatorPresentation(isAnimated: true, hasIcon: false, reduceMotion: false),
+            .hidden
+        )
+        XCTAssertTrue(
+            RuntimeFooterMotionPolicy.textSweepIsActive(
+                isAnimated: true,
+                reduceMotion: false
+            )
+        )
+
+        XCTAssertEqual(
+            RuntimeFooterMotionPolicy.indicatorPresentation(isAnimated: true, hasIcon: false, reduceMotion: true),
+            .activeIndicator
+        )
+        XCTAssertFalse(
+            RuntimeFooterMotionPolicy.textSweepIsActive(
+                isAnimated: true,
+                reduceMotion: true
+            )
+        )
+
+        for reduceMotion in [false, true] {
+            XCTAssertEqual(
+                RuntimeFooterMotionPolicy.indicatorPresentation(
+                    isAnimated: false,
+                    hasIcon: false,
+                    reduceMotion: reduceMotion
+                ),
+                .staticIndicator
+            )
+            XCTAssertFalse(
+                RuntimeFooterMotionPolicy.textSweepIsActive(
+                    isAnimated: false,
+                    reduceMotion: reduceMotion
+                )
+            )
+            XCTAssertEqual(
+                RuntimeFooterMotionPolicy.indicatorPresentation(
+                    isAnimated: true,
+                    hasIcon: true,
+                    reduceMotion: reduceMotion
+                ),
+                .hidden
+            )
+            XCTAssertEqual(
+                RuntimeFooterMotionPolicy.textSweepIsActive(
+                    isAnimated: true,
+                    reduceMotion: reduceMotion
+                ),
+                !reduceMotion
+            )
+        }
+    }
 }

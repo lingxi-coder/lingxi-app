@@ -40,8 +40,8 @@ use std::path::{Path, PathBuf};
 
 use client_protocol::ask_user_question::{AskOptionDto, AskQuestionDto, AskUserQuestionRequestDto};
 use client_protocol::commands::{
-    AppCreateModeDto, ClientCommand, ImageRefDto, ListingKindDto, PromptModeDto,
-    ProviderCredentialSecretDto,
+    AppCreateModeDto, AudioResultDto, ClientCommand, ImageRefDto, ListingKindDto, McpScopeDto,
+    PermissionBehaviorDto, PromptModeDto, ProviderCredentialSecretDto, SettingsDestinationDto,
 };
 use client_protocol::computer_access::{
     AccessTierDto, ComputerAccessRequestDto, ComputerAccessResponseDto, RequestedAppDto,
@@ -53,12 +53,15 @@ use client_protocol::controls::{
     ReasoningControlStateDto, ReasoningOptionDto, ReasoningSelectionDto,
 };
 use client_protocol::error::ClientError;
-use client_protocol::events::{AttachmentDto, ClientEvent, CostDto, ErrorKindDto, TurnOutcomeDto};
+use client_protocol::events::{
+    AttachmentDto, AudioOpDto, ClientEvent, CostDto, ErrorKindDto, TurnOutcomeDto,
+    TurnRecoverySnapshotDto, TurnRecoveryStateDto,
+};
 use client_protocol::listings::{
     AgentDto, AuthStateDto, CheckStatusDto, CoordinatorWorkerDto, DoctorCheckDto, DoctorReportDto,
     DoctorSummaryDto, HookDto, McpServerDto, McpStatusDto, MemoryEntryDto, MemoryTierDto,
-    SessionAgentSummaryDto, SessionRowDto, SlashCommandDto, StatusSnapshotDto, TaskRowDto,
-    TaskStatusDto,
+    SessionAgentSummaryDto, SessionRowDto, SkillDto, SlashCommandDto, StatusSnapshotDto,
+    TaskRowDto, TaskStatusDto,
 };
 use client_protocol::local_apps::{
     AppAgentProfileProposalDto, AppAuthorizationDecisionDto, AppBridgeOperationDto,
@@ -303,6 +306,29 @@ fn event_goldens() -> Vec<(&'static str, ClientEvent)> {
             },
         ),
         (
+            "event/turn_recovery_state.json",
+            ClientEvent::TurnRecoveryState {
+                snapshot: TurnRecoverySnapshotDto {
+                    session_id: "11111111-1111-4111-8111-111111111111".to_string(),
+                    turn_id: 1,
+                    state: TurnRecoveryStateDto::PausedRecoverable,
+                    first_sequence: 1,
+                    last_sequence: 7,
+                    safe_to_resume: true,
+                    reason: Some("background lease expired".to_string()),
+                },
+            },
+        ),
+        (
+            "event/turn_event_replay.json",
+            ClientEvent::TurnEventReplay {
+                session_id: "11111111-1111-4111-8111-111111111111".to_string(),
+                turn_id: 1,
+                sequence: 7,
+                event_json: r#"{"type":"text_delta","text":"done"}"#.to_string(),
+            },
+        ),
+        (
             "event/cost_update.json",
             ClientEvent::CostUpdate {
                 total_usd: 0.0123,
@@ -474,6 +500,21 @@ fn event_goldens() -> Vec<(&'static str, ClientEvent)> {
             },
         ),
         (
+            "event/skills.json",
+            ClientEvent::Skills {
+                skills: vec![
+                    SkillDto {
+                        name: "greet".to_string(),
+                        source_dir: "/home/user/.lingxi/skills/greet".to_string(),
+                    },
+                    SkillDto {
+                        name: "pr-review".to_string(),
+                        source_dir: "/repo/.lingxi/skills/pr-review".to_string(),
+                    },
+                ],
+            },
+        ),
+        (
             "event/hooks.json",
             ClientEvent::Hooks {
                 hooks: vec![HookDto {
@@ -539,6 +580,14 @@ fn event_goldens() -> Vec<(&'static str, ClientEvent)> {
             ClientEvent::SettingsSnapshot {
                 effective_json: r#"{"model":"claude-opus-4-7"}"#.to_string(),
                 provenance_json: r#"{"model":"user-settings"}"#.to_string(),
+                // Left `None` deliberately: the golden proves the ADDED
+                // optional fields stay off the wire when unset, so a client
+                // that predates them sees the byte-identical payload.
+                files_json: None,
+                active_json: None,
+                locked: None,
+                layers_json: None,
+                merged_keys: None,
             },
         ),
         (
@@ -897,6 +946,15 @@ fn event_goldens() -> Vec<(&'static str, ClientEvent)> {
                 },
             },
         ),
+        (
+            "event/audio_request.json",
+            ClientEvent::AudioRequest {
+                request_id: 7,
+                op: AudioOpDto::Transcribe {
+                    language: Some("zh-CN".to_string()),
+                },
+            },
+        ),
     ]
 }
 
@@ -919,6 +977,24 @@ fn command_goldens() -> Vec<(&'static str, ClientCommand)> {
         (
             "command/cancel.json",
             ClientCommand::Cancel { turn_id: Some(1) },
+        ),
+        (
+            "command/attach_turn.json",
+            ClientCommand::AttachTurn {
+                turn_id: 1,
+                after_sequence: Some(4),
+            },
+        ),
+        (
+            "command/resume_turn.json",
+            ClientCommand::ResumeTurn { turn_id: 1 },
+        ),
+        (
+            "command/pause_turn.json",
+            ClientCommand::PauseTurn {
+                turn_id: 1,
+                reason: "background_time_expired".to_string(),
+            },
         ),
         (
             "command/approve_permission.json",
@@ -1210,6 +1286,63 @@ fn command_goldens() -> Vec<(&'static str, ClientCommand)> {
             ClientCommand::CancelAskUserQuestion { request_id: 9 },
         ),
         ("command/request_exit.json", ClientCommand::RequestExit),
+        (
+            "command/update_settings.json",
+            ClientCommand::UpdateSettings {
+                destination: SettingsDestinationDto::User,
+                patch_json: r#"{"outputStyle":"terse"}"#.to_string(),
+            },
+        ),
+        (
+            "command/update_permission_rules.json",
+            ClientCommand::UpdatePermissionRules {
+                destination: SettingsDestinationDto::Project,
+                behavior: PermissionBehaviorDto::Allow,
+                add: vec!["Bash(ls:*)".to_string()],
+                remove: vec![],
+            },
+        ),
+        (
+            "command/set_default_permission_mode.json",
+            ClientCommand::SetDefaultPermissionMode {
+                destination: SettingsDestinationDto::User,
+                mode: "acceptEdits".to_string(),
+            },
+        ),
+        (
+            "command/update_workspace_directories.json",
+            ClientCommand::UpdateWorkspaceDirectories {
+                destination: SettingsDestinationDto::Local,
+                add: vec!["/tmp/extra".to_string()],
+                remove: vec![],
+            },
+        ),
+        (
+            "command/upsert_mcp_server.json",
+            ClientCommand::UpsertMcpServer {
+                scope: McpScopeDto::Project,
+                name: "linear".to_string(),
+                config_json: r#"{"command":"npx","args":["-y","linear-mcp"]}"#.to_string(),
+            },
+        ),
+        (
+            "command/remove_mcp_server.json",
+            ClientCommand::RemoveMcpServer {
+                scope: McpScopeDto::User,
+                name: "linear".to_string(),
+            },
+        ),
+        (
+            "command/audio_response.json",
+            ClientCommand::AudioResponse {
+                request_id: 7,
+                result: AudioResultDto::Transcript {
+                    text: "你好".to_string(),
+                    language: Some("zh-CN".to_string()),
+                    confidence: Some(0.9),
+                },
+            },
+        ),
     ]
 }
 

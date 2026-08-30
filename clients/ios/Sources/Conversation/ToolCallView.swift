@@ -74,6 +74,7 @@ struct ToolCallView: View {
                 "conversation.tool-call.\(trace.id).icon.\(ToolDisplayText.icon(header: trace.header, tool: trace.tool).rawValue)"
             )
             titleText
+                .runtimeTextSweep(isActive: trace.status == .running, highlightColor: t.accent)
             Spacer(minLength: 4)
             if !compact || trace.status == .failed || trace.status == .cancelled {
                 Text(trace.status.label)

@@ -81,6 +81,18 @@ pub const MERGE_STRATEGIES: &[(&str, MergeStrategy)] = &[
     // deliberately NOT here — they fall through to the default Override, matching
     // CC returning the source array for non-concat arrays.
     ("modelOverrides", MergeStrategy::DeepMerge),
+    // `vimInsertModeRemaps` — deep-merge, matching `merger::merge`'s
+    // `merge_string_map` for this field (a one-level record has no nested
+    // structure, so a per-key union with `next` winning IS the deep merge).
+    // It was MISSING here while `merge` deep-merged it: the table and the
+    // merger disagreed, so `merger::merge_raw_layer` — and through it the
+    // desktop settings snapshot — took Override for a field the engine
+    // actually unions. (`tracer` was unaffected: it treats `DeepMerge` and
+    // `Override` identically, so only a `ConcatDedup` gap would reach it.)
+    // Pinned in both directions by
+    // `merger::tests::raw_layer_merge_agrees_with_the_typed_merge` and
+    // `merger::tests::every_field_merge_combines_is_registered_and_fixtured`.
+    ("vimInsertModeRemaps", MergeStrategy::DeepMerge),
     // HTTP-hook security allowlists (H-BIN-12). Both are arrays, and CC's
     // `settingsMergeCustomizer` (`ipe`) concat-dedups EVERY array except
     // `fallbackModel` (`WSm(e,t)=Mo([...e,...t])`); both describe strings say
@@ -626,7 +638,7 @@ pub struct SettingsJson {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_key_helper: Option<String>,
 
-    /// Object-merge field. `vimInsertModeRemaps`: two-key insert-mode sequences
+    /// Object-merge field (deep-merge, `MERGE_STRATEGIES`). `vimInsertModeRemaps`: two-key insert-mode sequences
     /// to key names. Claude Code 2.1.208 uses this for common Vim insert-exit
     /// mappings, for example `{ "jj": "Escape" }`.
     #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -29,6 +29,7 @@ import WebSocket from 'ws';
 import {
   BRIDGE_PROTOCOL_VERSION,
   CLIENT_PROTOCOL_VERSION,
+  MAX_BRIDGE_FRAME_BYTES,
   type ClientCommand,
   type ClientEvent,
   type ComputerAccessRequestDto,
@@ -89,6 +90,36 @@ interface QueueWaiter {
  * with {@link sendPrompt} and consume the live feed via
  * `for await (const ev of client.events()) { … }` or the `'event'` listener.
  */
+/** What an outbound frame is FOR, for the size error's message. */
+function frameMethod(frame: Frame): string {
+  const payload = (frame as { payload?: { method?: unknown } }).payload;
+  return typeof payload?.method === 'string' ? payload.method : frame.type;
+}
+
+/**
+ * The error an outbound frame too large for the engine's reader must produce
+ * HERE, or `null` when it fits.
+ *
+ * Sending it anyway is not a rejected command: the engine's WebSocket read
+ * yields `Err(Capacity(MessageTooLong))`, `run_frame_pump` breaks, and
+ * `BridgeConnection::close_connection` aborts the active turn and drains every
+ * broker — every session on the connection dies because one payload was
+ * oversized. Refusing it here costs the one command instead.
+ *
+ * This is a backstop, not the place a caller should discover its limits: a
+ * payload bound derived from {@link MAX_BRIDGE_FRAME_BYTES} (see
+ * `clients/electron/src/shared/audioResponse.ts`) lets the caller answer with a
+ * real, typed failure long before a frame gets here.
+ */
+export function frameSizeError(serialized: string, method: string): Error | null {
+  const bytes = Buffer.byteLength(serialized, 'utf8');
+  if (bytes <= MAX_BRIDGE_FRAME_BYTES) return null;
+  return new Error(
+    `bridge frame for "${method}" is too large to send: ${bytes} bytes, `
+    + `over the engine's ${MAX_BRIDGE_FRAME_BYTES}-byte read limit`,
+  );
+}
+
 export class BridgeClient extends EventEmitter {
   private readonly opts: BridgeClientOptions;
   private ws: WebSocket | null = null;
@@ -288,7 +319,12 @@ export class BridgeClient extends EventEmitter {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
       throw new Error('bridge client not connected');
     }
-    this.ws.send(JSON.stringify(frame));
+    const serialized = JSON.stringify(frame);
+    // Last line of defence, deliberately BEFORE the socket: see
+    // `frameSizeError` for why an oversize frame costs the whole connection.
+    const oversize = frameSizeError(serialized, frameMethod(frame));
+    if (oversize) throw oversize;
+    this.ws.send(serialized);
   }
 
   // ── High-level command helpers ──────────────────────────────────────────────

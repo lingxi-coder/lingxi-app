@@ -490,6 +490,62 @@ final class VoiceInteractionControllerTests: XCTestCase {
         XCTAssertEqual(session.cancelCalls, 1)
     }
 
+    func testBackgroundedFlowTurnStopsAudioButCompletesSilentlyUntilTapResumesListening() async {
+        let firstCapture = ControllerVoiceSession(
+            transcript: "keep working",
+            automaticallyFinishesWhenEndpointingEnabled: true
+        )
+        let secondCapture = ControllerVoiceSession(transcript: "resume only after tap")
+        let monitor = ControllerBargeInSession()
+        let barge = ControllerBargeInRecognizer(sessions: [monitor])
+        let player = RecordingStreamingSpeechPlayer()
+        let source = ControllerConversationSource()
+        let controller = makeController(
+            sessions: [firstCapture, secondCapture],
+            player: player,
+            bargeInRecognizer: barge
+        )
+
+        controller.startFlow(source: source)
+        await settle()
+        let token = try! XCTUnwrap(source.lastToken)
+        controller.handleTurnSpeechUpdate(.init(
+            token: token,
+            sequence: 1,
+            delta: "这是前台播报。"
+        ))
+        await settle()
+
+        XCTAssertEqual(player.openCalls, 1)
+        XCTAssertEqual(player.session?.enqueued, ["这是前台播报。"])
+
+        controller.handleBackground()
+        await settle()
+
+        controller.handleTurnSpeechUpdate(.init(
+            token: token,
+            sequence: 2,
+            delta: "这是后台补发。"
+        ))
+        source.complete(token: token, text: "这是前台播报。这是后台补发。")
+        controller.handleTurnCompletion(try! XCTUnwrap(source.model.turnCompletion))
+        await settle(30)
+
+        XCTAssertEqual(source.cancelCalls, 0)
+        XCTAssertEqual(player.openCalls, 1, "backgrounded flow must not reopen playback")
+        XCTAssertEqual(player.session?.enqueued, ["这是前台播报。"])
+        XCTAssertEqual(player.session?.stopCalls, 1)
+        XCTAssertEqual(monitor.stopCalls, 1)
+        XCTAssertEqual(controller.phase, .paused)
+        XCTAssertEqual(secondCapture.transcribeCalls, 0)
+
+        controller.handleOrbTap()
+        await settle(30)
+
+        XCTAssertEqual(controller.phase, .listening)
+        XCTAssertEqual(secondCapture.transcribeCalls, 1)
+    }
+
     func testReopeningFlowWaitsForPreviousAudioCleanup() async {
         let firstCapture = ControllerVoiceSession(
             transcript: "first turn",
@@ -801,6 +857,7 @@ private final class FailingStreamingSpeechPlayer: VoiceSpeechPlaying {
 @MainActor
 private final class RecordingStreamingSpeechPlayer: VoiceSpeechPlaying {
     private(set) var session: RecordingStreamingSpeechSession?
+    private(set) var openCalls = 0
 
     func speak(_ request: VoiceSpeechRequest) async throws -> VoiceSpeechPlaybackOutcome {
         session?.enqueue(request.text)
@@ -813,6 +870,7 @@ private final class RecordingStreamingSpeechPlayer: VoiceSpeechPlaying {
         configuration _: VoiceSpeechConfiguration,
         managesAudioSession _: Bool
     ) async throws -> any VoiceSpeechStreamingSession {
+        openCalls += 1
         let session = RecordingStreamingSpeechSession()
         self.session = session
         return session

@@ -10,9 +10,53 @@
 
 **Spec:** `docs/superpowers/specs/2026-08-27-desktop-settings-redesign-design.md`
 
+## 契约修订 R1（2026-08-28，执行期实测后写入 —— 覆盖下文 §A2 的 DTO 设计）
+
+下文 Task 3 的接口块是**错的**，执行时以本节为准。三项实测：
+
+1. **`client-protocol` 不得引入 `serde_json`。** 其 `Cargo.toml` 记录着 governing
+   decision §0.4：`serde_json::Value` 不是 UniFFI-representable，故契约里的结构化
+   载荷一律是 JSON **字符串**（既有写法：`ToolUseStarted.input_json`、
+   `ToolUseResult.result_json`）。`serde_json` 只在 `[dev-dependencies]`。
+   `BTreeMap` 同样非 UniFFI-representable。**不要动这个 Cargo.toml。**
+2. **`ClientEvent::SettingsSnapshot { effective_json: String, provenance_json: String }`
+   已经存在**（`client-protocol/src/events.rs:262`）。新增同名变体编译不过。
+3. **读通道已在协议里完整定义但从未接线。**
+   `RefreshListings { which: [{type:"settings"}] }` → `ListingKindDto::Settings`
+   （`commands.rs:681`）→ 上述事件，并有 `version_guard_test.rs:438-440` 的字段级
+   契约钉子。而 `apps/bridge-server/src/router.rs:626` 的处理是
+   `ListingKindDto::Memory | ListingKindDto::Settings => { tracing::debug!(...) }`
+   —— 打一行日志，不发任何事件。
+
+**据此修订：**
+
+- **不新增 `GetSettings` 命令**；接线既有的 `ListingKindDto::Settings` 分支。
+  桌面侧只需在 `AllowedClientCommand` 的 `refresh_listings.which` 联合里加
+  `'settings'`（`refresh_listings` 本就在白名单内）。
+- **`SettingsSnapshot` 扩三个新的可选字段**（F1-09 下 additive，不 bump）：
+  `files_json: Option<String>`、`active_json: Option<String>`、
+  `locked: Option<Vec<String>>`；同步补 `version_guard_test.rs` 的 `put(...)` 行。
+- **写命令**：`UpdateSettings { destination: SettingsDestinationDto, patch_json: String }`。
+  `patch_json` 是一个 JSON 对象，值为 `null` 表示删除该键 —— 语义等价于原文的
+  `Vec<(String, Option<Value>)>`，但不用元组也不用 `Value`。
+  Tasks 5/6/7 的命令同理：结构化入参一律 `_json: String`。
+- **`serde_json::Value` 与 `BTreeMap` 在 `settings_bridge.rs` 内部照常使用** ——
+  bridge-server 本就依赖 serde_json。约束只针对**契约 crate**。
+- 桌面侧收到的是 JSON 字符串，需 `JSON.parse` 后再交给 `useEngineSettings`；
+  Task 13 的 `SettingsSnapshot` TS 接口不变，解析在桥接层做。
+
+---
+
 ## Global Constraints
 
-- `CLIENT_PROTOCOL_VERSION` 保持 `"8.0.0"`。本计划的协议改动全部是新增变体 / 新增可选字段，属 F1-09 guard 的 additive，**不得 bump，不得 re-bless `snapshots/blessed_major.txt`**。
+- **`CLIENT_PROTOCOL_VERSION` 不得由本计划改动。** ⚠️ 不要拿字面值比对：规划时它是
+  `"8.0.0"`，此后被本仓库的并发写入者在 `391d89fff` bump 到 `"9.0.0"`。判据是
+  「你的 diff 有没有碰 `version.rs`」，不是「它等不等于某个数」。
+  本计划的协议改动全部是新增变体 / 新增可选字段，属 F1-09 guard 的 additive。
+  **`snapshots/blessed_major.txt` 不得变化**（sha256 必须一致）。
+  `snapshots/contract_index.json` 则**可以且应当**随新增字段 re-bless ——
+  guard 自己在 Compatible 变更时就会提示「No major bump is required; re-bless」；
+  判据是该文件**只增不删**（`git diff` 的 `-` 行数为 0）。
 - **I1**：`UpdateSettings` 必须拒绝 `permissions` 顶层键。权限只经 `permission/src/persist.rs`。唯一例外是原始 JSON 逃生口（Task 19）。
 - **I2**：任何设置文件写入前必须调用 `permission::mark_internal_write(path)`。`settings_watch.rs:343` 以 5 秒窗口消费该标记。
 - **I3**：UI 不做乐观更新。写入成功后引擎重读并发新的 `SettingsSnapshot`，界面只渲染该快照。
@@ -305,136 +349,171 @@ git commit -m "Build a settings snapshot that names each value's layer"
 ```
 
 ---
+## Task 3: 接线既有的 `Settings` listing
 
-## Task 3: `GetSettings` 命令与 `SettingsSnapshot` 事件
+> **本节已按契约修订 R1 重写。** 原文要求「新增 `GetSettings` 命令 + `SettingsSnapshot` 事件」，
+> 那是错的：同名事件已存在，新增会编译不过；且读通道已在协议里完整定义、只是从未接线。
 
 **Files:**
-- Modify: `lingxi-code/client-protocol/src/commands.rs`（`ClientCommand` 新增变体）
-- Modify: `lingxi-code/client-protocol/src/events.rs`（`ClientEvent` 新增变体 + DTO）
-- Modify: `lingxi-code/client-protocol/src/lib.rs`（导出）
-- Modify: `lingxi-code/apps/bridge-server/src/router.rs`
-- Test: `lingxi-code/client-protocol/tests/commands_test.rs`、`lingxi-code/apps/bridge-server/tests/router_test.rs`
+- Modify: `lingxi-code/apps/bridge-server/src/router.rs:626`（`ListingKindDto::Settings` 分支）
+- Modify: `lingxi-code/apps/bridge-server/src/settings_bridge.rs`（加降级函数 + `SettingsContext`）
+- Modify: `lingxi-code/client-protocol/src/events.rs:262`（给既有 `SettingsSnapshot` 加三个可选字段）
+- Modify: `lingxi-code/client-protocol/tests/version_guard_test.rs:438`（补契约钉子）
+- Modify: `lingxi-code/apps/engine-desktop/src/lib.rs`（组合根注入 `SettingsContext`）
+- Test: `lingxi-code/apps/bridge-server/tests/router_test.rs`
 
 **Interfaces:**
-- Consumes: Task 2 的 `build_snapshot` / `SettingsPaths`
+- Consumes: Task 2 的 `SettingsPaths` / `SettingsSnapshot` / `build_snapshot` / `SettingsLayer`
 - Produces:
-  - `ClientCommand::GetSettings`
-  - `ClientEvent::SettingsSnapshot(SettingsSnapshotDto)`
-  - `ClientEvent::SettingsOperationFailed { message: String }`
-  - `SettingsDestinationDto { Env, Managed, Cli, Local, Project, User, Defaults }`
-  - `SettingsFileDto { destination, path, exists, writable, parse_error }`
-  - `SettingsSnapshotDto { files, effective, active, provenance, locked }`
+  - `SettingsContext { paths: SettingsPaths, active: BTreeMap<String, Value>, locked: Vec<String> }`
+  - `EngineCommandRouter::with_settings_context(self, SettingsContext) -> Self`
+  - `settings_bridge::lower_snapshot(&SettingsSnapshot) -> LoweredSettings`，
+    其中 `LoweredSettings { effective_json, provenance_json, files_json, active_json, locked }`
 
-- [ ] **Step 1: 写失败测试 —— 线格式与协议版本不变**
+### 现状（动手前请自行复核）
 
-在 `client-protocol/tests/commands_test.rs` 加入：
+- `ClientEvent::SettingsSnapshot { effective_json: String, provenance_json: String }`
+  已存在于 `client-protocol/src/events.rs:262`。
+- `ClientCommand::RefreshListings { which: [ListingKindDto::Settings] }` 已定义
+  （`commands.rs:681`：「Effective settings + provenance → `SettingsSnapshot`」）。
+- `listings.rs:46` 记载这两个载荷是 JSON **字符串**（governing decision §0.4：
+  `serde_json::Value` 不进契约 crate，它不是 UniFFI-representable）。
+- `router.rs:626` 的实现是
+  `ListingKindDto::Memory | ListingKindDto::Settings => { tracing::debug!(...) }`
+  —— 打一行日志、不发任何事件。**这就是本任务要修的东西。**
+- `version_guard_test.rs:438-440` 用 `put(...)` 钉住了该事件的字段集。
+
+### 三个设计点
+
+**1. 事件扩三个可选字段（additive，不 bump）。**
+F1-09 guard：新增变体与**新增可选字段**是 additive。故：
 
 ```rust
-#[test]
-fn get_settings_serializes_as_snake_case_tag() {
-    let json = serde_json::to_value(&ClientCommand::GetSettings).unwrap();
-    assert_eq!(json, serde_json::json!({ "type": "get_settings" }));
-}
+    SettingsSnapshot {
+        effective_json: String,
+        provenance_json: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        files_json: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        active_json: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        locked: Option<Vec<String>>,
+    },
 ```
 
-在 `client-protocol/tests/version_test.rs` 加入：
+`CLIENT_PROTOCOL_VERSION` 保持 `"8.0.0"`，`snapshots/blessed_major.txt` 不动。
+`version_guard_test.rs` 补三行 `put("ClientEvent::SettingsSnapshot.<field>", "<type>")`。
+
+**2. `SettingsContext` 走既有 builder 模式。**
+`EngineCommandRouter`（`router.rs:168`）已有
+`new(...)` + `with_credentials(...)` + `with_session_store(...)`，可选字段形如
+`session_store: Option<SessionStoreContext>`。照此加
+`settings: Option<SettingsContext>` 与 `with_settings_context(...)`。
+
+- `active` 由组合根在构造 router 时算一次 `build_snapshot(...).effective` 存入
+  —— 语义正是「运行中的会话启动时实际加载的值」。
+  ⚠️ `OrchestratorHandle` 上**没有** `active_settings()`，别去找。
+- `locked` 由组合根填：`apps/engine-desktop/src/lib.rs:4540` 已在构建
+  `managed_layers: Vec<engine::settings::SettingsJson>`，取其键集即可。
+  bridge-server 不实现 managed 层加载。
+- `settings` 为 `None` 时（轻量测试 / 嵌入式客户端），该 listing 分支保持现有的
+  debug 日志行为并额外发一个 `ClientEvent::Error`，消息点名缺少设置上下文。
+
+**3. 降级在 router 侧做，不在 `settings_bridge` 的构建函数里。**
+与本 crate 既有做法一致（router 用 `client_adapter::lowering` 的纯函数降级）。
+
+- [ ] **Step 1: 写失败测试**
+
+在 `apps/bridge-server/tests/router_test.rs` 加入：
 
 ```rust
-#[test]
-fn adding_settings_commands_is_additive_and_does_not_bump() {
+/// 今天这个 listing 什么都不发。这条测试钉住「它必须发」。
+#[tokio::test]
+async fn the_settings_listing_emits_a_snapshot_instead_of_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("home");
+    let project = dir.path().join("repo");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(project.join(branding::DOT_DIR)).unwrap();
+    std::fs::write(home.join("settings.json"), r#"{"outputStyle":"from-user"}"#).unwrap();
+    std::fs::write(
+        project.join(branding::DOT_DIR).join("settings.json"),
+        r#"{"outputStyle":"from-project"}"#,
+    ).unwrap();
+
+    let harness = RouterHarness::with_settings_context(SettingsContext {
+        paths: SettingsPaths { lingxi_home: home, project_dir: project },
+        active: BTreeMap::new(),
+        locked: vec!["telemetryEnabled".to_string()],
+    }).await;
+
+    let events = harness.send_and_collect(ClientCommand::RefreshListings {
+        which: vec![ListingKindDto::Settings],
+    }).await;
+
+    let snapshot = events.iter().find_map(|e| match e {
+        ClientEvent::SettingsSnapshot { effective_json, provenance_json, locked, .. } =>
+            Some((effective_json, provenance_json, locked)),
+        _ => None,
+    }).expect("the settings listing must emit a SettingsSnapshot, not just a debug log");
+
+    let effective: serde_json::Value = serde_json::from_str(snapshot.0).unwrap();
     assert_eq!(
-        client_protocol::CLIENT_PROTOCOL_VERSION, "8.0.0",
-        "settings commands are new variants only — additive under the F1-09 guard, no bump"
+        effective["outputStyle"], "from-project",
+        "project must beat user in the merged effective settings"
+    );
+    let provenance: serde_json::Value = serde_json::from_str(snapshot.1).unwrap();
+    assert_eq!(
+        provenance["outputStyle"], "project",
+        "provenance must name the layer the winning value came from"
+    );
+    assert_eq!(
+        snapshot.2.as_deref(), Some(&["telemetryEnabled".to_string()][..]),
+        "locked must carry through from the settings context, not be dropped"
+    );
+}
+
+/// 没有设置上下文时必须明确报错，而不是静默无事发生。
+#[tokio::test]
+async fn the_settings_listing_reports_a_missing_context_instead_of_staying_silent() {
+    let harness = RouterHarness::without_settings_context().await;
+    let events = harness.send_and_collect(ClientCommand::RefreshListings {
+        which: vec![ListingKindDto::Settings],
+    }).await;
+    let message = events.iter().find_map(|e| match e {
+        ClientEvent::Error { message, .. } => Some(message.clone()),
+        _ => None,
+    }).expect("a missing settings context must be reported, not swallowed");
+    assert!(
+        message.contains("settings context"),
+        "the error must name what is missing, got: {message}"
     );
 }
 ```
 
 - [ ] **Step 2: 运行测试确认失败**
 
-Run: `cd lingxi-code && cargo test -p client-protocol 2>&1 | tee /tmp/t3.log`
-Expected: 编译失败，`no variant named \`GetSettings\``
+Run: `cd lingxi-code && cargo test -p bridge-server settings_listing 2>&1 | tee /tmp/t3.log; grep -E "^test result|failures:" /tmp/t3.log`
+Expected: 第一条失败于 `expect("the settings listing must emit a SettingsSnapshot...")`
+——因为 `router.rs:626` 今天只打日志。这正是本任务存在的理由。
 
 - [ ] **Step 3: 最小实现**
 
-`client-protocol/src/events.rs` 加入 DTO：
-
-```rust
-/// 一个设置值可能来自的层。读方向可为任意层；写命令只接受 User/Project/Local。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
-#[serde(rename_all = "snake_case")]
-pub enum SettingsDestinationDto {
-    Env,
-    Managed,
-    Cli,
-    Local,
-    Project,
-    User,
-    Defaults,
-}
-
-/// 一个设置层文件的状态。
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
-pub struct SettingsFileDto {
-    pub destination: SettingsDestinationDto,
-    pub path: String,
-    pub exists: bool,
-    pub writable: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub parse_error: Option<String>,
-}
-
-/// 设置快照。`effective` 是盘上当前的合并结果，`active` 是运行中会话启动时
-/// 实际加载的值；两者的差集就是「待应用」。
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
-pub struct SettingsSnapshotDto {
-    pub files: Vec<SettingsFileDto>,
-    pub effective: BTreeMap<String, serde_json::Value>,
-    pub active: BTreeMap<String, serde_json::Value>,
-    pub provenance: BTreeMap<String, SettingsDestinationDto>,
-    pub locked: Vec<String>,
-}
-```
-
-`ClientEvent` 加入两个变体：
-
-```rust
-    SettingsSnapshot(SettingsSnapshotDto),
-    SettingsOperationFailed { message: String },
-```
-
-`ClientCommand` 加入：
-
-```rust
-    // ── Settings ──────────────────────────────────────────────────────────
-    /// 请求一份设置快照（四层合并结果 + 每键来源 + 各层文件状态）。
-    GetSettings,
-```
-
-`router.rs` 在命令 match 中加入：
-
-```rust
-            ClientCommand::GetSettings => {
-                let snapshot = crate::settings_bridge::build_snapshot(
-                    &self.settings_paths(),
-                    self.handle.active_settings().await.unwrap_or_default(),
-                );
-                sink.emit(ClientEvent::SettingsSnapshot(snapshot)).await;
-            }
-```
+按上文三个设计点实现：事件加三个可选字段、`SettingsContext` + `with_settings_context`、
+`router.rs:626` 把 `Settings` 从 `Memory` 的合并臂里拆出来单独处理、
+组合根注入上下文、`version_guard_test.rs` 补钉子。
 
 - [ ] **Step 4: 运行测试确认通过**
 
-Run: `cd lingxi-code && cargo test -p client-protocol -p bridge-server 2>&1 | tee /tmp/t3.log; grep -E "^test result|failures:" /tmp/t3.log`
-Expected: 全部 PASS，且 `CLIENT_PROTOCOL_VERSION` 仍为 `8.0.0`
+Run: `cd lingxi-code && cargo test -p bridge-server -p client-protocol 2>&1 | tee /tmp/t3.log; grep -E "^test result|failures:" /tmp/t3.log`
+Expected: 全 PASS；`CLIENT_PROTOCOL_VERSION` 仍为 `"8.0.0"`；
+`git diff --stat lingxi-code/client-protocol/snapshots/` 为空。
 
 - [ ] **Step 5: 提交**
 
 ```bash
-git add lingxi-code/client-protocol lingxi-code/apps/bridge-server
-git commit -m "Expose the settings snapshot over the client protocol"
+git add lingxi-code/client-protocol lingxi-code/apps/bridge-server lingxi-code/apps/engine-desktop
+git commit -m "Wire the settings listing that was only ever logged"
 ```
 
 ---

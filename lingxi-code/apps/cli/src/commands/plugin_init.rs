@@ -15,9 +15,12 @@
 //! appends a `channels` entry to `plugin.json` and (like `mcp`) writes an
 //! `.mcp.json`; when both are requested `channel`'s file wins.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use serde_json::{Map, Value};
+
+use crate::commands::{plugin_policy, plugin_settings};
 
 /// The `SKILL.md` body for a freshly-scaffolded skill plugin (name interpolated).
 fn skill_md(name: &str) -> String {
@@ -339,6 +342,77 @@ fn scaffold_component(component: &str, plugin_root: &Path, name: &str) -> Result
     }
 }
 
+/// §22: the marketplace name a freshly-scaffolded skills-dir plugin loads
+/// under (oracle `Zc`).
+const SKILLS_DIR_MARKETPLACE: &str = "skills-dir";
+
+/// §22 — `plugin init`'s post-create name-collision line (oracle: the
+/// `if(j) … else if(I) … else if(A) … else …` chain in the `/plugin init`
+/// success handler). `None` when nothing conflicts, in which case the caller
+/// prints the ordinary auto-load line instead.
+///
+/// Checked in the oracle's own priority order:
+/// 1. `name` is claimed by managed settings' `enabledPlugins` (any boolean
+///    value keyed `name@*`) — that entry wins regardless of what it names, so
+///    this copy scaffolds but can never load under this name.
+/// 2. An already-enabled, non-skills-dir, non-blocked, cache-known
+///    marketplace plugin has the same plain name — it loads first, so this
+///    copy never will.
+/// 3. This exact `name@skills-dir` id was already explicitly disabled in a
+///    settings scope (user < project < local; a later scope's value wins).
+fn name_collision_warning(name: &str, home: &Path, cwd: &Path) -> Option<String> {
+    let qualified = format!("{name}@{SKILLS_DIR_MARKETPLACE}");
+    let manifest_dir = branding::PLUGIN_MANIFEST_DIR;
+
+    if plugin_policy::managed_locked_plugin_names().contains(name) {
+        return Some(format!(
+            "  \u{26a0} A plugin named \"{name}\" is locked by managed settings, which takes \
+             precedence \u{2014} {qualified} won't load. To load this copy, give it a different \
+             \"name\" in {manifest_dir}/plugin.json."
+        ));
+    }
+
+    // Merge the editable enabledPlugins scopes: user < project < local (a
+    // later scope's value for the same key wins), matching this port's other
+    // scope-precedence readers (e.g. `load_enabled_plugins`).
+    let mut merged: BTreeMap<String, bool> = BTreeMap::new();
+    for scope in plugin_settings::SCOPES {
+        for (key, value) in plugin_settings::read_enabled(&scope.path(home, cwd)) {
+            if let Some(enabled) = value.as_bool() {
+                merged.insert(key, enabled);
+            }
+        }
+    }
+
+    let blocked = plugin_policy::blocked_marketplaces();
+    let conflict = merged.iter().find(|(key, &enabled)| {
+        enabled
+            && key.as_str() != qualified
+            && key.split_once('@').is_some_and(|(other_name, marketplace)| {
+                other_name == name
+                    && marketplace != SKILLS_DIR_MARKETPLACE
+                    && !blocked.contains(marketplace)
+                    && plugin_settings::marketplace_source(home, marketplace).is_some()
+            })
+    });
+    if let Some((conflicting_id, _)) = conflict {
+        return Some(format!(
+            "  \u{26a0} The name \"{name}\" is already taken by {conflicting_id} \u{2014} when \
+             that plugin loads, {qualified} won't. To load this copy, give it a different \
+             \"name\" in {manifest_dir}/plugin.json or uninstall the conflicting plugin."
+        ));
+    }
+
+    if merged.get(&qualified) == Some(&false) {
+        return Some(format!(
+            "  \u{26a0} A disabled setting for {qualified} exists, so it won't load until you \
+             re-enable it in /plugin"
+        ));
+    }
+
+    None
+}
+
 /// `plugin init <name>` (default skill scaffold plus optional `--with`
 /// components). Returns the success block, or the already-formatted error line.
 #[allow(clippy::too_many_arguments)]
@@ -350,6 +424,7 @@ pub fn run_init(
     force: bool,
     with: &[String],
     home: &Path,
+    cwd: &Path,
 ) -> Result<String, String> {
     // Reject names that would escape `~/.lingxi/skills/` (path traversal /
     // arbitrary-write) — the binary validates this and writes nothing.
@@ -426,9 +501,18 @@ pub fn run_init(
         }
     }
 
+    // §22: only one of the collision warning / plain auto-load line prints —
+    // the trailing Disable/Remove line always follows, regardless of which.
+    let status_line = name_collision_warning(name, home, cwd).unwrap_or_else(|| {
+        format!(
+            "  It will auto-load next session as {name}@skills-dir. Run /reload-plugins to load \
+             it now."
+        )
+    });
+
     Ok(format!(
-        "✔ Created plugin \"{name}\" at {}\n  \
-         It will auto-load next session as {name}@skills-dir. Run /reload-plugins to load it now.\n  \
+        "✔ Created plugin \"{name}\" at {}\n\
+         {status_line}\n  \
          Disable: lingxi-cli plugin disable {name}@skills-dir. Remove: delete the directory.",
         tilde(&plugin_root)
     ))
@@ -441,13 +525,23 @@ mod tests {
     struct Env {
         _tmp: tempfile::TempDir,
         home: PathBuf,
+        /// A separate project dir: no scope settings files here by default,
+        /// so the §22 collision check finds nothing and existing tests are
+        /// unaffected.
+        cwd: PathBuf,
     }
 
     fn env() -> Env {
         let tmp = tempfile::tempdir().unwrap();
         let home = tmp.path().join(".lingxi");
+        let cwd = tmp.path().join("proj");
         std::fs::create_dir_all(&home).unwrap();
-        Env { _tmp: tmp, home }
+        std::fs::create_dir_all(&cwd).unwrap();
+        Env {
+            _tmp: tmp,
+            home,
+            cwd,
+        }
     }
 
     #[test]
@@ -461,6 +555,7 @@ mod tests {
             false,
             &[],
             &e.home,
+            &e.cwd,
         )
         .unwrap();
         assert!(
@@ -507,6 +602,7 @@ mod tests {
             false,
             &[],
             &e.home,
+            &e.cwd,
         )
         .unwrap();
         let manifest: Value = serde_json::from_str(
@@ -519,8 +615,8 @@ mod tests {
     #[test]
     fn init_duplicate_without_force_errors() {
         let e = env();
-        run_init("dup", Some("A"), Some("a@b"), None, false, &[], &e.home).unwrap();
-        let err = run_init("dup", Some("A"), Some("a@b"), None, false, &[], &e.home).unwrap_err();
+        run_init("dup", Some("A"), Some("a@b"), None, false, &[], &e.home, &e.cwd).unwrap();
+        let err = run_init("dup", Some("A"), Some("a@b"), None, false, &[], &e.home, &e.cwd).unwrap_err();
         assert!(
             err.ends_with(".lingxi-plugin already exists. Use --force to overwrite."),
             "got: {err}"
@@ -531,9 +627,9 @@ mod tests {
     #[test]
     fn init_force_overwrites() {
         let e = env();
-        run_init("f", Some("A"), Some("a@b"), None, false, &[], &e.home).unwrap();
+        run_init("f", Some("A"), Some("a@b"), None, false, &[], &e.home, &e.cwd).unwrap();
         // Second call with force succeeds.
-        let msg = run_init("f", Some("A"), Some("a@b"), None, true, &[], &e.home).unwrap();
+        let msg = run_init("f", Some("A"), Some("a@b"), None, true, &[], &e.home, &e.cwd).unwrap();
         assert!(msg.starts_with("✔ Created plugin \"f\""));
     }
 
@@ -550,7 +646,7 @@ mod tests {
     #[test]
     fn init_with_unknown_component_errors_and_writes_nothing() {
         let e = env();
-        let err = run_init("u", None, None, None, false, &with(&["bogus"]), &e.home).unwrap_err();
+        let err = run_init("u", None, None, None, false, &with(&["bogus"]), &e.home, &e.cwd).unwrap_err();
         assert_eq!(
             err,
             "✘ Unknown --with component \"bogus\". Valid: skills, agents, hooks, mcp, lsp, output-style, channel"
@@ -569,6 +665,7 @@ mod tests {
             false,
             &with(&["skills"]),
             &e.home,
+            &e.cwd,
         )
         .unwrap();
         let body = std::fs::read_to_string(root(&e, "s").join("skills/example/SKILL.md")).unwrap();
@@ -587,6 +684,7 @@ mod tests {
             false,
             &with(&["agents"]),
             &e.home,
+            &e.cwd,
         )
         .unwrap();
         let body = std::fs::read_to_string(root(&e, "a").join("agents/example.md")).unwrap();
@@ -606,6 +704,7 @@ mod tests {
             false,
             &with(&["hooks"]),
             &e.home,
+            &e.cwd,
         )
         .unwrap();
         let cfg = std::fs::read_to_string(root(&e, "h").join("hooks/hooks.json")).unwrap();
@@ -633,6 +732,7 @@ mod tests {
             false,
             &with(&["mcp"]),
             &e.home,
+            &e.cwd,
         )
         .unwrap();
         let body = std::fs::read_to_string(root(&e, "m").join(".mcp.json")).unwrap();
@@ -653,6 +753,7 @@ mod tests {
             false,
             &with(&["lsp"]),
             &e.home,
+            &e.cwd,
         )
         .unwrap();
         let body = std::fs::read_to_string(root(&e, "l").join(".lsp.json")).unwrap();
@@ -672,6 +773,7 @@ mod tests {
             false,
             &with(&["output-style"]),
             &e.home,
+            &e.cwd,
         )
         .unwrap();
         let body = std::fs::read_to_string(root(&e, "os").join("output-styles/os.md")).unwrap();
@@ -691,6 +793,7 @@ mod tests {
             false,
             &with(&["channel"]),
             &e.home,
+            &e.cwd,
         )
         .unwrap();
         let r = root(&e, "ch");
@@ -740,6 +843,7 @@ mod tests {
             false,
             &with(&["channel", "mcp"]),
             &e.home,
+            &e.cwd,
         )
         .unwrap();
         let mcp = std::fs::read_to_string(root(&e, "both").join(".mcp.json")).unwrap();
@@ -750,7 +854,7 @@ mod tests {
     #[test]
     fn init_default_manifest_has_no_channels() {
         let e = env();
-        run_init("plain", Some("A"), Some("a@b"), None, false, &[], &e.home).unwrap();
+        run_init("plain", Some("A"), Some("a@b"), None, false, &[], &e.home, &e.cwd).unwrap();
         let manifest =
             std::fs::read_to_string(root(&e, "plain").join(".lingxi-plugin/plugin.json")).unwrap();
         assert!(!manifest.contains("channels"));
@@ -760,7 +864,7 @@ mod tests {
     fn init_rejects_path_traversal_name() {
         let e = env();
         for bad in ["../pwned", "a/b", "..", "."] {
-            let err = run_init(bad, Some("A"), Some("a@b"), None, false, &[], &e.home).unwrap_err();
+            let err = run_init(bad, Some("A"), Some("a@b"), None, false, &[], &e.home, &e.cwd).unwrap_err();
             assert!(
                 err.starts_with(&format!("✘ Invalid plugin name \"{bad}\":")),
                 "got: {err}"
@@ -777,7 +881,7 @@ mod tests {
     fn init_rejects_bidi_formatting_name() {
         let e = env();
         let bad = "evil\u{202E}reversed";
-        let err = run_init(bad, Some("A"), Some("a@b"), None, false, &[], &e.home).unwrap_err();
+        let err = run_init(bad, Some("A"), Some("a@b"), None, false, &[], &e.home, &e.cwd).unwrap_err();
         assert_eq!(
             err,
             format!(
@@ -791,9 +895,138 @@ mod tests {
     #[test]
     fn init_plugin_json_has_trailing_newline() {
         let e = env();
-        run_init("p", Some("A"), Some("a@b"), None, false, &[], &e.home).unwrap();
+        run_init("p", Some("A"), Some("a@b"), None, false, &[], &e.home, &e.cwd).unwrap();
         let raw =
             std::fs::read_to_string(root(&e, "p").join(".lingxi-plugin/plugin.json")).unwrap();
         assert!(raw.ends_with("}\n"), "expected trailing newline");
+    }
+
+    // --- §22: the post-create name-collision warnings ----------------------
+
+    /// An already-enabled, cache-known, non-skills-dir marketplace plugin
+    /// with the same name wins — the freshly scaffolded copy is warned it
+    /// will never load, with the `.lingxi-plugin/plugin.json` remediation.
+    #[test]
+    fn init_warns_when_the_name_is_already_taken_by_an_enabled_marketplace_plugin() {
+        let e = env();
+        std::fs::create_dir_all(e.home.join("plugins")).unwrap();
+        std::fs::write(
+            e.home.join("plugins").join("known_marketplaces.json"),
+            serde_json::json!({
+                "othermkt": {"source": {"source": "directory", "path": "/tmp/othermkt"}}
+            })
+            .to_string(),
+        )
+        .unwrap();
+        std::fs::write(
+            e.home.join("settings.json"),
+            serde_json::json!({"enabledPlugins": {"conflict@othermkt": true}}).to_string(),
+        )
+        .unwrap();
+
+        let msg = run_init(
+            "conflict",
+            Some("A"),
+            Some("a@b"),
+            None,
+            false,
+            &[],
+            &e.home,
+            &e.cwd,
+        )
+        .unwrap();
+        assert!(
+            msg.contains(
+                "The name \"conflict\" is already taken by conflict@othermkt \u{2014} when that \
+                 plugin loads, conflict@skills-dir won't. To load this copy, give it a different \
+                 \"name\" in .lingxi-plugin/plugin.json or uninstall the conflicting plugin."
+            ),
+            "got: {msg}"
+        );
+        assert!(!msg.contains("It will auto-load next session"));
+        // The trailing Disable/Remove line still prints regardless.
+        assert!(msg.contains("Disable: lingxi-cli plugin disable conflict@skills-dir."));
+    }
+
+    /// A marketplace entry unknown to `known_marketplaces.json` (never
+    /// fetched/cached) does not block the new copy — only a marketplace the
+    /// cache actually knows about takes precedence.
+    #[test]
+    fn init_ignores_an_enabled_entry_whose_marketplace_is_not_cached() {
+        let e = env();
+        std::fs::write(
+            e.home.join("settings.json"),
+            serde_json::json!({"enabledPlugins": {"conflict@unknownmkt": true}}).to_string(),
+        )
+        .unwrap();
+
+        let msg = run_init(
+            "conflict",
+            Some("A"),
+            Some("a@b"),
+            None,
+            false,
+            &[],
+            &e.home,
+            &e.cwd,
+        )
+        .unwrap();
+        assert!(msg.contains("It will auto-load next session as conflict@skills-dir."));
+    }
+
+    /// This exact `name@skills-dir` id was already disabled in a settings
+    /// scope (e.g. a stale entry from a previous scaffold) — warn instead of
+    /// claiming it will auto-load.
+    #[test]
+    fn init_warns_when_this_exact_id_was_already_disabled() {
+        let e = env();
+        std::fs::write(
+            e.home.join("settings.json"),
+            serde_json::json!({"enabledPlugins": {"stale@skills-dir": false}}).to_string(),
+        )
+        .unwrap();
+
+        let msg = run_init(
+            "stale",
+            Some("A"),
+            Some("a@b"),
+            None,
+            false,
+            &[],
+            &e.home,
+            &e.cwd,
+        )
+        .unwrap();
+        assert!(
+            msg.contains(
+                "A disabled setting for stale@skills-dir exists, so it won't load until you \
+                 re-enable it in /plugin"
+            ),
+            "got: {msg}"
+        );
+        assert!(!msg.contains("It will auto-load next session"));
+    }
+
+    /// A LOCAL-scope value overrides an earlier USER-scope value for the same
+    /// key (user < project < local precedence).
+    #[test]
+    fn init_disabled_setting_check_honours_scope_precedence() {
+        let e = env();
+        // User scope says enabled; local scope (more specific) says disabled.
+        std::fs::write(
+            e.home.join("settings.json"),
+            serde_json::json!({"enabledPlugins": {"p@skills-dir": true}}).to_string(),
+        )
+        .unwrap();
+        let dot_dir = e.cwd.join(branding::DOT_DIR);
+        std::fs::create_dir_all(&dot_dir).unwrap();
+        std::fs::write(
+            dot_dir.join("settings.local.json"),
+            serde_json::json!({"enabledPlugins": {"p@skills-dir": false}}).to_string(),
+        )
+        .unwrap();
+
+        let msg = run_init("p", Some("A"), Some("a@b"), None, false, &[], &e.home, &e.cwd).unwrap();
+        assert!(msg.contains("A disabled setting for p@skills-dir exists"), "got: {msg}");
     }
 }

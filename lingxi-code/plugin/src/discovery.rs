@@ -2658,6 +2658,18 @@ async fn merge_one_declared_mcp_source(
         }
         return;
     }
+    // §22 (oracle `chr`'s confinement test, the sibling of the MCPB skip
+    // above): a directory-loaded plugin's non-MCPB source that would resolve
+    // outside the plugin directory is skipped with this specific copy,
+    // rather than falling through to `merge_declared_json_records`'s generic
+    // "skipping invalid plugin manifest json path" (shared by every other
+    // declared-path field, and worded for a malformed path, not a
+    // confinement refusal).
+    if confined && resolve_declared_relative_path(plugin_dir, raw).is_none() {
+        let message = out_of_directory_mcp_source_message(raw, plugin_name);
+        tracing::warn!(source = %raw, plugin = %plugin_name, "{message}");
+        return;
+    }
     let parse = |raw_json: &str| {
         mcp::parse_plugin_mcp_json_string(raw_json, mcp::ConfigScope::Dynamic).map(|v| {
             v.into_iter()
@@ -2666,6 +2678,17 @@ async fn merge_one_declared_mcp_source(
         })
     };
     merge_declared_json_records(plugin_dir, raw, &parse, out).await;
+}
+
+/// §22: the oracle's exact copy for [`merge_one_declared_mcp_source`]'s
+/// out-of-directory guard: `Skipping out-of-directory MCP source "${F}" for
+/// directory-loaded plugin "${e.name}": it may only reference files inside
+/// the plugin directory here.`
+fn out_of_directory_mcp_source_message(raw: &str, plugin_name: &str) -> String {
+    format!(
+        "Skipping out-of-directory MCP source \"{raw}\" for directory-loaded plugin \
+         \"{plugin_name}\": it may only reference files inside the plugin directory here."
+    )
 }
 
 /// Resolve ONE path-form `.mcpb`/`.dxt` `mcpServers` entry into a single
@@ -2843,6 +2866,34 @@ async fn merge_declared_json_records<T, E>(
 mod tests {
     use super::*;
     use std::fs;
+
+    /// §22: byte-exact copy for the out-of-directory MCP source skip (the
+    /// oracle string recovered from the 2.1.251 Mach-O @160863770), sibling
+    /// of the already-landed MCPB skip a few lines above.
+    #[test]
+    fn out_of_directory_mcp_source_message_matches_the_oracle_copy() {
+        assert_eq!(
+            out_of_directory_mcp_source_message("../escape.json", "demo"),
+            "Skipping out-of-directory MCP source \"../escape.json\" for directory-loaded \
+             plugin \"demo\": it may only reference files inside the plugin directory here."
+        );
+    }
+
+    // NOTE: no behavioral test calls `merge_one_declared_mcp_source` with
+    // `confined: true` here. `resolve_declared_relative_path` already refuses
+    // any `..`/absolute path for EVERY plugin regardless of `confined` (the
+    // general path-confinement net `merge_declared_json_records` falls back
+    // on), so `out` ends up empty either way — a test asserting only
+    // `out.is_empty()` would stay green even with the new `if confined && …`
+    // branch above deleted entirely, which I confirmed by deleting it and
+    // re-running: no compile error, no red. The only OBSERVABLE difference
+    // the new branch makes is which `tracing::warn!` line fires, which this
+    // crate has no subscriber-capture harness to assert on (nothing else
+    // here does either — see the MCPB skip a few lines up, also untested
+    // this way). The copy itself is pinned by the test above; the dead-until-
+    // `confined` `if` is unreachable in production today, exactly like its
+    // already-landed MCPB sibling — see the `confined` doc note at this
+    // file's `load_plugin_from_path`.
 
     #[tokio::test]
     async fn declared_commands_replace_defaults_and_declared_skills_extend_defaults() {

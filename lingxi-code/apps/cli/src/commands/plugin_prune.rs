@@ -267,6 +267,53 @@ fn dfs(id: &str, loaded: &HashMap<String, Vec<String>>, reachable: &mut HashSet<
     }
 }
 
+/// The orphan ids [`scan`] finds at `scope`, or an empty list when the
+/// dependency graph is unresolvable — mirrors the silent-skip the oracle's
+/// `plugin uninstall` post-removal orphan check takes rather than surfacing a
+/// scary "cannot determine orphans" error after a successful uninstall.
+pub(crate) fn scan_orphans(db: &Value, scope: Scope, project_path: &Option<String>) -> Vec<String> {
+    let result = scan(db, scope, project_path);
+    if result.unloadable.is_empty() {
+        result.orphans
+    } else {
+        Vec::new()
+    }
+}
+
+/// §22: the proactive notice `plugin uninstall` appends (mirrors oracle
+/// `QWn`) when removing a plugin leaves auto-installed dependencies newly
+/// unreachable and the caller did NOT pass `--prune` to remove them
+/// immediately. Empty when there is nothing to report — the caller appends
+/// this verbatim, so an empty orphan set contributes no trailing text.
+///
+/// Lists up to 5 orphan names (by their pre-`@` display name), then `, …`
+/// when there are more; `scope_label` "user" contributes no `--scope` suffix
+/// to the suggested command (matching every other `user`-is-the-default
+/// wording in this file).
+pub(crate) fn orphan_notice(orphans: &[String], scope_label: &str) -> String {
+    const MAX_NAMES: usize = 5;
+    if orphans.is_empty() {
+        return String::new();
+    }
+    let names: Vec<&str> = orphans.iter().map(|id| name_of(id)).collect();
+    let listed = if names.len() <= MAX_NAMES {
+        names.join(", ")
+    } else {
+        format!("{}, \u{2026}", names[..MAX_NAMES].join(", "))
+    };
+    let suffix = if scope_label == "user" {
+        String::new()
+    } else {
+        format!(" --scope {scope_label}")
+    };
+    format!(
+        "\n{} auto-installed {} no longer needed: {listed}. Run `lingxi-cli plugin prune{suffix}` \
+         to remove.",
+        orphans.len(),
+        plural(orphans.len(), "dependency", "dependencies"),
+    )
+}
+
 /// Read a scope's `enabledPlugins` map.
 fn read_enabled(path: &Path) -> Map<String, Value> {
     read_settings_map(path)
@@ -802,5 +849,84 @@ mod tests {
         .unwrap();
         assert_eq!(msg, "Aborted.");
         assert!(db_json(&e)["plugins"].get("dep@mkt").is_some());
+    }
+
+    // --- §22: the proactive `plugin uninstall` orphan notice --------------
+
+    #[test]
+    fn orphan_notice_is_empty_when_there_are_no_orphans() {
+        assert_eq!(orphan_notice(&[], "user"), "");
+    }
+
+    /// Oracle `QWn`: singular noun, no `--scope` suffix at the default
+    /// (`user`) scope.
+    #[test]
+    fn orphan_notice_singular_at_user_scope() {
+        assert_eq!(
+            orphan_notice(&["dep@mkt".to_string()], "user"),
+            "\n1 auto-installed dependency no longer needed: dep. Run `lingxi-cli plugin prune` \
+             to remove."
+        );
+    }
+
+    /// Plural noun, up to 5 names listed, `--scope` suffix for a non-`user`
+    /// scope.
+    #[test]
+    fn orphan_notice_plural_with_scope_suffix() {
+        let orphans = vec!["a@m".to_string(), "b@m".to_string()];
+        assert_eq!(
+            orphan_notice(&orphans, "project"),
+            "\n2 auto-installed dependencies no longer needed: a, b. Run `lingxi-cli plugin \
+             prune --scope project` to remove."
+        );
+    }
+
+    /// More than 5 orphans truncate to 5 names plus a `, …` ellipsis (oracle
+    /// `r.slice(0,o).join(", "), …`).
+    #[test]
+    fn orphan_notice_truncates_past_five_names() {
+        let orphans: Vec<String> = (1..=6).map(|n| format!("dep{n}@m")).collect();
+        let msg = orphan_notice(&orphans, "user");
+        assert_eq!(
+            msg,
+            "\n6 auto-installed dependencies no longer needed: dep1, dep2, dep3, dep4, dep5, \
+             \u{2026}. Run `lingxi-cli plugin prune` to remove."
+        );
+    }
+
+    /// [`scan_orphans`] surfaces the same orphan set `run_prune` would remove.
+    #[test]
+    fn scan_orphans_matches_a_real_orphan() {
+        let e = env();
+        let dep = materialize(&e, "dep@mkt", "1.0.0", &[]);
+        let app = materialize(&e, "app@mkt", "1.0.0", &[]);
+        write_db(
+            &e,
+            &[
+                ("app@mkt", "1.0.0", &app, false),
+                ("dep@mkt", "1.0.0", &dep, true),
+            ],
+        );
+        let db = load_installed(&e.plugins);
+        let orphans = scan_orphans(&db, Scope::User, &None);
+        assert_eq!(orphans, vec!["dep@mkt".to_string()]);
+    }
+
+    /// An unresolvable graph (a manual plugin's manifest failed to load)
+    /// degrades to an empty orphan list rather than surfacing `run_prune`'s
+    /// "cannot determine orphans" error inline after a successful uninstall.
+    #[test]
+    fn scan_orphans_is_empty_when_the_graph_is_unresolvable() {
+        let e = env();
+        let dep = materialize(&e, "dep@mkt", "1.0.0", &[]);
+        write_db(
+            &e,
+            &[
+                ("app@mkt", "1.0.0", "/does/not/exist", false),
+                ("dep@mkt", "1.0.0", &dep, true),
+            ],
+        );
+        let db = load_installed(&e.plugins);
+        assert_eq!(scan_orphans(&db, Scope::User, &None), Vec::<String>::new());
     }
 }

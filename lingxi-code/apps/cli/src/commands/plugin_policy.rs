@@ -566,6 +566,47 @@ pub fn blocked_marketplaces() -> BTreeSet<String> {
     MarketplacePolicy::from_managed_settings().blocked_names()
 }
 
+/// §22: the plain plugin NAMES managed settings' `enabledPlugins` map has an
+/// opinion about (oracle `Id()`: `Object.entries(ye("policySettings")?.enabledPlugins
+/// ?? {}).filter(([,v]) => typeof v === "boolean" && k.includes("@"))`, mapped
+/// to each key's pre-`@` name). A name in this set is locked to whatever
+/// managed settings says regardless of which marketplace it names — used by
+/// `plugin init`'s post-create collision check to warn a freshly scaffolded
+/// skills-dir plugin whose name is claimed here will never load.
+///
+/// Any boolean value counts (both `true` and `false` mean managed settings
+/// has an opinion about that name); a value of any other type, or a key with
+/// no `@`, is ignored, matching the oracle's own filter.
+#[must_use]
+pub fn managed_locked_plugin_names() -> BTreeSet<String> {
+    managed_locked_plugin_names_from_tiers(managed_settings_raw_tiers())
+}
+
+fn managed_locked_plugin_names_from_tiers(
+    tiers: impl IntoIterator<Item = String>,
+) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    for raw in tiers {
+        let Ok(value) = serde_json::from_str::<Value>(&raw) else {
+            continue;
+        };
+        let Some(enabled) = value.get("enabledPlugins").and_then(Value::as_object) else {
+            continue;
+        };
+        for (key, entry) in enabled {
+            if !entry.is_boolean() {
+                continue;
+            }
+            if let Some((name, _marketplace)) = key.split_once('@') {
+                if !name.is_empty() {
+                    out.insert(name.to_string());
+                }
+            }
+        }
+    }
+    out
+}
+
 /// Reject an operation when its name is denied or outside a name allowlist.
 pub fn ensure_marketplace_allowed(marketplace: &str) -> Result<(), String> {
     ensure_marketplace_source_allowed(Some(marketplace), None)
@@ -870,5 +911,40 @@ mod tests {
             policy(r#"{"strictKnownMarketplaces":["canonical"],"allowedMarketplaces":["alias"]}"#);
         assert!(policy.check(Some("canonical"), None).is_ok());
         assert!(policy.check(Some("alias"), None).is_err());
+    }
+
+    // --- §22: `managed_locked_plugin_names` (oracle `Id()`) ----------------
+
+    #[test]
+    fn managed_locked_names_are_the_pre_at_part_of_every_boolean_entry() {
+        let names = managed_locked_plugin_names_from_tiers([
+            r#"{"enabledPlugins":{"foo@marketplace-a":true,"bar@marketplace-b":false}}"#
+                .to_string(),
+        ]);
+        assert_eq!(
+            names,
+            BTreeSet::from(["foo".to_string(), "bar".to_string()])
+        );
+    }
+
+    #[test]
+    fn managed_locked_names_union_across_tiers_and_ignore_bad_shapes() {
+        let names = managed_locked_plugin_names_from_tiers([
+            r#"{"enabledPlugins":{"first@m":true}}"#.to_string(),
+            // Non-boolean value, and a key without "@" — both dropped.
+            r#"{"enabledPlugins":{"second@m":"not-a-bool","no-at-sign":true}}"#.to_string(),
+            r#"{"enabledPlugins":{"third@m":false}}"#.to_string(),
+            "not json at all".to_string(),
+            "{}".to_string(),
+        ]);
+        assert_eq!(
+            names,
+            BTreeSet::from(["first".to_string(), "third".to_string()])
+        );
+    }
+
+    #[test]
+    fn managed_locked_names_is_empty_with_no_enabled_plugins_key() {
+        assert!(managed_locked_plugin_names_from_tiers(["{}".to_string()]).is_empty());
     }
 }

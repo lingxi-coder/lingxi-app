@@ -156,6 +156,36 @@ iOS 客户端确实实现了 `RuntimeProfileSelection`（`clients/ios/Sources/Lo
 如果它真的是问题的话。参考 [[local-app-phase-1a-ui-contract-2026-08-24]]：那批 UI 契约
 15 个提交全绿且过评审，一行都没上过真机。
 
+### 🚨 「实现了但模型够不着」出现了第二例
+
+第一例是 `confirm_runtime_profile`（见上）。写七个 agent 时又撞到一例，同一个形状：
+
+`confirm_dependency_change`（`local_apps_host.rs:6459`）和 `update_dependencies`（`:6590`）
+都是真实实现的 Host 操作，而 `LOCAL_APP_TOOLS` 那张 **24 个操作**的模型可调用表里
+**零命中**。于是没有任何 agent 能调到它们。
+
+两例合起来说明这不是一次疏漏，而是**一整类**：Host 操作的实现和它进入工具表是两件
+分开的事，中间没有任何东西对账。一个操作可以写完、测完、被 trait 暴露，然后永远没有
+调用者——而所有测试都是绿的，因为测试直接调函数，绕过了那张表。
+
+⚠️ **这值得一道门**：把 `LocalAppsMcpHost` 的 dispatch 分支集合与 `LOCAL_APP_TOOLS`
+的 operation 集合对账，差集非空就点名。Phase -1 的组件扫描器管的是「名字不该出现在
+哪」，这条管的是「实现了却没接上」，是另一回事。
+
+### ⚠️ builder agent 的写边界是**构建期**的，不是写入期的
+
+七个 agent 里只有 `builder` 拿到 `Read`/`Write`/`Edit`。它的边界**不在**工具授权里——
+`tools/file/src/{read,write,edit}.rs` 没有路径作用域，agent frontmatter 也没有这种字段。
+
+真正的强制点是 `restore_host_managed_files`（`local_apps_build.rs:505`），它在**构建时**
+把 `managed_files` 重新钉回去。那个函数自己的注释写得很清楚：
+「`.lingxi/source-policy.json` **声明** `host_managed_paths`；在这里恢复，
+才让构建成为真正的强制点，而不是把契约只留在 prompt 文本里。」
+
+所以：**写入的那一刻没有任何东西挡着**，agent 可以写工作区里的任何文件；下一次构建
+会把 host-managed 的那些覆盖回来。对「防止 agent 意外改坏脚手架」来说够用；对
+「防止 agent 故意写别处」来说不够。写 builder 的 prompt 时不要暗示写入本身受限。
+
 ### 其他量出来的事实
 
 | 事实 | 值 |

@@ -45,6 +45,19 @@ MAX_DESCRIPTION_COLUMNS = 180
 # 门要扫的 skill 根目录，相对仓库根。
 SKILL_ROOTS = ["lingxi-code/plugins/lingxi-local-app/skills"]
 
+# Agent 用同一套 frontmatter 判据,但形状不同:agent 是 `agents/<name>.md`
+# 单文件,identity 来自**文件名**;skill 是 `skills/<name>/SKILL.md`,identity
+# 来自**目录名**。两者都由 `plugin/src/discovery.rs` 的 `glob_md()` 递归发现。
+AGENT_ROOTS = ["lingxi-code/plugins/lingxi-local-app/agents"]
+
+# ⛔ 这三个字段出现在 plugin agent 的 frontmatter 里就是错的,而且**两种错法不同**:
+# `hooks` / `permissionMode` 让 `validate_plugin_agent_frontmatter` 失败,
+# 于是 `PluginManagerError::Validation` **让整个 plugin 装载失败**
+# (`plugin/src/manager.rs:605-609`)——不是跳过这一个 agent,是全部。
+# `mcpServers` 则是解析后被清空并 warn(`manager.rs:620-627`),静默降级。
+# 前者炸得很响,后者不响,所以后者更需要门。
+FORBIDDEN_AGENT_FIELDS = ["permissionMode", "mcpServers", "hooks"]
+
 FRONTMATTER = re.compile(r"\A---\r?\n(.*?)\r?\n---\r?\n", re.S)
 
 
@@ -84,8 +97,42 @@ def main():
               "from an empty enumeration" % ", ".join(SKILL_ROOTS), file=sys.stderr)
         return 1
 
+    agents = []
+    for root in AGENT_ROOTS:
+        base = repo / root
+        if base.is_dir():
+            agents.extend(sorted(base.glob("*.md")))
+
     problems = []
     rows = []
+    for path in agents:
+        stem = path.stem
+        text = path.read_text(encoding="utf-8", errors="replace")
+        m = FRONTMATTER.match(text)
+        if not m:
+            problems.append("agents/%s.md: no YAML frontmatter block" % stem)
+            continue
+        block = m.group(1)
+        name = scalar(block, "name")
+        if not name:
+            problems.append("agents/%s.md: frontmatter has no non-empty `name`" % stem)
+        elif name != stem:
+            problems.append(
+                "agents/%s.md: frontmatter name is %r but the file is %r.md — agent identity comes "
+                "from the FILE NAME" % (stem, name, stem)
+            )
+        if not scalar(block, "description"):
+            problems.append("agents/%s.md: frontmatter has no non-empty `description`" % stem)
+        for field in FORBIDDEN_AGENT_FIELDS:
+            if re.search(r"^%s\s*:" % re.escape(field), block, re.M):
+                how = ("makes validate_plugin_agent_frontmatter fail, which fails the WHOLE plugin load"
+                       if field in ("hooks", "permissionMode")
+                       else "is parsed then silently cleared with only a tracing warning")
+                problems.append(
+                    "agents/%s.md declares `%s`, which a plugin agent must never set — it %s"
+                    % (stem, field, how)
+                )
+
     for path in skills:
         directory = path.parent.name
         text = path.read_text(encoding="utf-8", errors="replace")
@@ -126,8 +173,9 @@ def main():
         print("SKILL-FRONTMATTER FAIL:\n  - " + "\n  - ".join(problems), file=sys.stderr)
         return 1
     widest = max(rows, key=lambda r: r[1])
-    print("OK: %d skills, every name matches its directory, widest description is %s at %d/%d columns"
-          % (len(rows), widest[0], widest[1], MAX_DESCRIPTION_COLUMNS))
+    print("OK: %d skills + %d agents; every name matches its directory/file, no agent declares a "
+          "forbidden field, widest description is %s at %d/%d columns"
+          % (len(rows), len(agents), widest[0], widest[1], MAX_DESCRIPTION_COLUMNS))
     return 0
 
 

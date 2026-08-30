@@ -32,6 +32,8 @@ pub mod events;
 pub mod ids;
 pub mod mailbox;
 pub mod manifest;
+pub mod packer;
+pub mod performance_thresholds;
 pub mod permissions;
 pub mod runtime_migration;
 pub mod runtime_v2;
@@ -61,6 +63,13 @@ pub use manifest::{
     load_manifest, save_manifest, AppDependencySnapshot, AppLayout, AppManifest,
     AppRuntimeProfileBinding, AppSurface, DataCollectionSchema, DataFieldKind, DataFieldSchema,
     DeviceContext, WORKSPACE_SETTINGS_LOCAL_FILE,
+};
+pub use packer::{
+    pack, sha256_hex, InventoryEntry, PackResult, PackedFile, PackerError, PRUNE_DIR_NAMES,
+};
+pub use performance_thresholds::{
+    load_baseline, validate as validate_performance_thresholds, PerformanceThresholds,
+    ThresholdError,
 };
 pub use permissions::{
     load_permissions, save_permissions, save_workspace_permission_settings, AppCapability,

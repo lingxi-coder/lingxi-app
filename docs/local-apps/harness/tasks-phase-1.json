@@ -1,0 +1,322 @@
+{
+  "phase": "1",
+  "tasks": [
+    {
+      "id": "P1.0",
+      "title": "Checked-in performance baselines file with non-zero hard limits",
+      "gate": "§19.0 missing field, zero value, or non-numeric placeholder fails validation outright",
+      "owns": [
+        "docs/local-apps/performance-baselines/local-app-plugin-v1.json"
+      ],
+      "crates": [
+        "engine-mobile"
+      ],
+      "testPackages": [
+        "engine-mobile"
+      ],
+      "exclusive": false,
+      "repeatRuns": 1,
+      "plantedFailure": {
+        "edit": "set builtin_archive_max_bytes to 0",
+        "mustNameInOutput": [
+          "builtin_archive_max_bytes"
+        ]
+      },
+      "addedTests": [
+        "a_zero_threshold_is_rejected",
+        "a_missing_field_is_rejected",
+        "a_non_numeric_placeholder_is_rejected"
+      ],
+      "deps": [],
+      "notes": "WAVE 0 — authored before anything is measured. Writing thresholds after measuring is precisely the retroactive gate §19.0 forbids. The ten values are fixed by §19.0; the 124 tracked runtime-profile source files total 387,943 bytes, so 4 MiB / 12 MiB are not a rubber stamp on the status quo."
+    },
+    {
+      "id": "P1.1",
+      "title": "Prune node_modules/dist/.vite/.lingxi-build-state before the packer's directory walk",
+      "gate": "§19.2 the archive digest on a checkout that has run pnpm install equals the digest on a clean checkout",
+      "owns": [
+        "lingxi-code/plugin/src/mcpb.rs",
+        "lingxi-code/local-apps/src/packer.rs"
+      ],
+      "crates": [
+        "plugin",
+        "local-apps"
+      ],
+      "testPackages": [
+        "plugin",
+        "local-apps"
+      ],
+      "exclusive": false,
+      "repeatRuns": 1,
+      "plantedFailure": {
+        "edit": "remove the prune list so the walk descends into node_modules",
+        "mustNameInOutput": [
+          "MAX_FILES"
+        ]
+      },
+      "addedTests": [
+        "digest_is_identical_on_a_dirty_and_a_clean_checkout",
+        "a_file_outside_the_inventory_in_a_non_prune_dir_fails_the_build"
+      ],
+      "deps": [
+        "P1.0"
+      ],
+      "notes": "NOT optional hardening. plugin/src/mcpb.rs:16 sets MAX_FILES = 10_000; measured on disk at lap/baseline, babylon-3d holds 20,093 files and phaser-2d 13,014 after pnpm install, and the whole templates tree is 524 MiB against a 4 MiB gate — 131x. Without pruning the packer rejects two of the five families outright. §19.2's 'dirty checkout' reverse case is simply the current state of the tree: the four ignored dirs are already materialized."
+    },
+    {
+      "id": "P1.2",
+      "title": "Deterministic builtin archive and inventory, built from a SYNTHETIC fixture plugin root",
+      "gate": "§19.2 deterministic archive/inventory golden",
+      "owns": [
+        "lingxi-code/local-apps/src/packer.rs",
+        "lingxi-code/local-apps/tests/fixtures/synthetic-plugin"
+      ],
+      "crates": [
+        "local-apps"
+      ],
+      "testPackages": [
+        "local-apps"
+      ],
+      "exclusive": false,
+      "repeatRuns": 1,
+      "plantedFailure": {
+        "edit": "introduce a timestamp into the archive so two builds differ",
+        "mustNameInOutput": [
+          "digest"
+        ]
+      },
+      "addedTests": [
+        "two_builds_of_the_same_root_produce_the_same_digest"
+      ],
+      "deps": [
+        "P1.1"
+      ],
+      "notes": "The packer MUST pack a synthetic fixture root, not the real package. Otherwise §19.2's packer gates and Phase 2's completion condition reference each other: the packer cannot be tested until 27 skills / 7 agents / 112 assets exist, and none of those can be validated until the packer exists. §18 gestures at this ('parallel tracks do not constitute a cycle') without ever naming the fixture that makes it true. Packing the REAL package is a separate, late task."
+    },
+    {
+      "id": "P1.3",
+      "title": "Packer rejects path traversal, duplicate paths and symlink escape",
+      "gate": "§19.2 path traversal, duplicate path, symlink escape rejection",
+      "owns": [
+        "lingxi-code/local-apps/src/packer.rs"
+      ],
+      "crates": [
+        "local-apps"
+      ],
+      "testPackages": [
+        "local-apps"
+      ],
+      "exclusive": false,
+      "repeatRuns": 1,
+      "plantedFailure": {
+        "edit": "allow a ../ component through the path check",
+        "mustNameInOutput": [
+          "traversal"
+        ]
+      },
+      "addedTests": [
+        "path_traversal_is_rejected",
+        "duplicate_path_is_rejected",
+        "symlink_escape_is_rejected"
+      ],
+      "deps": [
+        "P1.2"
+      ],
+      "notes": ""
+    },
+    {
+      "id": "P1.4",
+      "title": "Mobile atomic materialization with digest verification",
+      "gate": "§19.2 a single-byte tamper fails the digest; an interrupted materialization does not replace a previous verified root",
+      "owns": [
+        "lingxi-code/apps/engine-mobile/src/builtin_bundle.rs"
+      ],
+      "crates": [
+        "engine-mobile"
+      ],
+      "testPackages": [
+        "engine-mobile"
+      ],
+      "exclusive": false,
+      "repeatRuns": 1,
+      "plantedFailure": {
+        "edit": "accept an archive whose digest does not match the inventory",
+        "mustNameInOutput": [
+          "digest"
+        ]
+      },
+      "addedTests": [
+        "single_byte_tamper_fails_digest",
+        "interrupted_materialization_keeps_the_previous_verified_root",
+        "no_previous_root_and_failed_materialization_returns_builtin_bundle_unavailable"
+      ],
+      "deps": [
+        "P1.3"
+      ],
+      "notes": "The original 'interrupted materialization does not replace previous verified root' is VACUOUSLY TRUE in the first-install case, so it must be split into with-previous-root and without-previous-root. Without a previous root the contract is: return builtin_bundle_unavailable — do not panic, do not half-register."
+    },
+    {
+      "id": "P1.5",
+      "title": "Idempotent short-circuit: an unchanged digest does not unpack or re-verify file by file",
+      "gate": "§19.2 marker field, missing manifest/inventory/component entry, and symlink root each have a reverse case",
+      "owns": [
+        "lingxi-code/apps/engine-mobile/src/builtin_bundle.rs"
+      ],
+      "crates": [
+        "engine-mobile"
+      ],
+      "testPackages": [
+        "engine-mobile"
+      ],
+      "exclusive": false,
+      "repeatRuns": 1,
+      "plantedFailure": {
+        "edit": "short-circuit on the marker alone without checking the digest",
+        "mustNameInOutput": [
+          "marker"
+        ]
+      },
+      "addedTests": [
+        "unchanged_digest_skips_unpack",
+        "a_missing_manifest_defeats_the_short_circuit",
+        "a_missing_inventory_defeats_the_short_circuit",
+        "a_missing_component_entry_defeats_the_short_circuit",
+        "a_symlink_root_defeats_the_short_circuit"
+      ],
+      "deps": [
+        "P1.4"
+      ],
+      "notes": ""
+    },
+    {
+      "id": "P1.6",
+      "title": "engine-mobile takes a dependency on the plugin crate and composes PluginManager",
+      "gate": "§19.2 mobile discovers exactly one plugin, name=lingxi-local-app, source=BuiltIn",
+      "owns": [
+        "lingxi-code/apps/engine-mobile/Cargo.toml",
+        "lingxi-code/apps/engine-mobile/src/lib.rs",
+        "lingxi-code/apps/engine-mobile/src/local_app_plugin_binding.rs"
+      ],
+      "crates": [
+        "engine-mobile"
+      ],
+      "testPackages": [
+        "engine-mobile"
+      ],
+      "exclusive": false,
+      "repeatRuns": 1,
+      "plantedFailure": {
+        "edit": "let a second plugin source reach the mobile registry",
+        "mustNameInOutput": [
+          "lingxi-local-app"
+        ]
+      },
+      "addedTests": [
+        "mobile_discovers_exactly_one_plugin",
+        "mobile_loads_only_the_builtin_source"
+      ],
+      "deps": [
+        "P1.5",
+        "P0a.9"
+      ],
+      "notes": "NEW CRATE EDGE. plugin/ is not a dependency of engine-mobile at lap/baseline: engine-mobile's Cargo.toml has no plugin edge and its src/ has zero PluginManager/PluginSource hits, while engine-desktop/Cargo.toml:64 and apps/cli/Cargo.toml:97 do. scripts/check_deps.py classifies plugin/ as `engine` and apps/* as `app`, and FORBIDDEN has no `app` key, so the edge is legal and no gate change is needed — but §19.0's binary-size and startup budgets now bind. Budget for the argument even though the dependency checker will not raise it."
+    },
+    {
+      "id": "P1.7",
+      "title": "register_verified_builtin is called exactly once, from the composition module",
+      "gate": "§19.3 planting a second call site must go red and print file:line",
+      "owns": [
+        "lingxi-code/apps/engine-mobile/src/lib.rs",
+        "lingxi-code/scripts/check_component_literals.py"
+      ],
+      "crates": [
+        "engine-mobile"
+      ],
+      "testPackages": [
+        "engine-mobile"
+      ],
+      "exclusive": false,
+      "repeatRuns": 1,
+      "plantedFailure": {
+        "edit": "add a second register_verified_builtin call site in a non-composition module",
+        "mustNameInOutput": [
+          "register_verified_builtin"
+        ]
+      },
+      "addedTests": [
+        "register_verified_builtin_has_exactly_one_call_site"
+      ],
+      "deps": [
+        "P1.6"
+      ],
+      "notes": ""
+    },
+    {
+      "id": "P1.8",
+      "title": "Wire the command/skill/agent/workflow registries to the live plugin inventory",
+      "gate": "§19.2 one live registry drives both listing and invocation",
+      "owns": [
+        "lingxi-code/apps/engine-mobile/src/lib.rs",
+        "lingxi-code/apps/engine-mobile/src/local_apps_host.rs"
+      ],
+      "crates": [
+        "engine-mobile"
+      ],
+      "testPackages": [
+        "engine-mobile"
+      ],
+      "exclusive": false,
+      "repeatRuns": 1,
+      "plantedFailure": {
+        "edit": "let listing read the inventory while invocation reads a separate copy",
+        "mustNameInOutput": [
+          "registry"
+        ]
+      },
+      "addedTests": [
+        "listing_and_invocation_share_one_registry"
+      ],
+      "deps": [
+        "P1.7"
+      ],
+      "notes": ""
+    },
+    {
+      "id": "P1.9",
+      "title": "Single-plugin enable/disable/status protocol, including the bare enabledPlugins key",
+      "gate": "§19.2 three-way behaviour of a bare enabledPlugins[\"lingxi-local-app\"]: explicit true + default false => Loaded; explicit false => PluginState::Disabled and PRESENT in the registry; key missing => manifest default",
+      "owns": [
+        "lingxi-code/apps/engine-mobile/src/lib.rs",
+        "lingxi-code/client-protocol/src/commands.rs"
+      ],
+      "crates": [
+        "engine-mobile",
+        "client-protocol"
+      ],
+      "testPackages": [
+        "engine-mobile",
+        "client-protocol"
+      ],
+      "exclusive": true,
+      "repeatRuns": 1,
+      "plantedFailure": {
+        "edit": "make explicit-false drop the plugin from the registry instead of marking it Disabled",
+        "mustNameInOutput": [
+          "Disabled"
+        ]
+      },
+      "addedTests": [
+        "explicit_true_with_default_false_loads",
+        "explicit_false_is_disabled_not_absent",
+        "missing_key_uses_the_manifest_default",
+        "native_toggle_writes_back_the_same_bare_key",
+        "state_survives_restart",
+        "a_changed_plugin_id_after_restart_does_not_break_provenance"
+      ],
+      "deps": [
+        "P1.8"
+      ],
+      "notes": "Touches client-protocol, which is exclusive. BEFORE adding any ClientCommand variant, read the UniFFI metadata budget note in the harness README: the enum's metadata buffer is 14,137 of 16,384 bytes at lap/baseline (86.3% consumed, 2,247 free), doc comments are copied verbatim into it, and overflow is an error[E0080] at const-eval that breaks BOTH mobile builds while cargo build --workspace and the whole test suite stay green."
+    }
+  ]
+}

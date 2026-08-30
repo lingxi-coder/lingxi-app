@@ -1,0 +1,340 @@
+{
+  "phase": "-1",
+  "tasks": [
+    {
+      "id": "P-1.0",
+      "title": "Component-literal scanner: narrowed to 'no list, no basename-derived authority', with a counted allowlist",
+      "gate": "§19.3 production literal scanner planted-positive; three mandatory reverse cases (a) discovery-derived needle (b) namespaced FQN (c) un-allowlisted new module",
+      "owns": [
+        "lingxi-code/scripts/check-component-literals.sh",
+        "lingxi-code/scripts/check_component_literals.py",
+        "lingxi-code/scripts/component_literal_allowlist.txt"
+      ],
+      "crates": [
+        "engine-mobile"
+      ],
+      "testPackages": [
+        "engine-mobile"
+      ],
+      "exclusive": false,
+      "repeatRuns": 1,
+      "plantedFailure": {
+        "edit": "plant the namespaced FQN `lingxi-local-app:local-app-build` (NOT the basename) into apps/engine-mobile/src/local_apps_host.rs",
+        "mustNameInOutput": [
+          "local_apps_host.rs",
+          "lingxi-local-app:local-app-build"
+        ]
+      },
+      "addedTests": [
+        "scanner_rejects_namespaced_fqn_not_just_basename",
+        "scanner_rejects_a_literal_in_a_module_no_allowlist_mentions",
+        "scanner_needle_comes_from_discovery_not_from_a_static_array",
+        "allowlist_entry_count_matches_the_committed_baseline"
+      ],
+      "deps": [],
+      "notes": "§19.3's literal wording — `tasks/src` and `tools/workflow/src` contain no Local App workflow basename — CANNOT be green on landing, because Phase -1 step 1 explicitly KEEPS both existing registrations (tools/workflow/src/builtins.rs plus three .js files in that directory). Ship the allowlist explicit and counted, reaching 0 only at Phase 9. Without the count, the obvious way to make the red gate green is to exempt the directory, which silently disables the scanner for all of tools/workflow/. The count is the thing that makes that visible."
+    },
+    {
+      "id": "P-1.1",
+      "title": "Add the LocalAppPluginBinding composition adapter",
+      "gate": "§19.3 Host contract carries no workflow/skill/agent names",
+      "owns": [
+        "lingxi-code/apps/engine-mobile/src/local_app_plugin_binding.rs",
+        "lingxi-code/apps/engine-mobile/src/lib.rs"
+      ],
+      "crates": [
+        "engine-mobile"
+      ],
+      "testPackages": [
+        "engine-mobile"
+      ],
+      "exclusive": false,
+      "repeatRuns": 1,
+      "plantedFailure": {
+        "edit": "make the binding resolve a workflow handle by string name instead of by typed handle",
+        "mustNameInOutput": [
+          "local_app_plugin_binding"
+        ]
+      },
+      "addedTests": [
+        "binding_resolves_a_typed_handle_not_a_name"
+      ],
+      "deps": [
+        "P-1.0"
+      ],
+      "notes": ""
+    },
+    {
+      "id": "P-1.2",
+      "title": "Bind Host launch-context injection to the resolved handle",
+      "gate": "§19.3 workflow context is injected only by the Host; caller-supplied host_context/profile/template/renderer/surface is rejected or overridden",
+      "owns": [
+        "lingxi-code/apps/engine-mobile/src/local_apps_host.rs",
+        "lingxi-code/apps/engine-mobile/src/local_app_plugin_binding.rs"
+      ],
+      "crates": [
+        "engine-mobile"
+      ],
+      "testPackages": [
+        "engine-mobile"
+      ],
+      "exclusive": false,
+      "repeatRuns": 1,
+      "plantedFailure": {
+        "edit": "accept a caller-supplied host_context instead of overriding it",
+        "mustNameInOutput": [
+          "host_context"
+        ]
+      },
+      "addedTests": [
+        "caller_supplied_host_context_is_rejected_or_overridden",
+        "caller_supplied_profile_is_rejected_or_overridden",
+        "caller_supplied_surface_is_rejected_or_overridden"
+      ],
+      "deps": [
+        "P-1.1"
+      ],
+      "notes": ""
+    },
+    {
+      "id": "P-1.3",
+      "title": "Delete the Profile -> workflow-name map in workflow_support",
+      "gate": "§19.3 no Local App workflow basename derives authority",
+      "owns": [
+        "lingxi-code/apps/engine-mobile/src/workflow_support.rs"
+      ],
+      "crates": [
+        "engine-mobile"
+      ],
+      "testPackages": [
+        "engine-mobile"
+      ],
+      "exclusive": false,
+      "repeatRuns": 1,
+      "plantedFailure": {
+        "edit": "restore the ReactDomR1 => \"local-app-build\" arm",
+        "mustNameInOutput": [
+          "workflow_support",
+          "local-app-build"
+        ]
+      },
+      "addedTests": [
+        "profile_no_longer_selects_a_workflow_by_name"
+      ],
+      "deps": [
+        "P-1.1"
+      ],
+      "notes": "The map is at workflow_support.rs:1286-1290 at lap/baseline. Anchor on the symbol, never the line."
+    },
+    {
+      "id": "P-1.4",
+      "title": "Make LINGXI.md contract prose prompt-layer neutral",
+      "gate": "§19.3 Host contract carries no workflow names",
+      "owns": [
+        "lingxi-code/apps/engine-mobile/src/local_apps_host.rs"
+      ],
+      "crates": [
+        "engine-mobile"
+      ],
+      "testPackages": [
+        "engine-mobile"
+      ],
+      "exclusive": false,
+      "repeatRuns": 1,
+      "plantedFailure": {
+        "edit": "put the literal `local-app-build` back into the LINGXI.md contract prose",
+        "mustNameInOutput": [
+          "local_apps_host.rs",
+          "local-app-build"
+        ]
+      },
+      "addedTests": [
+        "lingxi_md_contract_prose_names_no_workflow"
+      ],
+      "deps": [
+        "P-1.3"
+      ],
+      "notes": "Workflow names are baked into the contract PROSE at local_apps_host.rs:5977 and :6010, with a test at :11845. Prose is exactly what a name-based scanner sees and a type-based refactor does not."
+    },
+    {
+      "id": "P-1.5",
+      "title": "Mobile Local App skill registration iterates mobile_skill_registry() instead of a second hardcoded list",
+      "gate": "§19.3 skill listing / Skill invocation / slash invocation share one registry",
+      "owns": [
+        "lingxi-code/apps/engine-mobile/src/lib.rs"
+      ],
+      "crates": [
+        "engine-mobile"
+      ],
+      "testPackages": [
+        "engine-mobile"
+      ],
+      "exclusive": false,
+      "repeatRuns": 1,
+      "plantedFailure": {
+        "edit": "reintroduce a second hardcoded skill name into the array",
+        "mustNameInOutput": [
+          "lib.rs"
+        ]
+      },
+      "addedTests": [
+        "mobile_skill_list_is_derived_from_the_live_registry"
+      ],
+      "deps": [
+        "P-1.0"
+      ],
+      "notes": "The hardcoded 10-skill array is at lib.rs:437-460. Phase -1 only removes the SECOND list; switching the provider to PluginManager inventory is Phase 2."
+    },
+    {
+      "id": "P-1.6",
+      "title": "Introduce the typed LocalAppWorkflowTaskScope { app_id, purpose }",
+      "gate": "§19.3 typed task scope still lets the build workflow take a workspace lease and read workflowModel",
+      "owns": [
+        "lingxi-code/tasks/src/lib.rs",
+        "lingxi-code/tasks/src/scope.rs"
+      ],
+      "crates": [
+        "tasks"
+      ],
+      "testPackages": [
+        "tasks"
+      ],
+      "exclusive": true,
+      "repeatRuns": 1,
+      "plantedFailure": {
+        "edit": "widen the scope so any workflow whose meta.name matches is admitted",
+        "mustNameInOutput": [
+          "LocalAppWorkflowTaskScope"
+        ]
+      },
+      "addedTests": [
+        "scope_is_constructed_by_the_host_not_derived_from_meta_name"
+      ],
+      "deps": [
+        "P-1.2"
+      ],
+      "notes": ""
+    },
+    {
+      "id": "P-1.7",
+      "title": "Workspace lease reads the typed scope; delete the tasks/src workflow-name list",
+      "gate": "§19.3 a custom workflow with the same name gets NO workspace lease",
+      "owns": [
+        "lingxi-code/tasks/src/lib.rs"
+      ],
+      "crates": [
+        "tasks"
+      ],
+      "testPackages": [
+        "tasks"
+      ],
+      "exclusive": true,
+      "repeatRuns": 1,
+      "plantedFailure": {
+        "edit": "reinstate the LOCAL_APP_BUILD_WORKFLOWS array at tasks/src/lib.rs:37 and key the lease off it",
+        "mustNameInOutput": [
+          "LOCAL_APP_BUILD_WORKFLOWS"
+        ]
+      },
+      "addedTests": [
+        "a_same_named_custom_workflow_gets_no_workspace_lease"
+      ],
+      "deps": [
+        "P-1.6"
+      ],
+      "notes": ""
+    },
+    {
+      "id": "P-1.8",
+      "title": "Delete guard for all three purposes reads the typed scope",
+      "gate": "§19.3 all Local App workflows block App delete; a same-named custom workflow does not",
+      "owns": [
+        "lingxi-code/tasks/src/lib.rs"
+      ],
+      "crates": [
+        "tasks"
+      ],
+      "testPackages": [
+        "tasks"
+      ],
+      "exclusive": true,
+      "repeatRuns": 1,
+      "plantedFailure": {
+        "edit": "let a custom workflow named local-app-build block a delete",
+        "mustNameInOutput": [
+          "delete"
+        ]
+      },
+      "addedTests": [
+        "all_three_purposes_block_delete",
+        "a_same_named_custom_workflow_does_not_block_delete"
+      ],
+      "deps": [
+        "P-1.7"
+      ],
+      "notes": ""
+    },
+    {
+      "id": "P-1.9",
+      "title": "workflowModel default reads the typed scope; delete the tools/workflow name list and apply_local_app_build_default_model",
+      "gate": "§19.3 a custom workflow with the same name gets no model default",
+      "owns": [
+        "lingxi-code/tools/workflow/src/lib.rs",
+        "lingxi-code/apps/engine-desktop/src/lib.rs"
+      ],
+      "crates": [
+        "tool-workflow",
+        "engine-desktop"
+      ],
+      "testPackages": [
+        "tool-workflow",
+        "engine-desktop"
+      ],
+      "exclusive": false,
+      "repeatRuns": 1,
+      "plantedFailure": {
+        "edit": "reinstate the LOCAL_APP_BUILD_WORKFLOWS array at tools/workflow/src/lib.rs:310 and key the model default off it",
+        "mustNameInOutput": [
+          "LOCAL_APP_BUILD_WORKFLOWS"
+        ]
+      },
+      "addedTests": [
+        "a_same_named_custom_workflow_gets_no_model_default"
+      ],
+      "deps": [
+        "P-1.8"
+      ],
+      "notes": "apps/engine-desktop/src/lib.rs:1853 is the ONLY Local App reference in the entire desktop product and it calls apply_local_app_build_default_model, the function this task deletes. That one call site is the whole desktop blast radius for Phase -1."
+    },
+    {
+      "id": "P-1.10",
+      "title": "Re-enter the five Canvas hard gates as policy = canvas_*, preserving them across the name deletion",
+      "gate": "§19.5 the five existing Canvas gates still bite after drive_local_workflow(\"local-canvas-build\") is gone",
+      "owns": [
+        "lingxi-code/tools/workflow/src/builtins.rs"
+      ],
+      "crates": [
+        "tool-workflow"
+      ],
+      "testPackages": [
+        "tool-workflow"
+      ],
+      "exclusive": false,
+      "repeatRuns": 1,
+      "plantedFailure": {
+        "edit": "make the zero-surfaces case pass (return Ok) while leaving both test functions in place",
+        "mustNameInOutput": [
+          "canvas_zero_surfaces_blocks_even_when_render_and_motion_pass"
+        ]
+      },
+      "addedTests": [
+        "canvas_policy_is_selected_by_typed_policy_not_by_workflow_name",
+        "render_check_status_not_applicable_has_a_behavioural_case"
+      ],
+      "deps": [
+        "P-1.9"
+      ],
+      "notes": "HIGHEST silent-loss risk in the backlog. Five Canvas hard gates reach their policy through drive_local_workflow(\"local-canvas-build\"), a name §8.3 deletes — exactly 1 call site at lap/baseline. Merging the workflows without re-entering the policy makes five gates vanish with every test still green. Exit criterion: the call-site count reaches 0 AND both named functions still exist (builtins.rs:1944 and :2509 at lap/baseline). If the count hits 0 and the functions are gone, the gates were deleted, not migrated — anchor on function names, never line numbers. Separately, render_check.status=\"not_applicable\" has NO behavioural test today: builtins.rs:2263 pins a schema-description string, which is copy-pinning, not a gate. That case is net-new, not a migration."
+    }
+  ]
+}

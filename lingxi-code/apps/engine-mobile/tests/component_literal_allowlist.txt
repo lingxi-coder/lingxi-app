@@ -76,13 +76,12 @@ apps/engine-mobile/src/lib.rs:threejs-local-app:1
 apps/engine-mobile/src/lib.rs:phaser-2d-local-app:1
 apps/engine-mobile/src/lib.rs:babylon-3d-local-app:1
 
-# local_apps_host.rs — Host-authored prompt text told to the model at build
-# time, naming which workflow the app's surface requires so the model does not
-# invoke the other one. Composition binding, not a leak: the names are not read
-# back from anywhere, they are values the Host asserts. `local-app-build`
-# occurs twice (once alone, once on the same line as its canvas sibling).
-apps/engine-mobile/src/local_apps_host.rs:local-app-build:2
-apps/engine-mobile/src/local_apps_host.rs:local-canvas-build:1
+# local_apps_host.rs — P-1.4 removed the Host's two prose sentences naming
+# which build workflow the app's surface requires (§19.3: the Host contract
+# carries no workflow/skill/agent names). The Host now selects and enforces
+# the build workflow itself via LocalAppPluginBinding::resolve/enforce
+# (local_app_plugin_binding.rs, below) instead of telling the model which one
+# to launch, so this file has no entries here any more.
 
 # local_apps_mcp.rs — incidental prose matches, not component-name leaks: the
 # `inspect_ui` MCP tool's own description ("the structured accessibility/DOM

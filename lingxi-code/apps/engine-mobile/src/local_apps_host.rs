@@ -5938,10 +5938,12 @@ fn scaffold_next_step_guidance() -> String {
     "The app now has its shape and its source tree. Re-read this workspace's LINGXI.md before \
      doing anything else: it has been REPLACED by the formal contract for the surface you just \
      committed, and it names the editable entry points, the host-managed files you must not \
-     touch, and the build workflow for this surface. Anything written into the workspace before \
-     this call is gone, as the guided contract said it would be. Do not create a second \
-     scaffold, do not run a package manager, and do not call LocalAppScaffold again — the shape \
-     and the name are now fixed."
+     touch, and the rules this surface must be written to. It names no build workflow, and you \
+     do not need one: the host authorizes exactly one build workflow for this surface and \
+     refuses any other, so ask for a build without naming one. Anything written into the \
+     workspace before this call is gone, as the guided contract said it would be. Do not create \
+     a second scaffold, do not run a package manager, and do not call LocalAppScaffold again — \
+     the shape and the name are now fixed."
         .into()
 }
 
@@ -5974,7 +5976,7 @@ fn formal_workspace_contract(
     let setup_path = match binding.family {
         local_apps::AppRuntimeProfile::ReactDom => format!(
             "{profile_identity}\
-             - This app's surface is `dom`, so its build workflow is `local-app-build`. The surface and runtime profile are fixed at creation; do not infer them from source or launch the other workflow.\n\
+             - This app's surface is `dom`. The host authorizes exactly one build workflow for this surface and refuses any other; you never name or choose a workflow yourself, and a request that named a different one would be refused. The surface and runtime profile are fixed at creation; do not infer them from source.\n\
              - This workspace already contains the repository-verified Vite + Ionic foundation. The host prepares app-local dependencies in `workspace/node_modules`. Do not run `npm create vite`, do not create a second scaffold, do not add a wrapper build layer, and do not run a package manager in this local-app workspace.\n\
              - Host-managed files are `.gitignore`, `package.json`, `pnpm-lock.yaml`, `pnpm-workspace.yaml`, `jsconfig.json`, `index.html`, `vite.config.mjs`, `.lingxi/source-policy.json`, `lib/lingxi-bridge.js`, `lib/device-context.js`, `lib/platform-adapter.js`, `lib/lingxi-provider.jsx`, and `styles/foundation.css`. Do not edit them.\n\
              - Default editable entry points are `app/screens/home-screen.jsx`, `app/screens/detail-screen.jsx`, and `app/globals.css`. You may edit files under `app/`, `src/`, `styles/`, `public/`, and add non-host-managed helpers under `lib/`.\n\
@@ -6007,7 +6009,7 @@ fn formal_workspace_contract(
             };
             format!(
                 "{profile_identity}\
-                 - This app's surface is `canvas`, so its build workflow is `local-canvas-build` — NOT `local-app-build`. It is one drawn surface plus overlays; do not infer a screen hierarchy or launch the DOM workflow.\n\
+                 - This app's surface is `canvas`. The host authorizes exactly one build workflow for this surface and refuses any other; you never name or choose a workflow yourself, and a request that named a different one would be refused. It is one drawn surface plus overlays; do not infer a screen hierarchy or the surface from source.\n\
                  - This workspace already contains the repository-verified Vite + Ionic foundation, scaffolded for a single DRAWN SURFACE. The host prepares app-local dependencies in `workspace/node_modules`. Do not run `npm create vite`, do not create a second scaffold, do not add a wrapper build layer, and do not run a package manager in this local-app workspace.\n\
                  - Host-managed files are `.gitignore`, `package.json`, `pnpm-lock.yaml`, `pnpm-workspace.yaml`, `jsconfig.json`, `index.html`, `vite.config.mjs`, `.lingxi/source-policy.json`, `lib/lingxi-bridge.js`, `lib/device-context.js`, `lib/platform-adapter.js`, `lib/lingxi-provider.jsx`, `{helper}`, and `styles/foundation.css`. Do not edit them; `{helper}` is the profile's checked-in runtime adapter.\n\
                  - Default editable entry points are `app/screens/game-screen.jsx`, `src/stores/game-store.js`, and `app/globals.css`. You may edit files under `app/`, `src/`, `styles/`, `public/`, and add non-host-managed helpers under `lib/`, but never edit the managed adapter `{helper}`.\n\
@@ -11842,9 +11844,17 @@ mod tests {
             "the guided contract must be overwritten, not appended to"
         );
         assert!(
-            contract.contains("local-canvas-build"),
+            contract.contains("This app's surface is `canvas`"),
             "the contract must be the one for the CONFIRMED surface: {contract}"
         );
+        for workflow in tool_workflow::LOCAL_APP_BUILD_WORKFLOWS {
+            assert!(
+                !contract.contains(workflow),
+                "the contract must not name a build workflow: the host authorizes one and \
+                 refuses any other, the model does not choose it — found `{workflow}` in \
+                 {contract}"
+            );
+        }
         assert!(
             contract.contains("runtime profile `canvas_2d` revision `1`"),
             "the formal contract must mirror the persisted profile identity: {contract}"
@@ -11880,6 +11890,84 @@ mod tests {
                 .state,
             local_apps::AppDependencyState::Ready
         );
+    }
+
+    /// Phase -1 (P-1.4), §19.3: the Host contract carries no workflow/skill/
+    /// agent names. `formal_workspace_contract` used to tell the model which
+    /// build workflow to launch and which one NOT to launch; that authority
+    /// is now the Host's alone — `LocalAppPluginBinding::resolve` computes the
+    /// one workflow authorized for a build target and `enforce` refuses a
+    /// caller-supplied mismatch by naming both ids in the error, so the model
+    /// never needs (and must never be told) a workflow name to act correctly.
+    /// This pins the absence for BOTH surfaces, not just the one the test
+    /// above happens to exercise, so a name reintroduced on only one branch
+    /// of `formal_workspace_contract`'s `match` still goes red — and over the
+    /// next-step guidance family as well, which is model-visible tool-result
+    /// prose that no test other than the component scanner covered.
+    #[tokio::test]
+    async fn lingxi_md_contract_prose_names_no_workflow() {
+        // The needle set is the PRODUCTION constant, never a pair of names
+        // typed in here: `tool_workflow::LOCAL_APP_BUILD_WORKFLOWS` is the one
+        // array in the codebase that answers "what are the Local App build
+        // workflow names", and the component scanner's module doc forbids a
+        // second copy of it for exactly the reason that applies here — add a
+        // third build workflow, name it in this prose, and a hardcoded pair
+        // would sail past while only the scanner (one allowlist entry away
+        // from being talked out of it) fires.
+        let workflows = tool_workflow::LOCAL_APP_BUILD_WORKFLOWS;
+        // An empty needle set would make every assertion below vacuously
+        // true, which is the failure mode this whole test exists to prevent.
+        assert!(
+            workflows.len() >= 2,
+            "the build-workflow constant must be non-trivially populated, or the absence \
+             assertions below prove nothing: {workflows:?}"
+        );
+
+        for surface in ["dom", "canvas"] {
+            let runtime = MockMobileLinuxRuntime::new(Duration::ZERO);
+            let (root, service, broker) = create_broker(false, Some(runtime)).await;
+            let shell = shell_app_fixture(&broker, &service).await;
+            let input =
+                confirmed_scaffold_input(&broker, &shell.id, "测试", "一个测试应用", surface).await;
+            broker
+                .scaffold_shell_app_value(input)
+                .await
+                .expect("scaffold");
+            let contract = fs::read_to_string(workspace_of(&root, &shell.id).join("LINGXI.md"))
+                .expect("read the formal contract");
+            for workflow in workflows {
+                assert!(
+                    !contract.contains(workflow),
+                    "surface {surface}: the contract must name no build workflow — the host \
+                     authorizes one and refuses any other, the model does not choose it — \
+                     found `{workflow}` in {contract}"
+                );
+            }
+        }
+
+        // The contract file is not the only Host-authored prose the model
+        // reads. The next-step guidance family is returned INSIDE the
+        // `LocalAppCreate` / `LocalAppScaffold` tool results, so a workflow
+        // name there reaches the model on exactly the turn it is deciding
+        // what to do next — and it is otherwise guarded only by the component
+        // scanner, whose documented ritual (change the constant, change the
+        // allowlist in the same diff) is a sanctioned route back in.
+        // Demonstrated by mutation: a build-workflow name planted in
+        // `scaffold_next_step_guidance` left this test GREEN before this arm
+        // existed, while only the scanner fired.
+        for (generator, prose) in [
+            ("scaffold_next_step_guidance", scaffold_next_step_guidance()),
+            ("create_next_step_guidance", create_next_step_guidance()),
+        ] {
+            for workflow in workflows {
+                assert!(
+                    !prose.contains(workflow),
+                    "{generator} must name no build workflow — it is model-visible tool-result \
+                     prose, and a name here reintroduces the model↔workflow-name coupling the \
+                     Host-side resolve/enforce exists to remove — found `{workflow}` in {prose}"
+                );
+            }
+        }
     }
 
     /// The branch's central guarantee, pinned at its PRODUCTION call site:

@@ -144,7 +144,7 @@ const PLUGIN_NAMESPACE: &str = "lingxi-local-app";
 /// exit code — is the thing that actually gates a regression. Phase 9 is
 /// expected to drive this to zero; any change to this constant must be
 /// accompanied by an equal change in the allowlist file, in the same diff.
-const ALLOWLIST_BASELINE_COUNT: usize = 40;
+const ALLOWLIST_BASELINE_COUNT: usize = 38;
 
 /// Scan roots, relative to the workspace root. Deny-by-default directory
 /// enumeration: every source file under each of these is scanned unless it is

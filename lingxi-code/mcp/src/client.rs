@@ -606,6 +606,7 @@ impl McpClient {
                     } else {
                         t.meta.always_load
                     },
+                    requires_user_interaction: t.meta.requires_user_interaction,
                 })
             })
             .collect())
@@ -1593,7 +1594,8 @@ struct ToolsListResponse {
 /// `_meta` block carries claude-code-specific hints
 /// (`anthropic/searchHint` for retrieval prefiltering, `anthropic/alwaysLoad`
 /// to force-include the tool in the agent prompt even when the search hint
-/// doesn't match).
+/// doesn't match, `anthropic/requiresUserInteraction` to mark a tool that
+/// needs fresh interaction on every call).
 #[derive(Debug, Deserialize)]
 struct RawTool {
     name: String,
@@ -1609,8 +1611,9 @@ struct RawTool {
 /// `None`/`false` when absent so non-claude-code servers decode cleanly.
 ///
 /// Public because the round-trip serde contract for the slashed key names
-/// (`anthropic/searchHint`, `anthropic/alwaysLoad`) is part of the
-/// load-bearing wire surface tests assert against.
+/// (`anthropic/searchHint`, `anthropic/alwaysLoad`,
+/// `anthropic/requiresUserInteraction`) is part of the load-bearing wire
+/// surface tests assert against.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct ToolMeta {
     /// Claude-code retrieval prefilter hint (e.g. `"shell"`, `"editor"`).
@@ -1620,6 +1623,19 @@ pub struct ToolMeta {
     /// search hint doesn't match the current task.
     #[serde(default, rename = "anthropic/alwaysLoad")]
     pub always_load: Option<bool>,
+    /// `true` when the tool needs a fresh, in-the-moment user interaction on
+    /// every invocation (e.g. an embedded OAuth/consent step) that a stored
+    /// "always allow" rule cannot satisfy. Oracle: `v._meta?.
+    /// ["anthropic/requiresUserInteraction"]===!0` (client.ts factory,
+    /// binary-confirmed @182519150); read back as `requiresUserInteraction()`
+    /// (@182520425) and folded into `suppressesAlwaysAllowRule` (@182520462).
+    /// Forwarded onto `traits::McpToolDto::requires_user_interaction` and from
+    /// there onto `tool-mcp`'s `MCPTool::requires_user_interaction` override,
+    /// so a persistent "always allow" grant is never offered/written for such
+    /// a tool (see `tui/src/permission_gate.rs` and
+    /// `tui/src/bottom_pane/permission_view.rs`).
+    #[serde(default, rename = "anthropic/requiresUserInteraction")]
+    pub requires_user_interaction: bool,
 }
 
 /// Wire-level shape of a `tools/call` response body.
@@ -2313,6 +2329,31 @@ mod constructor_tests {
         .await;
         assert_eq!(tools[0].always_load, None);
         assert_eq!(tools[1].always_load, Some(true));
+    }
+
+    // ── `requiresUserInteraction` (§27b) ─────────────────────────────────────
+
+    #[tokio::test]
+    async fn requires_user_interaction_meta_is_forwarded_onto_the_dto() {
+        let (conn, peer_tx, peer_rx) = paired_connection();
+        let client = McpClient::new("srv", std::path::PathBuf::from("/tmp/work"), conn).await;
+        let tools = list_tools_with(
+            client,
+            peer_tx,
+            peer_rx,
+            serde_json::json!([
+                { "name": "a", "description": "A", "inputSchema": {} },
+                { "name": "b", "description": "B", "inputSchema": {},
+                  "_meta": { "anthropic/requiresUserInteraction": true } },
+            ]),
+        )
+        .await;
+        assert_eq!(tools.len(), 2);
+        // No `_meta` at all ⇒ defaults to false (non-claude-code servers
+        // decode cleanly).
+        assert!(!tools[0].requires_user_interaction);
+        // `_meta.anthropic/requiresUserInteraction: true` ⇒ forwarded as-is.
+        assert!(tools[1].requires_user_interaction);
     }
 }
 

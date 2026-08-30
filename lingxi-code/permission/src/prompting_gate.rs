@@ -170,6 +170,10 @@ impl PermissionGate for InteractivePromptingGate {
             tool_name: name.to_string(),
             tool_input: input.clone(),
             default_decision: crate::defaults_per_tool::tool_default(name),
+            // This gate is a bare stdin y/N prompt with no persistent-rule
+            // concept at all (`PromptDecision::persist` is always false — see
+            // its doc comment), so there is nothing to suppress.
+            suppress_always_allow_rule: false,
         };
         match self.prompt_user(&request).await {
             Ok(d) if d.allow => PermissionDecision::Allow,
@@ -501,6 +505,7 @@ mod tests {
                 tool_name: "Bash".to_string(),
                 tool_input: serde_json::json!({}),
                 default_decision: PromptDefault::DenyByDefault,
+                suppress_always_allow_rule: false,
             })
             .await
             .expect("prompt_user should succeed on `y`");

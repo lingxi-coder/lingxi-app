@@ -235,6 +235,24 @@ pub struct McpToolDto {
     /// the `searchHint` matches. Forwarded from `client.ts:1779-1780`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub always_load: Option<bool>,
+    /// `true` when `tool._meta['anthropic/requiresUserInteraction'] === true`
+    /// (client.ts factory, binary-confirmed @182519150). Marks a tool that
+    /// needs fresh, in-the-moment user interaction on every call (e.g. an
+    /// embedded OAuth/consent step) — a stored "always allow" rule cannot
+    /// satisfy that, so a persistent grant must never be offered/written for
+    /// it (oracle `suppressesAlwaysAllowRule` @182520462). Forwarded onto
+    /// `MCPTool`'s `Tool::requires_user_interaction` override; consumed by
+    /// the TUI permission dialog to hide "Yes, allow always"
+    /// (`tui/src/permission_gate.rs`, `tui/src/bottom_pane/permission_view.rs`).
+    /// Defaults to `false` for servers/paths that don't set it.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub requires_user_interaction: bool,
+}
+
+/// `serde(skip_serializing_if)` helper for a plain `bool` field defaulting to
+/// `false` — keeps the common (unset) case terse in serialized form.
+fn is_false(b: &bool) -> bool {
+    !b
 }
 
 /// One resource advertised by an MCP server.

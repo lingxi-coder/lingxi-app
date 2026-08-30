@@ -393,6 +393,11 @@ pub struct MCPTool {
     search_hint: Option<String>,
     /// `_meta.anthropic/alwaysLoad` / server-level `alwaysLoad` opt-out.
     always_load: bool,
+    /// `_meta.anthropic/requiresUserInteraction` (§27b). `true` means this
+    /// tool needs a fresh interaction on every call, so a persisted "always
+    /// allow" grant must never be offered — see
+    /// `Tool::requires_user_interaction` below.
+    requires_user_interaction: bool,
 }
 
 /// Inspect a configured MCP server's auth/transport surface.
@@ -424,6 +429,7 @@ impl MCPTool {
             bound_desc: None,
             search_hint: None,
             always_load: true,
+            requires_user_interaction: false,
         }
     }
 
@@ -444,6 +450,7 @@ impl MCPTool {
         input_schema: Value,
         search_hint: Option<String>,
         always_load: bool,
+        requires_user_interaction: bool,
     ) -> Self {
         Self {
             ctx,
@@ -456,6 +463,7 @@ impl MCPTool {
             bound_desc: Some(mcp::truncate_description(&description).into_owned()),
             search_hint,
             always_load,
+            requires_user_interaction,
         }
     }
 
@@ -803,6 +811,16 @@ impl Tool for MCPTool {
     }
     fn search_hint(&self) -> Option<&str> {
         self.search_hint.as_deref()
+    }
+    /// §27b — `_meta.anthropic/requiresUserInteraction`. Oracle:
+    /// `requiresUserInteraction(){return Ee}` (@182520425), where `Ee` is the
+    /// same bit read from `_meta` at tool-list time. The dispatcher's
+    /// consumers use this to suppress a persistent "always allow" grant for
+    /// this tool (`suppressesAlwaysAllowRule:()=>Ee||Zt(x,v.name)` —
+    /// @182520462; the `Zt(x,v.name)` disjunct has no port equivalent and is
+    /// out of scope here).
+    fn requires_user_interaction(&self) -> bool {
+        self.requires_user_interaction
     }
     fn max_result_size_chars(&self) -> usize {
         30_000
@@ -1846,7 +1864,8 @@ impl Tool for ReadMcpResourceTool {
 ///
 /// For each `Connected` server we map each [`traits::McpToolDto`] →
 /// `Arc::new(MCPTool::new_for_tool(ctx, dto.full_name, dto.description,
-/// dto.input_schema, dto.search_hint, dto.always_load))`. The resulting tool's wire `name()` is the real
+/// dto.input_schema, dto.search_hint, dto.always_load,
+/// dto.requires_user_interaction))`. The resulting tool's wire `name()` is the real
 /// `mcp__<server>__<tool>` FQN, its `input_schema()` is the server's own
 /// `inputSchema`, and its `description()`/`prompt()` is the server's
 /// (truncated) description — so the model addresses it by name with the
@@ -1908,6 +1927,7 @@ pub async fn build_registered_mcp_tools(
                         dto.input_schema.clone(),
                         dto.search_hint.clone(),
                         dto.always_load.unwrap_or(false),
+                        dto.requires_user_interaction,
                     )) as Arc<dyn Tool>
                 })
                 .collect();
@@ -1969,6 +1989,46 @@ mod tests {
             Some(tool.max_result_size_chars()),
             "persistence threshold must NOT be the truncation cap"
         );
+    }
+
+    /// §27b: `MCPTool::new_for_tool`'s `requires_user_interaction` param must
+    /// override the `Tool` trait's `false` default (`tool-api/src/tool_trait.rs`)
+    /// — oracle `requiresUserInteraction(){return Ee}` (@182520425), where
+    /// `Ee` is the same per-tool `_meta.anthropic/requiresUserInteraction` bit.
+    #[test]
+    fn requires_user_interaction_reflects_the_per_tool_bit() {
+        let ctx = || {
+            tool_api::test_support::ctx_for_file_tools(
+                tool_api::test_support::make_dummy_fs(),
+                std::sync::Arc::new(telemetry::AnalyticsBus::new()),
+                vec![std::path::PathBuf::from("/tmp")],
+            )
+        };
+        let plain = MCPTool::new_for_tool(
+            ctx(),
+            "mcp__srv__plain".into(),
+            "d".into(),
+            serde_json::json!({}),
+            None,
+            false,
+            false,
+        );
+        assert!(!plain.requires_user_interaction());
+
+        let interactive = MCPTool::new_for_tool(
+            ctx(),
+            "mcp__srv__interactive".into(),
+            "d".into(),
+            serde_json::json!({}),
+            None,
+            false,
+            true,
+        );
+        assert!(interactive.requires_user_interaction());
+
+        // The generic dispatcher (no bound per-tool DTO) is not marked
+        // interactive — it has no single tool's `_meta` to read.
+        assert!(!MCPTool::new(ctx()).requires_user_interaction());
     }
 
     #[test]

@@ -519,6 +519,7 @@ impl McpTransport for PosixMcpTransport {
                 input_schema: t.input_schema,
                 search_hint: None,
                 always_load: None,
+                requires_user_interaction: false,
             })
             .collect())
     }

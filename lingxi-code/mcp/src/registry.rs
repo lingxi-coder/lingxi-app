@@ -3152,6 +3152,7 @@ mod tests {
                     input_schema: serde_json::json!({"type": "object"}),
                     search_hint: None,
                     always_load: None,
+                    requires_user_interaction: false,
                 })
                 .collect();
             Self {
@@ -3308,6 +3309,7 @@ mod tests {
                 full_name: String::new(),
                 search_hint: None,
                 always_load: Some(true),
+                requires_user_interaction: false,
             }])
         }
 

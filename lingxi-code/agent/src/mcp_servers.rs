@@ -87,11 +87,20 @@ pub fn agent_mcp_specs_to_scoped_configs(
         return Vec::new();
     }
     let mut out: Vec<ScopedAgentMcpServer> = Vec::new();
-    let mut upsert = |cfg: mcp::McpServerConfig, is_newly_created: bool| {
-        match out.iter_mut().find(|s| s.config.name == cfg.name) {
-            Some(slot) => *slot = ScopedAgentMcpServer { config: cfg, is_newly_created },
-            None => out.push(ScopedAgentMcpServer { config: cfg, is_newly_created }),
+    let mut upsert = |cfg: mcp::McpServerConfig, is_newly_created: bool| match out
+        .iter_mut()
+        .find(|s| s.config.name == cfg.name)
+    {
+        Some(slot) => {
+            *slot = ScopedAgentMcpServer {
+                config: cfg,
+                is_newly_created,
+            }
         }
+        None => out.push(ScopedAgentMcpServer {
+            config: cfg,
+            is_newly_created,
+        }),
     };
     for spec in &def.mcp_servers {
         let record = match spec {
@@ -253,7 +262,10 @@ mod tests {
         let cfgs = agent_mcp_specs_to_scoped_configs(&def, false, false, &existing);
         assert_eq!(cfgs.len(), 1);
         assert_eq!(cfgs[0].config.name, "slack");
-        assert!(!cfgs[0].is_newly_created, "resolved-by-name is NOT newly created");
+        assert!(
+            !cfgs[0].is_newly_created,
+            "resolved-by-name is NOT newly created"
+        );
         assert_eq!(
             cfgs[0].config.scope,
             mcp::ConfigScope::User,
@@ -286,7 +298,10 @@ mod tests {
         assert_eq!(cfgs.len(), 1);
         assert_eq!(cfgs[0].config.name, "docs");
         assert_eq!(cfgs[0].config.scope, mcp::ConfigScope::Agent);
-        assert!(cfgs[0].is_newly_created, "an inline record IS newly created");
+        assert!(
+            cfgs[0].is_newly_created,
+            "an inline record IS newly created"
+        );
         assert!(matches!(
             &cfgs[0].config.spec,
             traits::McpTransportSpec::Stdio { command, .. } if command == "npx"

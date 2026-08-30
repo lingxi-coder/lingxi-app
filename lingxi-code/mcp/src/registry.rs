@@ -881,9 +881,7 @@ impl McpRegistry {
         let table_key = agent_scope_table_key(agent_id, &config.name);
         let lifecycle = self.lifecycle_lock(&table_key);
         let _guard = lifecycle.lock().await;
-        let id = self
-            .connect_locked(config, Some(table_key.clone()))
-            .await?;
+        let id = self.connect_locked(config, Some(table_key.clone())).await?;
         Ok((id, table_key))
     }
 
@@ -5258,7 +5256,10 @@ mod tests {
             .await
             .unwrap();
 
-        assert_ne!(key_a, key_b, "distinct agent ids must get distinct table keys");
+        assert_ne!(
+            key_a, key_b,
+            "distinct agent ids must get distinct table keys"
+        );
         assert_ne!(id_a, id_b, "each spawn gets its own live connection");
         assert!(registry.get_config(&key_a).await.is_some());
         assert!(registry.get_config(&key_b).await.is_some());

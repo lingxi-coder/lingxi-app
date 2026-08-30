@@ -9525,9 +9525,13 @@ pub async fn build(
                 cfg.strict_mcp_config,
                 agent_id,
                 def,
-            )) as std::pin::Pin<
-                Box<dyn std::future::Future<Output = agent::agent_mcp_tools::AgentMcpToolSet> + Send>,
-            >
+            ))
+                as std::pin::Pin<
+                    Box<
+                        dyn std::future::Future<Output = agent::agent_mcp_tools::AgentMcpToolSet>
+                            + Send,
+                    >,
+                >
         }));
     }
     let profile_first_party_for_subagents = profile_first_party.clone();

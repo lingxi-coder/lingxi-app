@@ -1319,7 +1319,10 @@ impl PoolSubagentSpawner {
         inherit: SubagentInheritance,
         persistent: bool,
     ) -> Result<
-        (SubagentContext, Vec<crate::agent_mcp_tools::AgentMcpCleanupHandle>),
+        (
+            SubagentContext,
+            Vec<crate::agent_mcp_tools::AgentMcpCleanupHandle>,
+        ),
         SubagentSpawnError,
     > {
         // The parent / main-loop model this spawn resolves against: the request's
@@ -3717,7 +3720,8 @@ mod tests {
                 false,
             )
             .await
-            .expect("provider-qualified context").0;
+            .expect("provider-qualified context")
+            .0;
         assert_eq!(crate::runner::resolve_model(&context), "deepseek-v4-flash");
         assert_eq!(context.model_profile.as_deref(), Some("deepseek"));
     }
@@ -3753,7 +3757,8 @@ mod tests {
                 false,
             )
             .await
-            .expect("custom Anthropic parent selection").0;
+            .expect("custom Anthropic parent selection")
+            .0;
 
         assert_eq!(crate::runner::resolve_model(&context), "claude-opus-4-8");
         assert_eq!(context.model_profile, None);
@@ -3795,7 +3800,8 @@ mod tests {
                 false,
             )
             .await
-            .expect("catalog-resolved custom Anthropic parent").0;
+            .expect("catalog-resolved custom Anthropic parent")
+            .0;
 
         assert_eq!(crate::runner::resolve_model(&context), "claude-opus-4-8");
         assert_eq!(context.model_profile, None);
@@ -3831,7 +3837,8 @@ mod tests {
                 false,
             )
             .await
-            .expect("statusline child context").0;
+            .expect("statusline child context")
+            .0;
 
         assert_eq!(crate::runner::resolve_model(&context), "claude-sonnet-5");
         assert_eq!(
@@ -3896,7 +3903,8 @@ mod tests {
                 false,
             )
             .await
-            .expect("explicit provider-qualified spawn is self-contained").0;
+            .expect("explicit provider-qualified spawn is self-contained")
+            .0;
 
         assert_eq!(crate::runner::resolve_model(&context), "deepseek-v4-flash");
         assert_eq!(context.model_profile.as_deref(), Some("deepseek"));
@@ -3943,7 +3951,8 @@ mod tests {
                 false,
             )
             .await
-            .expect("barred model inherits the permitted parent").0;
+            .expect("barred model inherits the permitted parent")
+            .0;
 
         assert_eq!(crate::runner::resolve_model(&context), "claude-opus-4-7");
         assert_eq!(context.model_profile.as_deref(), Some("anthropic"));
@@ -3978,7 +3987,8 @@ mod tests {
                 false,
             )
             .await
-            .expect("live provider selection").0;
+            .expect("live provider selection")
+            .0;
 
         assert_eq!(crate::runner::resolve_model(&context), "claude-fable-5");
         assert_eq!(context.model_profile, None);
@@ -4049,7 +4059,8 @@ mod tests {
         let ctx = spawner
             .build_subagent_context(&req, inherit, false)
             .await
-            .expect("subagent context should build").0;
+            .expect("subagent context should build")
+            .0;
         assert!(
             matches!(&ctx.agent_definition.model, AgentModel::Explicit(m) if m == "claude-sonnet-5"),
             "nested spawn inherits its immediate parent's resolved model, got {:?}",
@@ -4188,7 +4199,8 @@ mod tests {
                     false,
                 )
                 .await
-                .expect("spawn context").0
+                .expect("spawn context")
+                .0
         };
 
         let baseline = build().await;
@@ -4764,7 +4776,8 @@ mod tests {
         let plan_ctx = spawner
             .build_subagent_context(&plan_req, mk_inherit(), false)
             .await
-            .expect("plan-mode context should build").0;
+            .expect("plan-mode context should build")
+            .0;
         assert_eq!(
             plan_ctx.permission_mode_override, None,
             "the deprecated mode:\"plan\" call param must be ignored (inherit the live mode)"
@@ -4775,7 +4788,8 @@ mod tests {
         let none_ctx = spawner
             .build_subagent_context(&base_req(), mk_inherit(), false)
             .await
-            .expect("default context should build").0;
+            .expect("default context should build")
+            .0;
         assert_eq!(
             none_ctx.permission_mode_override, None,
             "a mode-less spawn of a Bubble-default agent inherits the live mode"
@@ -4787,7 +4801,8 @@ mod tests {
         let escalate_ctx = spawner
             .build_subagent_context(&escalate_req, mk_inherit(), false)
             .await
-            .expect("escalating context should still build").0;
+            .expect("escalating context should still build")
+            .0;
         assert_eq!(
             escalate_ctx.permission_mode_override, None,
             "the deprecated mode call param cannot escalate the child's mode"
@@ -4800,7 +4815,8 @@ mod tests {
         let fork_ctx = spawner
             .build_subagent_context(&fork_req, mk_inherit(), false)
             .await
-            .expect("fork context should build").0;
+            .expect("fork context should build")
+            .0;
         assert_eq!(
             fork_ctx.permission_mode_override, None,
             "the fork path never applies a mode override"
@@ -4867,7 +4883,8 @@ mod tests {
         let ctx = spawner
             .build_subagent_context(&req, inherit, false)
             .await
-            .expect("definition-plan context should build").0;
+            .expect("definition-plan context should build")
+            .0;
         assert_eq!(
             ctx.permission_mode_override.as_deref(),
             Some("plan"),
@@ -4937,7 +4954,8 @@ mod tests {
         let ctx = spawner
             .build_subagent_context(&req, inherit, false)
             .await
-            .expect("plan-mode context should build").0;
+            .expect("plan-mode context should build")
+            .0;
         let names: Vec<&str> = ctx
             .tool_schemas
             .iter()
@@ -5000,7 +5018,8 @@ mod tests {
         let persistent = spawner
             .build_subagent_context(&req, mk_inherit(), true)
             .await
-            .expect("persistent context should build").0;
+            .expect("persistent context should build")
+            .0;
         assert!(
             persistent.persistent,
             "persistent agent must park (come to rest)"
@@ -5013,7 +5032,8 @@ mod tests {
         let one_shot = spawner
             .build_subagent_context(&req, mk_inherit(), false)
             .await
-            .expect("one-shot context should build").0;
+            .expect("one-shot context should build")
+            .0;
         assert!(
             !one_shot.persistent,
             "the one-shot spawn path must NOT park"
@@ -5217,7 +5237,8 @@ mod tests {
         let ctx = spawner
             .build_subagent_context(&req, mk_inherit(), false)
             .await
-            .expect("context should build").0;
+            .expect("context should build")
+            .0;
         let sys = ctx.rendered_system_prompt.as_deref().unwrap();
         assert!(
             sys.ends_with("\n\n<env>\nMODEL: claude-opus-4-8[1m]\nCWD: <none>\n</env>"),
@@ -5233,7 +5254,8 @@ mod tests {
         let wt_ctx = spawner
             .build_subagent_context(&wt_req, mk_inherit(), false)
             .await
-            .expect("worktree cwd context should build").0;
+            .expect("worktree cwd context should build")
+            .0;
         let wt_sys = wt_ctx.rendered_system_prompt.as_deref().unwrap();
         assert!(
             wt_sys.contains("CWD: /repo/.lingxi/worktrees/agent-x"),
@@ -5250,7 +5272,8 @@ mod tests {
         let fork_ctx = spawner
             .build_subagent_context(&req, mk_inherit(), false)
             .await
-            .expect("fork context should build").0;
+            .expect("fork context should build")
+            .0;
         assert_eq!(
             fork_ctx.rendered_system_prompt.as_deref(),
             Some("PARENT VERBATIM"),
@@ -5305,7 +5328,8 @@ mod tests {
         let ctx = spawner
             .build_subagent_context(&request, inherit, true)
             .await
-            .expect("context should build").0;
+            .expect("context should build")
+            .0;
 
         assert_eq!(ctx.agent_name.as_deref(), Some("researcher"));
         assert_eq!(ctx.team_name.as_deref(), Some("alpha"));

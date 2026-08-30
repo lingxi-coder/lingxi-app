@@ -44,7 +44,8 @@ pub struct AgentMcpCleanupHandle {
     /// this must never revoke OAuth tokens). `Err` carries a display-ready
     /// message for the log line above; never fatal to the caller.
     #[allow(clippy::type_complexity)]
-    pub run: Arc<dyn Fn() -> Pin<Box<dyn Future<Output = Result<(), String>> + Send>> + Send + Sync>,
+    pub run:
+        Arc<dyn Fn() -> Pin<Box<dyn Future<Output = Result<(), String>> + Send>> + Send + Sync>,
 }
 
 /// The tools + teardown handles built for one subagent spawn's per-agent MCP

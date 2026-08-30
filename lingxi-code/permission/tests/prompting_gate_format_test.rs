@@ -16,6 +16,7 @@ fn allow_by_default_round_trips() {
         tool_name: "Read".to_string(),
         tool_input: json!({}),
         default_decision: PromptDefault::AllowByDefault,
+        suppress_always_allow_rule: false,
     };
     match r {
         PermissionRequest::ToolUseConfirm {
@@ -31,6 +32,7 @@ fn deny_by_default_round_trips() {
         tool_name: "Bash".to_string(),
         tool_input: json!({}),
         default_decision: PromptDefault::DenyByDefault,
+        suppress_always_allow_rule: false,
     };
     match r {
         PermissionRequest::ToolUseConfirm {

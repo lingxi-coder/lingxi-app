@@ -23,7 +23,7 @@ use async_trait::async_trait;
 use mcp::registry::McpRegistry;
 use mcp::McpClientError;
 use once_cell::sync::Lazy;
-use permission::result::PermissionMetadata;
+use permission::result::{PermissionMetadata, PermissionPrompt};
 use permission::{PermissionDecisionReason, PermissionResult};
 use serde_json::{json, Value};
 use telemetry::sink::{AnalyticsValue, LogEventMetadata};
@@ -348,6 +348,10 @@ fn persist_id_seed() -> (u128, String) {
 
 // -- Permission shape (shared by all four MCP tools) -------------------------
 
+/// Oracle-byte-locked ask/passthrough message on the MCP factory's
+/// `checkPermissions` (@182520945).
+const MCP_TOOL_REQUIRES_PERMISSION_MESSAGE: &str = "MCPTool requires permission.";
+
 fn allow_mcp(reason: &str) -> PermissionResult {
     PermissionResult::Allow {
         reason: PermissionDecisionReason::Other {
@@ -393,6 +397,11 @@ pub struct MCPTool {
     search_hint: Option<String>,
     /// `_meta.anthropic/alwaysLoad` / server-level `alwaysLoad` opt-out.
     always_load: bool,
+    /// `_meta.anthropic/requiresUserInteraction` (§27b). `true` means this
+    /// tool needs a fresh interaction on every call, so a persisted "always
+    /// allow" grant must never be offered — see
+    /// `Tool::requires_user_interaction` below.
+    requires_user_interaction: bool,
 }
 
 /// Inspect a configured MCP server's auth/transport surface.
@@ -424,6 +433,7 @@ impl MCPTool {
             bound_desc: None,
             search_hint: None,
             always_load: true,
+            requires_user_interaction: false,
         }
     }
 
@@ -444,6 +454,7 @@ impl MCPTool {
         input_schema: Value,
         search_hint: Option<String>,
         always_load: bool,
+        requires_user_interaction: bool,
     ) -> Self {
         Self {
             ctx,
@@ -456,6 +467,7 @@ impl MCPTool {
             bound_desc: Some(mcp::truncate_description(&description).into_owned()),
             search_hint,
             always_load,
+            requires_user_interaction,
         }
     }
 
@@ -804,6 +816,16 @@ impl Tool for MCPTool {
     fn search_hint(&self) -> Option<&str> {
         self.search_hint.as_deref()
     }
+    /// §27b — `_meta.anthropic/requiresUserInteraction`. Oracle:
+    /// `requiresUserInteraction(){return Ee}` (@182520425), where `Ee` is the
+    /// same bit read from `_meta` at tool-list time. The dispatcher's
+    /// consumers use this to suppress a persistent "always allow" grant for
+    /// this tool (`suppressesAlwaysAllowRule:()=>Ee||Zt(x,v.name)` —
+    /// @182520462; the `Zt(x,v.name)` disjunct has no port equivalent and is
+    /// out of scope here).
+    fn requires_user_interaction(&self) -> bool {
+        self.requires_user_interaction
+    }
     fn max_result_size_chars(&self) -> usize {
         30_000
     }
@@ -840,7 +862,52 @@ impl Tool for MCPTool {
         InterruptBehavior::Cancel
     }
 
+    /// §27b — the MCP factory's own `checkPermissions` arm (@182520945):
+    ///
+    /// ```js
+    /// if(Ee)return{behavior:"ask",message:"MCPTool requires permission.",
+    ///              suggestions:[],suppressAlwaysAllowRule:!0};
+    /// return{behavior:"passthrough",message:"MCPTool requires permission.",…}
+    /// ```
+    ///
+    /// `Ee` is the same `_meta.anthropic/requiresUserInteraction` bit
+    /// [`Self::requires_user_interaction`] reads. Without this arm the dialog
+    /// change landed with §27b never engages at all: the tool is allowed
+    /// outright and no prompt is ever built for the suppressed always-allow
+    /// row to be missing from.
+    ///
+    /// `suppressAlwaysAllowRule` is not a field here — the port carries it as
+    /// [`traits::permission_gate::PermissionCheckContext::requires_user_interaction`],
+    /// which `turn_loop` fills from [`Self::requires_user_interaction`] and
+    /// `TuiPermissionGate` reads to hide the persistent-grant row.
+    ///
+    /// KNOWN NARROWING (reported, not fixed here): the oracle raises this ask
+    /// inside `Aon`, whose tool-wide ALLOW-rule arm (`W=NLe(he(r),e)`) runs
+    /// AFTER it, so a pre-existing `mcp__srv__tool` allow rule still prompts.
+    /// `turn_loop` only consults a tool's `check_permissions` when no rule
+    /// matched, so an allow rule still bypasses this arm in the port.
     async fn check_permissions(&self, _: &Value, _: &ToolUseContext) -> PermissionResult {
+        if self.requires_user_interaction {
+            return PermissionResult::Ask {
+                // The oracle's tool-level ask carries no `decisionReason`; the
+                // gate arm that forwards it names
+                // `{type:"other",reason:"requiresUserInteraction"}`
+                // (@160210348), which is the reason the UI ends up showing.
+                reason: PermissionDecisionReason::Other {
+                    reason: "requiresUserInteraction".into(),
+                },
+                prompt: PermissionPrompt {
+                    title: self.name().to_string(),
+                    // Byte-locked `message:"MCPTool requires permission."`.
+                    message: MCP_TOOL_REQUIRES_PERMISSION_MESSAGE.to_string(),
+                    // `suggestions:[]` — the oracle deliberately offers NO
+                    // "add an allow rule" suggestion for such a tool.
+                    options: Vec::new(),
+                },
+                pending_classifier_check: None,
+                metadata: PermissionMetadata::default(),
+            };
+        }
         allow_mcp("MCP server tool dispatch")
     }
 
@@ -1846,7 +1913,8 @@ impl Tool for ReadMcpResourceTool {
 ///
 /// For each `Connected` server we map each [`traits::McpToolDto`] →
 /// `Arc::new(MCPTool::new_for_tool(ctx, dto.full_name, dto.description,
-/// dto.input_schema, dto.search_hint, dto.always_load))`. The resulting tool's wire `name()` is the real
+/// dto.input_schema, dto.search_hint, dto.always_load,
+/// dto.requires_user_interaction))`. The resulting tool's wire `name()` is the real
 /// `mcp__<server>__<tool>` FQN, its `input_schema()` is the server's own
 /// `inputSchema`, and its `description()`/`prompt()` is the server's
 /// (truncated) description — so the model addresses it by name with the
@@ -1908,6 +1976,7 @@ pub async fn build_registered_mcp_tools(
                         dto.input_schema.clone(),
                         dto.search_hint.clone(),
                         dto.always_load.unwrap_or(false),
+                        dto.requires_user_interaction,
                     )) as Arc<dyn Tool>
                 })
                 .collect();
@@ -1969,6 +2038,108 @@ mod tests {
             Some(tool.max_result_size_chars()),
             "persistence threshold must NOT be the truncation cap"
         );
+    }
+
+    /// §27b's LOAD-BEARING half: the oracle's MCP factory
+    /// `checkPermissions` raises an ASK for a tool carrying
+    /// `_meta.anthropic/requiresUserInteraction`
+    /// (`if(Ee)return{behavior:"ask",message:"MCPTool requires permission.",
+    /// suggestions:[],suppressAlwaysAllowRule:!0}`, @182520945).
+    ///
+    /// Without it the §27b dialog change is unreachable: `MCPTool` allowed
+    /// EVERY call outright, so no permission prompt was ever built and the
+    /// suppressed "Yes, allow always" row had no dialog to be missing from.
+    /// The bit alone (asserted by the sibling test) does not prove this.
+    #[tokio::test]
+    async fn requires_user_interaction_raises_the_factory_ask() {
+        let ctx = || {
+            tool_api::test_support::ctx_for_file_tools(
+                tool_api::test_support::make_dummy_fs(),
+                std::sync::Arc::new(telemetry::AnalyticsBus::new()),
+                vec![std::path::PathBuf::from("/tmp")],
+            )
+        };
+        let use_ctx = tool_api::test_support::fresh_ctx();
+
+        let interactive = MCPTool::new_for_tool(
+            ctx(),
+            "mcp__srv__interactive".into(),
+            "d".into(),
+            serde_json::json!({}),
+            None,
+            false,
+            true,
+        );
+        let decision = interactive
+            .check_permissions(&serde_json::json!({}), &use_ctx)
+            .await;
+        let PermissionResult::Ask { reason, prompt, .. } = decision else {
+            panic!("a requiresUserInteraction tool must ASK, got: {decision:?}");
+        };
+        assert_eq!(prompt.message, "MCPTool requires permission.");
+        assert!(
+            prompt.options.is_empty(),
+            "the oracle's arm carries `suggestions:[]`"
+        );
+        assert!(
+            matches!(&reason, PermissionDecisionReason::Other { reason } if reason == "requiresUserInteraction"),
+            "unexpected reason: {reason:?}"
+        );
+
+        // A plain MCP tool is unaffected — the passthrough/allow arm stands.
+        let plain = MCPTool::new_for_tool(
+            ctx(),
+            "mcp__srv__plain".into(),
+            "d".into(),
+            serde_json::json!({}),
+            None,
+            false,
+            false,
+        );
+        assert!(matches!(
+            plain.check_permissions(&serde_json::json!({}), &use_ctx).await,
+            PermissionResult::Allow { .. }
+        ));
+    }
+
+    /// §27b: `MCPTool::new_for_tool`'s `requires_user_interaction` param must
+    /// override the `Tool` trait's `false` default (`tool-api/src/tool_trait.rs`)
+    /// — oracle `requiresUserInteraction(){return Ee}` (@182520425), where
+    /// `Ee` is the same per-tool `_meta.anthropic/requiresUserInteraction` bit.
+    #[test]
+    fn requires_user_interaction_reflects_the_per_tool_bit() {
+        let ctx = || {
+            tool_api::test_support::ctx_for_file_tools(
+                tool_api::test_support::make_dummy_fs(),
+                std::sync::Arc::new(telemetry::AnalyticsBus::new()),
+                vec![std::path::PathBuf::from("/tmp")],
+            )
+        };
+        let plain = MCPTool::new_for_tool(
+            ctx(),
+            "mcp__srv__plain".into(),
+            "d".into(),
+            serde_json::json!({}),
+            None,
+            false,
+            false,
+        );
+        assert!(!plain.requires_user_interaction());
+
+        let interactive = MCPTool::new_for_tool(
+            ctx(),
+            "mcp__srv__interactive".into(),
+            "d".into(),
+            serde_json::json!({}),
+            None,
+            false,
+            true,
+        );
+        assert!(interactive.requires_user_interaction());
+
+        // The generic dispatcher (no bound per-tool DTO) is not marked
+        // interactive — it has no single tool's `_meta` to read.
+        assert!(!MCPTool::new(ctx()).requires_user_interaction());
     }
 
     #[test]

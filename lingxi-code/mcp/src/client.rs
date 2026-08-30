@@ -261,6 +261,15 @@ pub struct McpClient {
     /// [`McpTransportKind::Stdio`] (claude-code's `e?.type ?? "stdio"`) until the
     /// registry sets the real kind via [`Self::with_transport_kind`].
     transport_kind: McpTransportKind,
+    /// The server's connection URL, when it has one (`None` for `stdio`).
+    /// Feeds the §20a per-server schema-normalization gate
+    /// ([`crate::tool_schema::decide_tool_schema`]) the same way
+    /// `protocol_negotiation.rs`'s denylist gate consults a server's URL.
+    /// Defaults to `None` (byte-identical to omitting [`Self::with_server_url`]
+    /// entirely) until a caller threads the resolved
+    /// [`crate::McpTransportSpec`]'s URL through — no production call site
+    /// does yet; see the §20a batch report.
+    server_url: Option<String>,
 }
 
 impl McpClient {
@@ -365,6 +374,7 @@ impl McpClient {
             config_timeout_ms: None,
             config_always_load: false,
             transport_kind: McpTransportKind::Stdio,
+            server_url: None,
         }
     }
 
@@ -391,6 +401,19 @@ impl McpClient {
     #[must_use]
     pub fn with_transport_kind(mut self, kind: McpTransportKind) -> Self {
         self.transport_kind = kind;
+        self
+    }
+
+    /// Builder that records the server's connection URL (`None` for
+    /// `stdio`/url-less transports) so [`Self::list_tools`] can consult the
+    /// §20a per-server schema-normalization gate
+    /// ([`crate::tool_schema::decide_tool_schema`]) the same way a remote
+    /// server's URL feeds `protocol_negotiation.rs`'s denylist gate. Not
+    /// calling this is byte-identical to a url-less server for that gate
+    /// (only a bare `"*"` allowlist entry can still match).
+    #[must_use]
+    pub fn with_server_url(mut self, url: Option<String>) -> Self {
+        self.server_url = url;
         self
     }
 
@@ -523,7 +546,31 @@ impl McpClient {
         Ok(resp
             .tools
             .into_iter()
-            .map(|t| {
+            .filter_map(|t| {
+                // §20a — normalize or drop the tool's `inputSchema` before it
+                // reaches the model (oracle `Wrt`/`qrt`, see
+                // `crate::tool_schema`). Must run before the DTO is built so
+                // a dropped tool never gets constructed.
+                let decision =
+                    crate::tool_schema::decide_tool_schema(self.server_url.as_deref(), &t.input_schema);
+                if let Some(reason) = decision.drop_reason {
+                    tracing::warn!(
+                        server = %self.server_name,
+                        tool = %t.name,
+                        "Skipping tool \"{}\": {reason}. Other tools from this server remain available.",
+                        t.name
+                    );
+                    return None;
+                }
+                if let Some(warning) = &decision.warning {
+                    tracing::debug!(
+                        server = %self.server_name,
+                        tool = %t.name,
+                        "Tool \"{}\" {warning}",
+                        t.name
+                    );
+                }
+
                 // Normalize BOTH segments (server + tool) — 1:1 with TS
                 // `buildMcpToolName` = `getMcpPrefix(server) +
                 // normalizeNameForMCP(toolName)` (`mcpStringUtils.ts:51`).
@@ -533,11 +580,19 @@ impl McpClient {
                 } else {
                     format!("mcp__{normalized_server}__{norm_tool}")
                 };
-                McpToolDto {
+                let description = match decision.description_note {
+                    // oracle: `E.description ? \`${note}\n\n${description}\` : note`.
+                    Some(note) if !t.description.is_empty() => {
+                        format!("{note}\n\n{}", t.description)
+                    }
+                    Some(note) => note,
+                    None => t.description,
+                };
+                Some(McpToolDto {
                     full_name,
                     server_name: self.server_name.clone(),
-                    description: truncate_description(&t.description).into_owned(),
-                    input_schema: t.input_schema,
+                    description: truncate_description(&description).into_owned(),
+                    input_schema: decision.schema,
                     tool_name: t.name,
                     // Forward `_meta.anthropic/searchHint` + `alwaysLoad`
                     // from the wire (client.ts:1777-1780). Both default
@@ -551,7 +606,8 @@ impl McpClient {
                     } else {
                         t.meta.always_load
                     },
-                }
+                    requires_user_interaction: t.meta.requires_user_interaction,
+                })
             })
             .collect())
     }
@@ -1538,7 +1594,8 @@ struct ToolsListResponse {
 /// `_meta` block carries claude-code-specific hints
 /// (`anthropic/searchHint` for retrieval prefiltering, `anthropic/alwaysLoad`
 /// to force-include the tool in the agent prompt even when the search hint
-/// doesn't match).
+/// doesn't match, `anthropic/requiresUserInteraction` to mark a tool that
+/// needs fresh interaction on every call).
 #[derive(Debug, Deserialize)]
 struct RawTool {
     name: String,
@@ -1554,8 +1611,9 @@ struct RawTool {
 /// `None`/`false` when absent so non-claude-code servers decode cleanly.
 ///
 /// Public because the round-trip serde contract for the slashed key names
-/// (`anthropic/searchHint`, `anthropic/alwaysLoad`) is part of the
-/// load-bearing wire surface tests assert against.
+/// (`anthropic/searchHint`, `anthropic/alwaysLoad`,
+/// `anthropic/requiresUserInteraction`) is part of the load-bearing wire
+/// surface tests assert against.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct ToolMeta {
     /// Claude-code retrieval prefilter hint (e.g. `"shell"`, `"editor"`).
@@ -1565,6 +1623,19 @@ pub struct ToolMeta {
     /// search hint doesn't match the current task.
     #[serde(default, rename = "anthropic/alwaysLoad")]
     pub always_load: Option<bool>,
+    /// `true` when the tool needs a fresh, in-the-moment user interaction on
+    /// every invocation (e.g. an embedded OAuth/consent step) that a stored
+    /// "always allow" rule cannot satisfy. Oracle: `v._meta?.
+    /// ["anthropic/requiresUserInteraction"]===!0` (client.ts factory,
+    /// binary-confirmed @182519150); read back as `requiresUserInteraction()`
+    /// (@182520425) and folded into `suppressesAlwaysAllowRule` (@182520462).
+    /// Forwarded onto `traits::McpToolDto::requires_user_interaction` and from
+    /// there onto `tool-mcp`'s `MCPTool::requires_user_interaction` override,
+    /// so a persistent "always allow" grant is never offered/written for such
+    /// a tool (see `tui/src/permission_gate.rs` and
+    /// `tui/src/bottom_pane/permission_view.rs`).
+    #[serde(default, rename = "anthropic/requiresUserInteraction")]
+    pub requires_user_interaction: bool,
 }
 
 /// Wire-level shape of a `tools/call` response body.
@@ -2258,6 +2329,31 @@ mod constructor_tests {
         .await;
         assert_eq!(tools[0].always_load, None);
         assert_eq!(tools[1].always_load, Some(true));
+    }
+
+    // ── `requiresUserInteraction` (§27b) ─────────────────────────────────────
+
+    #[tokio::test]
+    async fn requires_user_interaction_meta_is_forwarded_onto_the_dto() {
+        let (conn, peer_tx, peer_rx) = paired_connection();
+        let client = McpClient::new("srv", std::path::PathBuf::from("/tmp/work"), conn).await;
+        let tools = list_tools_with(
+            client,
+            peer_tx,
+            peer_rx,
+            serde_json::json!([
+                { "name": "a", "description": "A", "inputSchema": {} },
+                { "name": "b", "description": "B", "inputSchema": {},
+                  "_meta": { "anthropic/requiresUserInteraction": true } },
+            ]),
+        )
+        .await;
+        assert_eq!(tools.len(), 2);
+        // No `_meta` at all ⇒ defaults to false (non-claude-code servers
+        // decode cleanly).
+        assert!(!tools[0].requires_user_interaction);
+        // `_meta.anthropic/requiresUserInteraction: true` ⇒ forwarded as-is.
+        assert!(tools[1].requires_user_interaction);
     }
 }
 

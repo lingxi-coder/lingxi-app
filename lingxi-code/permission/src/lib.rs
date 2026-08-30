@@ -44,6 +44,7 @@ pub mod host_context;
 pub mod internal_writes;
 pub mod layers;
 pub mod loader;
+pub mod mcp_policy;
 pub mod mode;
 pub mod mode_policy;
 mod model_path;
@@ -120,6 +121,10 @@ pub use loader::{
     bypass_permissions_disabled_from_settings_json, classify_all_shell_from_settings_json,
     default_mode_from_settings_json, permission_rule_file_warning, permission_rule_startup_warning,
     permission_rules_from_settings_json,
+};
+pub use mcp_policy::{
+    mcp_server_policy_rules, upstream_name_drift_warning, McpServerPolicyView, McpServerToolDecl,
+    McpToolMaxPermission, McpToolPermissionPolicy,
 };
 pub use mode::{next_permission_mode, PermissionMode};
 pub use mode_policy::is_plan_safe_tool;

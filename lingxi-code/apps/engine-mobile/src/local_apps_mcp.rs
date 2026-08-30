@@ -720,6 +720,7 @@ impl LocalAppsMcpTransport {
             full_name: String::new(),
             search_hint: Some("local app".into()),
             always_load: Some(true),
+            requires_user_interaction: false,
         }
     }
 

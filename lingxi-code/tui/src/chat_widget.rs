@@ -6752,6 +6752,7 @@ mod tests {
             tool_name: "Bash".to_string(),
             tool_input: serde_json::json!({ "command": "ls -la" }),
             default_decision: permission::gate::PromptDefault::DenyByDefault,
+            suppress_always_allow_rule: false,
         };
         (
             PermissionExchange {

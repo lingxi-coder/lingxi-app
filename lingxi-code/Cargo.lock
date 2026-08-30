@@ -3507,6 +3507,7 @@ version = "0.12.0"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
+ "boon",
  "branding",
  "bytes",
  "futures-util",
@@ -7375,6 +7376,7 @@ dependencies = [
  "async-trait",
  "branding",
  "engine",
+ "mcp",
  "once_cell",
  "permission",
  "protocol",

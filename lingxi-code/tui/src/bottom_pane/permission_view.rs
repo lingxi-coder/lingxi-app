@@ -57,13 +57,21 @@ const BYPASS_BODY_2: &str = "By proceeding, you accept all responsibility for ac
 
 /// The variant-specific interaction model behind the shared response channel.
 enum Prompt {
-    /// `ToolUseConfirm` / `ExitPlanMode`: a 3-option select dialog whose
-    /// option order is always allow-once / allow-always / deny.
+    /// `ToolUseConfirm` / `ExitPlanMode`: a select dialog whose row order is
+    /// always allow-once / allow-always / deny — UNLESS
+    /// `always_allow_offered` is `false`, in which case the middle row is
+    /// omitted (§27b: a tool that requires fresh interaction on every call
+    /// must never offer a persistent "always allow" grant, since the tool
+    /// would ignore a stored rule anyway).
     Select {
         dialog: DialogView,
         /// `Some(rows)` pins the locked `ToolUseConfirm` viewport height;
         /// `None` sizes to the dialog content (plan approval).
         fixed_height: Option<u16>,
+        /// `false` ⇒ the dialog was built with 2 rows (allow-once / deny),
+        /// so a `Selected(1)` outcome means Deny, not AllowAlways. Always
+        /// `true` for `ExitPlanMode` (no suppression concept there).
+        always_allow_offered: bool,
     },
     /// `BypassPermissionsMode`: type `yes` + Enter to enable (`AllowOnce`);
     /// `Esc`/`n` deny. The buffer keeps typos visible for Backspace editing.
@@ -93,45 +101,56 @@ impl PermissionView {
             PermissionRequest::ToolUseConfirm {
                 tool_name,
                 tool_input,
+                suppress_always_allow_rule,
                 ..
             } => {
                 let mut input = tool_input.to_string();
                 if input.chars().count() > 68 {
                     input = format!("{}…", input.chars().take(67).collect::<String>());
                 }
+                let always_allow_offered = !*suppress_always_allow_rule;
+                let deny_row = format!(
+                    "No, and tell {} what to do differently (esc)",
+                    branding::PRODUCT_NAME
+                );
+                // PERM-02 (claude-code 2.1.238 @302829842). The oracle
+                // builds this row set as
+                //   [{label:"Yes",value:"yes"},
+                //    ...(persistRow ? [{label:<composed>,value:"yes-dont-ask-again"}] : []),
+                //    {label:"No, and tell Claude what to do differently (esc)",value:"no"}]
+                // Rows 1 and 3 are fixed strings and are now byte-exact
+                // (with the LingXi rebrand in row 3).
+                //
+                // Row 2 is NOT fixed upstream: the oracle composes it
+                // from the permission result's `suggestions`
+                // (`ma0` @302931138 renders "Yes, and don't ask again
+                // for " + the bolded rule display) and OMITS the row
+                // entirely when no rule can be derived. The port has
+                // `permission_suggestions` as a field but no engine
+                // source for it (hooks/src/hook_payload.rs:639,
+                // executor.rs:2184 pass None), so the rule display
+                // cannot be composed here yet and the row stays
+                // unconditional with its own wording. Closing that gap
+                // is the suggestions engine, not a copy fix.
+                //
+                // §27b: the oracle ALSO omits row 2 outright when the tool's
+                // `suppressesAlwaysAllowRule()` is true (@182520462/@172369864
+                // `showAlwaysAllow:...&&e.tool.suppressesAlwaysAllowRule?.(e.input)!==!0&&...`)
+                // — a persisted rule would be written but then ignored by a
+                // tool that needs fresh interaction on every call.
+                let rows = if always_allow_offered {
+                    vec!["Yes".to_string(), "Yes, allow always".to_string(), deny_row]
+                } else {
+                    vec!["Yes".to_string(), deny_row]
+                };
                 Prompt::Select {
                     dialog: DialogView::new(
                         "Permission required",
                         vec![format!("{who} wants to use {tool_name}:"), input],
-                        // PERM-02 (claude-code 2.1.238 @302829842). The oracle
-                        // builds this row set as
-                        //   [{label:"Yes",value:"yes"},
-                        //    ...(persistRow ? [{label:<composed>,value:"yes-dont-ask-again"}] : []),
-                        //    {label:"No, and tell Claude what to do differently (esc)",value:"no"}]
-                        // Rows 1 and 3 are fixed strings and are now byte-exact
-                        // (with the LingXi rebrand in row 3).
-                        //
-                        // Row 2 is NOT fixed upstream: the oracle composes it
-                        // from the permission result's `suggestions`
-                        // (`ma0` @302931138 renders "Yes, and don't ask again
-                        // for " + the bolded rule display) and OMITS the row
-                        // entirely when no rule can be derived. The port has
-                        // `permission_suggestions` as a field but no engine
-                        // source for it (hooks/src/hook_payload.rs:639,
-                        // executor.rs:2184 pass None), so the rule display
-                        // cannot be composed here yet and the row stays
-                        // unconditional with its own wording. Closing that gap
-                        // is the suggestions engine, not a copy fix.
-                        vec![
-                            "Yes".to_string(),
-                            "Yes, allow always".to_string(),
-                            format!(
-                                "No, and tell {} what to do differently (esc)",
-                                branding::PRODUCT_NAME
-                            ),
-                        ],
+                        rows,
                     ),
                     fixed_height: Some(VIEWPORT_HEIGHT),
+                    always_allow_offered,
                 }
             }
             PermissionRequest::ExitPlanMode { plan } => {
@@ -163,6 +182,7 @@ impl PermissionView {
                         ],
                     ),
                     fixed_height: None,
+                    always_allow_offered: true,
                 }
             }
             PermissionRequest::BypassPermissionsMode => Prompt::TypedConfirm {
@@ -261,7 +281,11 @@ impl BottomPaneView for PermissionView {
     fn handle_key(&mut self, key: KeyEvent) -> ViewOutcome {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let response = match &mut self.prompt {
-            Prompt::Select { dialog, .. } => {
+            Prompt::Select {
+                dialog,
+                always_allow_offered,
+                ..
+            } => {
                 // `n`/`N` denies (iocraft dialog parity); Ctrl chords stay
                 // swallowed by the view (locked keyboard-ownership behavior).
                 if matches!(key.code, KeyCode::Char('n' | 'N')) && !ctrl {
@@ -271,7 +295,11 @@ impl BottomPaneView for PermissionView {
                         DialogOutcome::Pending => None,
                         DialogOutcome::Selected(idx) => Some(match idx {
                             0 => PermissionResponse::AllowOnce,
-                            1 => PermissionResponse::AllowAlways,
+                            // §27b: row 1 is "Yes, allow always" only when
+                            // `always_allow_offered` — a suppressed dialog has
+                            // only 2 rows (allow-once / deny), so idx 1 there
+                            // IS the deny row and must fall through to `_`.
+                            1 if *always_allow_offered => PermissionResponse::AllowAlways,
                             _ => PermissionResponse::Deny,
                         }),
                         // Esc denies (a resolution, not a silent dismissal):
@@ -333,6 +361,18 @@ mod tests {
             tool_name: "Bash".to_string(),
             tool_input: serde_json::json!({ "command": "ls -la" }),
             default_decision: permission::gate::PromptDefault::DenyByDefault,
+            suppress_always_allow_rule: false,
+        })
+    }
+
+    /// §27b: a request from a tool marked `requiresUserInteraction` — the
+    /// dialog must omit "Yes, allow always".
+    fn suppressed_tool_exchange() -> (PermissionExchange, oneshot::Receiver<PermissionResponse>) {
+        exchange_for(PermissionRequest::ToolUseConfirm {
+            tool_name: "mcp__server__tool".to_string(),
+            tool_input: serde_json::json!({}),
+            default_decision: permission::gate::PromptDefault::DenyByDefault,
+            suppress_always_allow_rule: true,
         })
     }
 
@@ -432,6 +472,61 @@ mod tests {
         assert_eq!(resp_rx.blocking_recv().unwrap(), PermissionResponse::Deny);
     }
 
+    // ===== §27b: `suppress_always_allow_rule` =====
+
+    #[test]
+    fn suppressed_request_omits_the_allow_always_row() {
+        let (exchange, _resp_rx) = suppressed_tool_exchange();
+        let view = PermissionView::new(exchange);
+        let text = buffer_text(&view, Rect::new(0, 0, 80, VIEWPORT_HEIGHT));
+        assert!(
+            !text.contains("allow always"),
+            "suppressed dialog must not render \"Yes, allow always\": {text:?}"
+        );
+        // The other two rows are unaffected.
+        assert!(text.contains("Yes"));
+        assert!(text.contains("differently"));
+    }
+
+    #[test]
+    fn unsuppressed_request_still_offers_allow_always() {
+        let (exchange, _resp_rx) = tool_exchange();
+        let view = PermissionView::new(exchange);
+        let text = buffer_text(&view, Rect::new(0, 0, 80, VIEWPORT_HEIGHT));
+        assert!(text.contains("allow always"));
+    }
+
+    #[test]
+    fn suppressed_request_arrow_down_plus_enter_denies_not_allow_always() {
+        // With the middle row gone, Down then Enter lands on the (now second)
+        // row, which is Deny — NOT AllowAlways.
+        let (exchange, resp_rx) = suppressed_tool_exchange();
+        let mut view = PermissionView::new(exchange);
+        assert!(matches!(
+            view.handle_key(press(KeyCode::Down)),
+            ViewOutcome::Pending
+        ));
+        assert!(matches!(
+            view.handle_key(press(KeyCode::Enter)),
+            ViewOutcome::PermissionResponse(PermissionResponse::Deny)
+        ));
+        assert_eq!(resp_rx.blocking_recv().unwrap(), PermissionResponse::Deny);
+    }
+
+    #[test]
+    fn suppressed_request_number_shortcut_two_denies() {
+        // Only 2 rows exist, so the `2` shortcut selects the deny row (there
+        // is no row 3 to fall through to `_` from — this exercises the
+        // `1 if *always_allow_offered` guard directly).
+        let (exchange, resp_rx) = suppressed_tool_exchange();
+        let mut view = PermissionView::new(exchange);
+        assert!(matches!(
+            view.handle_key(press(KeyCode::Char('2'))),
+            ViewOutcome::PermissionResponse(PermissionResponse::Deny)
+        ));
+        assert_eq!(resp_rx.blocking_recv().unwrap(), PermissionResponse::Deny);
+    }
+
     #[test]
     fn n_key_denies_but_ctrl_n_stays_swallowed() {
         let (exchange, resp_rx) = tool_exchange();
@@ -477,6 +572,7 @@ mod tests {
                 tool_name: "Bash".to_string(),
                 tool_input: serde_json::json!({}),
                 default_decision: permission::gate::PromptDefault::DenyByDefault,
+                suppress_always_allow_rule: false,
             },
             PermissionRequest::ExitPlanMode {
                 plan: "1. Foo".to_string(),

@@ -973,3 +973,124 @@ async fn inbound_elicitation_create_returns_cancel_literal() {
         "wire bytes must carry literal cancel result, got: {text}",
     );
 }
+
+// ── §20a — MCP tool JSON-Schema normalization (`mcp::tool_schema`) ─────────
+
+#[tokio::test]
+async fn list_tools_drops_root_combinator_schema_by_default() {
+    // The oracle's `tengu_mcp_normalize_root_combinators` gate defaults to an
+    // empty allowlist (off for everyone) with no flag fetcher wired, so a
+    // tool whose `inputSchema` root is a top-level `anyOf`/`oneOf`/`allOf` is
+    // unconditionally dropped from the list — never forwarded verbatim, and
+    // never silently normalized either. This is the list-length-changing
+    // half of §20a: a plain tool from the same server survives untouched.
+    let (client, _cap, _h) =
+        make_client_against_mock("combos", std::path::PathBuf::from("/tmp/work"), |req| {
+            let id = req["id"].clone();
+            let method = req["method"].as_str().unwrap_or("");
+            let result = match method {
+                "initialize" => json!({
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": { "tools": {} },
+                    "serverInfo": { "name": "m", "version": "0" }
+                }),
+                "tools/list" => json!({
+                    "tools": [
+                        {
+                            "name": "plain_tool",
+                            "description": "A normal tool",
+                            "inputSchema": { "type": "object", "properties": { "a": { "type": "string" } } }
+                        },
+                        {
+                            "name": "combo_tool",
+                            "description": "Uses a root anyOf",
+                            "inputSchema": {
+                                "anyOf": [
+                                    { "type": "object", "properties": { "a": { "type": "string" } } },
+                                    { "type": "object", "properties": { "b": { "type": "string" } } }
+                                ]
+                            }
+                        }
+                    ]
+                }),
+                _ => return None,
+            };
+            Some(json!({ "jsonrpc": "2.0", "id": id, "result": result }))
+        })
+        .await;
+
+    client.initialize().await.expect("init");
+    let tools = client.list_tools().await.expect("list");
+    assert_eq!(
+        tools.len(),
+        1,
+        "the root-anyOf tool must be dropped, only the plain tool remains: {tools:?}"
+    );
+    assert_eq!(tools[0].tool_name, "plain_tool");
+}
+
+#[tokio::test]
+async fn list_tools_keeps_a_meta_invalid_schema_with_warning_by_default() {
+    // The oracle's `tengu_mcp_drop_invalid_tool_schemas` gate also defaults
+    // to off, so a tool whose schema fails JSON-Schema-2020-12 meta
+    // validation (here: `"type": 5`, not a valid type keyword value) is KEPT
+    // — not dropped — matching the oracle's default "requests that include
+    // it may fail" warn-and-keep behavior rather than silently forwarding it
+    // as verbatim-valid OR dropping the tool from the list.
+    let (client, _cap, _h) =
+        make_client_against_mock("badschema", std::path::PathBuf::from("/tmp/work"), |req| {
+            let id = req["id"].clone();
+            let method = req["method"].as_str().unwrap_or("");
+            let result = match method {
+                "initialize" => json!({
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": { "tools": {} },
+                    "serverInfo": { "name": "m", "version": "0" }
+                }),
+                "tools/list" => json!({
+                    "tools": [
+                        {
+                            "name": "invalid_type_tool",
+                            "description": "Bad type keyword",
+                            "inputSchema": { "type": 5 }
+                        }
+                    ]
+                }),
+                _ => return None,
+            };
+            Some(json!({ "jsonrpc": "2.0", "id": id, "result": result }))
+        })
+        .await;
+
+    client.initialize().await.expect("init");
+    let tools = client.list_tools().await.expect("list");
+    assert_eq!(tools.len(), 1, "kept-with-warning, not dropped: {tools:?}");
+    assert_eq!(tools[0].input_schema, json!({ "type": 5 }));
+
+    // "Kept" alone is what the PRE-§20a code already did, so the assertions
+    // above cannot tell warn-and-keep apart from silent forwarding. Pin the
+    // decision this schema produced: a `warning` (not a `drop_reason`) is the
+    // half of §20a that the list length can never show.
+    let decision = mcp::tool_schema::decide_tool_schema(None, &json!({ "type": 5 }));
+    assert!(
+        decision.drop_reason.is_none(),
+        "drop gate is off by default: {decision:?}"
+    );
+    let warning = decision
+        .warning
+        .expect("a meta-invalid schema must be KEPT WITH A WARNING, not silently forwarded");
+    assert!(
+        warning.starts_with("input schema would be rejected by the Anthropic API (")
+            && warning.ends_with("); requests that include it may fail"),
+        "oracle warn copy, got: {warning}"
+    );
+}
+
+// COVERAGE NOTE: the two tests above drive `McpClient::list_tools`, which
+// production reaches only through `McpRegistry::refresh_catalog` (a
+// server-sent `notifications/tools/list_changed`). The CONNECT path — the one
+// that fills `McpConnectionState::Connected { tools }` for
+// `build_registered_mcp_tools` — goes through `McpTransport::list_tools`
+// instead, and is covered by
+// `registry::tests::connect_applies_the_tool_schema_decision_to_the_model_facing_list`
+// and `registry::tests::connect_resolves_the_schema_gate_from_the_servers_own_hostname`.

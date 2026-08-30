@@ -147,6 +147,7 @@ impl MockMcpTransport {
             full_name: format!("mcp__mock__{name}"),
             search_hint: None,
             always_load: None,
+            requires_user_interaction: false,
         });
     }
 }

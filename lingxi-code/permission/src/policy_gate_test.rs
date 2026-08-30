@@ -1628,6 +1628,20 @@ mod tests {
         assert_eq!(seen.decision_reason_type.as_deref(), Some("rule"));
     }
 
+    /// §27b reconciliation note (deliberate, not a silent flip): §27b adds a
+    /// SEPARATE consumer of `requires_user_interaction` —
+    /// `TuiPermissionGate::check_with_context` (`tui/src/permission_gate.rs`)
+    /// reads it to decide whether the ALREADY-BUILT `ToolUseConfirm` dialog
+    /// offers "Yes, allow always" (oracle `suppressesAlwaysAllowRule`,
+    /// @182520462). That is orthogonal to what THIS test asserts: whether an
+    /// Ask is reached AT ALL. `PolicyPermissionGate` (under test here) still
+    /// never reads `requires_user_interaction` when deciding Allow/Ask/Deny —
+    /// confirmed by probe: this same Allow-with-no-inner-call outcome holds
+    /// for ANY unmatched tool name under `PermissionMode::Default` with empty
+    /// `permissions`, with the field set to either `true` or `false`. So the
+    /// bit stays "metadata only" at THIS layer exactly as asserted below;
+    /// §27b's new behavior lives entirely inside `self.inner` (the TUI gate),
+    /// which this test's `ContextRecordingInner` mock does not model.
     #[tokio::test]
     async fn interaction_metadata_does_not_create_a_duplicate_permission_prompt() {
         let policy = policy_with(r#"{ "permissions": {} }"#, PermissionMode::Default);

@@ -61,15 +61,21 @@ use std::path::{Path, PathBuf};
 /// `PluginManifestMetadataSchema` + component declaration fields):
 /// - Identity: `name`, `version`, `description`, `author`, `homepage`.
 /// - Component declarations: `skills`, `commands`, `agents`, `outputStyles`,
-///   `hooks`, `mcpServers`, `lspServers`, `channels`.
+///   `hooks`, `mcpServers`, `lspServers`, `channels`, `workflows`
+///   (LingXi-only — see [`PluginComponents::workflows`]).
 /// - Metadata: `keywords`, `license`, `repository`.
 ///
-/// `name` is required; all other fields are optional. Unknown top-level
-/// fields are silently ignored by serde. Component path fields follow Claude
+/// `name` is required; all other fields are optional. An unrecognized
+/// top-level field never breaks parsing here — it is captured into
+/// [`Self::unknown_fields`], which normal validation
+/// ([`scan_unknown_manifest_fields`]) reports and strict validation
+/// ([`validate_manifest_fields`]) rejects (§19.1 "manifest field / default /
+/// unknown-field / strict validation"). Component path fields follow Claude
 /// Code's field-specific merge rules in [`detect_components`]: commands,
-/// agents, and output styles replace their default directories; skills extend
-/// the default; hooks, MCP, and LSP declarations merge with their conventional
-/// files. Binary: `PluginManifestSchema` in `schemas.ts`.
+/// agents, output styles, and workflows replace their default directories;
+/// skills extend the default; hooks, MCP, and LSP declarations merge with
+/// their conventional files.
+/// Binary: `PluginManifestSchema` in `schemas.ts`.
 #[derive(Debug, Deserialize)]
 struct RawManifest {
     name: String,
@@ -102,6 +108,13 @@ struct RawManifest {
     /// Explicitly declared output-style directories. Binary: `outputStyles`.
     #[serde(rename = "outputStyles", default)]
     output_styles: Option<PathDecl>,
+    /// Explicitly declared workflow-script directories/files. These REPLACE
+    /// the default `workflows/` directory (matching `commands` / `agents` /
+    /// `outputStyles` replace semantics), never merge with it — see
+    /// [`detect_components`]. LingXi-specific: not a claude-code
+    /// `plugin.json` field, so there is no `Binary:` cross-reference.
+    #[serde(default)]
+    workflows: Option<PathDecl>,
     /// Explicitly declared MCP server configs (manifest-declared MCP servers).
     /// Binary: `mcpServers` in `PluginManifestSchema`.
     #[serde(rename = "mcpServers", default)]
@@ -136,6 +149,16 @@ struct RawManifest {
     /// Repository URL or object. Binary: `repository`.
     #[serde(default)]
     repository: Option<serde_json::Value>,
+    /// Every top-level key that matched none of the named fields above.
+    ///
+    /// `#[serde(flatten)]` makes serde itself — not a hand-maintained list —
+    /// the definition of "unrecognized field". Adding, removing, or
+    /// `#[serde(rename)]`-ing any field above automatically changes what
+    /// lands here, so the unknown-field validators cannot drift out of sync
+    /// with the schema they validate against. `BTreeMap` keeps the reported
+    /// names in a stable sorted order.
+    #[serde(flatten)]
+    unknown_fields: BTreeMap<String, serde_json::Value>,
 }
 
 fn default_plugin_enabled() -> bool {
@@ -156,6 +179,48 @@ impl PathDecl {
             Self::Many(v) => v,
         }
     }
+}
+
+/// Normal validation (§19.1 "unknown-field / strict validation"): report
+/// every unrecognized top-level field in a raw `plugin.json` **without**
+/// rejecting it.
+///
+/// Parsing already drops unknown keys silently, which is the right runtime
+/// posture — an older engine must not brick on a manifest written for a
+/// newer one — but silence gives a plugin author no signal that a typo
+/// (`"workflow"` for `"workflows"`) discarded their whole declaration. This
+/// returns those names so a caller can decide what to do with them
+/// (`load_plugin_from_path` warns and carries on).
+///
+/// The set of "known" names is defined by [`RawManifest`]'s own serde
+/// schema via its flattened [`RawManifest::unknown_fields`] catch-all, not
+/// by a parallel list, so it cannot fall out of sync with the struct.
+///
+/// Returns `Err` only when `raw` is not a well-formed plugin manifest
+/// document at all (not an object, or missing the required `name`).
+pub fn scan_unknown_manifest_fields(raw: &str) -> Result<Vec<String>, String> {
+    let parsed: RawManifest =
+        serde_json::from_str(raw).map_err(|error| format!("invalid plugin.json: {error}"))?;
+    Ok(parsed.unknown_fields.into_keys().collect())
+}
+
+/// Strict variant of the same scan (§19.1 "strict validation"): rejects the
+/// manifest outright the moment any unrecognized top-level field is present,
+/// naming every offender, rather than warning and ignoring them.
+///
+/// Mirrors [`crate::agent_validation::validate_plugin_agent_frontmatter`]'s
+/// relationship to [`crate::agent_validation::scan_plugin_agent_privileged_fields`]:
+/// one scan, two postures, the strict one a thin wrapper so the two can
+/// never disagree about what counts as an offence.
+pub fn validate_manifest_fields(raw: &str) -> Result<(), String> {
+    let unknown = scan_unknown_manifest_fields(raw)?;
+    if unknown.is_empty() {
+        return Ok(());
+    }
+    Err(format!(
+        "unknown plugin.json field(s): {}",
+        unknown.join(", ")
+    ))
 }
 
 /// `author` may be a string or an object (`{ name, email, url }`); claude-code
@@ -641,6 +706,16 @@ pub(crate) async fn load_plugin_from_path(plugin_dir: &Path) -> Option<(PluginId
             return None;
         }
     };
+    // Normal validation (§19.1): an unrecognized top-level field is reported
+    // but never fatal — the plugin still loads with everything serde did
+    // recognize. `validate_manifest_fields` is the strict counterpart.
+    if !parsed.unknown_fields.is_empty() {
+        tracing::warn!(
+            fields = %parsed.unknown_fields.keys().cloned().collect::<Vec<_>>().join(", "),
+            path = %manifest_path.display(),
+            "plugin.json declares unrecognized field(s); ignoring"
+        );
+    }
 
     let id = PluginId::new();
     let source = PluginSource::LocalPath {
@@ -754,6 +829,7 @@ async fn detect_components(plugin_dir: &Path, parsed: &RawManifest) -> PluginCom
         }
     }
     let default_output_styles = glob_md(&plugin_dir.join("output-styles")).await;
+    let default_workflows = glob_js(&plugin_dir.join("workflows")).await;
     let default_hooks = load_standard_hooks(plugin_dir).await;
     let default_mcp_servers = load_mcp_servers(plugin_dir).await;
     let default_lsp_servers = load_lsp_servers(plugin_dir).await;
@@ -775,6 +851,10 @@ async fn detect_components(plugin_dir: &Path, parsed: &RawManifest) -> PluginCom
         Some(paths) => resolve_markdown_declared_paths(plugin_dir, paths.clone()).await,
         None => default_output_styles,
     };
+    let workflows = match &parsed.workflows {
+        Some(paths) => resolve_workflow_declared_paths(plugin_dir, paths.clone()).await,
+        None => default_workflows,
+    };
     let mut hooks = default_hooks;
     hooks.extend(load_declared_hooks(plugin_dir, parsed.hooks.clone()).await);
     let mut mcp_servers = default_mcp_servers;
@@ -790,6 +870,7 @@ async fn detect_components(plugin_dir: &Path, parsed: &RawManifest) -> PluginCom
         hooks,
         mcp_servers,
         lsp_servers,
+        workflows,
     }
 }
 
@@ -848,6 +929,42 @@ async fn resolve_markdown_declared_paths(plugin_dir: &Path, paths: PathDecl) -> 
             .extension()
             .and_then(|s| s.to_str())
             .is_some_and(|ext| ext.eq_ignore_ascii_case("md"))
+        {
+            let root = abs.parent().unwrap_or(plugin_dir).to_path_buf();
+            out.push(ComponentPath {
+                path: abs,
+                metadata: component_root_metadata(&root),
+            });
+        }
+    }
+    out.sort_by(|a, b| a.path.cmp(&b.path));
+    dedup_component_paths(&mut out);
+    out
+}
+
+/// [`resolve_markdown_declared_paths`]'s twin for the `workflows` field: same
+/// replace-the-default-directory contract, but glob-filters on `.js` instead
+/// of `.md` (§19.1: "Plugin ... workflow directory discovery只接受 `.js`；
+/// `.mjs/.cjs/.ts` near-miss不进入 inventory").
+async fn resolve_workflow_declared_paths(plugin_dir: &Path, paths: PathDecl) -> Vec<ComponentPath> {
+    let mut out = Vec::new();
+    for raw in paths.into_vec() {
+        let Some(abs) = resolve_declared_relative_path(plugin_dir, &raw) else {
+            tracing::warn!(path = %raw, "skipping invalid plugin manifest workflow path");
+            continue;
+        };
+        let Ok(meta) = tokio::fs::metadata(&abs).await else {
+            tracing::warn!(path = %abs.display(), "skipping missing plugin manifest workflow path");
+            continue;
+        };
+        if meta.is_dir() {
+            let mut found = glob_js(&abs).await;
+            stamp_component_root(&mut found, &abs);
+            out.extend(found);
+        } else if abs
+            .extension()
+            .and_then(|s| s.to_str())
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("js"))
         {
             let root = abs.parent().unwrap_or(plugin_dir).to_path_buf();
             out.push(ComponentPath {
@@ -1012,6 +1129,39 @@ async fn glob_md(dir: &Path) -> Vec<ComponentPath> {
                 .extension()
                 .and_then(|s| s.to_str())
                 .is_some_and(|e| e.eq_ignore_ascii_case("md"))
+            {
+                out.push(ComponentPath {
+                    path: p,
+                    metadata: component_root_metadata(dir),
+                });
+            }
+        }
+    }
+    out.sort_by(|a, b| a.path.cmp(&b.path));
+    out
+}
+
+/// [`glob_md`]'s twin for the `workflows/` default directory: collects every
+/// `*.js` file under `dir` **recursively** (same iterative-DFS, same
+/// case-insensitive extension match, same missing-dir → empty-vec contract),
+/// sorted by path. `.mjs` / `.cjs` / `.ts` are deliberately NOT matched — only
+/// `.js` is a discoverable plugin workflow script (§19.1).
+async fn glob_js(dir: &Path) -> Vec<ComponentPath> {
+    let mut out = Vec::new();
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(current) = stack.pop() {
+        let Ok(mut entries) = tokio::fs::read_dir(&current).await else {
+            continue;
+        };
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            let p = entry.path();
+            let is_dir = entry.file_type().await.map(|t| t.is_dir()).unwrap_or(false);
+            if is_dir {
+                stack.push(p);
+            } else if p
+                .extension()
+                .and_then(|s| s.to_str())
+                .is_some_and(|e| e.eq_ignore_ascii_case("js"))
             {
                 out.push(ComponentPath {
                     path: p,
@@ -1623,5 +1773,333 @@ mod tests {
         let (_id, manifest) = load_plugin_from_path(plugin).await.unwrap();
         assert_eq!(manifest.channels.len(), 1);
         assert_eq!(manifest.channels[0].server, "telegram");
+    }
+
+    // --- P0a.2: workflows slot -------------------------------------------
+
+    /// Required test: a manifest-declared custom `workflows` path is
+    /// discovered. Doubles as the REPLACE-semantic pin (§19.1): the negative
+    /// half of the assertion — the default `workflows/` directory's script is
+    /// NOT in the result — is what rules out "discovery returned the fixture
+    /// unchanged" or "declared merges with default" as passing explanations.
+    #[tokio::test]
+    async fn workflows_declared_in_manifest_are_discovered() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin = tmp.path();
+        fs::create_dir_all(plugin.join(branding::PLUGIN_MANIFEST_DIR)).unwrap();
+        fs::create_dir_all(plugin.join("workflows")).unwrap();
+        fs::create_dir_all(plugin.join("custom-workflows")).unwrap();
+        fs::write(
+            plugin
+                .join(branding::PLUGIN_MANIFEST_DIR)
+                .join("plugin.json"),
+            r#"{"name":"demo","workflows":"./custom-workflows"}"#,
+        )
+        .unwrap();
+        fs::write(plugin.join("workflows/default.js"), "// default").unwrap();
+        fs::write(plugin.join("custom-workflows/custom.js"), "// custom").unwrap();
+
+        let (_id, manifest) = load_plugin_from_path(plugin).await.unwrap();
+        let names: Vec<_> = manifest
+            .components
+            .workflows
+            .iter()
+            .map(|c| c.path.file_name().unwrap().to_str().unwrap().to_string())
+            .collect();
+        // Positive: the declared custom path was actually walked.
+        assert_eq!(names, vec!["custom.js"]);
+        // Negative control: the default directory's script must NOT also be
+        // present — proves replace, not merge, and rules out a no-op glob
+        // (an empty result would fail the positive assertion above already,
+        // but a MERGE bug would pass it while still failing this one).
+        assert!(!names.contains(&"default.js".to_string()));
+    }
+
+    /// Distinction #2: a manifest that declares no `workflows` field at all
+    /// must still discover the default `workflows/` directory, recursively
+    /// (§19.1 "nested agent/workflow namespace").
+    ///
+    /// The near-miss siblings are the negative controls: §5.5 spells out that
+    /// `.mjs`, `.cjs`, `.ts` and extensionless files do NOT enter the
+    /// workflow inventory, so a glob that returned "everything in the
+    /// directory" — or that matched the `WORKFLOW_EXTENSIONS` name-probe
+    /// table instead of the discovery contract — fails here by name.
+    #[tokio::test]
+    async fn manifest_without_workflows_field_still_discovers_default_workflows_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin = tmp.path();
+        fs::create_dir_all(plugin.join(branding::PLUGIN_MANIFEST_DIR)).unwrap();
+        fs::create_dir_all(plugin.join("workflows/nested")).unwrap();
+        fs::write(
+            plugin
+                .join(branding::PLUGIN_MANIFEST_DIR)
+                .join("plugin.json"),
+            r#"{"name":"demo"}"#,
+        )
+        .unwrap();
+        fs::write(plugin.join("workflows/build.js"), "// build").unwrap();
+        fs::write(plugin.join("workflows/nested/deep.js"), "// nested").unwrap();
+        fs::write(plugin.join("workflows/README.md"), "not a workflow").unwrap();
+        fs::write(plugin.join("workflows/notes.mjs"), "// near-miss").unwrap();
+        fs::write(plugin.join("workflows/legacy.cjs"), "// near-miss").unwrap();
+        fs::write(plugin.join("workflows/typed.ts"), "// near-miss").unwrap();
+        fs::write(plugin.join("workflows/extensionless"), "// near-miss").unwrap();
+
+        let (_id, manifest) = load_plugin_from_path(plugin).await.unwrap();
+        let names: Vec<_> = manifest
+            .components
+            .workflows
+            .iter()
+            .map(|c| c.path.file_name().unwrap().to_str().unwrap().to_string())
+            .collect();
+        assert_eq!(names, vec!["build.js", "deep.js"]);
+    }
+
+    /// The declared-path branch that is NOT a directory. `workflows` accepts
+    /// a path array, and `resolve_workflow_declared_paths` handles a directly
+    /// named script in a **different** arm from the directory walk — so the
+    /// `.js`-only gate (§5.5) needs its own pin there. An explicitly named
+    /// `.ts` is still a near-miss; a manifest `workflows` declaration is the
+    /// custom-path form of directory discovery, not the workflow engine's
+    /// exempt explicit `scriptPath`.
+    ///
+    /// Negative controls: the named `.ts` must be dropped, and the default
+    /// `workflows/` directory must stay out entirely (replace, not merge)
+    /// even when the declaration is an array.
+    #[tokio::test]
+    async fn declared_workflow_array_takes_a_direct_js_file_and_drops_a_named_near_miss() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin = tmp.path();
+        fs::create_dir_all(plugin.join(branding::PLUGIN_MANIFEST_DIR)).unwrap();
+        fs::create_dir_all(plugin.join("workflows")).unwrap();
+        fs::create_dir_all(plugin.join("scripts")).unwrap();
+        fs::create_dir_all(plugin.join("more")).unwrap();
+        fs::write(
+            plugin
+                .join(branding::PLUGIN_MANIFEST_DIR)
+                .join("plugin.json"),
+            r#"{"name":"demo","workflows":["./scripts/one.js","./scripts/two.ts","./more"]}"#,
+        )
+        .unwrap();
+        fs::write(plugin.join("workflows/default.js"), "// default").unwrap();
+        fs::write(plugin.join("scripts/one.js"), "// one").unwrap();
+        fs::write(plugin.join("scripts/two.ts"), "// near-miss").unwrap();
+        fs::write(plugin.join("more/three.js"), "// three").unwrap();
+
+        let (_id, manifest) = load_plugin_from_path(plugin).await.unwrap();
+        let names: Vec<_> = manifest
+            .components
+            .workflows
+            .iter()
+            .map(|c| c.path.file_name().unwrap().to_str().unwrap().to_string())
+            .collect();
+        // Sorted by absolute path: `more/` precedes `scripts/`.
+        assert_eq!(names, vec!["three.js", "one.js"]);
+    }
+
+    /// ADD-semantic pin (skills): a manifest-declared custom skill directory
+    /// EXTENDS the default `skills/` directory rather than replacing it —
+    /// unlike commands/agents/output_styles/workflows. The negative control
+    /// is that the default-only skill stays present (a REPLACE bug would drop
+    /// it; a no-op discovery would report neither).
+    #[tokio::test]
+    async fn skills_declared_path_extends_default_directory_without_replacing_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin = tmp.path();
+        fs::create_dir_all(plugin.join(branding::PLUGIN_MANIFEST_DIR)).unwrap();
+        fs::create_dir_all(plugin.join("skills/default-only")).unwrap();
+        fs::create_dir_all(plugin.join("extra-skills/custom-only")).unwrap();
+        fs::write(
+            plugin
+                .join(branding::PLUGIN_MANIFEST_DIR)
+                .join("plugin.json"),
+            r#"{"name":"demo","skills":"./extra-skills"}"#,
+        )
+        .unwrap();
+        fs::write(plugin.join("skills/default-only/SKILL.md"), "default").unwrap();
+        fs::write(plugin.join("extra-skills/custom-only/SKILL.md"), "custom").unwrap();
+
+        let (_id, manifest) = load_plugin_from_path(plugin).await.unwrap();
+        let dirs: Vec<_> = manifest
+            .components
+            .skills
+            .iter()
+            .map(|c| {
+                c.path
+                    .parent()
+                    .unwrap()
+                    .file_name()
+                    .unwrap()
+                    .to_str()
+                    .unwrap()
+                    .to_string()
+            })
+            .collect();
+        assert_eq!(dirs, vec!["default-only", "custom-only"]);
+    }
+
+    /// MERGE-semantic pin (mcp_servers): a manifest-declared `mcpServers`
+    /// entry merges into the default `.mcp.json` map BY KEY — a shared name
+    /// is overwritten by the declaration (not duplicated, not ignored), while
+    /// an unrelated default-only entry survives untouched. This is the one
+    /// existing merge semantic no prior test pinned as an overwrite (prior
+    /// coverage only exercised disjoint-name addition).
+    #[tokio::test]
+    async fn mcp_servers_declared_in_manifest_merge_with_default_file_by_overwriting_shared_name() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin = tmp.path();
+        fs::create_dir_all(plugin.join(branding::PLUGIN_MANIFEST_DIR)).unwrap();
+        fs::write(
+            plugin.join(".mcp.json"),
+            r#"{"mcpServers":{
+                "shared":{"type":"stdio","command":"from-default-file"},
+                "default-only":{"type":"stdio","command":"stays"}
+            }}"#,
+        )
+        .unwrap();
+        fs::write(
+            plugin
+                .join(branding::PLUGIN_MANIFEST_DIR)
+                .join("plugin.json"),
+            r#"{"name":"demo","mcpServers":{
+                "shared":{"type":"stdio","command":"from-manifest","disabled":true}
+            }}"#,
+        )
+        .unwrap();
+
+        let (_id, manifest) = load_plugin_from_path(plugin).await.unwrap();
+        let servers = &manifest.components.mcp_servers;
+        assert_eq!(
+            servers.len(),
+            2,
+            "declared entry must merge, not replace the map"
+        );
+        assert!(
+            servers["shared"].disabled,
+            "manifest-declared entry must win over the default-file entry sharing its name"
+        );
+        assert!(
+            !servers["default-only"].disabled,
+            "an unrelated default-file entry must survive the merge untouched"
+        );
+    }
+
+    // --- P0a.2: manifest field validation ---------------------------------
+
+    /// §19.1 "unknown-field / strict validation": normal validation NAMES
+    /// every unrecognized top-level field without rejecting it; strict
+    /// validation rejects, naming them all.
+    ///
+    /// The normal half asserts what the scan actually FOUND, not merely that
+    /// it returned `Ok`. That distinction is load-bearing: the earlier shape
+    /// (`assert!(validate_manifest_fields(bad, false).is_ok())`) stayed green
+    /// when the whole normal branch was replaced by an unconditional
+    /// `return Ok(())` — it asserted nothing about detection at all.
+    #[test]
+    fn unknown_manifest_field_is_named_by_normal_scan_and_rejected_by_strict_validation() {
+        let with_typos = r#"{"name":"demo","workflowz":"./custom-workflows","agentz":"./a"}"#;
+
+        // Normal: never errors, and names every offender (sorted).
+        assert_eq!(
+            scan_unknown_manifest_fields(with_typos).unwrap(),
+            vec!["agentz".to_string(), "workflowz".to_string()],
+        );
+
+        // Strict: rejects, naming both.
+        let err = validate_manifest_fields(with_typos).unwrap_err();
+        assert!(
+            err.contains("workflowz") && err.contains("agentz"),
+            "strict rejection must name every offending field, got {err:?}"
+        );
+
+        // Positive control: a manifest using only real fields — including the
+        // new `workflows` one — reports nothing and passes strict validation.
+        // Rules out an always-fail gate, and would go red if `workflows` were
+        // dropped from or renamed on `RawManifest`.
+        let clean = r#"{"name":"demo","workflows":"./custom-workflows"}"#;
+        assert_eq!(
+            scan_unknown_manifest_fields(clean).unwrap(),
+            Vec::<String>::new()
+        );
+        assert!(validate_manifest_fields(clean).is_ok());
+    }
+
+    /// Schema-drift guard: a manifest exercising every key `RawManifest`
+    /// declares must leave the flattened catch-all empty. Renaming or
+    /// deleting any serde field turns this red and names the key that fell
+    /// through. (The opposite drift — a field ADDED to `RawManifest` — needs
+    /// no guard now that `#[serde(flatten)]`, rather than a parallel list,
+    /// defines "unknown": serde recognizes a new field the moment it exists.)
+    #[test]
+    fn no_field_declared_by_raw_manifest_is_reported_as_unknown() {
+        let every_field = r#"{
+            "name": "demo",
+            "displayName": "Demo",
+            "defaultEnabled": true,
+            "version": "1.0.0",
+            "description": "d",
+            "author": { "name": "a" },
+            "homepage": "https://example.invalid",
+            "skills": "./skills/",
+            "commands": "./commands/",
+            "agents": "./agents/",
+            "outputStyles": "./output-styles/",
+            "workflows": "./workflows/",
+            "mcpServers": {},
+            "lspServers": {},
+            "hooks": {},
+            "userConfig": {},
+            "settings": {},
+            "channels": [],
+            "dependencies": {},
+            "keywords": ["k"],
+            "license": "UNLICENSED",
+            "repository": "https://example.invalid/r"
+        }"#;
+        assert_eq!(
+            scan_unknown_manifest_fields(every_field).unwrap(),
+            Vec::<String>::new(),
+            "a key listed here fell through to `RawManifest::unknown_fields` — \
+             either the serde field was renamed/removed, or this fixture is stale"
+        );
+    }
+
+    /// The load seam's normal-validation posture (`load_plugin_from_path`):
+    /// an unrecognized field must not make the plugin unloadable, and must
+    /// not be mistaken for the field it resembles.
+    ///
+    /// Making the load-seam check fatal turns the first half red; treating
+    /// `workflowz` as a `workflows` declaration turns the second half red.
+    #[tokio::test]
+    async fn manifest_with_unknown_field_still_loads_and_the_typo_is_not_honoured() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin = tmp.path();
+        fs::create_dir_all(plugin.join(branding::PLUGIN_MANIFEST_DIR)).unwrap();
+        fs::create_dir_all(plugin.join("workflows")).unwrap();
+        fs::create_dir_all(plugin.join("typo-workflows")).unwrap();
+        fs::write(
+            plugin
+                .join(branding::PLUGIN_MANIFEST_DIR)
+                .join("plugin.json"),
+            r#"{"name":"demo","displayName":"Demo","workflowz":"./typo-workflows"}"#,
+        )
+        .unwrap();
+        fs::write(plugin.join("workflows/default.js"), "// default").unwrap();
+        fs::write(plugin.join("typo-workflows/typo.js"), "// typo").unwrap();
+
+        let (_id, manifest) = load_plugin_from_path(plugin)
+            .await
+            .expect("an unrecognized manifest field must not make the plugin unloadable");
+        // Known fields survive untouched.
+        assert_eq!(manifest.display_name.as_deref(), Some("Demo"));
+        // The typo was IGNORED, not honoured: discovery fell back to the
+        // default `workflows/` directory and never walked `typo-workflows/`.
+        let names: Vec<_> = manifest
+            .components
+            .workflows
+            .iter()
+            .map(|c| c.path.file_name().unwrap().to_str().unwrap().to_string())
+            .collect();
+        assert_eq!(names, vec!["default.js"]);
     }
 }

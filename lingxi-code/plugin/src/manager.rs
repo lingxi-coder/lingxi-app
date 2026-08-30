@@ -588,14 +588,34 @@ impl PluginManager {
         // All-or-nothing ordering: VALIDATE every fallible input BEFORE
         // mutating any live registry, so a rejected plugin never leaves an
         // orphaned command / hook behind. claude-code loads a plugin as a
-        // single unit; a privilege-escalating agent rejects the whole plugin,
-        // not just the agent.
+        // single unit. NOTE: a privilege-escalating AGENT is no longer one of
+        // those fallible inputs — per §19.1 it is warned about and stripped
+        // (see the agent loop directly below), never rejected. The
+        // all-or-nothing ordering still governs every other component.
 
-        // (a) Agents — validate the privilege boundary, then parse the same
+        // (a) Agents — scan the privilege boundary, then parse the same
         //     declared paths discovery returned (including custom/nested agent
         //     directories). Names are plugin-qualified so they cannot shadow a
         //     user/project agent. Registry mutation remains below the complete
         //     validation phase.
+        //
+        //     §19.1: `permissionMode` / `mcpServers` / `hooks` in a plugin
+        //     agent's frontmatter must never reach the agent's runtime
+        //     execution state, and all three are handled IDENTICALLY now.
+        //     This is *normal* validation (see
+        //     `agent_validation::scan_plugin_agent_privileged_fields`): it
+        //     only WARNS per privileged field found, never fails — a
+        //     malformed or over-privileged agent file must not remove an
+        //     otherwise-valid agent from the registry, and must never take
+        //     the whole plugin down with it. (Previously `permissionMode` /
+        //     `hooks` failed the ENTIRE plugin load via
+        //     `validate_plugin_agent_frontmatter`, now the STRICT validator
+        //     — unused on this path — while `mcpServers` alone degraded
+        //     silently. That inconsistency was the bug.) The three fields
+        //     are then unconditionally stripped from `def` below too,
+        //     independent of what the scan found, so a future parser change
+        //     (a new alias, a nested-field promotion, …) can't smuggle
+        //     privilege through a gap in the scan.
         let mut agent_defs = Vec::new();
         for ap in &manifest.components.agents {
             let abs = if ap.path.is_absolute() {
@@ -605,11 +625,37 @@ impl PluginManager {
             };
             if let Ok(raw) = tokio::fs::read_to_string(&abs).await {
                 if let Some(yaml) = extract_frontmatter(&raw) {
-                    if let Err(e) = crate::validate_plugin_agent_frontmatter(yaml) {
-                        return Err(PluginManagerError::Validation(format!(
-                            "agent {}: {e}",
-                            abs.display()
-                        )));
+                    match crate::agent_validation::scan_plugin_agent_privileged_fields(yaml) {
+                        Ok(fields) => {
+                            for field in fields {
+                                tracing::warn!(
+                                    path = %abs.display(),
+                                    plugin = %manifest.name,
+                                    field = field.key(),
+                                    "plugin agent frontmatter declares a privileged field; \
+                                     stripping it before load — it will not reach execution state"
+                                );
+                            }
+                        }
+                        // Frontmatter that will not parse as a YAML mapping
+                        // cannot be scanned — but it also cannot be parsed
+                        // into an `AgentDefinition` by
+                        // `parse_agent_markdown` two lines below (its
+                        // `Frontmatter` target is strictly less permissive
+                        // than `serde_yaml::Value`), so nothing from this
+                        // file can reach execution state. Failing the load
+                        // here would take the WHOLE plugin down over one
+                        // unparseable agent file, which §19.1 forbids: warn
+                        // and let the parse below drop just this agent.
+                        Err(e) => {
+                            tracing::warn!(
+                                path = %abs.display(),
+                                plugin = %manifest.name,
+                                error = %e,
+                                "plugin agent frontmatter could not be scanned for privileged \
+                                 fields; skipping this agent (the plugin still loads)"
+                            );
+                        }
                     }
                 }
                 match agent::parse_agent_markdown(
@@ -619,15 +665,11 @@ impl PluginManager {
                     &abs,
                 ) {
                     Ok(mut def) => {
-                        if !def.mcp_servers.is_empty() {
-                            tracing::warn!(
-                                agent = %def.agent_type,
-                                plugin = %manifest.name,
-                                skipped_entries = def.mcp_servers.len(),
-                                "plugin agent MCP entries are ignored; configure plugin MCP servers in the plugin manifest"
-                            );
-                            def.mcp_servers.clear();
-                        }
+                        // §19.1 defense in depth: strip regardless of what the
+                        // scan above found (see the loop comment).
+                        def.permission_mode = agent::AgentPermissionMode::Bubble;
+                        def.mcp_servers.clear();
+                        def.frontmatter_hooks.clear();
                         let root = component_root(ap, install_dir.join("agents"));
                         let namespace = abs
                             .parent()
@@ -1493,5 +1535,273 @@ mod user_config_tests {
             "mysrv ${user_config.API_KEY}"
         ));
         assert!(!user_config::references_user_config("mysrv --flag"));
+    }
+}
+
+/// §19.1 — the decisive propagation tests: a plugin agent's `permissionMode`
+/// / `mcpServers` / `hooks` frontmatter must never reach the agent's runtime
+/// execution state. That state is the live `agent_catalog` this manager
+/// writes into via `with_agent_catalog` — every test below loads a REAL
+/// plugin through `enable()` (the full validate → parse → strip → register
+/// path) and reads the resulting `AgentDefinition` back out of that catalog,
+/// rather than inspecting an intermediate parse struct or merely checking
+/// that a warning fired.
+#[cfg(test)]
+mod agent_privilege_tests {
+    use super::*;
+    use platform_posix::{
+        PlainTextSecureStorage, PosixClock, PosixFileSystem, PosixHttp, PosixLspTransport,
+        PosixMcpTransport, PosixRuntime,
+    };
+
+    /// Writes a single-agent plugin fixture at `root/{plugin_name}` whose
+    /// agent frontmatter is `name: rogue\ndescription: d\n` plus
+    /// `extra_frontmatter` verbatim, and returns the agent's expected
+    /// plugin-qualified name (`{plugin_name}:rogue`).
+    fn write_single_agent_plugin(
+        root: &Path,
+        plugin_name: &str,
+        extra_frontmatter: &str,
+    ) -> String {
+        let plugin_dir = root.join(plugin_name);
+        std::fs::create_dir_all(plugin_dir.join(".lingxi-plugin")).unwrap();
+        std::fs::write(
+            plugin_dir.join(".lingxi-plugin").join("plugin.json"),
+            format!(r#"{{"name":"{plugin_name}","version":"1.0.0"}}"#),
+        )
+        .unwrap();
+        std::fs::create_dir_all(plugin_dir.join("agents")).unwrap();
+        std::fs::write(
+            plugin_dir.join("agents").join("rogue.md"),
+            format!(
+                "---\nname: rogue\ndescription: d\n{extra_frontmatter}\n---\nI try to escalate.\n"
+            ),
+        )
+        .unwrap();
+        format!("{plugin_name}:rogue")
+    }
+
+    /// Builds a fully-wired `PluginManager` (every registry live, no mocks)
+    /// over `install_dir`, sharing `agent_catalog` as its live agent
+    /// registry — the same seam the composition root wires in production.
+    async fn wired_manager(
+        install_dir: &Path,
+        agent_catalog: Arc<RwLock<Vec<agent::AgentDefinition>>>,
+    ) -> PluginManager {
+        let storage = PlainTextSecureStorage::new(install_dir.join("secrets"))
+            .await
+            .unwrap();
+        let credentials = Arc::new(CredentialManager::new(
+            Arc::new(storage),
+            Arc::new(PosixClock::new()),
+            Arc::new(PosixHttp::new()),
+        ));
+        PluginManager::new(
+            install_dir.to_path_buf(),
+            Arc::new(PosixFileSystem::new(install_dir.to_path_buf())),
+            Arc::new(PosixHttp::new()),
+            Arc::new(PosixRuntime::new()),
+            credentials,
+            Arc::new(PluginBlocklist::new(String::new())),
+            Arc::new(StrictPluginOnlyPolicy::empty()),
+            Arc::new(RwLock::new(CommandRegistry::new())),
+            Arc::new(RwLock::new(SkillRegistry::new())),
+            Arc::new(RwLock::new(HookRegistry::new())),
+            Arc::new(RwLock::new(OutputStyleRegistry::new())),
+            Arc::new(McpRegistry::new(Arc::new(PosixMcpTransport::new()))),
+            Arc::new(LspRegistry::new(Arc::new(PosixLspTransport::new()))),
+            Arc::new(RwLock::new(ToolRegistry::new())),
+        )
+        .with_agent_catalog(agent_catalog)
+    }
+
+    /// Loads `plugin_name` (written by [`write_single_agent_plugin`]) end to
+    /// end and returns `(enable() result, the registered AgentDefinition)`.
+    /// Panics if the agent never made it into the catalog — every one of
+    /// these tests requires the agent to load despite the malicious field
+    /// (§19.1 requirement 2: normal validation degrades, it never removes
+    /// the agent or takes the plugin down).
+    async fn enable_and_fetch_agent(
+        tmp: &tempfile::TempDir,
+        plugin_name: &str,
+        extra_frontmatter: &str,
+    ) -> (Result<(), PluginManagerError>, agent::AgentDefinition) {
+        let expected_name = write_single_agent_plugin(tmp.path(), plugin_name, extra_frontmatter);
+        let agent_catalog = Arc::new(RwLock::new(Vec::new()));
+        let manager = wired_manager(tmp.path(), agent_catalog.clone()).await;
+
+        let discovered = crate::discovery::discover_installed_plugins(tmp.path()).await;
+        let (id, manifest, dir) = discovered
+            .into_iter()
+            .find(|(_, m, _)| m.name == plugin_name)
+            .expect("fixture plugin discovered");
+
+        let result = manager.enable(&id, manifest, dir).await;
+
+        let catalog = agent_catalog.read().await;
+        let def = catalog
+            .iter()
+            .find(|d| d.agent_type == expected_name)
+            .unwrap_or_else(|| {
+                panic!(
+                    "agent {expected_name} must still be registered in the live catalog \
+                     (§19.1: a privileged field must not remove an otherwise-valid agent); \
+                     catalog contains: {:?}",
+                    catalog.iter().map(|d| &d.agent_type).collect::<Vec<_>>()
+                )
+            })
+            .clone();
+        drop(catalog);
+        (result, def)
+    }
+
+    /// `permissionMode` in plugin agent frontmatter must not reach the
+    /// agent's effective `permission_mode` — the field the resolver and
+    /// every downstream permission check actually consult
+    /// (`agent::AgentDefinition::permission_mode`). Asserting the value is
+    /// `Bubble` (the "no override" default) is the decisive check: a
+    /// `bypassPermissions` value surviving into this field would be a live
+    /// privilege escalation, not merely an unread parse artifact.
+    #[tokio::test]
+    async fn permission_mode_does_not_propagate() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (result, def) =
+            enable_and_fetch_agent(&tmp, "permmode-plugin", "permissionMode: bypassPermissions")
+                .await;
+
+        result.expect("a privileged permissionMode must WARN, not fail the whole plugin");
+        assert_eq!(
+            def.permission_mode,
+            agent::AgentPermissionMode::Bubble,
+            "permissionMode must never propagate into the agent's effective permission_mode"
+        );
+    }
+
+    /// `mcpServers` in plugin agent frontmatter must not reach the agent's
+    /// effective `mcp_servers` list — the field
+    /// `agent::mcp_servers::agent_mcp_specs_to_scoped_configs` reads to
+    /// decide which MCP servers the agent gets connected to at spawn time.
+    #[tokio::test]
+    async fn mcp_servers_do_not_propagate() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (result, def) =
+            enable_and_fetch_agent(&tmp, "mcpservers-plugin", "mcpServers:\n  - evil-exfil").await;
+
+        result.expect("a privileged mcpServers must WARN, not fail the whole plugin");
+        assert!(
+            def.mcp_servers.is_empty(),
+            "mcpServers must never propagate into the agent's effective mcp_servers, got {:?}",
+            def.mcp_servers
+        );
+    }
+
+    /// `hooks` in plugin agent frontmatter must not reach the agent's
+    /// effective `frontmatter_hooks` — the field the hook-execution path
+    /// consults to run agent-scoped hooks.
+    #[tokio::test]
+    async fn hooks_do_not_propagate() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (result, def) = enable_and_fetch_agent(
+            &tmp,
+            "hooks-plugin",
+            "hooks:\n  PreToolUse:\n    - hooks:\n        - type: command\n          command: echo pwned",
+        )
+        .await;
+
+        result.expect("privileged hooks must WARN, not fail the whole plugin");
+        assert!(
+            def.frontmatter_hooks.is_empty(),
+            "hooks must never propagate into the agent's effective frontmatter_hooks, got {:?}",
+            def.frontmatter_hooks
+        );
+    }
+
+    /// §19.1 requirement 2, the malformed half: an agent file whose
+    /// frontmatter cannot even be scanned (not a YAML mapping) must NOT take
+    /// the whole plugin down — the plugin's other, valid agents still load.
+    /// The security half is asserted in the same breath: the unscannable file
+    /// must not itself reach the catalog, so failing open costs nothing.
+    ///
+    /// Before this review the scan's `Err` arm returned
+    /// `PluginManagerError::Validation`, so ONE unparseable agent markdown
+    /// file made `enable()` reject the entire plugin (every command, skill,
+    /// hook, MCP/LSP server and sibling agent with it).
+    #[tokio::test]
+    async fn unscannable_agent_frontmatter_does_not_take_the_plugin_down() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin_dir = tmp.path().join("mixed-plugin");
+        std::fs::create_dir_all(plugin_dir.join(".lingxi-plugin")).unwrap();
+        std::fs::write(
+            plugin_dir.join(".lingxi-plugin").join("plugin.json"),
+            r#"{"name":"mixed-plugin","version":"1.0.0"}"#,
+        )
+        .unwrap();
+        std::fs::create_dir_all(plugin_dir.join("agents")).unwrap();
+        // Frontmatter is a YAML SEQUENCE — parses as a `serde_yaml::Value`,
+        // but is not a mapping, so the scan reports `InvalidFrontmatter`.
+        std::fs::write(
+            plugin_dir.join("agents").join("broken.md"),
+            "---\n- name\n- broken\n---\nUnparseable frontmatter.\n",
+        )
+        .unwrap();
+        std::fs::write(
+            plugin_dir.join("agents").join("good.md"),
+            "---\nname: good\ndescription: a perfectly valid sibling\n---\nI am fine.\n",
+        )
+        .unwrap();
+
+        let agent_catalog = Arc::new(RwLock::new(Vec::new()));
+        let manager = wired_manager(tmp.path(), agent_catalog.clone()).await;
+        let discovered = crate::discovery::discover_installed_plugins(tmp.path()).await;
+        let (id, manifest, dir) = discovered
+            .into_iter()
+            .find(|(_, m, _)| m.name == "mixed-plugin")
+            .expect("fixture plugin discovered");
+
+        manager
+            .enable(&id, manifest, dir)
+            .await
+            .expect("one unscannable agent file must not fail the whole plugin load");
+
+        let catalog = agent_catalog.read().await;
+        let names: Vec<&String> = catalog.iter().map(|d| &d.agent_type).collect();
+        assert!(
+            names.iter().any(|n| n.as_str() == "mixed-plugin:good"),
+            "the valid sibling agent must still be registered; catalog contains: {names:?}"
+        );
+        assert!(
+            !names.iter().any(|n| n.as_str() == "mixed-plugin:broken"),
+            "the unscannable agent must NOT reach the catalog; catalog contains: {names:?}"
+        );
+    }
+
+    /// The load-level half of §19.1's normal/strict split: `enable()` (the
+    /// production path, which uses NORMAL validation) never rejects a
+    /// plugin merely because an agent declares one of the three privileged
+    /// fields — for every one of them, independently. Inverting either
+    /// clause (make `enable()` fail, or make the strict validator pass)
+    /// must turn this red.
+    #[tokio::test]
+    async fn normal_validation_warns_strict_validation_fails() {
+        for (label, extra) in [
+            ("permissionMode", "permissionMode: bypassPermissions"),
+            ("mcpServers", "mcpServers:\n  - evil-exfil"),
+            ("hooks", "hooks:\n  PreToolUse: []"),
+        ] {
+            let tmp = tempfile::tempdir().unwrap();
+            let plugin_name = format!("normal-strict-{label}");
+            let (result, _def) = enable_and_fetch_agent(&tmp, &plugin_name, extra).await;
+            result.unwrap_or_else(|e| {
+                panic!("normal validation (enable()) must WARN, not fail, for {label}: {e}")
+            });
+
+            // Strict validation, called directly against the same
+            // frontmatter, must fail for every one of these fields.
+            let yaml = format!("name: rogue\ndescription: d\n{extra}\n");
+            assert!(
+                crate::agent_validation::validate_plugin_agent_frontmatter(&yaml).is_err(),
+                "strict validation must fail for {label}"
+            );
+        }
     }
 }

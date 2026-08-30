@@ -2,9 +2,11 @@
 //!
 //! A `PluginManifest` is the canonical description of a plugin: identity,
 //! source provenance, declared components (commands / agents / skills /
-//! hooks / output styles / MCP servers / LSP servers), trust level, and
-//! optional user-config schema. Materialization into the 8 engine
-//! registries is handled by [`crate::manager::PluginManager::load_plugin`].
+//! hooks / output styles / MCP servers / LSP servers / workflows), trust
+//! level, and optional user-config schema. Materialization into the engine
+//! registries is handled by [`crate::manager::PluginManager::load_plugin`]
+//! — except for `workflows`, which discovery populates but nothing
+//! materializes yet (see [`PluginComponents::workflows`]).
 //!
 //! See spec §15.1.
 
@@ -56,7 +58,7 @@ pub struct PluginManifest {
     pub homepage: Option<String>,
     /// Where the plugin came from.
     pub source: PluginSource,
-    /// Declared components (the 7-tuple materialised into engine registries).
+    /// Declared components (the 8-tuple materialised into engine registries).
     pub components: PluginComponents,
     /// Trust classification (defaults to [`crate::trust::default_trust_for_source`]).
     pub trust_level: PluginTrustLevel,
@@ -74,10 +76,11 @@ pub struct PluginManifest {
     pub settings: HashMap<String, serde_json::Value>,
 }
 
-/// The 7 component slots a plugin can populate.
+/// The 8 component slots a plugin can populate.
 ///
-/// Each slot is materialized into its matching engine registry by
-/// [`crate::manager::PluginManager::load_plugin`].
+/// The first seven are materialized into their matching engine registries by
+/// [`crate::manager::PluginManager::load_plugin`]; [`Self::workflows`] is
+/// discovered but not yet materialized.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PluginComponents {
     /// Markdown slash-command files.
@@ -94,6 +97,22 @@ pub struct PluginComponents {
     pub mcp_servers: HashMap<String, McpServerConfig>,
     /// LSP servers contributed by this plugin, keyed by logical name.
     pub lsp_servers: IndexMap<String, LspServerConfig>,
+    /// Workflow scripts contributed by this plugin — a LingXi-specific slot
+    /// with no claude-code `plugin.json` counterpart.
+    ///
+    /// Discovery only (spec §5.5): `discovery::detect_components` fills this
+    /// with the `.js` files under the default `workflows/` directory, or with
+    /// the manifest's `workflows` declaration, which REPLACES that default
+    /// directory rather than extending it (§5.3, matching `commands` /
+    /// `agents` / `output_styles`; contrast `skills`, which extends).
+    /// `.mjs` / `.cjs` / `.ts` / extensionless files are near-misses and are
+    /// deliberately excluded.
+    ///
+    /// ⚠️ Populating this slot is all that happens today.
+    /// [`crate::manager::PluginManager::load_plugin`] does NOT yet materialize
+    /// it into the workflow registry — that wiring is a separate task, so a
+    /// discovered workflow is not yet invocable.
+    pub workflows: Vec<ComponentPath>,
 }
 
 /// On-disk component reference plus arbitrary metadata.

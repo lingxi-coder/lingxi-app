@@ -288,6 +288,184 @@ pub fn resolve_named_workflow(
 }
 
 // ---------------------------------------------------------------------------
+// Task script copy + digest (spec §19.1 — "task copy, digest, pause/resume")
+// ---------------------------------------------------------------------------
+//
+// The property (task write-up, verbatim): a workflow task that pauses and
+// later resumes must run the SAME script bytes it started with. If the
+// plugin is updated, disabled, or its file edited between pause and resume,
+// resuming against the new bytes silently changes what the task does
+// mid-flight — the journal replays prior `agent()` results while the JS body
+// re-runs, so a changed body reads stale results as its own. This is exactly
+// the reasoning `workflow::check_determinism`'s doc comment gives for why
+// resume needs determinism at all (`workflow/src/lib.rs:614-621`): journal
+// replay assumes the re-run body is the SAME body. A drifted script breaks
+// that assumption every bit as badly as `Date.now()` does.
+//
+// So: a launched task takes a COPY of the script bytes and a DIGEST of them
+// at launch ([`TaskScriptCopy`]), and resume must verify the digest against
+// whatever bytes it is about to re-run before proceeding
+// ([`verify_resume_digest`]).
+//
+// ## What this crate can and cannot deliver
+//
+// [`script_digest`], [`TaskScriptCopy`], and [`verify_resume_digest`] are the
+// full reachable mechanism from `plugin/` alone: compute a digest, capture a
+// copy+digest pair at launch, and decide go/no-go for a resume given the
+// launch-time copy and the script bytes resume is about to run. All three are
+// exercised end-to-end below, through the SAME production discovery path
+// (`load_plugin_from_path` → `detect_components` → `build_plugin_workflow_inventory`)
+// the rest of this module's tests use, with a real on-disk file edit standing
+// in for "the plugin's script changed between pause and resume".
+//
+// What this crate does **not** and structurally **cannot** deliver: wiring
+// [`verify_resume_digest`] into an actual task-resume call site. That call
+// site does not exist inside `plugin/` — resume is orchestrated by
+// `tools/workflow`'s `Workflow` tool (`tools/workflow/src/lib.rs`, the
+// errorCode-3 "still-running resume target" gate and the `scriptPath`
+// re-read branch just above it) together with the task row `tasks::state::LocalWorkflowTaskState`
+// persists (`tasks/src/state.rs:296-386`, explicitly NOT owned by this task).
+// Today that row has a `script: String` copy (already "carried for resume",
+// per its own doc comment) and a `script_path: Option<String>`, but **no
+// digest field** — so there is nowhere on the task row to persist the
+// launch-time digest this property needs, and no reachable call site to
+// invoke the check against it. Closing that gap needs, in a follow-up whose
+// owned files include `tasks/src/state.rs` and `tools/workflow/src/lib.rs`:
+//
+// 1. A new field on `LocalWorkflowTaskState`, e.g.
+//    `#[serde(default)] pub launch_script_digest: Option<String>`, populated
+//    at launch from `plugin::workflow::script_digest(&resolved_script)`
+//    (mirroring how `script`/`script_path` are already populated there).
+// 2. A call in `tools/workflow`'s resume handling — right where it already
+//    re-reads the file with `std::fs::read(&resolved_path)` into
+//    `resolved_script` (`tools/workflow/src/lib.rs`, the `scriptPath` arm of
+//    the errorCode-1 resolution) and before its errorCode-3 still-running
+//    check — to `plugin::workflow::verify_resume_digest` against that
+//    persisted digest, surfacing a mismatch as a new `ValidationError` in the
+//    same byte-exact-message style as errorCode 2/4.
+// 3. That call site does not compile today for a reason beyond ownership:
+//    `tools/workflow/Cargo.toml` does not depend on `plugin` at all (only
+//    `apps/engine-desktop` and `apps/cli` do). The follow-up must add that
+//    dependency. It is acyclic — `plugin`'s own dependency closure
+//    (branding/protocol/traits/tool-api/hooks/mcp/agent/skill-api/command-api/
+//    outputstyles/lsp/secret) does not reach `tools/workflow`.
+//
+// That the drift is real and not hypothetical is visible in the launch text
+// `tools/workflow` already emits: it tells the model, verbatim, "To resume
+// after editing the script: Workflow({scriptPath: …, resumeFromRunId: …})".
+// The resume then re-reads the file — the CURRENT bytes — while the journal
+// still replays the OLD run's `agent()` results. This module is the check
+// that path is missing.
+//
+// Neither of those two call sites is reachable from this task's owned files
+// (`plugin/src/workflow.rs` alone), so the test below pins the strongest
+// thing that genuinely IS reachable — the digest-copy-verify mechanism
+// itself, driven through real discovery and a real file mutation — rather
+// than a weaker "two hashes differ" tautology wearing the "refuses resume"
+// name, and rather than a test that only LOOKS wired by calling through a
+// resume path that does not exist here.
+
+/// Lowercase-hex SHA-256 of a script's bytes, taken as the DIGEST half of a
+/// launch-time [`TaskScriptCopy`]. Delegates to [`crate::plugin_source_sha256`]
+/// (the public re-export of `mcpb::sha256_hex`, which is a private module) —
+/// the same SHA-256 integrity check this crate already uses to verify a
+/// `.mcpb` bundle's contents — rather than hashing independently, so there is
+/// exactly one SHA-256 code path in this crate to keep correct.
+///
+/// SHA-256 specifically, and not merely "some fingerprint that changes when
+/// the script changes", is the load-bearing part: the drift this gate exists
+/// to catch is frequently SAME-LENGTH (`'create'` → `'delete'`,
+/// `maxSteps: 3` → `maxSteps: 8`), so a length- or size-derived stand-in would
+/// wave exactly the realistic edits through. `script_digest_is_sha256_of_the_scripts_bytes`
+/// pins it to published SHA-256 test vectors for that reason.
+#[must_use]
+pub fn script_digest(script: &str) -> String {
+    crate::mcpb::sha256_hex(script.as_bytes())
+}
+
+/// The launch-time COPY a workflow task carries forward, paired with its
+/// digest, taken together at the same instant. `script` is the same shape
+/// `tasks::LocalWorkflowTaskState::script` already persists ("carried for
+/// resume"); `digest` is what a resume call must check before trusting that
+/// carried copy — or before trusting a re-read `scriptPath` — is still the
+/// script the task actually launched with.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskScriptCopy {
+    /// The script bytes exactly as they existed at launch.
+    pub script: String,
+    /// [`script_digest`] of `script`, taken at the same instant — frozen at
+    /// capture time, independent of anything that happens to `script` on disk
+    /// afterward.
+    pub digest: String,
+}
+
+impl TaskScriptCopy {
+    /// Take a copy+digest of already-in-hand script text (e.g. an inline
+    /// `script` input, or bytes a caller already resolved from a path).
+    #[must_use]
+    pub fn at_launch(script: &str) -> Self {
+        Self {
+            script: script.to_string(),
+            digest: script_digest(script),
+        }
+    }
+
+    /// Take a copy+digest by reading a script off disk right now — the
+    /// launch-time capture for a plugin-discovered workflow. Uses the same
+    /// `tokio::fs::read_to_string` this module's own
+    /// [`build_plugin_workflow_inventory`] already reads scripts through, so
+    /// a caller capturing a copy this way is reading exactly the bytes
+    /// discovery itself saw.
+    ///
+    /// # Errors
+    /// Propagates the underlying [`tokio::fs::read_to_string`] I/O error.
+    pub async fn read_at_launch(path: &Path) -> std::io::Result<Self> {
+        let script = tokio::fs::read_to_string(path).await?;
+        Ok(Self::at_launch(&script))
+    }
+}
+
+/// A resume was refused because the script it is about to run no longer
+/// matches the digest captured at launch.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error(
+    "workflow script changed since launch (expected digest {expected}, found {actual}); \
+     refusing resume so a paused task never re-runs a different script body"
+)]
+pub struct ScriptDigestMismatch {
+    /// The digest captured in [`TaskScriptCopy::digest`] at launch.
+    pub expected: String,
+    /// [`script_digest`] of the bytes resume was about to run.
+    pub actual: String,
+}
+
+/// The resume gate this task exists to build: verify that `current_script`
+/// (the bytes a resume is about to re-run — a re-read `scriptPath`, or
+/// whatever else a caller resolves) still matches the digest captured in
+/// `copy` at launch. `Ok(())` means resume may proceed; `Err` means the
+/// script drifted between pause and resume and resume must be refused (see
+/// this section's module-level doc for why: a changed body would read stale
+/// journaled `agent()` results as its own).
+///
+/// # Errors
+/// Returns [`ScriptDigestMismatch`] when `current_script`'s digest does not
+/// match `copy.digest`.
+pub fn verify_resume_digest(
+    copy: &TaskScriptCopy,
+    current_script: &str,
+) -> Result<(), ScriptDigestMismatch> {
+    let actual = script_digest(current_script);
+    if actual == copy.digest {
+        Ok(())
+    } else {
+        Err(ScriptDigestMismatch {
+            expected: copy.digest.clone(),
+            actual,
+        })
+    }
+}
+
+// ---------------------------------------------------------------------------
 // `meta.name` extraction (best-effort — see module doc's "deliberate gap")
 // ---------------------------------------------------------------------------
 
@@ -931,5 +1109,228 @@ mod tests {
             resolve_named_workflow("demo-plugin:anon", &[], &inventory, &BTreeSet::new()),
             None
         );
+    }
+
+    // -- task script copy + digest (pause/resume) --------------------------
+
+    /// Pins `script_digest` to SHA-256 by KNOWN ANSWER, against published
+    /// vectors — not by "the digest changed when the script changed".
+    ///
+    /// This test exists because of a hole the review found and reproduced:
+    /// with `script_digest` replaced by `format!("{:x}", script.len())`, ALL
+    /// 14 tests in this module passed, including
+    /// `a_changed_script_digest_refuses_resume`. Every drift the fixtures
+    /// staged happened to change the script's LENGTH, so the suite pinned
+    /// "some value moved", not "the bytes are digested". A length-derived
+    /// stand-in waves through exactly the edits this gate exists to catch —
+    /// `'create'` → `'delete'`, `maxSteps: 3` → `maxSteps: 8` — because those
+    /// are same-length. Known answers cannot be satisfied by any function
+    /// other than SHA-256-hex.
+    #[test]
+    fn script_digest_is_sha256_of_the_scripts_bytes() {
+        // Published SHA-256 vectors, independently confirmed with
+        // `printf '…' | shasum -a 256` rather than quoted from memory.
+        assert_eq!(
+            script_digest(""),
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "script_digest(\"\") must be the SHA-256 of the empty input"
+        );
+        assert_eq!(
+            script_digest("abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+            "script_digest(\"abc\") must be the SHA-256 of \"abc\""
+        );
+        // A realistic workflow script, digested by the same external tool:
+        //   printf "export const meta = {\n  name: 'a',\n  description: \
+        //   'd',\n};\n" | shasum -a 256
+        // The bytes are spelled out here rather than taken from `script("a")`
+        // so the vector's provenance is unambiguous — and then checked to be
+        // exactly what the helper produces, so the helper cannot drift away
+        // from the pinned vector unnoticed.
+        const FIXTURE: &str = "export const meta = {\n  name: 'a',\n  description: 'd',\n};\n";
+        assert_eq!(script("a"), FIXTURE, "the `script` helper's shape changed");
+        assert_eq!(
+            script_digest(FIXTURE),
+            "458d2173b3f9a7f70388d44b38e5a1c32d96ef3cd88935f74908c6485ab8f98d",
+            "script_digest of the fixture script must be its SHA-256"
+        );
+
+        // Shape: 64 lowercase hex characters, always.
+        let d = script_digest(&script("some-workflow"));
+        assert_eq!(d.len(), 64, "expected 64 hex chars, got {d:?}");
+        assert!(
+            d.chars()
+                .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c)),
+            "expected lowercase hex, got {d:?}"
+        );
+
+        // The property the length plant broke, stated directly: two scripts of
+        // the SAME length and different bytes must digest differently.
+        let a = "export const meta = {\n  name: 'create',\n};\n";
+        let b = "export const meta = {\n  name: 'delete',\n};\n";
+        assert_eq!(a.len(), b.len(), "fixture setup error: lengths must match");
+        assert_ne!(a, b);
+        assert_ne!(
+            script_digest(a),
+            script_digest(b),
+            "a same-length edit must still change the digest"
+        );
+    }
+
+    /// Pins [`TaskScriptCopy`] as a launch-time snapshot: the copy answers for
+    /// the bytes that existed when it was taken, and a later edit to the file
+    /// it came from does not retroactively change it.
+    ///
+    /// Honest scoping: that `copy.script` cannot mutate when the SOURCE
+    /// mutates is structural in Rust (the field is an owned `String`), so
+    /// asserting it proves nothing. The assertions that can actually fail are
+    /// the ones about the DIGEST's binding to the captured bytes, and about
+    /// [`TaskScriptCopy::read_at_launch`] having snapshotted disk contents at
+    /// read time rather than answering for whatever the file holds later.
+    /// Uses non-ASCII content so this is a statement about the copy's BYTES,
+    /// not merely its parsed ASCII `meta.name`.
+    #[tokio::test]
+    async fn task_script_copy_snapshots_the_bytes_it_was_taken_from() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("snapshot.js");
+        let original = "export const meta = {\n  name: 'ünïcode-résumé',\n};\n// 🚀\n";
+        fs::write(&path, original).unwrap();
+
+        let copy = TaskScriptCopy::read_at_launch(&path)
+            .await
+            .expect("fixture script must be readable");
+        assert_eq!(copy.script, original);
+        assert_eq!(copy.digest, script_digest(original));
+        // …and `at_launch` on the same bytes agrees, so the two constructors
+        // are not two different capture semantics.
+        assert_eq!(copy, TaskScriptCopy::at_launch(original));
+
+        // Edit the FILE the copy was read from, keeping the byte length
+        // identical, so a length-derived digest cannot pass this.
+        let edited = "export const meta = {\n  name: 'ünïcode-résumé',\n};\n// 🛰\n";
+        assert_eq!(edited.len(), original.len(), "fixture: lengths must match");
+        assert_ne!(edited, original);
+        fs::write(&path, edited).unwrap();
+
+        // The copy still answers for the ORIGINAL bytes.
+        assert_eq!(copy.script, original);
+        assert_eq!(
+            copy.digest,
+            script_digest(original),
+            "the copy's digest must still answer for the ORIGINAL bytes"
+        );
+        assert_ne!(
+            copy.digest,
+            script_digest(edited),
+            "a same-length on-disk edit must not collide with the captured digest"
+        );
+        // Positive control: a fresh read of the same path really does see the
+        // new bytes, so the assertions above are not passing because the write
+        // silently failed.
+        let reread = TaskScriptCopy::read_at_launch(&path).await.unwrap();
+        assert_eq!(reread.script, edited);
+        assert_ne!(reread.digest, copy.digest);
+    }
+
+    /// The required test: a workflow task's script changing on disk between
+    /// launch and resume must refuse resume. Routed through PRODUCTION
+    /// discovery (`load_plugin_from_path` → `detect_components` →
+    /// `build_plugin_workflow_inventory`, the same `discovered_inventory`
+    /// helper every other production-path test in this module uses) so the
+    /// launch-time copy is captured from a real discovered
+    /// `WorkflowInventoryEntry`, not a bespoke fixture — and the "resume"
+    /// side re-reads the SAME file fresh off disk, standing in for
+    /// `tools/workflow`'s `std::fs::read(&resolved_path)` at the actual
+    /// (out-of-crate) resume call site.
+    ///
+    /// Two drift cases, deliberately:
+    ///  * a SAME-LENGTH edit — the review's plant showed a length-derived
+    ///    "digest" passed this test when the only staged drift changed the
+    ///    script's length, so the realistic edit is staged FIRST and on its
+    ///    own;
+    ///  * a length-changing edit, the original case.
+    ///
+    /// Positive control included: resuming against genuinely UNCHANGED bytes
+    /// (re-read fresh, not the stored copy) must succeed — proving the gate
+    /// can pass at all, so the refusals below are not merely a gate that
+    /// always fails.
+    #[tokio::test]
+    async fn a_changed_script_digest_refuses_resume() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = plugin_root(tmp.path(), r#"{"name":"demo-plugin"}"#);
+        let dir = root.join("workflows");
+        fs::create_dir_all(&dir).unwrap();
+        let script_path = dir.join("resumable.js");
+        fs::write(&script_path, script("resumable")).unwrap();
+
+        let inventory = discovered_inventory(&root).await;
+        assert_eq!(file_names(&inventory), vec!["resumable.js"]);
+        let entry = &inventory[0];
+
+        // LAUNCH: take the copy+digest by reading the discovered script's
+        // bytes off disk.
+        let copy = TaskScriptCopy::read_at_launch(&entry.path)
+            .await
+            .expect("discovered script must be readable");
+        assert_eq!(copy.script, script("resumable"));
+
+        // Positive control — nothing has changed yet: a fresh re-read still
+        // verifies clean, and resume may proceed.
+        let unchanged_reread = fs::read_to_string(&entry.path).unwrap();
+        assert!(
+            verify_resume_digest(&copy, &unchanged_reread).is_ok(),
+            "resume must be allowed to proceed when the script has not changed"
+        );
+
+        // PAUSE, then the plugin's script file is edited on disk before
+        // resume — the exact scenario this task exists to close.
+        //
+        // Case 1: a SAME-LENGTH edit. `'resumable'` → `'resumabIe'` is one
+        // byte different and identical in length — the shape a real "plugin
+        // updated between pause and resume" edit usually takes.
+        let same_len = script("resumabIe");
+        assert_eq!(
+            same_len.len(),
+            copy.script.len(),
+            "fixture setup error: case 1 must be the SAME length as the launch script"
+        );
+        assert_ne!(same_len, copy.script);
+        fs::write(&entry.path, &same_len).unwrap();
+        let current = fs::read_to_string(&entry.path).unwrap();
+        let err = verify_resume_digest(&copy, &current).expect_err(
+            "a same-length script edit must still refuse resume — the digest must be a \
+             content digest, not a size fingerprint",
+        );
+        assert_eq!(err.expected, copy.digest);
+        assert_eq!(err.actual, script_digest(&current));
+        assert_ne!(err.actual, copy.digest);
+
+        // The refusal's rendered message is what an out-of-crate resume call
+        // site would surface; pin that it names BOTH digests and says what it
+        // refused, so the eventual user-facing failure identifies the drift.
+        let rendered = err.to_string();
+        assert!(
+            rendered.contains(&copy.digest)
+                && rendered.contains(&err.actual)
+                && rendered.contains("refusing resume"),
+            "mismatch message must name both digests and the refusal: {rendered}"
+        );
+
+        // Case 2: a length-changing edit.
+        fs::write(&entry.path, script("resumable-but-edited")).unwrap();
+        let current = fs::read_to_string(&entry.path).unwrap();
+        assert_ne!(
+            current.len(),
+            copy.script.len(),
+            "fixture setup error: case 2 must change the length"
+        );
+        let err = verify_resume_digest(&copy, &current)
+            .expect_err("a changed script's digest must refuse resume");
+        assert_eq!(err.expected, copy.digest);
+        assert_ne!(
+            err.actual, copy.digest,
+            "the reported actual digest must be the CHANGED script's digest"
+        );
+        assert_eq!(err.actual, script_digest(&current));
     }
 }

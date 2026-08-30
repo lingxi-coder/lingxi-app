@@ -14,6 +14,7 @@
 
 pub mod agent_validation;
 pub mod blocklist;
+pub mod brand_normalize;
 pub mod dependency;
 pub mod discovery;
 mod git;
@@ -38,6 +39,12 @@ pub use hooks::user_config;
 
 pub use agent_validation::{validate_plugin_agent_frontmatter, AgentValidationError};
 pub use blocklist::PluginBlocklist;
+/// §19.1 / P0a.7 — brand-token normalization layer for comparing Claude-oracle
+/// plugin fixtures against LingXi's plugin contract; see the module doc for
+/// the frozen-identity vs. known-pair distinction.
+pub use brand_normalize::{
+    known_pairs, load_frozen_identities, normalize, BrandPair, FrozenIdentity, NormalizeReport,
+};
 pub use dependency::{
     merge_dependency_requirements, parse_dependencies, version_satisfies_all, PluginDependency,
 };

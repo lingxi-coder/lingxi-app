@@ -154,9 +154,9 @@ pub fn read_mcp_config_file(path: &Path, scope: ConfigScope) -> Result<String, M
                         scope = label,
                         "MCP config skipped for {file} (scope={label}): not a regular file or exceeds {MCP_CONFIG_MAX_BYTES} byte limit"
                     );
-                    // Oracle telemetry (DEFERRED — no `tengu::mcp` event module
-                    // exists yet; its event-name registry is count-locked by
-                    // three guard tests): `p("mcp_config_parse","mcp_config_shape_gate")`.
+                    telemetry::emit_mcp_config_parse_gate(Some(
+                        telemetry::MCP_CONFIG_SHAPE_GATE,
+                    ));
                     return Err(McpConfigWarning {
                         file: Some(file.clone()),
                         path: String::new(),
@@ -206,8 +206,7 @@ fn io_error_warning(
         error = %e,
         "MCP config read error for {file} (scope={label}): {e}"
     );
-    // Oracle telemetry (DEFERRED, see [`read_mcp_config_file`]):
-    // `p("mcp_config_parse","mcp_config_read_failed")`.
+    telemetry::emit_mcp_config_parse_gate(Some(telemetry::MCP_CONFIG_READ_FAILED));
     McpConfigWarning {
         file: Some(file.to_string()),
         path: String::new(),
@@ -253,8 +252,7 @@ pub fn parse_mcp_config_json(
             length,
             "MCP config is not valid JSON: {file} (scope={label}, length={length}, first100={quoted})"
         );
-        // Oracle telemetry (DEFERRED, see [`read_mcp_config_file`]):
-        // `p("mcp_config_parse","mcp_config_invalid_json")`.
+        telemetry::emit_mcp_config_parse_gate(Some(telemetry::MCP_CONFIG_INVALID_JSON));
         McpConfigWarning {
             file: Some(file),
             path: String::new(),
@@ -735,11 +733,17 @@ pub fn collect_all_mcp_config_warnings_at(
     let project = project_mcp_path;
     match read_mcp_config_file(project, ConfigScope::Project) {
         Ok(raw) => match parse_mcp_config_json(&raw, project, ConfigScope::Project) {
-            Ok(v) => out.extend(collect_mcp_config_warnings(
-                &v,
-                ConfigScope::Project,
-                Some(&project.to_string_lossy()),
-            )),
+            Ok(v) => {
+                // oracle: `return y("mcp_config_parse"), xqe({...})` — the
+                // success half of the gate, fired right where `Iqe` hands the
+                // parsed object off to its caller.
+                telemetry::emit_mcp_config_parse_gate(None);
+                out.extend(collect_mcp_config_warnings(
+                    &v,
+                    ConfigScope::Project,
+                    Some(&project.to_string_lossy()),
+                ))
+            }
             Err(warning) => out.push(warning),
         },
         Err(warning) if warning.is_not_found() => {}
@@ -1299,6 +1303,97 @@ mod tests {
         let path = Path::new("/p/.mcp.json");
         let v = parse_mcp_config_json(r#"{"mcpServers":{}}"#, path, ConfigScope::Project).unwrap();
         assert_eq!(v, json!({"mcpServers":{}}));
+    }
+
+    // ── §23b telemetry: each fatal branch fires `mcp_config_parse` with its
+    //    OWN reason; the success branch fires it with none ──────────────────
+
+    use crate::tracing_capture::GateCapture;
+    use tracing_subscriber::prelude::*;
+    use tracing_subscriber::Registry;
+
+    #[test]
+    fn shape_gate_rejection_reports_its_own_reason() {
+        let cap = GateCapture::default();
+        let _guard = tracing::subscriber::set_default(Registry::default().with(cap.clone()));
+
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("huge.mcp.json");
+        std::fs::write(&path, vec![b' '; (MCP_CONFIG_MAX_BYTES + 1) as usize]).unwrap();
+        let _ = read_mcp_config_file(&path, ConfigScope::Project);
+
+        assert_eq!(
+            cap.rows(),
+            vec![(
+                telemetry::MCP_CONFIG_PARSE_GATE.to_string(),
+                Some(telemetry::MCP_CONFIG_SHAPE_GATE.to_string())
+            )]
+        );
+    }
+
+    #[test]
+    fn read_failure_reports_its_own_reason() {
+        let cap = GateCapture::default();
+        let _guard = tracing::subscriber::set_default(Registry::default().with(cap.clone()));
+
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("a".repeat(300));
+        let _ = read_mcp_config_file(&path, ConfigScope::Project);
+
+        assert_eq!(
+            cap.rows(),
+            vec![(
+                telemetry::MCP_CONFIG_PARSE_GATE.to_string(),
+                Some(telemetry::MCP_CONFIG_READ_FAILED.to_string())
+            )]
+        );
+    }
+
+    #[test]
+    fn missing_file_fires_no_telemetry_at_all() {
+        // Oracle: `E(A)==="ENOENT"` returns immediately with no `n(...)` log
+        // and no `p(...)` call — a missing ancestor config is routine.
+        let cap = GateCapture::default();
+        let _guard = tracing::subscriber::set_default(Registry::default().with(cap.clone()));
+
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("absent.mcp.json");
+        let _ = read_mcp_config_file(&path, ConfigScope::Project);
+
+        assert_eq!(cap.rows(), Vec::<(String, Option<String>)>::new());
+    }
+
+    #[test]
+    fn invalid_json_reports_its_own_reason() {
+        let cap = GateCapture::default();
+        let _guard = tracing::subscriber::set_default(Registry::default().with(cap.clone()));
+
+        let path = Path::new("/p/.mcp.json");
+        let _ = parse_mcp_config_json("{ not json", path, ConfigScope::Project);
+
+        assert_eq!(
+            cap.rows(),
+            vec![(
+                telemetry::MCP_CONFIG_PARSE_GATE.to_string(),
+                Some(telemetry::MCP_CONFIG_INVALID_JSON.to_string())
+            )]
+        );
+    }
+
+    #[test]
+    fn successful_project_config_parse_reports_no_reason() {
+        let cap = GateCapture::default();
+        let _guard = tracing::subscriber::set_default(Registry::default().with(cap.clone()));
+
+        let dir = TempDir::new().unwrap();
+        let project = dir.path().join(".mcp.json");
+        std::fs::write(&project, r#"{"mcpServers":{}}"#).unwrap();
+        let _ = collect_all_mcp_config_warnings_at(&project, dir.path(), None);
+
+        assert_eq!(
+            cap.rows(),
+            vec![(telemetry::MCP_CONFIG_PARSE_GATE.to_string(), None)]
+        );
     }
 
     // ── `collect_all_mcp_config_warnings_at` wiring ────────────────────────

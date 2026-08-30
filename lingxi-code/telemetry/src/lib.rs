@@ -441,6 +441,135 @@ pub fn emit_uncompilable_ignore_pattern(site: &'static str) {
     );
 }
 
+// -- 2.1.251 §23b: MCP config-parse outcome gate -----------------------------
+//
+// Oracle `Iqe` (mcp/src/config_diagnostics.rs's byte-faithful port) reports
+// its outcome through a NAMED COUNT-GATE, not a `tengu_*` analytics event:
+// `p("mcp_config_parse", reason)` on one of three fatal outcomes, or
+// `y("mcp_config_parse")` on success — the SAME gate name every time, with an
+// optional `reason` sub-label. This is a distinct wire family from the
+// `tengu_*` event tree in [`crate::tengu`] (no `tengu_` prefix, and the
+// oracle routes it through its OTel log-gate helpers `p`/`y` rather than the
+// `s(...)` analytics-bus call every `tengu_*` event uses) — see
+// `mcp/src/tool_schema.rs`'s module doc for the sibling `mcp_list_tools_*` /
+// `mcp_connect_*` family in the same OTel log-gate style.
+
+/// The oracle's `mcp_config_parse` gate name (both `p(...)` and `y(...)` use
+/// this literal as their first argument).
+pub const MCP_CONFIG_PARSE_GATE: &str = "mcp_config_parse";
+/// `p("mcp_config_parse","mcp_config_shape_gate")` — the config path is not a
+/// regular file, or exceeds the byte cap (`Iqe`'s `Atr(...)===null` branch).
+pub const MCP_CONFIG_SHAPE_GATE: &str = "mcp_config_shape_gate";
+/// `p("mcp_config_parse","mcp_config_read_failed")` — the file exists and
+/// passed the shape gate but a non-ENOENT I/O error stopped the read.
+pub const MCP_CONFIG_READ_FAILED: &str = "mcp_config_read_failed";
+/// `p("mcp_config_parse","mcp_config_invalid_json")` — the file read cleanly
+/// but did not parse as JSON.
+pub const MCP_CONFIG_INVALID_JSON: &str = "mcp_config_invalid_json";
+
+/// Emit the `mcp_config_parse` outcome gate. `reason` is `None` for the
+/// success case (oracle `y(...)`) or one of [`MCP_CONFIG_SHAPE_GATE`] /
+/// [`MCP_CONFIG_READ_FAILED`] / [`MCP_CONFIG_INVALID_JSON`] for a fatal
+/// outcome (oracle `p(...)`). Deliberately NOT gated on ENOENT — the oracle's
+/// `catch` block returns immediately with no `n(...)` log and no `p(...)`
+/// call for a missing file, so callers must not call this at all for that
+/// branch (see `mcp/src/config_diagnostics.rs::io_error_warning`).
+pub fn emit_mcp_config_parse_gate(reason: Option<&'static str>) {
+    match reason {
+        Some(reason) => tracing::warn!(event = MCP_CONFIG_PARSE_GATE, reason = reason),
+        None => tracing::debug!(event = MCP_CONFIG_PARSE_GATE),
+    }
+}
+
+#[cfg(test)]
+mod mcp_config_parse_gate_tests {
+    use super::*;
+    use std::sync::{Arc, Mutex as StdMutex};
+    use tracing::field::Field;
+    use tracing::Event;
+    use tracing::Subscriber;
+    use tracing_subscriber::layer::{Context, Layer};
+    use tracing_subscriber::prelude::*;
+    use tracing_subscriber::Registry;
+
+    /// Capture every event's `event`/`reason` fields as `(event, reason)`.
+    #[derive(Default, Clone)]
+    struct GateCapture {
+        rows: Arc<StdMutex<Vec<(String, Option<String>)>>>,
+    }
+
+    impl<S: Subscriber> Layer<S> for GateCapture {
+        fn on_event(&self, event: &Event<'_>, _ctx: Context<'_, S>) {
+            struct V {
+                event: Option<String>,
+                reason: Option<String>,
+            }
+            impl tracing::field::Visit for V {
+                fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+                    let rendered = format!("{value:?}").trim_matches('"').to_string();
+                    match field.name() {
+                        "event" => self.event = Some(rendered),
+                        "reason" => self.reason = Some(rendered),
+                        _ => {}
+                    }
+                }
+                fn record_str(&mut self, field: &Field, value: &str) {
+                    match field.name() {
+                        "event" => self.event = Some(value.to_string()),
+                        "reason" => self.reason = Some(value.to_string()),
+                        _ => {}
+                    }
+                }
+            }
+            let mut v = V {
+                event: None,
+                reason: None,
+            };
+            event.record(&mut v);
+            if let Some(name) = v.event {
+                self.rows.lock().unwrap().push((name, v.reason));
+            }
+        }
+    }
+
+    /// Every fatal outcome must fire the SAME gate name with its own reason —
+    /// reverting the `reason` argument at any one call site (or dropping the
+    /// call entirely) is caught here, not just at the config_diagnostics.rs
+    /// layer, since this is the shared primitive every one of those sites
+    /// funnels through.
+    #[test]
+    fn shape_gate_read_failed_and_invalid_json_each_report_their_own_reason() {
+        let cap = GateCapture::default();
+        let subscriber = Registry::default().with(cap.clone());
+        let _guard = tracing::subscriber::set_default(subscriber);
+
+        emit_mcp_config_parse_gate(Some(MCP_CONFIG_SHAPE_GATE));
+        emit_mcp_config_parse_gate(Some(MCP_CONFIG_READ_FAILED));
+        emit_mcp_config_parse_gate(Some(MCP_CONFIG_INVALID_JSON));
+        emit_mcp_config_parse_gate(None);
+
+        let rows = cap.rows.lock().unwrap().clone();
+        assert_eq!(
+            rows,
+            vec![
+                (
+                    MCP_CONFIG_PARSE_GATE.to_string(),
+                    Some(MCP_CONFIG_SHAPE_GATE.to_string())
+                ),
+                (
+                    MCP_CONFIG_PARSE_GATE.to_string(),
+                    Some(MCP_CONFIG_READ_FAILED.to_string())
+                ),
+                (
+                    MCP_CONFIG_PARSE_GATE.to_string(),
+                    Some(MCP_CONFIG_INVALID_JSON.to_string())
+                ),
+                (MCP_CONFIG_PARSE_GATE.to_string(), None),
+            ]
+        );
+    }
+}
+
 // -- M5-14 Task 10: release-marker emit-once helpers -------------------------
 
 /// Emit the release markers exactly once per process lifetime.

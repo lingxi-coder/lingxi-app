@@ -3525,6 +3525,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+ "tracing-subscriber",
  "traits",
  "unicode-normalization",
  "url",
@@ -6684,6 +6685,7 @@ dependencies = [
  "tokio",
  "tonic",
  "tracing",
+ "tracing-subscriber",
  "traits",
 ]
 

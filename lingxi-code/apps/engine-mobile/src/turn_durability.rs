@@ -1037,7 +1037,7 @@ mod tests {
             .append_event(
                 "session-a",
                 721,
-                r#"{"type":"error","kind":{"type":"internal"},"message":"provider failed"}"
+                r#"{"type":"error","kind":{"type":"internal"},"message":"provider failed"}"#
                     .to_string(),
             )
             .expect("error event");

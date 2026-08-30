@@ -865,38 +865,6 @@ async fn enable_materializes_declared_theme_into_plugin_theme_registry() {
     );
 }
 
-/// Initialise a git repo at `dir` containing a single-plugin tree (manifest +
-/// one command) and commit it, so it can be cloned via `file://`.
-fn init_git_plugin_repo(dir: &Path, plugin_name: &str) {
-    init_git_plugin_repo_versioned(dir, plugin_name, "2.1.0");
-}
-
-fn init_git_plugin_repo_versioned(dir: &Path, plugin_name: &str, version: &str) {
-    fs::create_dir_all(dir.join(".lingxi-plugin")).unwrap();
-    fs::write(
-        dir.join(".lingxi-plugin").join("plugin.json"),
-        format!(r#"{{"name":"{plugin_name}","version":"{version}"}}"#),
-    )
-    .unwrap();
-    fs::create_dir_all(dir.join("commands")).unwrap();
-    fs::write(
-        dir.join("commands").join("hello.md"),
-        "---\ndescription: greets from git\n---\nHello from the git plugin.\n",
-    )
-    .unwrap();
-
-    let repo = git2::Repository::init(dir).unwrap();
-    let mut index = repo.index().unwrap();
-    index
-        .add_all(["*"].iter(), git2::IndexAddOption::DEFAULT, None)
-        .unwrap();
-    index.write().unwrap();
-    let tree = repo.find_tree(index.write_tree().unwrap()).unwrap();
-    let sig = git2::Signature::now("Test", "test@example.com").unwrap();
-    repo.commit(Some("HEAD"), &sig, &sig, "init", &tree, &[])
-        .unwrap();
-}
-
 /// Build a `PluginManager` rooted at `install_dir`, returning it + the live
 /// command registry to assert against.
 async fn make_manager(
@@ -931,437 +899,72 @@ async fn make_manager(
     (manager, command_registry)
 }
 
+/// spec §25d: `PluginManager::install`'s git / marketplace / `.mcpb` arms
+/// were deleted (see `manager.rs`'s module doc) because they duplicated
+/// production's real install pipeline with zero non-test callers and an
+/// installed_plugins.json writer that was INCOMPATIBLE with the real V2
+/// shape. Each arm now returns a "use the CLI installer" guidance error
+/// instead of fetching/unpacking anything — this pins that down (not a
+/// panic, not a stale success) for every network-backed variant.
+///
+/// The guards these arms used to carry are exercised at their real, still-
+/// live source instead:
+/// - the git URL-protocol guard: `plugin::git::tests::rejects_unsupported_protocol`
+///   (`clone_plugin_git` is unchanged and still used by
+///   `apps/cli/src/commands/plugin_install.rs::materialize_external_plugin_source`);
+/// - the `.mcpb` zip path-traversal guard:
+///   `plugin::mcpb::tests::unpack_rejects_path_traversal_entries` (migrated
+///   there in this same change — `unpack_mcpb` is still used by
+///   `discovery.rs`'s live `mcpServers` `.mcpb`/`.dxt` loading path);
+/// - the marketplace cache-escape check: already duplicated in production's
+///   own `marketplace_entry_source_path`
+///   (`apps/cli/src/commands/plugin_install.rs`), which this change adds a
+///   dedicated symlink-escape test for;
+/// - the "malicious version cannot escape the cache" guard: production's
+///   `sanitize` (`plugin_install.rs`) is byte-identical to the deleted arm's
+///   `sanitize_segment` call and gets its own dedicated unit test in this
+///   change too.
 #[tokio::test]
-async fn install_git_arm_clones_materializes_and_registers() {
+async fn install_network_fetch_arms_return_guidance_error_not_panic() {
     use plugin::PluginSource;
 
     let tmp = tempfile::tempdir().unwrap();
-    // Source repo to clone FROM (file://).
-    let src = tmp.path().join("src-repo");
-    init_git_plugin_repo(&src, "gitplugin");
-    // Manager rooted at a SEPARATE install dir (the plugin cache).
-    let install_root = tmp.path().join("plugins");
-    let (manager, command_registry) =
-        make_manager(&install_root, &tmp.path().join("secrets")).await;
+    let (manager, _cmd) = make_manager(&tmp.path().join("plugins"), &tmp.path().join("secrets")).await;
 
-    let url = format!("file://{}", src.display());
-    let id = manager
+    let git_err = manager
         .install(PluginSource::Git {
-            url,
+            url: "https://example.invalid/repo.git".into(),
             ref_: String::new(),
         })
         .await
-        .expect("git install should clone + materialize + enable");
-    assert!(!id.to_string().is_empty());
-
-    // The clone landed in the versioned cache layout the discovery resolves:
-    // cache/<repo-identity>/<plugin>/<version>/ holding the manifest.
-    let cache_root = install_root.join("cache");
-    let mut found_manifest = false;
-    for entry in walkdir(&cache_root) {
-        if entry.ends_with(".lingxi-plugin/plugin.json") {
-            found_manifest = true;
-        }
-    }
+        .expect_err("the git arm must not fetch anything");
     assert!(
-        found_manifest,
-        "plugin manifest should be materialized under {cache_root:?}"
+        format!("{git_err}").contains("not supported by PluginManager::install"),
+        "got: {git_err}"
     );
 
-    // The plugin's command was registered via install→enable (namespaced).
-    assert!(
-        command_registry
-            .read()
-            .await
-            .resolve("gitplugin:hello")
-            .is_some(),
-        "git-installed plugin's command should be registered as gitplugin:hello"
-    );
-}
-
-#[tokio::test]
-async fn install_git_arm_malicious_version_cannot_escape_cache() {
-    use plugin::PluginSource;
-
-    let tmp = tempfile::tempdir().unwrap();
-    // A malicious repo whose plugin.json declares version "..".
-    let src = tmp.path().join("evil-repo");
-    init_git_plugin_repo_versioned(&src, "evil", "..");
-    let install_root = tmp.path().join("plugins");
-    let (manager, _cmd) = make_manager(&install_root, &tmp.path().join("secrets")).await;
-
-    manager
-        .install(PluginSource::Git {
-            url: format!("file://{}", src.display()),
-            ref_: String::new(),
-        })
-        .await
-        .expect("install should succeed safely");
-
-    // The version segment ".." was neutralized to "-" — the manifest lands DEEP
-    // under `<name>/-/…`, never directly under the marketplace cache dir (which
-    // would prove a `..` escape + the destructive remove_dir_all).
-    let cache_root = install_root.join("cache");
-    let manifests: Vec<String> = walkdir(&cache_root)
-        .into_iter()
-        .filter(|p| p.ends_with(".lingxi-plugin/plugin.json"))
-        .collect();
-    assert_eq!(
-        manifests.len(),
-        1,
-        "exactly one manifest materialized: {manifests:?}"
-    );
-    assert!(
-        manifests[0].contains("/evil/-/.lingxi-plugin/plugin.json"),
-        "version must be neutralized to '-' and stay nested; got {}",
-        manifests[0]
-    );
-}
-
-/// Build a git marketplace repo: a `.lingxi-plugin/marketplace.json` catalog
-/// listing one path-based plugin that lives at `plugins/<plugin>/` in the repo.
-fn init_git_marketplace_repo(dir: &Path, marketplace: &str, plugin: &str) {
-    fs::create_dir_all(dir.join(".lingxi-plugin")).unwrap();
-    fs::write(
-        dir.join(".lingxi-plugin").join("marketplace.json"),
-        format!(
-            r#"{{"name":"{marketplace}","plugins":[{{"name":"{plugin}","path":"plugins/{plugin}"}}]}}"#
-        ),
-    )
-    .unwrap();
-    let pdir = dir.join("plugins").join(plugin);
-    fs::create_dir_all(pdir.join(".lingxi-plugin")).unwrap();
-    fs::write(
-        pdir.join(".lingxi-plugin").join("plugin.json"),
-        format!(r#"{{"name":"{plugin}","version":"3.0.0"}}"#),
-    )
-    .unwrap();
-    fs::create_dir_all(pdir.join("commands")).unwrap();
-    fs::write(
-        pdir.join("commands").join("hi.md"),
-        "---\ndescription: marketplace cmd\n---\nHi from the marketplace plugin.\n",
-    )
-    .unwrap();
-
-    let repo = git2::Repository::init(dir).unwrap();
-    let mut index = repo.index().unwrap();
-    index
-        .add_all(["*"].iter(), git2::IndexAddOption::DEFAULT, None)
-        .unwrap();
-    index.write().unwrap();
-    let tree = repo.find_tree(index.write_tree().unwrap()).unwrap();
-    let sig = git2::Signature::now("Test", "test@example.com").unwrap();
-    repo.commit(Some("HEAD"), &sig, &sig, "init", &tree, &[])
-        .unwrap();
-}
-
-#[tokio::test]
-async fn install_marketplace_arm_clones_catalog_finds_entry_and_registers() {
-    use plugin::PluginSource;
-
-    let tmp = tempfile::tempdir().unwrap();
-    let mkt_repo = tmp.path().join("mkt-repo");
-    init_git_marketplace_repo(&mkt_repo, "mymkt", "mpplugin");
-    let install_root = tmp.path().join("plugins");
-    let (manager, command_registry) =
-        make_manager(&install_root, &tmp.path().join("secrets")).await;
-
-    let id = manager
+    let marketplace_err = manager
         .install(PluginSource::Marketplace {
-            url: format!("file://{}", mkt_repo.display()),
-            name: "mpplugin".into(),
+            url: "https://example.invalid/marketplace.git".into(),
+            name: "some-plugin".into(),
         })
         .await
-        .expect("marketplace install should resolve catalog + materialize + enable");
-    assert!(!id.to_string().is_empty());
-
-    // The catalog was cloned under marketplaces/, and the plugin materialized
-    // into the cache + its command registered (namespaced).
-    assert!(install_root.join("marketplaces").exists(), "catalog cloned");
+        .expect_err("the marketplace arm must not fetch anything");
     assert!(
-        command_registry
-            .read()
-            .await
-            .resolve("mpplugin:hi")
-            .is_some(),
-        "marketplace plugin's command should be registered as mpplugin:hi"
+        format!("{marketplace_err}").contains("not supported by PluginManager::install"),
+        "got: {marketplace_err}"
     );
-}
 
-#[tokio::test]
-async fn install_marketplace_arm_unknown_plugin_returns_not_found() {
-    use plugin::PluginSource;
-
-    let tmp = tempfile::tempdir().unwrap();
-    let mkt_repo = tmp.path().join("mkt-repo");
-    init_git_marketplace_repo(&mkt_repo, "mymkt", "mpplugin");
-    let (manager, _) = make_manager(&tmp.path().join("plugins"), &tmp.path().join("secrets")).await;
-
-    let err = manager
-        .install(PluginSource::Marketplace {
-            url: format!("file://{}", mkt_repo.display()),
-            name: "ghost".into(),
-        })
-        .await
-        .expect_err("a missing plugin must be a typed not-found error");
-    assert!(
-        format!("{err}").contains("Marketplace 'ghost' not found. Available marketplaces:"),
-        "got: {err}"
-    );
-}
-
-#[cfg(unix)]
-#[tokio::test]
-async fn install_marketplace_arm_rejects_symlink_escape() {
-    use plugin::PluginSource;
-
-    let tmp = tempfile::tempdir().unwrap();
-    // The exfiltration target OUTSIDE the marketplace repo (stands in for ~/.ssh).
-    let outside = tmp.path().join("outside");
-    fs::create_dir_all(outside.join(".lingxi-plugin")).unwrap();
-    fs::write(
-        outside.join(".lingxi-plugin").join("plugin.json"),
-        r#"{"name":"secret","version":"1.0.0"}"#,
-    )
-    .unwrap();
-    fs::write(outside.join("id_rsa"), "PRIVATE KEY").unwrap();
-
-    // A malicious catalog: entry path "link" is a single Normal component (passes
-    // the lexical guard) but is a symlink pointing OUT of the repo.
-    let mkt_repo = tmp.path().join("mkt-repo");
-    fs::create_dir_all(mkt_repo.join(".lingxi-plugin")).unwrap();
-    fs::write(
-        mkt_repo.join(".lingxi-plugin").join("marketplace.json"),
-        r#"{"name":"m","plugins":[{"name":"p","path":"link"}]}"#,
-    )
-    .unwrap();
-    std::os::unix::fs::symlink(&outside, mkt_repo.join("link")).unwrap();
-    let repo = git2::Repository::init(&mkt_repo).unwrap();
-    let mut idx = repo.index().unwrap();
-    idx.add_all(["*"].iter(), git2::IndexAddOption::DEFAULT, None)
-        .unwrap();
-    idx.write().unwrap();
-    let tree = repo.find_tree(idx.write_tree().unwrap()).unwrap();
-    let sig = git2::Signature::now("Test", "t@e.com").unwrap();
-    repo.commit(Some("HEAD"), &sig, &sig, "init", &tree, &[])
-        .unwrap();
-
-    let install_root = tmp.path().join("plugins");
-    let (manager, _) = make_manager(&install_root, &tmp.path().join("secrets")).await;
-    let err = manager
-        .install(PluginSource::Marketplace {
-            url: format!("file://{}", mkt_repo.display()),
-            name: "p".into(),
-        })
-        .await
-        .expect_err("a symlinked catalog entry must be rejected, not followed");
-    assert!(
-        format!("{err}").contains("outside the cache directory"),
-        "got: {err}"
-    );
-    // And nothing was exfiltrated into the cache.
-    let leaked = walkdir(&install_root.join("cache"))
-        .into_iter()
-        .any(|p| p.ends_with("id_rsa"));
-    assert!(
-        !leaked,
-        "the symlink target's files must NOT be copied into the cache"
-    );
-}
-
-/// Write a `.mcpb` (zip) bundle of `(entry_name, contents)` to `dest`.
-fn write_mcpb(dest: &Path, entries: &[(&str, &str)]) {
-    use std::io::Write;
-    let mut buf = Vec::new();
-    {
-        let mut w = zip::ZipWriter::new(std::io::Cursor::new(&mut buf));
-        let opts = zip::write::SimpleFileOptions::default();
-        for (name, content) in entries {
-            w.start_file(*name, opts).unwrap();
-            w.write_all(content.as_bytes()).unwrap();
-        }
-        w.finish().unwrap();
-    }
-    fs::write(dest, &buf).unwrap();
-}
-
-#[tokio::test]
-async fn install_mcpb_arm_unpacks_materializes_and_registers() {
-    use plugin::PluginSource;
-
-    let tmp = tempfile::tempdir().unwrap();
-    let bundle = tmp.path().join("bundleplugin.mcpb");
-    write_mcpb(
-        &bundle,
-        &[
-            (
-                ".lingxi-plugin/plugin.json",
-                r#"{"name":"bundleplugin","version":"1.0.0"}"#,
-            ),
-            (
-                "commands/zip.md",
-                "---\ndescription: from a bundle\n---\nZipped command.\n",
-            ),
-        ],
-    );
-    let install_root = tmp.path().join("plugins");
-    let (manager, command_registry) =
-        make_manager(&install_root, &tmp.path().join("secrets")).await;
-
-    let id = manager
+    let mcpb_err = manager
         .install(PluginSource::Mcpb {
-            path: bundle.clone(),
+            path: tmp.path().join("bundle.mcpb"),
             hash: String::new(),
         })
         .await
-        .expect(".mcpb install should unpack + materialize + enable");
-    assert!(!id.to_string().is_empty());
+        .expect_err("the .mcpb arm must not unpack anything (the file doesn't even exist)");
     assert!(
-        command_registry
-            .read()
-            .await
-            .resolve("bundleplugin:zip")
-            .is_some(),
-        ".mcpb plugin's command should be registered as bundleplugin:zip"
-    );
-}
-
-#[tokio::test]
-async fn install_mcpb_arm_rejects_path_traversal() {
-    use plugin::PluginSource;
-    let tmp = tempfile::tempdir().unwrap();
-    let bundle = tmp.path().join("evil.mcpb");
-    write_mcpb(&bundle, &[("../../escape.txt", "pwned")]);
-    let (manager, _) = make_manager(&tmp.path().join("plugins"), &tmp.path().join("secrets")).await;
-
-    let err = manager
-        .install(PluginSource::Mcpb {
-            path: bundle,
-            hash: String::new(),
-        })
-        .await
-        .expect_err("a traversal entry must be rejected");
-    assert!(
-        format!("{err}").contains("Path traversal attempt detected"),
-        "got: {err}"
-    );
-    assert!(
-        !tmp.path().join("escape.txt").exists(),
-        "no file escaped the extract dir"
-    );
-}
-
-#[tokio::test]
-async fn install_mcpb_arm_rejects_hash_mismatch() {
-    use plugin::PluginSource;
-    let tmp = tempfile::tempdir().unwrap();
-    let bundle = tmp.path().join("p.mcpb");
-    write_mcpb(
-        &bundle,
-        &[(
-            ".lingxi-plugin/plugin.json",
-            r#"{"name":"p","version":"1.0.0"}"#,
-        )],
-    );
-    let (manager, _) = make_manager(&tmp.path().join("plugins"), &tmp.path().join("secrets")).await;
-
-    let err = manager
-        .install(PluginSource::Mcpb {
-            path: bundle,
-            hash: "deadbeef".into(),
-        })
-        .await
-        .expect_err("a hash mismatch must abort before extraction");
-    assert!(format!("{err}").contains("hash mismatch"), "got: {err}");
-}
-
-#[tokio::test]
-async fn install_git_arm_rejects_bad_protocol() {
-    use plugin::PluginSource;
-    let tmp = tempfile::tempdir().unwrap();
-    let (manager, _) = make_manager(&tmp.path().join("plugins"), &tmp.path().join("secrets")).await;
-    let err = manager
-        .install(PluginSource::Git {
-            url: "ftp://evil.example/x".into(),
-            ref_: String::new(),
-        })
-        .await
-        .expect_err("unsupported protocol must be rejected");
-    assert!(
-        format!("{err}").contains("Invalid git URL protocol"),
-        "got: {err}"
-    );
-}
-
-/// Tiny recursive file walk (test-only) yielding every file path as a String.
-fn walkdir(root: &Path) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut stack = vec![root.to_path_buf()];
-    while let Some(dir) = stack.pop() {
-        let Ok(rd) = fs::read_dir(&dir) else { continue };
-        for e in rd.flatten() {
-            let p = e.path();
-            if p.is_dir() {
-                stack.push(p);
-            } else {
-                out.push(p.to_string_lossy().into_owned());
-            }
-        }
-    }
-    out
-}
-
-#[tokio::test]
-async fn install_records_to_installed_plugins_json_and_is_rediscovered() {
-    use plugin::PluginSource;
-
-    let tmp = tempfile::tempdir().unwrap();
-    let src = tmp.path().join("src-repo");
-    init_git_plugin_repo(&src, "durableplugin"); // version 2.1.0
-    let install_root = tmp.path().join("plugins");
-
-    // Install once (via the git arm → copy_into_cache → record).
-    {
-        let (manager, _cmd) = make_manager(&install_root, &tmp.path().join("secrets")).await;
-        manager
-            .install(PluginSource::Git {
-                url: format!("file://{}", src.display()),
-                ref_: String::new(),
-            })
-            .await
-            .expect("git install should succeed + record");
-    }
-
-    // The durable record was written.
-    let recorded = install_root.join("installed_plugins.json");
-    assert!(
-        recorded.exists(),
-        "installed_plugins.json should be written"
-    );
-    let json: serde_json::Value =
-        serde_json::from_str(&fs::read_to_string(&recorded).unwrap()).unwrap();
-    assert_eq!(json["version"], 2, "V2 schema");
-
-    // A FRESH manager (simulating a relaunch) re-discovers the plugin from the
-    // record alone — resolving its exact cache dir, no probing.
-    let rediscovered = plugin::discover_recorded_plugins(&install_root).await;
-    assert_eq!(
-        rediscovered.len(),
-        1,
-        "exactly one recorded plugin re-discovered"
-    );
-    assert_eq!(rediscovered[0].1.name, "durableplugin");
-    assert_eq!(rediscovered[0].1.version, "2.1.0");
-
-    // And re-enabling it on a fresh manager materializes its command again.
-    let (m2, cmd2) = make_manager(&install_root, &tmp.path().join("secrets2")).await;
-    let (id, manifest, dir) = rediscovered.into_iter().next().unwrap();
-    m2.enable(&id, manifest, dir)
-        .await
-        .expect("re-enable from record");
-    assert!(
-        cmd2.read().await.resolve("durableplugin:hello").is_some(),
-        "re-discovered plugin's command should register"
+        format!("{mcpb_err}").contains("not supported by PluginManager::install"),
+        "got: {mcpb_err}"
     );
 }
 

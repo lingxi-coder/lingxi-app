@@ -561,6 +561,38 @@ mod tests {
         );
     }
 
+    /// Migrated from `plugin/tests/materialize.rs`'s
+    /// `install_mcpb_arm_rejects_path_traversal` (spec §25d): that test drove
+    /// this guard through `PluginManager::install`'s now-deleted `.mcpb`
+    /// install arm. `unpack_mcpb` itself is still very much live — it is the
+    /// same function `discovery.rs`'s `mcpServers` `.mcpb`/`.dxt` loading
+    /// path calls — so the guard is exercised directly against its real,
+    /// still-used entry point instead.
+    #[test]
+    fn unpack_rejects_path_traversal_entries() {
+        use std::io::Write;
+        let mut buf = Vec::new();
+        {
+            let mut w = zip::ZipWriter::new(std::io::Cursor::new(&mut buf));
+            w.start_file("../../escape.txt", zip::write::SimpleFileOptions::default())
+                .unwrap();
+            w.write_all(b"pwned").unwrap();
+            w.finish().unwrap();
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let dest = tmp.path().join("dest");
+        std::fs::create_dir_all(&dest).unwrap();
+        let err = unpack_mcpb(&buf, &dest).unwrap_err();
+        assert!(
+            err.contains("Path traversal attempt detected"),
+            "got: {err}"
+        );
+        assert!(
+            !tmp.path().join("escape.txt").exists(),
+            "no file escaped the extract dir"
+        );
+    }
+
     #[test]
     fn too_many_files_guard_trips() {
         use std::io::Write;

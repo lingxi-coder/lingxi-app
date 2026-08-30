@@ -1969,6 +1969,27 @@ mod tests {
         serde_json::from_str(&std::fs::read_to_string(installed_path(&e.plugins)).unwrap()).unwrap()
     }
 
+    /// Tiny recursive file walk (test-only) yielding every file path under
+    /// `root` as a String.
+    fn walkdir(root: &Path) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut stack = vec![root.to_path_buf()];
+        while let Some(dir) = stack.pop() {
+            let Ok(rd) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            for entry in rd.flatten() {
+                let p = entry.path();
+                if p.is_dir() {
+                    stack.push(p);
+                } else {
+                    out.push(p.to_string_lossy().into_owned());
+                }
+            }
+        }
+        out
+    }
+
     #[test]
     fn install_materializes_records_and_enables() {
         let e = env();
@@ -2012,6 +2033,92 @@ mod tests {
             .plugins
             .join("cache/mymkt/hello/1.2.3/.lingxi-plugin/plugin.json")
             .exists());
+    }
+
+    /// Migrated from `plugin/tests/materialize.rs`'s
+    /// `install_marketplace_arm_rejects_symlink_escape` (spec §25d): that
+    /// test drove a lexically-safe-but-symlinked marketplace catalog entry
+    /// through `PluginManager::install`'s now-deleted marketplace arm.
+    /// Production's own `marketplace_entry_source_path` carries an
+    /// equivalent canonicalize + `starts_with` containment check (see its
+    /// doc comment) — this pins THAT check down directly, since nothing
+    /// exercised it before.
+    ///
+    /// A symlinked entry canonicalizes outside the marketplace root, so
+    /// `marketplace_entry_source_path` returns `Ok(None)` (fails closed,
+    /// same as a plugin that was never listed) rather than the deleted
+    /// arm's "resolves to a path outside the cache directory" message —
+    /// the shape of the failure differs, but the security property (never
+    /// copy the escaped directory) is the same.
+    #[cfg(unix)]
+    #[test]
+    fn install_rejects_a_marketplace_entry_whose_path_symlinks_outside_the_root() {
+        let e = env();
+        // The exfiltration target OUTSIDE the marketplace repo (stands in
+        // for `~/.ssh`).
+        let outside = e._tmp.path().join("outside");
+        std::fs::create_dir_all(outside.join(branding::PLUGIN_MANIFEST_DIR)).unwrap();
+        std::fs::write(
+            outside.join(branding::PLUGIN_MANIFEST_DIR).join("plugin.json"),
+            r#"{"name":"evil","version":"1.0.0"}"#,
+        )
+        .unwrap();
+        std::fs::write(outside.join("id_rsa"), "PRIVATE KEY").unwrap();
+
+        // A malicious catalog entry: "link" is a single Normal path component
+        // (passes the lexical `..`/absolute guard in `plugin_dir_in_clone`)
+        // but is a symlink pointing OUT of the marketplace root.
+        std::fs::write(
+            e.market
+                .join(branding::PLUGIN_MANIFEST_DIR)
+                .join("marketplace.json"),
+            r#"{"name":"mymkt","owner":{"name":"me"},"plugins":[{"name":"evil","source":"link"}]}"#,
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(&outside, e.market.join("link")).unwrap();
+
+        let err = run_install("evil@mymkt", None, &[], &e.plugins, &e.home, &e.cwd)
+            .expect_err("a symlinked catalog entry must be rejected, not followed");
+        assert!(
+            err.contains("not found in marketplace"),
+            "got: {err}"
+        );
+        // Nothing was exfiltrated into the cache or source-cache.
+        for root in [e.plugins.join("cache"), e.plugins.join("source-cache")] {
+            if !root.exists() {
+                continue;
+            }
+            let leaked = walkdir(&root).iter().any(|p| p.ends_with("id_rsa"));
+            assert!(
+                !leaked,
+                "the symlink target's files must NOT be copied into {root:?}"
+            );
+        }
+    }
+
+    /// Migrated from `plugin/tests/materialize.rs`'s
+    /// `install_git_arm_malicious_version_cannot_escape_cache` (spec §25d):
+    /// that test drove a malicious `plugin.json` `"version":".."` through
+    /// `PluginManager::install`'s now-deleted git arm's `copy_into_cache`
+    /// (whose `sanitize_segment` is byte-identical to this crate's own
+    /// `sanitize`, still live at every versioned-cache-path call site in
+    /// this file). Pin the guard down directly at its real, still-used
+    /// entry point instead of through the deleted duplicate.
+    #[test]
+    fn sanitize_neutralizes_dot_and_dotdot_segments() {
+        for segment in ["..", ".", ""] {
+            assert_eq!(
+                sanitize(segment, true),
+                "-",
+                "segment {segment:?} must collapse to a safe token, not resolve to a parent/current dir"
+            );
+        }
+        // A real version string is untouched (dots preserved only when allowed).
+        assert_eq!(sanitize("1.2.3", true), "1.2.3");
+        // A non-empty segment that merely CONTAINS ".." is not collapsed (only
+        // an ENTIRE segment equal to ".." is); its slash becomes "-" and its
+        // dots are preserved (allow_dot=true), same as any other character map.
+        assert_eq!(sanitize("../1.2.3", true), "..-1.2.3");
     }
 
     #[test]

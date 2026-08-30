@@ -106,6 +106,19 @@ pub struct PoolSubagentSpawner {
     /// resolves `subagent_type -> AgentDefinition` against this (overridden by
     /// the file catalog below) instead of fabricating a generic stub.
     builtins: Arc<HashMap<String, AgentDefinition>>,
+    /// Agent-scoped MCP teardowns owed by PERSISTENT spawns, keyed by agent.
+    ///
+    /// The one-shot path runs its cleanups inline once the run concludes.
+    /// A persistent spawn comes to rest and may be resumed arbitrarily
+    /// later, so its teardown has to wait for the one place that ends it:
+    /// [`StreamingSubagentSpawner::stop`], the sole caller of the pool's
+    /// only slot-release (`deallocate`). Oracle parity: `Agr`'s `cleanup`
+    /// is registered in `runAgent`'s UNCONDITIONAL teardown list
+    /// (@160995191 `{name:"mcp",run:()=>ss()}`) and fires on the async
+    /// path too, so a background subagent is not exempt.
+    persistent_agent_mcp_cleanups: Arc<
+        tokio::sync::Mutex<HashMap<AgentId, Vec<crate::agent_mcp_tools::AgentMcpCleanupHandle>>>,
+    >,
     /// File-loaded user/project agent catalog (set-once, mirrors the registry
     /// cycle-break). When set it takes PRECEDENCE over [`Self::builtins`] on an
     /// `agent_type` collision — matching claude-code's later-wins ordering
@@ -389,6 +402,7 @@ impl PoolSubagentSpawner {
             api_client: None,
             tool_registry: Arc::new(std::sync::OnceLock::new()),
             builtins: Arc::new(builtins),
+            persistent_agent_mcp_cleanups: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             agent_catalog: Arc::new(std::sync::OnceLock::new()),
             default_model: None,
             default_model_provider: Arc::new(std::sync::OnceLock::new()),
@@ -1665,20 +1679,37 @@ impl StreamingSubagentSpawner for PoolSubagentSpawner {
         request: SubagentSpawnRequest,
         inherit: SubagentInheritance,
     ) -> Result<(AgentId, tokio::sync::mpsc::Receiver<SubagentEvent>), SubagentSpawnError> {
-        // §24b DEFERRED: a persistent/background spawn's agent-scoped MCP
-        // connections (if any) are connected here but never torn down — this
-        // path "comes to rest" and may be resumed arbitrarily later, so there
-        // is no single point analogous to `spawn_with_observer`'s post-loop
-        // teardown to hook without a larger lifecycle change. Not a
-        // regression (nothing tore these down before this feature existed
-        // either), but a real gap versus the one-shot `spawn` path above.
-        let (ctx, _agent_mcp_cleanups_not_yet_wired_for_persistent_spawns) =
+        // §24b: a persistent spawn's agent-scoped MCP connections are owed a
+        // teardown just like a one-shot spawn's. It cannot run inline here —
+        // this path comes to rest and may be resumed later — so the handles
+        // are parked until `stop`, the sole caller of the pool's only
+        // slot-release. Oracle `Agr`'s cleanup is in `runAgent`'s
+        // unconditional teardown list and fires on the async path too.
+        let (ctx, agent_mcp_cleanups) =
             self.build_subagent_context(&request, inherit, true).await?;
         let agent_id = ctx.agent_id;
-        let (_aid, rx) = self.pool.allocate(ctx).await.map_err(|e| match e {
-            crate::pool::PoolError::TooManyAgents => SubagentSpawnError::PoolFull,
-            other => SubagentSpawnError::Runtime(other.to_string()),
-        })?;
+        let (_aid, rx) = match self.pool.allocate(ctx).await {
+            Ok(pair) => pair,
+            Err(e) => {
+                // Never allocated, so `stop` will never be called for this id:
+                // settle the debt here rather than leak it.
+                crate::agent_mcp_tools::run_agent_mcp_cleanups(
+                    agent_mcp_cleanups,
+                    &request.subagent_type,
+                )
+                .await;
+                return Err(match e {
+                    crate::pool::PoolError::TooManyAgents => SubagentSpawnError::PoolFull,
+                    other => SubagentSpawnError::Runtime(other.to_string()),
+                });
+            }
+        };
+        if !agent_mcp_cleanups.is_empty() {
+            self.persistent_agent_mcp_cleanups
+                .lock()
+                .await
+                .insert(agent_id, agent_mcp_cleanups);
+        }
         Ok((agent_id, rx))
     }
 
@@ -1705,6 +1736,19 @@ impl StreamingSubagentSpawner for PoolSubagentSpawner {
             .pool
             .send_event(agent_id, engine::Event::UserExit)
             .await;
+        // §24b: settle any agent-scoped MCP teardown this persistent spawn
+        // parked. Runs BEFORE `deallocate` so a teardown failure cannot leave
+        // the slot held, and is idempotent — the entry is removed, so a second
+        // `stop` finds nothing owed.
+        let owed = self
+            .persistent_agent_mcp_cleanups
+            .lock()
+            .await
+            .remove(agent_id);
+        if let Some(cleanups) = owed {
+            let label = agent_id.to_string();
+            crate::agent_mcp_tools::run_agent_mcp_cleanups(cleanups, &label).await;
+        }
         self.pool
             .deallocate(agent_id)
             .await
@@ -2721,6 +2765,96 @@ mod tests {
     /// wiring back to a literal `&[]` (this feature's actual prior state)
     /// fails the first assertion below with `mcp__fake__tool` absent from
     /// `names`; reverting the `spawn_with_observer` post-loop cleanup call
+    /// A PERSISTENT spawn's agent-scoped MCP connections must be torn down too.
+    ///
+    /// The one-shot path runs its cleanups inline once the run concludes;
+    /// `spawn_persistent` comes to rest and may be resumed later, so its
+    /// teardown is parked until `stop` — the sole caller of the pool's only
+    /// slot-release. Oracle parity: `Agr`'s `cleanup` sits in `runAgent`'s
+    /// UNCONDITIONAL teardown list (@160995191 `{name:"mcp",run:()=>ss()}`)
+    /// and the same block carries `isAsync`, so a background subagent is not
+    /// exempt. Before this was wired the handles were dropped on the floor and
+    /// the stdio child / HTTP session outlived the host.
+    ///
+    /// Asserts the teardown COUNT, and that it is still 0 while the agent is
+    /// merely parked — tearing down at spawn time would defeat the feature.
+    #[tokio::test]
+    async fn a_persistent_spawn_tears_down_its_agent_scoped_mcp_on_stop() {
+        let runtime = Arc::new(MockRuntimeSpawner::default());
+        let pool = Arc::new(StateMachinePool::new(runtime, 4));
+
+        let torn_down = Arc::new(AtomicUsize::new(0));
+        let torn_down_for_builder = torn_down.clone();
+        let builder: crate::agent_mcp_tools::AgentMcpToolBuilder =
+            Arc::new(move |_agent_id, _def| {
+                let torn_down = torn_down_for_builder.clone();
+                Box::pin(async move {
+                    let cleanup = crate::agent_mcp_tools::AgentMcpCleanupHandle {
+                        server_name: "fake".into(),
+                        run: Arc::new(move || {
+                            let torn_down = torn_down.clone();
+                            Box::pin(async move {
+                                torn_down.fetch_add(1, Ordering::SeqCst);
+                                Ok(())
+                            })
+                        }),
+                    };
+                    crate::agent_mcp_tools::AgentMcpToolSet {
+                        tools: vec![Arc::new(StubTool {
+                            name: "mcp__fake__tool",
+                            aliases: &[],
+                        }) as Arc<dyn Tool>],
+                        cleanups: vec![cleanup],
+                    }
+                })
+            });
+
+        let spawner = PoolSubagentSpawner::new(pool)
+            .with_tool_registry(registry_with(&[]))
+            .with_mcp_tool_builder(builder);
+
+        let request: SubagentSpawnRequest = serde_json::from_value(serde_json::json!({
+            "subagent_type": "general-purpose",
+            "prompt": "park with an mcp server"
+        }))
+        .expect("minimal spawn request");
+
+        let (agent_id, _rx) = spawner
+            .spawn_persistent(
+                request,
+                SubagentInheritance {
+                    tool_invoker: Arc::new(DummyInvoker),
+                    budget: Arc::new(DummyBudget),
+                },
+            )
+            .await
+            .expect("persistent spawn should start");
+
+        assert_eq!(
+            torn_down.load(Ordering::SeqCst),
+            0,
+            "a parked persistent agent must KEEP its MCP connections — \
+             tearing down at spawn time would defeat the feature"
+        );
+
+        spawner.stop(&agent_id).await.expect("stop should succeed");
+
+        assert_eq!(
+            torn_down.load(Ordering::SeqCst),
+            1,
+            "stop must settle the persistent spawn's agent-scoped MCP teardown, \
+             or the stdio child / HTTP session outlives the host"
+        );
+
+        // Idempotent: the entry was removed, so a second stop owes nothing.
+        let _ = spawner.stop(&agent_id).await;
+        assert_eq!(
+            torn_down.load(Ordering::SeqCst),
+            1,
+            "a second stop must not re-run the teardown"
+        );
+    }
+
     /// fails the second with `torn_down == 0`.
     #[tokio::test]
     async fn agent_scoped_mcp_tools_reach_the_wire_and_are_torn_down_on_exit() {

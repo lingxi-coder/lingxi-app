@@ -1999,7 +1999,20 @@ pub async fn build_registered_mcp_tools(
     // declares `capabilities.resources`.
     let mut resource_tools_pushed = false;
     for state in conns.values() {
+        // §11 Stage 2 (LingXi discovery cache): a `Cached` server was served
+        // from disk with NO transport dialed yet — its catalog fields mirror
+        // `Connected`'s exactly (see `McpConnectionState::Cached`'s doc), so
+        // it builds the SAME per-tool wire entries here. Dispatch (`MCPTool::
+        // call` → `call_tool_with_auth_retry`) lazily dials it on first
+        // invocation; a `Cached` server that never appeared here would be
+        // hidden from the model entirely, defeating the point of caching it.
         if let McpConnectionState::Connected {
+            connection_id,
+            capabilities,
+            tools,
+            ..
+        }
+        | McpConnectionState::Cached {
             connection_id,
             capabilities,
             tools,

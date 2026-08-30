@@ -4816,7 +4816,15 @@ async fn build_agent_mcp_tool_set(
         let dtos: Vec<traits::McpToolDto> = {
             let conns = mcp_registry.connections.read().await;
             match conns.get(&table_key) {
-                Some(mcp::McpConnectionState::Connected { tools, .. }) => tools.clone(),
+                // §11 Stage 2: `connect`/`connect_agent_scoped` above may have
+                // resolved a discovery-cache hit instead of dialing — the
+                // server is `Cached`, not `Connected`, but carries the same
+                // catalog, so the subagent's tool set must be built from it
+                // exactly the same way.
+                Some(
+                    mcp::McpConnectionState::Connected { tools, .. }
+                    | mcp::McpConnectionState::Cached { tools, .. },
+                ) => tools.clone(),
                 _ => Vec::new(),
             }
         };

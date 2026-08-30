@@ -219,6 +219,46 @@ pub enum McpConnectionState {
         /// When the connection became `Connected`.
         connected_at: SystemTime,
     },
+    /// §11 Stage 2 — served entirely from the discovery cache: no transport
+    /// was ever dialed. A lazily-dialed cached server IS a fresh connection
+    /// (the transport was never opened), so this carries a freshly allocated
+    /// [`McpConnectionId`] with NOTHING live behind it —
+    /// [`crate::raw_conn::RawConnectionProvider::connection_for`] naturally
+    /// returns `None` for it (an unrecognized id), and [`McpConnectionId`] is
+    /// generated fresh here precisely so `connect()`'s signature and every
+    /// caller stay unchanged. The catalog fields mirror [`Self::Connected`]
+    /// exactly (same names/types) so match sites can share one arm via an
+    /// or-pattern (`Connected {..} | Cached {..}`) wherever the two are
+    /// semantically interchangeable — see `mcp::registry`'s Stage 2 doc for
+    /// which call sites do and don't get a `Cached` arm.
+    ///
+    /// Upgraded to a real [`Self::Connected`] on the first tool dispatch
+    /// (`mcp::registry::McpRegistry::call_tool_with_auth_retry`'s lazy dial),
+    /// which re-runs the ordinary connect path — this is NOT a special
+    /// "resume" state; a lazily-dialed cached server is just a fresh connect
+    /// that happened to skip the dial once.
+    Cached {
+        /// Config for the connection a lazy dial will use.
+        config: McpServerConfig,
+        /// Freshly allocated identifier; no live transport connection is
+        /// registered under it until the lazy dial upgrades this state.
+        connection_id: McpConnectionId,
+        /// Server capabilities from the cached `initialize` round.
+        capabilities: ServerCapabilitiesDto,
+        /// Tools from the cached `tools/list` round.
+        tools: Vec<McpToolDto>,
+        /// Resources from the cached `resources/list` round.
+        resources: Vec<McpResourceDto>,
+        /// Resource templates from the cached `resources/templates/list` round.
+        resource_templates: Vec<McpResourceTemplateDto>,
+        /// Prompts from the cached `prompts/list` round.
+        prompts: Vec<McpPromptDto>,
+        /// The cache entry's own `saved_at_ms` (oracle `cacheSavedAt`).
+        cache_saved_at_ms: u64,
+        /// Entry age at decision time, ms ([`crate::discovery_cache::Decision`]'s
+        /// `age_ms`) — reported on `tengu_mcp_discovery_source`'s `entryAgeMs`.
+        age_ms: u64,
+    },
     /// A liveness ping is in-flight.
     HealthChecking {
         /// Connection being pinged.
@@ -260,6 +300,7 @@ impl McpConnectionState {
             | Self::Connecting { config, .. }
             | Self::AwaitingOAuth { config, .. }
             | Self::Connected { config, .. }
+            | Self::Cached { config, .. }
             | Self::HealthChecking { config, .. }
             | Self::Reconnecting { config, .. }
             | Self::Failed { config, .. }
@@ -277,6 +318,7 @@ impl McpConnectionState {
             | Self::Connecting { config, .. }
             | Self::AwaitingOAuth { config, .. }
             | Self::Connected { config, .. }
+            | Self::Cached { config, .. }
             | Self::HealthChecking { config, .. }
             | Self::Reconnecting { config, .. }
             | Self::Failed { config, .. }
@@ -294,6 +336,7 @@ impl McpConnectionState {
             | Self::Connecting { config, .. }
             | Self::AwaitingOAuth { config, .. }
             | Self::Connected { config, .. }
+            | Self::Cached { config, .. }
             | Self::HealthChecking { config, .. }
             | Self::Reconnecting { config, .. }
             | Self::Failed { config, .. }

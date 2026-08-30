@@ -129,31 +129,65 @@
 //!   port has no background revalidation yet (Stage 3, deferred), so the
 //!   nearest available signal is treating every connect as an implicit
 //!   refresh attempt.
-//! * **Telemetry.** [`crate::registry`] calls [`decide`] before every dial
-//!   purely for observability and reports [`MissReason`]s that oracle `Ko`
-//!   (2.1.251, same chunk as `cot`) surfaces (`absent`/`expired`/`corrupt`/
+//! * **Telemetry (MISS side).** Before every dial, [`crate::registry`] calls
+//!   [`decide`] and reports [`MissReason`]s that oracle `Ko` (2.1.251, same
+//!   chunk as `cot`) surfaces (`absent`/`expired`/`corrupt`/
 //!   `strike-threshold`/`no-fingerprint`) as `tengu_mcp_discovery_source`
 //!   with `source` = [`miss_telemetry_value`] — see
 //!   [`miss_emits_discovery_source_telemetry`] for the exact set and the
-//!   recovered `Ko`/`Jo` source. A `Fresh`/`Stale` decision emits NOTHING:
-//!   the oracle's hit-branch event describes actually SERVING the cached
-//!   catalog without dialing, which this port does not do yet (see Stage 2
-//!   below), so emitting `cache_fresh`/`cache_stale` here would misreport an
-//!   action that never happened.
+//!   recovered `Ko`/`Jo` source. The HIT side (`Fresh`/`Stale`) is emitted by
+//!   a separate code path — see "What §11 Stage 2 wires in" below.
 //!
-//! ## What is still NOT built (Stage 2 / Stage 3)
+//! ## What §11 Stage 2 wires in (this revision)
 //!
-//! * **Serving from cache (Stage 2).** A `Fresh`/`Stale` decision does not
-//!   skip the dial — every connect still goes live and re-discovers the
-//!   catalog over the wire, then overwrites the entry it just read. Building
-//!   this needs a `type:"cached"` connection state in `mcp::connection` plus
-//!   a lazy first-tool-use dial, which is real transport-lifecycle surgery;
-//!   see the batch report for what specifically blocks it if it was not
-//!   completed this wave.
-//! * **Background revalidation on a `Stale` hit (Stage 3).** The oracle
-//!   kicks off an async re-dial after serving a stale entry immediately;
-//!   without Stage 2 there is no "serve stale, refresh behind it" moment to
-//!   hang this off of.
+//! **Serving from cache.** `mcp::connection::McpConnectionState` gained a
+//! `Cached` variant carrying the entry's full catalog plus a freshly
+//! allocated [`traits::McpTransportSpec`]-agnostic connection id with NO live
+//! transport behind it. `McpRegistry::connect_locked_inner` consults
+//! [`decide`] BEFORE dialing (unless the call is itself the lazy-dial
+//! upgrade of an already-`Cached` entry — see below): on `Fresh`/`Stale` it
+//! installs `Cached` and returns WITHOUT ever calling
+//! `McpTransport::connect`, emitting `tengu_mcp_discovery_source` with
+//! `source` `"cache_fresh"`/`"cache_stale"` and the real `entryAgeMs`
+//! (oracle @182536408's hit branch) — the previously-deferred half of the
+//! telemetry story above. An already-`Connected` server still short-circuits
+//! to a live reuse before the cache is ever consulted (the oracle's
+//! `$o`/`"live-connection"` check).
+//!
+//! **Lazy dial.** A `Cached` server has no registered [`crate::client::McpClient`]
+//! (`clients` is a map separate from `connections`, and a cache hit never
+//! populates it), so `McpRegistry::has_callable_server` still reports it
+//! callable, and the FIRST tool dispatch against it
+//! (`McpRegistry::call_tool_with_auth_retry`) upgrades it to a real
+//! `Connected` by running the ordinary connect path — a lazily-dialed cached
+//! server IS a fresh connection, since the transport was simply never opened
+//! yet. Single-flighted through the SAME per-server lifecycle lock every
+//! other connect path already uses, so two concurrent tool calls against one
+//! cached server dial exactly once.
+//!
+//! Every match site that projects `McpConnectionState` was audited for a
+//! `Cached` arm; see `mcp::registry`'s and `tool_mcp::mcp_tool`'s doc
+//! comments at each call site for which got one and why (most notably
+//! `build_registered_mcp_tools`, `servers_with_tools`, and
+//! `has_callable_server` — a cached server MUST appear in tool listings and
+//! report callable, or the cache would hide servers instead of accelerating
+//! them).
+//!
+//! ## What is still NOT built (Stage 3)
+//!
+//! * **Background revalidation on a `Stale` hit.** The oracle kicks off an
+//!   async re-dial immediately after serving a stale entry
+//!   (stale-while-revalidate); this port serves the stale entry but does not
+//!   yet kick off that background refresh — a `Stale` hit here is a signal,
+//!   not a mandate. `record_discovery_cache_connect_failure`'s strike
+//!   counter (§11 Stage 1) remains an approximation of the oracle's `_6e`
+//!   counter for the same reason.
+//! * **Resources-family tools (`ListMcpResourcesTool`/`ReadMcpResourceTool`/
+//!   `ReadMcpResourceDirTool`) and the MCP-prompt/slash-command surface
+//!   (`McpRegistry::connected_prompts`/`get_prompt`) do not lazily dial a
+//!   `Cached` server** — both still require a live [`crate::client::McpClient`]
+//!   and read `Connected` only. Only the generic `MCPTool` dispatch path
+//!   (`mcp__<server>__<tool>`) gained a lazy dial this stage.
 
 use traits::{
     McpPromptDto, McpResourceDto, McpResourceTemplateDto, McpToolDto, McpTransportSpec,

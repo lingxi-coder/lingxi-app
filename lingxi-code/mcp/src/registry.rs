@@ -391,6 +391,17 @@ impl McpRegistry {
                 {
                     *connection_id
                 }
+                // §11 Stage 2 — a `Cached` server has no live connection to
+                // re-query: the cached catalog IS the freshest thing this
+                // port has for it. Report success unchanged so the receiver
+                // (`apps/engine-desktop`'s `mcp_catalog_changes` listener)
+                // still rebuilds the model-facing tool list from the
+                // (now-`Cached`) state via `build_registered_mcp_tools`.
+                Some(McpConnectionState::Cached { connection_id, .. })
+                    if *connection_id == change.connection_id =>
+                {
+                    return Ok(Some(*connection_id));
+                }
                 _ => return Ok(None),
             }
         };
@@ -709,6 +720,71 @@ impl McpRegistry {
     pub async fn has_callable_server(&self, name: &str) -> bool {
         self.get_client(name).await.is_some()
             || self.direct_inprocess_connection(name).await.is_some()
+            // §11 Stage 2: a `Cached` server has no registered client (`clients`
+            // is a separate map from `connections`, and a cache hit never
+            // populates it — see `McpConnectionState::Cached`'s doc), but it
+            // MUST still report callable: `call_tool_with_auth_retry`'s lazy
+            // dial upgrades it to a real `Connected` client on first use.
+            // Without this arm a cached server would be dropped from dispatch
+            // entirely, defeating the whole point of caching it.
+            || self.cached_raw_key(name).await.is_some()
+    }
+
+    /// §11 Stage 2 — the RAW stored key of a `Cached` entry matching `name`
+    /// by NORMALIZED form (same lookup convention as [`Self::get_client`]),
+    /// or `None` when `name` isn't currently `Cached`. Used by
+    /// [`Self::has_callable_server`] and by `call_tool_with_auth_retry`'s
+    /// lazy dial to find what to hand [`Self::ensure_dialed_from_cache`].
+    async fn cached_raw_key(&self, name: &str) -> Option<String> {
+        let connections = self.connections.read().await;
+        connections.iter().find_map(|(raw_name, state)| {
+            if normalize_name_for_mcp(raw_name) != name {
+                return None;
+            }
+            matches!(state, McpConnectionState::Cached { .. }).then(|| raw_name.clone())
+        })
+    }
+
+    /// §11 Stage 2 — lazy dial: upgrade a `Cached` entry stored under the RAW
+    /// key `key` to a real `Connected` one by running the ordinary connect
+    /// path (a lazily-dialed cached server IS a fresh connection — the
+    /// transport was simply never opened yet). Single-flighted through the
+    /// SAME per-server [`Self::lifecycle_lock`] every other connect path
+    /// uses, so two concurrent tool calls against the same cached server
+    /// dial exactly once: the second caller blocks on the lock, then
+    /// re-reads the state and finds `Connected` already, returning its id
+    /// with no second dial.
+    ///
+    /// Returns the live [`McpConnectionId`] on success. Returns an error
+    /// (never silently no-ops) when `key` is no longer `Cached` by the time
+    /// the lock is acquired AND is not already `Connected` either (e.g. it
+    /// was disconnected/removed concurrently) — the caller (dispatch) then
+    /// falls through to its existing "no live client" failure.
+    async fn ensure_dialed_from_cache(&self, key: &str) -> Result<McpConnectionId, McpError> {
+        let lifecycle = self.lifecycle_lock(key);
+        let _guard = lifecycle.lock().await;
+        let config_to_dial = {
+            let conns = self.connections.read().await;
+            match conns.get(key) {
+                Some(McpConnectionState::Connected { connection_id, .. }) => {
+                    return Ok(*connection_id)
+                }
+                Some(McpConnectionState::Cached { config, .. }) => config.clone(),
+                _ => {
+                    return Err(McpError::Connection(format!(
+                        "MCP server \"{key}\" is no longer cached"
+                    )))
+                }
+            }
+        };
+        // `agent_scope_table_key` never collides with a plain `config.name`
+        // (it's always prefixed — see its doc), so this equality reliably
+        // tells an ordinary session-level entry (`table_key` must be `None`,
+        // matching every other unscoped call to `connect_locked`) apart from
+        // an agent-scoped one (must keep dialing under the SAME scoped key it
+        // was cached under, never falling back to the plain name).
+        let table_key = (key != config_to_dial.name).then(|| key.to_string());
+        self.connect_locked(config_to_dial, table_key).await
     }
 
     async fn direct_inprocess_connection(&self, name: &str) -> Option<(McpConnectionId, String)> {
@@ -739,20 +815,10 @@ impl McpRegistry {
     /// so a model-supplied `<server>` token resolves a raw stored key.
     pub async fn get_config(&self, name: &str) -> Option<McpServerConfig> {
         let conns = self.connections.read().await;
-        let state = conns
+        conns
             .iter()
             .find(|(k, _)| normalize_name_for_mcp(k) == name)
-            .map(|(_, v)| v)?;
-        match state {
-            McpConnectionState::Disconnected { config, .. }
-            | McpConnectionState::Connecting { config, .. }
-            | McpConnectionState::AwaitingOAuth { config, .. }
-            | McpConnectionState::Connected { config, .. }
-            | McpConnectionState::HealthChecking { config, .. }
-            | McpConnectionState::Reconnecting { config, .. }
-            | McpConnectionState::Failed { config, .. }
-            | McpConnectionState::Stopped { config } => Some(config.clone()),
-        }
+            .map(|(_, v)| v.config().clone())
     }
 
     /// Call one MCP tool and retry a single authentication failure after a
@@ -767,6 +833,24 @@ impl McpRegistry {
         on_progress: Option<crate::client::McpProgressCallback>,
     ) -> Result<traits::McpToolResultDto, crate::client::McpClientError> {
         let Some(client) = self.get_client(server).await else {
+            // §11 Stage 2 — lazy dial: a `Cached` server was served from disk
+            // at connect time with no transport ever opened, so it has no
+            // registered client yet. The FIRST tool call against it dials for
+            // real (single-flighted via `ensure_dialed_from_cache`'s
+            // lifecycle lock), then dispatches through the now-real client.
+            if let Some(raw_key) = self.cached_raw_key(server).await {
+                self.ensure_dialed_from_cache(&raw_key)
+                    .await
+                    .map_err(|error| crate::client::McpClientError::Rpc(error.to_string()))?;
+                let dialed = self.get_client(server).await.ok_or_else(|| {
+                    crate::client::McpClientError::Rpc(format!(
+                        "MCP server \"{server}\" did not publish a client after cache lazy-dial"
+                    ))
+                })?;
+                return dialed
+                    .call_tool_with_progress(full_name, input, tool_use_id, on_progress)
+                    .await;
+            }
             let Some((connection_id, _registry_key)) =
                 self.direct_inprocess_connection(server).await
             else {
@@ -965,6 +1049,20 @@ impl McpRegistry {
         table_key: Option<String>,
     ) -> Result<McpConnectionId, McpError> {
         let key = table_key.clone().unwrap_or_else(|| config.name.clone());
+        // §11 Stage 2 — capture whether `key` is ALREADY `Cached` before any
+        // gate below can change it. A `Cached` entry means a PRIOR call to
+        // this same function already served the cache decision for this
+        // server; this call is therefore either the lazy-dial upgrade
+        // (`Self::ensure_dialed_from_cache`) or an ordinary caller re-connecting
+        // an already-cache-served server. Either way, this pass must dial
+        // LIVE and must NOT consult `decide()` again — a lazily-dialed cached
+        // server is just a fresh connect that happened to skip the dial once,
+        // and re-deciding here would serve `Fresh`/`Stale` forever and never
+        // actually open a transport.
+        let already_cached = matches!(
+            self.connections.read().await.get(&key),
+            Some(McpConnectionState::Cached { .. })
+        );
         if let Some(McpConnectionState::Connected { connection_id, .. }) =
             self.connections.read().await.get(&key)
         {
@@ -1010,12 +1108,49 @@ impl McpRegistry {
             return Err(McpError::Connection(err.to_string()));
         }
 
-        // §11 — observability only: report what the discovery cache WOULD
-        // decide for this server before dialing. See
-        // `emit_discovery_source_for_pending_connect`'s doc for why only the
-        // MISS side is reported today (Stage 2 — actually serving a
-        // Fresh/Stale hit without dialing — is not wired).
-        self.emit_discovery_source_for_pending_connect(&config);
+        // §11 Stage 2 — consult the discovery cache before dialing, UNLESS
+        // this pass is itself the lazy-dial upgrade of an already-`Cached`
+        // entry (`already_cached`, captured above): that call must dial live
+        // unconditionally. Oracle `await $o(C,E) ? {miss,"live-connection"} :
+        // await cot(C,E)` — `$o` (an already-live-or-in-flight connection)
+        // is this port's `already_cached` disjunct generalized: a lazily-served
+        // cache entry already stands in for a live connection from the
+        // caller's point of view, so it must never be re-decided.
+        if !already_cached {
+            if let Some(decision) = self.discovery_cache_decision_for(&config) {
+                match decision {
+                    crate::discovery_cache::Decision::Fresh { entry, age_ms } => {
+                        return Ok(self
+                            .serve_discovery_cache_hit(&config, &key, entry, age_ms, true)
+                            .await);
+                    }
+                    crate::discovery_cache::Decision::Stale { entry, age_ms } => {
+                        return Ok(self
+                            .serve_discovery_cache_hit(&config, &key, entry, age_ms, false)
+                            .await);
+                    }
+                    crate::discovery_cache::Decision::Miss { reason } => {
+                        if let Some(source) =
+                            discovery_source_emission(&crate::discovery_cache::Decision::Miss {
+                                reason,
+                            })
+                        {
+                            telemetry::emit_mcp_discovery_source(
+                                &telemetry::tengu::mcp::DiscoverySourcePayload {
+                                    transport_type: telemetry::pii::Verified::assert_safe(
+                                        config.spec.kind().to_string(),
+                                    ),
+                                    source: telemetry::pii::Verified::assert_safe(
+                                        source.to_string(),
+                                    ),
+                                    entry_age_ms: None,
+                                },
+                            );
+                        }
+                    }
+                }
+            }
+        }
 
         self.connections.write().await.insert(
             key.clone(),
@@ -1553,20 +1688,18 @@ impl McpRegistry {
         Ok(connection_id)
     }
 
-    /// §11 — before dialing, compute what the discovery cache WOULD decide
-    /// for this server (oracle `cot`/`me`) and, when a store is wired,
-    /// report the observable half of it. This port does not yet skip the
-    /// dial on a `Fresh`/`Stale` decision (see `discovery_cache`'s module
-    /// doc — Stage 2 is deferred), so every connect goes live regardless;
-    /// only the [`crate::discovery_cache::MissReason`]s the oracle's `Ko`
-    /// gate reports are surfaced ([`crate::discovery_cache::miss_emits_discovery_source_telemetry`]),
-    /// exactly mirroring the oracle's own `if(Ho()&&Ko(U))` guard on the
-    /// live-dial path. A `Fresh`/`Stale` decision emits NOTHING — see
-    /// [`discovery_source_emission`]'s doc for why.
-    fn emit_discovery_source_for_pending_connect(&self, config: &McpServerConfig) {
-        let Some(store) = &self.discovery_cache_store else {
-            return;
-        };
+    /// §11 — before dialing, compute what the discovery cache decides for
+    /// this server (oracle `cot`/`me`). Returns `None` only when no store is
+    /// wired (every pre-Stage-2 caller's behavior: never consult, never
+    /// serve, never emit). With a store wired this ALWAYS returns `Some`,
+    /// including a `Miss` — the caller decides what to do with each variant
+    /// (Stage 2: serve `Fresh`/`Stale` without dialing; emit telemetry for a
+    /// `Miss` the oracle's `Ko` gate reports, then dial live).
+    fn discovery_cache_decision_for(
+        &self,
+        config: &McpServerConfig,
+    ) -> Option<crate::discovery_cache::Decision> {
+        let store = self.discovery_cache_store.as_ref()?;
         let feature_enabled = crate::discovery_cache::feature_enabled();
         let decision = match crate::discovery_cache::cache_gate(&config.spec, None, feature_enabled)
         {
@@ -1585,14 +1718,70 @@ impl McpRegistry {
                 crate::discovery_cache::decide(&config.spec, None, feature_enabled, lookup, policy)
             }
         };
-        let Some(source) = discovery_source_emission(&decision) else {
-            return;
-        };
+        Some(decision)
+    }
+
+    /// §11 Stage 2 — serve a `Fresh`/`Stale` discovery-cache hit WITHOUT
+    /// dialing: install a [`McpConnectionState::Cached`] under `key` carrying
+    /// the entry's full catalog, emit `tengu_mcp_discovery_source` with
+    /// `source` `"cache_fresh"`/`"cache_stale"` and the real `entryAgeMs`
+    /// (oracle @182536408's hit branch), and — for a session-level (not
+    /// agent-scoped) server — fan the change out on [`Self::catalog_changes`]
+    /// exactly like a live connect does, so a mid-session cache hit (a
+    /// reconnect that resolves `Fresh`/`Stale` instead of `Miss`) still
+    /// reaches the live `ToolRegistry` without a restart. Returns the freshly
+    /// allocated [`McpConnectionId`] — see [`McpConnectionState::Cached`]'s
+    /// doc for why it is safe to mint one with nothing live behind it.
+    async fn serve_discovery_cache_hit(
+        &self,
+        config: &McpServerConfig,
+        key: &str,
+        entry: crate::discovery_cache::DiscoveryCacheEntry,
+        age_ms: u64,
+        is_fresh: bool,
+    ) -> McpConnectionId {
+        let connection_id = McpConnectionId::new();
+        self.connections.write().await.insert(
+            key.to_string(),
+            McpConnectionState::Cached {
+                config: config.clone(),
+                connection_id,
+                capabilities: entry.capabilities,
+                tools: entry.tools,
+                resources: entry.resources,
+                resource_templates: entry.resource_templates,
+                prompts: entry.prompts,
+                cache_saved_at_ms: entry.saved_at_ms,
+                age_ms,
+            },
+        );
         telemetry::emit_mcp_discovery_source(&telemetry::tengu::mcp::DiscoverySourcePayload {
             transport_type: telemetry::pii::Verified::assert_safe(config.spec.kind().to_string()),
-            source: telemetry::pii::Verified::assert_safe(source.to_string()),
-            entry_age_ms: None,
+            source: telemetry::pii::Verified::assert_safe(
+                if is_fresh {
+                    "cache_fresh"
+                } else {
+                    "cache_stale"
+                }
+                .to_string(),
+            ),
+            entry_age_ms: Some(age_ms),
         });
+        // Same gate the live-connect tail uses (`table_key.is_none()`):
+        // `key == config.name` for an ordinary session-level server (no
+        // table-key namespacing applied), `false` for an agent-scoped one
+        // (`agent_scope_table_key` never collides with a plain name — see its
+        // doc). An agent-scoped cache hit stays private to the subagent that
+        // requested it, exactly like a live agent-scoped connect.
+        if key == config.name {
+            let _ = self.catalog_changes.send(McpCatalogChanged {
+                server_name: config.name.clone(),
+                connection_id,
+                retired_connection_id: None,
+                kind: McpCatalogKind::Tools,
+            });
+        }
+        connection_id
     }
 
     /// §11 write-through: after a LIVE discovery round completes
@@ -2437,8 +2626,13 @@ impl McpRegistry {
                     }
                     // A concurrent connect/reconnect already brought the server
                     // up — leave its live connection alone; overwriting it with
-                    // `Reconnecting` would leak that connection id.
-                    Some(McpConnectionState::Connected { .. }) => {
+                    // `Reconnecting` would leak that connection id. §11 Stage 2:
+                    // a concurrent connect that resolved `Cached` counts too —
+                    // it already serves this server without a dial; the
+                    // reconnect loop only exists to un-stick a broken one.
+                    Some(
+                        McpConnectionState::Connected { .. } | McpConnectionState::Cached { .. },
+                    ) => {
                         tracing::debug!(server = %name, "reconnect aborted: already connected");
                         return;
                     }
@@ -2522,14 +2716,27 @@ impl McpRegistry {
     }
 
     async fn disconnect_locked(&self, name: &str) -> Result<(), McpError> {
-        let Some((connection_id, config)) = ({
+        // §11 Stage 2 — a `Cached` server has NO live transport connection to
+        // tear down (`is_live = false`): its `connection_id` is a synthetic
+        // one minted purely to key the tool-registry partition (see
+        // `McpConnectionState::Cached`'s doc), so calling
+        // `self.transport.disconnect` on it would hand the platform transport
+        // an id it never registered. It is still disconnect-able, though —
+        // the user must be able to `/mcp disconnect` a cache-served server
+        // exactly as they would a live one.
+        let Some((connection_id, config, is_live)) = ({
             let conns = self.connections.read().await;
             match conns.get(name) {
                 Some(McpConnectionState::Connected {
                     connection_id,
                     config,
                     ..
-                }) => Some((*connection_id, config.clone())),
+                }) => Some((*connection_id, config.clone(), true)),
+                Some(McpConnectionState::Cached {
+                    connection_id,
+                    config,
+                    ..
+                }) => Some((*connection_id, config.clone(), false)),
                 _ => None,
             }
         }) else {
@@ -2540,17 +2747,23 @@ impl McpRegistry {
         // teardown fails, callers keep the still-live state and cached client.
         // The per-server lifecycle lock prevents a concurrent connect from
         // racing this await, while snapshots for every server remain unblocked.
-        self.transport.disconnect(connection_id).await?;
+        if is_live {
+            self.transport.disconnect(connection_id).await?;
+        }
 
         let transitioned = {
             let mut conns = self.connections.write().await;
-            let same_generation = matches!(
-                conns.get(name),
+            let same_generation = match conns.get(name) {
                 Some(McpConnectionState::Connected {
                     connection_id: current,
                     ..
-                }) if *current == connection_id
-            );
+                }) => is_live && *current == connection_id,
+                Some(McpConnectionState::Cached {
+                    connection_id: current,
+                    ..
+                }) => !is_live && *current == connection_id,
+                _ => false,
+            };
             if same_generation {
                 conns.insert(
                     name.to_string(),
@@ -2904,26 +3117,34 @@ impl McpRegistry {
             .iter()
             .map(|(name, entry)| (name.clone(), Arc::clone(&entry.client)))
             .collect();
-        let cached: HashMap<String, Vec<traits::McpToolDto>> = self
-            .connections
-            .read()
-            .await
-            .iter()
-            .filter_map(|(name, state)| match state {
-                McpConnectionState::Connected { tools, .. } => Some((name.clone(), tools.clone())),
-                _ => None,
-            })
-            .collect();
-        let mut out: Vec<String> = Vec::new();
-        for (name, client) in clients {
-            let tools = if let Some(tools) = cached.get(&name) {
-                tools.clone()
-            } else {
-                match client.list_tools().await {
-                    Ok(tools) => tools,
-                    Err(_) => continue,
+        // §11 Stage 2: `cache_only` names a `Cached` server that has NO
+        // registered client yet (`clients` is a separate map — see
+        // `McpConnectionState::Cached`'s doc) — it must still contribute its
+        // tools here, or `AgentTool`'s required-MCP gate would wrongly refuse
+        // a subagent spawn naming a server the model's own tool list already
+        // shows as available. `cached` (both `Connected` and `Cached`) is
+        // reused as the fast-path source for a server that DOES have a
+        // client, same as before this change.
+        let (cached, cache_only): (HashMap<String, Vec<traits::McpToolDto>>, Vec<String>) = {
+            let conns = self.connections.read().await;
+            let mut cached = HashMap::new();
+            let mut cache_only = Vec::new();
+            for (name, state) in conns.iter() {
+                match state {
+                    McpConnectionState::Connected { tools, .. } => {
+                        cached.insert(name.clone(), tools.clone());
+                    }
+                    McpConnectionState::Cached { tools, .. } => {
+                        cached.insert(name.clone(), tools.clone());
+                        cache_only.push(name.clone());
+                    }
+                    _ => {}
                 }
-            };
+            }
+            (cached, cache_only)
+        };
+        let mut out: Vec<String> = Vec::new();
+        let push_tools = |tools: Vec<traits::McpToolDto>, out: &mut Vec<String>| {
             for tool in tools {
                 // `full_name` is `mcp__<server>__<tool>` (rewrite site in
                 // `connect`); the server segment is index 1.
@@ -2933,6 +3154,22 @@ impl McpRegistry {
                         out.push((*server).to_string());
                     }
                 }
+            }
+        };
+        for (name, client) in clients {
+            let tools = if let Some(tools) = cached.get(&name) {
+                tools.clone()
+            } else {
+                match client.list_tools().await {
+                    Ok(tools) => tools,
+                    Err(_) => continue,
+                }
+            };
+            push_tools(tools, &mut out);
+        }
+        for name in cache_only {
+            if let Some(tools) = cached.get(&name) {
+                push_tools(tools.clone(), &mut out);
             }
         }
         out
@@ -3058,7 +3295,12 @@ impl McpRegistry {
                     continue;
                 }
             }
-            if let McpConnectionState::Connected { config, tools, .. } = state {
+            // §11 Stage 2: a `Cached` server's tool dtos are the SAME
+            // catalog a live `Connected` one would carry (served from disk
+            // instead of the wire), so the raw-name recovery is identical.
+            if let McpConnectionState::Connected { config, tools, .. }
+            | McpConnectionState::Cached { config, tools, .. } = state
+            {
                 if normalize_name_for_mcp(&config.name) == normalized_server {
                     return tools
                         .iter()
@@ -3585,14 +3827,15 @@ fn connected_zero_tools_fires(caps_tools: bool, raw_tool_count: usize) -> bool {
     caps_tools && raw_tool_count == 0
 }
 
-/// §11 — pure core of `McpRegistry::emit_discovery_source_for_pending_connect`:
+/// §11 — pure core of `McpRegistry::connect_locked_inner`'s MISS branch:
 /// given the pre-dial [`crate::discovery_cache::Decision`], what `source`
 /// string to emit on `tengu_mcp_discovery_source` (if anything). `None`
-/// means do not emit at all — either a `Fresh`/`Stale` decision (this port
-/// doesn't serve from cache, so there's nothing honest to report about
-/// "adopting" a cached catalog it never actually adopted), or a `Miss`
-/// reason the oracle's `Ko` gate excludes (`Disabled`/`Transport`/
-/// `LiveConnection`/`SkillsCapable`/`ChannelCapable`).
+/// means do not emit at all — either a `Fresh`/`Stale` decision (a HIT is
+/// handled entirely separately by `McpRegistry::serve_discovery_cache_hit`,
+/// which emits its own `"cache_fresh"`/`"cache_stale"` — this function is
+/// never even called for one), or a `Miss` reason the oracle's `Ko` gate
+/// excludes (`Disabled`/`Transport`/`LiveConnection`/`SkillsCapable`/
+/// `ChannelCapable`).
 fn discovery_source_emission(decision: &crate::discovery_cache::Decision) -> Option<&'static str> {
     match decision {
         crate::discovery_cache::Decision::Miss { reason }
@@ -3712,16 +3955,7 @@ fn degraded_payloads_for_server(
 
 /// Whether a state's config is flagged `disabled` (mid-reconnect guard).
 fn state_is_disabled(state: &McpConnectionState) -> bool {
-    match state {
-        McpConnectionState::Disconnected { config, .. }
-        | McpConnectionState::Connecting { config, .. }
-        | McpConnectionState::AwaitingOAuth { config, .. }
-        | McpConnectionState::Connected { config, .. }
-        | McpConnectionState::HealthChecking { config, .. }
-        | McpConnectionState::Reconnecting { config, .. }
-        | McpConnectionState::Failed { config, .. }
-        | McpConnectionState::Stopped { config } => config.disabled,
-    }
+    state.config().disabled
 }
 
 /// Project a [`McpConnectionState`] onto the fine-grained
@@ -3738,9 +3972,12 @@ fn project_action_state(state: &McpConnectionState) -> traits::McpActionState {
         return McpActionState::Disabled;
     }
     match state {
-        McpConnectionState::Connected { .. } | McpConnectionState::HealthChecking { .. } => {
-            McpActionState::Connected
-        }
+        // §11 Stage 2 — a `Cached` server presents identically to a live
+        // `Connected` one for `/mcp` action reporting: the whole point of
+        // serving from cache is that the user perceives no difference.
+        McpConnectionState::Connected { .. }
+        | McpConnectionState::Cached { .. }
+        | McpConnectionState::HealthChecking { .. } => McpActionState::Connected,
         McpConnectionState::Connecting { .. } | McpConnectionState::Reconnecting { .. } => {
             McpActionState::Pending
         }
@@ -3756,7 +3993,11 @@ fn project_action_state(state: &McpConnectionState) -> traits::McpActionState {
 fn project_status(state: &McpConnectionState) -> traits::McpStatus {
     use traits::McpStatus;
     match state {
-        McpConnectionState::Connected { .. } => McpStatus::Connected,
+        // §11 Stage 2 — same rationale as `project_action_state`: a cached
+        // server reports `Connected`, never a distinct status.
+        McpConnectionState::Connected { .. } | McpConnectionState::Cached { .. } => {
+            McpStatus::Connected
+        }
         McpConnectionState::Disconnected {
             last_error: Some(e),
             ..
@@ -3850,6 +4091,17 @@ mod tests {
         block_disconnect: AtomicBool,
         disconnect_started: Notify,
         disconnect_release: Notify,
+        /// §11 Stage 2 — how many times `McpTransport::connect` actually
+        /// dialed. The whole claim of Stage 2 is that a cache hit dials ZERO
+        /// times and a subsequent tool call dials exactly once; an unchanged
+        /// `tools`/`resources` field on the served state would pass even if
+        /// the mock dialed and the result were silently discarded, so the
+        /// call COUNT is the only thing that actually proves it.
+        connect_calls: AtomicUsize,
+        /// §11 Stage 2 — how many times `McpTransport::disconnect` actually
+        /// ran, so a test can prove a `Cached` server's teardown does NOT
+        /// touch the transport (it has no live connection registered).
+        disconnect_calls: AtomicUsize,
     }
 
     impl BridgeMock {
@@ -3881,6 +4133,8 @@ mod tests {
                 block_disconnect: AtomicBool::new(false),
                 disconnect_started: Notify::new(),
                 disconnect_release: Notify::new(),
+                connect_calls: AtomicUsize::new(0),
+                disconnect_calls: AtomicUsize::new(0),
             }
         }
 
@@ -3919,6 +4173,7 @@ mod tests {
     #[async_trait]
     impl McpTransport for BridgeMock {
         async fn connect(&self, _s: &McpTransportSpec) -> Result<McpRawConnection, McpError> {
+            self.connect_calls.fetch_add(1, Ordering::SeqCst);
             let id = ConnId::new();
             self.conns.lock().unwrap().insert(id, paired_connection());
             Ok(McpRawConnection { connection_id: id })
@@ -4003,6 +4258,7 @@ mod tests {
             Err(McpError::Internal("not implemented".into()))
         }
         async fn disconnect(&self, id: ConnId) -> Result<(), McpError> {
+            self.disconnect_calls.fetch_add(1, Ordering::SeqCst);
             self.disconnect_started.notify_one();
             if self.block_disconnect.load(Ordering::SeqCst) {
                 self.disconnect_release.notified().await;
@@ -5244,11 +5500,378 @@ mod tests {
         );
     }
 
-    /// Pure-function coverage of the emission gate `emit_discovery_source_for_pending_connect`
-    /// consults: a `Fresh`/`Stale` decision emits nothing (Stage 2 isn't
-    /// wired — see the module doc); a `Miss` emits iff
+    // ── §11 Stage 2: serve discovery-cache hits without dialing, lazy dial ──
+
+    /// Seed a discovery-cache entry for `srv` carrying one tool (`alpha`),
+    /// saved `age_ms` in the past (relative to "now"), for the Stage 2 tests
+    /// below. `age_ms` alone decides Fresh (< 900s default TTL) vs Stale
+    /// (>= TTL, < 14 400s default max-stale).
+    fn seed_entry(
+        store: &crate::discovery_cache::DiscoveryCacheStore,
+        cache_key: &str,
+        age_ms: u64,
+    ) {
+        let saved_at_ms = crate::discovery_cache::now_ms().saturating_sub(age_ms);
+        store
+            .store(&crate::discovery_cache::DiscoveryCacheEntry::new(
+                cache_key.to_string(),
+                saved_at_ms,
+                ServerCapabilitiesDto {
+                    tools: true,
+                    resources: false,
+                    prompts: false,
+                    logging: false,
+                    experimental: HashMap::new(),
+                },
+                vec![McpToolDto {
+                    server_name: "srv".into(),
+                    tool_name: "alpha".into(),
+                    description: "alpha tool".into(),
+                    input_schema: serde_json::json!({"type": "object"}),
+                    full_name: "mcp__srv__alpha".into(),
+                    search_hint: None,
+                    always_load: None,
+                    requires_user_interaction: false,
+                }],
+                vec![],
+                vec![],
+                vec![],
+            ))
+            .expect("seed store");
+    }
+
+    /// The headline Stage 2 claim: a `Fresh` cache hit serves the cached
+    /// catalog and dials the transport ZERO times. Proven with the
+    /// TRANSPORT CALL COUNT (`mock.connect_calls`) — not merely "tools are
+    /// present", which a "dial-then-discard" bug would also satisfy.
+    #[tokio::test]
+    async fn a_fresh_cache_hit_serves_without_dialing() {
+        let _guard = crate::discovery_cache::tests_env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        std::env::set_var(crate::discovery_cache::ENV_ENABLED, "true");
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = crate::discovery_cache::DiscoveryCacheStore::new(dir.path());
+        let cfg = http_cfg("srv", "https://mcp.example.com/v1");
+        let cache_key = crate::discovery_cache::DiscoveryCacheStore::cache_key("srv", &cfg.spec);
+        seed_entry(&store, &cache_key, 0); // saved "now" — well inside the TTL.
+
+        // The mock's OWN tools deliberately differ from the cached ones, so a
+        // test that accidentally dialed live would be caught by tool identity
+        // too, not just the call count.
+        let mock = Arc::new(BridgeMock::new(&["should_never_be_dialed"]));
+        let registry = McpRegistry::with_raw_conn(
+            mock.clone() as Arc<dyn McpTransport>,
+            mock.clone() as Arc<dyn RawConnectionProvider>,
+        )
+        .with_discovery_cache_store(crate::discovery_cache::DiscoveryCacheStore::new(dir.path()));
+
+        let result = registry.connect(cfg).await;
+        std::env::remove_var(crate::discovery_cache::ENV_ENABLED);
+
+        assert!(result.is_ok(), "a cache hit must succeed, got {result:?}");
+        assert_eq!(
+            mock.connect_calls.load(Ordering::SeqCst),
+            0,
+            "a Fresh cache hit must dial the transport ZERO times"
+        );
+        {
+            let conns = registry.connections.read().await;
+            let McpConnectionState::Cached {
+                tools,
+                cache_saved_at_ms,
+                ..
+            } = conns.get("srv").unwrap()
+            else {
+                panic!("expected Cached state, got {:?}", conns.get("srv"));
+            };
+            assert_eq!(
+                tools
+                    .iter()
+                    .map(|t| t.tool_name.as_str())
+                    .collect::<Vec<_>>(),
+                vec!["alpha"],
+                "the served catalog must be the CACHED one, not the mock's live tools"
+            );
+            assert!(*cache_saved_at_ms > 0);
+        }
+        assert!(
+            registry.has_callable_server("srv").await,
+            "a Cached server must report callable"
+        );
+    }
+
+    /// A `Stale` hit (past the 900s TTL but inside the 14 400s max-stale
+    /// window) must ALSO serve from cache without dialing — Stage 2 covers
+    /// both hit kinds, only Stage 3's background revalidation is deferred.
+    #[tokio::test]
+    async fn a_stale_cache_hit_also_serves_without_dialing() {
+        let _guard = crate::discovery_cache::tests_env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        std::env::set_var(crate::discovery_cache::ENV_ENABLED, "true");
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = crate::discovery_cache::DiscoveryCacheStore::new(dir.path());
+        let cfg = http_cfg("srv", "https://mcp.example.com/v1");
+        let cache_key = crate::discovery_cache::DiscoveryCacheStore::cache_key("srv", &cfg.spec);
+        // 1_000_000ms (~16.7min) > the 900_000ms default TTL, but well under
+        // the 14_400_000ms default max-stale.
+        seed_entry(&store, &cache_key, 1_000_000);
+
+        let mock = Arc::new(BridgeMock::new(&["should_never_be_dialed"]));
+        let registry = McpRegistry::with_raw_conn(
+            mock.clone() as Arc<dyn McpTransport>,
+            mock.clone() as Arc<dyn RawConnectionProvider>,
+        )
+        .with_discovery_cache_store(crate::discovery_cache::DiscoveryCacheStore::new(dir.path()));
+
+        let result = registry.connect(cfg).await;
+        std::env::remove_var(crate::discovery_cache::ENV_ENABLED);
+
+        assert!(
+            result.is_ok(),
+            "a stale hit must still succeed, got {result:?}"
+        );
+        assert_eq!(
+            mock.connect_calls.load(Ordering::SeqCst),
+            0,
+            "a Stale cache hit must ALSO dial the transport ZERO times"
+        );
+        let conns = registry.connections.read().await;
+        assert!(
+            matches!(conns.get("srv"), Some(McpConnectionState::Cached { .. })),
+            "expected Cached state, got {:?}",
+            conns.get("srv")
+        );
+    }
+
+    /// The other half of the Stage 2 claim: the FIRST tool call against a
+    /// `Cached` server dials the transport EXACTLY ONCE (the lazy dial),
+    /// after which the state is a real `Connected` — not still `Cached`,
+    /// and not re-dialed a second time by the same call.
+    #[tokio::test]
+    async fn first_tool_call_against_a_cached_server_dials_exactly_once() {
+        let _guard = crate::discovery_cache::tests_env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        std::env::set_var(crate::discovery_cache::ENV_ENABLED, "true");
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = crate::discovery_cache::DiscoveryCacheStore::new(dir.path());
+        let cfg = http_cfg("srv", "https://mcp.example.com/v1");
+        let cache_key = crate::discovery_cache::DiscoveryCacheStore::cache_key("srv", &cfg.spec);
+        seed_entry(&store, &cache_key, 0);
+
+        let mock = Arc::new(BridgeMock::new(&["alpha"]));
+        let registry = McpRegistry::with_raw_conn(
+            mock.clone() as Arc<dyn McpTransport>,
+            mock.clone() as Arc<dyn RawConnectionProvider>,
+        )
+        .with_discovery_cache_store(crate::discovery_cache::DiscoveryCacheStore::new(dir.path()));
+
+        registry.connect(cfg).await.expect("cache hit connect");
+        assert_eq!(
+            mock.connect_calls.load(Ordering::SeqCst),
+            0,
+            "precondition: the cache hit must not have dialed yet"
+        );
+
+        // Dispatch a tool call. The mock's paired jsonrpc connection has no
+        // live peer (see `paired_connection`'s doc), so the RPC itself may
+        // fail — this test only asserts that the DIAL happened, not that the
+        // round-trip succeeded.
+        let _ = registry
+            .call_tool_with_auth_retry("srv", "mcp__srv__alpha", serde_json::json!({}), None, None)
+            .await;
+        std::env::remove_var(crate::discovery_cache::ENV_ENABLED);
+
+        assert_eq!(
+            mock.connect_calls.load(Ordering::SeqCst),
+            1,
+            "the first tool call against a Cached server must dial EXACTLY ONCE"
+        );
+        let conns = registry.connections.read().await;
+        assert!(
+            matches!(conns.get("srv"), Some(McpConnectionState::Connected { .. })),
+            "the lazy dial must upgrade Cached to a real Connected, got {:?}",
+            conns.get("srv")
+        );
+    }
+
+    /// Single-flight: two CONCURRENT tool calls against the same `Cached`
+    /// server must dial the transport exactly ONCE between them — the
+    /// second caller blocks on the same per-server lifecycle lock `connect`
+    /// already uses, then observes `Connected` and never dials again.
+    #[tokio::test]
+    async fn concurrent_tool_calls_against_a_cached_server_dial_only_once() {
+        let _guard = crate::discovery_cache::tests_env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        std::env::set_var(crate::discovery_cache::ENV_ENABLED, "true");
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = crate::discovery_cache::DiscoveryCacheStore::new(dir.path());
+        let cfg = http_cfg("srv", "https://mcp.example.com/v1");
+        let cache_key = crate::discovery_cache::DiscoveryCacheStore::cache_key("srv", &cfg.spec);
+        seed_entry(&store, &cache_key, 0);
+
+        let mock = Arc::new(BridgeMock::new(&["alpha"]));
+        let registry = Arc::new(
+            McpRegistry::with_raw_conn(
+                mock.clone() as Arc<dyn McpTransport>,
+                mock.clone() as Arc<dyn RawConnectionProvider>,
+            )
+            .with_discovery_cache_store(
+                crate::discovery_cache::DiscoveryCacheStore::new(dir.path()),
+            ),
+        );
+
+        registry.connect(cfg).await.expect("cache hit connect");
+        assert_eq!(
+            mock.connect_calls.load(Ordering::SeqCst),
+            0,
+            "precondition: the cache hit must not have dialed yet — otherwise \
+             this test cannot distinguish single-flighting the lazy dial from \
+             simply never having anything left to single-flight"
+        );
+
+        let a = {
+            let registry = registry.clone();
+            tokio::spawn(async move {
+                let _ = registry
+                    .call_tool_with_auth_retry(
+                        "srv",
+                        "mcp__srv__alpha",
+                        serde_json::json!({}),
+                        None,
+                        None,
+                    )
+                    .await;
+            })
+        };
+        let b = {
+            let registry = registry.clone();
+            tokio::spawn(async move {
+                let _ = registry
+                    .call_tool_with_auth_retry(
+                        "srv",
+                        "mcp__srv__alpha",
+                        serde_json::json!({}),
+                        None,
+                        None,
+                    )
+                    .await;
+            })
+        };
+        let _ = tokio::join!(a, b);
+        std::env::remove_var(crate::discovery_cache::ENV_ENABLED);
+
+        assert_eq!(
+            mock.connect_calls.load(Ordering::SeqCst),
+            1,
+            "two concurrent tool calls against one Cached server must dial exactly ONCE"
+        );
+    }
+
+    /// `/mcp disconnect` on a `Cached` server must transition it to
+    /// `Stopped` WITHOUT calling `McpTransport::disconnect` — there is no
+    /// live transport connection behind a cache-served entry to tear down
+    /// (its `connection_id` is a synthetic one; see
+    /// `McpConnectionState::Cached`'s doc).
+    #[tokio::test]
+    async fn disconnecting_a_cached_server_never_touches_the_transport() {
+        let _guard = crate::discovery_cache::tests_env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        std::env::set_var(crate::discovery_cache::ENV_ENABLED, "true");
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = crate::discovery_cache::DiscoveryCacheStore::new(dir.path());
+        let cfg = http_cfg("srv", "https://mcp.example.com/v1");
+        let cache_key = crate::discovery_cache::DiscoveryCacheStore::cache_key("srv", &cfg.spec);
+        seed_entry(&store, &cache_key, 0);
+
+        let mock = Arc::new(BridgeMock::new(&["alpha"]));
+        let registry = McpRegistry::with_raw_conn(
+            mock.clone() as Arc<dyn McpTransport>,
+            mock.clone() as Arc<dyn RawConnectionProvider>,
+        )
+        .with_discovery_cache_store(crate::discovery_cache::DiscoveryCacheStore::new(dir.path()));
+
+        registry.connect(cfg).await.expect("cache hit connect");
+        registry.disconnect("srv").await.expect("disconnect");
+        std::env::remove_var(crate::discovery_cache::ENV_ENABLED);
+
+        assert_eq!(
+            mock.disconnect_calls.load(Ordering::SeqCst),
+            0,
+            "a Cached server's teardown must never call transport disconnect"
+        );
+        let conns = registry.connections.read().await;
+        assert!(
+            matches!(conns.get("srv"), Some(McpConnectionState::Stopped { .. })),
+            "expected Stopped state, got {:?}",
+            conns.get("srv")
+        );
+        drop(conns);
+        assert!(
+            !registry.has_callable_server("srv").await,
+            "a stopped server must not report callable"
+        );
+    }
+
+    /// A `Cached` server must contribute to [`McpRegistry::servers_with_tools`]
+    /// exactly like a `Connected` one — `AgentTool`'s required-MCP gate must
+    /// not refuse a subagent spawn naming a server the model's own tool list
+    /// already shows as available (`build_registered_mcp_tools` gets the same
+    /// treatment, in `tool-mcp`).
+    #[tokio::test]
+    async fn servers_with_tools_includes_a_cached_server() {
+        let _guard = crate::discovery_cache::tests_env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        std::env::set_var(crate::discovery_cache::ENV_ENABLED, "true");
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = crate::discovery_cache::DiscoveryCacheStore::new(dir.path());
+        let cfg = http_cfg("srv", "https://mcp.example.com/v1");
+        let cache_key = crate::discovery_cache::DiscoveryCacheStore::cache_key("srv", &cfg.spec);
+        seed_entry(&store, &cache_key, 0);
+
+        let mock = Arc::new(BridgeMock::new(&["should_never_be_dialed"]));
+        let registry = McpRegistry::with_raw_conn(
+            mock.clone() as Arc<dyn McpTransport>,
+            mock.clone() as Arc<dyn RawConnectionProvider>,
+        )
+        .with_discovery_cache_store(crate::discovery_cache::DiscoveryCacheStore::new(dir.path()));
+
+        registry.connect(cfg).await.expect("cache hit connect");
+        std::env::remove_var(crate::discovery_cache::ENV_ENABLED);
+
+        assert_eq!(
+            registry.servers_with_tools().await,
+            vec!["srv".to_string()],
+            "a Cached server's tools must count toward servers_with_tools"
+        );
+        assert_eq!(
+            mock.connect_calls.load(Ordering::SeqCst),
+            0,
+            "servers_with_tools must not have triggered a dial either"
+        );
+    }
+
+    /// Pure-function coverage of `discovery_source_emission`, the helper
+    /// `connect_locked_inner`'s MISS branch consults: a `Miss` emits iff
     /// `crate::discovery_cache::miss_emits_discovery_source_telemetry` says
-    /// so, with the exact `miss_telemetry_value` string.
+    /// so, with the exact `miss_telemetry_value` string. A `Fresh`/`Stale`
+    /// decision is asserted `None` here too, but that is this PURE HELPER's
+    /// contract, not the whole connect path any more (§11 Stage 2): a real
+    /// cache hit is served by `serve_discovery_cache_hit`, a SEPARATE code
+    /// path that emits its own `"cache_fresh"`/`"cache_stale"` telemetry with
+    /// the real `entryAgeMs` — see
+    /// `a_fresh_cache_hit_serves_without_dialing_and_emits_cache_fresh`.
     #[test]
     fn discovery_source_emission_matches_the_miss_gate() {
         use crate::discovery_cache::{Decision, DiscoveryCacheEntry, MissReason};
@@ -5294,12 +5917,12 @@ mod tests {
                 age_ms: 1
             }),
             None,
-            "this port doesn't serve from cache yet, so a HIT must emit nothing"
+            "this pure helper never handles a HIT — `serve_discovery_cache_hit` does"
         );
         assert_eq!(
             discovery_source_emission(&Decision::Stale { entry, age_ms: 1 }),
             None,
-            "this port doesn't serve from cache yet, so a HIT must emit nothing"
+            "this pure helper never handles a HIT — `serve_discovery_cache_hit` does"
         );
     }
 

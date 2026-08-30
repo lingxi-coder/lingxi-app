@@ -74,17 +74,26 @@ fn same_origin(left: &reqwest::Url, right: &reqwest::Url) -> bool {
 /// downloads run with cross-origin redirects allowed, so that check is a
 /// no-op for this attack).
 fn is_denied_download_host(host: &str) -> bool {
-    let lower = host.to_ascii_lowercase();
-    if lower == "localhost" || lower.ends_with(".localhost") {
-        return true;
-    }
+    // Oracle `PTt` opens with
+    // `let t=e.toLowerCase().replace(/^\[|\]$/g,""); if(t.endsWith("."))t=t.slice(0,-1);`
+    // — the trailing-dot strip is its SECOND operation, precisely so the
+    // fully-qualified spellings `localhost.` / `sub.localhost.` cannot walk
+    // past the denylist. (`Url::host_str` normalises `127.0.0.1.` back to
+    // `127.0.0.1` via the WHATWG IPv4 parser, so only the NAME arm leaks
+    // without it.) An empty host is denied too (`t===""`).
+    //
     // `Url::host_str` returns an IPv6 literal WITH its brackets (`"[::1]"`);
     // strip them before handing the bare address to `IpAddr::parse`.
-    let unbracketed = host.strip_prefix('[').and_then(|h| h.strip_suffix(']'));
-    unbracketed
-        .unwrap_or(host)
-        .parse::<std::net::IpAddr>()
-        .is_ok_and(is_denied_download_ip)
+    let host = host
+        .strip_prefix('[')
+        .and_then(|host| host.strip_suffix(']'))
+        .unwrap_or(host);
+    let host = host.strip_suffix('.').unwrap_or(host);
+    let lower = host.to_ascii_lowercase();
+    if lower.is_empty() || lower == "localhost" || lower.ends_with(".localhost") {
+        return true;
+    }
+    host.parse::<std::net::IpAddr>().is_ok_and(is_denied_download_ip)
 }
 
 fn is_denied_download_ip(ip: std::net::IpAddr) -> bool {
@@ -399,6 +408,11 @@ mod tests {
             "https://100.100.100.200/x", // Alibaba Cloud metadata
             "https://localhost/x",
             "https://sub.localhost/x",
+            // Oracle `PTt` strips a trailing dot before the name arms — the
+            // fully-qualified spelling resolves to 127.0.0.1 just the same.
+            "https://localhost./x",
+            "https://localhost.:8080/evil.zip",
+            "https://sub.localhost./x",
             "https://[::1]/x",
             "https://[::]/x",
             "https://[fd00:ec2::254]/x", // AWS IMDSv2 IPv6 alias

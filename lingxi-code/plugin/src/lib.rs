@@ -43,7 +43,9 @@ pub use discovery::{
     discover_installed_plugins, discover_recorded_plugins, has_control_or_bidi_formatting,
     validate_marketplace_name, validate_plugin_name,
 };
-pub use git::{clone_plugin_git, is_suspicious_url};
+pub use git::{
+    clone_plugin_git, clone_plugin_git_pinned, is_confusable_authority_url, is_suspicious_url,
+};
 pub use lifecycle::PluginState;
 pub use loader::{resolve_user_config, LoaderError};
 pub use manager::{PluginManager, PluginManagerError};

@@ -575,16 +575,20 @@ pub fn run_add(
     // Classification (incl. local existence) is checked FIRST — before scope,
     // and before any "Adding marketplace…" progress line — matching the binary.
     let classified = classify_source(source)?;
+    // Oracle `qn`: the scope is validated FIRST
+    // (`if(w=i.scope??"user",w!=="user"&&w!=="project"&&w!=="local")return …`),
+    // and only then does the `--sparse` kind guard run. With both wrong, the
+    // caller must see the scope error.
+    let target = match scope {
+        Some(s) => Scope::parse(s).ok_or_else(|| market_invalid_scope(s))?,
+        None => Scope::User,
+    };
     if !sparse.is_empty() && !matches!(classified, Source::Github { .. } | Source::Git { .. }) {
         return Err(format!(
             "✘ --sparse is only supported for github and git marketplace sources (got: {})",
             source_kind(&classified)
         ));
     }
-    let target = match scope {
-        Some(s) => Scope::parse(s).ok_or_else(|| market_invalid_scope(s))?,
-        None => Scope::User,
-    };
 
     match classified {
         Source::Directory(abs) => add_directory(&abs, target, plugins_dir, home, cwd),
@@ -2053,6 +2057,24 @@ mod tests {
             err,
             "✘ --sparse is only supported for github and git marketplace sources (got: url)"
         );
+    }
+
+    /// Oracle `qn` validates `--scope` BEFORE the `--sparse` kind guard, so
+    /// with both wrong the caller sees the scope error. (Both message bodies
+    /// are byte-exact already; only the precedence diverged.)
+    #[test]
+    fn an_invalid_scope_beats_the_sparse_kind_guard() {
+        let e = full_env();
+        let err = run_add(
+            "https://example.test/marketplace.json",
+            Some("bogus"),
+            &["plugins".to_string()],
+            &e.plugins,
+            &e.home,
+            &e.cwd,
+        )
+        .unwrap_err();
+        assert_eq!(err, "✘ Invalid scope \'bogus\'. Use: user, project, or local");
     }
 
     /// `prune_to_sparse_paths` — the working-tree narrowing that stands in for

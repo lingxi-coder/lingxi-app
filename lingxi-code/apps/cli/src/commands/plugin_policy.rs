@@ -9,7 +9,7 @@ use std::collections::BTreeSet;
 use std::fmt;
 use std::path::PathBuf;
 
-use regex::{Regex, RegexBuilder};
+use regex::Regex;
 use serde_json::Value;
 
 /// Canonical identity of a marketplace source.
@@ -80,28 +80,47 @@ impl MarketplaceSourceIdentity {
         }
     }
 
-    fn host_path(&self) -> (String, String) {
+    /// Oracle `w`/`Q_r`: the host a `hostPattern` rule is tested against.
+    fn host(&self) -> String {
         match self {
-            Self::Github { repo, path, .. } => (
-                "github.com".to_string(),
-                format!("/{}{}", repo, path_suffix(path.as_deref())),
-            ),
-            Self::Git { url, path, .. } => {
-                let (host, mut source_path) = split_host_path(url);
-                source_path.push_str(&path_suffix(path.as_deref()));
-                (host, source_path)
-            }
-            Self::Url { url } => split_host_path(url),
-            Self::Npm { package } => ("npm".to_string(), package.clone()),
-            Self::File { path } | Self::Directory { path } => (String::new(), normalize_path(path)),
+            Self::Github { .. } => "github.com".to_string(),
+            Self::Git { url, .. } | Self::Url { url } => split_host_path(url).0,
+            Self::Npm { .. } => "npm".to_string(),
+            Self::File { .. } | Self::Directory { .. } => String::new(),
         }
     }
-}
 
-fn path_suffix(path: Option<&str>) -> String {
-    path.filter(|path| !path.is_empty())
-        .map(|path| format!("/{}", path.trim_start_matches('/')))
-        .unwrap_or_default()
+    /// Oracle `P`: a `pathPattern` rule is *"matched against the .path field
+    /// of file and directory sources"* and its first line is
+    /// `if(t.source!=="file"&&t.source!=="directory")return!1` — every remote
+    /// source is refused by such a rule outright, never pattern-matched. The
+    /// value is the raw `path`, untouched.
+    fn file_or_directory_path(&self) -> Option<&str> {
+        match self {
+            Self::File { path } | Self::Directory { path } => Some(path.as_str()),
+            _ => None,
+        }
+    }
+
+    /// Oracle `b`: is this a plain relative path (no leading `/` or `\\`, no
+    /// drive letter, no `..` segment)? A `hostPattern` allow rule refuses a
+    /// github/git source whose `path` fails this.
+    fn has_unsafe_relative_path(&self) -> bool {
+        let path = match self {
+            Self::Github { path, .. } | Self::Git { path, .. } => path.as_deref(),
+            _ => None,
+        };
+        let Some(path) = path.filter(|path| !path.is_empty()) else {
+            return false;
+        };
+        let absolute = path.starts_with('/')
+            || path.starts_with('\\')
+            || path
+                .as_bytes()
+                .get(1)
+                .is_some_and(|byte| *byte == b':' && path.as_bytes()[0].is_ascii_alphabetic());
+        absolute || path.split(['/', '\\']).any(|segment| segment == "..")
+    }
 }
 
 fn normalize_path(path: &str) -> String {
@@ -144,25 +163,27 @@ fn split_host_path(locator: &str) -> (String, String) {
 enum MarketplaceRule {
     Name(String),
     Exact(MarketplaceSourceIdentity),
-    /// Oracle `hostPattern`/`pathPattern` are JS `RegExp`, not glob — an
-    /// entry like `^github\.mycompany\.com$` is meant to anchor an exact
-    /// host, not match nothing the way a `*`/`?` glob would. Compiled once
-    /// at parse time (case-insensitive, matching JS `RegExp` without
-    /// per-pattern flags).
-    Pattern {
-        host_pattern: PatternField,
-        path_pattern: PatternField,
-    },
+    /// Oracle `{"source":"hostPattern","hostPattern":"…"}` — a JS `RegExp`
+    /// (not glob) tested against the host extracted from ANY source kind.
+    /// `hostPattern` and `pathPattern` are two MUTUALLY EXCLUSIVE members of
+    /// the oracle's rule union, each with its own `source` discriminant; they
+    /// are never AND-combined inside one rule.
+    HostPattern(PatternField),
+    /// Oracle `{"source":"pathPattern","pathPattern":"…"}` — matched against
+    /// the raw `.path` of a `file`/`directory` source ONLY. Oracle `P` opens
+    /// with `if(t.source!=="file"&&t.source!=="directory")return!1`, so the
+    /// documented `".*"` ("allow all filesystem paths") does NOT turn a
+    /// strict allowlist into an allow-everything rule for remote sources.
+    PathPattern(PatternField),
 }
 
-/// One `hostPattern`/`pathPattern` slot: absent (no constraint on that
-/// field), a compiled regex, or an invalid pattern. Invalid is deliberately
-/// distinct from absent — a diagnostic ("Invalid hostPattern regex in
-/// policy settings …") is logged and the RULE that carries it can never
-/// match, rather than the broken field silently becoming unconstrained.
+/// One `hostPattern`/`pathPattern` value: a compiled regex, or an invalid
+/// pattern. Invalid is deliberately NOT "unconstrained" — a diagnostic
+/// ("Invalid hostPattern regex in policy settings …") is logged and the RULE
+/// that carries it can never match, rather than the broken pattern silently
+/// matching everything.
 #[derive(Debug, Clone)]
 enum PatternField {
-    Absent,
     Compiled(Regex),
     Invalid,
 }
@@ -170,7 +191,6 @@ enum PatternField {
 impl PatternField {
     fn is_match(&self, candidate: &str) -> bool {
         match self {
-            Self::Absent => true,
             Self::Compiled(regex) => regex.is_match(candidate),
             Self::Invalid => false,
         }
@@ -186,13 +206,13 @@ impl MarketplaceRule {
             return Some(Self::Name(name.to_string()));
         }
         let object = value.as_object()?;
-        let host_pattern = object.get("hostPattern").and_then(Value::as_str);
-        let path_pattern = object.get("pathPattern").and_then(Value::as_str);
-        if host_pattern.is_some() || path_pattern.is_some() {
-            return Some(Self::Pattern {
-                host_pattern: compile_pattern_field(host_pattern, "hostPattern", tier),
-                path_pattern: compile_pattern_field(path_pattern, "pathPattern", tier),
-            });
+        // Oracle `D`/`w5e` dispatch on the rule's own `source` discriminant,
+        // hostPattern first, so exactly one arm can apply to any one rule.
+        if let Some(pattern) = object.get("hostPattern").and_then(Value::as_str) {
+            return Some(Self::HostPattern(compile_host_pattern(pattern)));
+        }
+        if let Some(pattern) = object.get("pathPattern").and_then(Value::as_str) {
+            return Some(Self::PathPattern(compile_path_pattern(pattern)));
         }
         if let Some(name) = object
             .get("name")
@@ -256,12 +276,13 @@ impl MarketplaceRule {
                 }
                 source == Some(expected)
             }
-            Self::Pattern {
-                host_pattern,
-                path_pattern,
-            } => source.is_some_and(|source| {
-                let (host, path) = source.host_path();
-                host_pattern.is_match(&host) && path_pattern.is_match(&path)
+            Self::HostPattern(pattern) => {
+                source.is_some_and(|source| pattern.is_match(&source.host()))
+            }
+            Self::PathPattern(pattern) => source.is_some_and(|source| {
+                source
+                    .file_or_directory_path()
+                    .is_some_and(|path| pattern.is_match(path))
             }),
         }
     }
@@ -271,24 +292,32 @@ impl MarketplaceRule {
     }
 }
 
-/// Compile an optional `hostPattern`/`pathPattern` string as a
-/// case-insensitive regex (oracle: JS `RegExp`, not glob). `None` (the key
-/// was absent) stays unconstrained; a present-but-invalid pattern is
-/// diagnosed and becomes `Invalid`, so the rule fails closed instead of the
-/// broken field silently matching everything.
-fn compile_pattern_field(pattern: Option<&str>, field: &str, tier: &str) -> PatternField {
-    let Some(pattern) = pattern else {
-        return PatternField::Absent;
-    };
-    match RegexBuilder::new(pattern).case_insensitive(true).build() {
-        Ok(regex) => PatternField::Compiled(regex),
-        Err(error) => {
+/// Compile a `hostPattern`/`pathPattern` string. The oracle builds these
+/// with a bare `new RegExp(p)` — NO flags, so matching is case-SENSITIVE; a
+/// case-insensitive port widens every strict allowlist (a `pathPattern` is
+/// matched against a raw filesystem path that nothing case-folds). An
+/// invalid pattern is diagnosed and becomes `Invalid`, so the rule that
+/// carries it fails closed instead of silently matching everything.
+fn compile_host_pattern(pattern: &str) -> PatternField {
+    Regex::new(pattern).map_or_else(
+        |_| {
+            tracing::warn!("Invalid hostPattern regex in policy settings: {pattern}");
+            PatternField::Invalid
+        },
+        PatternField::Compiled,
+    )
+}
+
+fn compile_path_pattern(pattern: &str) -> PatternField {
+    Regex::new(pattern).map_or_else(
+        |_| {
             tracing::warn!(
-                "Invalid {field} regex in policy settings {tier}: {pattern:?} ({error})"
+                "Invalid pathPattern regex in policy settings strictKnownMarketplaces: {pattern}"
             );
             PatternField::Invalid
-        }
-    }
+        },
+        PatternField::Compiled,
+    )
 }
 
 /// `<owner>/*` is the only wildcard shape a policy rule's github `repo`
@@ -313,12 +342,17 @@ fn source_value_contains_wildcard(value: &Value) -> bool {
     })
 }
 
-/// Oracle `D`: a suspicious git URL (`plugin::is_suspicious_url`) can never
-/// satisfy a strict-allowlist rule, regardless of what its fields would
-/// otherwise equal or pattern-match — the ambiguity itself is the reason to
-/// distrust it, so it fails closed instead of being resolved one way or the
-/// other. Deny-list matching is untouched: a confusable URL must still be
-/// caught by a `blockedMarketplaces` rule that would otherwise catch it.
+/// Oracle `D`: a suspicious git URL (`plugin::is_suspicious_url` = `ffe`)
+/// can never satisfy a strict-allowlist rule, regardless of what its fields
+/// would otherwise equal or pattern-match — the ambiguity itself is the
+/// reason to distrust it, so it fails closed instead of being resolved one
+/// way or the other. Deny-list matching is untouched: a confusable URL must
+/// still be caught by a `blockedMarketplaces` rule that would otherwise
+/// catch it.
+///
+/// `D` also refuses a github/git source whose `path` is not a plain relative
+/// path (`b`) before consulting a `hostPattern` rule — an allowlist that says
+/// "any repo on this host" must not thereby admit `path:"../../etc"`.
 fn allow_rule_matches(
     rule: &MarketplaceRule,
     name: Option<&str>,
@@ -329,7 +363,23 @@ fn allow_rule_matches(
             return false;
         }
     }
+    if matches!(rule, MarketplaceRule::HostPattern(_))
+        && source.is_some_and(MarketplaceSourceIdentity::has_unsafe_relative_path)
+    {
+        return false;
+    }
     rule.matches(name, source)
+}
+
+/// Oracle `Ip`'s FIRST clause — `if(t.source==="git"&&bgn(t.url))return!1`,
+/// where `bgn` is `pfe`, the raw-authority backslash test. It runs before the
+/// blocklist and before `strictKnownMarketplaces` is even read, so a
+/// confusable git URL is refused in the DEFAULT configuration, with no
+/// managed settings at all. (`D`'s `ffe` test above is an extra refinement
+/// *inside* the allowlist, not the boundary.)
+fn source_is_confusable(source: &MarketplaceSourceIdentity) -> bool {
+    matches!(source, MarketplaceSourceIdentity::Git { url, .. }
+        if plugin::is_confusable_authority_url(url))
 }
 
 /// Why a marketplace operation was rejected before side effects.
@@ -339,6 +389,10 @@ pub enum MarketplacePolicyBlockReason {
     Blocked,
     /// A strict allowlist exists and no rule matched.
     NotKnown,
+    /// Oracle `Ip`: the git URL's raw authority carries a backslash, so two
+    /// parsers can disagree about which host it names. Refused unconditionally
+    /// — before any allow/block list is consulted.
+    ConfusableUrl,
 }
 
 impl fmt::Display for MarketplacePolicyBlockReason {
@@ -346,6 +400,10 @@ impl fmt::Display for MarketplacePolicyBlockReason {
         match self {
             Self::Blocked => formatter.write_str("blocked by managed settings"),
             Self::NotKnown => formatter.write_str("not allowed by strictKnownMarketplaces"),
+            Self::ConfusableUrl => formatter.write_str(
+                "refused: the git URL's authority contains a backslash, so different parsers \
+                 disagree about which host it names",
+            ),
         }
     }
 }
@@ -403,6 +461,9 @@ impl MarketplacePolicy {
         name: Option<&str>,
         source: Option<&MarketplaceSourceIdentity>,
     ) -> Result<(), MarketplacePolicyBlockReason> {
+        if source.is_some_and(source_is_confusable) {
+            return Err(MarketplacePolicyBlockReason::ConfusableUrl);
+        }
         if self.blocked.iter().any(|rule| rule.matches(name, source)) {
             return Err(MarketplacePolicyBlockReason::Blocked);
         }
@@ -423,6 +484,9 @@ impl MarketplacePolicy {
         &self,
         source: &MarketplaceSourceIdentity,
     ) -> Result<(), MarketplacePolicyBlockReason> {
+        if source_is_confusable(source) {
+            return Err(MarketplacePolicyBlockReason::ConfusableUrl);
+        }
         if self
             .blocked
             .iter()
@@ -573,27 +637,115 @@ mod tests {
         assert!(policy.check(None, Some(&wrong_ref)).is_err());
     }
 
+    /// Oracle `P` (`pathPattern`) opens with
+    /// `if(t.source!=="file"&&t.source!=="directory")return!1`, and its own
+    /// schema describes the value as *"matched against the .path field of
+    /// file and directory sources"* with `".*"` documented as "allow all
+    /// filesystem paths". A port that evaluates that rule against remote
+    /// sources turns the documented allowlist spelling into an
+    /// allow-EVERYTHING rule.
     #[test]
-    fn host_and_path_patterns_are_both_required() {
-        // Rewritten for §7: hostPattern/pathPattern are JS RegExp in the
-        // oracle, not `*`/`?` glob — `*.example.com` and `/team/*` are
-        // glob-shaped, not valid anchored regexes for "any host under
-        // example.com" / "any path under /team/".
-        let allowed = MarketplaceSourceIdentity::Url {
+    fn a_path_pattern_rule_never_matches_a_remote_source() {
+        let remote = MarketplaceSourceIdentity::Url {
+            url: "https://attacker.example/marketplace.json".to_string(),
+        };
+        let local = MarketplaceSourceIdentity::Directory {
+            path: "/opt/approved/mkt".to_string(),
+        };
+        let policy = policy(r#"{"strictKnownMarketplaces":[{"source":"pathPattern","pathPattern":".*"}]}"#);
+        assert!(
+            policy.check(None, Some(&remote)).is_err(),
+            "\".*\" allows filesystem paths, not every host on the internet"
+        );
+        assert!(policy.check(None, Some(&local)).is_ok());
+        assert!(policy.check_source_preflight(&remote).is_err());
+    }
+
+    /// `hostPattern` and `pathPattern` are two MUTUALLY EXCLUSIVE members of
+    /// the oracle's rule union, each carrying its own `source` discriminant —
+    /// never AND-combined inside one rule. A host rule constrains the host and
+    /// says nothing about the path.
+    #[test]
+    fn host_and_path_patterns_are_separate_rules() {
+        let team = MarketplaceSourceIdentity::Url {
             url: "https://plugins.example.com/team/marketplace.json".to_string(),
         };
-        let denied_path = MarketplaceSourceIdentity::Url {
+        let private = MarketplaceSourceIdentity::Url {
             url: "https://plugins.example.com/private/marketplace.json".to_string(),
         };
-        let denied_host = MarketplaceSourceIdentity::Url {
+        let other_host = MarketplaceSourceIdentity::Url {
             url: "https://plugins.evil.com/team/marketplace.json".to_string(),
         };
         let policy = policy(
-            r#"{"strictKnownMarketplaces":[{"hostPattern":"^plugins\\.example\\.com$","pathPattern":"^/team/"}]}"#,
+            r#"{"strictKnownMarketplaces":[{"source":"hostPattern","hostPattern":"^plugins\\.example\\.com$"}]}"#,
         );
-        assert!(policy.check(None, Some(&allowed)).is_ok());
-        assert!(policy.check(None, Some(&denied_path)).is_err());
-        assert!(policy.check(None, Some(&denied_host)).is_err());
+        assert!(policy.check(None, Some(&team)).is_ok());
+        assert!(policy.check(None, Some(&private)).is_ok());
+        assert!(policy.check(None, Some(&other_host)).is_err());
+    }
+
+    /// The oracle builds both patterns with a bare `new RegExp(p)` — no `i`
+    /// flag. A case-insensitive port widens the allowlist: a `pathPattern` is
+    /// matched against a raw filesystem path that nothing case-folds.
+    #[test]
+    fn pattern_rules_are_case_sensitive_like_a_bare_js_regexp() {
+        let approved = MarketplaceSourceIdentity::Directory {
+            path: "/opt/approved/mkt".to_string(),
+        };
+        let look_alike = MarketplaceSourceIdentity::Directory {
+            path: "/OPT/Approved/evil".to_string(),
+        };
+        let policy = policy(
+            r#"{"strictKnownMarketplaces":[{"source":"pathPattern","pathPattern":"^/opt/approved/"}]}"#,
+        );
+        assert!(policy.check(None, Some(&approved)).is_ok());
+        assert!(
+            policy.check(None, Some(&look_alike)).is_err(),
+            "/OPT/Approved/ is a DIFFERENT directory on a case-sensitive filesystem"
+        );
+    }
+
+    /// Oracle `D`: before consulting a `hostPattern` rule, a github/git source
+    /// whose `path` is not a plain relative path (`b`) is refused — "any repo
+    /// on this host" must not thereby admit `path:"../../etc"`.
+    #[test]
+    fn a_host_pattern_rule_refuses_a_traversing_source_path() {
+        let traversal = MarketplaceSourceIdentity::Github {
+            repo: "acme/plugins".to_string(),
+            git_ref: None,
+            path: Some("../../etc".to_string()),
+        };
+        let ordinary = MarketplaceSourceIdentity::Github {
+            repo: "acme/plugins".to_string(),
+            git_ref: None,
+            path: Some("catalog".to_string()),
+        };
+        let policy =
+            policy(r#"{"strictKnownMarketplaces":[{"source":"hostPattern","hostPattern":"^github\\.com$"}]}"#);
+        assert!(policy.check(None, Some(&ordinary)).is_ok());
+        assert!(policy.check(None, Some(&traversal)).is_err());
+    }
+
+    /// Oracle `Ip`'s FIRST clause (`bgn` = `pfe`) runs before the blocklist
+    /// and before `strictKnownMarketplaces` is read at all, so a confusable
+    /// git URL is refused in the DEFAULT configuration — with no managed
+    /// settings whatsoever.
+    #[test]
+    fn a_confusable_git_url_is_refused_with_no_managed_settings_at_all() {
+        let confusable = MarketplaceSourceIdentity::Git {
+            url: r"https://good.example.com\@evil.example.com/plugins.git".to_string(),
+            git_ref: None,
+            path: None,
+        };
+        let policy = policy("{}");
+        assert_eq!(
+            policy.check(None, Some(&confusable)),
+            Err(MarketplacePolicyBlockReason::ConfusableUrl)
+        );
+        assert_eq!(
+            policy.check_source_preflight(&confusable),
+            Err(MarketplacePolicyBlockReason::ConfusableUrl)
+        );
     }
 
     #[test]

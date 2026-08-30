@@ -365,9 +365,10 @@ fn resolve_external_plugin_source(
             sha,
         } => {
             let checkout = work.join("checkout");
-            let head = plugin::clone_plugin_git(
+            let head = plugin::clone_plugin_git_pinned(
                 &format!("https://github.com/{repo}.git"),
                 git_ref.as_deref().unwrap_or_default(),
+                sha.as_deref(),
                 &checkout,
             )?;
             verify_sha_pin(sha.as_deref(), &head)?;
@@ -380,8 +381,12 @@ fn resolve_external_plugin_source(
             sha,
         } => {
             let checkout = work.join("checkout");
-            let head =
-                plugin::clone_plugin_git(url, git_ref.as_deref().unwrap_or_default(), &checkout)?;
+            let head = plugin::clone_plugin_git_pinned(
+                url,
+                git_ref.as_deref().unwrap_or_default(),
+                sha.as_deref(),
+                &checkout,
+            )?;
             verify_sha_pin(sha.as_deref(), &head)?;
             confined_source_subdir(&checkout, path.as_deref())
         }
@@ -391,8 +396,12 @@ fn resolve_external_plugin_source(
         // the plugin root (this arm has no `path`).
         MarketplaceExternalSource::Url { url, git_ref, sha } => {
             let checkout = work.join("checkout");
-            let head =
-                plugin::clone_plugin_git(url, git_ref.as_deref().unwrap_or_default(), &checkout)?;
+            let head = plugin::clone_plugin_git_pinned(
+                url,
+                git_ref.as_deref().unwrap_or_default(),
+                sha.as_deref(),
+                &checkout,
+            )?;
             verify_sha_pin(sha.as_deref(), &head)?;
             Ok(checkout)
         }
@@ -407,8 +416,12 @@ fn resolve_external_plugin_source(
             sha,
         } => {
             let checkout = work.join("checkout");
-            let head =
-                plugin::clone_plugin_git(url, git_ref.as_deref().unwrap_or_default(), &checkout)?;
+            let head = plugin::clone_plugin_git_pinned(
+                url,
+                git_ref.as_deref().unwrap_or_default(),
+                sha.as_deref(),
+                &checkout,
+            )?;
             verify_sha_pin(sha.as_deref(), &head)?;
             confined_source_subdir(&checkout, Some(path.as_str()))
         }
@@ -1957,41 +1970,6 @@ fn update_inner(arg: &str, scope: &str, plugins_dir: &Path, cwd: &Path) -> Resul
         ));
     }
 
-    // A versionless plugin's cache dir is a FIXED path
-    // (`cache/<marketplace>/<plugin>/unknown`) shared by every scope, so this
-    // update's dest may already be the install path some OTHER record (a
-    // different scope, project, or plugin id) still points at — a live
-    // scope/session may be reading it right now. Real per-session liveness
-    // has no substrate in this port; the available proxy (per §21.9) is
-    // whether any OTHER installed-plugin record still references this exact
-    // path (oracle `ice`: "Cache for {name} at {path} is in use by another
-    // session; deferring overwrite until it exits", returning WITHOUT
-    // deleting). Skip the check when dest doesn't exist yet — nothing to
-    // protect, and this is also reached for a fresh (non-"unknown") version
-    // whose cache dir just happens to collide, which is equally worth
-    // guarding.
-    if dest.exists() {
-        let referenced_elsewhere = installed
-            .get("plugins")
-            .and_then(Value::as_object)
-            .is_some_and(|plugins| {
-                plugins.iter().any(|(other_id, records)| {
-                    records.as_array().is_some_and(|records| {
-                        records.iter().enumerate().any(|(i, record)| {
-                            !(other_id == &id && i == idx)
-                                && record.get("installPath").and_then(Value::as_str)
-                                    == Some(dest_str.as_str())
-                        })
-                    })
-                })
-            });
-        if referenced_elsewhere {
-            return Ok(format!(
-                "Cache for \"{name}\" at {dest_str} is in use by another session; deferring overwrite until it exits."
-            ));
-        }
-    }
-
     // Re-materialize into the (new) versioned cache.
     let _ = std::fs::remove_dir_all(&dest);
     copy_dir(&plugin_src, &dest).map_err(|e| e.to_string())?;
@@ -2414,11 +2392,13 @@ mod tests {
             .is_file());
     }
 
-    /// The oracle: *"SHA pin verification failed … Refusing to install."* — a
-    /// `sha` that does not match the resolved HEAD must refuse the install.
+    /// Oracle `ohr`: a `sha` that is not in the repository at all reaches
+    /// `git checkout <sha>` (the `--unshallow` fallback fetch succeeds) and
+    /// fails there — *"Failed to checkout commit …"*. Either way the install
+    /// is refused; what must NOT happen is the pin being silently ignored.
     #[cfg(unix)]
     #[test]
-    fn external_url_source_rejects_a_mismatched_sha_pin() {
+    fn external_url_source_rejects_a_sha_pin_that_is_not_in_the_repository() {
         let e = env();
         let repository = e._tmp.path().join("url-source-pinned");
         let (repository, head) = init_git_plugin_fixture(&repository);
@@ -2434,8 +2414,118 @@ mod tests {
             materialize_external_plugin_source(&e.plugins, "mymkt", "urlrepo-pinned", &source)
                 .expect_err("a mismatched sha pin must refuse the install");
         assert!(
-            error.contains("SHA pin verification failed"),
-            "expected a SHA pin failure, got: {error}"
+            error.contains("Failed to checkout commit"),
+            "expected the pinned checkout to fail, got: {error}"
+        );
+    }
+
+    /// The tamper check itself (oracle `KHt`): once the pinned commit IS
+    /// checked out, a resolved HEAD that still disagrees with the pin refuses
+    /// the install with this byte-exact copy.
+    #[test]
+    fn verify_sha_pin_refuses_a_head_that_does_not_match_the_pin() {
+        let error = verify_sha_pin(Some("a".repeat(40).as_str()), &"b".repeat(40)).unwrap_err();
+        assert_eq!(
+            error,
+            format!(
+                "SHA pin verification failed: expected HEAD to be {} , got {}. \
+                 The pinned commit may have been removed upstream, or a ref with the same name \
+                 exists. Refusing to install.",
+                "a".repeat(40),
+                "b".repeat(40)
+            )
+            .replace(" ,", ",")
+        );
+        assert!(verify_sha_pin(None, &"b".repeat(40)).is_ok());
+    }
+
+    /// Oracle `ohr`: a `sha` names the commit to CHECK OUT (`--no-checkout`,
+    /// `fetch origin <sha>`, `checkout <sha>`), and the `rev-parse HEAD`
+    /// verification is the tamper check that runs AFTER it. A pin to anything
+    /// but the current tip — the only reason anyone pins — must therefore
+    /// install, not refuse. A port that only compares the pin against the tip
+    /// of the cloned ref inverts the feature: every genuine pin fails.
+    #[cfg(unix)]
+    #[test]
+    fn external_url_source_installs_a_pin_to_a_non_tip_commit() {
+        let e = env();
+        let repository = e._tmp.path().join("url-source-nontip");
+        let (repository, first) = init_git_plugin_fixture(&repository);
+
+        // A second commit moves the tip away from the pinned commit and
+        // changes the manifest, so the checked-out content is identifiable.
+        std::fs::write(
+            repository
+                .join(branding::PLUGIN_MANIFEST_DIR)
+                .join("plugin.json"),
+            r#"{"name":"url-repo","version":"2.0.0"}"#,
+        )
+        .unwrap();
+        for args in [
+            vec!["-C", repository.to_str().unwrap(), "add", "."],
+            vec![
+                "-C",
+                repository.to_str().unwrap(),
+                "-c",
+                "user.name=LingXi Test",
+                "-c",
+                "user.email=lingxi@example.invalid",
+                "commit",
+                "-m",
+                "second",
+            ],
+        ] {
+            let output = std::process::Command::new("git")
+                .args(args)
+                .output()
+                .expect("git is required by marketplace installation");
+            assert!(output.status.success());
+        }
+        let tip = String::from_utf8_lossy(
+            &std::process::Command::new("git")
+                .args(["-C", repository.to_str().unwrap(), "rev-parse", "HEAD"])
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .trim()
+        .to_string();
+        assert_ne!(first, tip, "the fixture must have moved the tip");
+
+        let source = plugin::marketplace::MarketplaceExternalSource::Url {
+            url: format!("file://{}", repository.display()),
+            git_ref: None,
+            sha: Some(first.clone()),
+        };
+
+        let materialized =
+            materialize_external_plugin_source(&e.plugins, "mymkt", "urlrepo-nontip", &source)
+                .expect("a pin to a non-tip commit must install");
+        let manifest = std::fs::read_to_string(
+            materialized
+                .join(branding::PLUGIN_MANIFEST_DIR)
+                .join("plugin.json"),
+        )
+        .unwrap();
+        assert!(
+            manifest.contains("1.0.0"),
+            "the PINNED commit's tree must be checked out, got: {manifest}"
+        );
+    }
+
+    /// Oracle `ohr`'s first line: `Invalid sha "…": cannot start with "-"`.
+    #[test]
+    fn a_sha_pin_that_looks_like_a_git_option_is_refused() {
+        let error = plugin::clone_plugin_git_pinned(
+            "https://example.invalid/x.git",
+            "",
+            Some("--upload-pack=touch /tmp/pwn"),
+            Path::new("/tmp/never-created-by-this-test"),
+        )
+        .expect_err("a sha starting with `-` must be refused before any git call");
+        assert!(
+            error.contains(r#"Invalid sha "--upload-pack=touch /tmp/pwn": cannot start with "-""#),
+            "{error}"
         );
     }
 
@@ -3105,11 +3195,20 @@ mod tests {
     /// is FIXED and shared by every scope. Install the same versionless plugin
     /// at two scopes (both records land on the identical shared cache dir), then
     /// update one scope: the update must defer instead of blowing the shared
-    /// directory away out from under the other scope's still-live record.
+    /// Oracle `ice`: the "in use by another session" branch is keyed on a LIVE
+    /// session lease (`gK` = `aS(…,{excludeSelf:!0},…)`), and even when it
+    /// fires it only writes a DEBUG line and RETURNS the cache path — the
+    /// install/update continues and the record is still written. A port that
+    /// substitutes "some other installed-plugin RECORD points at this path"
+    /// for a live lease deadlocks the ordinary case of one plugin installed at
+    /// two scopes: both records share the versionless cache path
+    /// `cache/<mkt>/<plugin>/unknown`, so neither scope can ever be updated
+    /// again and nothing ever clears the condition.
     #[test]
-    fn update_defers_when_versionless_cache_is_shared_by_another_scope() {
+    fn update_converges_when_a_versionless_cache_is_shared_by_another_scope() {
         let e = env();
-        // Strip `version` so the marketplace resolves to "unknown".
+        // Strip `version` so the marketplace resolves to "unknown" and both
+        // scopes' records land on the identical cache path.
         std::fs::write(
             e.market
                 .join("plugins")
@@ -3131,15 +3230,16 @@ mod tests {
         .unwrap();
 
         let shared_cache = e.plugins.join("cache/mymkt/hello/unknown");
-        assert!(shared_cache.join("commands/hi.md").exists());
-        let db = installed_db(&e);
-        let records = db["plugins"]["hello@mymkt"].as_array().unwrap();
+        let records = installed_db(&e)["plugins"]["hello@mymkt"]
+            .as_array()
+            .unwrap()
+            .clone();
         assert_eq!(records.len(), 2, "both scopes share one record set");
         assert!(records
             .iter()
             .all(|r| r["installPath"] == shared_cache.display().to_string()));
 
-        // Add a new file upstream — an ordinary update would re-copy over it.
+        // A new file upstream: the update must actually re-copy.
         std::fs::write(
             e.market
                 .join("plugins")
@@ -3151,23 +3251,59 @@ mod tests {
         .unwrap();
 
         let msg = run_update("hello@mymkt", "user", &e.plugins, &e.home, &e.cwd).unwrap();
-        assert_eq!(
-            msg,
-            format!(
-                "Checking for updates for plugin \"hello@mymkt\" at user scope\u{2026}\n\
-                 \u{2714} Cache for \"hello\" at {} is in use by another session; deferring \
-                 overwrite until it exits.",
-                shared_cache.display()
-            )
+        assert!(
+            !msg.contains("in use by another session"),
+            "a second scope's persisted record is not a live session: {msg}"
         );
-
-        // The shared cache directory must survive untouched: the pre-existing
-        // file is still there and the new upstream file was NOT copied in.
+        assert!(
+            shared_cache.join("commands/new.md").exists(),
+            "the update must have re-materialized the cache, got: {msg}"
+        );
         assert!(shared_cache.join("commands/hi.md").exists());
-        assert!(!shared_cache.join("commands/new.md").exists());
-        // Neither record was mutated by the deferred update.
-        let db_after = installed_db(&e);
-        assert_eq!(db_after, db);
+    }
+
+    /// The same deadlock in its versioned form (the reviewer's repro): update
+    /// the user scope to 2.0.0 first, then the project scope must be able to
+    /// reach the very same 2.0.0 cache dir instead of being pinned at 1.2.3.
+    #[test]
+    fn update_converges_for_a_second_scope_pointing_at_an_existing_version_cache() {
+        let e = env();
+        run_install("hello@mymkt", Some("user"), &[], &e.plugins, &e.home, &e.cwd).unwrap();
+        run_install(
+            "hello@mymkt",
+            Some("project"),
+            &[],
+            &e.plugins,
+            &e.home,
+            &e.cwd,
+        )
+        .unwrap();
+        std::fs::write(
+            e.market
+                .join("plugins")
+                .join("hello")
+                .join(branding::PLUGIN_MANIFEST_DIR)
+                .join("plugin.json"),
+            r#"{"name":"hello","version":"2.0.0"}"#,
+        )
+        .unwrap();
+
+        run_update("hello@mymkt", "user", &e.plugins, &e.home, &e.cwd).unwrap();
+        let msg = run_update("hello@mymkt", "project", &e.plugins, &e.home, &e.cwd).unwrap();
+        assert!(
+            msg.contains("updated from 1.2.3 to 2.0.0"),
+            "the project scope must converge too, got: {msg}"
+        );
+        let expected = e.plugins.join("cache/mymkt/hello/2.0.0").display().to_string();
+        let records = installed_db(&e)["plugins"]["hello@mymkt"]
+            .as_array()
+            .unwrap()
+            .clone();
+        assert!(
+            records.iter().all(|r| r["installPath"] == expected
+                && r["version"] == "2.0.0"),
+            "both records must land on the 2.0.0 cache: {records:?}"
+        );
     }
 
     #[test]

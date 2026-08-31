@@ -10442,6 +10442,7 @@ pub fn build_mobile_engine_inner(
     });
     let (session_lifecycle_tx, _) = tokio::sync::watch::channel(initial_session_key);
 
+    let skill_count = crate::mobile_skill_registry().len();
     let message_queue = Arc::new(msgqueue::MessageQueueManager::new());
     inner
         .orchestrator

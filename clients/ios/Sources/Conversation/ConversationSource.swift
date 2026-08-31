@@ -207,6 +207,10 @@ struct ConversationTurnSpeechUpdate: Equatable, Sendable {
         let kind: PermissionKindDto
         /// Sub-agent identity, when present (always `None` in the foundation).
         let worker: WorkerInfoDto?
+        /// When true, the prompt must not offer or persist an AllowAlways rule.
+        let suppressAlwaysAllowRule: Bool
+        /// Engine-owned optional Auto action for the primary approval button.
+        let autoModePrompt: AutoModePromptDto?
 
         var id: UInt64 { requestId }
 
@@ -214,6 +218,8 @@ struct ConversationTurnSpeechUpdate: Equatable, Sendable {
             self.requestId = request.requestId
             self.kind = request.kind
             self.worker = request.worker
+            self.suppressAlwaysAllowRule = request.suppressAlwaysAllowRule
+            self.autoModePrompt = request.autoModePrompt
         }
 
         static func == (lhs: PendingPermission, rhs: PendingPermission) -> Bool {

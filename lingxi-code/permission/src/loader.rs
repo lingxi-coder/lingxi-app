@@ -74,6 +74,110 @@ pub fn permission_rule_file_warning(value: &PermissionRuleValue) -> Option<Strin
     ))
 }
 
+/// Startup warning for an allow-listed Bash rule whose wildcard appears in a
+/// token before a later fixed subcommand/argument token. Such a wildcard also
+/// matches options inserted before the intended subcommand/argument. This
+/// mirrors the validator's token walk: options and shell operators are not
+/// fixed tokens, the first ordinary token without a preceding wildcard ends
+/// the scan, and a trailing `:*` prefix rule is excluded. Escaped `\*` is
+/// literal, and a wildcard in the final token is the intended suffix form.
+fn permission_rule_bash_wildcard_warning(
+    value: &PermissionRuleValue,
+    behavior: PermissionBehavior,
+) -> Option<String> {
+    if value.tool_name != "Bash" || !matches!(behavior, PermissionBehavior::Allow) {
+        return None;
+    }
+    let content = value.rule_content.as_deref()?;
+    if content.ends_with(":*") {
+        return None;
+    }
+    let mut tokens = content.split_whitespace();
+    // The validator only considers patterns with a command and at least two
+    // following tokens (and leaves `Bash(* main)` silent).
+    let command = tokens.next()?;
+    if contains_unescaped_wildcard(command) {
+        return None;
+    }
+
+    let mut token_count = 1;
+    let mut saw_wildcard = false;
+    for token in tokens {
+        token_count += 1;
+        // The oracle aborts on shell operators/redirections: those tokens do
+        // not establish a fixed subcommand/argument after the wildcard.
+        if is_shell_operator_or_redirection(token) {
+            return None;
+        }
+        if contains_unescaped_wildcard(token) {
+            saw_wildcard = true;
+            continue;
+        }
+        // Option tokens may occur after a wildcard without being the fixed
+        // subcommand/argument that makes the wildcard dangerous.
+        if token.starts_with('-') {
+            continue;
+        }
+        return if saw_wildcard && token_count >= 3 {
+            Some(bash_wildcard_warning(value, command))
+        } else {
+            None
+        };
+    }
+    None
+}
+
+fn bash_wildcard_warning(value: &PermissionRuleValue, command: &str) -> String {
+    let mut warning = format!(
+        "{} has a wildcard before the rest of the command, so it also matches any options inserted at that position and approves them without a prompt.",
+        value.to_rule_string()
+    );
+    if command == "git" {
+        warning.push_str(
+            " For git, options such as -c and --exec-path can run arbitrary commands. Replace that * with the exact value you mean, or only use * after the subcommand (for example Bash(git status *)).",
+        );
+    } else {
+        warning.push_str(
+            " Replace that * with the exact value you mean, or only use * after the subcommand.",
+        );
+    }
+    warning
+}
+
+/// Matches the validator's shell-operator/redirection check (`[|&;<>]` or a
+/// numeric file-descriptor prefix followed by `<`/`>`).
+fn is_shell_operator_or_redirection(token: &str) -> bool {
+    let bytes = token.as_bytes();
+    if bytes
+        .first()
+        .is_some_and(|byte| matches!(byte, b'|' | b'&' | b';' | b'<' | b'>'))
+    {
+        return true;
+    }
+    let mut digits = 0;
+    while digits < bytes.len() && bytes[digits].is_ascii_digit() {
+        digits += 1;
+    }
+    digits > 0 && digits < bytes.len() && matches!(bytes[digits], b'<' | b'>')
+}
+
+/// Returns whether `value` contains an unescaped `*`. Backslashes are counted
+/// by parity so `\*` is literal while `\\*` has an active wildcard.
+fn contains_unescaped_wildcard(value: &str) -> bool {
+    let mut escaped = false;
+    for byte in value.bytes() {
+        if byte == b'\\' {
+            escaped = !escaped;
+            continue;
+        }
+        if byte == b'*' && !escaped {
+            return true;
+        }
+        escaped = false;
+    }
+    false
+}
+
 /// Top-level projection consumed by [`permission_rules_from_settings_json`].
 /// A separate private struct (like the hooks loader) so this loader stays
 /// decoupled from the engine's typed `SettingsJson`.
@@ -147,7 +251,7 @@ struct PermissionsBlock {
 }
 
 /// The full startup warning LINE for a rule that carries a
-/// [`permission_rule_file_warning`], prefixed exactly like the binary:
+/// [`permission_rule_file_warning`] or Bash wildcard warning, prefixed exactly like the binary:
 /// ``Permission ${ruleBehavior} rule (${sourceDisplay}): ${warning}``. Returns
 /// `None` when the rule needs no warning. `source_display` is the caller-resolved
 /// origin label — the binary uses the settings file path for the on-disk tiers
@@ -162,7 +266,9 @@ struct PermissionsBlock {
 /// path (`C:\…` / `C:/…`), which is a real file path and so still warns. This
 /// suppresses the file-matcher warning for prefix-shaped contents such as
 /// `Write(scheme:foo)` exactly as the binary does. (The narrower `:*` Bash-prefix
-/// case is already handled inside [`permission_rule_file_warning`].)
+/// case is already handled inside [`permission_rule_file_warning`].) Allow+Bash
+/// rules with a wildcard before a later fixed token receive the corresponding
+/// command-pattern warning; the rule remains valid and is not removed.
 #[must_use]
 pub fn permission_rule_startup_warning(
     rule: &PermissionRule,
@@ -174,7 +280,8 @@ pub fn permission_rule_startup_warning(
             return None;
         }
     }
-    let warning = permission_rule_file_warning(&rule.value)?;
+    let warning = permission_rule_file_warning(&rule.value)
+        .or_else(|| permission_rule_bash_wildcard_warning(&rule.value, rule.behavior))?;
     let behavior = match rule.behavior {
         PermissionBehavior::Allow => "allow",
         PermissionBehavior::Deny => "deny",
@@ -405,7 +512,9 @@ pub fn skip_dangerous_mode_permission_prompt_from_settings_json(raw: &str) -> bo
 /// (best-effort projection, like the other loaders here). The returned paths are
 /// the RAW settings strings as [`PathBuf`]s (relative / `~`-prefixed / absolute) —
 /// they are resolved against the policy's filesystem roots at authorize time by
-/// `expand_path`, so the caller need not pre-resolve them.
+/// `expand_path`, so the caller need not pre-resolve them. Entries containing a
+/// NUL byte are discarded because they cannot be represented as filesystem
+/// paths by downstream consumers.
 #[must_use]
 pub fn additional_directories_from_settings_json(raw: &str) -> Vec<std::path::PathBuf> {
     serde_json::from_str::<SettingsTop>(raw)
@@ -414,6 +523,7 @@ pub fn additional_directories_from_settings_json(raw: &str) -> Vec<std::path::Pa
         .map(|p| {
             p.additional_directories
                 .into_iter()
+                .filter(|path| !path.contains('\0'))
                 .map(std::path::PathBuf::from)
                 .collect()
         })
@@ -715,6 +825,14 @@ mod tests {
             f(r#"{ "permissions": { "allow": ["Read"], "additionalDirectories": ["a"] } }"#),
             vec![PathBuf::from("a")]
         );
+        // A NUL byte cannot be represented by downstream filesystem paths, so
+        // discard only that entry while preserving valid entries and order.
+        assert_eq!(
+            f(
+                r#"{ "permissions": { "additionalDirectories": ["../sibling", "bad\u0000path", "~/work"] } }"#
+            ),
+            vec![PathBuf::from("../sibling"), PathBuf::from("~/work")]
+        );
     }
 
     #[test]
@@ -823,6 +941,94 @@ mod tests {
             source: PermissionRuleSource::UserSettings,
         };
         assert!(permission_rule_startup_warning(&ok, "settings.json").is_none());
+    }
+
+    #[test]
+    fn startup_warning_flags_bash_wildcard_before_subcommand_exactly() {
+        let rule = PermissionRule {
+            value: PermissionRuleValue::from_rule_string("Bash(git -C * status *)"),
+            behavior: PermissionBehavior::Allow,
+            source: PermissionRuleSource::ProjectSettings,
+        };
+        assert_eq!(
+            permission_rule_startup_warning(&rule, ".lingxi/settings.json").as_deref(),
+            Some(
+                "Permission allow rule (.lingxi/settings.json): Bash(git -C * status *) has a wildcard before the rest of the command, so it also matches any options inserted at that position and approves them without a prompt. For git, options such as -c and --exec-path can run arbitrary commands. Replace that * with the exact value you mean, or only use * after the subcommand (for example Bash(git status *))."
+            )
+        );
+
+        // The reviewer-reduced shape has the same exact warning body.
+        let reduced = PermissionRule {
+            value: PermissionRuleValue::from_rule_string("Bash(git * main)"),
+            behavior: PermissionBehavior::Allow,
+            source: PermissionRuleSource::UserSettings,
+        };
+        assert_eq!(
+            permission_rule_startup_warning(&reduced, "settings.json").as_deref(),
+            Some(
+                "Permission allow rule (settings.json): Bash(git * main) has a wildcard before the rest of the command, so it also matches any options inserted at that position and approves them without a prompt. For git, options such as -c and --exec-path can run arbitrary commands. Replace that * with the exact value you mean, or only use * after the subcommand (for example Bash(git status *))."
+            )
+        );
+    }
+
+    #[test]
+    fn startup_warning_bash_wildcard_checks_all_settings_tier_prefixes() {
+        let displays = [
+            (PermissionRuleSource::UserSettings, "user settings"),
+            (PermissionRuleSource::ProjectSettings, "project settings"),
+            (PermissionRuleSource::LocalSettings, "local settings"),
+            (PermissionRuleSource::CliArg, "CLI argument"),
+            (
+                PermissionRuleSource::PolicySettings,
+                "managed policy settings",
+            ),
+        ];
+        for (source, display) in displays {
+            let rule = PermissionRule {
+                value: PermissionRuleValue::from_rule_string("Bash(git * main)"),
+                behavior: PermissionBehavior::Allow,
+                source,
+            };
+            let warning = permission_rule_startup_warning(&rule, display)
+                .expect("wildcard warning should be visible for every startup tier");
+            assert!(
+                warning.starts_with(&format!(
+                    "Permission allow rule ({display}): Bash(git * main)"
+                )),
+                "warning={warning}"
+            );
+        }
+    }
+
+    #[test]
+    fn startup_warning_ignores_safe_bash_wildcard_shapes() {
+        let warning = |spec: &str, behavior: PermissionBehavior| {
+            let rule = PermissionRule {
+                value: PermissionRuleValue::from_rule_string(spec),
+                behavior,
+                source: PermissionRuleSource::ProjectSettings,
+            };
+            permission_rule_startup_warning(&rule, "settings.json")
+        };
+
+        // A final wildcard is the intended suffix form; no fixed token follows
+        // a wildcard in either pattern.
+        assert!(warning("Bash(git status *)", PermissionBehavior::Allow).is_none());
+        assert!(warning("Bash(git status * main)", PermissionBehavior::Allow).is_none());
+        assert!(warning("Bash(git *)", PermissionBehavior::Allow).is_none());
+        assert!(warning("Bash(git * *)", PermissionBehavior::Allow).is_none());
+        assert!(warning("Bash(git * --literal-option)", PermissionBehavior::Allow).is_none());
+        assert!(warning("Bash(git * > output)", PermissionBehavior::Allow).is_none());
+        assert!(warning("Bash(git * status:*)", PermissionBehavior::Allow).is_none());
+        // An escaped star is a literal, not a permission wildcard. A wildcard
+        // embedded at the end of a token likewise has no later fixed token.
+        assert!(warning(r"Bash(git \* main)", PermissionBehavior::Allow).is_none());
+        assert!(warning("Bash(git *foo)", PermissionBehavior::Allow).is_none());
+        assert!(warning("Bash(git foo*)", PermissionBehavior::Allow).is_none());
+        // Only allow+Bash rules use this startup warning.
+        assert!(warning("Bash(git * main)", PermissionBehavior::Deny).is_none());
+        assert!(warning("Bash(git * main)", PermissionBehavior::Ask).is_none());
+        assert!(warning("Read(git * main)", PermissionBehavior::Allow).is_none());
     }
 
     #[test]

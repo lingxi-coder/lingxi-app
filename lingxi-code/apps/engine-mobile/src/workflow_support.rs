@@ -1334,22 +1334,36 @@ impl tool_workflow::WorkflowLauncher for MobileWorkflowLauncher {
                 cwd.join(path)
             }
         };
-        // §14 plugin workflows: `None` here is CORRECT, not a stub — mobile
-        // has no plugin subsystem at all (`engine-mobile` does not depend on
-        // the `plugin` crate; every `PluginManager::new` in the workspace is
-        // in `engine-desktop`), so nothing can ever populate a registry on
-        // this host. Every mobile reader is uniformly unwired — the
-        // `WorkflowTool`, this launcher, and the `LocalWorkflowHandler` —
-        // which is what keeps validate and launch agreeing. If mobile ever
-        // gains a `PluginManager`, all three must be wired to ONE shared
-        // `Arc<workflow::PluginWorkflowRegistry>` together, the way
-        // `engine-desktop::build` does it.
-        let script = tool_workflow::resolve_script_at(
-            &cwd,
-            &spec,
-            |p| std::fs::read_to_string(abs(p)),
-            None,
-        )?;
+        // A caller-supplied scriptPath must carry the exact approval snapshot
+        // produced by `WorkflowTool::check_permissions`. Never reopen the
+        // model pathname here: a parent or leaf symlink may have retargeted
+        // since the nested Read decision.
+        let script =
+            if let Some(raw_path) = spec.script_path.as_deref().filter(|path| !path.is_empty()) {
+                let approval = spec.script_path_approval.take().ok_or_else(|| {
+                    tool_workflow::WorkflowLaunchError(
+                        "Workflow scriptPath permission snapshot is missing; refusing to read it"
+                            .into(),
+                    )
+                })?;
+                let requested = abs(raw_path);
+                if approval.requested != requested {
+                    return Err(tool_workflow::WorkflowLaunchError(
+                        "Workflow scriptPath changed after permission was checked".into(),
+                    ));
+                }
+                tool_workflow::read_script_path_after_permission(&approval)?
+            } else {
+                // Mobile has no plugin subsystem, so the launcher and the tool
+                // resolve named workflows through the same built-in/project/user
+                // resolver with no plugin registry.
+                tool_workflow::resolve_script_at(
+                    &cwd,
+                    &spec,
+                    |p| std::fs::read_to_string(abs(p)),
+                    None,
+                )?
+            };
         // Reject a malformed `meta` block at the tool boundary; the byte-exact
         // message surfaces to the model as the tool error (desktop parity).
         workflow::validate_meta(&script).map_err(|e| {
@@ -3220,6 +3234,7 @@ mod workspace_lease_forwarding_tests {
             parent_model: None,
             parent_model_profile: None,
             mode_override: None,
+            request_source: None,
             frozen_command_denies: Vec::new(),
         }
     }

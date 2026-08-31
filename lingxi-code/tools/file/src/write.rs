@@ -13,7 +13,7 @@ use permission::result::PermissionMetadata;
 use permission::{PermissionDecisionReason, PermissionResult};
 use serde_json::{json, Value};
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 use telemetry::otel;
 use telemetry::pii::{PiiTagged, Verified};
@@ -70,6 +70,75 @@ pub fn write_result_message(path: &str, is_create: bool) -> String {
 /// `FileWriteTool` — writes a UTF-8 file inside the trusted-dirs whitelist.
 pub struct FileWriteTool {
     ctx: BuiltinToolContext,
+}
+
+fn write_rooted_snapshot(
+    requested: &std::path::Path,
+    approved: &std::path::Path,
+    trusted_dirs: &[std::path::PathBuf],
+) -> Result<traits::rooted_fs::RootedFileSnapshot, traits::rooted_fs::RootedFsError> {
+    let Some((root, relative)) = crate::shared::rooted_location(approved, trusted_dirs) else {
+        return Err(traits::rooted_fs::RootedFsError::Fs(
+            traits::FsError::OutsideWorkspace(approved.display().to_string()),
+        ));
+    };
+    traits::rooted_fs::read_file_after_permission(&root, &relative, requested, approved)
+}
+
+/// Resolve a write target without materializing any missing parent through its
+/// pathname. `canonicalize_and_validate` can only canonicalize an existing
+/// target or its immediate existing parent, so preserve the old create-parents
+/// behavior by canonicalizing the nearest existing ancestor and appending the
+/// missing lexical components. The rooted write then creates those components
+/// through its no-follow directory-handle chain.
+fn canonicalize_write_target(path: &Path, trusted_dirs: &[PathBuf]) -> Result<PathBuf, ()> {
+    if let Ok(canonical) = canonicalize_and_validate(path, trusted_dirs) {
+        return Ok(canonical);
+    }
+
+    let mut missing = Vec::new();
+    let mut probe = path.to_path_buf();
+    while std::fs::symlink_metadata(&probe).is_err() {
+        let name = probe.file_name().ok_or(())?.to_os_string();
+        missing.push(name);
+        probe = probe.parent().ok_or(())?.to_path_buf();
+    }
+    let mut canonical = canonicalize_and_validate(&probe, trusted_dirs).map_err(|_| ())?;
+    for component in missing.iter().rev() {
+        canonical.push(component);
+    }
+    Ok(canonical)
+}
+
+fn write_resolution_error(path: &str, error: traits::rooted_fs::RootedFsError) -> ToolError {
+    match error {
+        traits::rooted_fs::RootedFsError::LeafSymlink => ToolError::InvalidInput(format!(
+            "Refusing to write {path}: it is a symbolic link. Write to the link's target path instead."
+        )),
+        traits::rooted_fs::RootedFsError::ParentSymlinkResolutionChanged => {
+            ToolError::InvalidInput(format!(
+                "Refusing to write {path}: its parent-directory symlink resolution changed after permission was checked."
+            ))
+        }
+        traits::rooted_fs::RootedFsError::SymlinkResolutionChanged => {
+            if std::fs::symlink_metadata(path)
+                .map(|metadata| metadata.file_type().is_symlink())
+                .unwrap_or(false)
+            {
+                ToolError::InvalidInput(format!(
+                    "Refusing to write {path}: it is a symbolic link. Write to the link's target path instead."
+                ))
+            } else {
+                ToolError::InvalidInput(format!(
+                    "Refusing to write {path}: its parent-directory symlink resolution changed after permission was checked."
+                ))
+            }
+        }
+        traits::rooted_fs::RootedFsError::NotRegularFile => {
+            ToolError::Io(format!("File {path} is not a regular file"))
+        }
+        traits::rooted_fs::RootedFsError::Fs(error) => ToolError::Io(error.to_string()),
+    }
 }
 
 impl FileWriteTool {
@@ -281,40 +350,12 @@ impl Tool for FileWriteTool {
         // straddle a swap between the two calls.
         let trusted_dirs = self.ctx.trusted_dirs();
 
-        // Parents are created UNCONDITIONALLY before the write — 1:1 with
-        // claude-code `FileWriteTool.ts:254` (`mkdir(dir, recursive)`), which
-        // runs for every write regardless of a flag. There is no `mkdir` input.
-        //
-        // The trusted-dir containment probe is KEPT: when the parent does not
-        // yet exist we cannot canonicalize the full target, so we canonicalize
-        // the nearest existing ancestor and gate on THAT before materializing
-        // any directories. This stops a write from creating a directory tree
-        // outside the trusted dirs (the post-mkdir `canonicalize_and_validate`
-        // below would otherwise validate too late, after the dirs exist).
-        if let Some(parent) = path.parent() {
-            if !parent.as_os_str().is_empty() {
-                if !parent.exists() {
-                    let mut probe = parent.to_path_buf();
-                    while !probe.exists() {
-                        match probe.parent() {
-                            Some(p) => probe = p.to_path_buf(),
-                            None => break,
-                        }
-                    }
-                    if canonicalize_and_validate(&probe, &trusted_dirs).is_err() {
-                        emit_blocked_event(&self.ctx.bus, TOOL_NAME, &path).await;
-                        self.emit_failed(&invocation_id, "path_blocked").await;
-                        return Err(ToolError::PathBlocked { path });
-                    }
-                }
-                if let Err(e) = tokio::fs::create_dir_all(parent).await {
-                    self.emit_failed(&invocation_id, "mkdir_failed").await;
-                    return Err(ToolError::Io(e.to_string()));
-                }
-            }
-        }
-
-        let canon = match canonicalize_and_validate(&path, &trusted_dirs) {
+        // Parents are created unconditionally, matching claude-code, but the
+        // creation is performed only after permission/containment checks by the
+        // rooted no-follow mkdirat/handle chain. Never call create_dir_all on
+        // the model pathname: a retargeted ancestor could create outside the
+        // approved tree before the rooted write gets a chance to reject it.
+        let canon = match canonicalize_write_target(&path, &trusted_dirs) {
             Ok(p) => p,
             Err(_) => {
                 emit_blocked_event(&self.ctx.bus, TOOL_NAME, &path).await;
@@ -336,32 +377,43 @@ impl Tool for FileWriteTool {
         // on physical existence (TS `meta !== null`, `FileWriteTool.ts:279`),
         // NOT on the create-vs-update truthiness — an existing-but-empty file
         // still requires a prior Read.
-        let (is_create, file_exists, prior_decoded) = match tokio::fs::read(&canon).await {
-            Ok(prior) => {
+        let prior_snapshot = match write_rooted_snapshot(&path, &canon, &trusted_dirs) {
+            Ok(snapshot) => Some(snapshot),
+            Err(traits::rooted_fs::RootedFsError::Fs(traits::FsError::NotFound(_))) => None,
+            Err(error @ traits::rooted_fs::RootedFsError::LeafSymlink)
+            | Err(error @ traits::rooted_fs::RootedFsError::ParentSymlinkResolutionChanged)
+            | Err(error @ traits::rooted_fs::RootedFsError::SymlinkResolutionChanged) => {
+                self.emit_failed(&invocation_id, "symlink_resolution_changed")
+                    .await;
+                return Err(write_resolution_error(file_path, error));
+            }
+            // A non-ENOENT read error means the path exists but is unreadable;
+            // treat as "no prior content" and let the write operation report
+            // its own error, matching the pre-hardening behavior.
+            Err(_) => None,
+        };
+        let prior_mtime_ms = prior_snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.modified)
+            .map_or(0, tool_api::read_file_state::mtime_ms_floor);
+        let (is_create, file_exists, prior_decoded) = match prior_snapshot {
+            Some(snapshot) => {
                 // Raw UTF-8 decode matching how `Read` records content (used by
                 // the content-equality fallback); a non-UTF-8 prior file leaves
                 // it `None` and the mtime check alone governs.
-                let decoded = crate::shared::decode_utf8_strict(&prior).ok();
-                (prior.is_empty(), true, decoded)
+                let decoded = crate::shared::decode_utf8_strict(&snapshot.bytes).ok();
+                (snapshot.bytes.is_empty(), true, decoded)
             }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => (true, false, None),
-            // A non-ENOENT read error means the path exists but is unreadable;
-            // treat as "no prior content" (create) and skip the guard rather
-            // than block the write (TS reaches its guard only via a successful
-            // stat, and a stat failure short-circuits earlier).
-            Err(_) => (true, false, None),
+            None => (true, false, None),
         };
 
         // Read-before-write staleness guard (Batch F): only for an EXISTING
         // file. New-file creation skips it (TS `meta === null` skips the
         // guard; `FileWriteTool.ts:198-219` & `:279-295`).
         if file_exists {
-            // Current mtime (floored ms); `None`/error falls back to epoch `0`.
-            let current_mtime_ms = tokio::fs::metadata(&canon)
-                .await
-                .ok()
-                .and_then(|m| m.modified().ok())
-                .map_or(0, tool_api::read_file_state::mtime_ms_floor);
+            // Current mtime (floored ms), captured from the same opened handle
+            // as the pre-write bytes; `None` falls back to epoch `0`.
+            let current_mtime_ms = prior_mtime_ms;
             let cmp_content = prior_decoded.as_deref().unwrap_or("");
             if let Err(e) = crate::check_read_before_write(
                 &self.ctx.read_file_state,
@@ -380,10 +432,23 @@ impl Tool for FileWriteTool {
             fh.track_edit(&canon.to_string_lossy()).await;
         }
 
-        if let Err(e) = tokio::fs::write(&canon, content.as_bytes()).await {
-            self.emit_failed(&invocation_id, "io_write").await;
-            return Err(ToolError::Io(e.to_string()));
-        }
+        let Some((root, relative)) = crate::shared::rooted_location(&canon, &trusted_dirs) else {
+            self.emit_failed(&invocation_id, "path_blocked").await;
+            return Err(ToolError::PathBlocked { path });
+        };
+        let write_result = match traits::rooted_fs::write_file_after_permission(
+            &root,
+            &relative,
+            &path,
+            &canon,
+            content.as_bytes(),
+        ) {
+            Ok(result) => result,
+            Err(error) => {
+                self.emit_failed(&invocation_id, "io_write").await;
+                return Err(write_resolution_error(file_path, error));
+            }
+        };
 
         let structured_patch = if is_create {
             Vec::new()
@@ -414,10 +479,8 @@ impl Tool for FileWriteTool {
         // <new mtime>, offset: undefined, limit: undefined})`). Write stores
         // the model-sent `content` verbatim (it is written as UTF-8/LF), with
         // offset/limit cleared so the next read counts as a full read.
-        let new_mtime_ms = tokio::fs::metadata(&canon)
-            .await
-            .ok()
-            .and_then(|m| m.modified().ok())
+        let new_mtime_ms = write_result
+            .modified
             .map_or(0, tool_api::read_file_state::mtime_ms_floor);
         tool_api::read_file_state::set(
             &self.ctx.read_file_state,
@@ -579,6 +642,56 @@ mod tests {
     #[test]
     fn tool_name_is_write() {
         assert_eq!(TOOL_NAME, "Write");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn leaf_symlink_is_refused_without_touching_target() {
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("target.txt");
+        let link = tmp.path().join("link.txt");
+        std::fs::write(&target, "original").unwrap();
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let (ctx, _sink) = make_ctx(&tmp);
+        seed_full_read(&ctx, &target);
+        let tool = FileWriteTool::new(ctx);
+
+        let error = tool
+            .call(
+                json!({ "file_path": link.to_string_lossy(), "content": "changed" }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .expect_err("Write must refuse a final symlink");
+        let message = match error {
+            tool_api::tool_trait::ToolError::InvalidInput(message) => message,
+            other => panic!("unexpected error: {other:?}"),
+        };
+        assert!(message.starts_with("Refusing to write "));
+        assert!(
+            message.ends_with("it is a symbolic link. Write to the link's target path instead.")
+        );
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "original");
+    }
+
+    #[test]
+    fn write_resolution_messages_are_byte_exact() {
+        assert_eq!(
+            write_resolution_error("/tmp/link.txt", traits::rooted_fs::RootedFsError::LeafSymlink)
+                .to_string()
+                .strip_prefix("invalid input: ")
+                .unwrap_or_default(),
+            "Refusing to write /tmp/link.txt: it is a symbolic link. Write to the link's target path instead."
+        );
+        assert_eq!(
+            write_resolution_error(
+                "/tmp/link.txt",
+                traits::rooted_fs::RootedFsError::ParentSymlinkResolutionChanged,
+            )
+            .to_string(),
+            "invalid input: Refusing to write /tmp/link.txt: its parent-directory symlink resolution changed after permission was checked."
+        );
     }
 
     /// S2 (PathAtlas): a Write to a guest path lands the bytes in the

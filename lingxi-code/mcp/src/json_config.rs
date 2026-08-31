@@ -16,9 +16,12 @@
 use crate::connection::{ConfigScope, McpServerConfig};
 use crate::env_expansion::expand_env_vars_in_string;
 use serde::Deserialize;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
-use traits::{McpHeaders, McpOAuthConfigDto, McpTransportSpec};
+use traits::{
+    McpConfiguredToolPolicyDto, McpHeaders, McpOAuthConfigDto, McpPermissionCeiling,
+    McpToolPermissionPolicy, McpTransportSpec,
+};
 
 /// Expand `${VAR}` / `${VAR:-default}` references in one string against the
 /// process environment, appending any missing-variable names to `missing`.
@@ -139,6 +142,16 @@ struct McpJsonEntry {
     /// `alwaysLoad: E.boolean().optional()`.
     #[serde(default, rename = "alwaysLoad")]
     always_load: Option<bool>,
+    /// Optional per-tool rule/ceiling records from dynamic remote MCP config.
+    #[serde(default, deserialize_with = "de_tool_policy_entries")]
+    tools: Vec<McpConfiguredToolPolicyDto>,
+    /// Optional tighten-only per-tool ceilings keyed by upstream tool name.
+    #[serde(
+        default,
+        rename = "toolPermissions",
+        deserialize_with = "de_tool_permissions"
+    )]
+    tool_permissions: BTreeMap<String, McpPermissionCeiling>,
     /// `claudeai-proxy`-only: the claude.ai-issued connector identifier.
     /// Oracle `NAn` (2.1.251 Mach-O @154585377) is
     /// `f({type:N("claudeai-proxy"),url:i(),id:i(),displayName:i().optional(),
@@ -336,6 +349,73 @@ where
         )),
         other => Ok(other),
     }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+struct RawToolPolicyEntry {
+    name: String,
+    #[serde(default, alias = "permissionPolicy")]
+    permission_policy: Option<String>,
+    #[serde(default, alias = "orgMaxPermission")]
+    org_max_permission: Option<String>,
+}
+
+fn de_tool_policy_entries<'de, D>(
+    deserializer: D,
+) -> Result<Vec<McpConfiguredToolPolicyDto>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = Vec::<RawToolPolicyEntry>::deserialize(deserializer)?;
+    raw.into_iter()
+        .map(|entry| {
+            let permission_policy =
+                entry.permission_policy.as_deref().map_or(Ok(None), |value| {
+                    McpToolPermissionPolicy::from_policy_str(value)
+                        .map(Some)
+                        .ok_or_else(|| {
+                            serde::de::Error::custom(format!(
+                                "tools[].permission_policy must be allow/ask/deny or always_allow/always_ask/always_deny, got {value:?}"
+                            ))
+                        })
+                })?;
+            let org_max_permission =
+                entry.org_max_permission.as_deref().map_or(Ok(None), |value| {
+                    McpPermissionCeiling::from_policy_str(value)
+                        .map(Some)
+                        .ok_or_else(|| {
+                            serde::de::Error::custom(format!(
+                                "tools[].org_max_permission must be allow/ask/blocked, got {value:?}"
+                            ))
+                        })
+                })?;
+            Ok(McpConfiguredToolPolicyDto {
+                name: entry.name,
+                permission_policy,
+                org_max_permission,
+            })
+        })
+        .collect()
+}
+
+fn de_tool_permissions<'de, D>(
+    deserializer: D,
+) -> Result<BTreeMap<String, McpPermissionCeiling>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = BTreeMap::<String, String>::deserialize(deserializer)?;
+    raw.into_iter()
+        .map(|(tool, value)| {
+            let Some(ceiling) = McpPermissionCeiling::from_policy_str(&value) else {
+                return Err(serde::de::Error::custom(format!(
+                    "toolPermissions[{tool:?}] must be allow/ask/blocked, got {value:?}"
+                )));
+            };
+            Ok((tool, ceiling))
+        })
+        .collect()
 }
 
 /// Validate the `oauth` child, mirroring the oracle's `a()` zod schema
@@ -1097,6 +1177,8 @@ fn build_entry(
             timeout_ms,
             discovery_cache,
             always_load,
+            tools: entry.tools,
+            tool_permissions: entry.tool_permissions,
             config_error,
         })
     }
@@ -2873,6 +2955,65 @@ mod tests {
         let raw = r#"{"mcpServers":{"s":{"command":"c","alwaysLoad":true}}}"#;
         let cfgs = parse_mcp_json_string(raw, ConfigScope::Project).unwrap();
         assert!(cfgs[0].always_load);
+    }
+
+    #[test]
+    fn tool_permission_policy_uses_oracle_snake_case_keys() {
+        let raw = r#"{
+          "mcpServers": {
+            "s": {
+              "command": "c",
+              "tools": [{
+                "name": "write_file",
+                "permission_policy": "deny",
+                "org_max_permission": "ask"
+              }],
+              "toolPermissions": {"write_file": "blocked"}
+            }
+          }
+        }"#;
+        let cfgs = parse_mcp_json_string(raw, ConfigScope::Project).unwrap();
+        assert_eq!(cfgs.len(), 1);
+        assert_eq!(cfgs[0].tools.len(), 1);
+        assert_eq!(
+            cfgs[0].tools[0].permission_policy,
+            Some(McpToolPermissionPolicy::AlwaysDeny)
+        );
+        assert_eq!(
+            cfgs[0].tools[0].org_max_permission,
+            Some(McpPermissionCeiling::Ask)
+        );
+        let serialized = serde_json::to_value(&cfgs[0]).unwrap();
+        let tool = &serialized["tools"][0];
+        assert_eq!(tool["permission_policy"], "always_deny");
+        assert_eq!(tool["org_max_permission"], "ask");
+        assert!(tool.get("permissionPolicy").is_none());
+        assert!(tool.get("orgMaxPermission").is_none());
+    }
+
+    #[test]
+    fn legacy_camel_case_tool_policy_aliases_remain_readable() {
+        let raw = r#"{
+          "mcpServers": {
+            "s": {
+              "command": "c",
+              "tools": [{
+                "name": "write_file",
+                "permissionPolicy": "allow",
+                "orgMaxPermission": "blocked"
+              }]
+            }
+          }
+        }"#;
+        let cfgs = parse_mcp_json_string(raw, ConfigScope::Project).unwrap();
+        assert_eq!(
+            cfgs[0].tools[0].permission_policy,
+            Some(McpToolPermissionPolicy::AlwaysAllow)
+        );
+        assert_eq!(
+            cfgs[0].tools[0].org_max_permission,
+            Some(McpPermissionCeiling::Deny)
+        );
     }
 
     #[test]

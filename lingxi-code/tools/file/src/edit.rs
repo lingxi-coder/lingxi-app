@@ -104,15 +104,13 @@ pub const ESCAPE_SWAP_NOTE: &str = "\n(note: Edit also tried swapping \\uXXXX es
 /// ([`OWNER_WRITE_BIT`]) is unset — a read-only file that has not been checked
 /// out via `p4 edit`. On non-Unix targets the POSIX mode is unavailable, so the
 /// guard never fires (the binary's `mode & 128` is a POSIX concept).
-#[cfg_attr(not(unix), allow(unused_variables))]
-fn is_perforce_read_only(metadata: &std::fs::Metadata) -> bool {
+fn is_perforce_read_only(mode: Option<u32>) -> bool {
     if !is_perforce_mode_enabled() {
         return false;
     }
     #[cfg(unix)]
     {
-        use std::os::unix::fs::MetadataExt;
-        (metadata.mode() & OWNER_WRITE_BIT) == 0
+        mode.is_some_and(|mode| (mode & OWNER_WRITE_BIT) == 0)
     }
     #[cfg(not(unix))]
     {
@@ -228,6 +226,50 @@ fn normalize_edit_aliases(input: &mut Value) {
 /// `FileEditTool` — literal-search replacement in a UTF-8 file.
 pub struct FileEditTool {
     ctx: BuiltinToolContext,
+}
+
+fn edit_rooted_snapshot(
+    requested: &std::path::Path,
+    approved: &std::path::Path,
+    trusted_dirs: &[std::path::PathBuf],
+) -> Result<traits::rooted_fs::RootedFileSnapshot, traits::rooted_fs::RootedFsError> {
+    let Some((root, relative)) = crate::shared::rooted_location(approved, trusted_dirs) else {
+        return Err(traits::rooted_fs::RootedFsError::Fs(
+            traits::FsError::OutsideWorkspace(approved.display().to_string()),
+        ));
+    };
+    traits::rooted_fs::read_file_after_permission(&root, &relative, requested, approved)
+}
+
+fn edit_resolution_error(path: &str, error: traits::rooted_fs::RootedFsError) -> ToolError {
+    match error {
+        traits::rooted_fs::RootedFsError::LeafSymlink => ToolError::InvalidInput(format!(
+            "Refusing to write {path}: it is a symbolic link. Write to the link's target path instead."
+        )),
+        traits::rooted_fs::RootedFsError::ParentSymlinkResolutionChanged => {
+            ToolError::InvalidInput(format!(
+                "Refusing to write {path}: its parent-directory symlink resolution changed after permission was checked."
+            ))
+        }
+        traits::rooted_fs::RootedFsError::SymlinkResolutionChanged => {
+            if std::fs::symlink_metadata(path)
+                .map(|metadata| metadata.file_type().is_symlink())
+                .unwrap_or(false)
+            {
+                ToolError::InvalidInput(format!(
+                    "Refusing to write {path}: it is a symbolic link. Write to the link's target path instead."
+                ))
+            } else {
+                ToolError::InvalidInput(format!(
+                    "Refusing to write {path}: its parent-directory symlink resolution changed after permission was checked."
+                ))
+            }
+        }
+        traits::rooted_fs::RootedFsError::NotRegularFile => {
+            ToolError::Io(format!("File {path} is not a regular file"))
+        }
+        traits::rooted_fs::RootedFsError::Fs(error) => ToolError::Io(error.to_string()),
+    }
 }
 
 impl FileEditTool {
@@ -491,7 +533,8 @@ impl Tool for FileEditTool {
 
         // `canonicalize_and_validate` tolerates a nonexistent target (it
         // canonicalizes the parent) so an empty `old_string` can create a file.
-        let canon = match canonicalize_and_validate(&path, &self.ctx.trusted_dirs()) {
+        let trusted_dirs = self.ctx.trusted_dirs();
+        let canon = match canonicalize_and_validate(&path, &trusted_dirs) {
             Ok(p) => p,
             Err(_) => {
                 emit_blocked_event(&self.ctx.bus, TOOL_NAME, &path).await;
@@ -500,52 +543,33 @@ impl Tool for FileEditTool {
             }
         };
 
+        // Read the approved target once through a fixed rooted handle. The
+        // resulting bytes, size, mtime, and mode feed both validation gates and
+        // the edit itself; no later pathname reopen can cross a symlink swap.
+        let initial_snapshot = match edit_rooted_snapshot(&path, &canon, &trusted_dirs) {
+            Ok(snapshot) => Some(snapshot),
+            Err(traits::rooted_fs::RootedFsError::Fs(traits::FsError::NotFound(_))) => None,
+            Err(error) => {
+                self.emit_failed(&invocation_id, "io_read").await;
+                return Err(edit_resolution_error(file_path, error));
+            }
+        };
+
         // Stat-based gates (claude-code `validateInput`, binary offset
-        // 202622179). The binary takes ONE `stat` and destructures
-        // `{size, mode}` from it, then runs the size cap and the Perforce
-        // read-only guard in order:
-        //   try{let{size:g,mode:_}=await u.stat(i);
-        //     if(g>DYa)return{...errorCode:10};
-        //     if(H7e(_))return{...message:k7e,errorCode:11}}
-        //   catch(g){if(!Pn(g))throw g}
-        // A `stat` failure (e.g. the file does not exist — an empty-`old_string`
-        // creation) is swallowed (`catch(g){if(!Pn(g))throw g}`), so a missing
-        // file falls through to the normal create/read path. Both gates are
-        // SKIPPED for UNC/network paths, which short-circuit before the `stat`
-        // (the `i.startsWith("\\\\")||i.startsWith("//")` early-allow above).
+        // 202622179) are evaluated from the same rooted snapshot as the body
+        // read. Missing-file creation is still allowed, and UNC paths retain
+        // their upstream early-allow behavior by skipping these gates.
         if !is_unc {
-            if let Ok(metadata) = tokio::fs::metadata(&canon).await {
-                // (1) Maximum-editable-file-size gate (errorCode 10): reject
-                // anything strictly larger than `DYa` (= [`MAX_EDIT_FILE_SIZE`],
-                // 1 GiB).
-                let size = metadata.len();
-                if size > MAX_EDIT_FILE_SIZE {
+            if let Some(snapshot) = initial_snapshot.as_ref() {
+                if snapshot.size > MAX_EDIT_FILE_SIZE {
                     self.emit_failed(&invocation_id, "file_too_large").await;
-                    // Byte-locked message; both sizes via `format_file_size`
-                    // (TS `formatFileSize` / binary `Ma`), so the 1-GiB cap
-                    // renders as `1GB`.
                     return Err(ToolError::InvalidInput(format!(
                         "File is too large to edit ({}). Maximum editable file size is {}.",
-                        crate::read::format_file_size(size),
+                        crate::read::format_file_size(snapshot.size),
                         crate::read::format_file_size(MAX_EDIT_FILE_SIZE),
                     )));
                 }
-
-                // (2) Perforce read-only guard (errorCode 11):
-                //   if(H7e(_))return{result:!1,behavior:"ask",
-                //     message:k7e,errorCode:11}
-                // where `H7e(e)=cfr()&&(e&128)===0` and
-                //   `cfr()=st(process.env.LINGXI_PERFORCE_MODE)`.
-                // i.e. reject when Perforce mode is enabled (the env var is
-                // env-truthy: `1`/`true`/`yes`/`on`, via `st` == LingXi
-                // `traits::env::is_env_truthy`) AND the stat'd file's owner-write
-                // bit (`0o200` == `128` == `S_IWUSR`) is unset — a read-only
-                // file that has not been `p4 edit`-ed. The mode bit is read via
-                // the Unix `MetadataExt::mode()`; on non-Unix the mode is
-                // unavailable so the guard never fires (faithful: `mode` is a
-                // POSIX concept and the binary's `e&128` is meaningless
-                // off-POSIX).
-                if is_perforce_read_only(&metadata) {
+                if is_perforce_read_only(snapshot.mode) {
                     self.emit_failed(&invocation_id, "perforce_read_only").await;
                     return Err(ToolError::InvalidInput(PERFORCE_READ_ONLY_MESSAGE.into()));
                 }
@@ -573,15 +597,15 @@ impl Tool for FileEditTool {
             crate::file_meta::LineEnding,
             i64,
             String,
-        )> = match tokio::fs::read(&canon).await {
-            Ok(bytes) => {
-                // Current mtime (floored ms) — `None`/error falls back to epoch
-                // `0`, matching `read.rs`'s handling.
-                let mtime_ms = tokio::fs::metadata(&canon)
-                    .await
-                    .ok()
-                    .and_then(|m| m.modified().ok())
-                    .map_or(0, tool_api::read_file_state::mtime_ms_floor);
+        )> = match initial_snapshot {
+            Some(snapshot) => {
+                let bytes = snapshot.bytes;
+                // Current mtime (floored ms) comes from the same opened handle
+                // as the bytes; `None` falls back to epoch `0`.
+                let mtime_ms = snapshot
+                    .modified
+                    .map(tool_api::read_file_state::mtime_ms_floor)
+                    .unwrap_or(0);
                 // Raw (non-LF-normalized) UTF-8 decode — the exact form the
                 // `Read` tool records into `read_file_state`. Used only for the
                 // content-equality fallback; falls back to the LF view if the
@@ -592,11 +616,7 @@ impl Tool for FileEditTool {
                 let raw_for_cmp = raw_decoded.unwrap_or_else(|| content.clone());
                 Some((content, enc, ending, mtime_ms, raw_for_cmp))
             }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
-            Err(e) => {
-                self.emit_failed(&invocation_id, "io_read").await;
-                return Err(ToolError::Io(e.to_string()));
-            }
+            None => None,
         };
 
         // New files are created as UTF-8/LF (TS `readFileForEdit` ENOENT
@@ -795,10 +815,19 @@ impl Tool for FileEditTool {
         // UTF-16LE file round-trips byte-for-byte (claude-code
         // `writeTextContent`, file.ts:84-98). `after` is LF-normalized.
         let bytes = crate::file_meta::encode_with_metadata(&after, enc, ending);
-        if let Err(e) = tokio::fs::write(&canon, bytes).await {
-            self.emit_failed(&invocation_id, "io_write").await;
-            return Err(ToolError::Io(e.to_string()));
-        }
+        let Some((root, relative)) = crate::shared::rooted_location(&canon, &trusted_dirs) else {
+            self.emit_failed(&invocation_id, "path_blocked").await;
+            return Err(ToolError::PathBlocked { path });
+        };
+        let write_result = match traits::rooted_fs::write_file_after_permission(
+            &root, &relative, &path, &canon, &bytes,
+        ) {
+            Ok(result) => result,
+            Err(error) => {
+                self.emit_failed(&invocation_id, "io_write").await;
+                return Err(edit_resolution_error(file_path, error));
+            }
+        };
 
         // Post-write: update the read-state registry so an immediate second
         // Edit/Write succeeds and Read-dedup sees the new mtime (TS
@@ -807,10 +836,8 @@ impl Tool for FileEditTool {
         // `after` is the LF-normalized written content (TS stores the same
         // LF-normalized `updatedFile`); offset/limit cleared so the next read
         // counts as a full read.
-        let new_mtime_ms = tokio::fs::metadata(&canon)
-            .await
-            .ok()
-            .and_then(|m| m.modified().ok())
+        let new_mtime_ms = write_result
+            .modified
             .map_or(0, tool_api::read_file_state::mtime_ms_floor);
         tool_api::read_file_state::set(
             &self.ctx.read_file_state,

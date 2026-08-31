@@ -47,10 +47,14 @@ use std::time::Duration;
 use async_trait::async_trait;
 use client_protocol::events::ClientEvent;
 use client_protocol::permission::{
-    PermissionKindDto, PermissionOwnerDto, PermissionRequest as PermissionRequestDto,
-    PermissionResolutionDto, PermissionResponseDto, WorkerInfoDto,
+    AutoModePromptDto, PermissionKindDto, PermissionOwnerDto,
+    PermissionRequest as PermissionRequestDto, PermissionResolutionDto, PermissionResponseDto,
+    WorkerInfoDto,
 };
-use permission::gate::{PermissionDecision, PermissionGate, PermissionResponse, PromptWorker};
+use permission::gate::{
+    AutoModePrompt, PermissionCheckContext, PermissionDecision, PermissionGate, PermissionOutcome,
+    PermissionResponse, PromptWorker,
+};
 use permission::{
     persist_permission_update, PermissionPaths, PermissionRule, PermissionUpdate,
     PermissionUpdateDestination,
@@ -94,6 +98,10 @@ struct ParkedRequest {
     tool_name: String,
     /// Immutable owner used for targeted turn cancellation.
     owner: Option<PermissionOwnerScope>,
+    /// A suppressed request may be answered AllowAlways by an older or
+    /// malicious client, but that response must be downgraded to AllowOnce.
+    suppress_always_allow_rule: bool,
+    auto_mode_prompt: Option<AutoModePrompt>,
 }
 
 #[derive(Clone)]
@@ -264,16 +272,34 @@ impl AdapterPermissionGate {
             sender,
             input,
             tool_name,
+            suppress_always_allow_rule,
+            auto_mode_prompt,
             ..
         }) = parked
         else {
             return false;
         };
 
-        let allow_always = matches!(response, PermissionResponseDto::AllowAlways);
+        let allow_always =
+            matches!(response, PermissionResponseDto::AllowAlways) && !suppress_always_allow_rule;
         let mapped = match response {
             PermissionResponseDto::AllowOnce => PermissionResponse::AllowOnce,
+            PermissionResponseDto::AllowAlways if suppress_always_allow_rule => {
+                // A stale client may still submit the removed AllowAlways
+                // action. Preserve this explicit approval for the current call,
+                // but never let it create a session or durable rule.
+                PermissionResponse::AllowOnce
+            }
             PermissionResponseDto::AllowAlways => PermissionResponse::AllowAlways,
+            PermissionResponseDto::AllowAuto
+                if auto_mode_prompt.is_some() && !suppress_always_allow_rule =>
+            {
+                PermissionResponse::AllowAuto
+            }
+            // A stale or malicious client cannot switch mode unless the engine
+            // marked this request eligible. Keep its explicit approval as a
+            // one-shot grant, with no persistence or mode transition.
+            PermissionResponseDto::AllowAuto => PermissionResponse::AllowOnce,
             // `#[non_exhaustive]` — any future/`Deny` response fails closed.
             _ => PermissionResponse::Deny,
         };
@@ -391,32 +417,30 @@ impl Drop for AdapterPermissionGate {
     }
 }
 
-#[async_trait]
-impl PermissionGate for AdapterPermissionGate {
-    fn set_permission_persistence_enabled(&self, enabled: bool) {
-        self.persistence_enabled.store(enabled, Ordering::Release);
-    }
-
-    async fn check(&self, name: &str, input: &serde_json::Value) -> PermissionDecision {
-        // Main-thread call — no worker attribution on the wire.
-        self.check_with_worker(name, input, None).await
-    }
-
-    async fn check_with_worker(
+impl AdapterPermissionGate {
+    async fn check_with_context_impl(
         &self,
         name: &str,
         input: &serde_json::Value,
         worker: Option<PromptWorker>,
-    ) -> PermissionDecision {
+        suppress_always_allow_rule: bool,
+        auto_mode_prompt: Option<AutoModePrompt>,
+    ) -> PermissionOutcome {
         // Step 1: consult session rules (identical to the TUI gate; content-aware
         // so a narrowed AllowAlways rule only short-circuits a matching call).
+        // A requiresUserInteraction tool must not be bypassed by an older rule.
         {
             let rules = self.session_allow_rules.lock().await;
-            if rules
-                .iter()
-                .any(|r| permission::call_matches_rule(r, name, input))
+            if !suppress_always_allow_rule
+                && rules
+                    .iter()
+                    .any(|r| permission::call_matches_rule(r, name, input))
             {
-                return PermissionDecision::Allow;
+                return PermissionOutcome::Allow {
+                    updated_input: None,
+                    permission_updates: Vec::new(),
+                    decision_classification: None,
+                };
             }
         }
 
@@ -440,13 +464,36 @@ impl PermissionGate for AdapterPermissionGate {
                 .clone()
         };
 
-        // Step 2: build the request DTO. Collapse `PromptDefault` → bool and
-        // lower the tool input `Value` → JSON string (reusing the F1-11 fns).
-        let default_allow = prompt_default_to_allow(permission::tool_default(name));
-        let kind = PermissionKindDto::ToolUseConfirm {
-            tool_name: name.to_string(),
-            tool_input_json: value_to_json_string(input),
-            default_allow,
+        // Step 2: build the request DTO. ExitPlanMode carries a real plan body
+        // and must use its dedicated wire kind; every other tool keeps the
+        // generic ToolUseConfirm shape.  Sanitize the optional Auto token at
+        // this transport boundary as a second line of defense against a stale
+        // caller pairing the wrong action with the request kind.
+        let (kind, auto_mode_prompt) = if name == "ExitPlanMode" {
+            let auto_mode_prompt = matches!(auto_mode_prompt, Some(AutoModePrompt::ExitPlanMode))
+                .then_some(AutoModePrompt::ExitPlanMode);
+            (
+                PermissionKindDto::ExitPlanMode {
+                    plan: input
+                        .get("plan")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or_default()
+                        .to_string(),
+                },
+                auto_mode_prompt,
+            )
+        } else {
+            let auto_mode_prompt = matches!(auto_mode_prompt, Some(AutoModePrompt::WorkflowBash))
+                .then_some(AutoModePrompt::WorkflowBash);
+            let default_allow = prompt_default_to_allow(permission::tool_default(name));
+            (
+                PermissionKindDto::ToolUseConfirm {
+                    tool_name: name.to_string(),
+                    tool_input_json: value_to_json_string(input),
+                    default_allow,
+                },
+                auto_mode_prompt,
+            )
         };
 
         // Step 3: reserve a fresh id, park the oneshot, emit the request.
@@ -460,6 +507,8 @@ impl PermissionGate for AdapterPermissionGate {
                     input: input.clone(),
                     tool_name: name.to_string(),
                     owner: owner.clone(),
+                    suppress_always_allow_rule,
+                    auto_mode_prompt,
                 },
             );
         }
@@ -476,6 +525,11 @@ impl PermissionGate for AdapterPermissionGate {
                 team: w.team,
             }),
             owner: owner.map(|owner| owner.wire),
+            suppress_always_allow_rule,
+            auto_mode_prompt: auto_mode_prompt.map(|prompt| match prompt {
+                AutoModePrompt::WorkflowBash => AutoModePromptDto::WorkflowBash,
+                AutoModePrompt::ExitPlanMode => AutoModePromptDto::ExitPlanMode,
+            }),
         };
         self.sink.emit_request(request).await;
 
@@ -486,7 +540,7 @@ impl PermissionGate for AdapterPermissionGate {
         let response = match tokio::time::timeout(self.timeout, rx).await {
             Ok(Ok(response)) => response,
             Ok(Err(_dropped)) => {
-                return PermissionDecision::Deny {
+                return PermissionOutcome::Deny {
                     reason: "permission request dropped (connection closed)".to_string(),
                 };
             }
@@ -496,21 +550,86 @@ impl PermissionGate for AdapterPermissionGate {
                     self.emit_resolution(request_id, PermissionResolutionDto::Expired)
                         .await;
                 }
-                return PermissionDecision::Deny {
+                return PermissionOutcome::Deny {
                     reason: "permission request timed out".to_string(),
                 };
             }
         };
 
         // Step 5: map the resolved response → decision (the AllowAlways rule was
-        // already persisted in `resolve`).
+        // already persisted in `resolve`, unless this request suppressed it).
         match response {
             PermissionResponse::AllowOnce | PermissionResponse::AllowAlways => {
-                PermissionDecision::Allow
+                PermissionOutcome::Allow {
+                    updated_input: None,
+                    permission_updates: Vec::new(),
+                    decision_classification: None,
+                }
             }
-            PermissionResponse::Deny => PermissionDecision::Deny {
+            PermissionResponse::AllowAuto
+                if auto_mode_prompt.is_some() && !suppress_always_allow_rule =>
+            {
+                PermissionOutcome::AllowAuto {
+                    updated_input: None,
+                }
+            }
+            PermissionResponse::AllowAuto => PermissionOutcome::Allow {
+                updated_input: None,
+                permission_updates: Vec::new(),
+                decision_classification: None,
+            },
+            PermissionResponse::Deny => PermissionOutcome::Deny {
                 reason: "user denied via permission dialog".to_string(),
             },
+        }
+    }
+}
+
+#[async_trait]
+impl PermissionGate for AdapterPermissionGate {
+    fn set_permission_persistence_enabled(&self, enabled: bool) {
+        self.persistence_enabled.store(enabled, Ordering::Release);
+    }
+
+    async fn check(&self, name: &str, input: &serde_json::Value) -> PermissionDecision {
+        // Main-thread call — no worker attribution on the wire.
+        self.check_with_worker(name, input, None).await
+    }
+
+    async fn check_with_worker(
+        &self,
+        name: &str,
+        input: &serde_json::Value,
+        worker: Option<PromptWorker>,
+    ) -> PermissionDecision {
+        match self
+            .check_with_context_impl(name, input, worker, false, None)
+            .await
+        {
+            PermissionOutcome::Allow { .. } | PermissionOutcome::AllowAuto { .. } => {
+                PermissionDecision::Allow
+            }
+            PermissionOutcome::Deny { reason } => PermissionDecision::Deny { reason },
+        }
+    }
+
+    async fn check_with_context(
+        &self,
+        name: &str,
+        input: &serde_json::Value,
+        ctx: &PermissionCheckContext,
+    ) -> PermissionOutcome {
+        match self
+            .check_with_context_impl(
+                name,
+                input,
+                ctx.worker.clone(),
+                ctx.suppress_always_allow_rule,
+                ctx.auto_mode_prompt,
+            )
+            .await
+        {
+            outcome => outcome,
         }
     }
 }
@@ -595,6 +714,74 @@ mod tests {
         assert!(gate.session_allow_rules().lock().await.is_empty());
     }
 
+    #[tokio::test]
+    async fn eligible_auto_response_is_rich_outcome_without_session_rule() {
+        let sink = MockRequestSink::arc();
+        let gate = Arc::new(AdapterPermissionGate::new(sink.clone()));
+        let ctx = PermissionCheckContext {
+            auto_mode_prompt: Some(AutoModePrompt::WorkflowBash),
+            ..PermissionCheckContext::default()
+        };
+        let g = gate.clone();
+        let task = tokio::spawn(async move {
+            g.check_with_context("Bash", &json!({"command": "echo hi"}), &ctx)
+                .await
+        });
+
+        wait_for_pending(&gate, 1).await;
+        let request = sink.last().await;
+        assert_eq!(
+            request.auto_mode_prompt,
+            Some(AutoModePromptDto::WorkflowBash)
+        );
+        assert!(
+            gate.resolve(request.request_id, PermissionResponseDto::AllowAuto, "Bash")
+                .await
+        );
+        assert!(matches!(
+            task.await.unwrap(),
+            PermissionOutcome::AllowAuto {
+                updated_input: None
+            }
+        ));
+        assert!(gate.session_allow_rules().lock().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn exit_plan_approval_uses_plan_kind_and_preserves_auto_action() {
+        let sink = MockRequestSink::arc();
+        let gate = Arc::new(AdapterPermissionGate::new(sink.clone()));
+        let ctx = PermissionCheckContext {
+            auto_mode_prompt: Some(AutoModePrompt::ExitPlanMode),
+            ..PermissionCheckContext::default()
+        };
+        let g = gate.clone();
+        let task = tokio::spawn(async move { g.check_exit_plan_mode("1. Ship it", &ctx).await });
+
+        wait_for_pending(&gate, 1).await;
+        let request = sink.last().await;
+        match &request.kind {
+            PermissionKindDto::ExitPlanMode { plan } => assert_eq!(plan, "1. Ship it"),
+            other => panic!("unexpected kind: {other:?}"),
+        }
+        assert_eq!(
+            request.auto_mode_prompt,
+            Some(AutoModePromptDto::ExitPlanMode)
+        );
+        assert!(
+            gate.resolve(
+                request.request_id,
+                PermissionResponseDto::AllowOnce,
+                "ExitPlanMode"
+            )
+            .await
+        );
+        assert!(matches!(
+            task.await.unwrap(),
+            PermissionOutcome::Allow { .. }
+        ));
+    }
+
     /// `gate_skips_dialog_when_session_rule_matches` — a pre-seeded rule
     /// short-circuits `Allow` with NO request emitted.
     #[tokio::test]
@@ -633,6 +820,42 @@ mod tests {
         let stored = stored.lock().await;
         assert_eq!(stored.len(), 1);
         assert!(stored[0].matches_tool("Bash"));
+    }
+
+    #[tokio::test]
+    async fn suppressed_request_downgrades_allow_always_to_once() {
+        let sink = MockRequestSink::arc();
+        let gate = Arc::new(AdapterPermissionGate::new(sink.clone()));
+        let ctx = PermissionCheckContext {
+            suppress_always_allow_rule: true,
+            ..PermissionCheckContext::default()
+        };
+
+        let g = gate.clone();
+        let task = tokio::spawn(async move {
+            g.check_with_context("McpTool", &json!({"value": 1}), &ctx)
+                .await
+        });
+
+        wait_for_pending(&gate, 1).await;
+        let req = sink.last().await;
+        assert!(req.suppress_always_allow_rule);
+        assert!(
+            gate.resolve(
+                req.request_id,
+                PermissionResponseDto::AllowAlways,
+                "McpTool"
+            )
+            .await
+        );
+        assert!(matches!(
+            task.await.unwrap(),
+            PermissionOutcome::Allow { .. }
+        ));
+        assert!(
+            gate.session_allow_rules().lock().await.is_empty(),
+            "a stale AllowAlways response must not create a session rule"
+        );
     }
 
     /// `AllowAlways` NARROWS the persisted rule to the call's command (not a bare
@@ -930,6 +1153,8 @@ mod tests {
                 input: json!({"command": "dangerous"}),
                 tool_name: "Bash".to_string(),
                 owner: None,
+                suppress_always_allow_rule: false,
+                auto_mode_prompt: None,
             },
         );
 

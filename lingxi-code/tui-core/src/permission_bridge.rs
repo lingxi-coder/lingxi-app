@@ -5,7 +5,7 @@
 //! the iocraft `components::permissions::worker` module; the `TuiPermissionGate`
 //! that produces these exchanges stays in `tui`.
 
-use permission::gate::{PermissionRequest, PermissionResponse};
+use permission::gate::{AutoModePrompt, PermissionRequest, PermissionResponse};
 use tokio::sync::oneshot;
 
 /// Worker identity carried on a pending permission (TUI-side; not on the wire).
@@ -36,4 +36,11 @@ pub struct PermissionExchange {
     /// main-thread tool call. Populated so the dialog renders the `● @name`
     /// badge.
     pub worker: Option<WorkerPermissionInfo>,
+    /// When true, the prompt must not offer or persist an "allow always"
+    /// rule. This is used for tools that require a human decision on every
+    /// invocation (MCP `requiresUserInteraction: true`).
+    pub suppress_always_allow_rule: bool,
+    /// Engine-computed optional Auto action. `None` means the transport must
+    /// not render an Auto row; clients must not infer this from the request.
+    pub auto_mode_prompt: Option<AutoModePrompt>,
 }

@@ -749,6 +749,9 @@ lazy_re!(awk_program_flag_long_re, r"^--(?:fil|e|i|lo|s|de)");
 lazy_re!(awk_xargs_value_flag_re, r"^(?:-[FvW]$|--(?:fie|a$|as))");
 // Valid bash variable name (ast.ts:1835): `[A-Za-z_][A-Za-z0-9_]*`, anchored.
 lazy_re!(valid_var_name_re, r"^[A-Za-z_][A-Za-z0-9_]*$");
+// Integer-attributed shell variable assignment value (claude-code 2.1.251):
+// only an unsigned decimal literal with at most 18 digits is statically safe.
+lazy_re!(integer_attribute_value_re, r"^(0|[1-9][0-9]{0,17})$");
 // PS4 `${IDENT}` reference, stripped before the charset check (ast.ts:1896).
 lazy_re!(ps4_dollar_brace_re, r"\$\{[A-Za-z_][A-Za-z0-9_]*\}");
 // PS4 safe charset after stripping `${VAR}` refs (ast.ts:1895): A-Za-z0-9, space,
@@ -1419,6 +1422,39 @@ pub(crate) struct VarAssign {
     pub is_append: bool,
 }
 
+/// Validate an assignment to a shell variable with bash's integer attribute.
+/// Integer assignment arithmetically evaluates its RHS, so only the exact
+/// decimal-literal subset is safe to model. The oracle applies this check to
+/// bare assignments and command env-prefix assignments at different points;
+/// `env_prefix` selects their byte-exact reason string.
+fn integer_attribute_assignment_error(
+    name: &str,
+    value: &str,
+    env_prefix: bool,
+) -> Option<ParseForSecurityResult> {
+    if !DANGEROUS_VAR_Y3I.contains(&name) {
+        return None;
+    }
+    if value.contains('[')
+        || value.contains('`')
+        || value.contains("$(")
+        || contains_any_placeholder(value)
+        || !integer_attribute_value_re().is_match(value)
+    {
+        let reason = if env_prefix {
+            format!(
+                "{name} has integer attribute — env-prefix arith-evals value, which can execute subscript command substitution or abort/diverge at runtime"
+            )
+        } else {
+            format!(
+                "{name} has integer attribute — assignment arith-evals RHS, which can execute subscript command substitution or abort/diverge at runtime"
+            )
+        };
+        return Some(ParseForSecurityResult::TooComplex { reason });
+    }
+    None
+}
+
 /// TS `extractSafeCatHeredoc` return (ast.ts:1721) `string | 'DANGEROUS' | null`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[allow(dead_code)]
@@ -1598,6 +1634,12 @@ pub(crate) fn collect_commands(
             Ok(ev) => ev,
             Err(e) => return Some(e),
         };
+        // Integer-attributed variables arithmetically evaluate bare assignment
+        // RHS values; reject anything outside the oracle's decimal subset
+        // before recording the value in the tracked scope.
+        if let Some(err) = integer_attribute_assignment_error(&ev.name, &ev.value, false) {
+            return Some(err);
+        }
         apply_var_to_scope(var_scope, &ev.name, &ev.value, ev.is_append);
         return None;
     }
@@ -2465,7 +2507,16 @@ pub(crate) fn walk_command(
                 // SECURITY: env-prefix assignments (`VAR=x cmd`) are command-local
                 // in bash — do NOT add to the global varScope.
                 match walk_variable_assignment(child, inner_commands, var_scope, src) {
-                    Ok(ev) => env_vars.push((ev.name, ev.value)),
+                    Ok(ev) => {
+                        // An env-prefix assignment to an integer-attributed
+                        // variable arithmetically evaluates its value too.
+                        if let Some(err) =
+                            integer_attribute_assignment_error(&ev.name, &ev.value, true)
+                        {
+                            return err;
+                        }
+                        env_vars.push((ev.name, ev.value));
+                    }
                     Err(e) => return e,
                 }
             }
@@ -5237,6 +5288,53 @@ EOF
         let cs = pfs("ls 2> /tmp/err").expect("simple");
         assert_eq!(cs[0].redirects[0].op, ">");
         assert_eq!(cs[0].redirects[0].fd, Some(2));
+    }
+
+    #[test]
+    fn l3_integer_attribute_assignment_values_are_fail_closed() {
+        // Decimal literals accepted by the oracle, including zero and the
+        // normal RANDOM assignment case.
+        assert!(pfs("OPTIND=1").is_ok());
+        assert!(pfs("OPTIND=0").is_ok());
+        assert!(pfs("RANDOM=2").is_ok());
+        assert!(pfs("RANDOM=2 echo ok").is_ok());
+
+        let assignment_reason = |name: &str| {
+            format!(
+                "{name} has integer attribute — assignment arith-evals RHS, which can execute subscript command substitution or abort/diverge at runtime"
+            )
+        };
+        let env_prefix_reason = |name: &str| {
+            format!(
+                "{name} has integer attribute — env-prefix arith-evals value, which can execute subscript command substitution or abort/diverge at runtime"
+            )
+        };
+
+        // Arithmetic syntax, a leading zero, and a value over 18 digits are
+        // not part of the safe decimal-literal subset.
+        assert_eq!(pfs("RANDOM=2+2"), Err(assignment_reason("RANDOM")));
+        assert_eq!(pfs("RANDOM=02"), Err(assignment_reason("RANDOM")));
+        assert_eq!(
+            pfs("RANDOM=1234567890123456789"),
+            Err(assignment_reason("RANDOM"))
+        );
+
+        // Both command substitution spellings reach the VarAssign value
+        // checker and retain its exact assignment reason.
+        assert_eq!(pfs("RANDOM=$(printf 2)"), Err(assignment_reason("RANDOM")));
+        assert_eq!(pfs("RANDOM=`printf 2`"), Err(assignment_reason("RANDOM")));
+        assert_eq!(pfs("RANDOM='[2]'"), Err(assignment_reason("RANDOM")));
+
+        // Env-prefix assignments use the separate oracle reason and are
+        // checked before the command is emitted.
+        assert_eq!(
+            pfs("RANDOM=2+2 printf ok"),
+            Err(env_prefix_reason("RANDOM"))
+        );
+        assert_eq!(
+            pfs("RANDOM=$(printf 2) printf ok"),
+            Err(env_prefix_reason("RANDOM"))
+        );
     }
 
     #[test]

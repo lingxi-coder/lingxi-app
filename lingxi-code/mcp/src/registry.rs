@@ -1987,7 +1987,12 @@ impl McpRegistry {
                             self.hook_dispatcher.clone(),
                         )
                         .await
-                        .with_config_options(config.timeout_ms, config.always_load)
+                        .with_config_options(
+                            config.timeout_ms,
+                            config.always_load,
+                            config.tools.clone(),
+                            config.tool_permissions.clone(),
+                        )
                         .with_transport_kind(config.spec.transport_kind())
                         .with_server_url(gate_url.clone()),
                     ));
@@ -5852,6 +5857,8 @@ mod tests {
             timeout_ms: None,
             always_load: false,
             discovery_cache: None,
+            tools: Vec::new(),
+            tool_permissions: std::collections::BTreeMap::new(),
             config_error: None,
         }
     }
@@ -5901,6 +5908,8 @@ mod tests {
                 timeout_ms: None,
                 always_load: true,
                 discovery_cache: None,
+                tools: Vec::new(),
+                tool_permissions: std::collections::BTreeMap::new(),
                 config_error: None,
             })
             .await
@@ -11860,6 +11869,8 @@ mod tests {
             timeout_ms: None,
             always_load: false,
             discovery_cache: None,
+            tools: Vec::new(),
+            tool_permissions: std::collections::BTreeMap::new(),
             config_error: None,
         }
     }
@@ -12011,6 +12022,8 @@ mod snapshot_tests {
             timeout_ms: None,
             always_load: false,
             discovery_cache: None,
+            tools: Vec::new(),
+            tool_permissions: std::collections::BTreeMap::new(),
             config_error: None,
         }
     }

@@ -10,10 +10,11 @@
 //! the `cwd`, the `lingxi_home`, and a `FileSystem` are all in scope.
 //!
 //! ## What this does (and does NOT do)
-//! SCOPE is firing the hook only. The live settings RELOAD / re-apply is a
-//! separate concern owned by the composition root and intentionally NOT done
-//! here (claude-code's `fanOut` step). This watcher: watches the relevant
-//! `.claude` (and managed) directories via the in-tree `fs_watch` primitive
+//! The watcher fires the hook first, then applies the narrow managed
+//! `disableAutoMode` safety update to an attached live permission gate. It does
+//! not reload ordinary user/project/local settings or rebuild the full policy;
+//! those remain composition-root concerns. It watches the relevant `.claude`
+//! (and managed) directories via the in-tree `fs_watch` primitive
 //! ([`traits::FileSystem::watch`]), classifies each changed path to a
 //! [`ConfigChangeSource`] layer, and fires
 //! [`ConversationOrchestrator::fire_config_change`] best-effort.
@@ -44,7 +45,8 @@
 //! and returns a [`SettingsWatcherHandle`]. Dropping the handle aborts every
 //! task (RAII) and the underlying `notify` watcher is released when the
 //! [`traits::FileSystem::watch`] stream is dropped — a clean teardown with no
-//! lingering OS handles.
+//! lingering OS handles. The task is started even when no ConfigChange hook is
+//! configured so the managed safety callback cannot be disabled by hook setup.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -54,7 +56,7 @@ use futures_core::Stream;
 use hooks::events::ConfigChangeSource;
 use tokio::task::JoinHandle;
 use tokio_stream::StreamExt;
-use traits::{FileEvent, FileSystem};
+use traits::{FileEvent, FileSystem, PermissionGate};
 
 /// Narrow fire seam: the watcher fires a `ConfigChange` without depending on
 /// the full orchestrator surface. The composition root injects the live
@@ -135,6 +137,17 @@ pub async fn managed_settings_raw_tiers() -> Vec<String> {
         }
     }
     out
+}
+
+/// Fold the currently loaded managed policy tiers into the one live setting
+/// owned by the permission gate. Managed tiers are already in ascending
+/// precedence; `disableAutoMode` is a sticky admin restriction, so any tier
+/// that says `"disable"` closes the gate.
+#[must_use]
+pub fn auto_mode_disabled_from_managed_tiers(tiers: &[String]) -> bool {
+    tiers
+        .iter()
+        .any(|raw| permission::auto_mode_disabled_from_settings_json(raw))
 }
 
 /// The set of settings paths the watcher cares about, resolved from the
@@ -268,6 +281,7 @@ impl Drop for SettingsWatcherHandle {
 pub struct SettingsWatcher {
     paths: SettingsPaths,
     firer: Arc<dyn ConfigChangeFirer>,
+    permission_gate: Option<Arc<dyn PermissionGate>>,
 }
 
 impl SettingsWatcher {
@@ -278,7 +292,14 @@ impl SettingsWatcher {
         Self {
             paths: SettingsPaths::resolve(lingxi_home, cwd),
             firer,
+            permission_gate: None,
         }
+    }
+
+    #[must_use]
+    pub fn with_permission_gate(mut self, gate: Arc<dyn PermissionGate>) -> Self {
+        self.permission_gate = Some(gate);
+        self
     }
 
     /// The resolved settings paths (exposed for tests / diagnostics).
@@ -296,7 +317,11 @@ impl SettingsWatcher {
     /// claude-code's `dirsWithExistingFiles` init-time gate. Best-effort: a
     /// directory that fails to watch is logged and skipped, never fatal.
     pub async fn spawn(self, fs: Arc<dyn FileSystem>) -> SettingsWatcherHandle {
-        let Self { paths, firer } = self;
+        let Self {
+            paths,
+            firer,
+            permission_gate,
+        } = self;
         let mut tasks = Vec::new();
         for dir in paths.watch_dirs() {
             if !dir.is_dir() {
@@ -312,8 +337,9 @@ impl SettingsWatcher {
             };
             let paths = paths.clone();
             let firer = firer.clone();
+            let permission_gate = permission_gate.clone();
             tasks.push(tokio::spawn(async move {
-                run_watch_loop(stream, paths, firer).await;
+                run_watch_loop_with_permission_gate(stream, paths, firer, permission_gate).await;
             }));
         }
         SettingsWatcherHandle { tasks }
@@ -323,12 +349,29 @@ impl SettingsWatcher {
 /// Drive one directory's change stream, classifying + firing per event. Split
 /// out so tests can drive it with a synthetic stream (no real `FSEvents`).
 pub async fn run_watch_loop(
-    mut stream: std::pin::Pin<Box<dyn Stream<Item = FileEvent> + Send>>,
+    stream: std::pin::Pin<Box<dyn Stream<Item = FileEvent> + Send>>,
     paths: SettingsPaths,
     firer: Arc<dyn ConfigChangeFirer>,
 ) {
+    run_watch_loop_with_permission_gate(stream, paths, firer, None).await;
+}
+
+/// Drive one directory's change stream and apply managed policy changes after
+/// the ConfigChange hook has completed.
+pub async fn run_watch_loop_with_permission_gate(
+    mut stream: std::pin::Pin<Box<dyn Stream<Item = FileEvent> + Send>>,
+    paths: SettingsPaths,
+    firer: Arc<dyn ConfigChangeFirer>,
+    permission_gate: Option<Arc<dyn PermissionGate>>,
+) {
     while let Some(event) = stream.next().await {
-        handle_event(&event, &paths, firer.as_ref()).await;
+        handle_event_with_permission_gate(
+            &event,
+            &paths,
+            firer.as_ref(),
+            permission_gate.as_deref(),
+        )
+        .await;
     }
 }
 
@@ -337,6 +380,15 @@ pub async fn run_watch_loop(
 /// (mirrors `handleChange` early-returning when `getSourceForPath` is
 /// undefined). Exposed for deterministic unit tests.
 pub async fn handle_event(event: &FileEvent, paths: &SettingsPaths, firer: &dyn ConfigChangeFirer) {
+    handle_event_with_permission_gate(event, paths, firer, None).await;
+}
+
+pub async fn handle_event_with_permission_gate(
+    event: &FileEvent,
+    paths: &SettingsPaths,
+    firer: &dyn ConfigChangeFirer,
+    permission_gate: Option<&dyn PermissionGate>,
+) {
     let Some(source) = paths.classify(&event.path) else {
         return;
     };
@@ -346,6 +398,12 @@ pub async fn handle_event(event: &FileEvent, paths: &SettingsPaths, firer: &dyn 
     firer
         .fire_config_change(source, Some(event.path.clone()))
         .await;
+    if source == ConfigChangeSource::PolicySettings {
+        if let Some(gate) = permission_gate {
+            let tiers = managed_settings_raw_tiers().await;
+            gate.update_auto_mode_disabled(auto_mode_disabled_from_managed_tiers(&tiers));
+        }
+    }
 }
 
 #[cfg(test)]
@@ -440,6 +498,19 @@ mod tests {
         // A sibling json in the project .claude dir that is NOT a watched
         // settings file maps to nothing.
         assert_eq!(p.classify(Path::new("/work/proj/.lingxi/other.json")), None);
+    }
+
+    #[test]
+    fn managed_auto_mode_fold_covers_base_dropins_and_clear() {
+        let enabled = vec![
+            r#"{"disableAutoMode":"disable"}"#.to_string(),
+            r#"{"permissions":{"allow":["Read"]}}"#.to_string(),
+        ];
+        assert!(auto_mode_disabled_from_managed_tiers(&enabled));
+        assert!(!auto_mode_disabled_from_managed_tiers(&[
+            r#"{"disableAutoMode":"enable"}"#.to_string(),
+            r#"{"permissions":{}}"#.to_string(),
+        ]));
     }
 
     #[tokio::test]

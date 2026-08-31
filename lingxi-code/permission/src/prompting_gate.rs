@@ -189,6 +189,39 @@ impl PermissionGate for InteractivePromptingGate {
             },
         }
     }
+
+    async fn check_exit_plan_mode(
+        &self,
+        plan: &str,
+        _ctx: &crate::gate::PermissionCheckContext,
+    ) -> crate::gate::PermissionOutcome {
+        // Keep the dedicated request variant all the way through this
+        // transport.  `prompt_user` intentionally rejects multiline plan
+        // dialogs on plain stdio, so this resolves to a fail-closed denial
+        // instead of silently degrading to a generic ToolUseConfirm prompt.
+        let request = PermissionRequest::ExitPlanMode {
+            plan: plan.to_string(),
+        };
+        match self.prompt_user(&request).await {
+            Ok(decision) if decision.allow => crate::gate::PermissionOutcome::Allow {
+                updated_input: None,
+                permission_updates: Vec::new(),
+                decision_classification: None,
+            },
+            Ok(decision) => crate::gate::PermissionOutcome::Deny {
+                reason: decision.reason,
+            },
+            Err(PromptError::InvalidInput { attempts }) => crate::gate::PermissionOutcome::Deny {
+                reason: format!("invalid permission input after {attempts} attempts"),
+            },
+            Err(PromptError::Cancelled { reason }) => crate::gate::PermissionOutcome::Deny {
+                reason: format!("prompt cancelled: {reason}"),
+            },
+            Err(PromptError::Io(reason)) => crate::gate::PermissionOutcome::Deny {
+                reason: format!("prompt io: {reason}"),
+            },
+        }
+    }
 }
 
 #[async_trait]

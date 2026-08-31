@@ -488,7 +488,9 @@ impl StdioControlPermissionGate {
     /// that cannot apply a rewrite.
     fn outcome_to_decision(outcome: PermissionOutcome) -> PermissionDecision {
         match outcome {
-            PermissionOutcome::Allow { .. } => PermissionDecision::Allow,
+            PermissionOutcome::Allow { .. } | PermissionOutcome::AllowAuto { .. } => {
+                PermissionDecision::Allow
+            }
             PermissionOutcome::Deny { reason } => PermissionDecision::Deny { reason },
         }
     }
@@ -561,6 +563,17 @@ impl StdioControlPermissionGate {
         if ctx.requires_user_interaction {
             request["requires_user_interaction"] = json!(true);
         }
+        // A requiresUserInteraction ask must not expose or honor a persistent
+        // AllowAlways choice. Keep the key additive/optional for older hosts;
+        // when supported, the exact oracle wire spelling is snake_case.
+        if ctx.suppress_always_allow_rule {
+            request["suppress_always_allow_rule"] = json!(true);
+        }
+        // Eligibility is computed by the engine and carried opaquely to the
+        // host. Do not let a client infer an Auto action from tool name/input.
+        if let Some(prompt) = ctx.auto_mode_prompt {
+            request["auto_mode_prompt"] = json!(prompt.as_wire());
+        }
         // Suggestions and blocked paths are emitted only when a structured
         // producer supplied them; never parse either out of display text.
         if let Some(suggestions) = &ctx.permission_suggestions {
@@ -600,7 +613,49 @@ impl StdioControlPermissionGate {
         };
         match result {
             Ok(Ok(payload)) => {
-                let outcome = self.map_payload(payload).await;
+                let mut outcome = self.map_payload(payload).await;
+                if matches!(&outcome, PermissionOutcome::AllowAuto { .. })
+                    && (ctx.auto_mode_prompt.is_none() || ctx.suppress_always_allow_rule)
+                {
+                    // A stale/malicious host response cannot switch mode unless
+                    // the engine explicitly marked this request eligible. Keep
+                    // the current approval as a one-shot allow.
+                    outcome = match outcome {
+                        PermissionOutcome::AllowAuto { updated_input } => {
+                            PermissionOutcome::Allow {
+                                updated_input,
+                                permission_updates: Vec::new(),
+                                decision_classification: Some(
+                                    traits::permission_gate::ToolDecisionClassification::UserTemporary,
+                                ),
+                            }
+                        }
+                        other => other,
+                    };
+                }
+                if ctx.suppress_always_allow_rule {
+                    // A stale or malicious host can still return an
+                    // AllowAlways-shaped response (`user_permanent` and/or
+                    // updatedPermissions). Preserve the explicit approval for
+                    // this invocation, but discard every rule update so no
+                    // session/local persistence can be created.
+                    if let PermissionOutcome::Allow {
+                        permission_updates,
+                        decision_classification,
+                        ..
+                    } = &mut outcome
+                    {
+                        permission_updates.clear();
+                        if matches!(
+                            decision_classification,
+                            Some(traits::permission_gate::ToolDecisionClassification::UserPermanent)
+                        ) {
+                            *decision_classification = Some(
+                                traits::permission_gate::ToolDecisionClassification::UserTemporary,
+                            );
+                        }
+                    }
+                }
                 // §2b: persist every file-backed `updatedPermissions` union
                 // member here. The outer PolicyPermissionGate applies the same
                 // array to live state; persistence remains best-effort and can
@@ -708,10 +763,19 @@ impl StdioControlPermissionGate {
                                 ),
                                 _ => None,
                             });
-                        PermissionOutcome::Allow {
+                        let auto_selected = payload
+                            .get("permissionMode")
+                            .or_else(|| payload.get("mode"))
+                            .and_then(Value::as_str)
+                            .is_some_and(|mode| mode == "auto");
+                        if auto_selected {
+                            PermissionOutcome::AllowAuto { updated_input }
+                        } else {
+                            PermissionOutcome::Allow {
                             updated_input,
                             permission_updates,
                             decision_classification,
+                            }
                         }
                     }
                     _ => PermissionOutcome::Deny {
@@ -719,6 +783,14 @@ impl StdioControlPermissionGate {
                             .to_string(),
                     },
                 }
+            }
+            Some("allow_auto") => {
+                let updated_input = payload
+                    .get("updatedInput")
+                    .and_then(Value::as_object)
+                    .filter(|map| !map.is_empty())
+                    .map(|map| Value::Object(map.clone()));
+                PermissionOutcome::AllowAuto { updated_input }
             }
             Some("deny") => {
                 // The oracle's deny schema REQUIRES `message`; a deny without it
@@ -851,6 +923,17 @@ fn parse_persistent_permission_update(raw: &Value) -> Option<PersistentPermissio
                 .map(Value::as_str)
                 .map(|value| value.map(str::to_string))
                 .collect::<Option<Vec<_>>>()?;
+            // `persistPermissionUpdates` rejects the whole directory update
+            // when any member contains NUL. Validate before handing the array
+            // to the persistence layer so a mixed valid/NUL update cannot
+            // create a partial settings write.
+            if let Some(directory) = directories
+                .iter()
+                .find(|directory| directory.contains('\0'))
+            {
+                tracing::debug!("{}", directory_update_null_byte_reason(kind, directory));
+                return None;
+            }
             Some(PersistentPermissionUpdate::Directories {
                 directories,
                 add: kind == "addDirectories",
@@ -859,6 +942,10 @@ fn parse_persistent_permission_update(raw: &Value) -> Option<PersistentPermissio
         }
         _ => None,
     }
+}
+
+fn directory_update_null_byte_reason(update_type: &str, directory: &str) -> String {
+    format!("{update_type} carries a directory containing a null byte: {directory}")
 }
 
 async fn persist_parsed_permission_update(
@@ -1639,6 +1726,7 @@ mod tests {
             blocked_path: Some("/etc/secret".to_string()),
             classifier_approvable: Some(false),
             requires_user_interaction: true,
+            suppress_always_allow_rule: true,
             matched_ask_rule: Some(MatchedAskRule {
                 source: "projectSettings".into(),
                 tool_name: "Bash".into(),
@@ -1658,6 +1746,7 @@ mod tests {
         assert_eq!(frame["request"]["blocked_path"], "/etc/secret");
         assert_eq!(frame["request"]["classifier_approvable"], false);
         assert_eq!(frame["request"]["requires_user_interaction"], true);
+        assert_eq!(frame["request"]["suppress_always_allow_rule"], true);
         assert_eq!(
             frame["request"]["matched_ask_rule"],
             json!({
@@ -1676,6 +1765,35 @@ mod tests {
         assert!(matches!(
             check.await.unwrap(),
             PermissionOutcome::Allow { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn eligible_auto_response_is_forwarded_without_permission_updates() {
+        let (plane, mut rx) = plane_with_channel();
+        let gate = StdioControlPermissionGate::new(plane.clone());
+        let input = json!({"command": "echo hi"});
+        let ctx = PermissionCheckContext {
+            auto_mode_prompt: Some(traits::permission_gate::AutoModePrompt::WorkflowBash),
+            ..PermissionCheckContext::default()
+        };
+        let check =
+            tokio::spawn(async move { gate.check_with_context("Bash", &input, &ctx).await });
+        let line = outbound_line(rx.recv().await.unwrap());
+        let frame: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(frame["request"]["auto_mode_prompt"], "workflow_bash");
+        let request_id = frame["request_id"].as_str().unwrap().to_string();
+        plane
+            .resolve_response(&success_response(
+                &request_id,
+                json!({"behavior": "allow_auto", "updatedInput": {}}),
+            ))
+            .await;
+        assert!(matches!(
+            check.await.unwrap(),
+            PermissionOutcome::AllowAuto {
+                updated_input: None
+            }
         ));
     }
 
@@ -1857,7 +1975,7 @@ mod tests {
         ));
         assert!(matches!(
             parse_persistent_permission_update(&json!({
-            "type": "setMode", "mode": "plan", "destination": "localSettings"
+            "type": "setMode", "mode": "auto", "destination": "localSettings"
             })),
             Some(PersistentPermissionUpdate::SetMode { .. })
         ));
@@ -1891,6 +2009,16 @@ mod tests {
             "behavior": "allow", "destination": "localSettings"
         }))
         .is_none());
+        assert!(parse_persistent_permission_update(&json!({
+            "type": "addDirectories",
+            "directories": ["/extra", "bad\u{0000}path"],
+            "destination": "localSettings"
+        }))
+        .is_none());
+        assert_eq!(
+            directory_update_null_byte_reason("addDirectories", "bad\0path"),
+            "addDirectories carries a directory containing a null byte: bad\0path"
+        );
         assert!(parse_persistent_permission_update(&json!("nonsense")).is_none());
     }
 
@@ -2043,6 +2171,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn nul_add_directories_update_is_not_persisted_atomically() {
+        let tmp =
+            std::env::temp_dir().join(format!("lx-p5-nul-directory-update-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(tmp.join("proj")).unwrap();
+        let paths = PermissionPaths {
+            lingxi_home: tmp.join("home/.lingxi"),
+            cwd: tmp.join("proj"),
+        };
+        let (plane, _rx) = plane_with_channel();
+        let gate = StdioControlPermissionGate::new(plane).with_persist(paths);
+        gate.persist_permission_updates_to_disk(&[json!({
+            "type": "addDirectories",
+            "directories": ["/extra", "bad\u{0000}path"],
+            "destination": "localSettings"
+        })])
+        .await;
+
+        assert!(
+            !tmp.join("proj/.lingxi/settings.local.json").exists(),
+            "a mixed valid/NUL directory update must not create a settings write"
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[tokio::test]
     async fn persist_updated_permissions_handles_every_file_backed_variant() {
         let tmp =
             std::env::temp_dir().join(format!("lx-p5-permission-union-{}", std::process::id()));
@@ -2075,7 +2229,7 @@ mod tests {
             }),
             json!({
                 "type": "setMode",
-                "mode": "plan",
+                "mode": "auto",
                 "destination": "localSettings"
             }),
             json!({
@@ -2095,7 +2249,7 @@ mod tests {
         let value: Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
         assert_eq!(value["permissions"]["allow"], json!(["Edit(src/**)"]));
         assert_eq!(value["permissions"]["deny"], json!(["Bash(cargo test)"]));
-        assert_eq!(value["permissions"]["defaultMode"], "plan");
+        assert_eq!(value["permissions"]["defaultMode"], "auto");
         assert_eq!(
             value["permissions"]["additionalDirectories"],
             json!(["/extra"])

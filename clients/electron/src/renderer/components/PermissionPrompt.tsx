@@ -5,8 +5,8 @@
  * The main process forwards every inbound {@link PermissionRequest} over the
  * bridge; `useBridge` queues them and exposes the head as `pendingPermission`
  * plus `approve` / `deny`. This component renders a compact session panel for
- * that head request with three actions — allow-once / allow-always / deny — each calling
- * back through the bridge with the matching {@link PermissionResponseDto}.
+ * that head request with allow-once / deny actions, plus allow-always only when
+ * the engine permits a persistent rule.
  *
  * It is intentionally framework-light (inline styles via the theme tokens,
  * mirroring the rest of the renderer) and renders nothing when no request is
@@ -108,7 +108,7 @@ export interface PermissionPromptProps {
   /** The head request to render, or `null` to render nothing. */
   request: PermissionRequest | null;
   /** Approve the request (defaults to allow-once in the hook). */
-  onApprove(requestId: number, response: { type: 'allow_once' | 'allow_always' }): void;
+  onApprove(requestId: number, response: { type: 'allow_once' | 'allow_always' | 'allow_auto' }): void;
   /** Deny the request. */
   onDeny(requestId: number): void;
 }
@@ -136,7 +136,10 @@ export function PermissionPrompt({ request, onApprove, onDeny }: PermissionPromp
     <div
       role="dialog"
       aria-label={title}
-      aria-describedby={detail ? 'lingxi-permission-detail lingxi-permission-scope' : 'lingxi-permission-scope'}
+      aria-describedby={[
+        detail ? 'lingxi-permission-detail' : null,
+        request.suppress_always_allow_rule || request.auto_mode_prompt ? null : 'lingxi-permission-scope',
+      ].filter(Boolean).join(' ') || undefined}
       onFocusCapture={() => { promptHasFocus.current = true; }}
       onBlurCapture={(event) => { promptHasFocus.current = event.currentTarget.contains(event.relatedTarget as Node | null); }}
       onKeyDown={(event) => {
@@ -211,18 +214,36 @@ export function PermissionPrompt({ request, onApprove, onDeny }: PermissionPromp
           >
             Deny
           </button>
-          <button
-            type="button"
-            onClick={() => onApprove(request.request_id, { type: 'allow_always' })}
-            style={{
-              flex: 1, padding: '8px 10px', borderRadius: 8, cursor: 'pointer',
-              fontSize: 12.5, fontWeight: 600, fontFamily: 'inherit',
-              color: t.text2, background: 'transparent',
-              border: `0.5px solid ${t.border}`,
-            }}
-          >
-            Allow matching actions
-          </button>
+          {!request.suppress_always_allow_rule && !request.auto_mode_prompt && (
+            <button
+              type="button"
+              onClick={() => onApprove(request.request_id, { type: 'allow_always' })}
+              style={{
+                flex: 1, padding: '8px 10px', borderRadius: 8, cursor: 'pointer',
+                fontSize: 12.5, fontWeight: 600, fontFamily: 'inherit',
+                color: t.text2, background: 'transparent',
+                border: `0.5px solid ${t.border}`,
+              }}
+            >
+              Allow matching actions
+            </button>
+          )}
+          {request.auto_mode_prompt && !request.suppress_always_allow_rule && (
+            <button
+              type="button"
+              onClick={() => onApprove(request.request_id, { type: 'allow_auto' })}
+              style={{
+                flex: 1, padding: '8px 10px', borderRadius: 8, cursor: 'pointer',
+                fontSize: 12.5, fontWeight: 600, fontFamily: 'inherit',
+                color: '#fff', background: t.accent,
+                border: `0.5px solid ${t.accentBorder}`,
+              }}
+            >
+              {request.auto_mode_prompt === 'workflow_bash'
+                ? 'Yes, and switch to auto mode'
+                : 'Yes, and use auto mode'}
+            </button>
+          )}
           <button
             ref={primaryRef}
             type="button"
@@ -237,9 +258,11 @@ export function PermissionPrompt({ request, onApprove, onDeny }: PermissionPromp
             Allow once
           </button>
         </div>
-        <div id="lingxi-permission-scope" style={{ padding: '0 16px 12px', background: t.surface, color: t.text3, fontSize: 10.5, lineHeight: 1.45 }}>
-          “Allow matching actions” saves a narrowed rule for this workspace when the engine supports it.
-        </div>
+        {!request.suppress_always_allow_rule && !request.auto_mode_prompt && (
+          <div id="lingxi-permission-scope" style={{ padding: '0 16px 12px', background: t.surface, color: t.text3, fontSize: 10.5, lineHeight: 1.45 }}>
+            “Allow matching actions” saves a narrowed rule for this workspace when the engine supports it.
+          </div>
+        )}
       </div>
     </div>
   );

@@ -2324,6 +2324,8 @@ mod tests {
             timeout_ms: Some(10),
             discovery_cache: None,
             always_load: false,
+            tools: Vec::new(),
+            tool_permissions: std::collections::BTreeMap::new(),
             config_error: None,
         };
         let same = crate::connection::McpServerConfig {
@@ -2368,6 +2370,8 @@ mod tests {
             timeout_ms: Some(10),
             discovery_cache: None,
             always_load: false,
+            tools: Vec::new(),
+            tool_permissions: std::collections::BTreeMap::new(),
             config_error: None,
         };
         let McpTransportSpec::Http { oauth, .. } = &mut empty_oauth.spec else {

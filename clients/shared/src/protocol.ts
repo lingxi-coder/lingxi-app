@@ -430,7 +430,13 @@ export interface PermissionRequest {
   kind: PermissionKindDto;
   worker?: WorkerInfoDto;
   owner?: PermissionOwnerDto;
+  /** True when the client must not offer or persist an always-allow rule. */
+  suppress_always_allow_rule?: boolean;
+  /** Engine-computed Auto action; clients must not infer eligibility. */
+  auto_mode_prompt?: AutoModePromptDto;
 }
+
+export type AutoModePromptDto = 'workflow_bash' | 'exit_plan_mode';
 
 /** Immutable owner scope for a parked permission request. */
 export interface PermissionOwnerDto {
@@ -443,6 +449,7 @@ export interface PermissionOwnerDto {
 export type PermissionResponseDto =
   | { type: 'allow_once' }
   | { type: 'allow_always' }
+  | { type: 'allow_auto' }
   | { type: 'deny' };
 
 /** Live session permission modes accepted by the engine. */

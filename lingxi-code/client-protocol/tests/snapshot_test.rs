@@ -1323,6 +1323,8 @@ fn permission_request_goldens() -> Vec<(&'static str, PermissionRequest)> {
                 },
                 worker: None,
                 owner: None,
+                suppress_always_allow_rule: false,
+                auto_mode_prompt: None,
             },
         ),
         (
@@ -1334,6 +1336,8 @@ fn permission_request_goldens() -> Vec<(&'static str, PermissionRequest)> {
                 },
                 worker: None,
                 owner: None,
+                suppress_always_allow_rule: false,
+                auto_mode_prompt: None,
             },
         ),
         (
@@ -1343,6 +1347,8 @@ fn permission_request_goldens() -> Vec<(&'static str, PermissionRequest)> {
                 kind: PermissionKindDto::BypassPermissionsMode,
                 worker: None,
                 owner: None,
+                suppress_always_allow_rule: false,
+                auto_mode_prompt: None,
             },
         ),
         (
@@ -1360,6 +1366,8 @@ fn permission_request_goldens() -> Vec<(&'static str, PermissionRequest)> {
                     team: None,
                 }),
                 owner: None,
+                suppress_always_allow_rule: false,
+                auto_mode_prompt: None,
             },
         ),
     ]

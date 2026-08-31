@@ -352,6 +352,43 @@ fn sandbox_auto_allow_from_settings_tiers(
     )
 }
 
+/// Add config-side MCP tool policy rules to the boot rule vector.
+fn append_mcp_permission_rules(
+    rules: &mut Vec<permission::PermissionRule>,
+    servers: &[mcp::McpServerConfig],
+    allow_managed_permission_rules_only: bool,
+) {
+    if allow_managed_permission_rules_only {
+        return;
+    }
+    for server in servers {
+        rules.extend(permission::permission_rules_from_mcp_tool_policies(
+            &server.name,
+            &server.tools,
+        ));
+    }
+}
+
+fn append_restricted_builtin_denies(
+    rules: &mut Vec<permission::PermissionRule>,
+    allowed_tools: Option<&[String]>,
+) {
+    const DEFAULT_RESTRICTED_DENIES: &[&str] = &["Bash", "PowerShell", "REPL", "WebFetch"];
+    for tool_name in DEFAULT_RESTRICTED_DENIES {
+        if allowed_tools.is_some_and(|tools| tools.iter().any(|tool| tool == tool_name)) {
+            continue;
+        }
+        rules.push(permission::PermissionRule {
+            value: permission::PermissionRuleValue {
+                tool_name: (*tool_name).to_string(),
+                rule_content: None,
+            },
+            behavior: permission::PermissionBehavior::Deny,
+            source: permission::PermissionRuleSource::CliArg,
+        });
+    }
+}
+
 /// (SANDBOX.1) Fold the `sandbox` subsection of the settings tiers (ascending
 /// priority, last write wins) into a full [`sandbox::runtime_config::SandboxRuntimeConfig`].
 ///
@@ -462,6 +499,15 @@ async fn load_boot_permission_tiers(
     cwd: &std::path::Path,
     setting_source_scope: (bool, bool),
 ) -> BootPermissionTiers {
+    load_boot_permission_tiers_with_flag(lingxi_home, cwd, setting_source_scope, None).await
+}
+
+async fn load_boot_permission_tiers_with_flag(
+    lingxi_home: &std::path::Path,
+    cwd: &std::path::Path,
+    setting_source_scope: (bool, bool),
+    flag_settings: Option<&engine::settings::SettingsJson>,
+) -> BootPermissionTiers {
     let mut rules = Vec::new();
     // With no explicit setting, new sessions start in Auto.  The resolved
     // mode is still passed through the existing model/provider/killswitch gate
@@ -551,6 +597,45 @@ async fn load_boot_permission_tiers(
                 .extend(permission::additional_directories_from_settings_json(&raw));
             raw_tiers.push(raw); // ascending priority preserved for sandbox derivation
         }
+    }
+    if let Some(raw) = flag_settings.and_then(|settings| serde_json::to_string(settings).ok()) {
+        let source = permission::PermissionRuleSource::FlagSettings;
+        match permission::permission_rules_from_settings_json(&raw, source) {
+            Ok(mut r) => {
+                for rule in &r {
+                    if let Some(line) =
+                        permission::permission_rule_startup_warning(rule, "flag settings")
+                    {
+                        tracing::warn!("{line}");
+                    }
+                }
+                rules.append(&mut r);
+            }
+            Err(e) => tracing::warn!(error = %e, "skipping malformed flag settings permissions"),
+        }
+        if let Some(m) = permission::default_mode_from_settings_json(&raw) {
+            if m != permission::PermissionMode::Auto
+                || permission::loader::auto_mode_grantable_by_source(source)
+            {
+                mode = m;
+            } else {
+                tracing::warn!(
+                    source = ?source,
+                    "settings defaultMode \"auto\" ignored — only policy/user/flag settings may grant auto mode (projectSettings and localSettings are repo-controllable)"
+                );
+            }
+        }
+        if permission::bypass_permissions_disabled_from_settings_json(&raw) {
+            bypass_disabled = true;
+        }
+        if permission::auto_mode_disabled_from_settings_json(&raw) {
+            auto_mode_disabled = true;
+        }
+        if permission::classify_all_shell_from_settings_json(&raw) {
+            classify_all_shell = true;
+        }
+        additional_working_dirs.extend(permission::additional_directories_from_settings_json(&raw));
+        raw_tiers.push(raw);
     }
     // Managed (policySettings) tier — HIGHEST priority, read LAST. Deliberately
     // NOT gated by `--setting-sources` (see the doc comment above).
@@ -1788,14 +1873,35 @@ impl tool_workflow::WorkflowLauncher for TaskRegistryWorkflowLauncher {
                 cwd.join(path)
             }
         };
-        // §14 — the SAME registry `WorkflowTool::validate_input` checked, so
-        // a name that validated resolves here too.
-        let script = tool_workflow::resolve_script_at(
-            &cwd,
-            &spec,
-            |p| std::fs::read_to_string(abs(p)),
-            Some(self.plugin_workflows.as_ref()),
-        )?;
+        // A caller-supplied scriptPath must carry the exact approval snapshot
+        // produced by `WorkflowTool::check_permissions`. Never reopen the
+        // model pathname here: a parent or leaf symlink may have retargeted
+        // since the nested Read decision.
+        let script =
+            if let Some(raw_path) = spec.script_path.as_deref().filter(|path| !path.is_empty()) {
+                let approval = spec.script_path_approval.take().ok_or_else(|| {
+                    tool_workflow::WorkflowLaunchError(
+                        "Workflow scriptPath permission snapshot is missing; refusing to read it"
+                            .into(),
+                    )
+                })?;
+                let requested = abs(raw_path);
+                if approval.requested != requested {
+                    return Err(tool_workflow::WorkflowLaunchError(
+                        "Workflow scriptPath changed after permission was checked".into(),
+                    ));
+                }
+                tool_workflow::read_script_path_after_permission(&approval)?
+            } else {
+                // §14 — the SAME registry `WorkflowTool::validate_input` checked,
+                // so a name that validated resolves here too.
+                tool_workflow::resolve_script_at(
+                    &cwd,
+                    &spec,
+                    |p| std::fs::read_to_string(abs(p)),
+                    Some(self.plugin_workflows.as_ref()),
+                )?
+            };
         // Reject a malformed `meta` block at the tool boundary (claude-code parses
         // + validates `meta` when the Workflow tool accepts a script). The
         // byte-exact message surfaces to the model as the tool error.
@@ -2653,6 +2759,12 @@ pub struct DesktopConfig {
     /// `--agents` flag (`r?.strictMcpConfig && t.source !== "flagSettings"`).
     /// `false` (the default) ⟶ no strict gating.
     pub strict_mcp_config: bool,
+    /// Claude Code 2.1.251 restricted-session bit. Separate from permission
+    /// mode: it narrows settings sources and protected-write handling without
+    /// changing the selected mode.
+    pub restricted: bool,
+    /// Explicit `--tools` names carried by a restricted session.
+    pub restricted_tools: Option<Vec<String>>,
     /// CLI `--exclude-dynamic-system-prompt-sections`. Threaded into
     /// `OrchestratorConfig::exclude_dynamic_system_prompt_sections`: moves the
     /// per-machine env block out of the (cacheable) system prompt and into the
@@ -3045,6 +3157,11 @@ impl std::fmt::Debug for DesktopConfig {
             .field("add_dir", &self.add_dir)
             .field("cli_mcp_server_count", &self.cli_mcp_servers.len())
             .field("strict_mcp_config", &self.strict_mcp_config)
+            .field("restricted", &self.restricted)
+            .field(
+                "restricted_tools",
+                &self.restricted_tools.as_ref().map(Vec::len),
+            )
             .field(
                 "exclude_dynamic_system_prompt_sections",
                 &self.exclude_dynamic_system_prompt_sections,
@@ -3120,6 +3237,8 @@ impl Default for DesktopConfig {
             cli_mcp_servers: Vec::new(),
             // Default: no `--strict-mcp-config` (ambient MCP configs load).
             strict_mcp_config: false,
+            restricted: false,
+            restricted_tools: None,
             exclude_dynamic_system_prompt_sections: false,
             // Default: all setting tiers load (absent `--setting-sources`).
             setting_source_scope: (true, true),
@@ -4464,6 +4583,40 @@ fn load_merged_settings(project_dir: &Path) -> Option<engine::settings::Effectiv
     Some(value)
 }
 
+fn load_effective_settings_for_config(
+    cfg: &DesktopConfig,
+    managed_raw_tiers: &[String],
+) -> Option<engine::settings::EffectiveSettings> {
+    let env: BTreeMap<String, String> = std::env::vars().collect();
+    let managed_layers: Vec<engine::settings::SettingsJson> = managed_raw_tiers
+        .iter()
+        .filter_map(|raw| serde_json::from_str(raw).ok())
+        .collect();
+    let (include_user, include_project) = if cfg.restricted {
+        (false, false)
+    } else {
+        cfg.setting_source_scope
+    };
+    engine::settings::Settings::load_with_layers_from_user_path(
+        engine::settings::LoadInputs {
+            env: &env,
+            project_dir: &cfg.cwd,
+            defaults: engine::settings::schema::SettingsJson::default(),
+        },
+        engine::settings::FileLayerScope {
+            include_user,
+            include_project,
+            include_local: include_project,
+        },
+        engine::settings::SupplementalLayers {
+            cli_layer: cfg.flag_settings.as_ref(),
+            managed_layers: &managed_layers,
+        },
+        Some(&cfg.lingxi_home.join("settings.json")),
+    )
+    .ok()
+}
+
 static SETTINGS_CACHE: OnceLock<Mutex<Option<MergedSettingsCacheEntry>>> = OnceLock::new();
 
 fn load_merged_output_style(project_dir: &std::path::Path) -> Option<String> {
@@ -4783,6 +4936,10 @@ async fn build_agent_mcp_tool_set(
     let mut cleanups = Vec::new();
     for entry in scoped {
         let plain_name = entry.config.name.clone();
+        // Keep the config-side permission declarations before the connection
+        // call consumes the scoped entry. The same declarations must reach
+        // both shared and agent-scoped per-tool builders.
+        let entry_config = entry.config.clone();
         let (table_key, bound_key): (String, Option<String>) = if entry.is_newly_created {
             match mcp_registry
                 .connect_agent_scoped(entry.config, agent_id)
@@ -4844,6 +5001,13 @@ async fn build_agent_mcp_tool_set(
                 dto.always_load.unwrap_or(false),
                 dto.requires_user_interaction,
             );
+            let tool = if let Some(ceiling) =
+                tool_mcp::configured_permission_ceiling(&entry_config, &dto.tool_name)
+            {
+                tool.with_mcp_permission_ceiling(ceiling)
+            } else {
+                tool
+            };
             let tool = match &bound_key {
                 Some(key) => tool.with_bound_server_key(key.clone()),
                 None => tool,
@@ -6656,7 +6820,16 @@ pub async fn build(
     permission_sink: Arc<dyn PermissionRequestSink>,
 ) -> Result<DesktopRuntime, BuildError> {
     let cwd = cfg.cwd.clone();
-    let vision_delegation_enabled = load_merged_vision_delegation_enabled(&cwd);
+    let managed_settings_for_strict = crate::settings_watch::managed_settings_raw_tiers().await;
+    let effective_settings = load_effective_settings_for_config(&cfg, &managed_settings_for_strict);
+    let vision_delegation_enabled = if cfg.restricted {
+        effective_settings
+            .as_ref()
+            .and_then(|settings| settings.settings.vision_delegation_enabled)
+            .unwrap_or(true)
+    } else {
+        load_merged_vision_delegation_enabled(&cwd)
+    };
 
     // On-disk data-retention sweep (claude-code `fWu`). DELETES stale
     // session-file entries (todos/statsig/logs older than the retention period),
@@ -6908,7 +7081,13 @@ pub async fn build(
     orch_cfg.interactive_permissions = interactive_session;
     // Resolve output style before query identity: Claude Code includes builtin
     // output-style names in `repl_main_thread:outputStyle:*`.
-    let output_style = load_merged_output_style(&cfg.cwd);
+    let output_style = if cfg.restricted {
+        effective_settings
+            .as_ref()
+            .and_then(|settings| settings.settings.output_style.clone())
+    } else {
+        load_merged_output_style(&cfg.cwd)
+    };
     // Claude Code 2.1.245: CLI is `repl_main_thread`, SDK/bridge transport is
     // `sdk`, and print is the explicit headless print mode only.
     let (query_source, print) = session_composition
@@ -6930,8 +7109,14 @@ pub async fn build(
     // via `with_initial_effort`). `None` (no `--effort`) omits the field, keeping
     // transcripts byte-identical.
     orch_cfg.effort.clone_from(&cfg.initial_effort);
-    orch_cfg.workflow_keyword_trigger_enabled =
-        load_merged_workflow_keyword_trigger_enabled(&cfg.cwd);
+    orch_cfg.workflow_keyword_trigger_enabled = if cfg.restricted {
+        effective_settings
+            .as_ref()
+            .and_then(|settings| settings.settings.workflow_keyword_trigger_enabled)
+            .unwrap_or(false)
+    } else {
+        load_merged_workflow_keyword_trigger_enabled(&cfg.cwd)
+    };
     // CLI `--max-turns` / `--max-budget` caps. Unset leaves the OrchestratorConfig
     // defaults (unbounded turns / no cost cap). USD → nano-USD for the cost cap.
     if let Some(max_turns) = cfg.max_turns {
@@ -6972,12 +7157,22 @@ pub async fn build(
     // `# Output Style: <name>` section (Explanatory / Learning builtins). `None`
     // / "default" / unknown ⇒ no section (prompt byte-identical to before).
     orch_cfg.output_style = output_style;
-    traits::session_flags::set_show_thinking_summaries(load_merged_show_thinking_summaries(
-        &cfg.cwd,
-    ));
-    traits::session_flags::set_agent_push_notif_enabled(load_merged_agent_push_notif_enabled(
-        &cfg.cwd,
-    ));
+    traits::session_flags::set_show_thinking_summaries(if cfg.restricted {
+        effective_settings
+            .as_ref()
+            .and_then(|settings| settings.settings.show_thinking_summaries)
+            .unwrap_or(false)
+    } else {
+        load_merged_show_thinking_summaries(&cfg.cwd)
+    });
+    traits::session_flags::set_agent_push_notif_enabled(if cfg.restricted {
+        effective_settings
+            .as_ref()
+            .and_then(|settings| settings.settings.agent_push_notif_enabled)
+            .unwrap_or(false)
+    } else {
+        load_merged_agent_push_notif_enabled(&cfg.cwd)
+    });
     // OUTSTYLE.3: custom output-style search dirs — user (`~/.lingxi/output-styles`)
     // then project (`<cwd>/.lingxi/output-styles`), in increasing priority so a
     // project style overrides a user one and both override the builtins. A
@@ -7270,7 +7465,6 @@ pub async fn build(
     // project `.mcp.json` (mcp_paths[0]), user + local both inside the global
     // config `~/.lingxi.json` (mcp_paths[1]); local is keyed by the canonical
     // project key for `cwd`.
-    let managed_settings_for_strict = crate::settings_watch::managed_settings_raw_tiers().await;
     let strict_plugin_policy = Arc::new(plugin::StrictPluginOnlyPolicy::from_settings_tiers(
         managed_settings_for_strict.iter().map(String::as_str),
     ));
@@ -7637,11 +7831,12 @@ pub async fn build(
     //   to surface a prompt, so they keep the `NoOpPermissionGate` (always-allow) or
     //   `DenyOnAskGate` (deny-on-ask) inner per `use_noop_permission_gate` /
     //   `deny_unresolved_ask`. Either way deny rules + modes are enforced below.
-    let enforce_permissions = should_enforce_permissions(
-        std::env::var("LINGXI_ENFORCE_PERMISSIONS").ok().as_deref(),
-        cfg.use_noop_permission_gate,
-        cfg.permission_mode,
-    );
+    let enforce_permissions = cfg.restricted
+        || should_enforce_permissions(
+            std::env::var("LINGXI_ENFORCE_PERMISSIONS").ok().as_deref(),
+            cfg.use_noop_permission_gate,
+            cfg.permission_mode,
+        );
     // Read(deny) → search-exclude globs (GrepTool.ts:417-427, glob.ts lLa()).
     // Populated inside the enforcement branch below from the boot policy and
     // threaded into the tool ctx so `Grep`/`Glob` skip denied/sensitive paths.
@@ -7687,7 +7882,7 @@ pub async fn build(
         // `allowManagedPermissionRulesOnly: true` drops every non-managed rule.
         // Full tier semantics on `load_boot_permission_tiers`.
         let BootPermissionTiers {
-            rules,
+            mut rules,
             mut mode,
             bypass_disabled,
             auto_mode_disabled,
@@ -7695,7 +7890,24 @@ pub async fn build(
             mut additional_working_dirs,
             raw_tiers,
             allow_managed_permission_rules_only,
-        } = load_boot_permission_tiers(&cfg.lingxi_home, &cwd, cfg.setting_source_scope).await;
+        } = load_boot_permission_tiers_with_flag(
+            &cfg.lingxi_home,
+            &cwd,
+            cfg.setting_source_scope,
+            cfg.flag_settings.as_ref(),
+        )
+        .await;
+        if cfg.restricted {
+            additional_working_dirs.clear();
+        }
+        append_mcp_permission_rules(
+            &mut rules,
+            &mcp_configs,
+            allow_managed_permission_rules_only,
+        );
+        if cfg.restricted {
+            append_restricted_builtin_denies(&mut rules, cfg.restricted_tools.as_deref());
+        }
         // CLI `--add-dir <directories...>`: union the host-provided dirs into
         // the working-dir set, exactly like a settings-tier
         // `additionalDirectories` entry (claude-code "Additional directories
@@ -7783,6 +7995,7 @@ pub async fn build(
                 .with_workspace_leases(workspace_leases.clone())
                 .with_sandbox_runtime(sandbox_auto_allow)
                 .with_managed_permission_rules_only(allow_managed_permission_rules_only)
+                .with_restricted(cfg.restricted)
                 // `autoMode.classifyAllShell` escalation (`QOi()`): any tier enabling
                 // it suspends every Bash/PowerShell allow rule in auto mode.
                 .with_classify_all_shell(classify_all_shell)
@@ -7794,8 +8007,9 @@ pub async fn build(
                 // vetoes it. (`g`, the Statsig remote killswitch, is a documented
                 // omission here like the other remote gates.)
                 .with_bypass_available(
-                    (mode == permission::PermissionMode::BypassPermissions
-                        || cfg.allow_dangerously_skip_permissions)
+                    !cfg.restricted
+                        && (mode == permission::PermissionMode::BypassPermissions
+                            || cfg.allow_dangerously_skip_permissions)
                         && !bypass_disabled,
                 )
                 // Enable PowerShell path-containment via a real `pwsh` parse
@@ -7941,7 +8155,19 @@ pub async fn build(
     // (`allowedHttpHookUrls` / `httpHookAllowedEnvVars`) from the merged settings
     // so the HTTP hook executor gates outbound URLs + intersects the per-hook
     // env-var allowlist. `(None, None)` = no restriction (behavior-neutral).
-    let (http_hook_urls, http_hook_env_vars) = load_merged_http_hook_policy(&cwd);
+    let (http_hook_urls, http_hook_env_vars) = if cfg.restricted {
+        effective_settings
+            .as_ref()
+            .map(|settings| {
+                (
+                    settings.settings.allowed_http_hook_urls.clone(),
+                    settings.settings.http_hook_allowed_env_vars.clone(),
+                )
+            })
+            .unwrap_or((None, None))
+    } else {
+        load_merged_http_hook_policy(&cwd)
+    };
     // Transcript sink for the per-hook-run `attachment` records claude-code
     // persists (one `hook_success` / `hook_non_blocking_error` /
     // `hook_cancelled` line per hook run). Created empty here because the hook
@@ -7955,7 +8181,14 @@ pub async fn build(
             http.clone(),
             hook_runtime as Arc<dyn traits::RuntimeSpawner>,
         )
-        .with_policy_disable_all_hooks(load_merged_disable_all_hooks(&cwd))
+        .with_policy_disable_all_hooks(if cfg.restricted {
+            effective_settings
+                .as_ref()
+                .and_then(|settings| settings.settings.disable_all_hooks)
+                .unwrap_or(false)
+        } else {
+            load_merged_disable_all_hooks(&cwd)
+        })
         .with_http_hook_policy(http_hook_urls, http_hook_env_vars)
         .with_process_runner(
             Arc::new(PosixProcess::new()) as Arc<dyn traits::ProcessRunner>,
@@ -8642,18 +8875,24 @@ pub async fn build(
         // Read the USER tier (lingxi_home/settings.json) separately so the
         // source-restricted `allowAppleEvents` resolution can consult it: CC honors
         // allowAppleEvents from user / managed / flag only, NOT project/local.
-        let user_settings_raw = tokio::fs::read_to_string(cfg.lingxi_home.join("settings.json"))
-            .await
-            .ok();
+        let user_settings_raw = if cfg.restricted {
+            None
+        } else {
+            tokio::fs::read_to_string(cfg.lingxi_home.join("settings.json"))
+                .await
+                .ok()
+        };
         if let Some(raw) = &user_settings_raw {
             tiers.push(raw.clone());
         }
-        for p in [
-            cwd.join(branding::DOT_DIR).join("settings.json"),
-            cwd.join(branding::DOT_DIR).join("settings.local.json"),
-        ] {
-            if let Ok(raw) = tokio::fs::read_to_string(&p).await {
-                tiers.push(raw);
+        if !cfg.restricted {
+            for p in [
+                cwd.join(branding::DOT_DIR).join("settings.json"),
+                cwd.join(branding::DOT_DIR).join("settings.local.json"),
+            ] {
+                if let Ok(raw) = tokio::fs::read_to_string(&p).await {
+                    tiers.push(raw);
+                }
             }
         }
         // CLI `--settings` / `flagSettings` sits between localSettings and
@@ -8925,7 +9164,14 @@ pub async fn build(
         // (P2-14) `settings.skipWebFetchPreflight` → WebFetch skips the
         // domain-blocklist preflight (enterprise escape hatch). Read from the
         // merged settings via the same `Settings::load` seam as outputStyle.
-        skip_web_fetch_preflight: load_merged_skip_web_fetch_preflight(&cwd),
+        skip_web_fetch_preflight: if cfg.restricted {
+            effective_settings
+                .as_ref()
+                .and_then(|settings| settings.settings.skip_web_fetch_preflight)
+                .unwrap_or(false)
+        } else {
+            load_merged_skip_web_fetch_preflight(&cwd)
+        },
         // (M-15) `settings.askUserQuestionTimeout` → the AskUserQuestion resolver's
         // idle window. Read from the merged settings via the same `Settings::load`
         // seam; parsed into `AskUserQuestionTimeout` at `tool_ui` registration.
@@ -9332,22 +9578,23 @@ pub async fn build(
             workflow_policy_enabled && workflow_session_enabled,
             workflow_session_managed || !workflow_policy_enabled,
         );
-        tools_inner.register_builtin(Arc::new(
-            tool_workflow::WorkflowTool::new(Some(workflow_launcher))
-                .with_current_cwd(current_cwd_cell.clone())
-                .with_size_guideline_state(workflow_size_guideline_state.clone())
-                .with_size_guideline_source(
-                    workflow_size_guideline,
-                    managed_workflow,
-                    default_workflow,
-                )
-                .with_disable_workflows(managed_disable_workflows)
-                .with_dynamic_workflows_gate(dynamic_workflows_gate.clone())
-                .with_session_enabled(workflow_session_enabled)
-                // §14 — the SAME registry the launcher above holds, so
-                // `validate_input` and `launch` agree on what resolves.
-                .with_plugin_workflows(plugin_workflow_registry.clone()),
-        ));
+        let mut workflow_tool = tool_workflow::WorkflowTool::new(Some(workflow_launcher))
+            .with_current_cwd(current_cwd_cell.clone())
+            .with_size_guideline_state(workflow_size_guideline_state.clone())
+            .with_size_guideline_source(workflow_size_guideline, managed_workflow, default_workflow)
+            .with_disable_workflows(managed_disable_workflows)
+            .with_dynamic_workflows_gate(dynamic_workflows_gate.clone())
+            .with_session_enabled(workflow_session_enabled)
+            // §14 — the SAME registry the launcher above holds, so
+            // `validate_input` and `launch` agree on what resolves.
+            .with_plugin_workflows(plugin_workflow_registry.clone())
+            // Route the nested `Read` check through the same enforcing gate as
+            // the main turn, including its interactive/headless behavior.
+            .with_permission_gate(perms.clone());
+        if let Some(policy) = boot_permission_policy.clone() {
+            workflow_tool = workflow_tool.with_permission_policy(policy);
+        }
+        tools_inner.register_builtin(Arc::new(workflow_tool));
     }
     for (conn_id, mcp_tools) in
         tool_mcp::build_registered_mcp_tools(&mcp_registry, mcp_tool_ctx.clone()).await
@@ -9391,6 +9638,10 @@ pub async fn build(
             ));
             slot
         });
+
+    if cfg.restricted {
+        tools_inner.set_restricted_builtin_filter(cfg.restricted_tools.as_deref());
+    }
 
     // Tool Search (2.1.207): now that the registry is fully assembled (builtins
     // + workflow + MCP + structured-output + end-conversation), publish the
@@ -9603,22 +9854,16 @@ pub async fn build(
     // moved into the orchestrator). A `FileChanged` hook's group `matcher`
     // (`HookDefinition::matcher()`) is the pipe-separated filename list
     // claude-code's `resolveWatchPaths` reads (`fileChangedWatcher.ts:48-65`).
-    let (has_config_change_hook, file_changed_matchers): (bool, Vec<String>) = {
+    let file_changed_matchers: Vec<String> = {
         let reg = hook_registry.read().await;
         let all = reg.all_hooks();
-        let has_config_change = all.iter().any(|h| {
-            h.events
-                .contains(&hooks::events::HookEventType::ConfigChange)
-        });
-        let matchers = all
-            .iter()
+        all.iter()
             .filter(|h| {
                 h.events
                     .contains(&hooks::events::HookEventType::FileChanged)
             })
             .filter_map(|h| h.matcher().map(ToString::to_string))
-            .collect();
-        (has_config_change, matchers)
+            .collect()
     };
     // Build the `FileChanged` firer over the SAME `Arc<HookExecutorImpl>` the
     // orchestrator is about to take ownership of (mirrors the `cwd_changed_firer`
@@ -9696,7 +9941,18 @@ pub async fn build(
     let goal_workspace_trusted = migrations::global_config::global_config_path()
         .map(|cfg| migrations::global_config::check_has_trust_dialog_accepted(&cfg, &cwd))
         .unwrap_or(false);
-    let goal_hooks_restricted = load_merged_hooks_restricted(&cwd);
+    let goal_hooks_restricted = if cfg.restricted {
+        effective_settings
+            .as_ref()
+            .map(|settings| {
+                settings.settings.disable_all_hooks.unwrap_or(false)
+                    || settings.settings.allow_managed_hooks_only.unwrap_or(false)
+            })
+            .unwrap_or(false)
+    } else {
+        load_merged_hooks_restricted(&cwd)
+    };
+    let settings_permission_gate = perms.clone();
     let orch_builder = ConversationOrchestrator::new_with_streaming(
         orch_cfg,
         api_client,
@@ -10651,16 +10907,13 @@ pub async fn build(
     //       thread) would be pure overhead in the common no-hook case — gating
     //       keeps boot cheap and avoids holding an OS watch handle nobody
     //       consumes.
-    let settings_watcher = if has_config_change_hook {
-        let watch_fs: Arc<dyn traits::FileSystem> =
-            Arc::new(PosixFileSystem::new(watch_cwd.clone()));
-        let firer: Arc<dyn settings_watch::ConfigChangeFirer> = orch.clone();
+    let watch_fs: Arc<dyn traits::FileSystem> = Arc::new(PosixFileSystem::new(watch_cwd.clone()));
+    let firer: Arc<dyn settings_watch::ConfigChangeFirer> = orch.clone();
+    let settings_watcher =
         settings_watch::SettingsWatcher::new(&cfg.lingxi_home, &watch_cwd, firer)
+            .with_permission_gate(settings_permission_gate)
             .spawn(watch_fs)
-            .await
-    } else {
-        settings_watch::SettingsWatcherHandle::empty()
-    };
+            .await;
 
     // (7.3) FileChanged lifecycle: start the file-changed watcher now that the
     //       orchestrator + hook registry are wired. claude-code resolves a set
@@ -11747,6 +12000,8 @@ mod tests {
                 disabled: false,
                 timeout_ms: None,
                 always_load: false,
+                tools: vec![],
+                tool_permissions: std::collections::BTreeMap::new(),
                 discovery_cache: None,
                 config_error: None,
             }
@@ -11941,6 +12196,150 @@ mod tests {
     }
 
     #[test]
+    fn mcp_tool_policy_rules_are_composed_into_the_boot_policy() {
+        let server = mcp::McpServerConfig {
+            name: "remote.server".into(),
+            spec: traits::McpTransportSpec::InProcess {
+                registry_key: "remote.server".into(),
+            },
+            scope: mcp::ConfigScope::Dynamic,
+            disabled: false,
+            timeout_ms: None,
+            always_load: false,
+            tools: vec![traits::McpConfiguredToolPolicyDto {
+                name: "delete_data".into(),
+                permission_policy: Some(traits::McpToolPermissionPolicy::AlwaysDeny),
+                org_max_permission: None,
+            }],
+            tool_permissions: std::collections::BTreeMap::new(),
+            discovery_cache: None,
+            config_error: None,
+        };
+        let mut rules = Vec::new();
+        super::append_mcp_permission_rules(&mut rules, &[server], false);
+        let policy = permission::PermissionPolicy::from_rules(
+            permission::PermissionMode::BypassPermissions,
+            rules,
+        );
+        assert!(matches!(
+            policy.authorize("mcp__remote_server__delete_data", &serde_json::json!({})),
+            permission::PermissionResult::Deny {
+                reason: permission::PermissionDecisionReason::MatchedRule { .. },
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn agent_scoped_mcp_builder_carries_policy_and_interaction_metadata() {
+        let agent_id = protocol::AgentId::new();
+        let config_json = serde_json::json!({
+            "command": "unused-in-test",
+            "tools": [
+                {"name": "deny", "permissionPolicy": "always_deny"},
+                {"name": "ask", "permissionPolicy": "always_ask"}
+            ],
+            "toolPermissions": {
+                "deny": "ask",
+                "ask": "allow"
+            }
+        });
+        let config =
+            mcp::build_server_from_json_entry("srv", &config_json, mcp::ConfigScope::Agent)
+                .expect("agent MCP config parses");
+        let table_key = mcp::registry::agent_scope_table_key(agent_id, "srv");
+        let dto = |tool_name: &str, requires_user_interaction: bool| traits::McpToolDto {
+            server_name: "srv".into(),
+            tool_name: tool_name.into(),
+            description: tool_name.into(),
+            input_schema: serde_json::json!({"type": "object"}),
+            full_name: format!("mcp__srv__{tool_name}"),
+            search_hint: None,
+            always_load: None,
+            requires_user_interaction,
+        };
+        let connection_id = protocol::McpConnectionId::new();
+        let registry = Arc::new(mcp::McpRegistry::new(Arc::new(
+            platform_posix::PosixMcpTransport::new(),
+        )));
+        registry.connections.write().await.insert(
+            table_key,
+            mcp::McpConnectionState::Connected {
+                config,
+                connection_id,
+                capabilities: traits::ServerCapabilitiesDto {
+                    tools: true,
+                    resources: false,
+                    prompts: false,
+                    logging: false,
+                    directory_read: false,
+                    experimental: std::collections::HashMap::new(),
+                },
+                tools: vec![
+                    dto("deny", false),
+                    dto("ask", false),
+                    dto("interactive", true),
+                ],
+                resources: vec![],
+                resource_templates: vec![],
+                prompts: vec![],
+                connected_at: std::time::SystemTime::now(),
+            },
+        );
+        let mut def = agent::parse_agent_from_json(
+            "tester",
+            &serde_json::json!({"description": "d", "prompt": "p"}),
+            agent::AgentSource::Project,
+        )
+        .expect("agent definition parses");
+        let mut server = serde_json::Map::new();
+        server.insert("srv".into(), config_json);
+        def.mcp_servers = vec![agent::AgentMcpServerSpec::Record(server)];
+
+        let mut ctx = tool_api::test_support::ctx_for_file_tools(
+            tool_api::test_support::make_dummy_fs(),
+            Arc::new(telemetry::AnalyticsBus::new()),
+            vec![std::path::PathBuf::from("/tmp")],
+        );
+        ctx.mcp_registry = Some(registry.clone());
+        let set = super::build_agent_mcp_tool_set(registry, ctx, false, false, agent_id, def).await;
+        assert_eq!(set.tools.len(), 3);
+
+        let deny = set
+            .tools
+            .iter()
+            .find(|tool| tool.name() == "mcp__srv__deny")
+            .expect("agent-scoped deny tool is registered")
+            .check_permissions(&serde_json::json!({}), &tool_api::test_support::fresh_ctx())
+            .await;
+        assert!(matches!(deny, permission::PermissionResult::Deny { .. }));
+
+        let ask = set
+            .tools
+            .iter()
+            .find(|tool| tool.name() == "mcp__srv__ask")
+            .expect("agent-scoped ask tool is registered")
+            .check_permissions(&serde_json::json!({}), &tool_api::test_support::fresh_ctx())
+            .await;
+        assert!(matches!(ask, permission::PermissionResult::Ask { .. }));
+
+        let interactive = set
+            .tools
+            .iter()
+            .find(|tool| tool.name() == "mcp__srv__interactive")
+            .expect("agent-scoped interactive tool is registered")
+            .check_permissions(&serde_json::json!({}), &tool_api::test_support::fresh_ctx())
+            .await;
+        assert!(matches!(
+            interactive,
+            permission::PermissionResult::Ask {
+                reason: permission::PermissionDecisionReason::PermissionPromptTool { ref tool_name },
+                ..
+            } if tool_name == "mcp__srv__interactive"
+        ));
+    }
+
+    #[test]
     fn oauth_subscriber_flag_gating() {
         use llm_client::oauth::anthropic::resolver::{resolve, ResolverContext};
         let inference = vec!["user:inference".to_string(), "user:profile".to_string()];
@@ -12127,6 +12526,8 @@ mod tests {
             add_dir: Vec::new(),
             cli_mcp_servers: Vec::new(),
             strict_mcp_config: false,
+            restricted: false,
+            restricted_tools: None,
             exclude_dynamic_system_prompt_sections: false,
             setting_source_scope: (true, true),
             customization_gates: super::CustomizationGates::default(),
@@ -14567,6 +14968,72 @@ mod tests {
             rt.coordinator.list().await.is_empty(),
             "a freshly-built coordinator session has no workers yet"
         );
+    }
+
+    #[tokio::test]
+    async fn restricted_build_hides_default_restricted_builtins_from_advertising() {
+        let (_tmp, mut cfg) = test_config(true);
+        cfg.restricted = true;
+        let output: Arc<dyn traits::OutputStream> =
+            Arc::new(orchestrator::test_support::MockOutputStream::new());
+        let perm_sink: Arc<dyn client_adapter::PermissionRequestSink> =
+            Arc::new(RecordingPermissionSink::default());
+
+        let rt = build(cfg, output, perm_sink).await.expect("build() failed");
+        let tool_names = rt.orchestrator.tool_names();
+
+        for hidden in [
+            "Agent",
+            "Bash",
+            "CronCreate",
+            "PowerShell",
+            "REPL",
+            "RemoteTrigger",
+            "WebFetch",
+            "Workflow",
+        ] {
+            assert!(
+                !tool_names.iter().any(|name| name == hidden),
+                "restricted sessions must not advertise {hidden}"
+            );
+        }
+        assert!(
+            tool_names.iter().any(|name| name == "Read"),
+            "restricted filtering must not drop unrelated builtins"
+        );
+    }
+
+    #[tokio::test]
+    async fn restricted_build_keeps_explicit_tool_allowlist_visible() {
+        let (_tmp, mut cfg) = test_config(true);
+        cfg.restricted = true;
+        cfg.restricted_tools = Some(vec!["Bash".into(), "WebFetch".into()]);
+        let output: Arc<dyn traits::OutputStream> =
+            Arc::new(orchestrator::test_support::MockOutputStream::new());
+        let perm_sink: Arc<dyn client_adapter::PermissionRequestSink> =
+            Arc::new(RecordingPermissionSink::default());
+
+        let rt = build(cfg, output, perm_sink).await.expect("build() failed");
+        let tool_names = rt.orchestrator.tool_names();
+
+        for allowed in ["Bash", "WebFetch"] {
+            assert!(
+                tool_names.iter().any(|name| name == allowed),
+                "explicit restricted --tools must keep {allowed} advertised"
+            );
+        }
+        for hidden in [
+            "Agent",
+            "CronCreate",
+            "PowerShell",
+            "RemoteTrigger",
+            "Workflow",
+        ] {
+            assert!(
+                !tool_names.iter().any(|name| name == hidden),
+                "only explicitly-allowed restricted builtins may stay visible"
+            );
+        }
     }
 
     /// A coordinator session can route a `SendMessage` to a registered worker
@@ -17339,6 +17806,7 @@ mod workspace_lease_forwarding_tests {
             tool_use_id: None,
             depth: 0,
             observer: None,
+            request_source: None,
             parent_model: None,
             parent_model_profile: None,
             mode_override: None,

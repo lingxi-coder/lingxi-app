@@ -61,6 +61,11 @@ use tool_api::util::path_validation::{
 };
 use tool_api::BuiltinToolContext;
 
+use crate::shared::{
+    open_rooted_search_file, run_search_candidate_hook, run_search_preparation_hook,
+    SearchResolutionError, SearchResolutionSnapshot,
+};
+
 /// Tool name byte-lock.
 pub const TOOL_NAME: &str = "Grep";
 
@@ -620,6 +625,7 @@ static INPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
 
 struct GrepWalkArgs {
     canon_base: PathBuf,
+    search_resolution: SearchResolutionSnapshot,
     overrides: ignore::overrides::Override,
     types_filter: Option<ignore::types::Types>,
     matcher: RegexMatcher,
@@ -643,9 +649,10 @@ struct GrepWalkResult {
     timed_out: bool,
 }
 
-fn grep_walk(args: GrepWalkArgs) -> GrepWalkResult {
+fn grep_walk(args: GrepWalkArgs) -> Result<GrepWalkResult, SearchResolutionError> {
     let GrepWalkArgs {
         canon_base,
+        search_resolution,
         overrides,
         types_filter,
         matcher,
@@ -661,6 +668,7 @@ fn grep_walk(args: GrepWalkArgs) -> GrepWalkResult {
         ctx_after,
     } = args;
 
+    search_resolution.verify()?;
     let mut wb = WalkBuilder::new(&canon_base);
     wb.hidden(false); // --hidden: search dotfiles
     wb.overrides(overrides);
@@ -675,6 +683,7 @@ fn grep_walk(args: GrepWalkArgs) -> GrepWalkResult {
     let mut timed_out = false;
 
     for entry in wb.build() {
+        search_resolution.verify()?;
         if Instant::now() >= deadline {
             timed_out = true;
             break;
@@ -687,6 +696,15 @@ fn grep_walk(args: GrepWalkArgs) -> GrepWalkResult {
             continue;
         }
         let path = entry.path();
+
+        search_resolution.verify()?;
+        // The walker's regular-file classification is pathname based. Pin the
+        // candidate through a rooted no-follow handle after the classification
+        // (with a deterministic test seam in between), then feed that handle
+        // directly to the searcher so a leaf/ancestor swap cannot reopen an
+        // external pathname.
+        run_search_candidate_hook(path);
+        let mut file = open_rooted_search_file(&canon_base, path)?;
 
         let mut sb = SearcherBuilder::new();
         sb.multi_line(multiline);
@@ -706,7 +724,12 @@ fn grep_walk(args: GrepWalkArgs) -> GrepWalkResult {
             record_lines: content_mode,
             first_match_only: files_mode,
         };
-        let _ = searcher.search_path(&matcher, path, &mut sink);
+        if searcher
+            .search_reader(&matcher, &mut file, &mut sink)
+            .is_err()
+        {
+            return Err(SearchResolutionError::SearchRootChanged);
+        }
 
         total_matches += sink.match_count as u64;
         if sink.match_count == 0 {
@@ -750,7 +773,7 @@ fn grep_walk(args: GrepWalkArgs) -> GrepWalkResult {
             count_lines.push(format!("{rel}:{}", sink.match_count));
         } else {
             // files_with_matches: defer relativize until after sort.
-            let mtime = entry
+            let mtime = file
                 .metadata()
                 .ok()
                 .and_then(|m| m.modified().ok())
@@ -759,13 +782,26 @@ fn grep_walk(args: GrepWalkArgs) -> GrepWalkResult {
         }
     }
 
-    GrepWalkResult {
+    search_resolution.verify()?;
+    Ok(GrepWalkResult {
         content_lines,
         count_lines,
         files_matched,
         total_matches,
         timed_out,
-    }
+    })
+}
+
+fn search_resolution_error(path: &Path, error: SearchResolutionError) -> ToolError {
+    let reason = match error {
+        SearchResolutionError::SearchRootChanged => {
+            "its symlink resolution changed after permission was checked"
+        }
+        SearchResolutionError::ReadDenyPathChanged => {
+            "a path one of its Read deny rules is written through changed while the search was being prepared. Retry."
+        }
+    };
+    ToolError::InvalidInput(format!("Refusing to search {}: {reason}", path.display()))
 }
 
 #[async_trait]
@@ -995,7 +1031,9 @@ impl Tool for GrepTool {
         // the reference does: a rooted
         // (`/`-anchored) entry → `!P`; a bare relative entry → `!**/P` (match at
         // any depth). In `OverrideBuilder`, a `!`-prefixed pattern is an ignore.
-        for p in self.ctx.effective_read_deny_exclude_globs(&canon_base) {
+        let deny_globs = self.ctx.effective_read_deny_exclude_globs(&canon_base);
+        let search_resolution = SearchResolutionSnapshot::capture(&base, &canon_base, &deny_globs);
+        for p in &deny_globs {
             let neg = if p.starts_with('/') {
                 format!("!{p}")
             } else {
@@ -1059,6 +1097,8 @@ impl Tool for GrepTool {
         let is_wsl = self.ctx.platform.as_str() == "wsl";
         let deadline = started + ripgrep_timeout(is_wsl);
         let cwd_for_rel_in_worker = cwd_for_rel.clone();
+        let search_path = base.clone();
+        let search_path_for_hook = base.clone();
 
         let GrepWalkResult {
             content_lines,
@@ -1067,8 +1107,14 @@ impl Tool for GrepTool {
             total_matches,
             timed_out,
         } = tokio::task::spawn_blocking(move || {
+            // This is deliberately after the deny overrides have been built
+            // and immediately before the walk is created. The test hook swaps
+            // a symlink at this exact preparation boundary.
+            run_search_preparation_hook(&search_path_for_hook);
+            search_resolution.verify()?;
             grep_walk(GrepWalkArgs {
                 canon_base,
+                search_resolution,
                 overrides,
                 types_filter,
                 matcher,
@@ -1085,7 +1131,8 @@ impl Tool for GrepTool {
             })
         })
         .await
-        .map_err(|e| ToolError::Io(e.to_string()))?;
+        .map_err(|e| ToolError::Io(e.to_string()))?
+        .map_err(|error| search_resolution_error(&search_path, error))?;
 
         // Mirror `utils/ripgrep.ts:444-454`: a timeout with NO results is a hard
         // error (so the model knows the search didn't complete rather than
@@ -1679,6 +1726,155 @@ mod tests {
             );
             assert!(!out.contains(".env"), "relative deny pruned .env: {out}");
         }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn stable_symlink_search_root_is_allowed() {
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("target");
+        std::fs::create_dir(&target).unwrap();
+        std::fs::write(target.join("hit.rs"), "needle\n").unwrap();
+        let link = tmp.path().join("search-link");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        let (ctx, _sink) = make_ctx(&tmp);
+        let tool = GrepTool::new(ctx);
+        let result = tool
+            .call(
+                json!({ "pattern": "needle", "path": link }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .unwrap();
+        let matches = result.data["filenames"].as_array().unwrap();
+        assert!(matches
+            .iter()
+            .any(|value| value.as_str().unwrap().ends_with("target/hit.rs")));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn candidate_leaf_swap_is_refused_before_grep_reads_content() {
+        let tmp = TempDir::new().unwrap();
+        let victim = TempDir::new().unwrap();
+        let candidate = std::fs::canonicalize(tmp.path())
+            .unwrap()
+            .join("candidate.rs");
+        std::fs::write(&candidate, "needle approved\n").unwrap();
+        let victim_file = victim.path().join("victim.rs");
+        std::fs::write(&victim_file, "needle SECRET_VICTIM_CONTENT\n").unwrap();
+
+        crate::shared::install_search_candidate_hook(&candidate, {
+            let candidate = candidate.clone();
+            let victim_file = victim_file.clone();
+            move || {
+                std::fs::remove_file(&candidate).unwrap();
+                std::os::unix::fs::symlink(victim_file, candidate).unwrap();
+            }
+        });
+
+        let (ctx, _sink) = make_ctx(&tmp);
+        let tool = GrepTool::new(ctx);
+        let error = tool
+            .call(
+                json!({
+                    "pattern": "needle",
+                    "path": tmp.path(),
+                    "output_mode": "content"
+                }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("symlink resolution changed"));
+        assert!(!error.to_string().contains("SECRET_VICTIM_CONTENT"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn search_root_symlink_retarget_is_refused_before_walk() {
+        let tmp = TempDir::new().unwrap();
+        let approved = tmp.path().join("approved");
+        let victim = tmp.path().join("victim");
+        std::fs::create_dir(&approved).unwrap();
+        std::fs::create_dir(&victim).unwrap();
+        std::fs::write(approved.join("approved.rs"), "approved\n").unwrap();
+        std::fs::write(victim.join("victim.rs"), "victim\n").unwrap();
+        let link = tmp.path().join("search-link");
+        std::os::unix::fs::symlink(&approved, &link).unwrap();
+
+        crate::shared::install_search_preparation_hook(&link, {
+            let link = link.clone();
+            let victim = victim.clone();
+            move || {
+                std::fs::remove_file(&link).unwrap();
+                std::os::unix::fs::symlink(victim, link).unwrap();
+            }
+        });
+
+        let (ctx, _sink) = make_ctx(&tmp);
+        let tool = GrepTool::new(ctx);
+        let error = tool
+            .call(
+                json!({ "pattern": "needle", "path": link }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "invalid input: Refusing to search {}: its symlink resolution changed after permission was checked",
+                tmp.path().join("search-link").display()
+            )
+        );
+        assert!(std::fs::read_to_string(victim.join("victim.rs"))
+            .unwrap()
+            .contains("victim"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn read_deny_symlink_retarget_is_refused_before_walk() {
+        let tmp = TempDir::new().unwrap();
+        let approved = tmp.path().join("approved-deny");
+        let victim = tmp.path().join("victim-deny");
+        std::fs::create_dir(&approved).unwrap();
+        std::fs::create_dir(&victim).unwrap();
+        std::fs::write(victim.join("victim.rs"), "victim\n").unwrap();
+        let link = tmp.path().join("deny-link");
+        std::os::unix::fs::symlink(&approved, &link).unwrap();
+
+        crate::shared::install_search_preparation_hook(tmp.path(), {
+            let link = link.clone();
+            let victim = victim.clone();
+            move || {
+                std::fs::remove_file(&link).unwrap();
+                std::os::unix::fs::symlink(victim, link).unwrap();
+            }
+        });
+
+        let (mut ctx, _sink) = make_ctx(&tmp);
+        ctx.read_deny_exclude_globs = vec!["/deny-link/**".to_string()];
+        let tool = GrepTool::new(ctx);
+        let error = tool
+            .call(json!({ "pattern": "victim" }), fresh_ctx(), fresh_tx())
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "invalid input: Refusing to search {}: a path one of its Read deny rules is written through changed while the search was being prepared. Retry.",
+                tmp.path().display()
+            )
+        );
+        assert!(std::fs::read_to_string(victim.join("victim.rs"))
+            .unwrap()
+            .contains("victim"));
     }
 
     #[tokio::test]

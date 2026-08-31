@@ -2253,6 +2253,8 @@ fn contract_index_covers_every_dto() {
             team: None,
         }),
         owner: None,
+        suppress_always_allow_rule: false,
+        auto_mode_prompt: None,
     };
     let _resolved = PermissionResolved {
         request_id: 0,

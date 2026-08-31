@@ -5,6 +5,7 @@ use super::*;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::CommandFactory;
 
     // parity 2.1.207: `--permission-mode manual` is ACCEPTED (was hard-rejected
     // by the old fixed value_parser list). `manual` is the CLI alias for
@@ -539,6 +540,18 @@ mod tests {
         let a = Argv::from_iter(["lingxi-cli", "fix it", "--tools", "Bash", "Read"]).unwrap();
         let tools = a.tools.unwrap();
         assert_eq!(tools, &["Bash", "Read"]);
+    }
+
+    #[test]
+    fn restricted_flag_and_help_are_exposed() {
+        let a = Argv::from_iter(["lingxi-cli", "--restricted", "fix it"]).unwrap();
+        assert!(a.restricted);
+        assert!(a.restricted_enabled());
+        let help = Argv::command().render_help().to_string();
+        assert!(help.contains("Restricted mode: removes the built-in tools"));
+        assert!(help.contains("bypassPermissions"));
+        assert!(help.contains("tool-configuration files."));
+        assert!(help.contains("--restricted"));
     }
 
     #[test]

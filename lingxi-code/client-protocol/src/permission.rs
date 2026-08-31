@@ -52,6 +52,29 @@ pub struct PermissionRequest {
     /// it; clients must continue to correlate by `request_id`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner: Option<PermissionOwnerDto>,
+    /// When true, the client must not offer or persist an `AllowAlways` rule.
+    /// Omitted/false preserves ordinary permission-prompt behavior.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub suppress_always_allow_rule: bool,
+    /// Engine-computed optional Auto action. Clients render this value but do
+    /// not derive eligibility from the tool or request payload.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_mode_prompt: Option<AutoModePromptDto>,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
+/// Stable wire description of an engine-approved Auto prompt action.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
+#[serde(rename_all = "snake_case")]
+pub enum AutoModePromptDto {
+    /// Workflow-agent Bash: approve this call and switch to Auto mode.
+    WorkflowBash,
+    /// ExitPlanMode: approve the plan and continue in Auto mode.
+    ExitPlanMode,
 }
 
 /// Session/turn or worker that owns one parked permission request.
@@ -150,6 +173,9 @@ pub enum PermissionResponseDto {
     AllowOnce,
     /// Allow and persist a session rule for matching future invocations.
     AllowAlways,
+    /// Allow this invocation and request the engine to atomically switch to
+    /// Auto mode. This does not create a persistent permission rule.
+    AllowAuto,
     /// Deny this invocation.
     Deny,
 }

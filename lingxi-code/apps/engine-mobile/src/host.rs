@@ -621,6 +621,8 @@ impl MobileAppAgentExecutor {
                 timeout_ms: Some(LOCAL_APPS_MCP_TIMEOUT_MS),
                 always_load: true,
                 discovery_cache: None,
+                tools: Vec::new(),
+                tool_permissions: std::collections::BTreeMap::new(),
                 config_error: None,
             })
             .await
@@ -2479,6 +2481,8 @@ async fn build_mobile_inner_with_ask(
             timeout_ms: Some(LOCAL_APPS_MCP_TIMEOUT_MS),
             always_load: true,
             discovery_cache: None,
+            tools: Vec::new(),
+            tool_permissions: std::collections::BTreeMap::new(),
             config_error: None,
         })
         .await
@@ -3769,10 +3773,12 @@ async fn build_mobile_inner_with_ask(
         budget_enforcer: Some(budget_enforcer.clone()),
         // Mobile has no coordinator runtime; fork-subagent gate sees non-coordinator.
         coordinator_mode: None,
-        // (3b) No subagent spawner on mobile → AgentTool never builds an
-        // invoker, so the dispatch gate is unused here. The main loop is still
-        // gated via `perms` (passed to the orchestrator below).
-        permission_gate: None,
+        // (3b) Share the enforcing mobile `PolicyPermissionGate` with tools
+        // that own a permission round-trip (notably `ExitPlanMode`). This is
+        // the same `perms` passed to the orchestrator, backed by the
+        // connection-scoped `AdapterPermissionGate`; never leave a tool with
+        // an approval seam unbound on mobile.
+        permission_gate: Some(perms.clone()),
         mcp_registry: Some(mcp_registry.clone()),
         lsp_registry: None,
         camera: platform.camera(),
@@ -3895,7 +3901,13 @@ async fn build_mobile_inner_with_ask(
                 workflow_size_guideline_is_default,
             )
             .with_dynamic_workflows_gate(dynamic_workflows_gate.clone())
-            .with_session_enabled(workflow_session_enabled),
+            .with_session_enabled(workflow_session_enabled)
+            .with_permission_gate(perms.clone())
+            .with_permission_policy(
+                boot_permission_policy
+                    .clone()
+                    .expect("mobile workflow permission policy is always wired"),
+            ),
         ));
     }
     // First-party local-app host operations as ORDINARY builtins. Registered
@@ -10971,6 +10983,25 @@ mod tests {
         let rt = build_mobile(test_config(tmp.path()), platform, listener, perm_sink)
             .await
             .expect("build_mobile failed");
+
+        // The policy gate is the same enforcing gate injected into the mobile
+        // builtin tool context. A headless ExitPlanMode check must deny before
+        // it can mutate plan state rather than relying on a prompt transport.
+        let headless_ctx = traits::permission_gate::PermissionCheckContext {
+            is_non_interactive_session: true,
+            ..Default::default()
+        };
+        let outcome = traits::permission_gate::PermissionGate::check_exit_plan_mode(
+            rt.permission_policy_gate.as_ref(),
+            "1. Ship it",
+            &headless_ctx,
+        )
+        .await;
+        assert!(matches!(
+            outcome,
+            traits::permission_gate::PermissionOutcome::Deny { reason }
+                if reason.starts_with("Permission to use ExitPlanMode has been denied.")
+        ));
 
         // Drive a `check()` on a spawned task; a deny-by-default tool parks a
         // request on the sink (proving the adapter gate is bound, not a no-op).

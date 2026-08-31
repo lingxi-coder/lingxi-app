@@ -2144,6 +2144,54 @@ agent's Bash use is clamped to a fixed set of command forms (per-spawn bashComma
         assert_eq!(inner.calls(), 0, "classifier allow must skip prompt");
     }
 
+    #[test]
+    fn auto_rows_hide_after_consecutive_or_total_denial_breaker() {
+        let reason = PermissionDecisionReason::SafetyCheck {
+            reason: "classifier-approvable action".into(),
+            classifier_approvable: true,
+        };
+        let workflow_ctx = PermissionCheckContext {
+            classifier_approvable: Some(true),
+            request_source: Some(PermissionRequestSource::WorkflowAgent),
+            ..Default::default()
+        };
+
+        for denials in [3, 20] {
+            let policy = Arc::new(PermissionPolicy::from_rules(
+                PermissionMode::Default,
+                std::iter::empty(),
+            ));
+            {
+                let mut tracking = policy.denial_tracking.lock().unwrap();
+                for _ in 0..denials {
+                    tracking.record_auto_deny();
+                }
+                assert!(
+                    tracking.is_circuit_broken(),
+                    "{denials} classifier denials must trip the breaker"
+                );
+            }
+            let gate =
+                PolicyPermissionGate::new(policy, RecordingInner::new(PermissionDecision::Allow));
+            assert_eq!(
+                gate.auto_prompt_for_ask(
+                    PermissionMode::Default,
+                    "Bash",
+                    &json!({ "command": "echo safe" }),
+                    &reason,
+                    &workflow_ctx,
+                ),
+                None,
+                "WorkflowBash Auto row must be hidden after {denials} denials"
+            );
+            assert_eq!(
+                gate.auto_prompt_for_exit_plan(&PermissionCheckContext::default()),
+                None,
+                "ExitPlanMode Auto row must be hidden after {denials} denials"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn hook_ask_floor_prevents_classifier_from_defeating_hook_ask() {
         // HOOK-ASKFLOOR-03: Auto mode + a safe local shell the classifier WOULD

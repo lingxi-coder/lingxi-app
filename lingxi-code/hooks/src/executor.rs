@@ -41,7 +41,10 @@ use crate::prompt_executor::{
     HookPromptRunner, PromptExecutionSignal, PromptExecutor, HOOK_PROMPT_TIMEOUT_MS,
 };
 use crate::registry::{HookContext, HookRegistry};
-use crate::response::{AggregateHookResult, HookDecision, HookOutcome, HookResponse, HookResult};
+use crate::response::{
+    AggregateHookResult, HookDecision, HookOutcome, HookResponse, HookResult,
+    PermissionRequestResult,
+};
 use crate::ssrf_guard::SsrfGuard;
 use async_trait::async_trait;
 use serde_json::Value;
@@ -1897,6 +1900,33 @@ impl HookExecutorImpl {
             if let Some(input) = &resp.updated_input {
                 agg.modified_input = Some(input.clone());
             }
+            // PermissionRequest carries an event-specific decision object in
+            // addition to the normalized HookDecision. Preserve the latest raw
+            // result and its permission-rule array; the block decision above
+            // remains sticky while these side effects stay available to the
+            // orchestrator's allow arm.
+            if let Some(permission_result) = &resp.permission_request_result {
+                if !already_blocked {
+                    agg.permission_request_result = Some(permission_result.clone());
+                }
+                if !already_blocked {
+                    if let PermissionRequestResult::Allow {
+                        updated_permissions: Some(updates),
+                        ..
+                    } = permission_result
+                    {
+                        agg.permission_updates = updates.clone();
+                    }
+                }
+            }
+            if !already_blocked {
+                if let Some(updates) = &resp.updated_permissions {
+                    agg.permission_updates = updates.clone();
+                }
+            }
+            if resp.interrupt == Some(true) {
+                agg.interrupt = true;
+            }
             if let Some(msg) = &resp.system_message {
                 agg.system_messages.push(msg.clone());
             }
@@ -3128,9 +3158,14 @@ fn process_error_outcome(hook: &HookDefinition, e: &ProcessError) -> (HookResult
 /// emit `HOOK_TIMEOUT` telemetry.
 ///
 /// Decision layering (mirrors `hooks.ts:2499-2697`):
-/// 1. If stdout (trimmed) starts with `{`, parse it via [`parse_response`].
-///    A parsed `HookResponse.decision` drives blocking through `merge`.
-/// 2. Otherwise apply the exit-code fallback:
+/// 1. If stdout (trimmed) starts with `{`, parse and validate it via
+///    [`parse_response`]. A parsed `HookResponse.decision` drives blocking
+///    through `merge`; a parse/validation failure at a non-2 exit code is a
+///    non-blocking hook error.
+/// 2. A JSON parse/validation failure at exit 2 falls through to the same
+///    blocking stderr fallback as plain text (the process explicitly chose the
+///    hook's blocking exit status).
+/// 3. Otherwise apply the exit-code fallback:
 ///    - `0` ⇒ success, no decision.
 ///    - `2` ⇒ **block**, with stderr as the reason (`hooks.ts:2648-2666`).
 ///    - any other non-zero ⇒ non-blocking error (`Error`, no `Block` decision).
@@ -3168,28 +3203,70 @@ fn map_command_output(
             true,
         ),
         Ok(o) => {
-            // Layer (a): JSON stdout. Guard on a leading `{` to match
-            // `parseHookOutput`'s plain-text bypass (`hooks.ts:404-408`).
+            // Layer (a): JSON stdout. A leading `{` opts the output into JSON
+            // parsing/validation. A malformed or schema-invalid response is a
+            // hook error for every status other than 2. Exit 2 is deliberately
+            // retained for the blocking stderr fallback below.
             if o.stdout.trim_start().starts_with('{') {
-                if let Ok(parsed) = parse_response(&o.stdout, expected_event) {
-                    let outcome = if o.exit_code == 0 {
-                        HookOutcome::Success
-                    } else {
-                        HookOutcome::Error
-                    };
-                    return (
-                        HookResult {
-                            outcome,
-                            stdout: o.stdout,
-                            stderr: o.stderr,
-                            exit_code: Some(o.exit_code),
-                            response: Some(parsed),
-                        },
-                        false,
-                    );
+                match parse_response(&o.stdout, expected_event) {
+                    Ok(parsed) => {
+                        let outcome = if o.exit_code == 0 {
+                            HookOutcome::Success
+                        } else {
+                            HookOutcome::Error
+                        };
+                        return (
+                            HookResult {
+                                outcome,
+                                stdout: o.stdout,
+                                stderr: o.stderr,
+                                exit_code: Some(o.exit_code),
+                                response: Some(parsed),
+                            },
+                            false,
+                        );
+                    }
+                    Err(error) if o.exit_code != 2 => {
+                        // Keep the parser's established, actionable error
+                        // wording (e.g. `hook response is not valid JSON:
+                        // ...` or the event-name mismatch).
+                        return (
+                            HookResult {
+                                outcome: HookOutcome::Error,
+                                stdout: o.stdout,
+                                stderr: error.to_string(),
+                                exit_code: Some(o.exit_code),
+                                response: None,
+                            },
+                            false,
+                        );
+                    }
+                    // Claude Code reserves exit 2 as the explicit blocking
+                    // signal even when JSON parsing/validation failed. Let the
+                    // plain-text arm below synthesize its stderr block.
+                    Err(_) => {}
                 }
             }
-            // Layer (b): exit-code fallback for plain-text / unparsable output.
+            // PermissionRequest uses its own decision union. In 2.1.251 an
+            // exit-2 command without a valid JSON decision is not the generic
+            // hook blocking signal: the request hook simply contributes no
+            // decision, and its stderr is not promoted to the hook reason.
+            // Keep the raw process streams on HookResult for diagnostics while
+            // leaving `response` absent so aggregation remains a no-op.
+            if expected_event == "PermissionRequest" && o.exit_code == 2 {
+                return (
+                    HookResult {
+                        outcome: HookOutcome::Error,
+                        stdout: o.stdout,
+                        stderr: o.stderr,
+                        exit_code: Some(2),
+                        response: None,
+                    },
+                    false,
+                );
+            }
+            // Layer (b): exit-code fallback for plain-text output, plus JSON
+            // that failed validation while exiting with the explicit block code.
             match o.exit_code {
                 0 => (
                     HookResult {

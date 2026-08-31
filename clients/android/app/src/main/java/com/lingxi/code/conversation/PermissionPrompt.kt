@@ -1,6 +1,7 @@
 package com.lingxi.code.conversation
 
 import com.lingxi.code.R
+import com.lingxi.code.bindings.AutoModePromptDto
 import com.lingxi.code.bindings.PermissionKindDto
 import com.lingxi.code.bindings.PermissionRequest
 import com.lingxi.code.bindings.WorkerInfoDto
@@ -42,6 +43,13 @@ data class PermissionPromptState(
     /** Immutable engine ownership; presentation remains global across navigation. */
     val originSessionId: String? = null,
     val ownerTurnId: ULong? = null,
+    /**
+     * When true, the engine requires a one-time human decision and the prompt
+     * must not offer a persistent AllowAlways rule.
+     */
+    val suppressAlwaysAllowRule: Boolean = false,
+    /** Engine-owned Auto action; clients must not infer this locally. */
+    val autoModePrompt: AutoModePromptDto? = null,
 )
 
 /** Worker attribution rendered on a [PermissionPromptState] (reserved). */
@@ -87,6 +95,8 @@ fun permissionRequestToPrompt(
             },
         originSessionId = request.owner?.sessionId,
         ownerTurnId = request.owner?.turnId,
+        suppressAlwaysAllowRule = request.suppressAlwaysAllowRule,
+        autoModePrompt = request.autoModePrompt,
     )
 }
 

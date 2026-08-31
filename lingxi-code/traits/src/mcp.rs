@@ -239,6 +239,100 @@ pub struct ServerCapabilitiesDto {
     pub experimental: std::collections::HashMap<String, Value>,
 }
 
+/// Per-tool permission policy declared by an MCP server/config producer.
+/// Kept separate from [`McpToolDto`] so discovery-cache payloads and existing
+/// DTO struct literals remain wire-compatible.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum McpToolPermissionPolicy {
+    /// Permit the tool without an additional prompt.
+    AlwaysAllow,
+    /// Require a prompt for every invocation.
+    AlwaysAsk,
+    /// Refuse every invocation.
+    AlwaysDeny,
+}
+
+impl McpToolPermissionPolicy {
+    /// Parse config spellings accepted by Claude Code's policy loader.
+    #[must_use]
+    pub fn from_policy_str(value: &str) -> Option<Self> {
+        match value {
+            "allow" | "always_allow" => Some(Self::AlwaysAllow),
+            "ask" | "always_ask" => Some(Self::AlwaysAsk),
+            "deny" | "always_deny" => Some(Self::AlwaysDeny),
+            _ => None,
+        }
+    }
+
+    /// Return the strictest of two declarations (`deny` > `ask` > `allow`).
+    #[must_use]
+    pub const fn strictest(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::AlwaysDeny, _) | (_, Self::AlwaysDeny) => Self::AlwaysDeny,
+            (Self::AlwaysAsk, _) | (_, Self::AlwaysAsk) => Self::AlwaysAsk,
+            (Self::AlwaysAllow, Self::AlwaysAllow) => Self::AlwaysAllow,
+        }
+    }
+}
+
+/// Tighten-only per-tool ceiling supplied by host/org policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum McpPermissionCeiling {
+    /// No additional restriction.
+    Allow,
+    /// Require interactive approval at minimum.
+    Ask,
+    /// Block the tool.
+    Deny,
+}
+
+impl McpPermissionCeiling {
+    /// Parse `toolPermissions`/org-policy values (`blocked` maps to `deny`).
+    #[must_use]
+    pub fn from_policy_str(value: &str) -> Option<Self> {
+        match value {
+            "allow" => Some(Self::Allow),
+            "ask" => Some(Self::Ask),
+            "blocked" | "deny" => Some(Self::Deny),
+            _ => None,
+        }
+    }
+
+    /// Return the stricter of two ceilings (`deny` > `ask` > `allow`).
+    #[must_use]
+    pub const fn strictest(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::Deny, _) | (_, Self::Deny) => Self::Deny,
+            (Self::Ask, _) | (_, Self::Ask) => Self::Ask,
+            (Self::Allow, Self::Allow) => Self::Allow,
+        }
+    }
+}
+
+/// Config-side policy record used to seed the MCP client's permission map.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct McpConfiguredToolPolicyDto {
+    /// Raw upstream tool name before MCP FQN qualification.
+    pub name: String,
+    /// Optional server-declared policy.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        alias = "permissionPolicy"
+    )]
+    pub permission_policy: Option<McpToolPermissionPolicy>,
+    /// Optional host/org ceiling for this tool.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        alias = "orgMaxPermission"
+    )]
+    pub org_max_permission: Option<McpPermissionCeiling>,
+}
+
 /// One tool advertised by an MCP server.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct McpToolDto {

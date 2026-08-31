@@ -23,8 +23,8 @@ use async_trait::async_trait;
 use mcp::registry::McpRegistry;
 use mcp::McpClientError;
 use once_cell::sync::Lazy;
-use permission::result::{PermissionMetadata, PermissionPrompt};
-use permission::{PermissionDecisionReason, PermissionResult};
+use permission::result::PermissionMetadata;
+use permission::{McpToolMaxPermission, PermissionDecisionReason, PermissionResult};
 use serde_json::{json, Value};
 use telemetry::sink::{AnalyticsValue, LogEventMetadata};
 use telemetry::tengu::tool::{
@@ -349,10 +349,6 @@ fn persist_id_seed() -> (u128, String) {
 
 // -- Permission shape (shared by all four MCP tools) -------------------------
 
-/// Oracle-byte-locked ask/passthrough message on the MCP factory's
-/// `checkPermissions` (@182520945).
-const MCP_TOOL_REQUIRES_PERMISSION_MESSAGE: &str = "MCPTool requires permission.";
-
 fn allow_mcp(reason: &str) -> PermissionResult {
     PermissionResult::Allow {
         reason: PermissionDecisionReason::Other {
@@ -360,6 +356,16 @@ fn allow_mcp(reason: &str) -> PermissionResult {
         },
         updated_input: None,
         update_destination: None,
+        metadata: PermissionMetadata::default(),
+    }
+}
+
+fn deny_mcp(reason: &str) -> PermissionResult {
+    PermissionResult::Deny {
+        reason: PermissionDecisionReason::Other {
+            reason: reason.into(),
+        },
+        explanation: Some(reason.into()),
         metadata: PermissionMetadata::default(),
     }
 }
@@ -403,6 +409,9 @@ pub struct MCPTool {
     /// allow" grant must never be offered — see
     /// `Tool::requires_user_interaction` below.
     requires_user_interaction: bool,
+    /// Tighten-only ceiling resolved from the MCP server/config policy. Kept
+    /// separate from the wire DTO so discovery-cache entries remain unchanged.
+    effective_max_permission: Option<McpToolMaxPermission>,
     /// §24b — explicit dispatch target for a per-SUBAGENT inline `mcpServers`
     /// entry. `None` (every existing construction site) preserves today's
     /// behaviour exactly: the server is derived from `full_name`'s parsed
@@ -449,6 +458,7 @@ impl MCPTool {
             search_hint: None,
             always_load: true,
             requires_user_interaction: false,
+            effective_max_permission: None,
             bound_server_key: None,
         }
     }
@@ -484,8 +494,26 @@ impl MCPTool {
             search_hint,
             always_load,
             requires_user_interaction,
+            effective_max_permission: None,
             bound_server_key: None,
         }
+    }
+
+    /// Attach a resolved MCP permission ceiling without changing the existing
+    /// constructor ABI used by shared and agent-scoped registry builders.
+    #[must_use]
+    pub fn with_effective_max_permission(mut self, ceiling: McpToolMaxPermission) -> Self {
+        self.effective_max_permission = Some(ceiling);
+        self
+    }
+
+    /// Attach a ceiling from the transport-facing MCP DTO. This conversion
+    /// keeps the permission crate's rule enum independent from the traits
+    /// crate while allowing a registry/client integration to pass through the
+    /// resolved `allow`/`ask`/`deny` value directly.
+    #[must_use]
+    pub fn with_mcp_permission_ceiling(self, ceiling: traits::McpPermissionCeiling) -> Self {
+        self.with_effective_max_permission(max_permission_from_ceiling(ceiling))
     }
 
     /// §24b: bind this per-tool wire entry's DISPATCH target to `key` — the
@@ -504,6 +532,34 @@ impl MCPTool {
     fn mcp_registry(&self) -> Option<&Arc<McpRegistry>> {
         self.ctx.mcp_registry.as_ref()
     }
+
+    /// Resolve permission metadata for a generic dispatcher request. The
+    /// generic `MCP` tool carries only the model-supplied FQN in its input, so
+    /// it must recover the discovered DTO from the live state before allowing
+    /// dispatch. Agent-scoped entries are intentionally excluded: they are
+    /// reachable only through their bound per-tool entries.
+    async fn generic_permission_metadata(
+        &self,
+        full_name: &str,
+    ) -> Option<(bool, Option<McpToolMaxPermission>)> {
+        let registry = self.mcp_registry()?;
+        let connections = registry.connections.read().await;
+        connections.iter().find_map(|(table_key, state)| {
+            let (config, tools) = match state {
+                mcp::McpConnectionState::Connected { config, tools, .. }
+                | mcp::McpConnectionState::Cached { config, tools, .. } => (config, tools),
+                _ => return None,
+            };
+            if table_key != &config.name {
+                return None;
+            }
+            let dto = tools.iter().find(|dto| dto.full_name == full_name)?;
+            let ceiling = configured_permission_ceiling(config, &dto.tool_name)
+                .map(max_permission_from_ceiling);
+            Some((dto.requires_user_interaction, ceiling))
+        })
+    }
+
     fn bus(&self) -> &Arc<AnalyticsBus> {
         &self.ctx.bus
     }
@@ -916,29 +972,39 @@ impl Tool for MCPTool {
     /// AFTER it, so a pre-existing `mcp__srv__tool` allow rule still prompts.
     /// `turn_loop` only consults a tool's `check_permissions` when no rule
     /// matched, so an allow rule still bypasses this arm in the port.
-    async fn check_permissions(&self, _: &Value, _: &ToolUseContext) -> PermissionResult {
-        if self.requires_user_interaction {
-            return PermissionResult::Ask {
-                // The oracle's tool-level ask carries no `decisionReason`; the
-                // gate arm that forwards it names
-                // `{type:"other",reason:"requiresUserInteraction"}`
-                // (@160210348), which is the reason the UI ends up showing.
-                reason: PermissionDecisionReason::Other {
-                    reason: "requiresUserInteraction".into(),
-                },
-                prompt: PermissionPrompt {
-                    title: self.name().to_string(),
-                    // Byte-locked `message:"MCPTool requires permission."`.
-                    message: MCP_TOOL_REQUIRES_PERMISSION_MESSAGE.to_string(),
-                    // `suggestions:[]` — the oracle deliberately offers NO
-                    // "add an allow rule" suggestion for such a tool.
-                    options: Vec::new(),
-                },
-                pending_classifier_check: None,
-                metadata: PermissionMetadata::default(),
+    async fn check_permissions(&self, input: &Value, _: &ToolUseContext) -> PermissionResult {
+        if self.full_name.is_none() {
+            let Some(full_name) = input.get("full_name").and_then(Value::as_str) else {
+                return deny_mcp("MCP tool metadata unavailable; refusing dispatch");
             };
+            let Some((requires_user_interaction, effective_max_permission)) =
+                self.generic_permission_metadata(full_name).await
+            else {
+                return deny_mcp("MCP tool metadata unavailable; refusing dispatch");
+            };
+            return permission::clamp_mcp_permission_result(
+                allow_mcp("MCP server tool dispatch"),
+                full_name,
+                effective_max_permission,
+                None,
+                requires_user_interaction,
+                true,
+            );
         }
-        allow_mcp("MCP server tool dispatch")
+
+        // MCP client-side ceilings and tool-owned interaction requirements are
+        // local, tighten-only overlays. No app-capability signal exists in
+        // this path, so capability authorization stays permissive until a
+        // real host signal is available; treating absence as false would deny
+        // every ordinary MCP tool.
+        permission::clamp_mcp_permission_result(
+            allow_mcp("MCP server tool dispatch"),
+            self.name(),
+            self.effective_max_permission,
+            None,
+            self.requires_user_interaction,
+            true,
+        )
     }
 
     async fn description(&self, _: &Value, _: &DescriptionOptions) -> String {
@@ -2458,6 +2524,40 @@ impl Tool for ReadMcpResourceTool {
 /// once-only `k` latch this function's `resource_tools_pushed` reproduces). A
 /// session with zero resource-capable MCP servers therefore no longer ships
 /// three unusable tool schemas in every request's `tools` array.
+pub fn configured_permission_ceiling(
+    config: &mcp::McpServerConfig,
+    tool_name: &str,
+) -> Option<traits::McpPermissionCeiling> {
+    let mut ceiling = config.tool_permissions.get(tool_name).copied();
+    for configured in config
+        .tools
+        .iter()
+        .filter(|configured| configured.name == tool_name)
+    {
+        if let Some(policy) = configured.permission_policy {
+            let policy_ceiling = match policy {
+                traits::McpToolPermissionPolicy::AlwaysAllow => traits::McpPermissionCeiling::Allow,
+                traits::McpToolPermissionPolicy::AlwaysAsk => traits::McpPermissionCeiling::Ask,
+                traits::McpToolPermissionPolicy::AlwaysDeny => traits::McpPermissionCeiling::Deny,
+            };
+            ceiling =
+                Some(ceiling.map_or(policy_ceiling, |current| current.strictest(policy_ceiling)));
+        }
+        if let Some(org_ceiling) = configured.org_max_permission {
+            ceiling = Some(ceiling.map_or(org_ceiling, |current| current.strictest(org_ceiling)));
+        }
+    }
+    ceiling
+}
+
+fn max_permission_from_ceiling(ceiling: traits::McpPermissionCeiling) -> McpToolMaxPermission {
+    match ceiling {
+        traits::McpPermissionCeiling::Allow => McpToolMaxPermission::Allow,
+        traits::McpPermissionCeiling::Ask => McpToolMaxPermission::Ask,
+        traits::McpPermissionCeiling::Deny => McpToolMaxPermission::Blocked,
+    }
+}
+
 pub async fn build_registered_mcp_tools(
     registry: &McpRegistry,
     ctx: tool_api::BuiltinToolContext,
@@ -2503,7 +2603,7 @@ pub async fn build_registered_mcp_tools(
             let mut handles: Vec<Arc<dyn Tool>> = tools
                 .iter()
                 .map(|dto| {
-                    Arc::new(MCPTool::new_for_tool(
+                    let tool = MCPTool::new_for_tool(
                         ctx.clone(),
                         dto.full_name.clone(),
                         dto.description.clone(),
@@ -2511,7 +2611,15 @@ pub async fn build_registered_mcp_tools(
                         dto.search_hint.clone(),
                         dto.always_load.unwrap_or(false),
                         dto.requires_user_interaction,
-                    )) as Arc<dyn Tool>
+                    );
+                    let tool = if let Some(ceiling) =
+                        configured_permission_ceiling(config, &dto.tool_name)
+                    {
+                        tool.with_mcp_permission_ceiling(ceiling)
+                    } else {
+                        tool
+                    };
+                    Arc::new(tool) as Arc<dyn Tool>
                 })
                 .collect();
             if capabilities.resources && !resource_tools_pushed {
@@ -2610,13 +2718,10 @@ mod tests {
         let PermissionResult::Ask { reason, prompt, .. } = decision else {
             panic!("a requiresUserInteraction tool must ASK, got: {decision:?}");
         };
-        assert_eq!(prompt.message, "MCPTool requires permission.");
+        assert!(prompt.message.contains("requires approval"));
+        assert_eq!(prompt.options, vec!["Allow once", "Deny"]);
         assert!(
-            prompt.options.is_empty(),
-            "the oracle's arm carries `suggestions:[]`"
-        );
-        assert!(
-            matches!(&reason, PermissionDecisionReason::Other { reason } if reason == "requiresUserInteraction"),
+            matches!(&reason, PermissionDecisionReason::PermissionPromptTool { tool_name } if tool_name == "mcp__srv__interactive"),
             "unexpected reason: {reason:?}"
         );
 
@@ -2635,6 +2740,30 @@ mod tests {
                 .check_permissions(&serde_json::json!({}), &use_ctx)
                 .await,
             PermissionResult::Allow { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn configured_ceiling_reaches_the_tool_permission_gate() {
+        let ctx = tool_api::test_support::ctx_for_file_tools(
+            tool_api::test_support::make_dummy_fs(),
+            Arc::new(telemetry::AnalyticsBus::new()),
+            vec![std::path::PathBuf::from("/tmp")],
+        );
+        let tool = MCPTool::new_for_tool(
+            ctx,
+            "mcp__srv__blocked".into(),
+            "blocked".into(),
+            serde_json::json!({"type": "object"}),
+            None,
+            false,
+            false,
+        )
+        .with_mcp_permission_ceiling(traits::McpPermissionCeiling::Deny);
+        assert!(matches!(
+            tool.check_permissions(&serde_json::json!({}), &tool_api::test_support::fresh_ctx())
+                .await,
+            PermissionResult::Deny { .. }
         ));
     }
 
@@ -3487,6 +3616,8 @@ pub(crate) mod cached_resource_test_support {
             timeout_ms: None,
             always_load: false,
             discovery_cache: None,
+            tools: Vec::new(),
+            tool_permissions: std::collections::BTreeMap::new(),
             config_error: None,
         }
     }
@@ -4332,9 +4463,10 @@ mod resource_tool_gating_tests {
     use super::*;
     use mcp::{ConfigScope, McpConnectionState, McpServerConfig};
     use traits::{
-        ElicitRequestDto, ElicitResultDto, McpError, McpNotificationStream, McpPromptDto,
-        McpRawConnection, McpResourceContentDto, McpResourceDto, McpToolDto, McpTransport,
-        McpTransportKind, McpTransportSpec, ServerCapabilitiesDto,
+        ElicitRequestDto, ElicitResultDto, McpConfiguredToolPolicyDto, McpError,
+        McpNotificationStream, McpPermissionCeiling, McpPromptDto, McpRawConnection,
+        McpResourceContentDto, McpResourceDto, McpToolDto, McpTransport, McpTransportKind,
+        McpTransportSpec, ServerCapabilitiesDto,
     };
 
     struct NeverDialled;
@@ -4412,6 +4544,8 @@ mod resource_tool_gating_tests {
             timeout_ms: None,
             always_load: false,
             discovery_cache: None,
+            tools: Vec::new(),
+            tool_permissions: std::collections::BTreeMap::new(),
             config_error: None,
         }
     }
@@ -4442,6 +4576,160 @@ mod resource_tool_gating_tests {
             always_load: None,
             requires_user_interaction: false,
         }
+    }
+
+    #[tokio::test]
+    async fn shared_builder_applies_strictest_configured_permission_ceiling() {
+        let registry = Arc::new(McpRegistry::new(Arc::new(NeverDialled)));
+        let connection_id = protocol::McpConnectionId::new();
+        let mut server_config = config("srv");
+        server_config.tools = vec![
+            McpConfiguredToolPolicyDto {
+                name: "allow".into(),
+                permission_policy: None,
+                org_max_permission: Some(McpPermissionCeiling::Allow),
+            },
+            McpConfiguredToolPolicyDto {
+                name: "ask".into(),
+                permission_policy: None,
+                org_max_permission: Some(McpPermissionCeiling::Ask),
+            },
+            McpConfiguredToolPolicyDto {
+                name: "deny".into(),
+                permission_policy: None,
+                org_max_permission: Some(McpPermissionCeiling::Ask),
+            },
+        ];
+        server_config.tool_permissions = std::collections::BTreeMap::from([
+            ("allow".into(), McpPermissionCeiling::Allow),
+            ("ask".into(), McpPermissionCeiling::Allow),
+            ("deny".into(), McpPermissionCeiling::Deny),
+        ]);
+        registry.connections.write().await.insert(
+            "srv".into(),
+            McpConnectionState::Connected {
+                config: server_config,
+                connection_id,
+                capabilities: caps(false),
+                tools: vec![dto("srv", "allow"), dto("srv", "ask"), dto("srv", "deny")],
+                resources: vec![],
+                resource_templates: vec![],
+                prompts: vec![],
+                connected_at: std::time::SystemTime::now(),
+            },
+        );
+
+        let mut ctx = tool_api::test_support::ctx_for_file_tools(
+            tool_api::test_support::make_dummy_fs(),
+            Arc::new(telemetry::AnalyticsBus::new()),
+            vec![std::path::PathBuf::from("/tmp")],
+        );
+        ctx.mcp_registry = Some(registry.clone());
+        let built = build_registered_mcp_tools(&registry, ctx).await;
+        assert_eq!(built.len(), 1);
+        let registered = &built[0].1;
+        assert_eq!(registered.len(), 3);
+
+        assert!(matches!(
+            registered[0]
+                .check_permissions(&serde_json::json!({}), &tool_api::test_support::fresh_ctx())
+                .await,
+            PermissionResult::Allow { .. }
+        ));
+        assert!(matches!(
+            registered[1]
+                .check_permissions(&serde_json::json!({}), &tool_api::test_support::fresh_ctx())
+                .await,
+            PermissionResult::Ask { .. }
+        ));
+        assert!(matches!(
+            registered[2]
+                .check_permissions(&serde_json::json!({}), &tool_api::test_support::fresh_ctx())
+                .await,
+            PermissionResult::Deny { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn generic_dispatcher_resolves_discovered_metadata_before_allowing_call() {
+        let registry = Arc::new(McpRegistry::new(Arc::new(NeverDialled)));
+        let connection_id = protocol::McpConnectionId::new();
+        let mut server_config = config("srv");
+        server_config.tools = vec![
+            McpConfiguredToolPolicyDto {
+                name: "write".into(),
+                permission_policy: Some(traits::McpToolPermissionPolicy::AlwaysAllow),
+                org_max_permission: Some(McpPermissionCeiling::Ask),
+            },
+            McpConfiguredToolPolicyDto {
+                name: "interactive".into(),
+                permission_policy: None,
+                org_max_permission: None,
+            },
+        ];
+        server_config.tool_permissions =
+            std::collections::BTreeMap::from([("write".into(), McpPermissionCeiling::Deny)]);
+        let mut interactive = dto("srv", "interactive");
+        interactive.requires_user_interaction = true;
+        registry.connections.write().await.insert(
+            "srv".into(),
+            McpConnectionState::Connected {
+                config: server_config,
+                connection_id,
+                capabilities: caps(false),
+                tools: vec![dto("srv", "write"), interactive],
+                resources: vec![],
+                resource_templates: vec![],
+                prompts: vec![],
+                connected_at: std::time::SystemTime::now(),
+            },
+        );
+        let mut ctx = tool_api::test_support::ctx_for_file_tools(
+            tool_api::test_support::make_dummy_fs(),
+            Arc::new(telemetry::AnalyticsBus::new()),
+            vec![std::path::PathBuf::from("/tmp")],
+        );
+        ctx.mcp_registry = Some(registry);
+        let dispatcher = MCPTool::new(ctx);
+
+        let denied = dispatcher
+            .check_permissions(
+                &serde_json::json!({
+                    "full_name": "mcp__srv__write",
+                    "arguments": {}
+                }),
+                &tool_api::test_support::fresh_ctx(),
+            )
+            .await;
+        assert!(matches!(denied, PermissionResult::Deny { .. }));
+
+        let interactive = dispatcher
+            .check_permissions(
+                &serde_json::json!({
+                    "full_name": "mcp__srv__interactive",
+                    "arguments": {}
+                }),
+                &tool_api::test_support::fresh_ctx(),
+            )
+            .await;
+        assert!(matches!(
+            interactive,
+            PermissionResult::Ask {
+                reason: PermissionDecisionReason::PermissionPromptTool { ref tool_name },
+                ..
+            } if tool_name == "mcp__srv__interactive"
+        ));
+
+        let unknown = dispatcher
+            .check_permissions(
+                &serde_json::json!({
+                    "full_name": "mcp__srv__not_advertised",
+                    "arguments": {}
+                }),
+                &tool_api::test_support::fresh_ctx(),
+            )
+            .await;
+        assert!(matches!(unknown, PermissionResult::Deny { .. }));
     }
 
     async fn build_names_by_connection(
@@ -4685,10 +4973,11 @@ mod resource_tool_gating_tests {
         );
     }
 
-    /// `register_all` must NOT register the trio as builtins — that is the whole
-    /// point of `iJ`'s `r`-set name filter.
+    /// `register_all` must not register the generic dispatcher or the resource
+    /// trio as builtins — discovered per-tool entries are the only production
+    /// MCP invocation surface, so an FQN cannot bypass its own permission rule.
     #[test]
-    fn register_all_omits_the_resource_trio() {
+    fn register_all_omits_generic_dispatcher_and_resource_trio() {
         let ctx = tool_api::test_support::ctx_for_file_tools(
             tool_api::test_support::make_dummy_fs(),
             Arc::new(telemetry::AnalyticsBus::new()),
@@ -4697,6 +4986,10 @@ mod resource_tool_gating_tests {
         let mut reg = tool_api::ToolRegistry::new();
         crate::register_all(&mut reg, ctx);
         let names = reg.all_names();
+        assert!(
+            !names.iter().any(|n| n == MCP_TOOL_NAME),
+            "generic MCP dispatcher must not be a production builtin; got {names:?}"
+        );
         for banned in [
             "ListMcpResourcesTool",
             "ReadMcpResourceTool",

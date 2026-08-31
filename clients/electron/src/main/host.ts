@@ -206,7 +206,7 @@ export class HostController {
         if (model !== undefined && typeof model !== 'string') throw new Error('invalid model');
         const ref = await this.bridge.newSession(project, model as string | undefined);
         this.settings.activateProject(project);
-        this.settings.setActiveSession(ref);
+        this.settings.setActiveSessionDraft(ref);
         return this.bootstrap();
       });
     });
@@ -506,7 +506,7 @@ export class HostController {
       if (wasEmpty && manager.newSession) {
         const ref = await this.bridge.newSession(workspace);
         this.settings.activateProject(workspace);
-        this.settings.setActiveSession(ref);
+        this.settings.setActiveSessionDraft(ref);
       } else if (wasEmpty) {
         // Compatibility for the pre-manager unit-test double. Production
         // always takes the session-owned branch above.
@@ -631,7 +631,8 @@ export class HostController {
       : await this.bridge.newSession(project);
     if (first) await this.bridge.openSession(ref, first.empty_session === true);
     this.settings.activateProject(project);
-    this.settings.setActiveSession(ref);
+    if (first) this.settings.setActiveSession(ref);
+    else this.settings.setActiveSessionDraft(ref);
     return ref;
   }
 

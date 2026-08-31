@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type ClipboardEvent, type KeyboardEvent, type ReactNode } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ClipboardEvent, type KeyboardEvent, type ReactNode } from 'react';
 import type {
   ImageRefDto,
   ModelDetailsDto,
@@ -132,7 +132,7 @@ function SessionRow({ session, active, pinned, opening, status, onClick, onPin }
         style={{
           width: '100%', minHeight: 43, display: 'grid', gap: 1,
           padding: '6px 34px 6px 30px', borderRadius: 8, border: 0, textAlign: 'left',
-          background: highlighted ? t.surface : 'transparent', color: highlighted ? t.text : t.text2,
+          background: active ? t.accentBg : opening ? t.surface : 'transparent', color: highlighted ? t.text : t.text2,
           cursor: opening ? 'wait' : 'pointer',
           fontSize: 12.5, fontWeight: active ? 620 : 470,
         }}
@@ -157,7 +157,7 @@ function SessionRow({ session, active, pinned, opening, status, onClick, onPin }
         style={{
           position: 'absolute', right: 4, top: 4, width: 26, height: 26,
           display: 'grid', placeItems: 'center', border: 0, borderRadius: 6,
-          background: active ? t.surface : t.sidebarBg, color: pinned ? t.accent : t.text3,
+          background: active ? 'transparent' : t.sidebarBg, color: pinned ? t.accent : t.text3,
           cursor: 'pointer',
         }}
       >
@@ -180,6 +180,7 @@ export function BetaSidebar({ bridge, onOpenSettings }: { bridge: UseBridge; onO
   const [showAllSessions, setShowAllSessions] = useState<Record<string, boolean>>({});
   const [menuProject, setMenuProject] = useState<string | null>(null);
   const [openingSessionKey, setOpeningSessionKey] = useState<string | null>(null);
+  const [editingProject, setEditingProject] = useState<string | null>(null);
 
   useEffect(() => {
     setMenuProject(null);
@@ -212,36 +213,45 @@ export function BetaSidebar({ bridge, onOpenSettings }: { bridge: UseBridge; onO
       .catch(() => undefined)
       .finally(() => setOpeningSessionKey((current) => current === key ? null : current));
   }, [bridge.openSession]);
+  const editProject = useCallback((projectPath: string) => {
+    setExpandedProjects((current) => current.has(projectPath) ? current : new Set([...current, projectPath]));
+    setEditingProject(projectPath);
+    void bridge.newSession(projectPath)
+      .catch(() => undefined)
+      .finally(() => setEditingProject((current) => current === projectPath ? null : current));
+  }, [bridge.newSession]);
   const pinInput = (projectPath: string, sessionId: string, title: string) => ({ projectPath, sessionId, title });
 
   return (
     <aside style={{ width: 260, flexShrink: 0, display: 'flex', flexDirection: 'column', background: t.sidebarBg, borderRight: `0.5px solid ${t.border}`, paddingTop: 38 }}>
       <div className="drag-region" style={{ minHeight: 46, padding: '7px 14px 6px', display: 'flex', alignItems: 'center' }}>
-        <strong style={{ color: t.text, fontSize: 17, fontWeight: 680, letterSpacing: '-.025em' }}>LingXi</strong>
+        <strong style={{ color: t.text, fontSize: 16.5, fontWeight: 650, letterSpacing: '-.02em' }}>LingXi</strong>
       </div>
 
       <div style={{ padding: '2px 9px 10px' }}>
         <button
           className="sidebar-primary-action"
           type="button"
-          disabled={bridge.sessionLoading}
-          onClick={() => invoke(bridge.newSession)}
+          disabled={bridge.sessionLoading || editingProject !== null}
+          onClick={() => selectedProject ? editProject(selectedProject) : invoke(bridge.addProject)}
           style={{
             width: '100%', minHeight: 38, display: 'flex', alignItems: 'center', gap: 11,
             padding: '8px 10px', borderRadius: 8, border: 0, background: 'transparent',
-            color: t.text, cursor: bridge.sessionLoading ? 'not-allowed' : 'pointer', opacity: bridge.sessionLoading ? .5 : 1,
-            textAlign: 'left', fontSize: 13.5, fontWeight: 560,
+            color: t.text, cursor: bridge.sessionLoading || editingProject !== null ? 'wait' : 'pointer', opacity: bridge.sessionLoading || editingProject !== null ? .5 : 1,
+            textAlign: 'left', fontSize: 14, fontWeight: 550,
           }}
         >
-          <Icon name="pencil" size={16} color={t.text2} stroke={1.8} />
-          <span>{selectedProject ? 'New session' : 'Add your first project'}</span>
+          {editingProject
+            ? <span className="beta-spinner" role="status" aria-label="Opening project draft" />
+            : <Icon name="pencil" size={16} color={t.text2} stroke={1.8} />}
+          <span>{editingProject ? 'Opening draft…' : selectedProject ? 'New session' : 'Add your first project'}</span>
         </button>
       </div>
 
       <nav aria-label="Projects and sessions" style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: '0 8px 12px' }}>
         {pinnedSessions.length > 0 ? (
           <section aria-labelledby="pinned-sessions-heading" style={{ marginBottom: 16 }}>
-            <h2 id="pinned-sessions-heading" style={{ padding: '7px 8px 6px', color: t.text4, fontSize: 12, fontWeight: 620 }}>Pinned</h2>
+            <h2 id="pinned-sessions-heading" style={{ padding: '7px 8px 6px', color: t.text4, fontSize: 12.5, fontWeight: 600, letterSpacing: '.01em' }}>Pinned</h2>
             {pinnedSessions.map((pinned) => {
               const pinnedCatalog = bridge.bootstrap?.projectCatalogs?.[pinned.projectPath];
               const current = pinnedCatalog?.sessions.find((session) => session.uuid === pinned.sessionId);
@@ -272,7 +282,7 @@ export function BetaSidebar({ bridge, onOpenSettings }: { bridge: UseBridge; onO
                     title={`${title}\n${pinned.projectPath}`}
                     style={{
                       width: '100%', minHeight: 43, display: 'grid', gap: 1, padding: '6px 34px 6px 10px',
-                      border: 0, borderRadius: 8, background: active || opening ? t.surface : 'transparent',
+                      border: 0, borderRadius: 8, background: active ? t.accentBg : opening ? t.surface : 'transparent',
                       color: t.text2, textAlign: 'left', cursor: opening ? 'wait' : 'pointer',
                     }}
                   >
@@ -305,7 +315,7 @@ export function BetaSidebar({ bridge, onOpenSettings }: { bridge: UseBridge; onO
 
         <section aria-labelledby="projects-heading">
           <div style={{ minHeight: 31, padding: '2px 4px 4px 8px', display: 'flex', alignItems: 'center' }}>
-            <h2 id="projects-heading" style={{ flex: 1, color: t.text4, fontSize: 12, fontWeight: 620 }}>Projects</h2>
+            <h2 id="projects-heading" style={{ flex: 1, color: t.text4, fontSize: 12.5, fontWeight: 600, letterSpacing: '.01em' }}>Projects</h2>
             <button
               type="button"
               className="sidebar-header-action"
@@ -352,14 +362,28 @@ export function BetaSidebar({ bridge, onOpenSettings }: { bridge: UseBridge; onO
                     }}
                     style={{
                       width: '100%', minHeight: 37, display: 'flex', alignItems: 'center', gap: 9,
-                      padding: '7px 34px 7px 8px', border: 0, borderRadius: 8,
+                      padding: '7px 62px 7px 8px', border: 0, borderRadius: 8,
                       background: active ? t.surface : 'transparent', color: active ? t.text : t.text2,
                       cursor: 'pointer', textAlign: 'left',
                     }}
                   >
                     <Icon name="folder" size={16} color={active ? t.text2 : t.text3} stroke={1.7} />
-                    <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: 13, fontWeight: active ? 620 : 520 }}>{basename(projectPath)}</span>
-                    {active ? <Icon name="chevron" size={12} color={t.text4} stroke={2} style={{ transform: open ? 'rotate(0deg)' : 'rotate(-90deg)' }} /> : null}
+                    <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: 13.5, fontWeight: active ? 600 : 500 }}>{basename(projectPath)}</span>
+                  </button>
+                  <button
+                    type="button"
+                    className="sidebar-row-action"
+                    data-visible={editingProject === projectPath ? 'true' : undefined}
+                    disabled={editingProject !== null}
+                    aria-label={`Edit ${basename(projectPath)}`}
+                    aria-busy={editingProject === projectPath || undefined}
+                    title="Open project draft"
+                    onClick={() => editProject(projectPath)}
+                    style={{ position: 'absolute', right: 32, top: 5, width: 26, height: 26, display: 'grid', placeItems: 'center', border: 0, borderRadius: 6, background: active ? t.surface : t.sidebarBg, color: t.text3, cursor: editingProject !== null ? 'wait' : 'pointer' }}
+                  >
+                    {editingProject === projectPath
+                      ? <span className="beta-spinner" role="status" aria-label="Opening project draft" />
+                      : <Icon name="pencil" size={13} stroke={1.8} />}
                   </button>
                   <button
                     type="button"
@@ -445,8 +469,8 @@ export function BetaTopBar({ bridge, tasksOpen, onToggleTasks, theme, onTheme }:
   return (
     <header className="drag-region" style={{ height: 52, flexShrink: 0, display: 'flex', alignItems: 'center', gap: 12, padding: '0 14px', borderBottom: `0.5px solid ${t.border}`, background: t.windowBg }}>
       <div style={{ flex: 1, minWidth: 0 }}>
-        <div style={{ color: t.text, fontSize: 12.5, fontWeight: 650, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{basename(bridge.activeSession?.projectPath ?? bridge.bootstrap?.workspace.path)}</div>
-        <div className="mono" style={{ color: t.text4, fontSize: 9.5, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{bridge.activeSession?.projectPath ?? bridge.bootstrap?.workspace.path ?? 'Add a project to begin'}</div>
+        <div style={{ color: t.text, fontSize: 13, fontWeight: 620, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{basename(bridge.activeSession?.projectPath ?? bridge.bootstrap?.workspace.path)}</div>
+        <div className="mono" style={{ color: t.text4, fontSize: 10, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{bridge.activeSession?.projectPath ?? bridge.bootstrap?.workspace.path ?? 'Add a project to begin'}</div>
       </div>
       {bridge.usage && (
         <span className="mono" style={{ color: t.text4, fontSize: 9.5 }} title="Input + output tokens">
@@ -538,6 +562,11 @@ type ModelPickerSection = Exclude<ModelPickerSubmenu, null>;
 type RichPromptSnapshot = {
   text: string;
   files: string[];
+};
+
+type ComposerDraft = RichPromptSnapshot & {
+  html: string;
+  images: ImageAttachment[];
 };
 
 const FILE_MENTION_SELECTOR = '[data-file-mention]';
@@ -671,7 +700,10 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onSetTheme }: {
   const activeSlashQuery = useRef<string | null>(null);
   const slashDismissed = useRef(false);
   const imageAttachmentsRef = useRef<ImageAttachment[]>([]);
+  const draftsBySession = useRef(new Map<string, ComposerDraft>());
+  const draftSessionId = useRef<string | null>(null);
   imageAttachmentsRef.current = imageAttachments;
+  const activeSessionId = bridge.activeSession?.sessionId ?? null;
 
   const slashCommands = useMemo(
     () => filterSlashCommands(bridge.desktop.slashCommands, slashQuery ?? ''),
@@ -713,9 +745,9 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onSetTheme }: {
     emit: (output, isError) => bridge.emitCommandOutput(output, isError === true),
   }), [bridge, onOpenSettings, onSetTheme]);
 
-  const slashMenuOpen = slashQuery !== null && ready && !bridge.running;
+  const slashMenuOpen = slashQuery !== null && ready;
 
-  const fileMenuOpen = Boolean(filePicker && ready && !bridge.running);
+  const fileMenuOpen = Boolean(filePicker && ready);
 
   useEffect(() => {
     if (ready) return;
@@ -813,7 +845,12 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onSetTheme }: {
   }, []);
 
   useEffect(() => () => {
-    imageAttachmentsRef.current.forEach((attachment) => URL.revokeObjectURL(attachment.previewUrl));
+    const previewUrls = new Set(imageAttachmentsRef.current.map((attachment) => attachment.previewUrl));
+    for (const draft of draftsBySession.current.values()) {
+      for (const attachment of draft.images) previewUrls.add(attachment.previewUrl);
+    }
+    previewUrls.forEach((previewUrl) => URL.revokeObjectURL(previewUrl));
+    draftsBySession.current.clear();
   }, []);
 
   useEffect(() => {
@@ -880,6 +917,42 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onSetTheme }: {
     ));
     return snapshot;
   };
+
+  useLayoutEffect(() => {
+    const editor = input.current;
+    if (!editor) return;
+
+    const previousSessionId = draftSessionId.current;
+    if (previousSessionId) {
+      const snapshot = richPromptSnapshot(editor);
+      const images = imageAttachmentsRef.current;
+      if (snapshot.text || snapshot.files.length || images.length) {
+        draftsBySession.current.set(previousSessionId, {
+          ...snapshot,
+          html: editor.innerHTML,
+          images: [...images],
+        });
+      } else {
+        draftsBySession.current.delete(previousSessionId);
+      }
+    }
+
+    draftSessionId.current = activeSessionId;
+    const draft = activeSessionId ? draftsBySession.current.get(activeSessionId) : undefined;
+    editor.innerHTML = draft?.html ?? '';
+    setText(draft?.text ?? '');
+    setSelectedFiles(draft ? [...draft.files] : []);
+    const images = draft ? [...draft.images] : [];
+    imageAttachmentsRef.current = images;
+    setImageAttachments(images);
+    setImageNotice(null);
+    setFilePicker(null);
+    setSlashQuery(null);
+    activeMentionRange.current = null;
+    activeSlashRange.current = null;
+    activeSlashQuery.current = null;
+    slashDismissed.current = false;
+  }, [activeSessionId]);
 
   const savePromptSelection = () => {
     const editor = input.current;
@@ -1019,7 +1092,7 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onSetTheme }: {
   };
 
   const addImageFiles = async (files: File[]) => {
-    if (!ready || bridge.running) return;
+    if (!ready) return;
     const remaining = MAX_IMAGE_ATTACHMENTS - imageAttachments.length;
     if (remaining <= 0) {
       setImageNotice(`最多添加 ${MAX_IMAGE_ATTACHMENTS} 张图片。`);
@@ -1059,7 +1132,13 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onSetTheme }: {
     });
   };
 
-  const clearComposer = () => {
+  const clearComposer = (sessionId = draftSessionId.current) => {
+    const draft = sessionId ? draftsBySession.current.get(sessionId) : undefined;
+    if (sessionId) draftsBySession.current.delete(sessionId);
+    if (sessionId !== draftSessionId.current) {
+      draft?.images.forEach((attachment) => URL.revokeObjectURL(attachment.previewUrl));
+      return;
+    }
     input.current?.replaceChildren();
     setText('');
     setSelectedFiles([]);
@@ -1078,13 +1157,21 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onSetTheme }: {
   const submit = async () => {
     const snapshot = input.current ? richPromptSnapshot(input.current) : { text, files: selectedFiles };
     const value = promptWithFileMentions(snapshot.text, snapshot.files);
-    if (!ready || bridge.running) return;
+    if (!ready) return;
     if (!value) {
       if (imageAttachments.length) setImageNotice('请先输入问题，再发送图片。');
       return;
     }
     const slashCommand = snapshot.files.length === 0 ? snapshot.text.trim() : '';
     const isSlashCommand = /^\/[^\s/]+(?:\s|$)/.test(slashCommand);
+    if (bridge.running && isSlashCommand) {
+      setImageNotice('当前任务完成后才能运行 / 命令。');
+      return;
+    }
+    if (bridge.running && imageAttachments.length) {
+      setImageNotice('Pending message 暂不支持图片，请等待当前任务完成后发送。');
+      return;
+    }
     if (isSlashCommand && imageAttachments.length) {
       setImageNotice('图片附件不能和 / 命令一起发送，请先输入普通问题。');
       return;
@@ -1102,9 +1189,10 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onSetTheme }: {
       return;
     }
     const images: ImageRefDto[] = imageAttachments.map(({ media_type, base64 }) => ({ media_type, base64 }));
+    const submittingSessionId = draftSessionId.current;
     try {
       await bridge.sendPrompt(value, images);
-      clearComposer();
+      clearComposer(submittingSessionId);
     } catch {
       setImageNotice('发送失败，图片附件已保留，可以重试。');
     }
@@ -1299,11 +1387,11 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onSetTheme }: {
       : !providerConfigured
         ? 'Connect a provider in Settings to start coding…'
         : 'Waiting for the local engine…'
-    : bridge.running
-      ? 'LingXi is working…'
-      : goalMode
+    : goalMode
         ? 'Describe the goal you want LingXi to accomplish'
-        : 'Do anything';
+        : bridge.running
+          ? 'LingXi is working — draft your next message…'
+          : 'Do anything';
   const hasPrompt = Boolean(text.trim() || selectedFiles.length);
   return (
     <div style={{ flexShrink: 0, padding: '10px 18px 18px', background: t.stageBg }}>
@@ -1356,7 +1444,7 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onSetTheme }: {
       <div
         className="beta-composer"
         onDragOver={(event) => {
-          if (!ready || bridge.running || !event.dataTransfer.types.includes('Files')) return;
+          if (!ready || !event.dataTransfer.types.includes('Files')) return;
           event.preventDefault();
           event.dataTransfer.dropEffect = 'copy';
           setImageDragActive(true);
@@ -1386,7 +1474,7 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onSetTheme }: {
           ref={input}
           className="beta-rich-prompt"
           role="textbox"
-          contentEditable={ready && !bridge.running}
+          contentEditable={ready}
           suppressContentEditableWarning
           spellCheck
           data-placeholder={promptPlaceholder}
@@ -1400,7 +1488,7 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onSetTheme }: {
           onPaste={pastePlainText}
           aria-label="Prompt"
           aria-multiline="true"
-          aria-disabled={!ready || bridge.running}
+          aria-disabled={!ready}
           aria-autocomplete="list"
           aria-controls={slashMenuOpen ? 'slash-command-results' : fileMenuOpen && filePicker?.source === 'mention' ? 'workspace-file-results' : undefined}
           aria-expanded={slashMenuOpen || (fileMenuOpen && filePicker?.source === 'mention')}
@@ -1409,7 +1497,7 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onSetTheme }: {
             : fileMenuOpen && filePicker?.source === 'mention' && fileResults[fileResultIndex]
               ? `workspace-file-result-${fileResultIndex}`
               : undefined}
-          style={{ display: 'block', width: '100%', minHeight: 86, maxHeight: 180, overflowY: 'auto', border: 0, outline: 0, background: 'transparent', color: t.text, lineHeight: 1.45, fontSize: 17, padding: '18px 22px 4px', fontWeight: 450, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', cursor: ready && !bridge.running ? 'text' : 'default', opacity: ready && !bridge.running ? 1 : .68 }}
+          style={{ display: 'block', width: '100%', minHeight: 86, maxHeight: 180, overflowY: 'auto', border: 0, outline: 0, background: 'transparent', color: t.text, lineHeight: 1.5, fontSize: 16.5, padding: '18px 22px 4px', fontWeight: 450, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', cursor: ready ? 'text' : 'default', opacity: ready ? 1 : .68 }}
         />
         {slashMenuOpen && (
           <div ref={slashControl} id="slash-command-results" role="listbox" aria-label="Slash commands" style={{ ...composerMenuStyle(t, 'left'), width: 600, maxWidth: 'min(600px, calc(100vw - 44px))', maxHeight: 300, overflowY: 'auto', padding: 7 }}>
@@ -1457,9 +1545,9 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onSetTheme }: {
         )}
         <div style={{ display: 'flex', alignItems: 'center', gap: 6, minHeight: 54, padding: '0 10px 10px 14px' }}>
           <input ref={imageFileInput} type="file" accept="image/png,image/jpeg,image/gif,image/webp" multiple onChange={(event) => { void addImageFiles(event.target.files ? [...event.target.files] : []); event.currentTarget.value = ''; }} style={{ display: 'none' }} />
-          <button type="button" disabled={!ready || bridge.running} aria-label="Attach image" title="Attach image" onClick={() => imageFileInput.current?.click()} style={{ ...composerIconStyle(t), width: 34, height: 34 }}><Icon name="image" size={19} color={t.text2} stroke={1.7} /></button>
+          <button type="button" disabled={!ready} aria-label="Attach image" title="Attach image" onClick={() => imageFileInput.current?.click()} style={{ ...composerIconStyle(t), width: 34, height: 34 }}><Icon name="image" size={19} color={t.text2} stroke={1.7} /></button>
           <div ref={fileControl}>
-            <button type="button" disabled={!ready || bridge.running} aria-label="Search workspace files" aria-expanded={fileMenuOpen} title="Add file context (@)" onMouseDown={savePromptSelection} onClick={openFileMenu} style={{ ...composerIconStyle(t), width: 34, height: 34 }}><Icon name="plus" size={21} color={t.text2} stroke={1.7} /></button>
+            <button type="button" disabled={!ready} aria-label="Search workspace files" aria-expanded={fileMenuOpen} title="Add file context (@)" onMouseDown={savePromptSelection} onClick={openFileMenu} style={{ ...composerIconStyle(t), width: 34, height: 34 }}><Icon name="plus" size={21} color={t.text2} stroke={1.7} /></button>
             {fileMenuOpen && (
               <div role="dialog" aria-label="Search workspace files" style={{ ...composerMenuStyle(t, 'left'), width: 560, maxWidth: 'min(560px, calc(100vw - 44px))', padding: 7, overflow: 'hidden' }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 7, padding: '3px 4px 7px', borderBottom: `0.5px solid ${t.border}` }}>
@@ -1583,7 +1671,7 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onSetTheme }: {
             )}
           </div>
           <span aria-hidden="true" style={{ width: 1, height: 24, background: t.border, margin: '0 4px' }} />
-          <button type="button" disabled={!ready || bridge.running} aria-pressed={goalMode} aria-label="Toggle goal mode" onClick={() => setGoalMode((enabled) => !enabled)} style={{ ...composerPillStyle(t, goalMode), color: goalMode ? t.accent : t.text2 }}><Icon name="goal" size={18} color={goalMode ? t.accent : t.text3} stroke={1.6} /><span>Goal</span></button>
+          <button type="button" disabled={!ready} aria-pressed={goalMode} aria-label="Toggle goal mode" onClick={() => setGoalMode((enabled) => !enabled)} style={{ ...composerPillStyle(t, goalMode), color: goalMode ? t.accent : t.text2 }}><Icon name="goal" size={18} color={goalMode ? t.accent : t.text3} stroke={1.6} /><span>Goal</span></button>
 
           <div style={{ flex: 1 }} />
 
@@ -1741,10 +1829,10 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onSetTheme }: {
               </div>
             )}
           </div>
-          <button type="button" disabled={!ready || bridge.running} aria-label={voiceState === 'listening' && !flowMode ? 'Stop ordinary recording' : 'Start ordinary recording'} title={voiceState === 'unsupported' ? 'Voice input is unavailable in this environment' : voiceState === 'denied' ? 'Microphone permission was denied' : '普通录音'} onClick={toggleStandardVoice} style={{ ...composerIconStyle(t), width: 36, height: 36, color: voiceState === 'listening' && !flowMode ? t.accent : voiceState === 'denied' ? t.danger : t.text }}><Icon name="mic" size={20} color="currentColor" stroke={voiceState === 'listening' && !flowMode ? 2.1 : 1.7} /></button>
+          <button type="button" disabled={!ready} aria-label={voiceState === 'listening' && !flowMode ? 'Stop ordinary recording' : 'Start ordinary recording'} title={voiceState === 'unsupported' ? 'Voice input is unavailable in this environment' : voiceState === 'denied' ? 'Microphone permission was denied' : '普通录音'} onClick={toggleStandardVoice} style={{ ...composerIconStyle(t), width: 36, height: 36, color: voiceState === 'listening' && !flowMode ? t.accent : voiceState === 'denied' ? t.danger : t.text }}><Icon name="mic" size={20} color="currentColor" stroke={voiceState === 'listening' && !flowMode ? 2.1 : 1.7} /></button>
           <button
             type="button"
-            disabled={!ready || bridge.running}
+            disabled={!ready}
             aria-label={flowMode ? '关闭心流模式' : '开启心流模式'}
             aria-pressed={flowMode}
             title={flowMode ? '关闭心流模式' : '开启心流模式'}
@@ -1753,7 +1841,7 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onSetTheme }: {
           >
             <Icon name="waveform" size={21} color={flowMode ? '#fff' : t.windowBg} stroke={2.15} />
           </button>
-          {bridge.running ? (
+          {bridge.running && (
             <button
               type="button"
               disabled={bridge.isCancelling}
@@ -1762,16 +1850,22 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onSetTheme }: {
               title={bridge.isCancelling ? 'Stopping…' : 'Stop'}
               style={{ ...composerSendStyle(t, true), background: t.danger, cursor: bridge.isCancelling ? 'wait' : 'pointer', opacity: bridge.isCancelling ? .7 : 1 }}
             ><Icon name="stop" size={15} color="#fff" /></button>
-          ) : (
-            <button type="button" disabled={!ready || !hasPrompt} onClick={() => { void submit(); }} aria-label="Send prompt" title="Send prompt" style={composerSendStyle(t, Boolean(ready && hasPrompt))}><Icon name="arrowU" size={19} color={ready && hasPrompt ? '#fff' : t.text4} /></button>
           )}
+          <button
+            type="button"
+            disabled={!ready || !hasPrompt}
+            onClick={() => { void submit(); }}
+            aria-label={bridge.running ? 'Send pending message' : 'Send prompt'}
+            title={bridge.running ? 'Send as pending message' : 'Send prompt'}
+            style={composerSendStyle(t, Boolean(ready && hasPrompt))}
+          ><Icon name="arrowU" size={19} color={ready && hasPrompt ? '#fff' : t.text4} /></button>
         </div>
         {(voiceState === 'unsupported' || voiceState === 'denied') && <div style={{ position: 'relative' }}>
           {voiceState === 'unsupported' && <span role="status" style={{ position: 'absolute', right: 52, bottom: 9, padding: '5px 8px', borderRadius: 7, background: t.surfaceHover, color: t.text3, fontSize: 10.5 }}>Voice input is unavailable here</span>}
           {voiceState === 'denied' && <span role="status" style={{ position: 'absolute', right: 52, bottom: 9, padding: '5px 8px', borderRadius: 7, background: t.surfaceHover, color: t.danger, fontSize: 10.5 }}>Microphone permission denied</span>}
         </div>}
       </div>
-      <div style={{ maxWidth: 980, margin: '5px auto 0', padding: '0 3px', display: 'flex', justifyContent: 'space-between', color: t.text4, fontSize: 9.5 }}>
+      <div style={{ maxWidth: 980, margin: '5px auto 0', padding: '0 3px', display: 'flex', justifyContent: 'space-between', color: t.text4, fontSize: 10 }}>
         <span>Enter to send · Shift+Enter for a new line · @ files · / commands</span>
         <span>{goalMode ? 'Goal mode enabled' : permissionMode.description}</span>
       </div>

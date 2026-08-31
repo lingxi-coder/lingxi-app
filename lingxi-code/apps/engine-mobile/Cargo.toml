@@ -41,6 +41,7 @@ uniffi = [
     # (the FFI surface) turns them on. All are engine-tier (no `apps/*` edge —
     # governing decision §0.3) so the dep-rule gate stays green.
     "dep:orchestrator",
+    "dep:msgqueue",
     "dep:protocol",
     "dep:llm-client",
     "dep:platform-common",
@@ -166,6 +167,7 @@ uniffi = { workspace = true, optional = true }
 # under the `uniffi` feature so the default host build stays lean. Every crate
 # is engine-tier (non-leaf) so no `apps/*` dep-rule edge is introduced.
 orchestrator = { path = "../../orchestrator", optional = true }
+msgqueue = { path = "../../msgqueue", optional = true }
 protocol = { path = "../../protocol", optional = true }
 # Task 10: DefaultLlmClient construction + LlmTransportBridge.
 llm-client = { path = "../../llm-client", optional = true }

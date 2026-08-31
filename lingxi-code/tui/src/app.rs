@@ -77,6 +77,9 @@ pub struct AppCallbacks<'cb> {
     /// prompt, honoring the paired [`CancellationToken`] (the widget cancels
     /// it on Ctrl-C/Esc).
     pub on_submit: Box<dyn FnMut(String, Vec<std::path::PathBuf>, CancellationToken) + 'cb>,
+    /// Executed for a prompt entered while a turn is already active. The host
+    /// queues it at the canonical `Next` priority.
+    pub on_queue_prompt: Box<dyn FnMut(String, Vec<std::path::PathBuf>) + 'cb>,
     /// Executed on [`ChatOutcome::SwitchModel`] with the picked
     /// `(request_model, profile)` pair.
     pub on_switch_model: Box<dyn FnMut(String, Option<String>) + 'cb>,
@@ -415,6 +418,9 @@ impl<'cb> RataApp<'cb> {
                         // (they become `ContentBlock::Image` on the user
                         // message).
                         (self.callbacks.on_submit)(prompt, images, token);
+                    }
+                    ChatOutcome::QueuePrompt(prompt, images) => {
+                        (self.callbacks.on_queue_prompt)(prompt, images);
                     }
                     ChatOutcome::PasteImage => {
                         // Clipboard image read + PNG encode can take hundreds
@@ -755,6 +761,7 @@ pub fn run_app(
     bypass_available: bool,
     emoji_completion_enabled: bool,
     on_submit: impl FnMut(String, Vec<std::path::PathBuf>, CancellationToken),
+    on_queue_prompt: impl FnMut(String, Vec<std::path::PathBuf>),
     on_switch_model: impl FnMut(String, Option<String>),
     on_web_action: impl FnMut(WebAction),
     on_connect_action: impl FnMut(ConnectAction),
@@ -808,6 +815,7 @@ pub fn run_app(
         computer_access_rx,
         AppCallbacks {
             on_submit: Box::new(on_submit),
+            on_queue_prompt: Box::new(on_queue_prompt),
             on_switch_model: Box::new(on_switch_model),
             on_web_action: Box::new(on_web_action),
             on_connect_action: Box::new(on_connect_action),
@@ -971,6 +979,7 @@ mod tests {
             computer_access_rx,
             AppCallbacks {
                 on_submit: Box::new(|_, _, _| {}),
+                on_queue_prompt: Box::new(|_, _| {}),
                 on_switch_model: Box::new(|_, _| {}),
                 on_web_action: Box::new(|_| {}),
                 on_connect_action: Box::new(|_| {}),
@@ -1083,6 +1092,25 @@ mod tests {
         assert!(app.chat_widget.turn_running());
         assert_eq!(cells(&app).len(), 1);
         assert_eq!(cell::<UserTextCell>(&app, 0).body(), "hi");
+    }
+
+    #[test]
+    fn submit_while_running_returns_pending_prompt_without_replacing_turn() {
+        let mut app = test_app(Vec::new());
+        typ(&mut app, "first");
+        let ChatOutcome::Submit(_, _, active) = app.on_key(press(KeyCode::Enter)) else {
+            panic!("first prompt starts the turn");
+        };
+        typ(&mut app, "pending");
+
+        assert!(matches!(
+            app.on_key(press(KeyCode::Enter)),
+            ChatOutcome::QueuePrompt(ref prompt, ref images)
+                if prompt == "pending" && images.is_empty()
+        ));
+        assert!(!active.is_cancelled());
+        assert!(app.chat_widget.turn_running());
+        assert_eq!(cell::<UserTextCell>(&app, 1).body(), "pending");
     }
 
     #[test]

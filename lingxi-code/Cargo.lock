@@ -1880,6 +1880,7 @@ dependencies = [
  "local-apps",
  "lsp",
  "mcp",
+ "msgqueue",
  "orchestrator",
  "outputstyles",
  "permission",

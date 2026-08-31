@@ -307,3 +307,37 @@ test('settings store persists project activation, pins, and recoverable removal'
   assert.deepEqual(restored.getPublic().pinnedSessions, []);
   assert.equal(restored.getTrust(second).trusted, false);
 });
+
+test('settings store keeps draft active sessions volatile until committed', () => {
+  const userData = temporaryDirectory();
+  const first = canonicalWorkspace(temporaryDirectory());
+  const second = canonicalWorkspace(temporaryDirectory());
+  const firstRef = { projectPath: first, sessionId: 'aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa' };
+  const secondRef = { projectPath: second, sessionId: 'bbbbbbbb-2222-4222-8222-bbbbbbbbbbbb' };
+  const store = new SettingsStore(userData);
+  store.addProject(first);
+  store.addProject(second);
+
+  store.setActiveSessionDraft(firstRef);
+  assert.deepEqual(store.getPublic().activeSession, firstRef);
+  assert.equal(JSON.parse(readFileSync(store.settingsPath, 'utf8')).activeSession, undefined);
+
+  store.update({ theme: 'light' });
+  assert.deepEqual(store.getPublic().activeSession, firstRef);
+  assert.equal(JSON.parse(readFileSync(store.settingsPath, 'utf8')).activeSession, undefined);
+
+  store.setActiveSession(firstRef);
+  assert.deepEqual(store.getPublic().activeSession, firstRef);
+  assert.deepEqual(JSON.parse(readFileSync(store.settingsPath, 'utf8')).activeSession, firstRef);
+
+  store.setActiveSessionDraft(secondRef);
+  assert.deepEqual(store.getPublic().activeSession, secondRef);
+  const originalPersist = (store as any).persist;
+  (store as any).persist = () => { throw new Error('settings disk is read-only'); };
+  assert.throws(() => store.setActiveSession(secondRef), /settings disk is read-only/);
+  assert.deepEqual(store.getPublic().activeSession, secondRef);
+  (store as any).persist = originalPersist;
+  store.removeProject(second);
+  assert.deepEqual(store.getPublic().activeSession, firstRef);
+  assert.equal(JSON.parse(readFileSync(store.settingsPath, 'utf8')).activeSession.projectPath, first);
+});

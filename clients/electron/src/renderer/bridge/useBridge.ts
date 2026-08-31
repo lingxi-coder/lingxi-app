@@ -89,7 +89,7 @@ export interface UseBridge {
   copyDiagnostics(): Promise<void>;
   exportDiagnostics(): Promise<string | null>;
   refresh(): Promise<void>;
-  newSession(): Promise<void>;
+  newSession(projectPath?: string): Promise<void>;
   resumeSession(sessionId: string): Promise<void>;
   setModel(model: string): Promise<void>;
   setReasoningSelection(selection: ReasoningSelectionDto): Promise<void>;
@@ -758,17 +758,20 @@ export function useBridge(): UseBridge {
     const trimmed = text.trim();
     const sessionId = activeSessionIdRef.current;
     if (sessionLoadingRef.current || !trimmed || !host || !sessionId) return;
+    const wasTurnActive = turnActiveRefs.current.get(sessionId) === true;
     turnActiveRefs.current.set(sessionId, true);
     updateRuntime(sessionId, (state) => ({ ...state, conversation: appendPendingUserPrompt(state.conversation, trimmed, images) }));
     try {
       await host.sendPrompt(sessionId, trimmed, images);
     } catch (cause) {
-      turnActiveRefs.current.set(sessionId, false);
+      turnActiveRefs.current.set(sessionId, wasTurnActive);
       updateRuntime(sessionId, (state) => ({
         ...state,
         conversation: {
-          ...reduceEvent(state.conversation, { type: 'error', kind: { type: 'transport' }, message: 'Failed to send the prompt to the engine.' }),
-          running: false,
+          ...reduceEvent(state.conversation, wasTurnActive
+            ? { type: 'system_notice', message: 'Failed to queue the pending message.', is_error: true }
+            : { type: 'error', kind: { type: 'transport' }, message: 'Failed to send the prompt to the engine.' }),
+          running: wasTurnActive,
         },
       }));
       capture(cause);
@@ -1092,9 +1095,9 @@ export function useBridge(): UseBridge {
     ]);
   }, [command, refreshDiagnostics, requestTaskList]);
 
-  const newSession = useCallback(async () => {
+  const newSession = useCallback(async (requestedProjectPath?: string) => {
     if (sessionLoadingRef.current) return;
-    const projectPath = bootstrap?.settings.activeProject;
+    const projectPath = requestedProjectPath ?? bootstrap?.settings.activeProject;
     if (!host || !projectPath) {
       await addProject();
       return;

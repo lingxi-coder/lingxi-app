@@ -64,6 +64,34 @@ use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 use traits::OrchestratorHandle;
 
+struct TuiMsgQueueInput {
+    queue: Arc<msgqueue::MessageQueueManager>,
+}
+
+#[async_trait::async_trait]
+impl orchestrator::prompt::mid_turn_input::MidTurnInputSource for TuiMsgQueueInput {
+    async fn take_mid_turn_input(&self) -> Option<String> {
+        self.queue.take_mid_turn_prompt().await
+    }
+}
+
+fn tui_prompt_command(text: String) -> msgqueue::QueuedCommand {
+    static SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    msgqueue::QueuedCommand {
+        uuid: format!(
+            "tui-prompt-{}",
+            SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ),
+        content: msgqueue::QueuedCommandContent::UserInput { text },
+        priority: msgqueue::QueuePriority::Next,
+        queued_at: std::time::SystemTime::now(),
+        source: msgqueue::QueueSource::PromptInput,
+        agent_id: None,
+        skip_slash_commands: false,
+        is_meta: false,
+    }
+}
+
 fn trim_decimal(mut rendered: String) -> String {
     while rendered.ends_with('0') {
         rendered.pop();
@@ -585,6 +613,26 @@ pub(crate) async fn run_ratatui_with_initial_state(
     initial_prompt: Option<String>,
     handoff: Option<traits::BackgroundingSnapshot>,
 ) -> RunOutcome {
+    let prompt_queue = Arc::new(msgqueue::MessageQueueManager::new());
+    tui_build
+        .runtime
+        .orchestrator
+        .set_mid_turn_input(Arc::new(TuiMsgQueueInput {
+            queue: prompt_queue.clone(),
+        }));
+    let queue_cancel_reason = orchestrator::prompt::mid_turn_input::CancelReasonFlag::new();
+    tui_build
+        .runtime
+        .orchestrator
+        .set_cancel_reason(queue_cancel_reason.clone());
+    {
+        let reason = queue_cancel_reason.clone();
+        prompt_queue
+            .set_now_abort_hook(Arc::new(move || {
+                reason.set(orchestrator::prompt::mid_turn_input::CancelReason::QueueNowCommand);
+            }))
+            .await;
+    }
     let orchestrator: Arc<dyn OrchestratorHandle> = tui_build.runtime.orchestrator.clone();
     // Boot permission mode + bypass-cycle availability for the indicator (Copy,
     // captured before `tui_build` is partly consumed below).
@@ -900,12 +948,18 @@ pub(crate) async fn run_ratatui_with_initial_state(
     if initial_cost > 0.0 {
         let _ = turn_tx.send(tui::TurnEvent::CostUpdated(format!("${initial_cost:.4}")));
     }
+    let submit_queue = prompt_queue.clone();
+    let submit_cancel_reason = queue_cancel_reason.clone();
     let on_submit =
         move |prompt: String, images: Vec<std::path::PathBuf>, cancel: CancellationToken| {
             let _ = turn_tx.send(tui::TurnEvent::TurnStarted);
             let orch = orchestrator.clone();
             let tx = turn_tx.clone();
+            let queue = submit_queue.clone();
+            let cancel_reason = submit_cancel_reason.clone();
             handle.spawn(async move {
+                cancel_reason.reset();
+                queue.register_active_turn(cancel.clone()).await;
                 // Image-aware entry: with no images this is byte-identical to
                 // `run_turn_streaming_with_cancel`; with pasted/attached images
                 // they become `ContentBlock::Image` on the user message.
@@ -924,8 +978,26 @@ pub(crate) async fn run_ratatui_with_initial_state(
                     let _ = tx.send(tui::TurnEvent::TextDelta(format!("{e}")));
                     let _ = tx.send(tui::TurnEvent::TurnEnded(traits::TurnOutcome::EndTurn));
                 }
+                queue.clear_active_turn().await;
             });
         };
+    let queued_prompt_queue = prompt_queue.clone();
+    let queued_prompt_handle = tokio::runtime::Handle::current();
+    let queued_prompt_tx = web_turn_tx.clone();
+    let on_queue_prompt = move |prompt: String, images: Vec<std::path::PathBuf>| {
+        let queue = queued_prompt_queue.clone();
+        let tx = queued_prompt_tx.clone();
+        queued_prompt_handle.spawn(async move {
+            queue.enqueue(tui_prompt_command(prompt)).await;
+            if !images.is_empty() {
+                let _ = tx.send(tui::TurnEvent::SystemNotice {
+                    body: "Queued text; pending image attachments are not supported yet."
+                        .to_string(),
+                    is_error: true,
+                });
+            }
+        });
+    };
     let on_switch_model = move |model: String, profile: Option<String>| {
         let orch = switch_orch.clone();
         switch_handle.spawn(async move {
@@ -1624,6 +1696,7 @@ pub(crate) async fn run_ratatui_with_initial_state(
             bypass_available,
             emoji_completion_enabled,
             on_submit,
+            on_queue_prompt,
             on_switch_model,
             on_web_action,
             on_connect_action,

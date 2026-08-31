@@ -7743,7 +7743,6 @@ mod tests {
             .expect("lazy dial succeeds");
         let responder = {
             let prompt_mock = prompt_mock.clone();
-            let live_id = live_id;
             tokio::spawn(async move {
                 let connection_id = prompt_mock.wait_for_connection_id().await;
                 assert_eq!(connection_id, live_id);

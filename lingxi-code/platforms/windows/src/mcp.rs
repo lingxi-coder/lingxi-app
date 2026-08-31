@@ -129,6 +129,7 @@ impl McpTransport for WindowsMcpTransport {
             prompts: false,
             logging: false,
             directory_read: false,
+            extensions: HashMap::new(),
             experimental: HashMap::new(),
         })
     }

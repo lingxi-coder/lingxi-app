@@ -86,6 +86,7 @@ fn stdio_cfg(name: &str) -> McpServerConfig {
         always_load: false,
         discovery_cache: None,
         config_error: None,
+        metadata: Default::default(),
     }
 }
 

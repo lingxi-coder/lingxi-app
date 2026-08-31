@@ -1691,6 +1691,7 @@ mod unload_tests {
                         always_load: false,
                         discovery_cache: None,
                         config_error: None,
+                        metadata: mcp::McpServerMetadata::default(),
                     },
                     connection_id: McpConnectionId::new(),
                     capabilities: ServerCapabilitiesDto {
@@ -1700,6 +1701,11 @@ mod unload_tests {
                         directory_read: false,
                         logging: false,
                         experimental: HashMap::new(),
+                        extensions: HashMap::new(),
+                    },
+                    negotiated: traits::McpNegotiatedProtocol {
+                        era: traits::McpProtocolEra::Legacy,
+                        version: "2025-11-25".into(),
                     },
                     tools: vec![],
                     resources: vec![],

@@ -3129,6 +3129,7 @@ mod pending_approval_tests {
             always_load: false,
             discovery_cache: None,
             config_error: None,
+            metadata: Default::default(),
         }
     }
 

@@ -47,6 +47,17 @@ const MCP_PROTOCOL_VERSION: &str = "2025-11-25";
 /// `mcp::identity::ClientInfo` model does not (yet) carry a `description`
 /// field, so the literal lives here at the posix wire boundary.
 const CLIENT_DESCRIPTION: &str = "An agentic coding tool";
+const MCP_SKILLS_EXTENSION_KEY: &str = "io.modelcontextprotocol/skills";
+
+fn directory_read_capability(raw_capabilities: Option<&Value>) -> bool {
+    raw_capabilities
+        .and_then(|caps| caps.get("extensions"))
+        .and_then(|exts| exts.get(MCP_SKILLS_EXTENSION_KEY))
+        .and_then(Value::as_object)
+        .and_then(|ext| ext.get("directoryRead"))
+        .and_then(Value::as_bool)
+        == Some(true)
+}
 
 /// Build the `params` object for the MCP `initialize` request.
 ///
@@ -539,6 +550,7 @@ impl McpTransport for PosixMcpTransport {
             resources: caps.contains_key("resources"),
             prompts: caps.contains_key("prompts"),
             logging: caps.contains_key("logging"),
+            directory_read: directory_read_capability(result.get("capabilities")),
             experimental: caps
                 .get("experimental")
                 .and_then(|v| serde_json::from_value(v.clone()).ok())
@@ -1143,6 +1155,30 @@ mod initialize_params_tests {
             "stale claude-code name leaked"
         );
         assert!(!s.contains("website_url"), "snake_case website_url leaked");
+    }
+
+    #[test]
+    fn directory_read_capability_decodes_none_absent_false_and_true() {
+        assert!(!super::directory_read_capability(None));
+        assert!(!super::directory_read_capability(Some(&serde_json::json!(
+            {}
+        ))));
+        assert!(!super::directory_read_capability(Some(
+            &serde_json::json!({
+                "extensions": {
+                    "io.modelcontextprotocol/skills": {
+                        "directoryRead": false
+                    }
+                }
+            })
+        )));
+        assert!(super::directory_read_capability(Some(&serde_json::json!({
+            "extensions": {
+                "io.modelcontextprotocol/skills": {
+                    "directoryRead": true
+                }
+            }
+        }))));
     }
 }
 

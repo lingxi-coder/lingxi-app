@@ -256,6 +256,17 @@ impl ToolRegistry {
             .retain(|(id, _)| *id != conn_id);
     }
 
+    /// Atomically replace the entire MCP partition set from a rebuilt shared
+    /// session snapshot, then refresh the deferred-search view against that
+    /// new partition set.
+    pub fn replace_mcp_tools(&self, tools: Vec<(McpConnectionId, Vec<Arc<dyn Tool>>)>) {
+        *self
+            .mcp_tools
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = tools;
+        self.refresh_tool_search_view();
+    }
+
     /// Register all tools exposed by a freshly-loaded plugin. Re-registering an
     /// existing plugin id replaces its tool set in place (upsert).
     pub fn register_plugin_tools(&mut self, plugin_id: PluginId, tools: Vec<Arc<dyn Tool>>) {
@@ -726,5 +737,28 @@ mod tests {
         assert!(r.find_by_name("mcp__y").is_some());
         r.unregister_mcp_tools(conn);
         assert!(r.find_by_name("mcp__y").is_none());
+    }
+
+    #[test]
+    fn replace_mcp_tools_swaps_entire_partition_set_for_lag_recovery() {
+        let r = Arc::new(ToolRegistry::new());
+        r.register_mcp_tools(
+            McpConnectionId::new(),
+            vec![Arc::new(NamedTool("mcp__keep")) as Arc<dyn Tool>],
+        );
+        let replacement = McpConnectionId::new();
+        r.replace_mcp_tools(vec![(
+            replacement,
+            vec![
+                Arc::new(NamedTool("ListMcpResourcesTool")) as Arc<dyn Tool>,
+                Arc::new(NamedTool("ReadMcpResourceTool")) as Arc<dyn Tool>,
+                Arc::new(NamedTool("ReadMcpResourceDirTool")) as Arc<dyn Tool>,
+            ],
+        )]);
+
+        assert!(r.find_by_name("mcp__keep").is_none());
+        assert!(r.find_by_name("ListMcpResourcesTool").is_some());
+        assert!(r.find_by_name("ReadMcpResourceTool").is_some());
+        assert!(r.find_by_name("ReadMcpResourceDirTool").is_some());
     }
 }

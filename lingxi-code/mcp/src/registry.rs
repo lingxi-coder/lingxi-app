@@ -11,12 +11,13 @@ use crate::hook_dispatch::HookDispatcher;
 use crate::normalization::normalize_name_for_mcp;
 use crate::oauth::{self, OnAuthorizationUrl};
 use crate::raw_conn::RawConnectionProvider;
+use futures_util::FutureExt as _;
 use indexmap::IndexMap;
 use protocol::{AgentId, McpConnectionId};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, SystemTime};
-use tokio::sync::{broadcast, Mutex, RwLock};
+use tokio::sync::{broadcast, Mutex, Notify, RwLock};
 use traits::{
     Clock, HttpTransport, McpError, McpRawConnection, McpTransport, McpTransportSpec,
     SecureStorage, ServerCapabilitiesDto,
@@ -133,10 +134,139 @@ pub struct McpCatalogChanged {
     pub kind: McpCatalogKind,
 }
 
-#[derive(Clone)]
 struct RegisteredClient {
     connection_id: Option<McpConnectionId>,
     client: Arc<McpClient>,
+}
+
+#[derive(Clone)]
+enum LazyUpgradeTerminal {
+    Success(McpConnectionId),
+    Error(Arc<McpError>),
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LazyUpgradeMode {
+    Foreground,
+    Background,
+}
+
+struct LazyUpgradeSlot {
+    key: String,
+    cached_connection_id: McpConnectionId,
+    expected_config: McpServerConfig,
+    mode: LazyUpgradeMode,
+    terminal: StdMutex<Option<LazyUpgradeTerminal>>,
+    notify: Notify,
+}
+
+impl LazyUpgradeSlot {
+    fn new(
+        key: String,
+        cached_connection_id: McpConnectionId,
+        expected_config: McpServerConfig,
+        mode: LazyUpgradeMode,
+    ) -> Self {
+        Self {
+            key,
+            cached_connection_id,
+            expected_config,
+            mode,
+            terminal: StdMutex::new(None),
+            notify: Notify::new(),
+        }
+    }
+
+    fn matches(&self, cached_connection_id: McpConnectionId, config: &McpServerConfig) -> bool {
+        self.cached_connection_id == cached_connection_id
+            && McpRegistry::same_config_snapshot(&self.expected_config, config)
+    }
+
+    fn stale_error(&self) -> McpError {
+        McpError::Connection(format!("MCP server \"{}\" is no longer cached", self.key))
+    }
+
+    fn panic_error(&self) -> McpError {
+        McpError::Internal(format!(
+            "MCP server \"{}\" cached lazy-upgrade task panicked",
+            self.key
+        ))
+    }
+
+    fn finish_if_unset(&self, terminal: LazyUpgradeTerminal) -> bool {
+        let mut guard = self
+            .terminal
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if guard.is_some() {
+            return false;
+        }
+        *guard = Some(terminal);
+        drop(guard);
+        self.notify.notify_waiters();
+        true
+    }
+
+    async fn wait(&self) -> Result<McpConnectionId, McpError> {
+        loop {
+            let notified = self.notify.notified();
+            let terminal = {
+                self.terminal
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .clone()
+            };
+            if let Some(terminal) = terminal {
+                return match terminal {
+                    LazyUpgradeTerminal::Success(connection_id) => Ok(connection_id),
+                    LazyUpgradeTerminal::Error(error) => Err(clone_mcp_error(error.as_ref())),
+                };
+            }
+            notified.await;
+        }
+    }
+}
+
+#[derive(Clone)]
+struct LiveDiscovery {
+    connection_id: McpConnectionId,
+    capabilities: ServerCapabilitiesDto,
+    tools: Vec<traits::McpToolDto>,
+    resources: Vec<traits::McpResourceDto>,
+    resource_templates: Vec<traits::McpResourceTemplateDto>,
+    prompts: Vec<traits::McpPromptDto>,
+    client: Option<Arc<McpClient>>,
+    listener_connection: Option<Arc<jsonrpc::Connection>>,
+}
+
+enum BackgroundInstallOutcome {
+    Installed(McpConnectionId),
+    Rejected(LiveDiscovery),
+}
+
+#[derive(Debug, Clone)]
+struct PendingTransportCleanup {
+    retrying: bool,
+}
+
+#[derive(Clone)]
+struct PromptPredecessor {
+    key: String,
+    config: McpServerConfig,
+    live_connection_id: McpConnectionId,
+}
+
+enum LazyUpgradePreparation {
+    Connected(McpConnectionId),
+    Wait(Arc<LazyUpgradeSlot>, bool),
+    Skip,
+}
+
+#[cfg(test)]
+#[derive(Default)]
+struct TestPauseHook {
+    entered: Notify,
+    release: Notify,
 }
 
 /// In-memory registry of every known MCP connection.
@@ -146,7 +276,7 @@ pub struct McpRegistry {
     /// `pub` so the CLI binary (M6-07 init.rs) can pre-populate
     /// `Disconnected` entries read from `.mcp.json` before the engine
     /// connects, and so engine-side tests can seed states directly.
-    pub connections: RwLock<HashMap<String, McpConnectionState>>,
+    pub connections: Arc<RwLock<HashMap<String, McpConnectionState>>>,
     /// Synchronous mirror of claude-code 2.1.238's `eZf()`
     /// (`bdl(b7e()??[]).length>0`, `cc-238.js @229641619`) — "at least one MCP
     /// client is `type === "pending"`".
@@ -157,21 +287,21 @@ pub struct McpRegistry {
     /// a tool list; [`Self::has_pending_servers`] then reads it without
     /// blocking. Starts `false`, so a host that never refreshes behaves exactly
     /// as it did before this mirror existed.
-    pending_servers: std::sync::atomic::AtomicBool,
+    pending_servers: Arc<std::sync::atomic::AtomicBool>,
     /// Serializes connect/disconnect/reconnect for each logical server without
     /// holding the public connection-state lock across transport or OAuth I/O.
     /// Different servers still progress independently.
-    lifecycle_locks: StdMutex<HashMap<String, Arc<Mutex<()>>>>,
+    lifecycle_locks: Arc<StdMutex<HashMap<String, Arc<Mutex<()>>>>>,
     /// Single-flight guard for the XAA token resolve chain, keyed by
     /// `oauth::server_key`. Mirrors the oracle's `_refreshInProgress`
     /// promise-sharing guard on `tokens()`/`xaaRefresh()` (@182213696, §26b
     /// delta 2): concurrent resolves for the SAME server share one exchange —
     /// a resolver that has to wait re-reads storage once it acquires the lock
     /// and reuses whatever the winner just persisted instead of re-exchanging.
-    xaa_refresh_locks: StdMutex<HashMap<String, Arc<Mutex<()>>>>,
+    xaa_refresh_locks: Arc<StdMutex<HashMap<String, Arc<Mutex<()>>>>>,
     /// Side-channel cache of [`McpClient`] handles per server name.
     ///
-    /// Populated by [`Self::register_client`] / [`Self::register_connected_client`].
+    /// Populated by [`Self::register_client`] and live connection install paths.
     /// Production wiring records the exact connection generation alongside the
     /// client so prompt dispatch can fail closed when a reconnect swaps the
     /// live client between command discovery and `prompts/get`.
@@ -181,14 +311,15 @@ pub struct McpRegistry {
     /// iterating `appState.mcp.tools` in order with no sort
     /// (`AgentTool.tsx:394-405`). A plain `HashMap` would make the required-MCP
     /// gate error text non-deterministic.
-    clients: RwLock<IndexMap<String, RegisteredClient>>,
+    clients: Arc<RwLock<IndexMap<String, RegisteredClient>>>,
     /// Fan-out for inbound server catalog invalidations. The engine subscribes
     /// once and refreshes the shared tool registry after a successful
-    /// `tools/list`; lagged consumers can safely refresh from the latest state.
+    /// `tools/list`; lagged consumers reconcile against the latest shared active
+    /// generations instead of replaying permanent tombstones.
     catalog_changes: broadcast::Sender<McpCatalogChanged>,
     /// Per-agent connection scoping (subagent isolation).
     #[allow(dead_code)] // populated by `register_for_agent` in Plan 13
-    agent_scoped: RwLock<HashMap<AgentId, HashMap<String, McpConnectionId>>>,
+    agent_scoped: Arc<RwLock<HashMap<AgentId, HashMap<String, McpConnectionId>>>>,
     /// Transport boundary supplied by the host platform.
     transport: Arc<dyn McpTransport>,
     /// Optional bridge to the transport's live `jsonrpc::Connection`s.
@@ -217,7 +348,7 @@ pub struct McpRegistry {
     /// Session cwd used by dynamic MCP header helpers.
     headers_helper_cwd: std::path::PathBuf,
     /// Plugin roots keyed by scoped MCP server name.
-    headers_helper_plugin_roots: RwLock<HashMap<String, std::path::PathBuf>>,
+    headers_helper_plugin_roots: Arc<RwLock<HashMap<String, std::path::PathBuf>>>,
     /// LIVE additional working directories (settings `additionalDirectories`
     /// union CLI `--add-dir`, plus any runtime `/add-dir`) advertised alongside
     /// cwd on each server's `roots/list`.
@@ -247,11 +378,61 @@ pub struct McpRegistry {
     /// how to read/write whatever [`crate::discovery_cache::DiscoveryCacheStore`]
     /// it is handed.
     discovery_cache_store: Option<Arc<crate::discovery_cache::DiscoveryCacheStore>>,
+    /// Best-effort cleanup retries for transport ids that MUST be disconnected
+    /// eventually (for example a background-revalidation CAS reject) even when
+    /// the first `disconnect` attempt fails. Retries are bounded; a permanent
+    /// failure leaves an observable pending entry that later lifecycle activity
+    /// can kick again.
+    pending_transport_cleanups: Arc<RwLock<HashMap<McpConnectionId, PendingTransportCleanup>>>,
+    /// Detached single-flight owners for cached->live upgrades. Waiters hold a
+    /// cloned slot handle, so removing the map entry invalidates future joins
+    /// without racing already-waiting callers.
+    lazy_upgrade_slots: Arc<RwLock<HashMap<String, Arc<LazyUpgradeSlot>>>>,
+    /// Exact cached-prompt generation bridges (`C -> L1`). Kept only while the
+    /// current state+client still publish that first live generation.
+    prompt_predecessors: Arc<RwLock<HashMap<McpConnectionId, PromptPredecessor>>>,
+    /// Builder-time connection semantics are immutable after the first
+    /// connect/connect-agent-scoped attempt so later `with_*` mutations cannot
+    /// fork behavior away from already-published connections.
+    configuration_frozen: Arc<std::sync::atomic::AtomicBool>,
+    #[cfg(test)]
+    pause_after_initial_client_miss: Option<Arc<TestPauseHook>>,
+    #[cfg(test)]
+    pause_before_client_publish: Option<Arc<TestPauseHook>>,
 }
 
 /// Message for a remote server with no usable URL (oracle
 /// `"No URL configured for this server"`).
 pub const UNCONFIGURED_MESSAGE: &str = "No URL configured for this server";
+
+fn clone_mcp_error(error: &McpError) -> McpError {
+    match error {
+        McpError::UnsupportedTransport(kind) => McpError::UnsupportedTransport(*kind),
+        McpError::Connection(message) => McpError::Connection(message.clone()),
+        McpError::Handshake(message) => McpError::Handshake(message.clone()),
+        McpError::HttpResponse {
+            status,
+            www_authenticate,
+        } => McpError::HttpResponse {
+            status: *status,
+            www_authenticate: www_authenticate.clone(),
+        },
+        McpError::OAuth(message) => McpError::OAuth(message.clone()),
+        McpError::ToolNotFound(message) => McpError::ToolNotFound(message.clone()),
+        McpError::Timeout { server, tool, secs } => McpError::Timeout {
+            server: server.clone(),
+            tool: tool.clone(),
+            secs: *secs,
+        },
+        McpError::Internal(message) => McpError::Internal(message.clone()),
+    }
+}
+
+fn lazy_upgrade_panic_error(server_name: &str, phase: &str) -> McpError {
+    McpError::Internal(format!(
+        "MCP server \"{server_name}\" panicked during {phase}"
+    ))
+}
 
 /// Is this a remote (url-bearing) spec whose URL is blank?
 ///
@@ -269,6 +450,36 @@ pub fn is_unconfigured_remote(spec: &McpTransportSpec) -> bool {
 }
 
 impl McpRegistry {
+    fn clone_for_background(&self) -> Self {
+        Self {
+            connections: Arc::clone(&self.connections),
+            pending_servers: Arc::clone(&self.pending_servers),
+            lifecycle_locks: Arc::clone(&self.lifecycle_locks),
+            xaa_refresh_locks: Arc::clone(&self.xaa_refresh_locks),
+            clients: Arc::clone(&self.clients),
+            catalog_changes: self.catalog_changes.clone(),
+            agent_scoped: Arc::clone(&self.agent_scoped),
+            transport: Arc::clone(&self.transport),
+            raw_conn: self.raw_conn.clone(),
+            hook_dispatcher: self.hook_dispatcher.clone(),
+            oauth: self.oauth.clone(),
+            headers_helper_cwd: self.headers_helper_cwd.clone(),
+            headers_helper_plugin_roots: Arc::clone(&self.headers_helper_plugin_roots),
+            additional_roots: self.additional_roots.clone(),
+            health_check_interval: self.health_check_interval,
+            max_retry_count: self.max_retry_count,
+            discovery_cache_store: self.discovery_cache_store.clone(),
+            pending_transport_cleanups: Arc::clone(&self.pending_transport_cleanups),
+            lazy_upgrade_slots: Arc::clone(&self.lazy_upgrade_slots),
+            prompt_predecessors: Arc::clone(&self.prompt_predecessors),
+            configuration_frozen: Arc::clone(&self.configuration_frozen),
+            #[cfg(test)]
+            pause_after_initial_client_miss: self.pause_after_initial_client_miss.clone(),
+            #[cfg(test)]
+            pause_before_client_publish: self.pause_before_client_publish.clone(),
+        }
+    }
+
     /// Build a registry bound to a platform transport.
     ///
     /// No `RawConnectionProvider` is wired, so [`Self::connect`] does NOT build
@@ -277,24 +488,60 @@ impl McpRegistry {
     pub fn new(transport: Arc<dyn McpTransport>) -> Self {
         let (catalog_changes, _unused_rx) = broadcast::channel(64);
         Self {
-            connections: RwLock::new(HashMap::new()),
-            pending_servers: std::sync::atomic::AtomicBool::new(false),
-            lifecycle_locks: StdMutex::new(HashMap::new()),
-            xaa_refresh_locks: StdMutex::new(HashMap::new()),
-            clients: RwLock::new(IndexMap::new()),
+            connections: Arc::new(RwLock::new(HashMap::new())),
+            pending_servers: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            lifecycle_locks: Arc::new(StdMutex::new(HashMap::new())),
+            xaa_refresh_locks: Arc::new(StdMutex::new(HashMap::new())),
+            clients: Arc::new(RwLock::new(IndexMap::new())),
             catalog_changes,
-            agent_scoped: RwLock::new(HashMap::new()),
+            agent_scoped: Arc::new(RwLock::new(HashMap::new())),
             transport,
             raw_conn: None,
             hook_dispatcher: None,
             oauth: None,
             headers_helper_cwd: std::env::current_dir()
                 .unwrap_or_else(|_| std::path::PathBuf::from(".")),
-            headers_helper_plugin_roots: RwLock::new(HashMap::new()),
+            headers_helper_plugin_roots: Arc::new(RwLock::new(HashMap::new())),
             additional_roots: crate::new_shared_roots(Vec::new()),
             health_check_interval: Duration::from_secs(30),
             max_retry_count: 5,
             discovery_cache_store: None,
+            pending_transport_cleanups: Arc::new(RwLock::new(HashMap::new())),
+            lazy_upgrade_slots: Arc::new(RwLock::new(HashMap::new())),
+            prompt_predecessors: Arc::new(RwLock::new(HashMap::new())),
+            configuration_frozen: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            #[cfg(test)]
+            pause_after_initial_client_miss: None,
+            #[cfg(test)]
+            pause_before_client_publish: None,
+        }
+    }
+
+    #[cfg(test)]
+    fn with_pause_after_initial_client_miss(mut self, hook: Arc<TestPauseHook>) -> Self {
+        self.pause_after_initial_client_miss = Some(hook);
+        self
+    }
+
+    #[cfg(test)]
+    fn with_pause_before_client_publish(mut self, hook: Arc<TestPauseHook>) -> Self {
+        self.pause_before_client_publish = Some(hook);
+        self
+    }
+
+    #[cfg(test)]
+    async fn maybe_pause_after_initial_client_miss(&self) {
+        if let Some(hook) = &self.pause_after_initial_client_miss {
+            hook.entered.notify_one();
+            hook.release.notified().await;
+        }
+    }
+
+    #[cfg(test)]
+    async fn maybe_pause_before_client_publish(&self) {
+        if let Some(hook) = &self.pause_before_client_publish {
+            hook.entered.notify_one();
+            hook.release.notified().await;
         }
     }
 
@@ -305,8 +552,23 @@ impl McpRegistry {
         mut self,
         store: crate::discovery_cache::DiscoveryCacheStore,
     ) -> Self {
+        self.assert_configuration_mutable("with_discovery_cache_store");
         self.discovery_cache_store = Some(Arc::new(store));
         self
+    }
+
+    fn freeze_configuration(&self) {
+        self.configuration_frozen
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    fn assert_configuration_mutable(&self, method: &str) {
+        assert!(
+            !self
+                .configuration_frozen
+                .load(std::sync::atomic::Ordering::SeqCst),
+            "McpRegistry::{method} cannot be called after the first connect attempt"
+        );
     }
 
     fn lifecycle_lock(&self, name: &str) -> Arc<Mutex<()>> {
@@ -335,6 +597,10 @@ impl McpRegistry {
         )
     }
 
+    async fn publish_catalog_change(&self, change: McpCatalogChanged) {
+        let _ = self.catalog_changes.send(change);
+    }
+
     /// Subscribe to inbound MCP catalog invalidations.
     #[must_use]
     pub fn subscribe_catalog_changes(&self) -> broadcast::Receiver<McpCatalogChanged> {
@@ -342,35 +608,57 @@ impl McpRegistry {
     }
 
     /// Return one refresh request for every catalog currently advertised by
-    /// every connected server. Consumers use this to recover deterministically
-    /// after a lagged broadcast receiver instead of leaving a missed
-    /// `list_changed` notification stale until the server happens to emit
-    /// another one.
+    /// every SHARED connected/cached server. Consumers use this to recover
+    /// deterministically after a lagged broadcast receiver instead of leaving a
+    /// missed `list_changed` notification stale until the server happens to
+    /// emit another one.
     pub async fn catalog_refresh_snapshot(&self) -> Vec<McpCatalogChanged> {
         let conns = self.connections.read().await;
+        let mut server_names: Vec<&String> = conns.keys().collect();
+        server_names.sort();
         let mut changes = Vec::new();
-        for (server_name, state) in conns.iter() {
-            let McpConnectionState::Connected {
+        for server_name in server_names {
+            let Some(state) = conns.get(server_name) else {
+                continue;
+            };
+            if state.config().name != *server_name {
+                continue;
+            }
+            changes.extend(Self::active_catalog_snapshot(server_name, state));
+        }
+        changes
+    }
+
+    fn active_catalog_snapshot(
+        server_name: &str,
+        state: &McpConnectionState,
+    ) -> Vec<McpCatalogChanged> {
+        let (connection_id, capabilities) = match state {
+            McpConnectionState::Connected {
                 connection_id,
                 capabilities,
                 ..
-            } = state
-            else {
-                continue;
-            };
-            for (supported, kind) in [
-                (capabilities.tools, McpCatalogKind::Tools),
-                (capabilities.prompts, McpCatalogKind::Prompts),
-                (capabilities.resources, McpCatalogKind::Resources),
-            ] {
-                if supported {
-                    changes.push(McpCatalogChanged {
-                        server_name: server_name.clone(),
-                        connection_id: *connection_id,
-                        retired_connection_id: None,
-                        kind,
-                    });
-                }
+            }
+            | McpConnectionState::Cached {
+                connection_id,
+                capabilities,
+                ..
+            } => (*connection_id, capabilities),
+            _ => return Vec::new(),
+        };
+        let mut changes = Vec::new();
+        for (supported, kind) in [
+            (capabilities.tools, McpCatalogKind::Tools),
+            (capabilities.prompts, McpCatalogKind::Prompts),
+            (capabilities.resources, McpCatalogKind::Resources),
+        ] {
+            if supported {
+                changes.push(McpCatalogChanged {
+                    server_name: server_name.to_string(),
+                    connection_id,
+                    retired_connection_id: None,
+                    kind,
+                });
             }
         }
         changes
@@ -383,28 +671,32 @@ impl McpRegistry {
         &self,
         change: &McpCatalogChanged,
     ) -> Result<Option<McpConnectionId>, McpError> {
-        let current_id = {
+        let (current_id, supports_tools) = {
             let conns = self.connections.read().await;
             match conns.get(&change.server_name) {
-                Some(McpConnectionState::Connected { connection_id, .. })
-                    if *connection_id == change.connection_id =>
-                {
-                    *connection_id
+                Some(McpConnectionState::Connected {
+                    connection_id,
+                    capabilities,
+                    ..
+                }) if *connection_id == change.connection_id => {
+                    (*connection_id, capabilities.tools)
                 }
-                // §11 Stage 2 — a `Cached` server has no live connection to
-                // re-query: the cached catalog IS the freshest thing this
-                // port has for it. Report success unchanged so the receiver
-                // (`apps/engine-desktop`'s `mcp_catalog_changes` listener)
-                // still rebuilds the model-facing tool list from the
-                // (now-`Cached`) state via `build_registered_mcp_tools`.
                 Some(McpConnectionState::Cached { connection_id, .. })
                     if *connection_id == change.connection_id =>
                 {
+                    // §11 Stage 2/3 — a `Cached` server has no live
+                    // connection to re-query: the cached catalog IS the
+                    // freshest thing this port has for it. Report success
+                    // unchanged so lag recovery can rebuild the model-facing
+                    // partition from the last-known cached snapshot.
                     return Ok(Some(*connection_id));
                 }
                 _ => return Ok(None),
             }
         };
+        if change.kind == McpCatalogKind::Tools && !supports_tools {
+            return Ok(Some(current_id));
+        }
         let Some(client) = self.get_client(&change.server_name).await else {
             return Err(McpError::Internal(format!(
                 "MCP server \"{}\" has no live client for catalog refresh",
@@ -519,6 +811,7 @@ impl McpRegistry {
     /// `{"action":"cancel"}`); `Some(_)` enables the `Elicitation` hook path.
     #[must_use]
     pub fn with_hook_dispatcher(mut self, dispatcher: Option<Arc<dyn HookDispatcher>>) -> Self {
+        self.assert_configuration_mutable("with_hook_dispatcher");
         self.hook_dispatcher = dispatcher;
         self
     }
@@ -537,6 +830,7 @@ impl McpRegistry {
     /// (`oauth: None`) take the unchanged path.
     #[must_use]
     pub fn with_oauth(mut self, deps: OAuthDeps) -> Self {
+        self.assert_configuration_mutable("with_oauth");
         self.oauth = Some(deps);
         self
     }
@@ -544,6 +838,7 @@ impl McpRegistry {
     /// Use the session cwd for every dynamic headers helper.
     #[must_use]
     pub fn with_headers_helper_cwd(mut self, cwd: std::path::PathBuf) -> Self {
+        self.assert_configuration_mutable("with_headers_helper_cwd");
         self.headers_helper_cwd = cwd;
         self
     }
@@ -586,6 +881,7 @@ impl McpRegistry {
     /// 2.1.207 `r1d()` = `[cwd, ...additionalWorkingDirectories]`.
     #[must_use]
     pub fn with_additional_roots(mut self, roots: crate::SharedRoots) -> Self {
+        self.assert_configuration_mutable("with_additional_roots");
         self.additional_roots = roots;
         self
     }
@@ -677,21 +973,6 @@ impl McpRegistry {
         );
     }
 
-    async fn register_connected_client(
-        &self,
-        name: &str,
-        connection_id: McpConnectionId,
-        client: Arc<McpClient>,
-    ) {
-        self.clients.write().await.insert(
-            name.into(),
-            RegisteredClient {
-                connection_id: Some(connection_id),
-                client,
-            },
-        );
-    }
-
     /// Return the cached `Arc<McpClient>` for `name`, if any (M4-07).
     ///
     /// Matches by NORMALIZED key: a model-supplied `<server>` token is the
@@ -700,12 +981,40 @@ impl McpRegistry {
     /// name). This mirrors claude-code's `normalizeNameForMCP(client.name) ===
     /// serverName` lookup (normalization.rs:22-24, client.ts).
     pub async fn get_client(&self, name: &str) -> Option<Arc<McpClient>> {
-        self.clients
-            .read()
-            .await
+        let clients = self.clients.read().await;
+        if let Some(entry) = clients.get(name) {
+            return Some(Arc::clone(&entry.client));
+        }
+        let normalized = normalize_name_for_mcp(name);
+        clients
             .iter()
-            .find(|(k, _)| normalize_name_for_mcp(k) == name)
+            .find(|(k, _)| normalize_name_for_mcp(k) == normalized)
             .map(|(_, entry)| Arc::clone(&entry.client))
+    }
+
+    /// Return a live [`McpClient`] for `name`, lazily dialing a discovery-cache
+    /// hit when needed. `name` is matched by normalized form, exactly like
+    /// [`Self::get_client`].
+    pub async fn ensure_connected_client(&self, name: &str) -> Result<Arc<McpClient>, McpError> {
+        if let Some(client) = self.get_client(name).await {
+            return Ok(client);
+        }
+        #[cfg(test)]
+        self.maybe_pause_after_initial_client_miss().await;
+        if let Some(raw_key) = self.cached_raw_key(name).await {
+            self.ensure_dialed_from_cache(&raw_key).await?;
+            return self.get_client(name).await.ok_or_else(|| {
+                McpError::Internal(format!(
+                    "MCP server \"{name}\" did not publish a client after cache lazy-dial"
+                ))
+            });
+        }
+        if let Some(client) = self.get_client(name).await {
+            return Ok(client);
+        }
+        Err(McpError::Internal(format!(
+            "MCP server \"{name}\" has no live client"
+        )))
     }
 
     /// Whether `name` can currently accept tool calls.
@@ -730,19 +1039,41 @@ impl McpRegistry {
             || self.cached_raw_key(name).await.is_some()
     }
 
-    /// §11 Stage 2 — the RAW stored key of a `Cached` entry matching `name`
-    /// by NORMALIZED form (same lookup convention as [`Self::get_client`]),
-    /// or `None` when `name` isn't currently `Cached`. Used by
-    /// [`Self::has_callable_server`] and by `call_tool_with_auth_retry`'s
-    /// lazy dial to find what to hand [`Self::ensure_dialed_from_cache`].
+    /// The RAW stored key of a cache-served entry matching `name` by
+    /// NORMALIZED form (same lookup convention as [`Self::get_client`]).
+    ///
+    /// This includes both a visible [`McpConnectionState::Cached`] entry and
+    /// its detached lazy-upgrade successor [`McpConnectionState::Connecting`]
+    /// while the per-key slot is still active, so late waiters can join the
+    /// owner instead of falling through to a spurious "no live client".
     async fn cached_raw_key(&self, name: &str) -> Option<String> {
-        let connections = self.connections.read().await;
-        connections.iter().find_map(|(raw_name, state)| {
-            if normalize_name_for_mcp(raw_name) != name {
-                return None;
+        let candidate = {
+            let connections = self.connections.read().await;
+            if let Some(state) = connections.get(name) {
+                match state {
+                    McpConnectionState::Cached { .. } => return Some(name.to_string()),
+                    McpConnectionState::Connecting { .. } => Some((name.to_string(), true)),
+                    _ => None,
+                }
+            } else {
+                let normalized = normalize_name_for_mcp(name);
+                connections.iter().find_map(|(raw_name, state)| {
+                    if normalize_name_for_mcp(raw_name) != normalized {
+                        return None;
+                    }
+                    match state {
+                        McpConnectionState::Cached { .. } => Some((raw_name.clone(), false)),
+                        McpConnectionState::Connecting { .. } => Some((raw_name.clone(), true)),
+                        _ => None,
+                    }
+                })
             }
-            matches!(state, McpConnectionState::Cached { .. }).then(|| raw_name.clone())
-        })
+        };
+        match candidate {
+            Some((key, false)) => Some(key),
+            Some((key, true)) => self.lazy_upgrade_slot(&key).await.map(|_| key),
+            None => None,
+        }
     }
 
     /// §11 Stage 2 — lazy dial: upgrade a `Cached` entry stored under the RAW
@@ -762,29 +1093,23 @@ impl McpRegistry {
     /// falls through to its existing "no live client" failure.
     async fn ensure_dialed_from_cache(&self, key: &str) -> Result<McpConnectionId, McpError> {
         let lifecycle = self.lifecycle_lock(key);
-        let _guard = lifecycle.lock().await;
-        let config_to_dial = {
-            let conns = self.connections.read().await;
-            match conns.get(key) {
-                Some(McpConnectionState::Connected { connection_id, .. }) => {
-                    return Ok(*connection_id)
-                }
-                Some(McpConnectionState::Cached { config, .. }) => config.clone(),
-                _ => {
-                    return Err(McpError::Connection(format!(
-                        "MCP server \"{key}\" is no longer cached"
-                    )))
-                }
-            }
+        let outcome = {
+            let _guard = lifecycle.lock().await;
+            self.prepare_lazy_upgrade_slot_locked(key, LazyUpgradeMode::Foreground)
+                .await?
         };
-        // `agent_scope_table_key` never collides with a plain `config.name`
-        // (it's always prefixed — see its doc), so this equality reliably
-        // tells an ordinary session-level entry (`table_key` must be `None`,
-        // matching every other unscoped call to `connect_locked`) apart from
-        // an agent-scoped one (must keep dialing under the SAME scoped key it
-        // was cached under, never falling back to the plain name).
-        let table_key = (key != config_to_dial.name).then(|| key.to_string());
-        self.connect_locked(config_to_dial, table_key).await
+        match outcome {
+            LazyUpgradePreparation::Connected(connection_id) => Ok(connection_id),
+            LazyUpgradePreparation::Wait(slot, should_spawn) => {
+                if should_spawn {
+                    self.spawn_lazy_upgrade_owner(key.to_string(), slot.clone());
+                }
+                slot.wait().await
+            }
+            LazyUpgradePreparation::Skip => Err(McpError::Connection(format!(
+                "MCP server \"{key}\" is no longer cached"
+            ))),
+        }
     }
 
     async fn direct_inprocess_connection(&self, name: &str) -> Option<(McpConnectionId, String)> {
@@ -832,24 +1157,32 @@ impl McpRegistry {
         tool_use_id: Option<&str>,
         on_progress: Option<crate::client::McpProgressCallback>,
     ) -> Result<traits::McpToolResultDto, crate::client::McpClientError> {
-        let Some(client) = self.get_client(server).await else {
+        let mut lazy_dialed = false;
+        let client = if let Some(client) = self.get_client(server).await {
+            Some(client)
+        } else {
+            #[cfg(test)]
+            self.maybe_pause_after_initial_client_miss().await;
             // §11 Stage 2 — lazy dial: a `Cached` server was served from disk
             // at connect time with no transport ever opened, so it has no
             // registered client yet. The FIRST tool call against it dials for
             // real (single-flighted via `ensure_dialed_from_cache`'s
             // lifecycle lock), then dispatches through the now-real client.
             if let Some(raw_key) = self.cached_raw_key(server).await {
+                lazy_dialed = true;
                 self.ensure_dialed_from_cache(&raw_key)
                     .await
                     .map_err(|error| crate::client::McpClientError::Rpc(error.to_string()))?;
-                let dialed = self.get_client(server).await.ok_or_else(|| {
-                    crate::client::McpClientError::Rpc(format!(
-                        "MCP server \"{server}\" did not publish a client after cache lazy-dial"
-                    ))
-                })?;
-                return dialed
-                    .call_tool_with_progress(full_name, input, tool_use_id, on_progress)
-                    .await;
+                self.get_client(server).await
+            } else {
+                self.get_client(server).await
+            }
+        };
+        let Some(client) = client else {
+            if lazy_dialed {
+                return Err(crate::client::McpClientError::Rpc(format!(
+                    "MCP server \"{server}\" did not publish a client after cache lazy-dial"
+                )));
             }
             let Some((connection_id, _registry_key)) =
                 self.direct_inprocess_connection(server).await
@@ -896,7 +1229,21 @@ impl McpRegistry {
         self.reconnect(&raw_name)
             .await
             .map_err(|retry_error| crate::client::McpClientError::Rpc(retry_error.to_string()))?;
-        let refreshed = self.get_client(server).await.ok_or_else(|| {
+        let mut _refreshed_from_cache = false;
+        let refreshed = if let Some(client) = self.get_client(server).await {
+            Some(client)
+        } else if let Some(raw_key) = self.cached_raw_key(server).await {
+            _refreshed_from_cache = true;
+            self.ensure_dialed_from_cache(&raw_key)
+                .await
+                .map_err(|retry_error| {
+                    crate::client::McpClientError::Rpc(retry_error.to_string())
+                })?;
+            self.get_client(server).await
+        } else {
+            self.get_client(server).await
+        }
+        .ok_or_else(|| {
             crate::client::McpClientError::Rpc(format!(
                 "MCP server \"{server}\" did not publish a client after authentication refresh"
             ))
@@ -938,6 +1285,7 @@ impl McpRegistry {
     /// Re-uses the existing connection if `config.name` is already in the
     /// `Connected` state.
     pub async fn connect(&self, config: McpServerConfig) -> Result<McpConnectionId, McpError> {
+        self.freeze_configuration();
         // `zar()` — refuse an unconfigured remote server BEFORE opening a
         // socket or spawning anything. Oracle @231408727:
         //   if (zar(t)) return {type:"failed", errorCode:"UNCONFIGURED", ...}
@@ -980,6 +1328,7 @@ impl McpRegistry {
         config: McpServerConfig,
         agent_id: AgentId,
     ) -> Result<(McpConnectionId, String), McpError> {
+        self.freeze_configuration();
         if is_unconfigured_remote(&config.spec) {
             return Err(McpError::Connection(UNCONFIGURED_MESSAGE.to_string()));
         }
@@ -1003,6 +1352,7 @@ impl McpRegistry {
     pub async fn disconnect_agent_scoped(&self, table_key: &str) -> Result<(), McpError> {
         let lifecycle = self.lifecycle_lock(table_key);
         let _guard = lifecycle.lock().await;
+        let invalidated_slot = self.invalidate_lazy_upgrade_slot(table_key).await;
         let connection_id = {
             let conns = self.connections.read().await;
             match conns.get(table_key) {
@@ -1015,6 +1365,8 @@ impl McpRegistry {
         }
         self.connections.write().await.remove(table_key);
         self.clients.write().await.shift_remove(table_key);
+        self.clear_prompt_predecessors_for_key(table_key).await;
+        Self::finish_invalidated_lazy_upgrade_slot(invalidated_slot.as_ref());
         Ok(())
     }
 
@@ -1023,6 +1375,8 @@ impl McpRegistry {
         config: McpServerConfig,
         table_key: Option<String>,
     ) -> Result<McpConnectionId, McpError> {
+        self.freeze_configuration();
+        self.kick_pending_transport_cleanups().await;
         let key = table_key.clone().unwrap_or_else(|| config.name.clone());
         let result = self.connect_locked_inner(config.clone(), table_key).await;
         if let Err(error) = &result {
@@ -1033,12 +1387,13 @@ impl McpRegistry {
             // `Connecting`. Reconnect scheduling only considers disconnected
             // states, and `/mcp` should expose the actual last failure.
             self.connections.write().await.insert(
-                key,
+                key.clone(),
                 McpConnectionState::Disconnected {
                     config,
                     last_error: Some(error.to_string()),
                 },
             );
+            self.clear_prompt_predecessors_for_key(&key).await;
         }
         result
     }
@@ -1049,104 +1404,54 @@ impl McpRegistry {
         table_key: Option<String>,
     ) -> Result<McpConnectionId, McpError> {
         let key = table_key.clone().unwrap_or_else(|| config.name.clone());
-        // §11 Stage 2 — capture whether `key` is ALREADY `Cached` before any
-        // gate below can change it. A `Cached` entry means a PRIOR call to
-        // this same function already served the cache decision for this
-        // server; this call is therefore either the lazy-dial upgrade
-        // (`Self::ensure_dialed_from_cache`) or an ordinary caller re-connecting
-        // an already-cache-served server. Either way, this pass must dial
-        // LIVE and must NOT consult `decide()` again — a lazily-dialed cached
-        // server is just a fresh connect that happened to skip the dial once,
-        // and re-deciding here would serve `Fresh`/`Stale` forever and never
-        // actually open a transport.
-        let already_cached = matches!(
-            self.connections.read().await.get(&key),
-            Some(McpConnectionState::Cached { .. })
-        );
-        if let Some(McpConnectionState::Connected { connection_id, .. }) =
-            self.connections.read().await.get(&key)
+        Self::validate_connectable_config(&config)?;
         {
-            return Ok(*connection_id);
+            let conns = self.connections.read().await;
+            match conns.get(&key) {
+                Some(McpConnectionState::Connected { connection_id, .. })
+                | Some(McpConnectionState::Cached { connection_id, .. }) => {
+                    return Ok(*connection_id);
+                }
+                _ => {}
+            }
         }
+        let invalidated_slot = self.invalidate_lazy_upgrade_slot(&key).await;
+        Self::finish_invalidated_lazy_upgrade_slot(invalidated_slot.as_ref());
 
-        // claude `Nxe`'s two pre-dial gates, in order — neither dials.
-        //
-        // 1. `zar`: nothing to dial (a blank `url` and no `configError`). The
-        //    oracle logs `mcp_connect_skipped` reason "unconfigured" and fails
-        //    with `errorCode:"UNCONFIGURED"`; the text is
-        //    `configError ?? "No URL configured for this server"`, and the port
-        //    reaches this arm only with `configError` absent.
-        // 2. A `configError` (e.g. a url that expanded to an empty string) →
-        //    `errorCode:"INVALID_CONFIG"`, error text = the configError.
-        //
-        // The frozen `McpError` carries no error code, so both surface as a
-        // `Connection` error holding the oracle's text; callers that need the
-        // distinction (the `mcp list`/`mcp get` status) re-derive it from the
-        // config via [`McpServerConfig::is_unconfigured`].
-        if config.is_unconfigured() {
-            return Err(McpError::Connection(
-                crate::connection::UNCONFIGURED_ERROR.to_string(),
-            ));
-        }
-        if let Some(err) = &config.config_error {
-            emit_server_config_invalid(&config, telemetry::tengu::mcp::ConfigInvalidSource::Loader);
-            return Err(McpError::Connection(err.clone()));
-        }
-        // 3. §18 — the oracle's CONNECT-TIME `new URL(t.url)` re-check, run in
-        //    the same block as gate 2 (`Ve` @182283839 / `Ae` @182488092:
-        //    `let C=t.configError; if(!C&&"url" in t) try{new URL(t.url)}
-        //    catch{C="'url' is not a valid URL. ..."}; if(C) return ...`).
-        //    `configError` wins (gate 2 already returned), so this only fires
-        //    for a url the LOADER never flagged: present, non-blank, and
-        //    unparseable (a bare hostname with no scheme, say). Same
-        //    `errorCode:"INVALID_CONFIG"` as gate 2; also does not dial.
-        if let Some(err) = config.connect_time_url_error() {
-            emit_server_config_invalid(
-                &config,
-                telemetry::tengu::mcp::ConfigInvalidSource::Connect,
-            );
-            return Err(McpError::Connection(err.to_string()));
-        }
-
-        // §11 Stage 2 — consult the discovery cache before dialing, UNLESS
-        // this pass is itself the lazy-dial upgrade of an already-`Cached`
-        // entry (`already_cached`, captured above): that call must dial live
-        // unconditionally. Oracle `await $o(C,E) ? {miss,"live-connection"} :
-        // await cot(C,E)` — `$o` (an already-live-or-in-flight connection)
-        // is this port's `already_cached` disjunct generalized: a lazily-served
-        // cache entry already stands in for a live connection from the
-        // caller's point of view, so it must never be re-decided.
-        if !already_cached {
-            if let Some(decision) = self.discovery_cache_decision_for(&config) {
-                match decision {
-                    crate::discovery_cache::Decision::Fresh { entry, age_ms } => {
-                        return Ok(self
-                            .serve_discovery_cache_hit(&config, &key, entry, age_ms, true)
-                            .await);
+        if let Some(decision) = self.discovery_cache_decision_for(&config) {
+            match decision {
+                crate::discovery_cache::Decision::Fresh { entry, age_ms } => {
+                    return Ok(self
+                        .serve_discovery_cache_hit(&config, &key, entry, age_ms, true)
+                        .await);
+                }
+                crate::discovery_cache::Decision::Stale { entry, age_ms } => {
+                    let connection_id = self
+                        .serve_discovery_cache_hit(&config, &key, entry, age_ms, false)
+                        .await;
+                    if let LazyUpgradePreparation::Wait(slot, true) = self
+                        .prepare_lazy_upgrade_slot_locked(&key, LazyUpgradeMode::Background)
+                        .await?
+                    {
+                        self.spawn_lazy_upgrade_owner(key.clone(), slot);
                     }
-                    crate::discovery_cache::Decision::Stale { entry, age_ms } => {
-                        return Ok(self
-                            .serve_discovery_cache_hit(&config, &key, entry, age_ms, false)
-                            .await);
-                    }
-                    crate::discovery_cache::Decision::Miss { reason } => {
-                        if let Some(source) =
-                            discovery_source_emission(&crate::discovery_cache::Decision::Miss {
-                                reason,
-                            })
-                        {
-                            telemetry::emit_mcp_discovery_source(
-                                &telemetry::tengu::mcp::DiscoverySourcePayload {
-                                    transport_type: telemetry::pii::Verified::assert_safe(
-                                        config.spec.kind().to_string(),
-                                    ),
-                                    source: telemetry::pii::Verified::assert_safe(
-                                        source.to_string(),
-                                    ),
-                                    entry_age_ms: None,
-                                },
-                            );
-                        }
+                    return Ok(connection_id);
+                }
+                crate::discovery_cache::Decision::Miss { reason } => {
+                    if let Some(source) =
+                        discovery_source_emission(&crate::discovery_cache::Decision::Miss {
+                            reason,
+                        })
+                    {
+                        telemetry::emit_mcp_discovery_source(
+                            &telemetry::tengu::mcp::DiscoverySourcePayload {
+                                transport_type: telemetry::pii::Verified::assert_safe(
+                                    config.spec.kind().to_string(),
+                                ),
+                                source: telemetry::pii::Verified::assert_safe(source.to_string()),
+                                entry_age_ms: None,
+                            },
+                        );
                     }
                 }
             }
@@ -1159,31 +1464,239 @@ impl McpRegistry {
                 started_at: SystemTime::now(),
             },
         );
+        let discovery = self.discover_live_connection(&config).await?;
+        Ok(self
+            .install_live_discovery(key, config, discovery, None)
+            .await)
+    }
 
-        // MCPLIFE.4: bound the connect + initialize handshake by MCP_TIMEOUT
-        // (default 30s), mirroring claude-code's getConnectionTimeoutMs() race
-        // (`services/mcp/client.ts:456-458` + the `Promise.race` at 1020-1080).
-        // The transport connect (SSE GET / process spawn) is otherwise unbounded;
-        // map an elapsed deadline to a `Connection` error (the frozen `McpError`
-        // has no connect-timeout variant — `Timeout` is tool-call-specific).
+    fn validate_connectable_config(config: &McpServerConfig) -> Result<(), McpError> {
+        if config.is_unconfigured() {
+            return Err(McpError::Connection(
+                crate::connection::UNCONFIGURED_ERROR.to_string(),
+            ));
+        }
+        if let Some(err) = &config.config_error {
+            emit_server_config_invalid(config, telemetry::tengu::mcp::ConfigInvalidSource::Loader);
+            return Err(McpError::Connection(err.clone()));
+        }
+        if let Some(err) = config.connect_time_url_error() {
+            emit_server_config_invalid(config, telemetry::tengu::mcp::ConfigInvalidSource::Connect);
+            return Err(McpError::Connection(err.to_string()));
+        }
+        Ok(())
+    }
+
+    fn stable_config_signature(config: &McpServerConfig) -> Option<serde_json::Value> {
+        serde_json::to_value(config).ok()
+    }
+
+    fn same_config_snapshot(left: &McpServerConfig, right: &McpServerConfig) -> bool {
+        Self::stable_config_signature(left) == Self::stable_config_signature(right)
+    }
+
+    async fn lazy_upgrade_slot(&self, key: &str) -> Option<Arc<LazyUpgradeSlot>> {
+        self.lazy_upgrade_slots.read().await.get(key).cloned()
+    }
+
+    async fn invalidate_lazy_upgrade_slot(&self, key: &str) -> Option<Arc<LazyUpgradeSlot>> {
+        self.lazy_upgrade_slots.write().await.remove(key)
+    }
+
+    async fn remove_lazy_upgrade_slot_if_matches(&self, key: &str, slot: &Arc<LazyUpgradeSlot>) {
+        let mut slots = self.lazy_upgrade_slots.write().await;
+        if matches!(slots.get(key), Some(current) if Arc::ptr_eq(current, slot)) {
+            slots.remove(key);
+        }
+    }
+
+    fn finish_invalidated_lazy_upgrade_slot(slot: Option<&Arc<LazyUpgradeSlot>>) {
+        if let Some(slot) = slot {
+            slot.finish_if_unset(LazyUpgradeTerminal::Error(Arc::new(slot.stale_error())));
+        }
+    }
+
+    async fn clear_prompt_predecessors_for_key(&self, key: &str) {
+        self.prompt_predecessors
+            .write()
+            .await
+            .retain(|_, predecessor| predecessor.key != key);
+    }
+
+    async fn prepare_lazy_upgrade_slot_locked(
+        &self,
+        key: &str,
+        mode: LazyUpgradeMode,
+    ) -> Result<LazyUpgradePreparation, McpError> {
+        enum CachedDialState {
+            Connected(McpConnectionId),
+            Cached {
+                connection_id: McpConnectionId,
+                config: McpServerConfig,
+            },
+            Connecting {
+                config: McpServerConfig,
+            },
+            Missing,
+        }
+
+        let state = {
+            let conns = self.connections.read().await;
+            match conns.get(key) {
+                Some(McpConnectionState::Connected { connection_id, .. }) => {
+                    CachedDialState::Connected(*connection_id)
+                }
+                Some(McpConnectionState::Cached {
+                    connection_id,
+                    config,
+                    ..
+                }) => CachedDialState::Cached {
+                    connection_id: *connection_id,
+                    config: config.clone(),
+                },
+                Some(McpConnectionState::Connecting { config, .. }) => {
+                    CachedDialState::Connecting {
+                        config: config.clone(),
+                    }
+                }
+                _ => CachedDialState::Missing,
+            }
+        };
+
+        match state {
+            CachedDialState::Connected(connection_id) => {
+                Ok(LazyUpgradePreparation::Connected(connection_id))
+            }
+            CachedDialState::Cached {
+                connection_id,
+                config,
+            } => {
+                if let Some(slot) = self.lazy_upgrade_slot(key).await {
+                    if slot.matches(connection_id, &config) {
+                        return Ok(LazyUpgradePreparation::Wait(slot, false));
+                    }
+                    if let Some(slot) = self.invalidate_lazy_upgrade_slot(key).await {
+                        slot.finish_if_unset(LazyUpgradeTerminal::Error(Arc::new(
+                            slot.stale_error(),
+                        )));
+                    }
+                }
+                let slot = Arc::new(LazyUpgradeSlot::new(
+                    key.to_string(),
+                    connection_id,
+                    config.clone(),
+                    mode,
+                ));
+                if mode == LazyUpgradeMode::Foreground {
+                    self.connections.write().await.insert(
+                        key.to_string(),
+                        McpConnectionState::Connecting {
+                            config,
+                            started_at: SystemTime::now(),
+                        },
+                    );
+                }
+                self.lazy_upgrade_slots
+                    .write()
+                    .await
+                    .insert(key.to_string(), slot.clone());
+                Ok(LazyUpgradePreparation::Wait(slot, true))
+            }
+            CachedDialState::Connecting { config } => {
+                let Some(slot) = self.lazy_upgrade_slot(key).await else {
+                    return match mode {
+                        LazyUpgradeMode::Foreground => Err(McpError::Connection(format!(
+                            "MCP server \"{key}\" is no longer cached"
+                        ))),
+                        LazyUpgradeMode::Background => Ok(LazyUpgradePreparation::Skip),
+                    };
+                };
+                if Self::same_config_snapshot(&slot.expected_config, &config) {
+                    Ok(LazyUpgradePreparation::Wait(slot, false))
+                } else {
+                    match mode {
+                        LazyUpgradeMode::Foreground => Err(McpError::Connection(format!(
+                            "MCP server \"{key}\" is no longer cached"
+                        ))),
+                        LazyUpgradeMode::Background => Ok(LazyUpgradePreparation::Skip),
+                    }
+                }
+            }
+            CachedDialState::Missing => match mode {
+                LazyUpgradeMode::Foreground => Err(McpError::Connection(format!(
+                    "MCP server \"{key}\" is no longer cached"
+                ))),
+                LazyUpgradeMode::Background => Ok(LazyUpgradePreparation::Skip),
+            },
+        }
+    }
+
+    fn spawn_lazy_upgrade_owner(&self, key: String, slot: Arc<LazyUpgradeSlot>) {
+        let registry = self.clone_for_background();
+        tokio::spawn(async move {
+            let result = std::panic::AssertUnwindSafe(
+                registry.run_lazy_upgrade_owner(key.clone(), slot.clone()),
+            )
+            .catch_unwind()
+            .await;
+            if result.is_err() {
+                registry.recover_lazy_upgrade_owner_panic(key, slot).await;
+            }
+        });
+    }
+
+    async fn publish_connected_state(
+        &self,
+        key: &str,
+        config: &McpServerConfig,
+        discovery: &LiveDiscovery,
+        retired_connection_id: Option<McpConnectionId>,
+    ) {
+        let mut conns = self.connections.write().await;
+        #[cfg(test)]
+        self.maybe_pause_before_client_publish().await;
+        let mut clients = self.clients.write().await;
+        let mut prompt_predecessors = self.prompt_predecessors.write().await;
+        conns.insert(
+            key.to_string(),
+            McpConnectionState::Connected {
+                config: config.clone(),
+                connection_id: discovery.connection_id,
+                capabilities: discovery.capabilities.clone(),
+                tools: discovery.tools.clone(),
+                resources: discovery.resources.clone(),
+                resource_templates: discovery.resource_templates.clone(),
+                prompts: discovery.prompts.clone(),
+                connected_at: SystemTime::now(),
+            },
+        );
+        if let Some(client) = discovery.client.clone() {
+            clients.insert(
+                key.to_string(),
+                RegisteredClient {
+                    connection_id: Some(discovery.connection_id),
+                    client,
+                },
+            );
+        }
+        prompt_predecessors.retain(|_, predecessor| predecessor.key != key);
+        if let Some(cached_connection_id) = retired_connection_id {
+            prompt_predecessors.insert(
+                cached_connection_id,
+                PromptPredecessor {
+                    key: key.to_string(),
+                    config: config.clone(),
+                    live_connection_id: discovery.connection_id,
+                },
+            );
+        }
+    }
+
+    async fn discover_live_connection(
+        &self,
+        config: &McpServerConfig,
+    ) -> Result<LiveDiscovery, McpError> {
         let connect_timeout = mcp_connection_timeout();
-
-        // OAuth (SSE/HTTP with an `oauth` block + wired `OAuthDeps`): resolve a
-        // Bearer token and inject it into the spec headers before connecting.
-        // Returns `(augmented_spec, server_key)` so a 401 can drive a refresh +
-        // retry. Static-token servers (and any server when `oauth` is unwired)
-        // resolve to the spec unchanged with no server key.
-        //
-        // §19: a static `headers.Authorization` (`has_user_auth_header`) or a
-        // headers-helper-minted one (`helper_minted_authorization`) is
-        // AUTHORITATIVE over OAuth — oracle `hasUserAuthHeader` /
-        // `helperMintsAuthHeader`, checked (in that order) BEFORE any OAuth
-        // provider is constructed, so its Bearer can never be injected at
-        // all, let alone overwrite the value. `classify_auth_failure` reports
-        // a subsequent auth-type failure with the oracle's exact
-        // `AUTH_HEADER_REJECTED` / `HEADERS_HELPER_AUTH_REJECTED` copy instead
-        // of the raw transport error; it is a no-op pass-through whenever
-        // neither flag applies, so it is safe to wrap every exit below.
         let has_user_auth_header = crate::negotiation::spec_has_authorization(&config.spec);
         let helper_enabled = crate::headers_helper::has_headers_helper(&config.spec);
         let mut resolved_config = config.clone();
@@ -1195,7 +1708,7 @@ impl McpRegistry {
             .cloned();
         let (helper_spec, mut helper_minted_authorization) =
             crate::headers_helper::resolve_headers_helper_in(
-                &config,
+                config,
                 &self.headers_helper_cwd,
                 plugin_root.as_deref(),
             )
@@ -1207,17 +1720,6 @@ impl McpRegistry {
             self.resolve_oauth_spec(&resolved_config).await?
         };
 
-        // §17: resolve the MCP protocol-era negotiation mode for this
-        // connect attempt (oracle `co(Wr(t.type,...), t, cn(t))`), logging
-        // its two possible `warn`-level messages exactly as the oracle does.
-        // The resolved mode is not yet consumed to change the connect
-        // timeout or the `initialize` wire frame — that requires the
-        // `server/discover` era-probe sub-protocol and its pinned-legacy
-        // reconnect ladder, deferred (see `protocol_negotiation` module
-        // docs). Every label reachable in this port resolves to `Legacy`
-        // without an explicit `MCP_PROTOCOL_NEGOTIATION=auto` AND a wired
-        // feature-flag fetcher (neither exists by default), so today's
-        // connect flow is already byte-exact with the legacy path.
         let negotiation_mode = crate::protocol_negotiation::resolve_for_spec(
             &connect_spec,
             connect_timeout.as_millis() as u64,
@@ -1233,26 +1735,7 @@ impl McpRegistry {
 
         let (conn, caps) = match attempt(connect_spec.clone()).await {
             Ok(pair) => pair,
-            // 403 `insufficient_scope` for an OAuth server → step-up: the AS
-            // requires an elevated scope (RFC 6750). Re-run the interactive flow
-            // requesting that scope (RFC 6749 §6 forbids scope elevation via
-            // refresh, so we MUST do a fresh PKCE flow), re-inject the Bearer,
-            // and retry ONCE. Mirrors auth.ts `wrapFetchWithStepUpDetection`
-            // (1354-1374) + `markStepUpPending`/`cachedStepUpScope` persistence.
-            // Checked BEFORE the 401 branch so a 403 never falls into refresh.
-            //
-            // Unreachable when `has_user_auth_header || helper_minted_authorization`:
-            // `oauth_key` is `None` in that case (OAuth was never constructed
-            // above), so `classify_auth_failure` in this arm is always a
-            // pass-through.
             Err(e) if oauth_key.is_some() => {
-                // §24c: a live `WWW-Authenticate` challenge on THIS failure may
-                // name where the server's RFC 9728 Protected Resource Metadata
-                // actually lives (`resource_metadata`); when present it is
-                // threaded into the re-auth's discovery instead of the
-                // well-known guess (oracle `Be`/`Hxt`). `None` for any error
-                // shape that doesn't carry a structured `WWW-Authenticate`
-                // (the string-flattened fallback path).
                 let resource_metadata_url = error_resource_metadata_url(&e);
                 if let Some(scope) = error_is_403_insufficient_scope(&e) {
                     let stepped = self
@@ -1270,10 +1753,6 @@ impl McpRegistry {
                         )
                     })?
                 } else if error_is_401(&e) {
-                    // 401 → the access token is stale: force a refresh (or a
-                    // fresh interactive flow), re-inject the Bearer, retry ONCE.
-                    // Faithful-core 401 detection: the transport flattens errors
-                    // to strings (structured status is a noted residual).
                     let refreshed = self
                         .reauth_oauth_spec(&resolved_config, resource_metadata_url.as_deref())
                         .await?;
@@ -1293,13 +1772,8 @@ impl McpRegistry {
                 }
             }
             Err(e) if helper_enabled && error_is_auth_response(&e) => {
-                // A helper may emit short-lived credentials. Re-run it for one
-                // auth failure and reconnect once; never loop indefinitely.
-                // Re-derive `helper_minted_authorization` from THIS rerun (it
-                // can legitimately change run to run) so a still-failing retry
-                // classifies against what the helper minted this time.
                 let (refreshed, minted) = crate::headers_helper::resolve_headers_helper_in(
-                    &config,
+                    config,
                     &self.headers_helper_cwd,
                     plugin_root.as_deref(),
                 )
@@ -1321,371 +1795,573 @@ impl McpRegistry {
                 ))
             }
         };
-        // §20b — `tengu_mcp_tools_listed`'s `listDurationMs:Date.now()-o`.
-        // Oracle `yt` (@182326900) opens the timer immediately BEFORE the
-        // `tools/list` round-trip and `yn` reads it immediately after, with
-        // no other RPC inside the window: `let d=Date.now(), …,
-        // h=await …"tools/list"…, _=yn(e,h,d,"live",r)`. Timing the whole
-        // catalog block instead (tools + resources + prompts, as an earlier
-        // revision did) turned this into a multiple-x overstatement of the
-        // operation the field is named for — a server answering `tools/list`
-        // in 40 ms but `resources/list`/`prompts/list` in 300 ms each
-        // reported ~640 ms. Stop the clock where the oracle stops it.
-        let mut tools_list_elapsed = std::time::Duration::ZERO;
-        let catalog = async {
-            let tools = if caps.tools {
-                let started = std::time::Instant::now();
-                let listed = self.transport.list_tools(&conn).await?;
-                tools_list_elapsed = started.elapsed();
-                listed
-            } else {
-                Vec::new()
-            };
-            let resources = if caps.resources {
-                self.transport.list_resources(&conn).await?
-            } else {
-                Vec::new()
-            };
-            // §26a — `resources/templates/list` carries TWO gates, not one.
-            //
-            // The capability check quoted below (@167690139) is the SDK's
-            // `assertRequestHandlerCapability` — it proves the METHOD is
-            // capability-gated, but it is not the emission site and says
-            // nothing about whether discovery issues the call. The actual
-            // emission is the live-discovery `Promise.all` @182539595:
-            //
-            //   let[ae,de,Ee,Re,Ie]=await Promise.all([ …,
-            //     v&&JK(G.config) ? Qe(G) : Promise.resolve([]) ]);
-            //
-            // where `v = !!G.capabilities?.resources` AND `JK(config)`
-            // (@176260324, `me(e)===undefined`) requires the discovery cache
-            // to be eligible: enabled at all (`Sln()` @161529603 — env
-            // `MCP_DISCOVERY_CACHE` or the `tengu_mcp_discovery_cache_enable`
-            // gate, BOTH default off), on an `http`/`sse` transport, not
-            // cli-owned, no env placeholder, no ambient credential, not
-            // opted out. So with stock settings the oracle issues ZERO
-            // `resources/templates/list` RPCs, and never any for stdio.
-            //
-            // Templates are also absent from the live result — that path
-            // emits `resourceTemplates: void 0` (@182540366) and the fetched
-            // list feeds only the cache row (`Mt(G,{…templates:X…})`).
-            //
-            // `discovery_cache::cache_gate` is the port of `me()`; `None`
-            // means eligible. Gating here restores RPC parity and keeps the
-            // fetch ready for whenever the cache itself is wired.
-            let templates_eligible = crate::discovery_cache::cache_gate(
-                &config.spec,
-                None,
-                crate::discovery_cache::feature_enabled(),
-            )
-            .is_none();
-            //
-            // The fetch is NON-FATAL. Templates are optional in the MCP spec:
-            // a server may declare `capabilities.resources` on the strength of
-            // `resources/list` alone and answer `-32601 Method not found` here
-            // (the posix transport flattens that to `McpError::Internal` via
-            // `map_call_err`). Oracle `Qe` (2.1.251 Mach-O @182528544) wraps
-            // the whole fetch in a catch that returns `[]` on EVERY error —
-            // `catch(t){ mr().resourceTemplateLists.delete(ur(e.name,e.config));
-            // Z(e.name,`Failed to fetch resource templates: ${l(t)}`); let r=[];
-            // if(!(t instanceof Er&&t.code===Ir.MethodNotFound))
-            // qt().discoveryFetchErrors.set(r,we(t)); return r }` — so it can
-            // never fail a connection. Propagating it with `?` instead
-            // disconnected the live transport below and dropped ALL of the
-            // server's tools/resources/prompts.
-            let resource_templates = if caps.resources && templates_eligible {
-                match self.transport.list_resource_templates(&conn).await {
-                    Ok(templates) => templates,
-                    Err(error) => {
-                        tracing::warn!(
-                            server = %config.name,
-                            %error,
-                            "Failed to fetch resource templates"
-                        );
-                        Vec::new()
-                    }
-                }
-            } else {
-                Vec::new()
-            };
-            let prompts = if caps.prompts {
-                self.transport.list_prompts(&conn).await?
-            } else {
-                Vec::new()
-            };
-            Ok::<_, McpError>((tools, resources, resource_templates, prompts))
-        }
-        .await;
-        let (mut tools, resources, resource_templates, prompts) = match catalog {
-            Ok(catalog) => catalog,
-            Err(error) => {
-                // `initialize` succeeded, so the transport is live. A catalog
-                // failure must retire it before the state falls back to
-                // Disconnected; otherwise stdio children/sockets leak.
-                let _ = self.transport.disconnect(conn.connection_id).await;
-                return Err(error);
-            }
-        };
-
-        // Rewrite the empty `<server>` token the transport emits (it has no
-        // logical server name, only an `McpConnectionId`). This is the missing
-        // "rewrite site" the posix `list_tools` comment defers to: stamp the
-        // RAW `config.name` into `server_name` and build the normalized FQN
-        // `mcp__<normalize(server)>__<normalize(tool)>`. Mirrors claude-code's
-        // `buildMcpToolName(client.name, tool.name)` (client.ts:1768 →
-        // `mcpStringUtils.ts:51` `getMcpPrefix(server) + normalizeNameForMCP(tool)`),
-        // which normalizes BOTH segments with the 1:1 `normalizeNameForMCP`
-        // (normalization.rs). The RAW `tool_name` stays on the dto for dispatch
-        // (the server expects the unnormalized wire name, recovered via
-        // [`McpRegistry::resolve_wire_tool_name`] — claude-code carries it as
-        // `mcpInfo.toolName`, client.ts:1774). For valid-identifier tool names
-        // the normalized form equals the raw one, so the FQN is byte-unchanged
-        // except for names with characters outside `[a-zA-Z0-9_-]`.
-        let normalized_server = normalize_name_for_mcp(&config.name);
-        // §20a — normalize or drop each tool's `inputSchema` before it reaches
-        // the model (oracle `Wrt`/`qrt`, see [`crate::tool_schema`]). This is
-        // the CONNECT path: `McpClient::list_tools` runs the same decision but
-        // is reached only by `refresh_catalog`, so without this the transform
-        // never applied to the tool list `build_registered_mcp_tools` actually
-        // hands the model. The per-server gate reads the SAME resolved URL the
-        // client is given below via `with_server_url`.
-        let gate_url = {
-            let u = spec_url(&config.spec);
-            (!u.is_empty()).then(|| u.to_string())
-        };
-        let server_display = config.name.clone();
-        // §20b — `yn`'s seven per-server tool-schema-classification counters
-        // (see `telemetry::tengu::mcp::DegradedReason`'s doc for the full
-        // `x`/`W`/`ue`/`_e`/`xe`/`F`/`X` trace). Tallied across the WHOLE
-        // tool list, then one `tengu_mcp_degraded` fires per nonzero bucket
-        // AFTER the loop — the oracle does not fire one event per tool.
-        let mut degraded_counts: std::collections::HashMap<
-            telemetry::tengu::mcp::DegradedReason,
-            u32,
-        > = std::collections::HashMap::new();
-        // Oracle `yn`'s FIRST statement (@182316780), 20 lines above the
-        // seven counters below: `if(u.length===0&&r==="live")
-        // s("tengu_mcp_degraded",{reason:w("connected_zero_tools"),…})`.
-        // `u` is the RAW `tools/list` response, so this is measured BEFORE
-        // the §20a filter runs — a server whose every tool the filter dropped
-        // reports its drop reason, not zero-tools. `r==="live"` holds because
-        // this is the connect path (a fresh dial); the cached-row adoption
-        // path the oracle also feeds `yn` from does not exist in this port.
-        // Gated on `caps.tools` for the same reason `tools_listed` is: with
-        // no tools capability the oracle never reaches `yn` at all, so an
-        // empty list there is not a degraded signal.
-        if connected_zero_tools_fires(caps.tools, tools.len()) {
-            degraded_counts.insert(telemetry::tengu::mcp::DegradedReason::ConnectedZeroTools, 1);
-        }
-        tools.retain_mut(|dto| {
-            let decision = crate::tool_schema::decide_tool_schema(
-                gate_url.as_deref(),
-                &dto.input_schema,
-            );
-            // The oracle's `x++` and its validity counters are INDEPENDENT
-            // (the `x++` arm falls through into the validity check), so a
-            // normalized-then-invalid tool increments TWO buckets and fires
-            // TWO events. See `tool_schema::ToolSchemaDecision::normalized`.
-            if decision.normalized {
-                *degraded_counts
-                    .entry(telemetry::tengu::mcp::DegradedReason::ToolSchemaNormalized)
-                    .or_insert(0) += 1;
-            }
-            if let Some(reason) = decision.classification {
-                *degraded_counts.entry(reason).or_insert(0) += 1;
-            }
-            if let Some(reason) = decision.drop_reason {
-                tracing::warn!(
-                    server = %server_display,
-                    tool = %dto.tool_name,
-                    "Skipping tool \"{}\": {reason}. Other tools from this server remain available.",
-                    dto.tool_name
-                );
-                return false;
-            }
-            if let Some(warning) = &decision.warning {
-                tracing::debug!(
-                    server = %server_display,
-                    tool = %dto.tool_name,
-                    "Tool \"{}\" {warning}",
-                    dto.tool_name
-                );
-            }
-            if let Some(note) = decision.description_note {
-                // oracle: `E.description ? `${note}\n\n${description}` : note`.
-                dto.description = if dto.description.is_empty() {
-                    note
+        match std::panic::AssertUnwindSafe(async {
+            let mut tools_list_elapsed = std::time::Duration::ZERO;
+            let catalog = async {
+                let tools = if caps.tools {
+                    let started = std::time::Instant::now();
+                    let listed = self.transport.list_tools(&conn).await?;
+                    tools_list_elapsed = started.elapsed();
+                    listed
                 } else {
-                    format!("{note}\n\n{}", dto.description)
+                    Vec::new()
                 };
+                let resources = if caps.resources {
+                    self.transport.list_resources(&conn).await?
+                } else {
+                    Vec::new()
+                };
+                let templates_eligible = crate::discovery_cache::cache_gate(
+                    &config.spec,
+                    None,
+                    crate::discovery_cache::feature_enabled(),
+                )
+                .is_none();
+                let resource_templates = if caps.resources && templates_eligible {
+                    match self.transport.list_resource_templates(&conn).await {
+                        Ok(templates) => templates,
+                        Err(error) => {
+                            tracing::warn!(
+                                server = %config.name,
+                                %error,
+                                "Failed to fetch resource templates"
+                            );
+                            Vec::new()
+                        }
+                    }
+                } else {
+                    Vec::new()
+                };
+                let prompts = if caps.prompts {
+                    self.transport.list_prompts(&conn).await?
+                } else {
+                    Vec::new()
+                };
+                Ok::<_, McpError>((tools, resources, resource_templates, prompts))
             }
-            dto.input_schema = decision.schema;
-            dto.server_name.clone_from(&server_display);
-            dto.full_name = format!(
-                "mcp__{}__{}",
-                normalized_server,
-                normalize_name_for_mcp(&dto.tool_name)
-            );
-            true
-        });
+            .await;
+            let (mut tools, resources, resource_templates, prompts) = match catalog {
+                Ok(catalog) => catalog,
+                Err(error) => {
+                    self.disconnect_or_schedule_cleanup(conn.connection_id)
+                        .await;
+                    return Err(error);
+                }
+            };
 
-        // `tengu_mcp_tools_listed` — once per successful `tools/list`, not
-        // when the server had no `tools` capability at all (oracle only
-        // reaches this call site from inside the tools-listing branch).
-        if caps.tools {
-            telemetry::emit_mcp_tools_listed(&tools_listed_payload(
-                config.spec.kind(),
-                tools_list_elapsed,
-                &tools,
-                &server_display,
-            ));
-        }
+            let normalized_server = normalize_name_for_mcp(&config.name);
+            let gate_url = {
+                let u = spec_url(&config.spec);
+                (!u.is_empty()).then(|| u.to_string())
+            };
+            let server_display = config.name.clone();
+            let mut degraded_counts: std::collections::HashMap<
+                telemetry::tengu::mcp::DegradedReason,
+                u32,
+            > = std::collections::HashMap::new();
+            if connected_zero_tools_fires(caps.tools, tools.len()) {
+                degraded_counts.insert(
+                    telemetry::tengu::mcp::DegradedReason::ConnectedZeroTools,
+                    1,
+                );
+            }
+            tools.retain_mut(|dto| {
+                let decision = crate::tool_schema::decide_tool_schema(
+                    gate_url.as_deref(),
+                    &dto.input_schema,
+                );
+                if decision.normalized {
+                    *degraded_counts
+                        .entry(telemetry::tengu::mcp::DegradedReason::ToolSchemaNormalized)
+                        .or_insert(0) += 1;
+                }
+                if let Some(reason) = decision.classification {
+                    *degraded_counts.entry(reason).or_insert(0) += 1;
+                }
+                if let Some(reason) = decision.drop_reason {
+                    tracing::warn!(
+                        server = %server_display,
+                        tool = %dto.tool_name,
+                        "Skipping tool \"{}\": {reason}. Other tools from this server remain available.",
+                        dto.tool_name
+                    );
+                    return false;
+                }
+                if let Some(warning) = &decision.warning {
+                    tracing::debug!(
+                        server = %server_display,
+                        tool = %dto.tool_name,
+                        "Tool \"{}\" {warning}",
+                        dto.tool_name
+                    );
+                }
+                if let Some(note) = decision.description_note {
+                    dto.description = if dto.description.is_empty() {
+                        note
+                    } else {
+                        format!("{note}\n\n{}", dto.description)
+                    };
+                }
+                dto.input_schema = decision.schema;
+                dto.server_name.clone_from(&server_display);
+                dto.full_name = format!(
+                    "mcp__{}__{}",
+                    normalized_server,
+                    normalize_name_for_mcp(&dto.tool_name)
+                );
+                true
+            });
 
-        // Fire one `tengu_mcp_degraded` per nonzero classification bucket.
-        // oracle: `c(e.config.type??"stdio")` — the RAW config `type`
-        // string, matching `McpTransportSpec::kind()` (NOT the `Wr`-mapped
-        // `ide`/`sdk-control` labels `protocol_negotiation.rs` uses
-        // elsewhere) — see `server_key`'s doc for why `kind()` itself must
-        // never change shape; this only READS it. The payload-BUILDING step
-        // is a pure, non-async, non-tracing function so the aggregation
-        // logic is unit-testable without a tracing-capture race against the
-        // other `#[tokio::test]`s sharing this binary (a real `tracing`
-        // pitfall: `subscriber::set_default` is thread-local, but callsite
-        // `Interest` caching is process-global, so a concurrently-running
-        // test's subscriber can race the cache and silently starve this
-        // one's events under `cargo test`'s default parallelism).
-        for payload in
-            degraded_payloads_for_server(&degraded_counts, config.spec.kind(), &server_display)
-        {
-            telemetry::emit_mcp_degraded(&payload);
-        }
+            if caps.tools {
+                telemetry::emit_mcp_tools_listed(&tools_listed_payload(
+                    config.spec.kind(),
+                    tools_list_elapsed,
+                    &tools,
+                    &server_display,
+                ));
+            }
+            for payload in
+                degraded_payloads_for_server(&degraded_counts, config.spec.kind(), &server_display)
+            {
+                telemetry::emit_mcp_degraded(&payload);
+            }
 
-        // §11 — write-through: persist (or purge) the discovery-cache entry
-        // for this server now that a LIVE discovery round has actually
-        // completed. Must run before `config`/`caps`/`tools`/`resources`/
-        // `resource_templates`/`prompts` are moved into the `Connected`
-        // state just below.
-        self.persist_or_purge_discovery_cache(
-            &config,
-            &caps,
-            &tools,
-            &resources,
-            &resource_templates,
-            &prompts,
-        );
+            let connection_id = conn.connection_id;
+            let mut client = None;
+            let mut listener_connection = None;
+            if let Some(raw_conn) = &self.raw_conn {
+                if let Some(connection) = raw_conn.connection_for(connection_id) {
+                    let cwd = std::env::current_dir().unwrap_or_default();
+                    client = Some(Arc::new(
+                        McpClient::with_roots(
+                            config.name.clone(),
+                            cwd,
+                            self.additional_roots.clone(),
+                            connection.clone(),
+                            self.hook_dispatcher.clone(),
+                        )
+                        .await
+                        .with_config_options(config.timeout_ms, config.always_load)
+                        .with_transport_kind(config.spec.transport_kind())
+                        .with_server_url(gate_url.clone()),
+                    ));
+                    listener_connection = Some(connection);
+                }
+            }
 
-        let connection_id = conn.connection_id;
-        let server_name = config.name.clone();
-        // Capture the per-server config options before `config` is moved into
-        // the `Connected` state below — threaded into the `McpClient` further
-        // down (parity 2.1.207 P2-01).
-        let config_timeout_ms = config.timeout_ms;
-        let config_always_load = config.always_load;
-        // Transport kind feeds the `GLd` idle-timeout default (stdio 30 min /
-        // remote 5 min / in-process none) on the built `McpClient`.
-        let config_transport_kind = config.spec.transport_kind();
-        // Resolved endpoint URL (`None` for stdio/url-less transports) — feeds
-        // the §20a per-server gate on the `McpClient` refresh path.
-        let config_server_url = gate_url.clone();
-        self.connections.write().await.insert(
-            key.clone(),
-            McpConnectionState::Connected {
-                config,
+            Ok(LiveDiscovery {
                 connection_id,
                 capabilities: caps,
                 tools,
                 resources,
                 resource_templates,
                 prompts,
-                connected_at: SystemTime::now(),
-            },
-        );
-
-        // Bridge the transport's live `jsonrpc::Connection` into an `McpClient`
-        // so the 4 builtin MCP tools dispatch over the wire-locked client
-        // surface. The `initialize` handshake was ALREADY performed by
-        // `transport.initialize` above, so we do NOT re-run `McpClient::initialize`
-        // (that would double-handshake) — the `McpClient`'s own
-        // `server_capabilities` cache stays unpopulated, and tools rely on the
-        // transport-discovered caps stored in the `Connected` state. Mirrors
-        // claude-code's `ensureConnectedClient` returning a live client
-        // (client.ts:1688-1709). Registered under the RAW `config.name` so
-        // `/mcp` display stays raw; `get_client` matches by normalized key.
-        if let Some(raw_conn) = &self.raw_conn {
-            if let Some(connection) = raw_conn.connection_for(connection_id) {
-                // §24b: an agent-scoped connection's live `list_changed`
-                // notifications must never reach `catalog_changes` — that
-                // channel drives the SHARED session ToolRegistry's
-                // auto-register listener, and this connection must stay
-                // private to the subagent that opened it (see the initial
-                // `catalog_changes.send` gate below, and
-                // `connect_agent_scoped`'s doc).
-                if table_key.is_none() {
-                    self.spawn_catalog_change_listener(
-                        server_name.clone(),
-                        connection_id,
-                        connection.clone(),
-                    );
-                }
-                let cwd = std::env::current_dir().unwrap_or_default();
-                // Forward the optional hook dispatcher so this server's
-                // `elicitation/create` handler can fire the `Elicitation` hook.
-                // `None` => default `{"action":"cancel"}` (unchanged). Also
-                // advertise the session's additional working dirs (settings
-                // `additionalDirectories` + `--add-dir`) on `roots/list`, so a
-                // connected server sees the full working-dir set (parity 2.1.207
-                // r1d() = [cwd, ...additionalWorkingDirectories]).
-                let client = Arc::new(
-                    McpClient::with_roots(
-                        server_name.clone(),
-                        cwd,
-                        self.additional_roots.clone(),
-                        connection,
-                        self.hook_dispatcher.clone(),
-                    )
-                    .await
-                    // Carry the resolved per-server config `timeout` (folded
-                    // with `request_timeout_ms`) into the BHs per-call resolver,
-                    // and the server-level `alwaysLoad` flag into each listed
-                    // tool's `always_load` bit (parity 2.1.207 P2-01).
-                    .with_config_options(config_timeout_ms, config_always_load)
-                    // Transport kind → `GLd` idle-timeout default (parity 2.1.207
-                    // P2-01 remainder).
-                    .with_transport_kind(config_transport_kind)
-                    // §20a — the connected server's URL feeds the per-server
-                    // schema-normalization gate on `refresh_catalog`'s
-                    // `list_tools`, exactly as `gate_url` above feeds the
-                    // connect path. Without it the gate can only ever match a
-                    // bare `"*"` entry.
-                    .with_server_url(config_server_url),
-                );
-                self.register_connected_client(&key, connection_id, client)
+                client,
+                listener_connection,
+            })
+        })
+        .catch_unwind()
+        .await
+        {
+            Ok(Ok(discovery)) => Ok(discovery),
+            Ok(Err(error)) => Err(error),
+            Err(_) => {
+                self.disconnect_or_schedule_cleanup(conn.connection_id)
                     .await;
+                Err(lazy_upgrade_panic_error(
+                    &config.name,
+                    "post-connect discovery",
+                ))
             }
         }
+    }
 
-        // Drive the engine's already-Arc-wrapped ToolRegistry for both startup
-        // and reconnects. The startup event is an idempotent replacement; a
-        // reconnect needs it because its new connection id did not exist in the
-        // boot-time MCP partition.
-        //
-        // §24b: SKIPPED for an agent-scoped connect (`table_key.is_some()`) —
-        // this is the mechanism that grafts a connection's discovered tools
-        // onto the shared session `ToolRegistry` (`apps/engine-desktop` /
-        // `apps/engine-mobile`'s `mcp_catalog_changes` listener), and an
-        // agent-scoped server must stay private to the subagent spawn that
-        // opened it. The subagent's own tool set is built directly from this
-        // connection (by `key`) by the per-agent MCP tool builder instead.
-        if table_key.is_none() {
-            let _ = self.catalog_changes.send(McpCatalogChanged {
-                server_name,
-                connection_id,
-                retired_connection_id: None,
-                kind: McpCatalogKind::Tools,
-            });
+    async fn run_lazy_upgrade_owner(&self, key: String, slot: Arc<LazyUpgradeSlot>) {
+        if let Err(error) = Self::validate_connectable_config(&slot.expected_config) {
+            let terminal = {
+                let lifecycle = self.lifecycle_lock(&key);
+                let _guard = lifecycle.lock().await;
+                self.finish_lazy_upgrade_failure_locked(&key, &slot, &error)
+                    .await
+            };
+            slot.finish_if_unset(terminal);
+            return;
         }
 
-        Ok(connection_id)
+        let discovery = match self.discover_live_connection(&slot.expected_config).await {
+            Ok(discovery) => discovery,
+            Err(error) => {
+                let terminal = {
+                    let lifecycle = self.lifecycle_lock(&key);
+                    let _guard = lifecycle.lock().await;
+                    self.finish_lazy_upgrade_failure_locked(&key, &slot, &error)
+                        .await
+                };
+                slot.finish_if_unset(terminal);
+                return;
+            }
+        };
+
+        let (terminal, cleanup) = {
+            let lifecycle = self.lifecycle_lock(&key);
+            let _guard = lifecycle.lock().await;
+            match self
+                .install_lazy_upgrade_live_discovery_if_current(&key, &slot, discovery)
+                .await
+            {
+                BackgroundInstallOutcome::Installed(connection_id) => {
+                    self.remove_lazy_upgrade_slot_if_matches(&key, &slot).await;
+                    (LazyUpgradeTerminal::Success(connection_id), None)
+                }
+                BackgroundInstallOutcome::Rejected(discovery) => {
+                    self.remove_lazy_upgrade_slot_if_matches(&key, &slot).await;
+                    (
+                        LazyUpgradeTerminal::Error(Arc::new(slot.stale_error())),
+                        Some(discovery),
+                    )
+                }
+            }
+        };
+        if let Some(discovery) = cleanup {
+            self.discard_live_discovery(discovery).await;
+        }
+        slot.finish_if_unset(terminal);
+    }
+
+    async fn recover_lazy_upgrade_owner_panic(&self, key: String, slot: Arc<LazyUpgradeSlot>) {
+        let terminal = {
+            let lifecycle = self.lifecycle_lock(&key);
+            let _guard = lifecycle.lock().await;
+            let terminal = self
+                .finish_lazy_upgrade_failure_locked(&key, &slot, &slot.panic_error())
+                .await;
+            self.remove_lazy_upgrade_slot_if_matches(&key, &slot).await;
+            terminal
+        };
+        slot.finish_if_unset(terminal);
+    }
+
+    async fn install_live_discovery(
+        &self,
+        key: String,
+        config: McpServerConfig,
+        discovery: LiveDiscovery,
+        retired_connection_id: Option<McpConnectionId>,
+    ) -> McpConnectionId {
+        let server_name = config.name.clone();
+        let connection_id = discovery.connection_id;
+        let shared_server = key == server_name;
+        let capabilities = discovery.capabilities.clone();
+        let tools = discovery.tools.clone();
+        let resources = discovery.resources.clone();
+        let resource_templates = discovery.resource_templates.clone();
+        let prompts = discovery.prompts.clone();
+        let listener_connection = discovery.listener_connection.clone();
+        self.publish_connected_state(&key, &config, &discovery, retired_connection_id)
+            .await;
+        self.persist_or_purge_discovery_cache(
+            &config,
+            &capabilities,
+            &tools,
+            &resources,
+            &resource_templates,
+            &prompts,
+        );
+        if let Some(connection) = listener_connection {
+            if shared_server {
+                self.spawn_catalog_change_listener(server_name.clone(), connection_id, connection);
+            }
+        }
+        if shared_server {
+            self.publish_catalog_change(McpCatalogChanged {
+                server_name,
+                connection_id,
+                retired_connection_id,
+                kind: McpCatalogKind::Tools,
+            })
+            .await;
+        }
+        connection_id
+    }
+
+    async fn install_lazy_upgrade_live_discovery_if_current(
+        &self,
+        key: &str,
+        slot: &Arc<LazyUpgradeSlot>,
+        discovery: LiveDiscovery,
+    ) -> BackgroundInstallOutcome {
+        let server_name = slot.expected_config.name.clone();
+        let shared_server = key == server_name;
+        let capabilities = discovery.capabilities.clone();
+        let tools = discovery.tools.clone();
+        let resources = discovery.resources.clone();
+        let resource_templates = discovery.resource_templates.clone();
+        let prompts = discovery.prompts.clone();
+        let listener_connection = discovery.listener_connection.clone();
+        let current_slot = self.lazy_upgrade_slots.read().await.get(key).cloned();
+        let installed = {
+            if !matches!(current_slot.as_ref(), Some(current_slot) if Arc::ptr_eq(current_slot, slot))
+            {
+                false
+            } else {
+                let expected_current = match slot.mode {
+                    LazyUpgradeMode::Foreground => matches!(
+                        self.connections.read().await.get(key),
+                        Some(McpConnectionState::Connecting { config, .. })
+                            if Self::same_config_snapshot(config, &slot.expected_config)
+                    ),
+                    LazyUpgradeMode::Background => matches!(
+                        self.connections.read().await.get(key),
+                        Some(McpConnectionState::Cached {
+                            connection_id,
+                            config,
+                            ..
+                        }) if *connection_id == slot.cached_connection_id
+                            && Self::same_config_snapshot(config, &slot.expected_config)
+                    ),
+                };
+                if expected_current {
+                    self.publish_connected_state(
+                        key,
+                        &slot.expected_config,
+                        &discovery,
+                        Some(slot.cached_connection_id),
+                    )
+                    .await;
+                    true
+                } else {
+                    false
+                }
+            }
+        };
+        if !installed {
+            return BackgroundInstallOutcome::Rejected(discovery);
+        }
+        self.persist_or_purge_discovery_cache(
+            &slot.expected_config,
+            &capabilities,
+            &tools,
+            &resources,
+            &resource_templates,
+            &prompts,
+        );
+        if let Some(connection) = listener_connection {
+            if shared_server {
+                self.spawn_catalog_change_listener(
+                    server_name.clone(),
+                    discovery.connection_id,
+                    connection,
+                );
+            }
+        }
+        if shared_server {
+            self.publish_catalog_change(McpCatalogChanged {
+                server_name,
+                connection_id: discovery.connection_id,
+                retired_connection_id: Some(slot.cached_connection_id),
+                kind: McpCatalogKind::Tools,
+            })
+            .await;
+        }
+        BackgroundInstallOutcome::Installed(discovery.connection_id)
+    }
+
+    async fn finish_lazy_upgrade_failure_locked(
+        &self,
+        key: &str,
+        slot: &Arc<LazyUpgradeSlot>,
+        error: &McpError,
+    ) -> LazyUpgradeTerminal {
+        let current_slot = self.lazy_upgrade_slots.read().await.get(key).cloned();
+        let still_current =
+            matches!(current_slot.as_ref(), Some(current_slot) if Arc::ptr_eq(current_slot, slot));
+        if still_current {
+            match slot.mode {
+                LazyUpgradeMode::Foreground => {
+                    let current_connecting = matches!(
+                        self.connections.read().await.get(key),
+                        Some(McpConnectionState::Connecting { config, .. })
+                            if Self::same_config_snapshot(config, &slot.expected_config)
+                    );
+                    if current_connecting {
+                        self.record_discovery_cache_connect_failure(&slot.expected_config);
+                        self.connections.write().await.insert(
+                            key.to_string(),
+                            McpConnectionState::Disconnected {
+                                config: slot.expected_config.clone(),
+                                last_error: Some(error.to_string()),
+                            },
+                        );
+                        self.clear_prompt_predecessors_for_key(key).await;
+                        self.emit_retire_event_if_shared(
+                            &slot.expected_config,
+                            key,
+                            slot.cached_connection_id,
+                        )
+                        .await;
+                    }
+                }
+                LazyUpgradeMode::Background => {
+                    self.record_discovery_cache_refresh_failure_locked(
+                        key,
+                        slot.cached_connection_id,
+                        &slot.expected_config,
+                    )
+                    .await;
+                }
+            }
+            self.remove_lazy_upgrade_slot_if_matches(key, slot).await;
+        }
+        LazyUpgradeTerminal::Error(Arc::new(clone_mcp_error(error)))
+    }
+
+    async fn discard_live_discovery(&self, discovery: LiveDiscovery) {
+        self.disconnect_or_schedule_cleanup(discovery.connection_id)
+            .await;
+    }
+
+    async fn emit_retire_event_if_shared(
+        &self,
+        config: &McpServerConfig,
+        key: &str,
+        connection_id: McpConnectionId,
+    ) {
+        if key != config.name {
+            return;
+        }
+        self.publish_catalog_change(McpCatalogChanged {
+            server_name: config.name.clone(),
+            connection_id,
+            retired_connection_id: Some(connection_id),
+            kind: McpCatalogKind::Tools,
+        })
+        .await;
+    }
+
+    async fn disconnect_for_cleanup(&self, connection_id: McpConnectionId) -> Result<(), McpError> {
+        tokio::time::timeout(
+            cleanup_disconnect_timeout(),
+            self.transport.disconnect(connection_id),
+        )
+        .await
+        .map_err(|_| {
+            McpError::Internal(format!(
+                "disconnect timed out after {:?}",
+                cleanup_disconnect_timeout()
+            ))
+        })?
+    }
+
+    async fn disconnect_or_schedule_cleanup(&self, connection_id: McpConnectionId) {
+        if self.disconnect_for_cleanup(connection_id).await.is_err() {
+            self.schedule_transport_cleanup_retry(connection_id).await;
+        } else {
+            self.pending_transport_cleanups
+                .write()
+                .await
+                .remove(&connection_id);
+        }
+    }
+
+    async fn schedule_transport_cleanup_retry(&self, connection_id: McpConnectionId) {
+        let should_spawn = {
+            let mut pending = self.pending_transport_cleanups.write().await;
+            match pending.get_mut(&connection_id) {
+                Some(entry) if entry.retrying => false,
+                Some(entry) => {
+                    entry.retrying = true;
+                    true
+                }
+                None => {
+                    pending.insert(connection_id, PendingTransportCleanup { retrying: true });
+                    true
+                }
+            }
+        };
+        if !should_spawn {
+            return;
+        }
+        let registry = self.clone_for_background();
+        tokio::spawn(async move {
+            registry
+                .retry_pending_transport_cleanup(connection_id)
+                .await;
+        });
+    }
+
+    async fn retry_pending_transport_cleanup(&self, connection_id: McpConnectionId) {
+        const MAX_RETRIES: u8 = 5;
+        let mut delay = Duration::from_millis(10);
+        for attempt in 0..MAX_RETRIES {
+            tokio::time::sleep(delay).await;
+            match self.disconnect_for_cleanup(connection_id).await {
+                Ok(()) => {
+                    self.pending_transport_cleanups
+                        .write()
+                        .await
+                        .remove(&connection_id);
+                    return;
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        connection_id = %connection_id,
+                        %error,
+                        "retrying MCP transport cleanup after disconnect failure"
+                    );
+                    if attempt + 1 == MAX_RETRIES {
+                        break;
+                    }
+                    delay = std::cmp::min(delay.saturating_mul(2), Duration::from_millis(250));
+                }
+            }
+        }
+        if let Some(entry) = self
+            .pending_transport_cleanups
+            .write()
+            .await
+            .get_mut(&connection_id)
+        {
+            entry.retrying = false;
+        }
+    }
+
+    async fn kick_pending_transport_cleanups(&self) {
+        let pending: Vec<McpConnectionId> = {
+            let pending = self.pending_transport_cleanups.read().await;
+            pending
+                .iter()
+                .filter_map(|(connection_id, entry)| (!entry.retrying).then_some(*connection_id))
+                .collect()
+        };
+        for connection_id in pending {
+            self.schedule_transport_cleanup_retry(connection_id).await;
+        }
+    }
+
+    async fn record_discovery_cache_refresh_failure_locked(
+        &self,
+        key: &str,
+        cached_connection_id: McpConnectionId,
+        config: &McpServerConfig,
+    ) {
+        let still_current = {
+            let conns = self.connections.read().await;
+            match conns.get(key) {
+                Some(McpConnectionState::Cached {
+                    connection_id,
+                    config: current_config,
+                    ..
+                }) => {
+                    *connection_id == cached_connection_id
+                        && Self::same_config_snapshot(current_config, config)
+                }
+                _ => false,
+            }
+        };
+        if !still_current {
+            return;
+        }
+        self.record_discovery_cache_connect_failure(config);
     }
 
     /// §11 — before dialing, compute what the discovery cache decides for
@@ -1741,6 +2417,9 @@ impl McpRegistry {
         is_fresh: bool,
     ) -> McpConnectionId {
         let connection_id = McpConnectionId::new();
+        let invalidated_slot = self.invalidate_lazy_upgrade_slot(key).await;
+        Self::finish_invalidated_lazy_upgrade_slot(invalidated_slot.as_ref());
+        self.clear_prompt_predecessors_for_key(key).await;
         self.connections.write().await.insert(
             key.to_string(),
             McpConnectionState::Cached {
@@ -1774,12 +2453,13 @@ impl McpRegistry {
         // doc). An agent-scoped cache hit stays private to the subagent that
         // requested it, exactly like a live agent-scoped connect.
         if key == config.name {
-            let _ = self.catalog_changes.send(McpCatalogChanged {
+            self.publish_catalog_change(McpCatalogChanged {
                 server_name: config.name.clone(),
                 connection_id,
                 retired_connection_id: None,
                 kind: McpCatalogKind::Tools,
-            });
+            })
+            .await;
         }
         connection_id
     }
@@ -1862,10 +2542,10 @@ impl McpRegistry {
     ///
     /// This approximates the oracle's background-revalidation strike
     /// counter (`_6e`, reachable only from a `Stale`-hit's async
-    /// revalidation): this port has no background revalidation yet (Stage
-    /// 3, deferred — see `discovery_cache`'s module doc), so the nearest
-    /// available signal is treating every connect as an implicit refresh
-    /// attempt against whatever entry already exists.
+    /// revalidation): this port records the true background refresh failure
+    /// there when a stale hit revalidation fails, and still uses an ordinary
+    /// failed connect as a conservative fallback signal against whatever entry
+    /// already exists.
     fn record_discovery_cache_connect_failure(&self, config: &McpServerConfig) {
         let Some(store) = &self.discovery_cache_store else {
             return;
@@ -1913,15 +2593,27 @@ impl McpRegistry {
         let conn = tokio::time::timeout_at(deadline, self.transport.connect(&spec))
             .await
             .map_err(|_| timeout_error())??;
-        match tokio::time::timeout_at(deadline, self.transport.initialize(&conn)).await {
-            Ok(Ok(capabilities)) => Ok((conn, capabilities)),
-            Ok(Err(error)) => {
-                let _ = self.transport.disconnect(conn.connection_id).await;
+        match std::panic::AssertUnwindSafe(async {
+            tokio::time::timeout_at(deadline, self.transport.initialize(&conn)).await
+        })
+        .catch_unwind()
+        .await
+        {
+            Ok(Ok(Ok(capabilities))) => Ok((conn, capabilities)),
+            Ok(Ok(Err(error))) => {
+                self.disconnect_or_schedule_cleanup(conn.connection_id)
+                    .await;
                 Err(error)
             }
-            Err(_) => {
-                let _ = self.transport.disconnect(conn.connection_id).await;
+            Ok(Err(_)) => {
+                self.disconnect_or_schedule_cleanup(conn.connection_id)
+                    .await;
                 Err(timeout_error())
+            }
+            Err(_) => {
+                self.disconnect_or_schedule_cleanup(conn.connection_id)
+                    .await;
+                Err(lazy_upgrade_panic_error(server_name, "initialize"))
             }
         }
     }
@@ -2503,11 +3195,10 @@ impl McpRegistry {
     ///   `Disconnected { last_error: None }` and skipped — `/mcp` still lists
     ///   them but they never auto-connect. This subsumes the manual
     ///   pre-population block in `apps/cli/src/init.rs`.
-    /// - Otherwise [`Self::connect`] is invoked. On error the state is
-    ///   overwritten with `Disconnected { last_error: Some(..) }` so the
-    ///   reconnect loop ([`Self::run_reconnect_loop`]) can pick it up — note
-    ///   [`Self::connect`] itself leaves the state stuck in `Connecting` on a
-    ///   transport error, which this wrapper compensates for.
+    /// - Otherwise the per-server lifecycle lock is taken and
+    ///   [`Self::connect_locked`] is invoked directly, so the same generation-
+    ///   safe state install/writeback logic covers startup auto-connect,
+    ///   reconnect, and enable flows.
     ///
     /// One server's failure never aborts the batch; per-server failures are
     /// logged via `tracing::warn!`. Returns the per-server outcome in the same
@@ -2517,32 +3208,37 @@ impl McpRegistry {
         configs: Vec<McpServerConfig>,
     ) -> Vec<(String, Result<McpConnectionId, McpError>)> {
         use futures_util::future::join_all;
+        self.freeze_configuration();
         let futs = configs.into_iter().map(|config| async move {
             let name = config.name.clone();
+            let lifecycle = self.lifecycle_lock(&name);
+            let _guard = lifecycle.lock().await;
             if config.disabled {
-                self.connections.write().await.insert(
-                    name.clone(),
-                    McpConnectionState::Disconnected {
-                        config,
-                        last_error: None,
-                    },
-                );
+                let mut conns = self.connections.write().await;
+                match conns.get(&name) {
+                    Some(McpConnectionState::Connected { .. })
+                    | Some(McpConnectionState::Cached { .. })
+                    | Some(McpConnectionState::HealthChecking { .. })
+                    | Some(McpConnectionState::Connecting { .. })
+                    | Some(McpConnectionState::AwaitingOAuth { .. })
+                    | Some(McpConnectionState::Reconnecting { .. }) => {}
+                    _ => {
+                        conns.insert(
+                            name.clone(),
+                            McpConnectionState::Disconnected {
+                                config,
+                                last_error: None,
+                            },
+                        );
+                    }
+                }
                 tracing::debug!(server = %name, "skipping disabled MCP server");
                 return None;
             }
 
-            let result = self.connect(config.clone()).await;
+            let result = self.connect_locked(config, None).await;
             if let Err(ref e) = result {
                 tracing::warn!(server = %name, error = %e, "MCP auto-connect failed");
-                // `connect` leaves the state in `Connecting` on a transport
-                // error; reset it to a loop-eligible `Disconnected`.
-                self.connections.write().await.insert(
-                    name.clone(),
-                    McpConnectionState::Disconnected {
-                        config,
-                        last_error: Some(e.to_string()),
-                    },
-                );
             }
             Some((name, result))
         });
@@ -2561,6 +3257,7 @@ impl McpRegistry {
     /// process won't recover on its own); only remote transports are enrolled.
     pub async fn run_reconnect_loop(self: Arc<Self>) {
         loop {
+            self.kick_pending_transport_cleanups().await;
             let candidates: Vec<McpServerConfig> = {
                 let conns = self.connections.read().await;
                 conns
@@ -2712,10 +3409,21 @@ impl McpRegistry {
     pub async fn disconnect(&self, name: &str) -> Result<(), McpError> {
         let lifecycle = self.lifecycle_lock(name);
         let _guard = lifecycle.lock().await;
-        self.disconnect_locked(name).await
+        self.disconnect_locked_inner(name, true, false).await
     }
 
     async fn disconnect_locked(&self, name: &str) -> Result<(), McpError> {
+        self.disconnect_locked_inner(name, true, false).await
+    }
+
+    async fn disconnect_locked_inner(
+        &self,
+        name: &str,
+        revoke_oauth: bool,
+        remove_state: bool,
+    ) -> Result<(), McpError> {
+        self.kick_pending_transport_cleanups().await;
+        let invalidated_slot = self.invalidate_lazy_upgrade_slot(name).await;
         // §11 Stage 2 — a `Cached` server has NO live transport connection to
         // tear down (`is_live = false`): its `connection_id` is a synthetic
         // one minted purely to key the tool-registry partition (see
@@ -2724,19 +3432,34 @@ impl McpRegistry {
         // an id it never registered. It is still disconnect-able, though —
         // the user must be able to `/mcp disconnect` a cache-served server
         // exactly as they would a live one.
-        let Some((connection_id, config, is_live)) = ({
+        let slot_owned_connecting = invalidated_slot.is_some();
+        let Some((config, generation)) = ({
             let conns = self.connections.read().await;
             match conns.get(name) {
                 Some(McpConnectionState::Connected {
                     connection_id,
                     config,
                     ..
-                }) => Some((*connection_id, config.clone(), true)),
+                })
+                | Some(McpConnectionState::HealthChecking {
+                    connection_id,
+                    config,
+                }) => Some((config.clone(), Some((*connection_id, true)))),
                 Some(McpConnectionState::Cached {
                     connection_id,
                     config,
                     ..
-                }) => Some((*connection_id, config.clone(), false)),
+                }) => Some((config.clone(), Some((*connection_id, false)))),
+                Some(McpConnectionState::Connecting { config, .. }) if slot_owned_connecting => {
+                    Some((config.clone(), None))
+                }
+                Some(
+                    McpConnectionState::Disconnected { config, .. }
+                    | McpConnectionState::AwaitingOAuth { config, .. }
+                    | McpConnectionState::Reconnecting { config, .. }
+                    | McpConnectionState::Failed { config, .. }
+                    | McpConnectionState::Stopped { config },
+                ) if remove_state => Some((config.clone(), None)),
                 _ => None,
             }
         }) else {
@@ -2747,7 +3470,7 @@ impl McpRegistry {
         // teardown fails, callers keep the still-live state and cached client.
         // The per-server lifecycle lock prevents a concurrent connect from
         // racing this await, while snapshots for every server remain unblocked.
-        if is_live {
+        if let Some((connection_id, true)) = generation {
             self.transport.disconnect(connection_id).await?;
         }
 
@@ -2757,20 +3480,50 @@ impl McpRegistry {
                 Some(McpConnectionState::Connected {
                     connection_id: current,
                     ..
-                }) => is_live && *current == connection_id,
+                })
+                | Some(McpConnectionState::HealthChecking {
+                    connection_id: current,
+                    ..
+                }) => {
+                    matches!(generation, Some((connection_id, true)) if *current == connection_id)
+                }
                 Some(McpConnectionState::Cached {
                     connection_id: current,
                     ..
-                }) => !is_live && *current == connection_id,
+                }) => {
+                    matches!(generation, Some((connection_id, false)) if *current == connection_id)
+                }
+                Some(
+                    McpConnectionState::Disconnected {
+                        config: current, ..
+                    }
+                    | McpConnectionState::Connecting {
+                        config: current, ..
+                    }
+                    | McpConnectionState::AwaitingOAuth {
+                        config: current, ..
+                    }
+                    | McpConnectionState::Reconnecting {
+                        config: current, ..
+                    }
+                    | McpConnectionState::Failed {
+                        config: current, ..
+                    }
+                    | McpConnectionState::Stopped { config: current },
+                ) => generation.is_none() && Self::same_config_snapshot(current, &config),
                 _ => false,
             };
             if same_generation {
-                conns.insert(
-                    name.to_string(),
-                    McpConnectionState::Stopped {
-                        config: config.clone(),
-                    },
-                );
+                if remove_state {
+                    conns.remove(name);
+                } else {
+                    conns.insert(
+                        name.to_string(),
+                        McpConnectionState::Stopped {
+                            config: config.clone(),
+                        },
+                    );
+                }
             }
             same_generation
         };
@@ -2782,28 +3535,30 @@ impl McpRegistry {
         // handle to the now-dead connection. `shift_remove` preserves discovery
         // order for the remaining entries.
         self.clients.write().await.shift_remove(name);
+        self.clear_prompt_predecessors_for_key(name).await;
+        Self::finish_invalidated_lazy_upgrade_slot(invalidated_slot.as_ref());
         // Remove this connection's dynamic tool partition immediately. A later
         // reconnect emits a fresh Tools event with its new connection id.
-        let _ = self.catalog_changes.send(McpCatalogChanged {
-            server_name: name.to_string(),
-            connection_id,
-            retired_connection_id: Some(connection_id),
-            kind: McpCatalogKind::Tools,
-        });
+        if let Some((connection_id, _)) = generation {
+            self.emit_retire_event_if_shared(&config, name, connection_id)
+                .await;
+        }
 
         // Token revocation (RFC 7009) is best-effort and intentionally runs
         // after local state/catalog retirement, so slow network I/O cannot make
         // a dead server continue to appear live.
-        if let (Some(deps), Some(oauth_cfg)) = (self.oauth.as_ref(), spec_oauth(&config.spec)) {
-            let key = oauth::server_key(&config.name, &config.spec);
-            oauth::revoke_server_tokens(
-                &deps.storage,
-                &deps.http,
-                &key,
-                spec_url(&config.spec),
-                oauth_cfg,
-            )
-            .await;
+        if revoke_oauth {
+            if let (Some(deps), Some(oauth_cfg)) = (self.oauth.as_ref(), spec_oauth(&config.spec)) {
+                let key = oauth::server_key(&config.name, &config.spec);
+                oauth::revoke_server_tokens(
+                    &deps.storage,
+                    &deps.http,
+                    &key,
+                    spec_url(&config.spec),
+                    oauth_cfg,
+                )
+                .await;
+            }
         }
         Ok(())
     }
@@ -2814,10 +3569,17 @@ impl McpRegistry {
     /// server remains visible in `/mcp`, while a configuration reload must
     /// remove entries deleted from the on-disk config as well.
     pub async fn remove(&self, name: &str) -> Result<(), McpError> {
-        self.disconnect(name).await?;
-        self.connections.write().await.remove(name);
-        self.clients.write().await.shift_remove(name);
-        Ok(())
+        let lifecycle = self.lifecycle_lock(name);
+        let _guard = lifecycle.lock().await;
+        self.disconnect_locked_inner(name, true, true).await
+    }
+
+    /// Lifecycle-safe removal variant for plugin unload: retire any live or
+    /// cached partition and drop the state/client without revoking stored auth.
+    pub async fn remove_without_revoking_auth(&self, name: &str) -> Result<(), McpError> {
+        let lifecycle = self.lifecycle_lock(name);
+        let _guard = lifecycle.lock().await;
+        self.disconnect_locked_inner(name, false, true).await
     }
 
     /// Toggle one registered server immediately and retain the updated config
@@ -2842,8 +3604,9 @@ impl McpRegistry {
     ) -> Result<Option<traits::McpActionState>, McpError> {
         let lifecycle = self.lifecycle_lock(name);
         let _guard = lifecycle.lock().await;
+        self.kick_pending_transport_cleanups().await;
 
-        let (mut config, live_connection) = {
+        let (mut config, current_connection) = {
             let conns = self.connections.read().await;
             let Some(state) = conns.get(name) else {
                 return Err(McpError::Internal(format!(
@@ -2853,21 +3616,26 @@ impl McpRegistry {
             if state.config().disabled == disabled {
                 return Ok(None);
             }
-            let live_connection = match state {
+            let current_connection = match state {
                 McpConnectionState::Connected { connection_id, .. }
-                | McpConnectionState::HealthChecking { connection_id, .. } => Some(*connection_id),
+                | McpConnectionState::HealthChecking { connection_id, .. } => {
+                    Some((*connection_id, true))
+                }
+                McpConnectionState::Cached { connection_id, .. } => Some((*connection_id, false)),
                 _ => None,
             };
-            (state.config().clone(), live_connection)
+            (state.config().clone(), current_connection)
         };
+        let invalidated_slot = self.invalidate_lazy_upgrade_slot(name).await;
 
         if disabled {
             // Keep the live state/client until the transport confirms teardown.
             // This makes a failed disable visible and safely retryable.
-            if let Some(connection_id) = live_connection {
+            if let Some((connection_id, true)) = current_connection {
                 self.transport.disconnect(connection_id).await?;
             }
             config.disabled = true;
+            let retired_config = config.clone();
             self.connections.write().await.insert(
                 name.to_string(),
                 McpConnectionState::Disconnected {
@@ -2876,13 +3644,11 @@ impl McpRegistry {
                 },
             );
             self.clients.write().await.shift_remove(name);
-            if let Some(connection_id) = live_connection {
-                let _ = self.catalog_changes.send(McpCatalogChanged {
-                    server_name: name.to_string(),
-                    connection_id,
-                    retired_connection_id: Some(connection_id),
-                    kind: McpCatalogKind::Tools,
-                });
+            self.clear_prompt_predecessors_for_key(name).await;
+            Self::finish_invalidated_lazy_upgrade_slot(invalidated_slot.as_ref());
+            if let Some((connection_id, _)) = current_connection {
+                self.emit_retire_event_if_shared(&retired_config, name, connection_id)
+                    .await;
             }
             return Ok(Some(traits::McpActionState::Disabled));
         }
@@ -2895,6 +3661,8 @@ impl McpRegistry {
                 last_error: None,
             },
         );
+        self.clear_prompt_predecessors_for_key(name).await;
+        Self::finish_invalidated_lazy_upgrade_slot(invalidated_slot.as_ref());
         // A failed enable connect is a SETTLED "failed" outcome, not an error:
         // `connect_locked` already records `Disconnected { last_error }` on
         // failure, so the server flips on but reads back as `Failed`
@@ -3184,9 +3952,10 @@ impl McpRegistry {
     /// has always FETCHED them (`prompts/list` during `connect`, refreshed on
     /// `notifications/prompts/list_changed`); nothing read them back.
     ///
-    /// Only `Connected` servers contribute: a reconnecting or failed server's
-    /// last-known prompts would advertise commands that cannot be fetched.
-    /// Ordered by server name so the merged command list is deterministic.
+    /// `Connected` and discovery-cache-served `Cached` servers contribute; a
+    /// reconnecting or failed server's last-known prompts would advertise
+    /// commands that cannot be fetched. Ordered by server name so the merged
+    /// command list is deterministic.
     pub async fn connected_prompts(
         &self,
     ) -> Vec<(String, protocol::McpConnectionId, traits::McpPromptDto)> {
@@ -3195,11 +3964,18 @@ impl McpRegistry {
         servers.sort();
         let mut out = Vec::new();
         for name in servers {
-            if let Some(crate::connection::McpConnectionState::Connected {
-                connection_id,
-                prompts,
-                ..
-            }) = conns.get(name)
+            if let Some(
+                crate::connection::McpConnectionState::Connected {
+                    connection_id,
+                    prompts,
+                    ..
+                }
+                | crate::connection::McpConnectionState::Cached {
+                    connection_id,
+                    prompts,
+                    ..
+                },
+            ) = conns.get(name)
             {
                 for prompt in prompts {
                     out.push((name.clone(), *connection_id, prompt.clone()));
@@ -3220,23 +3996,78 @@ impl McpRegistry {
         prompt_name: &str,
         arguments: serde_json::Value,
     ) -> Result<serde_json::Value, McpError> {
-        let server_name = {
+        let direct = {
             let connections = self.connections.read().await;
-            connections
-                .iter()
-                .find_map(|(name, state)| match state {
-                    crate::connection::McpConnectionState::Connected {
-                        connection_id: current,
-                        ..
-                    } if *current == connection_id => Some(name.clone()),
-                    _ => None,
-                })
-                .ok_or_else(|| {
-                    McpError::Internal(format!(
-                        "MCP prompt connection {connection_id} is no longer active"
-                    ))
-                })?
+            connections.iter().find_map(|(name, state)| match state {
+                crate::connection::McpConnectionState::Connected {
+                    connection_id: current,
+                    ..
+                } if *current == connection_id => {
+                    Some((name.clone(), None, None::<PromptPredecessor>))
+                }
+                crate::connection::McpConnectionState::Cached {
+                    connection_id: current,
+                    ..
+                } if *current == connection_id => {
+                    Some((name.clone(), Some(*current), None::<PromptPredecessor>))
+                }
+                _ => None,
+            })
         };
+        let (server_name, expected_live_connection_id, predecessor) =
+            if let Some((server_name, cached_connection_id, predecessor)) = direct {
+                let expected_live_connection_id = match cached_connection_id {
+                    Some(_) => self.ensure_dialed_from_cache(&server_name).await?,
+                    None => connection_id,
+                };
+                (server_name, expected_live_connection_id, predecessor)
+            } else {
+                let predecessor = self
+                    .prompt_predecessors
+                    .read()
+                    .await
+                    .get(&connection_id)
+                    .cloned()
+                    .ok_or_else(|| {
+                        McpError::Internal(format!(
+                            "MCP prompt connection {connection_id} is no longer active"
+                        ))
+                    })?;
+                (
+                    predecessor.key.clone(),
+                    predecessor.live_connection_id,
+                    Some(predecessor),
+                )
+            };
+
+        {
+            let conns = self.connections.read().await;
+            match conns.get(&server_name) {
+                Some(crate::connection::McpConnectionState::Connected {
+                    connection_id: current,
+                    config,
+                    ..
+                }) => {
+                    if *current != expected_live_connection_id {
+                        return Err(McpError::Internal(format!(
+                            "MCP prompt connection {connection_id} is no longer active"
+                        )));
+                    }
+                    if let Some(predecessor) = predecessor.as_ref() {
+                        if !Self::same_config_snapshot(config, &predecessor.config) {
+                            return Err(McpError::Internal(format!(
+                                "MCP prompt connection {connection_id} is no longer active"
+                            )));
+                        }
+                    }
+                }
+                _ => {
+                    return Err(McpError::Internal(format!(
+                        "MCP prompt connection {connection_id} is no longer active"
+                    )))
+                }
+            }
+        }
 
         let client = {
             let clients = self.clients.read().await;
@@ -3245,7 +4076,7 @@ impl McpRegistry {
                     "MCP prompt server {server_name} has no live client"
                 ))
             })?;
-            if entry.connection_id != Some(connection_id) {
+            if entry.connection_id != Some(expected_live_connection_id) {
                 return Err(McpError::Internal(format!(
                     "MCP prompt connection {connection_id} is no longer active"
                 )));
@@ -3345,6 +4176,10 @@ pub(crate) fn mcp_connection_timeout() -> Duration {
         .filter(|&n| n > 0)
         .unwrap_or(30_000);
     Duration::from_millis(ms)
+}
+
+fn cleanup_disconnect_timeout() -> Duration {
+    Duration::from_secs(5)
 }
 
 /// Exponential backoff for reconnect `attempt` (1-based), capped at
@@ -4080,6 +4915,7 @@ mod tests {
         resource_templates: Vec<traits::McpResourceTemplateDto>,
         resources_capability: AtomicBool,
         list_resource_templates_fails: AtomicBool,
+        drivable_calls: bool,
         /// How many times `resources/templates/list` was actually issued. The
         /// parity claim is ZERO RPCs when the discovery cache is ineligible —
         /// an empty `resource_templates` field would also pass if we fetched
@@ -4089,6 +4925,7 @@ mod tests {
         list_tools_fails: AtomicBool,
         disconnect_fails: AtomicBool,
         block_disconnect: AtomicBool,
+        hang_disconnect: AtomicBool,
         disconnect_started: Notify,
         disconnect_release: Notify,
         /// §11 Stage 2 — how many times `McpTransport::connect` actually
@@ -4098,6 +4935,18 @@ mod tests {
         /// the mock dialed and the result were silently discarded, so the
         /// call COUNT is the only thing that actually proves it.
         connect_calls: AtomicUsize,
+        block_connect: AtomicBool,
+        panic_connect: AtomicBool,
+        panic_initialize: AtomicBool,
+        panic_list_tools: AtomicBool,
+        connect_started: Notify,
+        connect_release: Notify,
+        block_resource_templates: AtomicBool,
+        resource_templates_started: Notify,
+        resource_templates_release: Notify,
+        inbound_txs: TestMutex<HashMap<ConnId, mpsc::Sender<Bytes>>>,
+        tool_call_peers: TestMutex<HashMap<ConnId, mpsc::Receiver<Bytes>>>,
+        disconnect_failures_remaining: AtomicUsize,
         /// §11 Stage 2 — how many times `McpTransport::disconnect` actually
         /// ran, so a test can prove a `Cached` server's teardown does NOT
         /// touch the transport (it has no live connection registered).
@@ -4126,15 +4975,36 @@ mod tests {
                 resource_templates: Vec::new(),
                 resources_capability: AtomicBool::new(false),
                 list_resource_templates_fails: AtomicBool::new(false),
+                drivable_calls: false,
                 templates_calls: AtomicUsize::new(0),
                 conns: TestMutex::new(HashMap::new()),
                 list_tools_fails: AtomicBool::new(false),
                 disconnect_fails: AtomicBool::new(false),
                 block_disconnect: AtomicBool::new(false),
+                hang_disconnect: AtomicBool::new(false),
                 disconnect_started: Notify::new(),
                 disconnect_release: Notify::new(),
                 connect_calls: AtomicUsize::new(0),
+                block_connect: AtomicBool::new(false),
+                panic_connect: AtomicBool::new(false),
+                panic_initialize: AtomicBool::new(false),
+                panic_list_tools: AtomicBool::new(false),
+                connect_started: Notify::new(),
+                connect_release: Notify::new(),
+                block_resource_templates: AtomicBool::new(false),
+                resource_templates_started: Notify::new(),
+                resource_templates_release: Notify::new(),
+                inbound_txs: TestMutex::new(HashMap::new()),
+                tool_call_peers: TestMutex::new(HashMap::new()),
+                disconnect_failures_remaining: AtomicUsize::new(0),
                 disconnect_calls: AtomicUsize::new(0),
+            }
+        }
+
+        fn with_drivable_calls(tool_names: &[&str]) -> Self {
+            Self {
+                drivable_calls: true,
+                ..Self::new(tool_names)
             }
         }
 
@@ -4168,24 +5038,53 @@ mod tests {
                 .collect();
             mock
         }
+
+        fn take_tool_call_peer(
+            &self,
+            id: ConnId,
+        ) -> Option<(mpsc::Sender<Bytes>, mpsc::Receiver<Bytes>)> {
+            let inbound = self.inbound_txs.lock().unwrap().remove(&id)?;
+            let peer = self.tool_call_peers.lock().unwrap().remove(&id)?;
+            Some((inbound, peer))
+        }
     }
 
     #[async_trait]
     impl McpTransport for BridgeMock {
         async fn connect(&self, _s: &McpTransportSpec) -> Result<McpRawConnection, McpError> {
             self.connect_calls.fetch_add(1, Ordering::SeqCst);
+            self.connect_started.notify_one();
+            if self.block_connect.load(Ordering::SeqCst) {
+                self.connect_release.notified().await;
+            }
+            assert!(
+                !self.panic_connect.load(Ordering::SeqCst),
+                "bridge mock forced panic in connect"
+            );
             let id = ConnId::new();
-            self.conns.lock().unwrap().insert(id, paired_connection());
+            if self.drivable_calls {
+                let (connection, inbound_tx, peer_rx) = drivable_connection();
+                self.inbound_txs.lock().unwrap().insert(id, inbound_tx);
+                self.tool_call_peers.lock().unwrap().insert(id, peer_rx);
+                self.conns.lock().unwrap().insert(id, connection);
+            } else {
+                self.conns.lock().unwrap().insert(id, paired_connection());
+            }
             Ok(McpRawConnection { connection_id: id })
         }
         async fn initialize(
             &self,
             _c: &McpRawConnection,
         ) -> Result<ServerCapabilitiesDto, McpError> {
+            assert!(
+                !self.panic_initialize.load(Ordering::SeqCst),
+                "bridge mock forced panic in initialize"
+            );
             Ok(ServerCapabilitiesDto {
                 tools: true,
                 resources: self.resources_capability.load(Ordering::SeqCst),
                 prompts: false,
+                directory_read: false,
                 logging: false,
                 experimental: HashMap::new(),
             })
@@ -4195,6 +5094,10 @@ mod tests {
             _c: &McpRawConnection,
         ) -> Result<Vec<traits::McpResourceTemplateDto>, McpError> {
             self.templates_calls.fetch_add(1, Ordering::SeqCst);
+            self.resource_templates_started.notify_one();
+            if self.block_resource_templates.load(Ordering::SeqCst) {
+                self.resource_templates_release.notified().await;
+            }
             if self.list_resource_templates_fails.load(Ordering::SeqCst) {
                 // What a server with no `resources/templates/list` handler
                 // really replies: JSON-RPC -32601, which the posix transport
@@ -4206,6 +5109,10 @@ mod tests {
             Ok(self.resource_templates.clone())
         }
         async fn list_tools(&self, _c: &McpRawConnection) -> Result<Vec<McpToolDto>, McpError> {
+            assert!(
+                !self.panic_list_tools.load(Ordering::SeqCst),
+                "bridge mock forced panic in list_tools"
+            );
             if self.list_tools_fails.load(Ordering::SeqCst) {
                 return Err(McpError::Internal("list tools failed".into()));
             }
@@ -4260,12 +5167,30 @@ mod tests {
         async fn disconnect(&self, id: ConnId) -> Result<(), McpError> {
             self.disconnect_calls.fetch_add(1, Ordering::SeqCst);
             self.disconnect_started.notify_one();
+            if self.hang_disconnect.load(Ordering::SeqCst) {
+                std::future::pending::<()>().await;
+            }
             if self.block_disconnect.load(Ordering::SeqCst) {
                 self.disconnect_release.notified().await;
+            }
+            if self
+                .disconnect_failures_remaining
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                    if remaining > 0 {
+                        Some(remaining - 1)
+                    } else {
+                        None
+                    }
+                })
+                .is_ok()
+            {
+                return Err(McpError::Internal("disconnect failed".into()));
             }
             if self.disconnect_fails.load(Ordering::SeqCst) {
                 return Err(McpError::Internal("disconnect failed".into()));
             }
+            self.inbound_txs.lock().unwrap().remove(&id);
+            self.tool_call_peers.lock().unwrap().remove(&id);
             self.conns.lock().unwrap().remove(&id);
             Ok(())
         }
@@ -4315,6 +5240,7 @@ mod tests {
                 tools: true,
                 resources: false,
                 prompts: false,
+                directory_read: false,
                 logging: false,
                 experimental: HashMap::new(),
             })
@@ -4405,6 +5331,182 @@ mod tests {
 
     impl Wake for NoopWake {
         fn wake(self: Arc<Self>) {}
+    }
+
+    type DiscoveryCacheEnvGuard = crate::discovery_cache::TestEnvGuard;
+
+    async fn apply_lagged_tool_recovery(
+        registry: &McpRegistry,
+        active: &mut std::collections::HashSet<McpConnectionId>,
+    ) -> Result<(), McpError> {
+        let snapshot = registry.catalog_refresh_snapshot().await;
+        *active = snapshot
+            .iter()
+            .filter(|change| change.kind == McpCatalogKind::Tools)
+            .map(|change| change.connection_id)
+            .collect();
+        for change in snapshot {
+            if change.kind == McpCatalogKind::Tools {
+                if let Some(connection_id) = registry.refresh_catalog(&change).await? {
+                    active.insert(connection_id);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    async fn drive_cleanup_retry_attempts_for_test() {
+        for delay_ms in [10, 20, 40, 80, 160] {
+            tokio::time::advance(Duration::from_millis(delay_ms)).await;
+            tokio::task::yield_now().await;
+            tokio::time::advance(cleanup_disconnect_timeout()).await;
+            tokio::task::yield_now().await;
+        }
+    }
+
+    fn spawn_tools_list_response(
+        peer_tx: mpsc::Sender<Bytes>,
+        mut peer_rx: mpsc::Receiver<Bytes>,
+        tool_name: &'static str,
+    ) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(async move {
+            let request_frame = tokio::time::timeout(Duration::from_secs(2), peer_rx.recv())
+                .await
+                .expect("tools/list request within timeout")
+                .expect("tools/list frame");
+            let request: Value = serde_json::from_slice(&request_frame).expect("tools/list json");
+            assert_eq!(request["method"], "tools/list");
+            let mut response = serde_json::to_vec(&serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": request["id"].clone(),
+                "result": {
+                    "tools": [{
+                        "name": tool_name,
+                        "description": "fresh",
+                        "inputSchema": {"type": "object"}
+                    }]
+                }
+            }))
+            .expect("tools/list response");
+            response.push(b'\n');
+            peer_tx
+                .send(Bytes::from(response))
+                .await
+                .expect("send tools/list response");
+        })
+    }
+
+    fn spawn_tool_call_response(
+        peer_tx: mpsc::Sender<Bytes>,
+        mut peer_rx: mpsc::Receiver<Bytes>,
+        tool_name: &'static str,
+        input: Value,
+    ) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(async move {
+            let request_frame = tokio::time::timeout(Duration::from_secs(2), peer_rx.recv())
+                .await
+                .expect("tools/call request within timeout")
+                .expect("tools/call frame");
+            let request: Value = serde_json::from_slice(&request_frame).expect("tools/call json");
+            assert_eq!(request["method"], "tools/call");
+            assert_eq!(request["params"]["name"], tool_name);
+            assert_eq!(request["params"]["arguments"], input);
+            let mut response = serde_json::to_vec(&serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": request["id"].clone(),
+                "result": {
+                    "content": [{"type": "text", "text": "ok"}],
+                    "structuredContent": {"tool": tool_name, "input": request["params"]["arguments"].clone()},
+                    "isError": false
+                }
+            }))
+            .expect("tools/call response");
+            response.push(b'\n');
+            peer_tx
+                .send(Bytes::from(response))
+                .await
+                .expect("send tools/call response");
+        })
+    }
+
+    fn spawn_tool_call_auth_then_success(
+        mock: Arc<BridgeMock>,
+        first_connection_id: Option<ConnId>,
+        tool_name: &'static str,
+        input: Value,
+        auth_status: u16,
+    ) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(async move {
+            let first_connection_id = if let Some(id) = first_connection_id {
+                id
+            } else {
+                tokio::time::timeout(Duration::from_secs(2), async {
+                    loop {
+                        if let Some(id) = mock.conns.lock().unwrap().keys().next().copied() {
+                            break id;
+                        }
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .expect("first live connection appears")
+            };
+            let (first_tx, mut first_rx) = mock
+                .take_tool_call_peer(first_connection_id)
+                .expect("first tool-call peer");
+            let first_input = input.clone();
+            let first_request = tokio::time::timeout(Duration::from_secs(2), async move {
+                let request_frame = first_rx.recv().await.expect("first tools/call frame");
+                let request: Value =
+                    serde_json::from_slice(&request_frame).expect("first tools/call json");
+                assert_eq!(request["method"], "tools/call");
+                assert_eq!(request["params"]["name"], tool_name);
+                assert_eq!(request["params"]["arguments"], first_input);
+                request
+            })
+            .await
+            .expect("first tools/call request");
+            let mut first_response = serde_json::to_vec(&serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": first_request["id"].clone(),
+                "error": {
+                    "code": -32000,
+                    "message": format!(
+                        "MCP_HTTP_STATUS={auth_status};WWW_AUTHENTICATE=Bearer realm=\"mcp\""
+                    )
+                }
+            }))
+            .expect("auth error response");
+            first_response.push(b'\n');
+            first_tx
+                .send(Bytes::from(first_response))
+                .await
+                .expect("send auth error response");
+
+            let second_connection_id = tokio::time::timeout(Duration::from_secs(2), async {
+                loop {
+                    if let Some(id) = mock
+                        .conns
+                        .lock()
+                        .unwrap()
+                        .keys()
+                        .copied()
+                        .find(|id| *id != first_connection_id)
+                    {
+                        break id;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("reconnect publishes a second live connection");
+            let (second_tx, second_rx) = mock
+                .take_tool_call_peer(second_connection_id)
+                .expect("second tool-call peer");
+            spawn_tool_call_response(second_tx, second_rx, tool_name, input)
+                .await
+                .expect("second tools/call responder");
+        })
     }
 
     fn cfg(name: &str) -> McpServerConfig {
@@ -4558,6 +5660,403 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn lazy_dial_success_retires_cached_partition_then_disconnect_retires_live_partition() {
+        let _guard = crate::discovery_cache::tests_env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let env = DiscoveryCacheEnvGuard::new();
+        env.set(crate::discovery_cache::ENV_ENABLED, "true");
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = crate::discovery_cache::DiscoveryCacheStore::new(dir.path());
+        let cfg = http_cfg("srv", "https://mcp.example.com/v1");
+        let cache_key = crate::discovery_cache::DiscoveryCacheStore::cache_key("srv", &cfg.spec);
+        seed_entry(&store, &cache_key, 0);
+
+        let mock = Arc::new(BridgeMock::new(&["alpha"]));
+        let registry = McpRegistry::with_raw_conn(
+            mock.clone() as Arc<dyn McpTransport>,
+            mock.clone() as Arc<dyn RawConnectionProvider>,
+        )
+        .with_discovery_cache_store(crate::discovery_cache::DiscoveryCacheStore::new(dir.path()));
+        let mut changes = registry.subscribe_catalog_changes();
+
+        let cached_id = registry.connect(cfg).await.expect("cache hit connect");
+        let cached_connected = changes.recv().await.expect("cached connect event");
+        assert_eq!(
+            cached_connected,
+            McpCatalogChanged {
+                server_name: "srv".into(),
+                connection_id: cached_id,
+                retired_connection_id: None,
+                kind: McpCatalogKind::Tools,
+            }
+        );
+
+        let live_id = registry
+            .ensure_dialed_from_cache("srv")
+            .await
+            .expect("foreground lazy dial");
+        let live_connected = changes.recv().await.expect("live replacement event");
+        assert_eq!(
+            live_connected,
+            McpCatalogChanged {
+                server_name: "srv".into(),
+                connection_id: live_id,
+                retired_connection_id: Some(cached_id),
+                kind: McpCatalogKind::Tools,
+            }
+        );
+
+        registry.disconnect("srv").await.expect("disconnect");
+        let disconnected = changes.recv().await.expect("disconnect event");
+        assert_eq!(
+            disconnected,
+            McpCatalogChanged {
+                server_name: "srv".into(),
+                connection_id: live_id,
+                retired_connection_id: Some(live_id),
+                kind: McpCatalogKind::Tools,
+            }
+        );
+        drop(env);
+    }
+
+    #[tokio::test]
+    async fn lazy_dial_failure_retires_cached_partition_and_leaves_no_zombie_partition() {
+        let _guard = crate::discovery_cache::tests_env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let env = DiscoveryCacheEnvGuard::new();
+        env.set(crate::discovery_cache::ENV_ENABLED, "true");
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = crate::discovery_cache::DiscoveryCacheStore::new(dir.path());
+        let cfg = http_cfg("srv", "https://mcp.example.com/v1");
+        let cache_key = crate::discovery_cache::DiscoveryCacheStore::cache_key("srv", &cfg.spec);
+        seed_entry(&store, &cache_key, 0);
+
+        let mock = Arc::new(BridgeMock::new(&["alpha"]));
+        mock.list_tools_fails.store(true, Ordering::SeqCst);
+        let registry = McpRegistry::with_raw_conn(
+            mock.clone() as Arc<dyn McpTransport>,
+            mock.clone() as Arc<dyn RawConnectionProvider>,
+        )
+        .with_discovery_cache_store(crate::discovery_cache::DiscoveryCacheStore::new(dir.path()));
+        let mut changes = registry.subscribe_catalog_changes();
+
+        let cached_id = registry.connect(cfg).await.expect("cache hit connect");
+        let _ = changes.recv().await.expect("cached connect event");
+        let error = registry.ensure_dialed_from_cache("srv").await.unwrap_err();
+        assert!(error.to_string().contains("list tools failed"));
+        let retired = changes.recv().await.expect("cached retire event");
+        assert_eq!(
+            retired,
+            McpCatalogChanged {
+                server_name: "srv".into(),
+                connection_id: cached_id,
+                retired_connection_id: Some(cached_id),
+                kind: McpCatalogKind::Tools,
+            }
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), changes.recv())
+                .await
+                .is_err(),
+            "lazy-dial failure must retire the cached partition once, with no zombie follow-up"
+        );
+        drop(env);
+    }
+
+    #[tokio::test]
+    async fn late_waiters_join_one_detached_cached_lazy_upgrade_owner() {
+        let _guard = crate::discovery_cache::tests_env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let env = DiscoveryCacheEnvGuard::new();
+        env.set(crate::discovery_cache::ENV_ENABLED, "true");
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = crate::discovery_cache::DiscoveryCacheStore::new(dir.path());
+        let cfg = http_cfg("srv", "https://mcp.example.com/v1");
+        let cache_key = crate::discovery_cache::DiscoveryCacheStore::cache_key("srv", &cfg.spec);
+        seed_entry(&store, &cache_key, 0);
+
+        let mock = Arc::new(BridgeMock::new(&["alpha"]));
+        mock.block_connect.store(true, Ordering::SeqCst);
+        let registry = Arc::new(
+            McpRegistry::with_raw_conn(
+                mock.clone() as Arc<dyn McpTransport>,
+                mock.clone() as Arc<dyn RawConnectionProvider>,
+            )
+            .with_discovery_cache_store(
+                crate::discovery_cache::DiscoveryCacheStore::new(dir.path()),
+            ),
+        );
+
+        registry.connect(cfg).await.expect("cache hit connect");
+        let first = {
+            let registry = registry.clone();
+            tokio::spawn(async move { registry.ensure_connected_client("srv").await })
+        };
+        mock.connect_started.notified().await;
+
+        let second = {
+            let registry = registry.clone();
+            tokio::spawn(async move { registry.ensure_connected_client("srv").await })
+        };
+        assert!(
+            matches!(
+                registry.connections.read().await.get("srv"),
+                Some(McpConnectionState::Connecting { .. })
+            ),
+            "late waiter must join the detached lazy-upgrade owner while state is Connecting"
+        );
+
+        mock.block_connect.store(false, Ordering::SeqCst);
+        mock.connect_release.notify_one();
+        let first_client = tokio::time::timeout(Duration::from_secs(2), first)
+            .await
+            .expect("first waiter finishes")
+            .expect("first join succeeds")
+            .expect("first waiter receives client");
+        let second_client = tokio::time::timeout(Duration::from_secs(2), second)
+            .await
+            .expect("second waiter finishes")
+            .expect("second join succeeds")
+            .expect("second waiter receives client");
+        drop(env);
+
+        assert!(
+            Arc::ptr_eq(&first_client, &second_client),
+            "both waiters must receive the same published live client"
+        );
+        assert_eq!(
+            mock.connect_calls.load(Ordering::SeqCst),
+            1,
+            "late waiters must share one lazy-upgrade dial"
+        );
+        assert!(
+            matches!(
+                registry.connections.read().await.get("srv"),
+                Some(McpConnectionState::Connected { .. })
+            ),
+            "the detached owner must publish a final Connected state"
+        );
+    }
+
+    #[tokio::test]
+    async fn cancelling_the_initiating_waiter_does_not_cancel_the_detached_lazy_upgrade_owner() {
+        let _guard = crate::discovery_cache::tests_env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let env = DiscoveryCacheEnvGuard::new();
+        env.set(crate::discovery_cache::ENV_ENABLED, "true");
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = crate::discovery_cache::DiscoveryCacheStore::new(dir.path());
+        let cfg = http_cfg("srv", "https://mcp.example.com/v1");
+        let cache_key = crate::discovery_cache::DiscoveryCacheStore::cache_key("srv", &cfg.spec);
+        seed_entry(&store, &cache_key, 0);
+
+        let mock = Arc::new(BridgeMock::new(&["alpha"]));
+        mock.block_connect.store(true, Ordering::SeqCst);
+        let registry = Arc::new(
+            McpRegistry::with_raw_conn(
+                mock.clone() as Arc<dyn McpTransport>,
+                mock.clone() as Arc<dyn RawConnectionProvider>,
+            )
+            .with_discovery_cache_store(
+                crate::discovery_cache::DiscoveryCacheStore::new(dir.path()),
+            ),
+        );
+
+        registry.connect(cfg).await.expect("cache hit connect");
+        let waiter = {
+            let registry = registry.clone();
+            tokio::spawn(async move { registry.ensure_connected_client("srv").await })
+        };
+        mock.connect_started.notified().await;
+        waiter.abort();
+        let join = waiter.await;
+        assert!(join.is_err_and(|error| error.is_cancelled()));
+
+        mock.block_connect.store(false, Ordering::SeqCst);
+        mock.connect_release.notify_one();
+        let later_client = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                match registry.ensure_connected_client("srv").await {
+                    Ok(client) => break client,
+                    Err(_) => tokio::task::yield_now().await,
+                }
+            }
+        })
+        .await
+        .expect("later waiter succeeds after detached owner publishes");
+        drop(env);
+
+        assert_eq!(
+            mock.connect_calls.load(Ordering::SeqCst),
+            1,
+            "cancelling the initiating waiter must not trigger a second lazy-upgrade dial"
+        );
+        assert!(
+            registry.lazy_upgrade_slots.read().await.is_empty(),
+            "completed detached owner must retire its coordination slot"
+        );
+        assert!(
+            matches!(
+                registry.connections.read().await.get("srv"),
+                Some(McpConnectionState::Connected { .. })
+            ),
+            "owner completion must not strand the server in Connecting after waiter cancellation"
+        );
+        assert!(
+            registry.get_client("srv").await.is_some() && Arc::strong_count(&later_client) >= 1,
+            "the published live client remains available after the initiating waiter is dropped"
+        );
+    }
+
+    #[tokio::test]
+    async fn disconnecting_a_foreground_lazy_upgrade_clears_connecting_and_unblocks_waiters() {
+        let _guard = crate::discovery_cache::tests_env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let env = DiscoveryCacheEnvGuard::new();
+        env.set(crate::discovery_cache::ENV_ENABLED, "true");
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = crate::discovery_cache::DiscoveryCacheStore::new(dir.path());
+        let cfg = http_cfg("srv", "https://mcp.example.com/v1");
+        let cache_key = crate::discovery_cache::DiscoveryCacheStore::cache_key("srv", &cfg.spec);
+        seed_entry(&store, &cache_key, 0);
+
+        let mock = Arc::new(BridgeMock::new(&["alpha"]));
+        mock.block_connect.store(true, Ordering::SeqCst);
+        let registry = Arc::new(
+            McpRegistry::with_raw_conn(
+                mock.clone() as Arc<dyn McpTransport>,
+                mock.clone() as Arc<dyn RawConnectionProvider>,
+            )
+            .with_discovery_cache_store(
+                crate::discovery_cache::DiscoveryCacheStore::new(dir.path()),
+            ),
+        );
+
+        registry.connect(cfg).await.expect("cache hit connect");
+        let waiter = {
+            let registry = registry.clone();
+            tokio::spawn(async move { registry.ensure_connected_client("srv").await })
+        };
+        mock.connect_started.notified().await;
+
+        registry.disconnect("srv").await.expect("disconnect wins");
+        let waiter_result = tokio::time::timeout(Duration::from_secs(2), waiter)
+            .await
+            .expect("waiter finishes")
+            .expect("join succeeds");
+        let waiter_result = match waiter_result {
+            Ok(_) => panic!("waiter should fail after disconnect"),
+            Err(error) => error,
+        };
+        assert!(
+            matches!(
+                registry.connections.read().await.get("srv"),
+                Some(McpConnectionState::Stopped { .. })
+            ),
+            "disconnect must not leave a slot-owned Connecting zombie behind"
+        );
+        assert!(
+            registry.lazy_upgrade_slots.read().await.is_empty(),
+            "disconnect must remove the lazy-upgrade slot"
+        );
+        assert!(
+            waiter_result
+                .to_string()
+                .contains("MCP server \"srv\" is no longer cached"),
+            "disconnected waiters must resolve with a terminal error"
+        );
+
+        mock.block_connect.store(false, Ordering::SeqCst);
+        mock.connect_release.notify_one();
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        assert!(
+            matches!(
+                registry.connections.read().await.get("srv"),
+                Some(McpConnectionState::Stopped { .. })
+            ),
+            "late owner completion must not revive the disconnected server"
+        );
+        drop(env);
+    }
+
+    #[tokio::test]
+    async fn removing_a_foreground_lazy_upgrade_drops_state_and_unblocks_waiters() {
+        let _guard = crate::discovery_cache::tests_env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let env = DiscoveryCacheEnvGuard::new();
+        env.set(crate::discovery_cache::ENV_ENABLED, "true");
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = crate::discovery_cache::DiscoveryCacheStore::new(dir.path());
+        let cfg = http_cfg("srv", "https://mcp.example.com/v1");
+        let cache_key = crate::discovery_cache::DiscoveryCacheStore::cache_key("srv", &cfg.spec);
+        seed_entry(&store, &cache_key, 0);
+
+        let mock = Arc::new(BridgeMock::new(&["alpha"]));
+        mock.block_connect.store(true, Ordering::SeqCst);
+        let registry = Arc::new(
+            McpRegistry::with_raw_conn(
+                mock.clone() as Arc<dyn McpTransport>,
+                mock.clone() as Arc<dyn RawConnectionProvider>,
+            )
+            .with_discovery_cache_store(
+                crate::discovery_cache::DiscoveryCacheStore::new(dir.path()),
+            ),
+        );
+
+        registry.connect(cfg).await.expect("cache hit connect");
+        let waiter = {
+            let registry = registry.clone();
+            tokio::spawn(async move { registry.ensure_connected_client("srv").await })
+        };
+        mock.connect_started.notified().await;
+
+        registry
+            .remove_without_revoking_auth("srv")
+            .await
+            .expect("remove wins");
+        let waiter_result = tokio::time::timeout(Duration::from_secs(2), waiter)
+            .await
+            .expect("waiter finishes")
+            .expect("join succeeds");
+        let waiter_result = match waiter_result {
+            Ok(_) => panic!("waiter should fail after remove"),
+            Err(error) => error,
+        };
+        assert!(
+            registry.connections.read().await.get("srv").is_none(),
+            "remove must drop the slot-owned Connecting state entirely"
+        );
+        assert!(
+            waiter_result
+                .to_string()
+                .contains("MCP server \"srv\" is no longer cached"),
+            "removed waiters must resolve with a terminal error"
+        );
+
+        mock.block_connect.store(false, Ordering::SeqCst);
+        mock.connect_release.notify_one();
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        assert!(
+            registry.connections.read().await.get("srv").is_none(),
+            "late owner completion must not recreate a removed server"
+        );
+        drop(env);
+    }
+
+    #[tokio::test]
     async fn failed_disconnect_preserves_live_state_client_and_catalog() {
         let mock = Arc::new(BridgeMock::new(&["read"]));
         let registry = McpRegistry::with_raw_conn(
@@ -4625,6 +6124,47 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cached_disable_retires_connection_without_touching_transport() {
+        let _guard = crate::discovery_cache::tests_env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let env = DiscoveryCacheEnvGuard::new();
+        env.set(crate::discovery_cache::ENV_ENABLED, "true");
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = crate::discovery_cache::DiscoveryCacheStore::new(dir.path());
+        let cfg = http_cfg("srv", "https://mcp.example.com/v1");
+        let cache_key = crate::discovery_cache::DiscoveryCacheStore::cache_key("srv", &cfg.spec);
+        seed_entry(&store, &cache_key, 0);
+
+        let mock = Arc::new(BridgeMock::new(&["alpha"]));
+        let registry = McpRegistry::with_raw_conn(
+            mock.clone() as Arc<dyn McpTransport>,
+            mock.clone() as Arc<dyn RawConnectionProvider>,
+        )
+        .with_discovery_cache_store(crate::discovery_cache::DiscoveryCacheStore::new(dir.path()));
+        let mut changes = registry.subscribe_catalog_changes();
+
+        let cached_id = registry.connect(cfg).await.expect("fresh cache hit");
+        let initial = changes.recv().await.expect("cached registration");
+        assert_eq!(initial.connection_id, cached_id);
+        assert_eq!(initial.retired_connection_id, None);
+
+        assert_eq!(
+            registry.set_disabled("srv", true).await.unwrap(),
+            Some(traits::McpActionState::Disabled)
+        );
+        assert_eq!(
+            mock.disconnect_calls.load(Ordering::SeqCst),
+            0,
+            "cached disable must not call transport disconnect"
+        );
+        let retired = changes.recv().await.expect("cached retirement");
+        assert_eq!(retired.retired_connection_id, Some(cached_id));
+        drop(env);
+    }
+
+    #[tokio::test]
     async fn failed_live_disable_preserves_connected_generation() {
         let mock = Arc::new(BridgeMock::new(&["read"]));
         let registry = McpRegistry::with_raw_conn(
@@ -4644,6 +6184,218 @@ mod tests {
                 config,
                 ..
             }) if *current == connection_id && !config.disabled
+        ));
+    }
+
+    #[tokio::test]
+    async fn set_disabled_noop_false_preserves_a_foreground_lazy_upgrade_slot() {
+        let _guard = crate::discovery_cache::tests_env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let env = DiscoveryCacheEnvGuard::new();
+        env.set(crate::discovery_cache::ENV_ENABLED, "true");
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = crate::discovery_cache::DiscoveryCacheStore::new(dir.path());
+        let cfg = http_cfg("srv", "https://mcp.example.com/v1");
+        let cache_key = crate::discovery_cache::DiscoveryCacheStore::cache_key("srv", &cfg.spec);
+        seed_entry(&store, &cache_key, 0);
+
+        let mock = Arc::new(BridgeMock::new(&["alpha"]));
+        mock.block_connect.store(true, Ordering::SeqCst);
+        let registry = Arc::new(
+            McpRegistry::with_raw_conn(
+                mock.clone() as Arc<dyn McpTransport>,
+                mock.clone() as Arc<dyn RawConnectionProvider>,
+            )
+            .with_discovery_cache_store(
+                crate::discovery_cache::DiscoveryCacheStore::new(dir.path()),
+            ),
+        );
+
+        registry.connect(cfg).await.expect("fresh cache hit");
+        let owner = {
+            let registry = registry.clone();
+            tokio::spawn(async move { registry.ensure_dialed_from_cache("srv").await })
+        };
+        mock.connect_started.notified().await;
+
+        let slot = registry
+            .lazy_upgrade_slot("srv")
+            .await
+            .expect("foreground slot registered");
+        assert_eq!(registry.set_disabled("srv", false).await.unwrap(), None);
+        let same_slot = registry
+            .lazy_upgrade_slot("srv")
+            .await
+            .expect("no-op disable keeps foreground slot");
+        assert!(Arc::ptr_eq(&slot, &same_slot));
+
+        let joiner = {
+            let registry = registry.clone();
+            tokio::spawn(async move { registry.ensure_dialed_from_cache("srv").await })
+        };
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if mock.connect_calls.load(Ordering::SeqCst) == 1 {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("no-op disable must not redial");
+
+        mock.block_connect.store(false, Ordering::SeqCst);
+        mock.connect_release.notify_one();
+        let owner_id = tokio::time::timeout(Duration::from_secs(2), owner)
+            .await
+            .expect("owner waiter completes")
+            .expect("owner join succeeds")
+            .expect("owner receives live id");
+        let joiner_id = tokio::time::timeout(Duration::from_secs(2), joiner)
+            .await
+            .expect("joiner completes")
+            .expect("joiner task succeeds")
+            .expect("joiner receives same live id");
+        drop(env);
+
+        assert_eq!(owner_id, joiner_id);
+        assert_eq!(mock.connect_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn set_disabled_noop_false_preserves_a_background_lazy_upgrade_slot() {
+        let _guard = crate::discovery_cache::tests_env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let env = DiscoveryCacheEnvGuard::new();
+        env.set(crate::discovery_cache::ENV_ENABLED, "true");
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = crate::discovery_cache::DiscoveryCacheStore::new(dir.path());
+        let cfg = http_cfg("srv", "https://mcp.example.com/v1");
+        let cache_key = crate::discovery_cache::DiscoveryCacheStore::cache_key("srv", &cfg.spec);
+        seed_entry(&store, &cache_key, 1_000_000);
+
+        let mock = Arc::new(BridgeMock::new(&["alpha"]));
+        mock.block_connect.store(true, Ordering::SeqCst);
+        let registry = Arc::new(
+            McpRegistry::with_raw_conn(
+                mock.clone() as Arc<dyn McpTransport>,
+                mock.clone() as Arc<dyn RawConnectionProvider>,
+            )
+            .with_discovery_cache_store(
+                crate::discovery_cache::DiscoveryCacheStore::new(dir.path()),
+            ),
+        );
+
+        let cached_id = registry.connect(cfg).await.expect("stale cache hit");
+        mock.connect_started.notified().await;
+
+        let slot = registry
+            .lazy_upgrade_slot("srv")
+            .await
+            .expect("background slot registered");
+        assert_eq!(registry.set_disabled("srv", false).await.unwrap(), None);
+        let same_slot = registry
+            .lazy_upgrade_slot("srv")
+            .await
+            .expect("no-op disable keeps background slot");
+        assert!(Arc::ptr_eq(&slot, &same_slot));
+
+        let waiter = {
+            let registry = registry.clone();
+            tokio::spawn(async move { registry.ensure_dialed_from_cache("srv").await })
+        };
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if mock.connect_calls.load(Ordering::SeqCst) == 1 {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("foreground join must share the existing background owner");
+
+        mock.block_connect.store(false, Ordering::SeqCst);
+        mock.connect_release.notify_one();
+        let live_id = tokio::time::timeout(Duration::from_secs(2), waiter)
+            .await
+            .expect("foreground waiter completes")
+            .expect("waiter join succeeds")
+            .expect("foreground waiter receives live id");
+        drop(env);
+
+        assert_ne!(live_id, cached_id);
+        assert_eq!(mock.connect_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn disabling_a_foreground_lazy_upgrade_invalidates_the_slot_and_prevents_revival() {
+        let _guard = crate::discovery_cache::tests_env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let env = DiscoveryCacheEnvGuard::new();
+        env.set(crate::discovery_cache::ENV_ENABLED, "true");
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = crate::discovery_cache::DiscoveryCacheStore::new(dir.path());
+        let cfg = http_cfg("srv", "https://mcp.example.com/v1");
+        let cache_key = crate::discovery_cache::DiscoveryCacheStore::cache_key("srv", &cfg.spec);
+        seed_entry(&store, &cache_key, 0);
+
+        let mock = Arc::new(BridgeMock::new(&["alpha"]));
+        mock.block_connect.store(true, Ordering::SeqCst);
+        let registry = Arc::new(
+            McpRegistry::with_raw_conn(
+                mock.clone() as Arc<dyn McpTransport>,
+                mock.clone() as Arc<dyn RawConnectionProvider>,
+            )
+            .with_discovery_cache_store(
+                crate::discovery_cache::DiscoveryCacheStore::new(dir.path()),
+            ),
+        );
+
+        registry.connect(cfg).await.expect("fresh cache hit");
+        let waiter = {
+            let registry = registry.clone();
+            tokio::spawn(async move { registry.ensure_dialed_from_cache("srv").await })
+        };
+        mock.connect_started.notified().await;
+
+        assert_eq!(
+            registry.set_disabled("srv", true).await.unwrap(),
+            Some(traits::McpActionState::Disabled)
+        );
+        assert!(
+            registry.lazy_upgrade_slots.read().await.is_empty(),
+            "disable must invalidate the foreground slot"
+        );
+        tokio::time::timeout(Duration::from_secs(2), waiter)
+            .await
+            .expect("waiter completes after disable")
+            .expect("waiter join succeeds")
+            .unwrap_err();
+
+        mock.block_connect.store(false, Ordering::SeqCst);
+        mock.connect_release.notify_one();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if mock.disconnect_calls.load(Ordering::SeqCst) == 1 {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("rejected live transport cleaned up after disable");
+        drop(env);
+
+        assert!(matches!(
+            registry.connections.read().await.get("srv"),
+            Some(McpConnectionState::Disconnected { config, .. }) if config.disabled
         ));
     }
 
@@ -4868,6 +6620,7 @@ mod tests {
                     tools: true,
                     resources: false,
                     prompts: false,
+                    directory_read: false,
                     logging: false,
                     experimental: HashMap::new(),
                 },
@@ -4943,6 +6696,7 @@ mod tests {
                     tools: false,
                     resources: false,
                     prompts: true,
+                    directory_read: false,
                     logging: false,
                     experimental: HashMap::new(),
                 },
@@ -4984,6 +6738,7 @@ mod tests {
                     tools: false,
                     resources: false,
                     prompts: true,
+                    directory_read: false,
                     logging: false,
                     experimental: HashMap::new(),
                 },
@@ -5018,6 +6773,503 @@ mod tests {
         assert!(
             peer_b.try_recv().is_err(),
             "the new generation must not receive a stale prompts/get request",
+        );
+    }
+
+    #[tokio::test]
+    async fn cached_prompt_rejects_generation_swapped_after_lazy_dial_upgrade() {
+        let _guard = crate::discovery_cache::tests_env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let env = DiscoveryCacheEnvGuard::new();
+        env.set(crate::discovery_cache::ENV_ENABLED, "true");
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = crate::discovery_cache::DiscoveryCacheStore::new(dir.path());
+        let cfg = http_cfg("srv", "https://mcp.example.com/v1");
+        let cache_key = crate::discovery_cache::DiscoveryCacheStore::cache_key("srv", &cfg.spec);
+        seed_entry_with_catalog(
+            &store,
+            &cache_key,
+            0,
+            ServerCapabilitiesDto {
+                tools: false,
+                resources: false,
+                prompts: true,
+                directory_read: false,
+                logging: false,
+                experimental: HashMap::new(),
+            },
+            vec![],
+            vec![],
+            vec![McpPromptDto {
+                name: "draft".into(),
+                description: Some("draft prompt".into()),
+                arguments: Vec::new(),
+            }],
+        );
+
+        let prompt_mock = Arc::new(PromptBridgeMock::new());
+        let registry = Arc::new(
+            McpRegistry::with_raw_conn(
+                prompt_mock.clone() as Arc<dyn McpTransport>,
+                prompt_mock.clone() as Arc<dyn RawConnectionProvider>,
+            )
+            .with_discovery_cache_store(
+                crate::discovery_cache::DiscoveryCacheStore::new(dir.path()),
+            ),
+        );
+        let cached_id = registry
+            .connect(cfg)
+            .await
+            .expect("fresh cache hit connect");
+        let live_id = registry
+            .ensure_dialed_from_cache("srv")
+            .await
+            .expect("prompts path lazy dial");
+        assert_ne!(
+            live_id, cached_id,
+            "live generation replaces the cached one"
+        );
+
+        let (conn_b, mut peer_b) = observable_connection();
+        let client_b =
+            Arc::new(McpClient::new("srv", std::path::PathBuf::from("/tmp/work"), conn_b).await);
+        let new_id = ConnId::new();
+        registry.connections.write().await.insert(
+            "srv".into(),
+            McpConnectionState::Connected {
+                config: http_cfg("srv", "https://mcp.example.com/v1"),
+                connection_id: new_id,
+                capabilities: ServerCapabilitiesDto {
+                    tools: false,
+                    resources: false,
+                    prompts: true,
+                    directory_read: false,
+                    logging: false,
+                    experimental: HashMap::new(),
+                },
+                tools: Vec::new(),
+                resources: Vec::new(),
+                resource_templates: Vec::new(),
+                prompts: vec![McpPromptDto {
+                    name: "draft".into(),
+                    description: Some("draft prompt".into()),
+                    arguments: Vec::new(),
+                }],
+                connected_at: SystemTime::now(),
+            },
+        );
+        registry.clients.write().await.insert(
+            "srv".into(),
+            RegisteredClient {
+                connection_id: Some(new_id),
+                client: client_b,
+            },
+        );
+
+        let error = registry
+            .get_prompt(
+                cached_id,
+                "draft",
+                serde_json::json!({ "topic": "release" }),
+            )
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains(&format!(
+            "MCP prompt connection {cached_id} is no longer active"
+        )));
+        assert!(
+            peer_b.try_recv().is_err(),
+            "the swapped L2 generation must not receive a stale prompts/get request",
+        );
+        drop(env);
+    }
+
+    #[tokio::test]
+    async fn ensure_connected_client_accepts_raw_normalized_and_exact_scoped_names() {
+        let registry = Arc::new(McpRegistry::new(Arc::new(BridgeMock::new(&[]))));
+        let (raw_conn, _raw_peer) = observable_connection();
+        let raw_client = Arc::new(
+            McpClient::new("my.server", std::path::PathBuf::from("/tmp/work"), raw_conn).await,
+        );
+        registry
+            .register_client("my.server", raw_client.clone())
+            .await;
+
+        let (claude_conn, _claude_peer) = observable_connection();
+        let claude_client = Arc::new(
+            McpClient::new(
+                "claude.ai Linear",
+                std::path::PathBuf::from("/tmp/work"),
+                claude_conn,
+            )
+            .await,
+        );
+        registry
+            .register_client("claude.ai Linear", claude_client.clone())
+            .await;
+
+        let scoped_key = "__lingxi_agent_scope__deadbeef__docs";
+        let (scoped_conn, _scoped_peer) = observable_connection();
+        let scoped_client = Arc::new(
+            McpClient::new("docs", std::path::PathBuf::from("/tmp/work"), scoped_conn).await,
+        );
+        registry
+            .register_client(scoped_key, scoped_client.clone())
+            .await;
+
+        let raw_by_raw = registry
+            .ensure_connected_client("my.server")
+            .await
+            .expect("raw name lookup");
+        let raw_by_normalized = registry
+            .ensure_connected_client("my_server")
+            .await
+            .expect("normalized lookup");
+        let claude_by_raw = registry
+            .ensure_connected_client("claude.ai Linear")
+            .await
+            .expect("raw spaced name");
+        let claude_by_normalized = registry
+            .ensure_connected_client(&normalize_name_for_mcp("claude.ai Linear"))
+            .await
+            .expect("normalized spaced name");
+        let scoped_by_exact = registry
+            .ensure_connected_client(scoped_key)
+            .await
+            .expect("exact scoped key");
+
+        assert!(Arc::ptr_eq(&raw_by_raw, &raw_client));
+        assert!(Arc::ptr_eq(&raw_by_normalized, &raw_client));
+        assert!(Arc::ptr_eq(&claude_by_raw, &claude_client));
+        assert!(Arc::ptr_eq(&claude_by_normalized, &claude_client));
+        assert!(Arc::ptr_eq(&scoped_by_exact, &scoped_client));
+    }
+
+    #[tokio::test]
+    async fn connected_prompts_cache_generation_reaches_l1_twice_and_cleans_up_on_disconnect() {
+        let _guard = crate::discovery_cache::tests_env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let env = DiscoveryCacheEnvGuard::new();
+        env.set(crate::discovery_cache::ENV_ENABLED, "true");
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = crate::discovery_cache::DiscoveryCacheStore::new(dir.path());
+        let cfg = http_cfg("srv", "https://mcp.example.com/v1");
+        let cache_key = crate::discovery_cache::DiscoveryCacheStore::cache_key("srv", &cfg.spec);
+        seed_entry_with_catalog(
+            &store,
+            &cache_key,
+            0,
+            ServerCapabilitiesDto {
+                tools: false,
+                resources: false,
+                prompts: true,
+                directory_read: false,
+                logging: false,
+                experimental: HashMap::new(),
+            },
+            vec![],
+            vec![],
+            vec![McpPromptDto {
+                name: "draft".into(),
+                description: Some("draft prompt".into()),
+                arguments: Vec::new(),
+            }],
+        );
+
+        let prompt_mock = Arc::new(PromptBridgeMock::new());
+        let registry = Arc::new(
+            McpRegistry::with_raw_conn(
+                prompt_mock.clone() as Arc<dyn McpTransport>,
+                prompt_mock.clone() as Arc<dyn RawConnectionProvider>,
+            )
+            .with_discovery_cache_store(
+                crate::discovery_cache::DiscoveryCacheStore::new(dir.path()),
+            ),
+        );
+
+        let cached_id = registry
+            .connect(cfg)
+            .await
+            .expect("fresh cache hit connect");
+        let prompts = registry.connected_prompts().await;
+        assert_eq!(prompts.len(), 1);
+        assert_eq!(prompts[0].0, "srv");
+        assert_eq!(prompts[0].1, cached_id);
+        assert_eq!(prompts[0].2.name, "draft");
+
+        let responder = {
+            let prompt_mock = prompt_mock.clone();
+            tokio::spawn(async move {
+                let connection_id = prompt_mock.wait_for_connection_id().await;
+                prompt_mock.answer_next_prompt(connection_id).await;
+                prompt_mock.answer_next_prompt(connection_id).await;
+            })
+        };
+
+        let first = tokio::time::timeout(
+            Duration::from_secs(2),
+            registry.get_prompt(
+                cached_id,
+                "draft",
+                serde_json::json!({ "topic": "release" }),
+            ),
+        )
+        .await
+        .expect("first cached prompt returns in time")
+        .expect("first cached prompt lazy-dial succeeds");
+        let second = tokio::time::timeout(
+            Duration::from_secs(2),
+            registry.get_prompt(
+                cached_id,
+                "draft",
+                serde_json::json!({ "topic": "release" }),
+            ),
+        )
+        .await
+        .expect("second cached prompt returns in time")
+        .expect("second cached prompt should keep routing C -> L1");
+        responder.await.unwrap();
+        registry
+            .disconnect("srv")
+            .await
+            .expect("disconnect removes L1");
+        let disconnected = registry
+            .get_prompt(
+                cached_id,
+                "draft",
+                serde_json::json!({ "topic": "release" }),
+            )
+            .await
+            .unwrap_err();
+        drop(env);
+
+        let expected = serde_json::json!({
+            "description": "Draft prompt",
+            "messages": [{ "role": "user", "content": { "type": "text", "text": "topic=release" } }]
+        });
+        assert_eq!(
+            prompt_mock.connect_calls.load(Ordering::SeqCst),
+            1,
+            "repeated cached prompt invocations must reuse the first live generation"
+        );
+        assert_eq!(first, expected);
+        assert_eq!(second, expected);
+        assert!(disconnected.to_string().contains(&format!(
+            "MCP prompt connection {cached_id} is no longer active"
+        )));
+        assert!(
+            !registry
+                .prompt_predecessors
+                .read()
+                .await
+                .contains_key(&cached_id),
+            "disconnect must retire the cached prompt predecessor bridge"
+        );
+    }
+
+    #[tokio::test]
+    async fn stale_cached_prompt_command_survives_background_upgrade_before_first_invocation() {
+        let _guard = crate::discovery_cache::tests_env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let env = DiscoveryCacheEnvGuard::new();
+        env.set(crate::discovery_cache::ENV_ENABLED, "true");
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = crate::discovery_cache::DiscoveryCacheStore::new(dir.path());
+        let cfg = http_cfg("srv", "https://mcp.example.com/v1");
+        let cache_key = crate::discovery_cache::DiscoveryCacheStore::cache_key("srv", &cfg.spec);
+        seed_entry_with_catalog(
+            &store,
+            &cache_key,
+            1_000_000,
+            ServerCapabilitiesDto {
+                tools: false,
+                resources: false,
+                prompts: true,
+                directory_read: false,
+                logging: false,
+                experimental: HashMap::new(),
+            },
+            vec![],
+            vec![],
+            vec![McpPromptDto {
+                name: "draft".into(),
+                description: Some("draft prompt".into()),
+                arguments: Vec::new(),
+            }],
+        );
+
+        let prompt_mock = Arc::new(PromptBridgeMock::new());
+        prompt_mock.block_connect.store(true, Ordering::SeqCst);
+        let registry = Arc::new(
+            McpRegistry::with_raw_conn(
+                prompt_mock.clone() as Arc<dyn McpTransport>,
+                prompt_mock.clone() as Arc<dyn RawConnectionProvider>,
+            )
+            .with_discovery_cache_store(
+                crate::discovery_cache::DiscoveryCacheStore::new(dir.path()),
+            ),
+        );
+
+        let cached_id = registry
+            .connect(cfg)
+            .await
+            .expect("stale cache hit connect");
+        let prompts = registry.connected_prompts().await;
+        assert_eq!(prompts.len(), 1);
+        assert_eq!(prompts[0].1, cached_id);
+
+        prompt_mock.connect_started.notified().await;
+        prompt_mock.block_connect.store(false, Ordering::SeqCst);
+        prompt_mock.connect_release.notify_one();
+        let live_id = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                match registry.connections.read().await.get("srv") {
+                    Some(McpConnectionState::Connected { connection_id, .. }) => {
+                        break *connection_id;
+                    }
+                    _ => tokio::task::yield_now().await,
+                }
+            }
+        })
+        .await
+        .expect("background upgrade publishes L1");
+
+        let responder = {
+            let prompt_mock = prompt_mock.clone();
+            tokio::spawn(async move {
+                let connection_id = prompt_mock.wait_for_connection_id().await;
+                assert_eq!(connection_id, live_id);
+                prompt_mock.answer_next_prompt(connection_id).await;
+            })
+        };
+        let rendered = tokio::time::timeout(
+            Duration::from_secs(2),
+            registry.get_prompt(
+                cached_id,
+                "draft",
+                serde_json::json!({ "topic": "release" }),
+            ),
+        )
+        .await
+        .expect("cached command returns after background publish")
+        .expect("C -> L1 predecessor bridge remains valid");
+        responder.await.unwrap();
+        drop(env);
+
+        assert_eq!(
+            prompt_mock.connect_calls.load(Ordering::SeqCst),
+            1,
+            "using the cached prompt after a background upgrade must not dial L2"
+        );
+        assert_eq!(
+            rendered,
+            serde_json::json!({
+                "description": "Draft prompt",
+                "messages": [{ "role": "user", "content": { "type": "text", "text": "topic=release" } }]
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn connected_state_is_not_visible_until_cached_prompt_predecessor_publishes() {
+        let _guard = crate::discovery_cache::tests_env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let env = DiscoveryCacheEnvGuard::new();
+        env.set(crate::discovery_cache::ENV_ENABLED, "true");
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = crate::discovery_cache::DiscoveryCacheStore::new(dir.path());
+        let cfg = http_cfg("srv", "https://mcp.example.com/v1");
+        let cache_key = crate::discovery_cache::DiscoveryCacheStore::cache_key("srv", &cfg.spec);
+        seed_entry_with_catalog(
+            &store,
+            &cache_key,
+            0,
+            ServerCapabilitiesDto {
+                tools: false,
+                resources: false,
+                prompts: true,
+                directory_read: false,
+                logging: false,
+                experimental: HashMap::new(),
+            },
+            vec![],
+            vec![],
+            vec![McpPromptDto {
+                name: "draft".into(),
+                description: Some("draft prompt".into()),
+                arguments: Vec::new(),
+            }],
+        );
+
+        let prompt_mock = Arc::new(PromptBridgeMock::new());
+        prompt_mock.block_connect.store(true, Ordering::SeqCst);
+        let registry = Arc::new(
+            McpRegistry::with_raw_conn(
+                prompt_mock.clone() as Arc<dyn McpTransport>,
+                prompt_mock.clone() as Arc<dyn RawConnectionProvider>,
+            )
+            .with_discovery_cache_store(
+                crate::discovery_cache::DiscoveryCacheStore::new(dir.path()),
+            ),
+        );
+        let cached_id = registry.connect(cfg).await.expect("fresh cache hit");
+
+        let predecessor_guard = registry.prompt_predecessors.write().await;
+        let waiter = {
+            let registry = registry.clone();
+            tokio::spawn(async move { registry.ensure_dialed_from_cache("srv").await })
+        };
+        let mut waiter = std::pin::pin!(waiter);
+        prompt_mock.connect_started.notified().await;
+        prompt_mock.block_connect.store(false, Ordering::SeqCst);
+        prompt_mock.connect_release.notify_one();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), waiter.as_mut())
+                .await
+                .is_err(),
+            "Connected(L1) must not publish before the cached prompt predecessor map can publish"
+        );
+        drop(predecessor_guard);
+
+        let live_id = tokio::time::timeout(Duration::from_secs(2), waiter.as_mut())
+            .await
+            .expect("owner finishes after predecessor unlock")
+            .expect("join succeeds")
+            .expect("lazy dial succeeds");
+        let responder = {
+            let prompt_mock = prompt_mock.clone();
+            let live_id = live_id;
+            tokio::spawn(async move {
+                let connection_id = prompt_mock.wait_for_connection_id().await;
+                assert_eq!(connection_id, live_id);
+                prompt_mock.answer_next_prompt(connection_id).await;
+            })
+        };
+        let rendered = registry
+            .get_prompt(
+                cached_id,
+                "draft",
+                serde_json::json!({ "topic": "release" }),
+            )
+            .await
+            .expect("cached prompt C must be callable immediately once L1 is visible");
+        responder.await.unwrap();
+        drop(env);
+
+        assert_eq!(
+            rendered,
+            serde_json::json!({
+                "description": "Draft prompt",
+                "messages": [{ "role": "user", "content": { "type": "text", "text": "topic=release" } }]
+            })
         );
     }
 
@@ -5194,7 +7446,8 @@ mod tests {
         let _guard = crate::discovery_cache::tests_env_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        std::env::set_var(crate::discovery_cache::ENV_ENABLED, "true");
+        let env = DiscoveryCacheEnvGuard::new();
+        env.set(crate::discovery_cache::ENV_ENABLED, "true");
 
         let mock = Arc::new(BridgeMock::new(&["alpha"]));
         mock.resources_capability.store(true, Ordering::SeqCst);
@@ -5207,7 +7460,7 @@ mod tests {
         let connected = registry
             .connect(http_cfg("srv", "https://mcp.example.com/v1"))
             .await;
-        std::env::remove_var(crate::discovery_cache::ENV_ENABLED);
+        drop(env);
 
         assert!(
             connected.is_ok(),
@@ -5247,7 +7500,8 @@ mod tests {
         let _guard = crate::discovery_cache::tests_env_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        std::env::set_var(crate::discovery_cache::ENV_ENABLED, "true");
+        let env = DiscoveryCacheEnvGuard::new();
+        env.set(crate::discovery_cache::ENV_ENABLED, "true");
 
         let mock = Arc::new(BridgeMock::new(&["alpha"]));
         let registry = McpRegistry::with_raw_conn(
@@ -5257,7 +7511,7 @@ mod tests {
         let result = registry
             .connect(http_cfg("srv", "https://mcp.example.com/v1"))
             .await;
-        std::env::remove_var(crate::discovery_cache::ENV_ENABLED);
+        drop(env);
 
         assert!(result.is_ok(), "no store must never perturb a connect");
     }
@@ -5272,7 +7526,8 @@ mod tests {
         let _guard = crate::discovery_cache::tests_env_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        std::env::set_var(crate::discovery_cache::ENV_ENABLED, "true");
+        let env = DiscoveryCacheEnvGuard::new();
+        env.set(crate::discovery_cache::ENV_ENABLED, "true");
 
         let dir = tempfile::tempdir().expect("tempdir");
         let store = crate::discovery_cache::DiscoveryCacheStore::new(dir.path());
@@ -5286,7 +7541,7 @@ mod tests {
         let cfg = http_cfg("srv", "https://mcp.example.com/v1");
         let cache_key = crate::discovery_cache::DiscoveryCacheStore::cache_key("srv", &cfg.spec);
         registry.connect(cfg).await.unwrap();
-        std::env::remove_var(crate::discovery_cache::ENV_ENABLED);
+        drop(env);
 
         let entry = match store.load(&cache_key) {
             crate::discovery_cache::EntryLookup::Found(entry) => entry,
@@ -5318,7 +7573,8 @@ mod tests {
         let _guard = crate::discovery_cache::tests_env_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        std::env::set_var(crate::discovery_cache::ENV_ENABLED, "true");
+        let env = DiscoveryCacheEnvGuard::new();
+        env.set(crate::discovery_cache::ENV_ENABLED, "true");
 
         let dir = tempfile::tempdir().expect("tempdir");
         let mock = Arc::new(BridgeMock::new(&["alpha"]));
@@ -5331,7 +7587,7 @@ mod tests {
         // `cfg` builds a stdio spec — `Transport`-ineligible regardless of
         // the feature flag.
         registry.connect(cfg("srv")).await.unwrap();
-        std::env::remove_var(crate::discovery_cache::ENV_ENABLED);
+        drop(env);
 
         assert!(
             std::fs::read_dir(dir.path())
@@ -5357,7 +7613,8 @@ mod tests {
         let _guard = crate::discovery_cache::tests_env_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        std::env::set_var(crate::discovery_cache::ENV_ENABLED, "true");
+        let env = DiscoveryCacheEnvGuard::new();
+        env.set(crate::discovery_cache::ENV_ENABLED, "true");
 
         let dir = tempfile::tempdir().expect("tempdir");
         let store = crate::discovery_cache::DiscoveryCacheStore::new(dir.path());
@@ -5401,7 +7658,7 @@ mod tests {
             &[],
             &[],
         );
-        std::env::remove_var(crate::discovery_cache::ENV_ENABLED);
+        drop(env);
 
         assert_eq!(
             store.load(&cache_key),
@@ -5424,7 +7681,8 @@ mod tests {
         let _guard = crate::discovery_cache::tests_env_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        std::env::set_var(crate::discovery_cache::ENV_ENABLED, "true");
+        let env = DiscoveryCacheEnvGuard::new();
+        env.set(crate::discovery_cache::ENV_ENABLED, "true");
 
         let dir = tempfile::tempdir().expect("tempdir");
         let store = crate::discovery_cache::DiscoveryCacheStore::new(dir.path());
@@ -5451,7 +7709,7 @@ mod tests {
         .with_discovery_cache_store(crate::discovery_cache::DiscoveryCacheStore::new(dir.path()));
 
         let result = registry.connect(cfg).await;
-        std::env::remove_var(crate::discovery_cache::ENV_ENABLED);
+        drop(env);
 
         assert!(
             result.is_err(),
@@ -5475,7 +7733,8 @@ mod tests {
         let _guard = crate::discovery_cache::tests_env_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        std::env::set_var(crate::discovery_cache::ENV_ENABLED, "true");
+        let env = DiscoveryCacheEnvGuard::new();
+        env.set(crate::discovery_cache::ENV_ENABLED, "true");
 
         let dir = tempfile::tempdir().expect("tempdir");
         let mock = Arc::new(BridgeMock::new(&["alpha"]));
@@ -5489,7 +7748,7 @@ mod tests {
         let result = registry
             .connect(http_cfg("srv", "https://mcp.example.com/v1"))
             .await;
-        std::env::remove_var(crate::discovery_cache::ENV_ENABLED);
+        drop(env);
 
         assert!(result.is_err());
         assert!(
@@ -5502,42 +7761,63 @@ mod tests {
 
     // ── §11 Stage 2: serve discovery-cache hits without dialing, lazy dial ──
 
-    /// Seed a discovery-cache entry for `srv` carrying one tool (`alpha`),
-    /// saved `age_ms` in the past (relative to "now"), for the Stage 2 tests
-    /// below. `age_ms` alone decides Fresh (< 900s default TTL) vs Stale
-    /// (>= TTL, < 14 400s default max-stale).
-    fn seed_entry(
+    /// Seed a discovery-cache entry for `srv`, saved `age_ms` in the past
+    /// (relative to "now"), for the Stage 2/3 cache tests below. `age_ms`
+    /// alone decides Fresh (< 900s default TTL) vs Stale (>= TTL,
+    /// < 14 400s default max-stale).
+    fn seed_entry_with_catalog(
         store: &crate::discovery_cache::DiscoveryCacheStore,
         cache_key: &str,
         age_ms: u64,
+        capabilities: ServerCapabilitiesDto,
+        tools: Vec<McpToolDto>,
+        resources: Vec<McpResourceDto>,
+        prompts: Vec<McpPromptDto>,
     ) {
         let saved_at_ms = crate::discovery_cache::now_ms().saturating_sub(age_ms);
         store
             .store(&crate::discovery_cache::DiscoveryCacheEntry::new(
                 cache_key.to_string(),
                 saved_at_ms,
-                ServerCapabilitiesDto {
-                    tools: true,
-                    resources: false,
-                    prompts: false,
-                    logging: false,
-                    experimental: HashMap::new(),
-                },
-                vec![McpToolDto {
-                    server_name: "srv".into(),
-                    tool_name: "alpha".into(),
-                    description: "alpha tool".into(),
-                    input_schema: serde_json::json!({"type": "object"}),
-                    full_name: "mcp__srv__alpha".into(),
-                    search_hint: None,
-                    always_load: None,
-                    requires_user_interaction: false,
-                }],
+                capabilities,
+                tools,
+                resources,
                 vec![],
-                vec![],
-                vec![],
+                prompts,
             ))
             .expect("seed store");
+    }
+
+    fn seed_entry(
+        store: &crate::discovery_cache::DiscoveryCacheStore,
+        cache_key: &str,
+        age_ms: u64,
+    ) {
+        seed_entry_with_catalog(
+            store,
+            cache_key,
+            age_ms,
+            ServerCapabilitiesDto {
+                tools: true,
+                resources: false,
+                prompts: false,
+                directory_read: false,
+                logging: false,
+                experimental: HashMap::new(),
+            },
+            vec![McpToolDto {
+                server_name: "srv".into(),
+                tool_name: "alpha".into(),
+                description: "alpha tool".into(),
+                input_schema: serde_json::json!({"type": "object"}),
+                full_name: "mcp__srv__alpha".into(),
+                search_hint: None,
+                always_load: None,
+                requires_user_interaction: false,
+            }],
+            vec![],
+            vec![],
+        );
     }
 
     /// The headline Stage 2 claim: a `Fresh` cache hit serves the cached
@@ -5549,7 +7829,8 @@ mod tests {
         let _guard = crate::discovery_cache::tests_env_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        std::env::set_var(crate::discovery_cache::ENV_ENABLED, "true");
+        let env = DiscoveryCacheEnvGuard::new();
+        env.set(crate::discovery_cache::ENV_ENABLED, "true");
 
         let dir = tempfile::tempdir().expect("tempdir");
         let store = crate::discovery_cache::DiscoveryCacheStore::new(dir.path());
@@ -5568,7 +7849,7 @@ mod tests {
         .with_discovery_cache_store(crate::discovery_cache::DiscoveryCacheStore::new(dir.path()));
 
         let result = registry.connect(cfg).await;
-        std::env::remove_var(crate::discovery_cache::ENV_ENABLED);
+        drop(env);
 
         assert!(result.is_ok(), "a cache hit must succeed, got {result:?}");
         assert_eq!(
@@ -5603,14 +7884,15 @@ mod tests {
     }
 
     /// A `Stale` hit (past the 900s TTL but inside the 14 400s max-stale
-    /// window) must ALSO serve from cache without dialing — Stage 2 covers
-    /// both hit kinds, only Stage 3's background revalidation is deferred.
+    /// window) must return the cached generation immediately, without waiting
+    /// for the Stage 3 background revalidation dial to finish.
     #[tokio::test]
     async fn a_stale_cache_hit_also_serves_without_dialing() {
         let _guard = crate::discovery_cache::tests_env_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        std::env::set_var(crate::discovery_cache::ENV_ENABLED, "true");
+        let env = DiscoveryCacheEnvGuard::new();
+        env.set(crate::discovery_cache::ENV_ENABLED, "true");
 
         let dir = tempfile::tempdir().expect("tempdir");
         let store = crate::discovery_cache::DiscoveryCacheStore::new(dir.path());
@@ -5620,6 +7902,1559 @@ mod tests {
         // the 14_400_000ms default max-stale.
         seed_entry(&store, &cache_key, 1_000_000);
 
+        let mock = Arc::new(BridgeMock::new(&["fresh_live"]));
+        mock.block_connect.store(true, Ordering::SeqCst);
+        let registry = Arc::new(
+            McpRegistry::with_raw_conn(
+                mock.clone() as Arc<dyn McpTransport>,
+                mock.clone() as Arc<dyn RawConnectionProvider>,
+            )
+            .with_discovery_cache_store(
+                crate::discovery_cache::DiscoveryCacheStore::new(dir.path()),
+            ),
+        );
+
+        let connect = {
+            let registry = registry.clone();
+            tokio::spawn(async move { registry.connect(cfg).await })
+        };
+        let cached_id = tokio::time::timeout(Duration::from_millis(200), connect)
+            .await
+            .expect("stale hit must return before background dial finishes")
+            .expect("join")
+            .expect("stale hit succeeds");
+        mock.connect_started.notified().await;
+
+        let conns = registry.connections.read().await;
+        assert!(
+            matches!(
+                conns.get("srv"),
+                Some(McpConnectionState::Cached { connection_id, .. }) if *connection_id == cached_id
+            ),
+            "expected Cached state, got {:?}",
+            conns.get("srv")
+        );
+        drop(conns);
+
+        mock.block_connect.store(false, Ordering::SeqCst);
+        mock.connect_release.notify_one();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if matches!(
+                    registry.connections.read().await.get("srv"),
+                    Some(McpConnectionState::Connected { .. })
+                ) {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("background revalidation completes");
+        drop(env);
+    }
+
+    #[tokio::test]
+    async fn a_stale_cache_hit_returns_immediately_and_revalidates_in_background() {
+        let _guard = crate::discovery_cache::tests_env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let env = DiscoveryCacheEnvGuard::new();
+        env.set(crate::discovery_cache::ENV_ENABLED, "true");
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = crate::discovery_cache::DiscoveryCacheStore::new(dir.path());
+        let cfg = http_cfg("srv", "https://mcp.example.com/v1");
+        let cache_key = crate::discovery_cache::DiscoveryCacheStore::cache_key("srv", &cfg.spec);
+        seed_entry(&store, &cache_key, 1_000_000);
+
+        let mock = Arc::new(BridgeMock::new(&["fresh_live"]));
+        mock.block_connect.store(true, Ordering::SeqCst);
+        let registry = McpRegistry::with_raw_conn(
+            mock.clone() as Arc<dyn McpTransport>,
+            mock.clone() as Arc<dyn RawConnectionProvider>,
+        )
+        .with_discovery_cache_store(crate::discovery_cache::DiscoveryCacheStore::new(dir.path()));
+
+        let cached_id = registry
+            .connect(cfg)
+            .await
+            .expect("stale cache hit connect");
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if mock.connect_calls.load(Ordering::SeqCst) == 1 {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("background revalidation must start");
+        {
+            let conns = registry.connections.read().await;
+            assert!(
+                matches!(
+                    conns.get("srv"),
+                    Some(McpConnectionState::Cached { connection_id, .. }) if *connection_id == cached_id
+                ),
+                "the stale-hit connect must return the cached generation without waiting"
+            );
+        }
+
+        mock.block_connect.store(false, Ordering::SeqCst);
+        mock.connect_release.notify_one();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if matches!(
+                    registry.connections.read().await.get("srv"),
+                    Some(McpConnectionState::Connected { .. })
+                ) {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("background revalidation completes");
+        drop(env);
+
+        assert_eq!(
+            mock.connect_calls.load(Ordering::SeqCst),
+            1,
+            "the stale hit must trigger exactly one live revalidation dial"
+        );
+        let entry = match store.load(&cache_key) {
+            crate::discovery_cache::EntryLookup::Found(entry) => entry,
+            other => panic!("expected refreshed entry, got {other:?}"),
+        };
+        assert_eq!(
+            entry.consecutive_refresh_failures, 0,
+            "a successful background refresh must clear strikes"
+        );
+        assert_eq!(
+            entry
+                .tools
+                .iter()
+                .map(|tool| tool.tool_name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["fresh_live"],
+            "the background refresh must atomically replace the cached catalog"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_stale_cache_hit_background_failure_keeps_cached_state_and_records_a_strike() {
+        let _guard = crate::discovery_cache::tests_env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let env = DiscoveryCacheEnvGuard::new();
+        env.set(crate::discovery_cache::ENV_ENABLED, "true");
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = crate::discovery_cache::DiscoveryCacheStore::new(dir.path());
+        let cfg = http_cfg("srv", "https://mcp.example.com/v1");
+        let cache_key = crate::discovery_cache::DiscoveryCacheStore::cache_key("srv", &cfg.spec);
+        seed_entry(&store, &cache_key, 1_000_000);
+
+        let mock = Arc::new(BridgeMock::new(&["alpha"]));
+        mock.list_tools_fails.store(true, Ordering::SeqCst);
+        let registry = McpRegistry::with_raw_conn(
+            mock.clone() as Arc<dyn McpTransport>,
+            mock.clone() as Arc<dyn RawConnectionProvider>,
+        )
+        .with_discovery_cache_store(crate::discovery_cache::DiscoveryCacheStore::new(dir.path()));
+
+        let cached_id = registry
+            .connect(cfg)
+            .await
+            .expect("stale cache hit connect");
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let entry = match store.load(&cache_key) {
+                    crate::discovery_cache::EntryLookup::Found(entry) => entry,
+                    other => panic!("expected seeded entry, got {other:?}"),
+                };
+                if entry.consecutive_refresh_failures == 1 {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("background refresh failure recorded");
+        drop(env);
+
+        assert_eq!(
+            mock.connect_calls.load(Ordering::SeqCst),
+            1,
+            "the failed background refresh must still attempt one dial"
+        );
+        let conns = registry.connections.read().await;
+        assert!(
+            matches!(
+                conns.get("srv"),
+                Some(McpConnectionState::Cached { connection_id, .. }) if *connection_id == cached_id
+            ),
+            "a failed background refresh must leave the Cached generation in place"
+        );
+    }
+
+    #[tokio::test]
+    async fn background_revalidation_owner_is_shared_with_a_foreground_waiter() {
+        let _guard = crate::discovery_cache::tests_env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let env = DiscoveryCacheEnvGuard::new();
+        env.set(crate::discovery_cache::ENV_ENABLED, "true");
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = crate::discovery_cache::DiscoveryCacheStore::new(dir.path());
+        let cfg = http_cfg("srv", "https://mcp.example.com/v1");
+        let cache_key = crate::discovery_cache::DiscoveryCacheStore::cache_key("srv", &cfg.spec);
+        seed_entry(&store, &cache_key, 1_000_000);
+
+        let mock = Arc::new(BridgeMock::new(&["fresh_live"]));
+        mock.block_connect.store(true, Ordering::SeqCst);
+        let registry = Arc::new(
+            McpRegistry::with_raw_conn(
+                mock.clone() as Arc<dyn McpTransport>,
+                mock.clone() as Arc<dyn RawConnectionProvider>,
+            )
+            .with_discovery_cache_store(
+                crate::discovery_cache::DiscoveryCacheStore::new(dir.path()),
+            ),
+        );
+
+        let cached_id = registry.connect(cfg).await.expect("stale hit connect");
+        mock.connect_started.notified().await;
+        let waiter = {
+            let registry = registry.clone();
+            tokio::spawn(async move { registry.ensure_dialed_from_cache("srv").await })
+        };
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        assert!(
+            matches!(
+                registry.connections.read().await.get("srv"),
+                Some(McpConnectionState::Cached { connection_id, .. }) if *connection_id == cached_id
+            ),
+            "background-first owner must keep the cached generation visible while foreground joins"
+        );
+        assert_eq!(
+            mock.connect_calls.load(Ordering::SeqCst),
+            1,
+            "foreground join must not open a second transport when background already owns the slot"
+        );
+
+        mock.block_connect.store(false, Ordering::SeqCst);
+        mock.connect_release.notify_one();
+        let live_id = tokio::time::timeout(Duration::from_secs(2), waiter)
+            .await
+            .expect("foreground waiter finishes")
+            .expect("waiter join succeeds")
+            .expect("foreground waiter receives L1");
+        drop(env);
+
+        assert_ne!(live_id, cached_id);
+        assert_eq!(
+            mock.connect_calls.load(Ordering::SeqCst),
+            1,
+            "background and foreground must share one exact-key owner"
+        );
+    }
+
+    #[tokio::test]
+    async fn background_start_detects_an_existing_foreground_owner_without_redialing() {
+        let _guard = crate::discovery_cache::tests_env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let env = DiscoveryCacheEnvGuard::new();
+        env.set(crate::discovery_cache::ENV_ENABLED, "true");
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = crate::discovery_cache::DiscoveryCacheStore::new(dir.path());
+        let cfg = http_cfg("srv", "https://mcp.example.com/v1");
+        let cache_key = crate::discovery_cache::DiscoveryCacheStore::cache_key("srv", &cfg.spec);
+        seed_entry(&store, &cache_key, 0);
+
+        let mock = Arc::new(BridgeMock::new(&["alpha"]));
+        mock.block_connect.store(true, Ordering::SeqCst);
+        let registry = Arc::new(
+            McpRegistry::with_raw_conn(
+                mock.clone() as Arc<dyn McpTransport>,
+                mock.clone() as Arc<dyn RawConnectionProvider>,
+            )
+            .with_discovery_cache_store(
+                crate::discovery_cache::DiscoveryCacheStore::new(dir.path()),
+            ),
+        );
+
+        registry.connect(cfg).await.expect("fresh cache hit");
+        let waiter = {
+            let registry = registry.clone();
+            tokio::spawn(async move { registry.ensure_dialed_from_cache("srv").await })
+        };
+        mock.connect_started.notified().await;
+        let lifecycle = registry.lifecycle_lock("srv");
+        let _guard = lifecycle.lock().await;
+        let prepare = registry
+            .prepare_lazy_upgrade_slot_locked("srv", LazyUpgradeMode::Background)
+            .await
+            .expect("background probe");
+        drop(_guard);
+        assert!(
+            matches!(prepare, LazyUpgradePreparation::Wait(_, false)),
+            "background startup must detect the existing foreground owner and refrain from spawning another dial"
+        );
+        assert_eq!(
+            mock.connect_calls.load(Ordering::SeqCst),
+            1,
+            "existing foreground owner already holds the only live dial"
+        );
+
+        mock.block_connect.store(false, Ordering::SeqCst);
+        mock.connect_release.notify_one();
+        waiter.await.unwrap().expect("foreground owner completes");
+        drop(env);
+    }
+
+    #[tokio::test]
+    async fn foreground_lazy_upgrade_panic_recovers_to_disconnected_and_unblocks_waiters() {
+        let _guard = crate::discovery_cache::tests_env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let env = DiscoveryCacheEnvGuard::new();
+        env.set(crate::discovery_cache::ENV_ENABLED, "true");
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = crate::discovery_cache::DiscoveryCacheStore::new(dir.path());
+        let cfg = http_cfg("srv", "https://mcp.example.com/v1");
+        let cache_key = crate::discovery_cache::DiscoveryCacheStore::cache_key("srv", &cfg.spec);
+        seed_entry(&store, &cache_key, 0);
+
+        let mock = Arc::new(BridgeMock::new(&["alpha"]));
+        mock.panic_connect.store(true, Ordering::SeqCst);
+        let registry = Arc::new(
+            McpRegistry::with_raw_conn(
+                mock.clone() as Arc<dyn McpTransport>,
+                mock.clone() as Arc<dyn RawConnectionProvider>,
+            )
+            .with_discovery_cache_store(
+                crate::discovery_cache::DiscoveryCacheStore::new(dir.path()),
+            ),
+        );
+
+        registry.connect(cfg).await.expect("cache hit connect");
+        let error = tokio::time::timeout(
+            Duration::from_secs(2),
+            registry.ensure_dialed_from_cache("srv"),
+        )
+        .await
+        .expect("waiter completes after panic")
+        .unwrap_err();
+        drop(env);
+
+        assert!(
+            error
+                .to_string()
+                .contains("cached lazy-upgrade task panicked"),
+            "panic recovery must surface a terminal waiter error"
+        );
+        assert!(
+            matches!(
+                registry.connections.read().await.get("srv"),
+                Some(McpConnectionState::Disconnected { .. })
+            ),
+            "foreground panic must recover to Disconnected instead of stranding Connecting"
+        );
+        assert!(
+            registry.lazy_upgrade_slots.read().await.is_empty(),
+            "panic recovery must clear the detached owner slot"
+        );
+    }
+
+    #[tokio::test]
+    async fn foreground_initialize_panic_disconnects_the_known_transport() {
+        let _guard = crate::discovery_cache::tests_env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let env = DiscoveryCacheEnvGuard::new();
+        env.set(crate::discovery_cache::ENV_ENABLED, "true");
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = crate::discovery_cache::DiscoveryCacheStore::new(dir.path());
+        let cfg = http_cfg("srv", "https://mcp.example.com/v1");
+        let cache_key = crate::discovery_cache::DiscoveryCacheStore::cache_key("srv", &cfg.spec);
+        seed_entry(&store, &cache_key, 0);
+
+        let mock = Arc::new(BridgeMock::new(&["alpha"]));
+        mock.panic_initialize.store(true, Ordering::SeqCst);
+        let registry = Arc::new(
+            McpRegistry::with_raw_conn(
+                mock.clone() as Arc<dyn McpTransport>,
+                mock.clone() as Arc<dyn RawConnectionProvider>,
+            )
+            .with_discovery_cache_store(
+                crate::discovery_cache::DiscoveryCacheStore::new(dir.path()),
+            ),
+        );
+
+        registry.connect(cfg).await.expect("cache hit connect");
+        let error = tokio::time::timeout(
+            Duration::from_secs(2),
+            registry.ensure_dialed_from_cache("srv"),
+        )
+        .await
+        .expect("waiter completes after initialize panic")
+        .unwrap_err();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if mock.disconnect_calls.load(Ordering::SeqCst) == 1
+                    && mock.conns.lock().unwrap().is_empty()
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("known transport cleaned up after initialize panic");
+        drop(env);
+
+        assert!(
+            error.to_string().contains("initialize"),
+            "panic after connect must identify the initialize phase"
+        );
+        assert!(
+            matches!(
+                registry.connections.read().await.get("srv"),
+                Some(McpConnectionState::Disconnected { .. })
+            ),
+            "foreground initialize panic must recover to Disconnected"
+        );
+        assert!(registry.lazy_upgrade_slots.read().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn background_lazy_upgrade_panic_keeps_cached_state_and_records_a_refresh_failure() {
+        let _guard = crate::discovery_cache::tests_env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let env = DiscoveryCacheEnvGuard::new();
+        env.set(crate::discovery_cache::ENV_ENABLED, "true");
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = crate::discovery_cache::DiscoveryCacheStore::new(dir.path());
+        let cfg = http_cfg("srv", "https://mcp.example.com/v1");
+        let cache_key = crate::discovery_cache::DiscoveryCacheStore::cache_key("srv", &cfg.spec);
+        seed_entry(&store, &cache_key, 1_000_000);
+
+        let mock = Arc::new(BridgeMock::new(&["alpha"]));
+        mock.panic_connect.store(true, Ordering::SeqCst);
+        let registry = Arc::new(
+            McpRegistry::with_raw_conn(
+                mock.clone() as Arc<dyn McpTransport>,
+                mock.clone() as Arc<dyn RawConnectionProvider>,
+            )
+            .with_discovery_cache_store(
+                crate::discovery_cache::DiscoveryCacheStore::new(dir.path()),
+            ),
+        );
+
+        let cached_id = registry.connect(cfg).await.expect("stale hit connect");
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let entry = match store.load(&cache_key) {
+                    crate::discovery_cache::EntryLookup::Found(entry) => entry,
+                    other => panic!("expected entry, got {other:?}"),
+                };
+                if entry.consecutive_refresh_failures == 1
+                    && registry.lazy_upgrade_slots.read().await.is_empty()
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("background panic settles");
+        drop(env);
+
+        assert!(
+            matches!(
+                registry.connections.read().await.get("srv"),
+                Some(McpConnectionState::Cached { connection_id, .. }) if *connection_id == cached_id
+            ),
+            "background panic must keep the cached state available"
+        );
+    }
+
+    #[tokio::test]
+    async fn background_post_connect_panic_disconnects_the_known_transport() {
+        let _guard = crate::discovery_cache::tests_env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let env = DiscoveryCacheEnvGuard::new();
+        env.set(crate::discovery_cache::ENV_ENABLED, "true");
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = crate::discovery_cache::DiscoveryCacheStore::new(dir.path());
+        let cfg = http_cfg("srv", "https://mcp.example.com/v1");
+        let cache_key = crate::discovery_cache::DiscoveryCacheStore::cache_key("srv", &cfg.spec);
+        seed_entry(&store, &cache_key, 1_000_000);
+
+        let mock = Arc::new(BridgeMock::new(&["alpha"]));
+        mock.panic_list_tools.store(true, Ordering::SeqCst);
+        let registry = Arc::new(
+            McpRegistry::with_raw_conn(
+                mock.clone() as Arc<dyn McpTransport>,
+                mock.clone() as Arc<dyn RawConnectionProvider>,
+            )
+            .with_discovery_cache_store(
+                crate::discovery_cache::DiscoveryCacheStore::new(dir.path()),
+            ),
+        );
+
+        let cached_id = registry.connect(cfg).await.expect("stale cache hit");
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let struck = match store.load(&cache_key) {
+                    crate::discovery_cache::EntryLookup::Found(entry) => {
+                        entry.consecutive_refresh_failures == 1
+                    }
+                    other => panic!("expected entry, got {other:?}"),
+                };
+                if struck
+                    && registry.lazy_upgrade_slots.read().await.is_empty()
+                    && mock.disconnect_calls.load(Ordering::SeqCst) == 1
+                    && mock.conns.lock().unwrap().is_empty()
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("known transport cleaned up after post-connect panic");
+        drop(env);
+
+        assert!(
+            matches!(
+                registry.connections.read().await.get("srv"),
+                Some(McpConnectionState::Cached { connection_id, .. }) if *connection_id == cached_id
+            ),
+            "background post-connect panic must keep the cached generation available"
+        );
+    }
+
+    #[tokio::test]
+    async fn stale_background_failure_does_not_strike_a_replaced_cached_generation() {
+        let _guard = crate::discovery_cache::tests_env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let env = DiscoveryCacheEnvGuard::new();
+        env.set(crate::discovery_cache::ENV_ENABLED, "true");
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = crate::discovery_cache::DiscoveryCacheStore::new(dir.path());
+        let cfg = http_cfg("srv", "https://mcp.example.com/v1");
+        let cache_key = crate::discovery_cache::DiscoveryCacheStore::cache_key("srv", &cfg.spec);
+        seed_entry(&store, &cache_key, 1_000_000);
+
+        let mock = Arc::new(BridgeMock::new(&["alpha"]));
+        mock.block_connect.store(true, Ordering::SeqCst);
+        mock.list_tools_fails.store(true, Ordering::SeqCst);
+        let registry = Arc::new(
+            McpRegistry::with_raw_conn(
+                mock.clone() as Arc<dyn McpTransport>,
+                mock.clone() as Arc<dyn RawConnectionProvider>,
+            )
+            .with_discovery_cache_store(
+                crate::discovery_cache::DiscoveryCacheStore::new(dir.path()),
+            ),
+        );
+
+        registry.connect(cfg).await.expect("stale hit connect");
+        mock.connect_started.notified().await;
+        let replacement_id = McpConnectionId::new();
+        let lifecycle = registry.lifecycle_lock("srv");
+        let _guard = lifecycle.lock().await;
+        registry.connections.write().await.insert(
+            "srv".into(),
+            McpConnectionState::Cached {
+                config: http_cfg("srv", "https://mcp.example.com/v1"),
+                connection_id: replacement_id,
+                capabilities: ServerCapabilitiesDto {
+                    tools: true,
+                    resources: false,
+                    prompts: false,
+                    directory_read: false,
+                    logging: false,
+                    experimental: HashMap::new(),
+                },
+                tools: vec![McpToolDto {
+                    server_name: "srv".into(),
+                    tool_name: "replacement".into(),
+                    description: "replacement".into(),
+                    input_schema: serde_json::json!({"type":"object"}),
+                    full_name: "mcp__srv__replacement".into(),
+                    search_hint: None,
+                    always_load: None,
+                    requires_user_interaction: false,
+                }],
+                resources: vec![],
+                resource_templates: vec![],
+                prompts: vec![],
+                cache_saved_at_ms: 1,
+                age_ms: 1,
+            },
+        );
+        seed_entry_with_catalog(
+            &store,
+            &cache_key,
+            1,
+            ServerCapabilitiesDto {
+                tools: true,
+                resources: false,
+                prompts: false,
+                directory_read: false,
+                logging: false,
+                experimental: HashMap::new(),
+            },
+            vec![McpToolDto {
+                server_name: "srv".into(),
+                tool_name: "replacement".into(),
+                description: "replacement".into(),
+                input_schema: serde_json::json!({"type":"object"}),
+                full_name: "mcp__srv__replacement".into(),
+                search_hint: None,
+                always_load: None,
+                requires_user_interaction: false,
+            }],
+            vec![],
+            vec![],
+        );
+        drop(_guard);
+
+        mock.block_connect.store(false, Ordering::SeqCst);
+        mock.connect_release.notify_one();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let entry = match store.load(&cache_key) {
+                    crate::discovery_cache::EntryLookup::Found(entry) => entry,
+                    other => panic!("expected entry, got {other:?}"),
+                };
+                if entry
+                    .tools
+                    .iter()
+                    .any(|tool| tool.tool_name == "replacement")
+                    && entry.consecutive_refresh_failures == 0
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("replacement entry survives old background failure");
+        drop(env);
+
+        assert!(
+            matches!(
+                registry.connections.read().await.get("srv"),
+                Some(McpConnectionState::Cached { connection_id, .. }) if *connection_id == replacement_id
+            ),
+            "the replacement cached generation must remain current"
+        );
+    }
+
+    #[tokio::test]
+    async fn rejected_background_cleanup_does_not_hold_the_lifecycle_lock() {
+        let _guard = crate::discovery_cache::tests_env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let env = DiscoveryCacheEnvGuard::new();
+        env.set(crate::discovery_cache::ENV_ENABLED, "true");
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = crate::discovery_cache::DiscoveryCacheStore::new(dir.path());
+        let cfg = http_cfg("srv", "https://mcp.example.com/v1");
+        let cache_key = crate::discovery_cache::DiscoveryCacheStore::cache_key("srv", &cfg.spec);
+        seed_entry(&store, &cache_key, 1_000_000);
+
+        let mock = Arc::new(BridgeMock::new(&["fresh_live"]));
+        mock.block_connect.store(true, Ordering::SeqCst);
+        mock.block_disconnect.store(true, Ordering::SeqCst);
+        let registry = Arc::new(
+            McpRegistry::with_raw_conn(
+                mock.clone() as Arc<dyn McpTransport>,
+                mock.clone() as Arc<dyn RawConnectionProvider>,
+            )
+            .with_discovery_cache_store(
+                crate::discovery_cache::DiscoveryCacheStore::new(dir.path()),
+            ),
+        );
+
+        let cached_id = registry.connect(cfg).await.expect("stale hit connect");
+        mock.connect_started.notified().await;
+        registry.connections.write().await.insert(
+            "srv".into(),
+            McpConnectionState::Cached {
+                config: http_cfg("srv", "https://mcp.example.com/v2"),
+                connection_id: cached_id,
+                capabilities: ServerCapabilitiesDto {
+                    tools: true,
+                    resources: false,
+                    prompts: false,
+                    directory_read: false,
+                    logging: false,
+                    experimental: HashMap::new(),
+                },
+                tools: vec![],
+                resources: vec![],
+                resource_templates: vec![],
+                prompts: vec![],
+                cache_saved_at_ms: 1,
+                age_ms: 1_000_000,
+            },
+        );
+
+        mock.block_connect.store(false, Ordering::SeqCst);
+        mock.connect_release.notify_one();
+        mock.disconnect_started.notified().await;
+
+        tokio::time::timeout(Duration::from_millis(200), registry.remove("srv"))
+            .await
+            .expect("remove must not wait for rejected cleanup disconnect")
+            .expect("remove succeeds while cleanup is blocked");
+        assert!(
+            registry.connections.read().await.get("srv").is_none(),
+            "remove should acquire the lifecycle lock even while cleanup waits on transport disconnect"
+        );
+
+        mock.block_disconnect.store(false, Ordering::SeqCst);
+        mock.disconnect_release.notify_one();
+        drop(env);
+    }
+
+    #[tokio::test]
+    async fn concurrent_stale_cache_hits_share_one_background_revalidation() {
+        let _guard = crate::discovery_cache::tests_env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let env = DiscoveryCacheEnvGuard::new();
+        env.set(crate::discovery_cache::ENV_ENABLED, "true");
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = crate::discovery_cache::DiscoveryCacheStore::new(dir.path());
+        let cfg = http_cfg("srv", "https://mcp.example.com/v1");
+        let cache_key = crate::discovery_cache::DiscoveryCacheStore::cache_key("srv", &cfg.spec);
+        seed_entry(&store, &cache_key, 1_000_000);
+
+        let mock = Arc::new(BridgeMock::new(&["alpha"]));
+        mock.block_connect.store(true, Ordering::SeqCst);
+        let registry = Arc::new(
+            McpRegistry::with_raw_conn(
+                mock.clone() as Arc<dyn McpTransport>,
+                mock.clone() as Arc<dyn RawConnectionProvider>,
+            )
+            .with_discovery_cache_store(
+                crate::discovery_cache::DiscoveryCacheStore::new(dir.path()),
+            ),
+        );
+
+        let a = {
+            let registry = registry.clone();
+            let cfg = cfg.clone();
+            tokio::spawn(async move { registry.connect(cfg).await })
+        };
+        let b = {
+            let registry = registry.clone();
+            let cfg = cfg.clone();
+            tokio::spawn(async move { registry.connect(cfg).await })
+        };
+        let (a, b) = tokio::join!(a, b);
+        let id_a = a.unwrap().expect("first stale hit");
+        let id_b = b.unwrap().expect("second stale hit");
+
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if mock.connect_calls.load(Ordering::SeqCst) == 1 {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("shared background revalidation must start");
+        assert_eq!(
+            id_a, id_b,
+            "both callers must receive the same cached generation"
+        );
+        assert_eq!(
+            mock.connect_calls.load(Ordering::SeqCst),
+            1,
+            "concurrent stale-hit connects must single-flight the background dial"
+        );
+
+        mock.block_connect.store(false, Ordering::SeqCst);
+        mock.connect_release.notify_one();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if matches!(
+                    registry.connections.read().await.get("srv"),
+                    Some(McpConnectionState::Connected { .. })
+                ) {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("background revalidation completes");
+        drop(env);
+    }
+
+    #[tokio::test]
+    async fn catalog_refresh_snapshot_recovers_missed_cached_registration() {
+        let _guard = crate::discovery_cache::tests_env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let env = DiscoveryCacheEnvGuard::new();
+        env.set(crate::discovery_cache::ENV_ENABLED, "true");
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = crate::discovery_cache::DiscoveryCacheStore::new(dir.path());
+        let cfg = http_cfg("srv", "https://mcp.example.com/v1");
+        let cache_key = crate::discovery_cache::DiscoveryCacheStore::cache_key("srv", &cfg.spec);
+        seed_entry(&store, &cache_key, 0);
+
+        let mock = Arc::new(BridgeMock::new(&["live"]));
+        let registry = McpRegistry::with_raw_conn(
+            mock.clone() as Arc<dyn McpTransport>,
+            mock as Arc<dyn RawConnectionProvider>,
+        )
+        .with_discovery_cache_store(crate::discovery_cache::DiscoveryCacheStore::new(dir.path()));
+
+        let cached_id = registry.connect(cfg).await.expect("fresh cache hit");
+        let mut active = std::collections::HashSet::new();
+        apply_lagged_tool_recovery(&registry, &mut active)
+            .await
+            .expect("snapshot recovery");
+
+        assert_eq!(active, std::collections::HashSet::from([cached_id]));
+        drop(env);
+    }
+
+    #[tokio::test]
+    async fn catalog_refresh_snapshot_excludes_agent_scoped_entries() {
+        let _guard = crate::discovery_cache::tests_env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let env = DiscoveryCacheEnvGuard::new();
+        env.set(crate::discovery_cache::ENV_ENABLED, "true");
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = crate::discovery_cache::DiscoveryCacheStore::new(dir.path());
+        let cfg = http_cfg("srv", "https://mcp.example.com/v1");
+        let cache_key = crate::discovery_cache::DiscoveryCacheStore::cache_key("srv", &cfg.spec);
+        seed_entry(&store, &cache_key, 0);
+
+        let mock = Arc::new(BridgeMock::new(&["live"]));
+        let registry = McpRegistry::with_raw_conn(
+            mock.clone() as Arc<dyn McpTransport>,
+            mock as Arc<dyn RawConnectionProvider>,
+        )
+        .with_discovery_cache_store(crate::discovery_cache::DiscoveryCacheStore::new(dir.path()));
+
+        let shared_id = registry.connect(cfg).await.expect("shared fresh cache hit");
+        let scoped_id = McpConnectionId::new();
+        registry.connections.write().await.insert(
+            "agent:test:srv".into(),
+            McpConnectionState::Cached {
+                config: http_cfg("srv", "https://mcp.example.com/v1"),
+                connection_id: scoped_id,
+                capabilities: ServerCapabilitiesDto {
+                    tools: true,
+                    resources: false,
+                    prompts: false,
+                    directory_read: false,
+                    logging: false,
+                    experimental: HashMap::new(),
+                },
+                tools: vec![McpToolDto {
+                    server_name: "srv".into(),
+                    tool_name: "scoped".into(),
+                    description: "scoped".into(),
+                    input_schema: serde_json::json!({"type":"object"}),
+                    full_name: "mcp__srv__scoped".into(),
+                    search_hint: None,
+                    always_load: None,
+                    requires_user_interaction: false,
+                }],
+                resources: vec![],
+                resource_templates: vec![],
+                prompts: vec![],
+                cache_saved_at_ms: 1,
+                age_ms: 0,
+            },
+        );
+
+        let mut active = std::collections::HashSet::from([scoped_id]);
+        apply_lagged_tool_recovery(&registry, &mut active)
+            .await
+            .expect("snapshot recovery");
+
+        assert_eq!(active, std::collections::HashSet::from([shared_id]));
+        drop(env);
+    }
+
+    #[tokio::test]
+    async fn catalog_refresh_snapshot_recovers_missed_cached_retirement_after_lazy_dial_success() {
+        let _guard = crate::discovery_cache::tests_env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let env = DiscoveryCacheEnvGuard::new();
+        env.set(crate::discovery_cache::ENV_ENABLED, "true");
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = crate::discovery_cache::DiscoveryCacheStore::new(dir.path());
+        let cfg = http_cfg("srv", "https://mcp.example.com/v1");
+        let cache_key = crate::discovery_cache::DiscoveryCacheStore::cache_key("srv", &cfg.spec);
+        seed_entry(&store, &cache_key, 0);
+
+        let mock = Arc::new(BridgeMock::new(&["live"]));
+        let registry = McpRegistry::with_raw_conn(
+            mock.clone() as Arc<dyn McpTransport>,
+            mock.clone() as Arc<dyn RawConnectionProvider>,
+        )
+        .with_discovery_cache_store(crate::discovery_cache::DiscoveryCacheStore::new(dir.path()));
+
+        let cached_id = registry.connect(cfg).await.expect("fresh cache hit");
+        let live_id = registry
+            .ensure_dialed_from_cache("srv")
+            .await
+            .expect("lazy dial succeeds");
+        let (connection, peer_tx, peer_rx) = drivable_connection();
+        let live_client = Arc::new(
+            McpClient::new("srv", std::path::PathBuf::from("/tmp/work"), connection).await,
+        );
+        registry.clients.write().await.insert(
+            "srv".into(),
+            RegisteredClient {
+                connection_id: Some(live_id),
+                client: live_client,
+            },
+        );
+        let responder = spawn_tools_list_response(peer_tx, peer_rx, "live");
+        let mut active = std::collections::HashSet::from([cached_id]);
+        apply_lagged_tool_recovery(&registry, &mut active)
+            .await
+            .expect("snapshot recovery");
+        responder.await.expect("tools/list responder");
+
+        assert_eq!(active, std::collections::HashSet::from([live_id]));
+        assert!(!active.contains(&cached_id));
+        drop(env);
+    }
+
+    #[tokio::test]
+    async fn catalog_refresh_snapshot_recovers_missed_cached_retirement_after_lazy_dial_failure() {
+        let _guard = crate::discovery_cache::tests_env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let env = DiscoveryCacheEnvGuard::new();
+        env.set(crate::discovery_cache::ENV_ENABLED, "true");
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = crate::discovery_cache::DiscoveryCacheStore::new(dir.path());
+        let cfg = http_cfg("srv", "https://mcp.example.com/v1");
+        let cache_key = crate::discovery_cache::DiscoveryCacheStore::cache_key("srv", &cfg.spec);
+        seed_entry(&store, &cache_key, 0);
+
+        let mock = Arc::new(BridgeMock::new(&["live"]));
+        mock.list_tools_fails.store(true, Ordering::SeqCst);
+        let registry = McpRegistry::with_raw_conn(
+            mock.clone() as Arc<dyn McpTransport>,
+            mock as Arc<dyn RawConnectionProvider>,
+        )
+        .with_discovery_cache_store(crate::discovery_cache::DiscoveryCacheStore::new(dir.path()));
+
+        let cached_id = registry.connect(cfg).await.expect("fresh cache hit");
+        registry
+            .ensure_dialed_from_cache("srv")
+            .await
+            .expect_err("lazy dial fails");
+        let mut active = std::collections::HashSet::from([cached_id]);
+        apply_lagged_tool_recovery(&registry, &mut active)
+            .await
+            .expect("snapshot recovery");
+
+        assert!(
+            active.is_empty(),
+            "retired cached generation must be cleared"
+        );
+        drop(env);
+    }
+
+    #[tokio::test]
+    async fn background_revalidation_does_not_revive_a_removed_server() {
+        let _guard = crate::discovery_cache::tests_env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let env = DiscoveryCacheEnvGuard::new();
+        env.set(crate::discovery_cache::ENV_ENABLED, "true");
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = crate::discovery_cache::DiscoveryCacheStore::new(dir.path());
+        let cfg = http_cfg("srv", "https://mcp.example.com/v1");
+        let cache_key = crate::discovery_cache::DiscoveryCacheStore::cache_key("srv", &cfg.spec);
+        seed_entry(&store, &cache_key, 1_000_000);
+
+        let mock = Arc::new(BridgeMock::new(&["fresh_live"]));
+        mock.block_connect.store(true, Ordering::SeqCst);
+        let registry = Arc::new(
+            McpRegistry::with_raw_conn(
+                mock.clone() as Arc<dyn McpTransport>,
+                mock.clone() as Arc<dyn RawConnectionProvider>,
+            )
+            .with_discovery_cache_store(
+                crate::discovery_cache::DiscoveryCacheStore::new(dir.path()),
+            ),
+        );
+
+        registry
+            .connect(cfg)
+            .await
+            .expect("stale cache hit connect");
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if mock.connect_calls.load(Ordering::SeqCst) == 1 {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("background revalidation started");
+
+        let remove = {
+            let registry = registry.clone();
+            tokio::spawn(async move { registry.remove("srv").await })
+        };
+        mock.block_connect.store(false, Ordering::SeqCst);
+        mock.connect_release.notify_one();
+        remove.await.unwrap().expect("remove after background");
+        for _ in 0..20 {
+            tokio::task::yield_now().await;
+        }
+        drop(env);
+
+        assert!(
+            registry.connections.read().await.get("srv").is_none(),
+            "queued remove must win over the background refresh"
+        );
+    }
+
+    #[tokio::test]
+    async fn background_revalidation_cas_rejects_a_reconfigured_cached_state() {
+        let _guard = crate::discovery_cache::tests_env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let env = DiscoveryCacheEnvGuard::new();
+        env.set(crate::discovery_cache::ENV_ENABLED, "true");
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = crate::discovery_cache::DiscoveryCacheStore::new(dir.path());
+        let cfg = http_cfg("srv", "https://mcp.example.com/v1");
+        let cache_key = crate::discovery_cache::DiscoveryCacheStore::cache_key("srv", &cfg.spec);
+        seed_entry(&store, &cache_key, 1_000_000);
+
+        let mock = Arc::new(BridgeMock::new(&["fresh_live"]));
+        mock.block_connect.store(true, Ordering::SeqCst);
+        let registry = McpRegistry::with_raw_conn(
+            mock.clone() as Arc<dyn McpTransport>,
+            mock.clone() as Arc<dyn RawConnectionProvider>,
+        )
+        .with_discovery_cache_store(crate::discovery_cache::DiscoveryCacheStore::new(dir.path()));
+
+        let cached_id = registry
+            .connect(cfg)
+            .await
+            .expect("stale cache hit connect");
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if mock.connect_calls.load(Ordering::SeqCst) == 1 {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("background revalidation started");
+
+        let mut reconfigured = http_cfg("srv", "https://mcp.example.com/v1");
+        reconfigured.timeout_ms = Some(1234);
+        registry.connections.write().await.insert(
+            "srv".into(),
+            McpConnectionState::Cached {
+                config: reconfigured,
+                connection_id: cached_id,
+                capabilities: ServerCapabilitiesDto {
+                    tools: true,
+                    resources: false,
+                    prompts: false,
+                    directory_read: false,
+                    logging: false,
+                    experimental: HashMap::new(),
+                },
+                tools: vec![McpToolDto {
+                    server_name: "srv".into(),
+                    tool_name: "old".into(),
+                    description: "old tool".into(),
+                    input_schema: serde_json::json!({"type":"object"}),
+                    full_name: "mcp__srv__old".into(),
+                    search_hint: None,
+                    always_load: None,
+                    requires_user_interaction: false,
+                }],
+                resources: vec![],
+                resource_templates: vec![],
+                prompts: vec![],
+                cache_saved_at_ms: 1,
+                age_ms: 1_000_000,
+            },
+        );
+
+        mock.block_connect.store(false, Ordering::SeqCst);
+        mock.connect_release.notify_one();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if mock.disconnect_calls.load(Ordering::SeqCst) == 1 {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("discarded background transport is torn down");
+        drop(env);
+
+        let conns = registry.connections.read().await;
+        let McpConnectionState::Cached { config, tools, .. } =
+            conns.get("srv").expect("cached state remains")
+        else {
+            panic!("reconfigured cached state must remain cached")
+        };
+        assert_eq!(config.timeout_ms, Some(1234));
+        assert_eq!(tools[0].tool_name, "old");
+        drop(conns);
+        let entry = match store.load(&cache_key) {
+            crate::discovery_cache::EntryLookup::Found(entry) => entry,
+            other => panic!("seeded cache entry must survive, got {other:?}"),
+        };
+        assert_eq!(
+            entry
+                .tools
+                .iter()
+                .map(|tool| tool.tool_name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["alpha"],
+            "CAS failure must not overwrite the persisted cache entry"
+        );
+    }
+
+    #[tokio::test]
+    async fn background_cas_reject_disconnect_retries_until_success() {
+        let _guard = crate::discovery_cache::tests_env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let env = DiscoveryCacheEnvGuard::new();
+        env.set(crate::discovery_cache::ENV_ENABLED, "true");
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = crate::discovery_cache::DiscoveryCacheStore::new(dir.path());
+        let cfg = http_cfg("srv", "https://mcp.example.com/v1");
+        let cache_key = crate::discovery_cache::DiscoveryCacheStore::cache_key("srv", &cfg.spec);
+        seed_entry(&store, &cache_key, 1_000_000);
+
+        let mock = Arc::new(BridgeMock::new(&["fresh_live"]));
+        mock.block_connect.store(true, Ordering::SeqCst);
+        mock.disconnect_failures_remaining
+            .store(1, Ordering::SeqCst);
+        let registry = Arc::new(
+            McpRegistry::with_raw_conn(
+                mock.clone() as Arc<dyn McpTransport>,
+                mock.clone() as Arc<dyn RawConnectionProvider>,
+            )
+            .with_discovery_cache_store(
+                crate::discovery_cache::DiscoveryCacheStore::new(dir.path()),
+            ),
+        );
+
+        let cached_id = registry
+            .connect(cfg)
+            .await
+            .expect("stale cache hit connect");
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if mock.connect_calls.load(Ordering::SeqCst) == 1 {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("background revalidation started");
+
+        registry.connections.write().await.insert(
+            "srv".into(),
+            McpConnectionState::Cached {
+                config: http_cfg("srv", "https://mcp.example.com/v2"),
+                connection_id: cached_id,
+                capabilities: ServerCapabilitiesDto {
+                    tools: true,
+                    resources: false,
+                    prompts: false,
+                    directory_read: false,
+                    logging: false,
+                    experimental: HashMap::new(),
+                },
+                tools: vec![],
+                resources: vec![],
+                resource_templates: vec![],
+                prompts: vec![],
+                cache_saved_at_ms: 1,
+                age_ms: 1_000_000,
+            },
+        );
+
+        mock.block_connect.store(false, Ordering::SeqCst);
+        mock.connect_release.notify_one();
+        let live_connection_id = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let pending = registry.pending_transport_cleanups.read().await;
+                if let Some(connection_id) = pending.keys().copied().next() {
+                    break connection_id;
+                }
+                drop(pending);
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("disconnect failure queued for retry");
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if registry
+                    .pending_transport_cleanups
+                    .read()
+                    .await
+                    .contains_key(&live_connection_id)
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("disconnect failure queued for retry");
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if registry.pending_transport_cleanups.read().await.is_empty()
+                    && mock.conns.lock().unwrap().is_empty()
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("retry cleanup succeeds");
+
+        assert_eq!(
+            mock.disconnect_calls.load(Ordering::SeqCst),
+            2,
+            "cleanup must retry after the first disconnect failure"
+        );
+        assert!(
+            registry.pending_transport_cleanups.read().await.is_empty(),
+            "successful retry must clear the pending cleanup entry"
+        );
+        drop(env);
+    }
+
+    #[tokio::test]
+    async fn background_cleanup_retries_stop_and_can_be_kicked_again() {
+        let _guard = crate::discovery_cache::tests_env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let env = DiscoveryCacheEnvGuard::new();
+        env.set(crate::discovery_cache::ENV_ENABLED, "true");
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = crate::discovery_cache::DiscoveryCacheStore::new(dir.path());
+        let cfg = http_cfg("srv", "https://mcp.example.com/v1");
+        let cache_key = crate::discovery_cache::DiscoveryCacheStore::cache_key("srv", &cfg.spec);
+        seed_entry(&store, &cache_key, 1_000_000);
+
+        let mock = Arc::new(BridgeMock::new(&["fresh_live"]));
+        mock.block_connect.store(true, Ordering::SeqCst);
+        mock.disconnect_failures_remaining
+            .store(usize::MAX, Ordering::SeqCst);
+        let registry = Arc::new(
+            McpRegistry::with_raw_conn(
+                mock.clone() as Arc<dyn McpTransport>,
+                mock.clone() as Arc<dyn RawConnectionProvider>,
+            )
+            .with_discovery_cache_store(
+                crate::discovery_cache::DiscoveryCacheStore::new(dir.path()),
+            ),
+        );
+
+        let cached_id = registry
+            .connect(cfg)
+            .await
+            .expect("stale cache hit connect");
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if mock.connect_calls.load(Ordering::SeqCst) == 1 {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("background revalidation started");
+
+        registry.connections.write().await.insert(
+            "srv".into(),
+            McpConnectionState::Cached {
+                config: http_cfg("srv", "https://mcp.example.com/v2"),
+                connection_id: cached_id,
+                capabilities: ServerCapabilitiesDto {
+                    tools: true,
+                    resources: false,
+                    prompts: false,
+                    directory_read: false,
+                    logging: false,
+                    experimental: HashMap::new(),
+                },
+                tools: vec![],
+                resources: vec![],
+                resource_templates: vec![],
+                prompts: vec![],
+                cache_saved_at_ms: 1,
+                age_ms: 1_000_000,
+            },
+        );
+
+        mock.block_connect.store(false, Ordering::SeqCst);
+        mock.connect_release.notify_one();
+        let live_connection_id = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let pending = registry.pending_transport_cleanups.read().await;
+                if let Some((connection_id, entry)) = pending.iter().next() {
+                    if !entry.retrying {
+                        break *connection_id;
+                    }
+                }
+                drop(pending);
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("bounded retries end and leave a pending entry");
+
+        assert!(
+            registry
+                .pending_transport_cleanups
+                .read()
+                .await
+                .contains_key(&live_connection_id),
+            "permanent disconnect failure must leave an observable pending cleanup"
+        );
+        assert_eq!(
+            mock.disconnect_calls.load(Ordering::SeqCst),
+            6,
+            "cleanup should stop after one immediate disconnect and five retries"
+        );
+
+        mock.disconnect_failures_remaining
+            .store(0, Ordering::SeqCst);
+        registry.kick_pending_transport_cleanups().await;
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if registry.pending_transport_cleanups.read().await.is_empty()
+                    && mock.conns.lock().unwrap().is_empty()
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("later kick retries and clears the pending cleanup");
+        drop(env);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn hanging_cleanup_disconnect_times_out_and_can_be_kicked_again() {
+        let mock = Arc::new(BridgeMock::new(&["read"]));
+        let registry = Arc::new(McpRegistry::with_raw_conn(
+            mock.clone() as Arc<dyn McpTransport>,
+            mock.clone() as Arc<dyn RawConnectionProvider>,
+        ));
+        let connection_id = registry.connect(cfg("mock")).await.unwrap();
+        mock.hang_disconnect.store(true, Ordering::SeqCst);
+
+        let cleanup = {
+            let registry = registry.clone();
+            tokio::spawn(async move {
+                registry.disconnect_or_schedule_cleanup(connection_id).await;
+            })
+        };
+        mock.disconnect_started.notified().await;
+        tokio::time::advance(cleanup_disconnect_timeout()).await;
+        cleanup.await.expect("cleanup task joins");
+        tokio::task::yield_now().await;
+
+        drive_cleanup_retry_attempts_for_test().await;
+        let mut settled = false;
+        for _ in 0..64 {
+            let pending = registry.pending_transport_cleanups.read().await;
+            if matches!(pending.get(&connection_id), Some(entry) if !entry.retrying) {
+                settled = true;
+                break;
+            }
+            drop(pending);
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            settled,
+            "timed-out cleanup retries must stop and leave a retryable pending entry"
+        );
+
+        mock.hang_disconnect.store(false, Ordering::SeqCst);
+        registry.kick_pending_transport_cleanups().await;
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_millis(10)).await;
+        tokio::task::yield_now().await;
+        assert!(
+            registry.pending_transport_cleanups.read().await.is_empty(),
+            "a later kick must retry and clear the timed-out cleanup"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn bounded_cleanup_retry_task_does_not_hold_registry_forever() {
+        let mock = Arc::new(BridgeMock::new(&["read"]));
+        let registry = Arc::new(McpRegistry::with_raw_conn(
+            mock.clone() as Arc<dyn McpTransport>,
+            mock.clone() as Arc<dyn RawConnectionProvider>,
+        ));
+        let weak = Arc::downgrade(&registry);
+        let connection_id = registry.connect(cfg("mock")).await.unwrap();
+        mock.hang_disconnect.store(true, Ordering::SeqCst);
+
+        let cleanup = {
+            let registry = registry.clone();
+            tokio::spawn(async move {
+                registry.disconnect_or_schedule_cleanup(connection_id).await;
+            })
+        };
+        mock.disconnect_started.notified().await;
+        tokio::time::advance(cleanup_disconnect_timeout()).await;
+        cleanup.await.expect("cleanup task joins");
+        tokio::task::yield_now().await;
+        drop(registry);
+
+        drive_cleanup_retry_attempts_for_test().await;
+        let mut released = false;
+        for _ in 0..64 {
+            if weak.upgrade().is_none() {
+                released = true;
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            released,
+            "bounded cleanup retries must release the registry once they stop retrying"
+        );
+    }
+
+    #[tokio::test]
+    async fn connect_all_disabled_seed_does_not_override_live_state() {
+        let mock = Arc::new(BridgeMock::new(&["read"]));
+        let registry = Arc::new(McpRegistry::with_raw_conn(
+            mock.clone() as Arc<dyn McpTransport>,
+            mock as Arc<dyn RawConnectionProvider>,
+        ));
+        let lifecycle = registry.lifecycle_lock("srv");
+        let guard = lifecycle.lock().await;
+
+        let connect_all = {
+            let registry = registry.clone();
+            tokio::spawn(async move {
+                registry
+                    .connect_all(vec![McpServerConfig {
+                        disabled: true,
+                        ..cfg("srv")
+                    }])
+                    .await
+            })
+        };
+        tokio::task::yield_now().await;
+
+        let live_id = McpConnectionId::new();
+        registry.connections.write().await.insert(
+            "srv".into(),
+            McpConnectionState::Connected {
+                config: cfg("srv"),
+                connection_id: live_id,
+                capabilities: ServerCapabilitiesDto {
+                    tools: true,
+                    resources: false,
+                    prompts: false,
+                    directory_read: false,
+                    logging: false,
+                    experimental: HashMap::new(),
+                },
+                tools: vec![],
+                resources: vec![],
+                resource_templates: vec![],
+                prompts: vec![],
+                connected_at: SystemTime::now(),
+            },
+        );
+        drop(guard);
+
+        assert!(
+            connect_all.await.expect("join").is_empty(),
+            "disabled connect_all entries remain skipped"
+        );
+        assert!(
+            matches!(
+                registry.connections.read().await.get("srv"),
+                Some(McpConnectionState::Connected { connection_id, .. }) if *connection_id == live_id
+            ),
+            "disabled seeding must not overwrite a concurrently-live generation"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_fresh_cache_hit_does_not_start_background_revalidation() {
+        let _guard = crate::discovery_cache::tests_env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let env = DiscoveryCacheEnvGuard::new();
+        env.set(crate::discovery_cache::ENV_ENABLED, "true");
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = crate::discovery_cache::DiscoveryCacheStore::new(dir.path());
+        let cfg = http_cfg("srv", "https://mcp.example.com/v1");
+        let cache_key = crate::discovery_cache::DiscoveryCacheStore::cache_key("srv", &cfg.spec);
+        seed_entry(&store, &cache_key, 0);
+
         let mock = Arc::new(BridgeMock::new(&["should_never_be_dialed"]));
         let registry = McpRegistry::with_raw_conn(
             mock.clone() as Arc<dyn McpTransport>,
@@ -5627,24 +9462,167 @@ mod tests {
         )
         .with_discovery_cache_store(crate::discovery_cache::DiscoveryCacheStore::new(dir.path()));
 
-        let result = registry.connect(cfg).await;
-        std::env::remove_var(crate::discovery_cache::ENV_ENABLED);
+        registry
+            .connect(cfg)
+            .await
+            .expect("fresh cache hit connect");
+        for _ in 0..20 {
+            tokio::task::yield_now().await;
+        }
+        drop(env);
 
-        assert!(
-            result.is_ok(),
-            "a stale hit must still succeed, got {result:?}"
-        );
         assert_eq!(
             mock.connect_calls.load(Ordering::SeqCst),
             0,
-            "a Stale cache hit must ALSO dial the transport ZERO times"
+            "a Fresh cache hit must not schedule a background revalidation dial"
         );
-        let conns = registry.connections.read().await;
+    }
+
+    #[tokio::test]
+    async fn refresh_catalog_treats_resource_only_tools_change_as_rebuild_signal() {
+        let mock = Arc::new(BridgeMock::new(&[]));
+        mock.list_tools_fails.store(true, Ordering::SeqCst);
+        let registry = McpRegistry::new(mock as Arc<dyn McpTransport>);
+        let connection_id = McpConnectionId::new();
+        registry.connections.write().await.insert(
+            "srv".into(),
+            McpConnectionState::Connected {
+                config: http_cfg("srv", "https://mcp.example.com/v1"),
+                connection_id,
+                capabilities: ServerCapabilitiesDto {
+                    tools: false,
+                    resources: true,
+                    prompts: false,
+                    directory_read: false,
+                    logging: false,
+                    experimental: HashMap::new(),
+                },
+                tools: vec![],
+                resources: vec![],
+                resource_templates: vec![],
+                prompts: vec![],
+                connected_at: SystemTime::now(),
+            },
+        );
+
+        assert_eq!(
+            registry
+                .refresh_catalog(&McpCatalogChanged {
+                    server_name: "srv".into(),
+                    connection_id,
+                    retired_connection_id: None,
+                    kind: McpCatalogKind::Tools,
+                })
+                .await
+                .expect("resource-only tools refresh should short-circuit"),
+            Some(connection_id),
+            "lag recovery must still rebuild the resource-tool partition for a resource-only server"
+        );
+    }
+
+    #[tokio::test]
+    async fn connected_generation_is_not_visible_without_matching_client() {
+        let _guard = crate::discovery_cache::tests_env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let env = DiscoveryCacheEnvGuard::new();
+        env.set(crate::discovery_cache::ENV_ENABLED, "true");
+
+        let mock = Arc::new(BridgeMock::with_resource_templates(vec![
+            traits::McpResourceTemplateDto {
+                uri_template: "file:///{path}".into(),
+                name: "tmpl".into(),
+                description: None,
+                mime_type: None,
+            },
+        ]));
+        mock.block_resource_templates.store(true, Ordering::SeqCst);
+        let registry = Arc::new(McpRegistry::with_raw_conn(
+            mock.clone() as Arc<dyn McpTransport>,
+            mock.clone() as Arc<dyn RawConnectionProvider>,
+        ));
+        let clients_guard = registry.clients.read().await;
+        let connect = {
+            let registry = registry.clone();
+            tokio::spawn(async move {
+                registry
+                    .connect(http_cfg("srv", "https://mcp.example.com/v1"))
+                    .await
+            })
+        };
+
+        mock.resource_templates_started.notified().await;
+        mock.block_resource_templates.store(false, Ordering::SeqCst);
+        mock.resource_templates_release.notify_one();
+        let visible_while_client_locked = tokio::time::timeout(Duration::from_millis(50), async {
+            loop {
+                match registry.connections.read().await.get("srv") {
+                    Some(McpConnectionState::Connected { .. }) => break,
+                    _ => tokio::task::yield_now().await,
+                }
+            }
+        })
+        .await;
         assert!(
-            matches!(conns.get("srv"), Some(McpConnectionState::Cached { .. })),
-            "expected Cached state, got {:?}",
-            conns.get("srv")
+            visible_while_client_locked.is_err(),
+            "a Connected generation must not publish before its client can publish"
         );
+        drop(clients_guard);
+
+        let connection_id = connect.await.unwrap().expect("connect succeeds");
+        assert!(
+            matches!(
+                registry.connections.read().await.get("srv"),
+                Some(McpConnectionState::Connected { connection_id: current, .. }) if *current == connection_id
+            ),
+            "state publishes once the client lock is released"
+        );
+        assert!(
+            registry.get_client("srv").await.is_some(),
+            "a visible Connected generation must have a matching client"
+        );
+        drop(env);
+    }
+
+    #[tokio::test]
+    async fn builders_reject_mutation_after_first_connect_attempt() {
+        let _guard = crate::discovery_cache::tests_env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let env = DiscoveryCacheEnvGuard::new();
+        env.set(crate::discovery_cache::ENV_ENABLED, "true");
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = crate::discovery_cache::DiscoveryCacheStore::new(dir.path());
+        let cfg = http_cfg("srv", "https://mcp.example.com/v1");
+        let cache_key = crate::discovery_cache::DiscoveryCacheStore::cache_key("srv", &cfg.spec);
+        seed_entry(&store, &cache_key, 0);
+
+        let mock = Arc::new(BridgeMock::new(&["live"]));
+        let registry = McpRegistry::with_raw_conn(
+            mock.clone() as Arc<dyn McpTransport>,
+            mock as Arc<dyn RawConnectionProvider>,
+        )
+        .with_discovery_cache_store(crate::discovery_cache::DiscoveryCacheStore::new(dir.path()));
+
+        registry
+            .connect_all(vec![McpServerConfig {
+                disabled: true,
+                ..cfg.clone()
+            }])
+            .await;
+        assert_eq!(
+            registry.set_disabled("srv", false).await.unwrap(),
+            Some(traits::McpActionState::Connected)
+        );
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            registry.with_headers_helper_cwd(std::path::PathBuf::from("/tmp/other"))
+        }));
+        assert!(
+            result.is_err(),
+            "builders must reject post-connect mutation"
+        );
+        drop(env);
     }
 
     /// The other half of the Stage 2 claim: the FIRST tool call against a
@@ -5656,7 +9634,8 @@ mod tests {
         let _guard = crate::discovery_cache::tests_env_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        std::env::set_var(crate::discovery_cache::ENV_ENABLED, "true");
+        let env = DiscoveryCacheEnvGuard::new();
+        env.set(crate::discovery_cache::ENV_ENABLED, "true");
 
         let dir = tempfile::tempdir().expect("tempdir");
         let store = crate::discovery_cache::DiscoveryCacheStore::new(dir.path());
@@ -5685,7 +9664,7 @@ mod tests {
         let _ = registry
             .call_tool_with_auth_retry("srv", "mcp__srv__alpha", serde_json::json!({}), None, None)
             .await;
-        std::env::remove_var(crate::discovery_cache::ENV_ENABLED);
+        drop(env);
 
         assert_eq!(
             mock.connect_calls.load(Ordering::SeqCst),
@@ -5700,6 +9679,354 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn ensure_connected_client_rereads_the_live_client_after_publish_race() {
+        let _guard = crate::discovery_cache::tests_env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let env = DiscoveryCacheEnvGuard::new();
+        env.set(crate::discovery_cache::ENV_ENABLED, "true");
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = crate::discovery_cache::DiscoveryCacheStore::new(dir.path());
+        let cfg = http_cfg("srv", "https://mcp.example.com/v1");
+        let cache_key = crate::discovery_cache::DiscoveryCacheStore::cache_key("srv", &cfg.spec);
+        seed_entry(&store, &cache_key, 0);
+
+        let miss_hook = Arc::new(TestPauseHook::default());
+        let publish_hook = Arc::new(TestPauseHook::default());
+        let mock = Arc::new(BridgeMock::new(&["alpha"]));
+        let registry = Arc::new(
+            McpRegistry::with_raw_conn(
+                mock.clone() as Arc<dyn McpTransport>,
+                mock.clone() as Arc<dyn RawConnectionProvider>,
+            )
+            .with_discovery_cache_store(crate::discovery_cache::DiscoveryCacheStore::new(
+                dir.path(),
+            ))
+            .with_pause_after_initial_client_miss(miss_hook.clone())
+            .with_pause_before_client_publish(publish_hook.clone()),
+        );
+
+        registry.connect(cfg).await.expect("cache hit connect");
+        let clients_guard = registry.clients.read().await;
+        let caller = {
+            let registry = registry.clone();
+            tokio::spawn(async move { registry.ensure_connected_client("srv").await })
+        };
+        miss_hook.entered.notified().await;
+
+        let owner = {
+            let registry = registry.clone();
+            tokio::spawn(async move { registry.ensure_dialed_from_cache("srv").await })
+        };
+        publish_hook.entered.notified().await;
+        assert!(
+            !caller.is_finished(),
+            "caller must be paused after its initial client miss"
+        );
+
+        miss_hook.release.notify_one();
+        assert!(
+            !caller.is_finished(),
+            "caller must still be blocked while publish holds the connections writer"
+        );
+
+        publish_hook.release.notify_one();
+        drop(clients_guard);
+
+        let live_id = tokio::time::timeout(Duration::from_secs(2), owner)
+            .await
+            .expect("owner finishes")
+            .expect("owner join succeeds")
+            .expect("owner publishes L1");
+        let client = tokio::time::timeout(Duration::from_secs(2), caller)
+            .await
+            .expect("caller finishes")
+            .expect("caller join succeeds")
+            .expect("caller observes the consistency re-read");
+        let published = registry
+            .get_client("srv")
+            .await
+            .expect("published live client");
+        drop(env);
+
+        assert!(
+            Arc::ptr_eq(&client, &published),
+            "consistency re-read must return the L1 client that publish inserted"
+        );
+        assert_eq!(
+            registry
+                .clients
+                .read()
+                .await
+                .get("srv")
+                .and_then(|entry| entry.connection_id),
+            Some(live_id)
+        );
+        assert_eq!(
+            mock.connect_calls.load(Ordering::SeqCst),
+            1,
+            "the race recovery must not redial"
+        );
+    }
+
+    #[tokio::test]
+    async fn call_tool_rereads_the_live_client_after_publish_race() {
+        let _guard = crate::discovery_cache::tests_env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let env = DiscoveryCacheEnvGuard::new();
+        env.set(crate::discovery_cache::ENV_ENABLED, "true");
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = crate::discovery_cache::DiscoveryCacheStore::new(dir.path());
+        let cfg = http_cfg("srv", "https://mcp.example.com/v1");
+        let cache_key = crate::discovery_cache::DiscoveryCacheStore::cache_key("srv", &cfg.spec);
+        seed_entry(&store, &cache_key, 0);
+
+        let miss_hook = Arc::new(TestPauseHook::default());
+        let publish_hook = Arc::new(TestPauseHook::default());
+        let mock = Arc::new(BridgeMock::with_drivable_calls(&["alpha"]));
+        let registry = Arc::new(
+            McpRegistry::with_raw_conn(
+                mock.clone() as Arc<dyn McpTransport>,
+                mock.clone() as Arc<dyn RawConnectionProvider>,
+            )
+            .with_discovery_cache_store(crate::discovery_cache::DiscoveryCacheStore::new(
+                dir.path(),
+            ))
+            .with_pause_after_initial_client_miss(miss_hook.clone())
+            .with_pause_before_client_publish(publish_hook.clone()),
+        );
+
+        registry.connect(cfg).await.expect("cache hit connect");
+        let clients_guard = registry.clients.read().await;
+        let input = serde_json::json!({"city": "sf"});
+        let caller = {
+            let registry = registry.clone();
+            let input = input.clone();
+            tokio::spawn(async move {
+                registry
+                    .call_tool_with_auth_retry("srv", "mcp__srv__alpha", input, None, None)
+                    .await
+            })
+        };
+        miss_hook.entered.notified().await;
+
+        let owner = {
+            let registry = registry.clone();
+            tokio::spawn(async move { registry.ensure_dialed_from_cache("srv").await })
+        };
+        publish_hook.entered.notified().await;
+        assert!(
+            !caller.is_finished(),
+            "tool caller must be paused after its initial client miss"
+        );
+        let live_id = *mock
+            .conns
+            .lock()
+            .unwrap()
+            .keys()
+            .next()
+            .expect("connected raw id before publish completes");
+        let (peer_tx, peer_rx) = mock
+            .take_tool_call_peer(live_id)
+            .expect("tool-call peer for L1");
+        let responder = spawn_tool_call_response(peer_tx, peer_rx, "alpha", input.clone());
+
+        miss_hook.release.notify_one();
+        assert!(
+            !caller.is_finished(),
+            "tool caller must still be blocked behind publish before the consistency re-read"
+        );
+
+        publish_hook.release.notify_one();
+        drop(clients_guard);
+
+        let owner_id = tokio::time::timeout(Duration::from_secs(2), owner)
+            .await
+            .expect("owner finishes")
+            .expect("owner join succeeds")
+            .expect("owner publishes L1");
+        let result = tokio::time::timeout(Duration::from_secs(2), caller)
+            .await
+            .expect("tool caller finishes")
+            .expect("tool caller join succeeds")
+            .expect("tool call succeeds through the published client");
+        responder.await.expect("tool responder");
+        drop(env);
+
+        assert_eq!(owner_id, live_id);
+        assert_eq!(
+            result.structured_content,
+            Some(serde_json::json!({"tool":"alpha","input":{"city":"sf"}}))
+        );
+        assert_eq!(
+            mock.connect_calls.load(Ordering::SeqCst),
+            1,
+            "the publish-race recovery must reuse L1 instead of redialing"
+        );
+    }
+
+    #[tokio::test]
+    async fn call_tool_publish_race_client_still_retries_a_first_auth_challenge() {
+        let _guard = crate::discovery_cache::tests_env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let env = DiscoveryCacheEnvGuard::new();
+        env.set(crate::discovery_cache::ENV_ENABLED, "true");
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = crate::discovery_cache::DiscoveryCacheStore::new(dir.path());
+        let cfg = http_cfg("srv", "https://mcp.example.com/v1");
+        let cache_key = crate::discovery_cache::DiscoveryCacheStore::cache_key("srv", &cfg.spec);
+        seed_entry(&store, &cache_key, 0);
+
+        let miss_hook = Arc::new(TestPauseHook::default());
+        let publish_hook = Arc::new(TestPauseHook::default());
+        let mock = Arc::new(BridgeMock::with_drivable_calls(&["alpha"]));
+        let registry = Arc::new(
+            McpRegistry::with_raw_conn(
+                mock.clone() as Arc<dyn McpTransport>,
+                mock.clone() as Arc<dyn RawConnectionProvider>,
+            )
+            .with_discovery_cache_store(crate::discovery_cache::DiscoveryCacheStore::new(
+                dir.path(),
+            ))
+            .with_pause_after_initial_client_miss(miss_hook.clone())
+            .with_pause_before_client_publish(publish_hook.clone()),
+        );
+
+        registry.connect(cfg).await.expect("cache hit connect");
+        let clients_guard = registry.clients.read().await;
+        let input = serde_json::json!({"city": "sf"});
+        let caller = {
+            let registry = registry.clone();
+            let input = input.clone();
+            tokio::spawn(async move {
+                registry
+                    .call_tool_with_auth_retry("srv", "mcp__srv__alpha", input, None, None)
+                    .await
+            })
+        };
+        miss_hook.entered.notified().await;
+
+        let owner = {
+            let registry = registry.clone();
+            tokio::spawn(async move { registry.ensure_dialed_from_cache("srv").await })
+        };
+        publish_hook.entered.notified().await;
+        let first_live_id = *mock
+            .conns
+            .lock()
+            .unwrap()
+            .keys()
+            .next()
+            .expect("connected raw id before publish completes");
+        let responder = spawn_tool_call_auth_then_success(
+            mock.clone(),
+            Some(first_live_id),
+            "alpha",
+            input,
+            401,
+        );
+
+        miss_hook.release.notify_one();
+        publish_hook.release.notify_one();
+        publish_hook.release.notify_one();
+        drop(clients_guard);
+
+        let owner_id = tokio::time::timeout(Duration::from_secs(2), owner)
+            .await
+            .expect("owner finishes")
+            .expect("owner join succeeds")
+            .expect("owner publishes L1");
+        let result = tokio::time::timeout(Duration::from_secs(2), caller)
+            .await
+            .expect("tool caller finishes")
+            .expect("tool caller join succeeds")
+            .expect("tool call succeeds after reconnect retry");
+        responder.await.expect("auth retry responder");
+        let refreshed_id = registry
+            .clients
+            .read()
+            .await
+            .get("srv")
+            .and_then(|entry| entry.connection_id)
+            .expect("refreshed client id");
+        drop(env);
+
+        assert_eq!(owner_id, first_live_id);
+        assert_ne!(
+            refreshed_id, first_live_id,
+            "a first auth challenge must drive the reconnect path to a fresh generation"
+        );
+        assert_eq!(
+            result.structured_content,
+            Some(serde_json::json!({"tool":"alpha","input":{"city":"sf"}}))
+        );
+        assert_eq!(
+            mock.connect_calls.load(Ordering::SeqCst),
+            2,
+            "publish-race client recovery must still flow into the single reconnect retry"
+        );
+    }
+
+    #[tokio::test]
+    async fn cached_lazy_dial_client_still_retries_a_first_auth_challenge() {
+        let _guard = crate::discovery_cache::tests_env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let env = DiscoveryCacheEnvGuard::new();
+        env.set(crate::discovery_cache::ENV_ENABLED, "true");
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = crate::discovery_cache::DiscoveryCacheStore::new(dir.path());
+        let cfg = http_cfg("srv", "https://mcp.example.com/v1");
+        let cache_key = crate::discovery_cache::DiscoveryCacheStore::cache_key("srv", &cfg.spec);
+        seed_entry(&store, &cache_key, 0);
+
+        let mock = Arc::new(BridgeMock::with_drivable_calls(&["alpha"]));
+        let registry = McpRegistry::with_raw_conn(
+            mock.clone() as Arc<dyn McpTransport>,
+            mock.clone() as Arc<dyn RawConnectionProvider>,
+        )
+        .with_discovery_cache_store(crate::discovery_cache::DiscoveryCacheStore::new(dir.path()));
+
+        registry.connect(cfg).await.expect("cache hit connect");
+        let input = serde_json::json!({"city": "sf"});
+        let responder =
+            spawn_tool_call_auth_then_success(mock.clone(), None, "alpha", input.clone(), 401);
+        let result = registry
+            .call_tool_with_auth_retry("srv", "mcp__srv__alpha", input, None, None)
+            .await
+            .expect("tool call succeeds after cached lazy-dial auth retry");
+        responder.await.expect("auth retry responder");
+        let refreshed_id = registry
+            .clients
+            .read()
+            .await
+            .get("srv")
+            .and_then(|entry| entry.connection_id)
+            .expect("refreshed client id");
+        drop(env);
+
+        assert_eq!(
+            result.structured_content,
+            Some(serde_json::json!({"tool":"alpha","input":{"city":"sf"}}))
+        );
+        assert_eq!(
+            mock.connect_calls.load(Ordering::SeqCst),
+            2,
+            "cached lazy dial plus first auth challenge must use exactly one reconnect retry"
+        );
+        assert!(
+            mock.conns.lock().unwrap().contains_key(&refreshed_id),
+            "the post-retry client must point at the refreshed generation"
+        );
+    }
+
     /// Single-flight: two CONCURRENT tool calls against the same `Cached`
     /// server must dial the transport exactly ONCE between them — the
     /// second caller blocks on the same per-server lifecycle lock `connect`
@@ -5709,7 +10036,8 @@ mod tests {
         let _guard = crate::discovery_cache::tests_env_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        std::env::set_var(crate::discovery_cache::ENV_ENABLED, "true");
+        let env = DiscoveryCacheEnvGuard::new();
+        env.set(crate::discovery_cache::ENV_ENABLED, "true");
 
         let dir = tempfile::tempdir().expect("tempdir");
         let store = crate::discovery_cache::DiscoveryCacheStore::new(dir.path());
@@ -5766,7 +10094,7 @@ mod tests {
             })
         };
         let _ = tokio::join!(a, b);
-        std::env::remove_var(crate::discovery_cache::ENV_ENABLED);
+        drop(env);
 
         assert_eq!(
             mock.connect_calls.load(Ordering::SeqCst),
@@ -5785,7 +10113,8 @@ mod tests {
         let _guard = crate::discovery_cache::tests_env_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        std::env::set_var(crate::discovery_cache::ENV_ENABLED, "true");
+        let env = DiscoveryCacheEnvGuard::new();
+        env.set(crate::discovery_cache::ENV_ENABLED, "true");
 
         let dir = tempfile::tempdir().expect("tempdir");
         let store = crate::discovery_cache::DiscoveryCacheStore::new(dir.path());
@@ -5802,7 +10131,7 @@ mod tests {
 
         registry.connect(cfg).await.expect("cache hit connect");
         registry.disconnect("srv").await.expect("disconnect");
-        std::env::remove_var(crate::discovery_cache::ENV_ENABLED);
+        drop(env);
 
         assert_eq!(
             mock.disconnect_calls.load(Ordering::SeqCst),
@@ -5832,7 +10161,8 @@ mod tests {
         let _guard = crate::discovery_cache::tests_env_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        std::env::set_var(crate::discovery_cache::ENV_ENABLED, "true");
+        let env = DiscoveryCacheEnvGuard::new();
+        env.set(crate::discovery_cache::ENV_ENABLED, "true");
 
         let dir = tempfile::tempdir().expect("tempdir");
         let store = crate::discovery_cache::DiscoveryCacheStore::new(dir.path());
@@ -5848,7 +10178,7 @@ mod tests {
         .with_discovery_cache_store(crate::discovery_cache::DiscoveryCacheStore::new(dir.path()));
 
         registry.connect(cfg).await.expect("cache hit connect");
-        std::env::remove_var(crate::discovery_cache::ENV_ENABLED);
+        drop(env);
 
         assert_eq!(
             registry.servers_with_tools().await,
@@ -6533,6 +10863,198 @@ mod tests {
             Mode::Lines,
         ));
         (conn, us_to_peer_rx)
+    }
+
+    struct PromptBridgeMock {
+        conns: TestMutex<HashMap<ConnId, Arc<Connection>>>,
+        inbound_txs: TestMutex<HashMap<ConnId, mpsc::Sender<Bytes>>>,
+        prompt_peers: TestMutex<HashMap<ConnId, mpsc::Receiver<Bytes>>>,
+        connect_calls: AtomicUsize,
+        block_connect: std::sync::atomic::AtomicBool,
+        connect_started: Notify,
+        connect_release: Notify,
+    }
+
+    impl PromptBridgeMock {
+        fn new() -> Self {
+            Self {
+                conns: TestMutex::new(HashMap::new()),
+                inbound_txs: TestMutex::new(HashMap::new()),
+                prompt_peers: TestMutex::new(HashMap::new()),
+                connect_calls: AtomicUsize::new(0),
+                block_connect: std::sync::atomic::AtomicBool::new(false),
+                connect_started: Notify::new(),
+                connect_release: Notify::new(),
+            }
+        }
+
+        async fn wait_for_connection_id(&self) -> ConnId {
+            tokio::time::timeout(Duration::from_secs(2), async {
+                loop {
+                    let connection_id = { self.conns.lock().unwrap().keys().next().copied() };
+                    if let Some(connection_id) = connection_id {
+                        break connection_id;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("prompt connection appears")
+        }
+
+        async fn answer_next_prompt(&self, expected_connection_id: ConnId) {
+            let mut peer = self
+                .prompt_peers
+                .lock()
+                .unwrap()
+                .remove(&expected_connection_id)
+                .expect("peer for connected prompt server");
+            let frame = tokio::time::timeout(Duration::from_secs(2), peer.recv())
+                .await
+                .expect("prompts/get request within timeout")
+                .expect("prompts/get frame");
+            let req: Value = serde_json::from_slice(&frame).expect("json request");
+            assert_eq!(req["method"], "prompts/get");
+            assert_eq!(req["params"]["name"], "draft");
+            assert_eq!(
+                req["params"]["arguments"],
+                serde_json::json!({ "topic": "release" })
+            );
+            let mut response = serde_json::to_vec(&serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": req["id"].clone(),
+                "result": {
+                    "description": "Draft prompt",
+                    "messages": [{ "role": "user", "content": { "type": "text", "text": "topic=release" } }]
+                }
+            }))
+            .expect("serialize prompts/get response");
+            response.push(b'\n');
+            let sender = self
+                .inbound_txs
+                .lock()
+                .unwrap()
+                .get(&expected_connection_id)
+                .expect("live inbound sender")
+                .clone();
+            sender
+                .send(Bytes::from(response))
+                .await
+                .expect("send prompts/get response");
+            self.prompt_peers
+                .lock()
+                .unwrap()
+                .insert(expected_connection_id, peer);
+        }
+    }
+
+    #[async_trait]
+    impl McpTransport for PromptBridgeMock {
+        async fn connect(&self, _s: &McpTransportSpec) -> Result<McpRawConnection, McpError> {
+            self.connect_calls.fetch_add(1, Ordering::SeqCst);
+            self.connect_started.notify_one();
+            if self.block_connect.load(Ordering::SeqCst) {
+                self.connect_release.notified().await;
+            }
+            let id = ConnId::new();
+            let (peer_to_us_tx, peer_to_us_rx) = mpsc::channel::<Bytes>(8);
+            let (us_to_peer_tx, us_to_peer_rx) = mpsc::channel::<Bytes>(8);
+            let conn = Arc::new(Connection::new_streams(
+                peer_to_us_rx,
+                us_to_peer_tx,
+                Mode::Lines,
+            ));
+            self.conns.lock().unwrap().insert(id, conn);
+            self.inbound_txs.lock().unwrap().insert(id, peer_to_us_tx);
+            self.prompt_peers.lock().unwrap().insert(id, us_to_peer_rx);
+            Ok(McpRawConnection { connection_id: id })
+        }
+
+        async fn initialize(
+            &self,
+            _c: &McpRawConnection,
+        ) -> Result<ServerCapabilitiesDto, McpError> {
+            Ok(ServerCapabilitiesDto {
+                tools: false,
+                resources: false,
+                prompts: true,
+                directory_read: false,
+                logging: false,
+                experimental: HashMap::new(),
+            })
+        }
+
+        async fn list_tools(&self, _c: &McpRawConnection) -> Result<Vec<McpToolDto>, McpError> {
+            Ok(Vec::new())
+        }
+
+        async fn list_resources(
+            &self,
+            _c: &McpRawConnection,
+        ) -> Result<Vec<McpResourceDto>, McpError> {
+            Ok(Vec::new())
+        }
+
+        async fn list_prompts(&self, _c: &McpRawConnection) -> Result<Vec<McpPromptDto>, McpError> {
+            Ok(vec![McpPromptDto {
+                name: "draft".into(),
+                description: Some("draft prompt".into()),
+                arguments: Vec::new(),
+            }])
+        }
+
+        async fn call_tool(
+            &self,
+            _c: &McpRawConnection,
+            _t: &str,
+            _i: Value,
+        ) -> Result<McpToolResultDto, McpError> {
+            unreachable!("prompt mock never serves tools")
+        }
+
+        async fn read_resource(
+            &self,
+            _c: &McpRawConnection,
+            _u: &str,
+        ) -> Result<McpResourceContentDto, McpError> {
+            unreachable!("prompt mock never serves resources")
+        }
+
+        async fn ping(&self, _id: ConnId) -> Result<(), McpError> {
+            Ok(())
+        }
+
+        async fn notifications(
+            &self,
+            _c: &McpRawConnection,
+        ) -> Result<McpNotificationStream, McpError> {
+            unreachable!("prompt mock notifications unused")
+        }
+
+        async fn handle_elicitation(
+            &self,
+            _c: &McpRawConnection,
+            _r: ElicitRequestDto,
+        ) -> Result<ElicitResultDto, McpError> {
+            unreachable!("prompt mock elicitation unused")
+        }
+
+        async fn disconnect(&self, id: ConnId) -> Result<(), McpError> {
+            self.conns.lock().unwrap().remove(&id);
+            self.inbound_txs.lock().unwrap().remove(&id);
+            self.prompt_peers.lock().unwrap().remove(&id);
+            Ok(())
+        }
+
+        fn supported_transports(&self) -> Vec<McpTransportKind> {
+            vec![McpTransportKind::Http]
+        }
+    }
+
+    impl RawConnectionProvider for PromptBridgeMock {
+        fn connection_for(&self, id: ConnId) -> Option<Arc<Connection>> {
+            self.conns.lock().unwrap().get(&id).cloned()
+        }
     }
 
     #[test]

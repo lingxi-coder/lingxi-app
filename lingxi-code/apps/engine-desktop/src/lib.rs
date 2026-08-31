@@ -5140,8 +5140,9 @@ impl traits::RepoRootReloader for DesktopRepoRootReloader {
 /// `Arc`s the orchestrator reads), plus the discovery ingredients, so `refresh`
 /// re-reads `enabledPlugins` off disk and diffs it against what is loaded:
 /// `disable()` for plugins turned off (drops their commands/hooks/MCP/LSP from
-/// the live registries), `enable()` for newly-on ones (re-materialises +
-/// live-dials MCP), and a wholesale rebuild of the plugin-agent catalog portion.
+/// the live registries), and only if every unload succeeds `enable()` for
+/// newly-on ones (re-materialises + live-dials MCP), plus a wholesale rebuild
+/// of the plugin-agent catalog portion.
 pub struct PluginRuntime {
     manager: Arc<plugin::PluginManager>,
     plugins_dir: std::path::PathBuf,
@@ -5151,14 +5152,17 @@ pub struct PluginRuntime {
     additional_project_roots: Arc<RwLock<Vec<std::path::PathBuf>>>,
     ambient: bool,
     inline: bool,
+    refresh_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl PluginRuntime {
     /// Re-read the on-disk enabled set and reconcile it into the live session.
-    /// Returns the component tallies for the confirmation message. Best-effort:
-    /// a plugin that fails to enable is counted in `errors` and skipped; already
-    /// live plugins are left untouched (no MCP reconnect churn).
+    /// Returns the component tallies for the confirmation message. Best-effort
+    /// on load failures, but conservative on unload failures: if any currently
+    /// loaded plugin fails to disable, the refresh stops before enabling fresh
+    /// targets so ownership does not overlap or partially duplicate.
     pub async fn refresh(&self) -> PluginRefreshCounts {
+        let _refresh_guard = self.refresh_lock.lock().await;
         self.manager
             .replace_plugin_configs(load_plugin_configs(&self.home).await)
             .await;
@@ -5185,13 +5189,23 @@ impl PluginRuntime {
         //     set never aliases the old ids — disabling all here, then enabling
         //     the fresh target below, is the full swap. This also picks up
         //     edited-in-place plugin files, matching cc's full reload.
+        let mut counts = PluginRefreshCounts::default();
         for id in self.manager.loaded_plugin_ids().await {
-            let _ = self.manager.disable(&id).await;
+            if let Err(error) = self.manager.disable(&id).await {
+                counts.errors += 1;
+                tracing::warn!(
+                    error = %error,
+                    plugin_id = %id,
+                    "/reload-plugins: plugin failed to disable; aborting enable phase"
+                );
+            }
+        }
+        if counts.errors > 0 {
+            return counts;
         }
 
         // (3) Enable each target plugin. The manager validates agent privileges
         //     before materialising every component into the shared registries.
-        let mut counts = PluginRefreshCounts::default();
         for (id, manifest, dir) in target {
             // Tally BEFORE `manifest` moves into `enable`.
             let c = &manifest.components;
@@ -9414,6 +9428,12 @@ pub async fn build(
                                 skipped,
                                 "MCP catalog refresh receiver lagged; refreshing every connected catalog"
                             );
+                            let refreshed = tool_mcp::build_registered_mcp_tools(
+                                registry.as_ref(),
+                                live_mcp_tool_ctx.clone(),
+                            )
+                            .await;
+                            live_tools.replace_mcp_tools(refreshed);
                             recovery.extend(registry.catalog_refresh_snapshot().await);
                             continue;
                         }
@@ -9424,9 +9444,13 @@ pub async fn build(
                     break;
                 };
 
-                if let Some(retired) = change.retired_connection_id {
-                    live_tools.unregister_mcp_tools(retired);
-                    live_tools.refresh_tool_search_view();
+                if change.retired_connection_id.is_some() {
+                    let refreshed = tool_mcp::build_registered_mcp_tools(
+                        registry.as_ref(),
+                        live_mcp_tool_ctx.clone(),
+                    )
+                    .await;
+                    live_tools.replace_mcp_tools(refreshed);
                 }
 
                 tracing::debug!(
@@ -9436,18 +9460,13 @@ pub async fn build(
                     "Received MCP list_changed notification, refreshing catalog"
                 );
                 match registry.refresh_catalog(&change).await {
-                    Ok(Some(connection_id)) if change.kind == mcp::McpCatalogKind::Tools => {
+                    Ok(Some(_)) if change.kind == mcp::McpCatalogKind::Tools => {
                         let refreshed = tool_mcp::build_registered_mcp_tools(
                             registry.as_ref(),
                             live_mcp_tool_ctx.clone(),
                         )
                         .await;
-                        if let Some((_, handles)) =
-                            refreshed.into_iter().find(|(id, _)| *id == connection_id)
-                        {
-                            live_tools.register_mcp_tools(connection_id, handles);
-                            live_tools.refresh_tool_search_view();
-                        }
+                        live_tools.replace_mcp_tools(refreshed);
                     }
                     Ok(_) => {}
                     Err(error) => {
@@ -10291,6 +10310,7 @@ pub async fn build(
             additional_project_roots: repo_root_reloader.registered_roots(),
             ambient: ambient_plugins,
             inline: inline_plugins,
+            refresh_lock: Arc::new(tokio::sync::Mutex::new(())),
         }));
     }
     repo_root_reloader
@@ -16095,6 +16115,29 @@ mod tests {
         .unwrap();
     }
 
+    fn write_cached_plugin_with_stdio_mcp(
+        plugins_dir: &std::path::Path,
+        marketplace: &str,
+        name: &str,
+        version: &str,
+        cmd: &str,
+        server: &str,
+    ) {
+        write_cached_plugin(plugins_dir, marketplace, name, version, cmd);
+        let dir = plugins_dir
+            .join("cache")
+            .join(marketplace)
+            .join(name)
+            .join(version);
+        std::fs::write(
+            dir.join(".lingxi-plugin").join("plugin.json"),
+            format!(
+                r#"{{"name":"{name}","version":"{version}","mcpServers":{{"{server}":{{"type":"stdio","command":"echo"}}}}}}"#
+            ),
+        )
+        .unwrap();
+    }
+
     /// Write `home/settings.json` with the given `enabledPlugins` allowlist.
     fn write_enabled_plugins(home: &std::path::Path, entries: &[(&str, bool)]) {
         let map: serde_json::Map<String, serde_json::Value> = entries
@@ -16176,6 +16219,7 @@ mod tests {
             additional_project_roots: Arc::new(RwLock::new(Vec::new())),
             ambient: true,
             inline: false,
+            refresh_lock: Arc::new(tokio::sync::Mutex::new(())),
         };
 
         // First refresh: A enables, its command lands in the live registry.
@@ -16218,6 +16262,212 @@ mod tests {
         assert_eq!(ids.len(), 1, "only B remains loaded after the swap");
     }
 
+    #[tokio::test]
+    async fn plugin_runtime_refresh_aborts_enable_phase_after_disable_failure_then_recovers() {
+        use tokio::sync::RwLock;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        let cwd = tmp.path().join("cwd");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(&cwd).unwrap();
+        let plugins_dir = home.join("plugins");
+        write_cached_plugin_with_stdio_mcp(&plugins_dir, "mkt", "plugina", "1.0.0", "acmd", "srv");
+        write_cached_plugin(&plugins_dir, "mkt", "pluginb", "1.0.0", "bcmd");
+        write_enabled_plugins(&home, &[("plugina@mkt", true)]);
+
+        let agent_catalog = Arc::new(RwLock::new(Vec::new()));
+        let mcp_registry = Arc::new(mcp::McpRegistry::new(Arc::new(
+            FailOnceReloadPluginTransport::new(),
+        )));
+        let (manager, command_registry) = make_reload_test_manager_with_mcp_registry(
+            &plugins_dir,
+            &cwd,
+            &tmp.path().join("secrets"),
+            mcp_registry,
+            agent_catalog,
+        )
+        .await;
+        let rt = super::PluginRuntime {
+            manager: manager.clone(),
+            plugins_dir: plugins_dir.clone(),
+            home: home.clone(),
+            cwd: cwd.clone(),
+            cli_plugin_dirs: Vec::new(),
+            additional_project_roots: Arc::new(RwLock::new(Vec::new())),
+            ambient: true,
+            inline: false,
+            refresh_lock: Arc::new(tokio::sync::Mutex::new(())),
+        };
+
+        let first = rt.refresh().await;
+        assert_eq!(first.enabled, 1);
+        assert_eq!(first.errors, 0);
+        assert!(
+            command_registry
+                .read()
+                .await
+                .resolve("plugina:acmd")
+                .is_some(),
+            "first refresh must materialize the initially enabled plugin"
+        );
+
+        write_enabled_plugins(&home, &[("plugina@mkt", false), ("pluginb@mkt", true)]);
+        let failed = rt.refresh().await;
+        assert_eq!(
+            failed.enabled, 0,
+            "failed disable must abort the enable phase"
+        );
+        assert!(
+            failed.errors > 0,
+            "disable failure must be reported in refresh counts"
+        );
+        assert!(
+            command_registry
+                .read()
+                .await
+                .resolve("pluginb:bcmd")
+                .is_none(),
+            "fresh target must not be enabled while a prior unload failed"
+        );
+        assert!(
+            command_registry
+                .read()
+                .await
+                .resolve("plugina:acmd")
+                .is_some(),
+            "the failed disable keeps preexisting non-MCP surfaces intact"
+        );
+
+        let recovered = rt.refresh().await;
+        assert_eq!(
+            recovered.errors, 0,
+            "next refresh retries the failed disable"
+        );
+        assert_eq!(
+            recovered.enabled, 1,
+            "after recovery the target plugin enables"
+        );
+        assert!(
+            command_registry
+                .read()
+                .await
+                .resolve("plugina:acmd")
+                .is_none(),
+            "recovery must finish unloading the stale plugin"
+        );
+        assert!(
+            command_registry
+                .read()
+                .await
+                .resolve("pluginb:bcmd")
+                .is_some(),
+            "recovery then enables the fresh target"
+        );
+    }
+
+    #[tokio::test]
+    async fn concurrent_plugin_runtime_refresh_is_single_flight_and_leaves_one_owner() {
+        use std::sync::atomic::Ordering;
+        use tokio::sync::oneshot;
+        use tokio::sync::RwLock;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        let cwd = tmp.path().join("cwd");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(&cwd).unwrap();
+        let plugins_dir = home.join("plugins");
+        write_cached_plugin_with_stdio_mcp(&plugins_dir, "mkt", "plugina", "1.0.0", "acmd", "srv");
+        write_enabled_plugins(&home, &[("plugina@mkt", true)]);
+
+        let transport = Arc::new(BlockingReloadPluginTransport::new());
+        let agent_catalog = Arc::new(RwLock::new(Vec::new()));
+        let mcp_registry = Arc::new(mcp::McpRegistry::new(transport.clone()));
+        let (manager, command_registry) = make_reload_test_manager_with_mcp_registry(
+            &plugins_dir,
+            &cwd,
+            &tmp.path().join("secrets"),
+            mcp_registry,
+            agent_catalog,
+        )
+        .await;
+        let rt = Arc::new(super::PluginRuntime {
+            manager: manager.clone(),
+            plugins_dir: plugins_dir.clone(),
+            home: home.clone(),
+            cwd: cwd.clone(),
+            cli_plugin_dirs: Vec::new(),
+            additional_project_roots: Arc::new(RwLock::new(Vec::new())),
+            ambient: true,
+            inline: false,
+            refresh_lock: Arc::new(tokio::sync::Mutex::new(())),
+        });
+
+        let first = {
+            let rt = rt.clone();
+            tokio::spawn(async move { rt.refresh().await })
+        };
+        transport.connect_started.notified().await;
+
+        let second = {
+            let rt = rt.clone();
+            let (probe_tx, probe_rx) = oneshot::channel();
+            let handle = tokio::spawn(async move {
+                assert!(
+                    rt.refresh_lock.try_lock().is_err(),
+                    "the second refresh must observe the first refresh holding the transaction lock"
+                );
+                let _ = probe_tx.send(());
+                rt.refresh().await
+            });
+            probe_rx.await.unwrap();
+            handle
+        };
+        assert_eq!(
+            transport.connect_calls.load(Ordering::SeqCst),
+            1,
+            "the second refresh must wait for the first transaction instead of racing into a second enable"
+        );
+
+        transport.block_first_connect.store(false, Ordering::SeqCst);
+        transport.connect_release.notify_one();
+        let first_counts = first.await.unwrap();
+        let second_counts = second.await.unwrap();
+        assert_eq!(first_counts.errors, 0);
+        assert_eq!(second_counts.errors, 0);
+        assert_eq!(
+            manager.loaded_plugin_ids().await.len(),
+            1,
+            "two concurrent refreshes must settle on exactly one loaded PluginId for one plugin"
+        );
+        assert!(
+            command_registry
+                .read()
+                .await
+                .resolve("plugina:acmd")
+                .is_some(),
+            "the plugin command must still be materialized after the serialized double refresh"
+        );
+
+        write_enabled_plugins(&home, &[("plugina@mkt", false)]);
+        let disabled = rt.refresh().await;
+        assert_eq!(disabled.errors, 0);
+        assert_eq!(disabled.enabled, 0);
+        assert!(
+            manager.loaded_plugin_ids().await.is_empty(),
+            "disabling after the concurrent refresh must remove the one surviving ownership cleanly"
+        );
+        assert!(
+            command_registry
+                .read()
+                .await
+                .resolve("plugina:acmd")
+                .is_none(),
+            "the unload after the concurrent refresh must not leave a stale duplicate owner behind"
+        );
+    }
+
     /// Build a `PluginManager` (Arc, holding a fresh command registry to assert
     /// against) rooted at `plugins_dir`, like the composition root does.
     ///
@@ -16234,14 +16484,36 @@ mod tests {
         Arc<plugin::PluginManager>,
         Arc<tokio::sync::RwLock<command_api::CommandRegistry>>,
     ) {
+        use mcp::McpRegistry;
+        use platform_posix::PosixMcpTransport;
+
+        make_reload_test_manager_with_mcp_registry(
+            plugins_dir,
+            cwd,
+            secrets,
+            Arc::new(McpRegistry::new(Arc::new(PosixMcpTransport::new()))),
+            agent_catalog,
+        )
+        .await
+    }
+
+    async fn make_reload_test_manager_with_mcp_registry(
+        plugins_dir: &std::path::Path,
+        cwd: &std::path::Path,
+        secrets: &std::path::Path,
+        mcp_registry: Arc<mcp::McpRegistry>,
+        agent_catalog: Arc<tokio::sync::RwLock<Vec<agent::AgentDefinition>>>,
+    ) -> (
+        Arc<plugin::PluginManager>,
+        Arc<tokio::sync::RwLock<command_api::CommandRegistry>>,
+    ) {
         use command_api::CommandRegistry;
         use hooks::HookRegistry;
         use lsp::LspRegistry;
-        use mcp::McpRegistry;
         use outputstyles::OutputStyleRegistry;
         use platform_posix::{
             PlainTextSecureStorage, PosixClock, PosixFileSystem, PosixHttp, PosixLspTransport,
-            PosixMcpTransport, PosixRuntime,
+            PosixRuntime,
         };
         use plugin::{PluginManager, StrictPluginOnlyPolicy};
         use secret::CredentialManager;
@@ -16270,13 +16542,259 @@ mod tests {
                 Arc::new(RwLock::new(SkillRegistry::new())),
                 Arc::new(RwLock::new(HookRegistry::new())),
                 Arc::new(RwLock::new(OutputStyleRegistry::new())),
-                Arc::new(McpRegistry::new(Arc::new(PosixMcpTransport::new()))),
+                mcp_registry,
                 Arc::new(LspRegistry::new(Arc::new(PosixLspTransport::new()))),
                 Arc::new(RwLock::new(ToolRegistry::new())),
             )
             .with_agent_catalog(agent_catalog),
         );
         (manager, command_registry)
+    }
+
+    struct FailOnceReloadPluginTransport {
+        disconnect_calls: std::sync::atomic::AtomicUsize,
+    }
+
+    impl FailOnceReloadPluginTransport {
+        fn new() -> Self {
+            Self {
+                disconnect_calls: std::sync::atomic::AtomicUsize::new(0),
+            }
+        }
+    }
+
+    struct BlockingReloadPluginTransport {
+        connect_calls: std::sync::atomic::AtomicUsize,
+        block_first_connect: std::sync::atomic::AtomicBool,
+        connect_started: tokio::sync::Notify,
+        connect_release: tokio::sync::Notify,
+    }
+
+    impl BlockingReloadPluginTransport {
+        fn new() -> Self {
+            Self {
+                connect_calls: std::sync::atomic::AtomicUsize::new(0),
+                block_first_connect: std::sync::atomic::AtomicBool::new(true),
+                connect_started: tokio::sync::Notify::new(),
+                connect_release: tokio::sync::Notify::new(),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl traits::McpTransport for FailOnceReloadPluginTransport {
+        async fn connect(
+            &self,
+            _s: &traits::McpTransportSpec,
+        ) -> Result<traits::McpRawConnection, traits::McpError> {
+            Ok(traits::McpRawConnection {
+                connection_id: protocol::McpConnectionId::new(),
+            })
+        }
+
+        async fn initialize(
+            &self,
+            _c: &traits::McpRawConnection,
+        ) -> Result<traits::ServerCapabilitiesDto, traits::McpError> {
+            Ok(traits::ServerCapabilitiesDto {
+                tools: false,
+                resources: false,
+                prompts: false,
+                directory_read: false,
+                logging: false,
+                experimental: std::collections::HashMap::new(),
+            })
+        }
+
+        async fn list_tools(
+            &self,
+            _c: &traits::McpRawConnection,
+        ) -> Result<Vec<traits::McpToolDto>, traits::McpError> {
+            Ok(Vec::new())
+        }
+
+        async fn list_resources(
+            &self,
+            _c: &traits::McpRawConnection,
+        ) -> Result<Vec<traits::McpResourceDto>, traits::McpError> {
+            Ok(Vec::new())
+        }
+
+        async fn list_resource_templates(
+            &self,
+            _c: &traits::McpRawConnection,
+        ) -> Result<Vec<traits::McpResourceTemplateDto>, traits::McpError> {
+            Ok(Vec::new())
+        }
+
+        async fn list_prompts(
+            &self,
+            _c: &traits::McpRawConnection,
+        ) -> Result<Vec<traits::McpPromptDto>, traits::McpError> {
+            Ok(Vec::new())
+        }
+
+        async fn call_tool(
+            &self,
+            _c: &traits::McpRawConnection,
+            _t: &str,
+            _i: serde_json::Value,
+        ) -> Result<traits::McpToolResultDto, traits::McpError> {
+            unreachable!("unused in reload test")
+        }
+
+        async fn read_resource(
+            &self,
+            _c: &traits::McpRawConnection,
+            _u: &str,
+        ) -> Result<traits::McpResourceContentDto, traits::McpError> {
+            unreachable!("unused in reload test")
+        }
+
+        async fn ping(&self, _id: protocol::McpConnectionId) -> Result<(), traits::McpError> {
+            Ok(())
+        }
+
+        async fn notifications(
+            &self,
+            _c: &traits::McpRawConnection,
+        ) -> Result<traits::McpNotificationStream, traits::McpError> {
+            unreachable!("unused in reload test")
+        }
+
+        async fn handle_elicitation(
+            &self,
+            _c: &traits::McpRawConnection,
+            _r: traits::ElicitRequestDto,
+        ) -> Result<traits::ElicitResultDto, traits::McpError> {
+            unreachable!("unused in reload test")
+        }
+
+        async fn disconnect(&self, _id: protocol::McpConnectionId) -> Result<(), traits::McpError> {
+            if self
+                .disconnect_calls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                == 0
+            {
+                Err(traits::McpError::Internal("disconnect failed".into()))
+            } else {
+                Ok(())
+            }
+        }
+
+        fn supported_transports(&self) -> Vec<traits::McpTransportKind> {
+            vec![traits::McpTransportKind::Stdio]
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl traits::McpTransport for BlockingReloadPluginTransport {
+        async fn connect(
+            &self,
+            _s: &traits::McpTransportSpec,
+        ) -> Result<traits::McpRawConnection, traits::McpError> {
+            let call = self
+                .connect_calls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                + 1;
+            self.connect_started.notify_one();
+            if call == 1
+                && self
+                    .block_first_connect
+                    .load(std::sync::atomic::Ordering::SeqCst)
+            {
+                self.connect_release.notified().await;
+            }
+            Ok(traits::McpRawConnection {
+                connection_id: protocol::McpConnectionId::new(),
+            })
+        }
+
+        async fn initialize(
+            &self,
+            _c: &traits::McpRawConnection,
+        ) -> Result<traits::ServerCapabilitiesDto, traits::McpError> {
+            Ok(traits::ServerCapabilitiesDto {
+                tools: false,
+                resources: false,
+                prompts: false,
+                directory_read: false,
+                logging: false,
+                experimental: std::collections::HashMap::new(),
+            })
+        }
+
+        async fn list_tools(
+            &self,
+            _c: &traits::McpRawConnection,
+        ) -> Result<Vec<traits::McpToolDto>, traits::McpError> {
+            Ok(Vec::new())
+        }
+
+        async fn list_resources(
+            &self,
+            _c: &traits::McpRawConnection,
+        ) -> Result<Vec<traits::McpResourceDto>, traits::McpError> {
+            Ok(Vec::new())
+        }
+
+        async fn list_resource_templates(
+            &self,
+            _c: &traits::McpRawConnection,
+        ) -> Result<Vec<traits::McpResourceTemplateDto>, traits::McpError> {
+            Ok(Vec::new())
+        }
+
+        async fn list_prompts(
+            &self,
+            _c: &traits::McpRawConnection,
+        ) -> Result<Vec<traits::McpPromptDto>, traits::McpError> {
+            Ok(Vec::new())
+        }
+
+        async fn call_tool(
+            &self,
+            _c: &traits::McpRawConnection,
+            _t: &str,
+            _i: serde_json::Value,
+        ) -> Result<traits::McpToolResultDto, traits::McpError> {
+            unreachable!("unused in concurrent refresh test")
+        }
+
+        async fn read_resource(
+            &self,
+            _c: &traits::McpRawConnection,
+            _u: &str,
+        ) -> Result<traits::McpResourceContentDto, traits::McpError> {
+            unreachable!("unused in concurrent refresh test")
+        }
+
+        async fn ping(&self, _id: protocol::McpConnectionId) -> Result<(), traits::McpError> {
+            Ok(())
+        }
+
+        async fn notifications(
+            &self,
+            _c: &traits::McpRawConnection,
+        ) -> Result<traits::McpNotificationStream, traits::McpError> {
+            unreachable!("unused in concurrent refresh test")
+        }
+
+        async fn handle_elicitation(
+            &self,
+            _c: &traits::McpRawConnection,
+            _r: traits::ElicitRequestDto,
+        ) -> Result<traits::ElicitResultDto, traits::McpError> {
+            unreachable!("unused in concurrent refresh test")
+        }
+
+        async fn disconnect(&self, _id: protocol::McpConnectionId) -> Result<(), traits::McpError> {
+            Ok(())
+        }
+
+        fn supported_transports(&self) -> Vec<traits::McpTransportKind> {
+            vec![traits::McpTransportKind::Stdio]
+        }
     }
 
     /// A plugin rejected by `enable()`'s privilege gate (an escalating agent)
@@ -16341,6 +16859,7 @@ mod tests {
             additional_project_roots: Arc::new(RwLock::new(Vec::new())),
             ambient: true,
             inline: false,
+            refresh_lock: Arc::new(tokio::sync::Mutex::new(())),
         };
 
         let c = rt.refresh().await;
@@ -16415,6 +16934,7 @@ mod tests {
             additional_project_roots: Arc::new(RwLock::new(Vec::new())),
             ambient: true,
             inline: false,
+            refresh_lock: Arc::new(tokio::sync::Mutex::new(())),
         };
 
         let c = rt.refresh().await;

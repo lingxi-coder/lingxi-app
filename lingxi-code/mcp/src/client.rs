@@ -196,12 +196,21 @@ struct InitializeResponse {
 /// Decode the server's capability JSON object into the trait DTO.
 ///
 /// MCP servers send capability *objects* (e.g. `"tools": {}`); the DTO
-/// only carries boolean presence flags. Presence of the key (even with an
-/// empty object value) is treated as `true`.
+/// collapses the common wire shape down to booleans. Presence of the key
+/// (even with an empty object value) is treated as `true`. The one strict
+/// extension bit currently lifted into the DTO is
+/// `io.modelcontextprotocol/skills.directoryRead`.
 fn decode_server_capabilities(raw: &serde_json::Value) -> ServerCapabilitiesDto {
     use std::collections::HashMap;
     let obj = raw.as_object();
     let has = |k: &str| obj.is_some_and(|o| o.contains_key(k));
+    let directory_read = obj
+        .and_then(|o| o.get("extensions"))
+        .and_then(|v| v.get("io.modelcontextprotocol/skills"))
+        .and_then(serde_json::Value::as_object)
+        .and_then(|ext| ext.get("directoryRead"))
+        .and_then(serde_json::Value::as_bool)
+        == Some(true);
     let experimental: HashMap<String, serde_json::Value> = obj
         .and_then(|o| o.get("experimental"))
         .and_then(|v| v.as_object())
@@ -212,6 +221,7 @@ fn decode_server_capabilities(raw: &serde_json::Value) -> ServerCapabilitiesDto 
         resources: has("resources"),
         prompts: has("prompts"),
         logging: has("logging"),
+        directory_read,
         experimental,
     }
 }
@@ -234,14 +244,11 @@ pub struct McpClient {
     /// The RAW `capabilities` object from the `initialize` response, kept
     /// alongside the decoded [`ServerCapabilitiesDto`].
     ///
-    /// TR-03: [`decode_server_capabilities`] collapses the wire object down to
-    /// four presence booleans plus `experimental`, which throws away
-    /// `capabilities.extensions` — and `extensions` is exactly what 2.1.238's
-    /// `serverDeclaresDirectoryRead` (`FSf`, cc-238.js) reads:
-    /// `caps?.extensions?.["io.modelcontextprotocol/skills"]?.directoryRead === true`.
-    /// Caching the raw value here (rather than widening the shared DTO, which
-    /// has 13 struct-literal construction sites across nine crates) keeps the
-    /// extension surface addressable without touching any of them.
+    /// [`decode_server_capabilities`] now carries the strict
+    /// `directory_read` bit into [`ServerCapabilitiesDto`], so the production
+    /// directory-listing path no longer depends on this raw cache. The raw
+    /// object is still kept for direct-client initialize semantics, precise
+    /// extension reads beyond the DTO surface, and byte-faithful tests.
     raw_server_capabilities: RwLock<Option<serde_json::Value>>,
     /// Server-provided instructions string from the `initialize` response,
     /// truncated to [`MAX_MCP_DESCRIPTION_LENGTH`] chars on receipt

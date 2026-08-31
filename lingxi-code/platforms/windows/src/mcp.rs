@@ -128,6 +128,7 @@ impl McpTransport for WindowsMcpTransport {
             resources: false,
             prompts: false,
             logging: false,
+            directory_read: false,
             experimental: HashMap::new(),
         })
     }

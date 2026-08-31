@@ -126,9 +126,9 @@
 //!   entry yet records nothing — there is nothing to strike). This is an
 //!   approximation of the oracle's background-revalidation strike counter
 //!   (`_6e`, only reachable from a `Stale`-hit's revalidation path): this
-//!   port has no background revalidation yet (Stage 3, deferred), so the
-//!   nearest available signal is treating every connect as an implicit
-//!   refresh attempt.
+//!   port now records the real background-refresh failure there, and still
+//!   uses ordinary failed connects as a conservative fallback signal for
+//!   existing cache entries.
 //! * **Telemetry (MISS side).** Before every dial, [`crate::registry`] calls
 //!   [`decide`] and reports [`MissReason`]s that oracle `Ko` (2.1.251, same
 //!   chunk as `cot`) surfaces (`absent`/`expired`/`corrupt`/
@@ -173,21 +173,21 @@
 //! report callable, or the cache would hide servers instead of accelerating
 //! them).
 //!
-//! ## What is still NOT built (Stage 3)
+//! ## What §11 Stage 3 wires in (this revision)
 //!
-//! * **Background revalidation on a `Stale` hit.** The oracle kicks off an
-//!   async re-dial immediately after serving a stale entry
-//!   (stale-while-revalidate); this port serves the stale entry but does not
-//!   yet kick off that background refresh — a `Stale` hit here is a signal,
-//!   not a mandate. `record_discovery_cache_connect_failure`'s strike
-//!   counter (§11 Stage 1) remains an approximation of the oracle's `_6e`
-//!   counter for the same reason.
-//! * **Resources-family tools (`ListMcpResourcesTool`/`ReadMcpResourceTool`/
-//!   `ReadMcpResourceDirTool`) and the MCP-prompt/slash-command surface
-//!   (`McpRegistry::connected_prompts`/`get_prompt`) do not lazily dial a
-//!   `Cached` server** — both still require a live [`crate::client::McpClient`]
-//!   and read `Connected` only. Only the generic `MCPTool` dispatch path
-//!   (`mcp__<server>__<tool>`) gained a lazy dial this stage.
+//! `mcp::registry::McpRegistry` now completes the stale-while-revalidate
+//! path for `Decision::Stale`: serving the cached catalog immediately,
+//! kicking off a single-flight background live discovery, atomically
+//! upgrading `Cached` to `Connected` only if the cached generation and config
+//! snapshot still match, and recording strikes only against the still-current
+//! cached entry on a refresh failure.
+//!
+//! The same registry pass also generalized the lazy-dial seam from generic
+//! `mcp__<server>__<tool>` dispatch to the cached resources/prompts surfaces
+//! and to lag-recovery catalog reconciliation: cached servers now contribute
+//! to `catalog_refresh_snapshot()` as active SHARED generations, while lagged
+//! listeners rebuild the entire shared MCP partition set from those current
+//! generations before applying best-effort catalog refreshes.
 
 use traits::{
     McpPromptDto, McpResourceDto, McpResourceTemplateDto, McpToolDto, McpTransportSpec,
@@ -222,6 +222,119 @@ pub const ENV_ENABLED: &str = "MCP_DISCOVERY_CACHE";
 pub(crate) fn tests_env_lock() -> &'static std::sync::Mutex<()> {
     static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
     LOCK.get_or_init(|| std::sync::Mutex::new(()))
+}
+
+#[cfg(test)]
+const TEST_ENV_KEYS: [&str; 4] = [
+    ENV_ENABLED,
+    ENV_TTL_SECONDS,
+    ENV_MAX_STALE_SECONDS,
+    ENV_STRIKES,
+];
+
+#[cfg(test)]
+fn snapshot_test_env() -> [(&'static str, Option<std::ffi::OsString>); 4] {
+    TEST_ENV_KEYS.map(|key| (key, std::env::var_os(key)))
+}
+
+#[cfg(test)]
+fn clear_test_env() {
+    for key in TEST_ENV_KEYS {
+        std::env::remove_var(key);
+    }
+}
+
+#[cfg(test)]
+fn restore_test_env(saved: &[(&'static str, Option<std::ffi::OsString>); 4]) {
+    for (key, value) in saved {
+        match value {
+            Some(value) => std::env::set_var(key, value),
+            None => std::env::remove_var(key),
+        }
+    }
+}
+
+#[cfg(test)]
+#[derive(Clone)]
+struct StagePathObserver {
+    root: std::path::PathBuf,
+    on_stage_path: std::sync::Arc<dyn Fn(&std::path::Path) + Send + Sync>,
+}
+
+#[cfg(test)]
+fn stage_path_observer() -> &'static std::sync::Mutex<Option<StagePathObserver>> {
+    static OBSERVER: std::sync::OnceLock<std::sync::Mutex<Option<StagePathObserver>>> =
+        std::sync::OnceLock::new();
+    OBSERVER.get_or_init(|| std::sync::Mutex::new(None))
+}
+
+#[cfg(test)]
+fn notify_stage_path_observer(path: &std::path::Path) {
+    let observer = stage_path_observer()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    if let Some(observer) = observer {
+        if path.starts_with(&observer.root) {
+            (observer.on_stage_path)(path);
+        }
+    }
+}
+
+#[cfg(test)]
+struct StagePathObserverGuard {
+    previous: Option<StagePathObserver>,
+}
+
+#[cfg(test)]
+impl StagePathObserverGuard {
+    fn install(
+        root: std::path::PathBuf,
+        on_stage_path: std::sync::Arc<dyn Fn(&std::path::Path) + Send + Sync>,
+    ) -> Self {
+        let mut slot = stage_path_observer()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let previous = slot.replace(StagePathObserver {
+            root,
+            on_stage_path,
+        });
+        Self { previous }
+    }
+}
+
+#[cfg(test)]
+impl Drop for StagePathObserverGuard {
+    fn drop(&mut self) {
+        *stage_path_observer()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = self.previous.take();
+    }
+}
+
+#[cfg(test)]
+pub(crate) struct TestEnvGuard {
+    saved: [(&'static str, Option<std::ffi::OsString>); 4],
+}
+
+#[cfg(test)]
+impl TestEnvGuard {
+    pub(crate) fn new() -> Self {
+        let saved = snapshot_test_env();
+        clear_test_env();
+        Self { saved }
+    }
+
+    pub(crate) fn set(&self, key: &'static str, value: &str) {
+        std::env::set_var(key, value);
+    }
+}
+
+#[cfg(test)]
+impl Drop for TestEnvGuard {
+    fn drop(&mut self) {
+        restore_test_env(&self.saved);
+    }
 }
 /// Fresh-window override, in SECONDS (oracle `MCP_DISCOVERY_CACHE_TTL_S`).
 pub const ENV_TTL_SECONDS: &str = "MCP_DISCOVERY_CACHE_TTL_S";
@@ -609,8 +722,8 @@ pub enum Decision {
     },
     /// Cache hit, but old enough that a caller should refresh in the
     /// background while still serving the stale data immediately
-    /// (stale-while-revalidate) — this port does not implement the
-    /// revalidate half; a stale hit is a signal, not a mandate.
+    /// (stale-while-revalidate). Stage 3 callers install the cached catalog
+    /// and then kick a detached revalidation path through the registry.
     Stale {
         /// The hit entry.
         entry: DiscoveryCacheEntry,
@@ -736,6 +849,11 @@ pub struct DiscoveryCacheStore {
 }
 
 impl DiscoveryCacheStore {
+    fn staging_path(&self, key: &str, nonce: u64) -> std::path::PathBuf {
+        self.root
+            .join(format!("{key}.tmp-{}-{nonce}", std::process::id()))
+    }
+
     /// Open a store rooted at `root`. Does not touch the filesystem — the
     /// directory is created lazily on first [`Self::store`].
     #[must_use]
@@ -804,9 +922,8 @@ impl DiscoveryCacheStore {
         EntryLookup::Found(entry)
     }
 
-    /// Atomic write: serialize to a sibling temp file (named with the
-    /// current PID so two concurrent writers for the SAME key never collide
-    /// on the temp path), then rename into place. A crash mid-write leaves
+    /// Atomic write: serialize to a sibling temp file with an exclusive
+    /// per-attempt nonce, then rename into place. A crash mid-write leaves
     /// only an orphaned `.tmp-*` file behind — the real path is untouched
     /// until the rename commits.
     ///
@@ -814,16 +931,45 @@ impl DiscoveryCacheStore {
     /// Any I/O failure creating the directory, writing the temp file, or
     /// renaming it into place.
     pub fn store(&self, entry: &DiscoveryCacheEntry) -> std::io::Result<()> {
+        use std::io::Write as _;
+
+        static NEXT_STAGE_NONCE: std::sync::atomic::AtomicU64 =
+            std::sync::atomic::AtomicU64::new(1);
+
         std::fs::create_dir_all(&self.root)?;
         let path = self.entry_path(&entry.cache_key);
-        let tmp_path = self
-            .root
-            .join(format!("{}.tmp-{}", entry.cache_key, std::process::id()));
         let bytes = serde_json::to_vec(entry)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-        std::fs::write(&tmp_path, bytes)?;
-        std::fs::rename(&tmp_path, &path)?;
-        Ok(())
+        loop {
+            let nonce = NEXT_STAGE_NONCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let tmp_path = self.staging_path(&entry.cache_key, nonce);
+            #[cfg(test)]
+            notify_stage_path_observer(&tmp_path);
+            let mut file = match std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&tmp_path)
+            {
+                Ok(file) => file,
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(error) => return Err(error),
+            };
+
+            let write_result = file.write_all(&bytes);
+            drop(file);
+            if let Err(error) = write_result {
+                let _ = std::fs::remove_file(&tmp_path);
+                return Err(error);
+            }
+
+            return match std::fs::rename(&tmp_path, &path) {
+                Ok(()) => Ok(()),
+                Err(error) => {
+                    let _ = std::fs::remove_file(&tmp_path);
+                    Err(error)
+                }
+            };
+        }
     }
 
     /// Delete the entry for `key`. A missing file is not an error (mirrors
@@ -844,27 +990,6 @@ impl DiscoveryCacheStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// Env-mutating tests share process-global state; cargo runs a crate's
-    /// unit tests on multiple threads by default. Every test that touches
-    /// `ENV_ENABLED`/`ENV_TTL_SECONDS`/`ENV_MAX_STALE_SECONDS`/`ENV_STRIKES`
-    /// holds this lock for its whole body (same pattern as
-    /// `protocol_negotiation`'s `flag_test_lock`).
-    fn env_test_lock() -> &'static std::sync::Mutex<()> {
-        static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
-        LOCK.get_or_init(|| std::sync::Mutex::new(()))
-    }
-
-    fn clear_env() {
-        for var in [
-            ENV_ENABLED,
-            ENV_TTL_SECONDS,
-            ENV_MAX_STALE_SECONDS,
-            ENV_STRIKES,
-        ] {
-            std::env::remove_var(var);
-        }
-    }
 
     fn http_spec(url: &str, headers_helper: Option<&str>) -> McpTransportSpec {
         McpTransportSpec::Http {
@@ -1031,6 +1156,7 @@ mod tests {
             resources: false,
             prompts: false,
             logging: false,
+            directory_read: false,
             experimental: std::collections::HashMap::new(),
         }
     }
@@ -1296,67 +1422,98 @@ mod tests {
 
     #[test]
     fn feature_enabled_matrix() {
-        let _guard = env_test_lock()
+        let _guard = tests_env_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        clear_env();
+        let env = TestEnvGuard::new();
         assert!(!feature_enabled(), "unset defaults off");
-        std::env::set_var(ENV_ENABLED, "true");
+        env.set(ENV_ENABLED, "true");
         assert!(feature_enabled());
-        std::env::set_var(ENV_ENABLED, "false");
+        env.set(ENV_ENABLED, "false");
         assert!(!feature_enabled());
-        std::env::set_var(ENV_ENABLED, "nonsense");
+        env.set(ENV_ENABLED, "nonsense");
         assert!(!feature_enabled(), "unrecognized value defaults off");
-        clear_env();
     }
 
     #[test]
     fn ttl_and_max_stale_defaults() {
-        let _guard = env_test_lock()
+        let _guard = tests_env_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        clear_env();
+        let _env = TestEnvGuard::new();
         assert_eq!(max_stale_ms(), 14_400_000);
         assert_eq!(ttl_ms(), 900_000);
         assert_eq!(strike_threshold(), 1);
-        clear_env();
+    }
+
+    #[test]
+    fn test_env_guard_clears_and_restores_all_cache_vars() {
+        let _guard = tests_env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _host_restore = TestEnvGuard {
+            saved: snapshot_test_env(),
+        };
+        clear_test_env();
+        std::env::set_var(ENV_ENABLED, "true");
+        std::env::set_var(ENV_TTL_SECONDS, "17");
+        std::env::set_var(ENV_STRIKES, "9");
+
+        {
+            let env = TestEnvGuard::new();
+            for key in TEST_ENV_KEYS {
+                assert!(
+                    std::env::var_os(key).is_none(),
+                    "{key} must be cleared while the guard is alive"
+                );
+            }
+            env.set(ENV_MAX_STALE_SECONDS, "44");
+        }
+
+        assert_eq!(
+            std::env::var_os(ENV_ENABLED).as_deref(),
+            Some("true".as_ref())
+        );
+        assert_eq!(
+            std::env::var_os(ENV_TTL_SECONDS).as_deref(),
+            Some("17".as_ref())
+        );
+        assert!(std::env::var_os(ENV_MAX_STALE_SECONDS).is_none());
+        assert_eq!(std::env::var_os(ENV_STRIKES).as_deref(), Some("9".as_ref()));
     }
 
     #[test]
     fn max_stale_env_override_is_clamped_to_the_seven_day_ceiling() {
-        let _guard = env_test_lock()
+        let _guard = tests_env_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        clear_env();
-        std::env::set_var(ENV_MAX_STALE_SECONDS, "99999999");
+        let env = TestEnvGuard::new();
+        env.set(ENV_MAX_STALE_SECONDS, "99999999");
         assert_eq!(max_stale_ms(), 604_800_000);
-        clear_env();
     }
 
     #[test]
     fn ttl_env_override_is_capped_by_max_stale() {
-        let _guard = env_test_lock()
+        let _guard = tests_env_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        clear_env();
-        std::env::set_var(ENV_TTL_SECONDS, "999999");
-        std::env::set_var(ENV_MAX_STALE_SECONDS, "100");
+        let env = TestEnvGuard::new();
+        env.set(ENV_TTL_SECONDS, "999999");
+        env.set(ENV_MAX_STALE_SECONDS, "100");
         assert_eq!(max_stale_ms(), 100_000);
         assert_eq!(ttl_ms(), 100_000, "ttl can never exceed max-stale");
-        clear_env();
     }
 
     #[test]
     fn strikes_env_override_and_non_positive_fallback() {
-        let _guard = env_test_lock()
+        let _guard = tests_env_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        clear_env();
-        std::env::set_var(ENV_STRIKES, "3");
+        let env = TestEnvGuard::new();
+        env.set(ENV_STRIKES, "3");
         assert_eq!(strike_threshold(), 3);
-        std::env::set_var(ENV_STRIKES, "0");
+        env.set(ENV_STRIKES, "0");
         assert_eq!(strike_threshold(), 1, "non-positive falls back to default");
-        clear_env();
     }
 
     // ── store ─────────────────────────────────────────────────────────────
@@ -1462,6 +1619,38 @@ mod tests {
     }
 
     #[test]
+    fn store_load_missing_directory_read_defaults_false() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = DiscoveryCacheStore::new(dir.path());
+        let entry = serde_json::json!({
+            "v": CACHE_SCHEMA_VERSION,
+            "cache_key": "k",
+            "saved_at_ms": 1,
+            "consecutive_refresh_failures": 0,
+            "capabilities": {
+                "tools": true,
+                "resources": false,
+                "prompts": false,
+                "logging": false,
+                "experimental": {}
+            },
+            "tools": [],
+            "resources": [],
+            "resource_templates": [],
+            "prompts": []
+        });
+        std::fs::write(dir.path().join("k.json"), entry.to_string()).expect("write");
+
+        let EntryLookup::Found(entry) = store.load("k") else {
+            panic!("entry should deserialize")
+        };
+        assert!(
+            !entry.capabilities.directory_read,
+            "missing directory_read must default false for old cache entries"
+        );
+    }
+
+    #[test]
     fn store_load_cache_key_mismatch_is_corrupt() {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = DiscoveryCacheStore::new(dir.path());
@@ -1527,6 +1716,78 @@ mod tests {
         store.store(&entry).expect("store");
         store.purge("abc").expect("purge");
         assert_eq!(store.load("abc"), EntryLookup::Absent);
+    }
+
+    #[test]
+    fn concurrent_same_key_stores_leave_a_valid_entry_without_temp_collisions() {
+        use std::collections::BTreeSet;
+        use std::sync::{Arc, Barrier, Mutex};
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = Arc::new(DiscoveryCacheStore::new(dir.path()));
+        let writers = 8usize;
+        let start = Arc::new(Barrier::new(writers));
+        let observed_paths = Arc::new(Mutex::new(Vec::with_capacity(writers)));
+        let _observer_guard = StagePathObserverGuard::install(dir.path().to_path_buf(), {
+            let observed_paths = observed_paths.clone();
+            Arc::new(move |path: &std::path::Path| {
+                observed_paths.lock().unwrap().push(path.to_path_buf());
+            })
+        });
+
+        let handles: Vec<_> = (0..writers)
+            .map(|i| {
+                let store = store.clone();
+                let start = start.clone();
+                std::thread::spawn(move || {
+                    let entry = DiscoveryCacheEntry::new(
+                        "same".into(),
+                        i as u64,
+                        caps_tools(true),
+                        sample_tools(i + 1),
+                        vec![],
+                        vec![],
+                        vec![],
+                    );
+                    start.wait();
+                    store.store(&entry).expect("concurrent store");
+                    entry
+                })
+            })
+            .collect();
+
+        let written: Vec<_> = handles
+            .into_iter()
+            .map(|handle| handle.join().expect("writer thread"))
+            .collect();
+        let staged_paths: BTreeSet<_> = observed_paths.lock().unwrap().iter().cloned().collect();
+        assert_eq!(
+            staged_paths.len(),
+            writers,
+            "each same-key writer must use a distinct staging path"
+        );
+
+        let loaded = match store.load("same") {
+            EntryLookup::Found(entry) => entry,
+            other => panic!("expected a valid entry, got {other:?}"),
+        };
+        assert!(
+            written.iter().any(|entry| entry == &loaded),
+            "final entry must deserialize as one complete writer payload"
+        );
+        let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+            .expect("read_dir")
+            .map(|entry| entry.expect("dir entry").path())
+            .filter(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with("same.tmp-"))
+            })
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "successful stores must not leave staging files behind: {leftovers:?}"
+        );
     }
 
     #[test]

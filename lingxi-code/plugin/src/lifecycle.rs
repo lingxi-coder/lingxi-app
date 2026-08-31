@@ -1,12 +1,14 @@
-//! Plugin lifecycle — seven mutually-exclusive states.
+//! Plugin lifecycle — eight mutually-exclusive states.
 //!
 //! Transitions are driven by [`crate::manager::PluginManager`]:
 //!
 //! ```text
-//!  Declared ──fetch──▶ Fetching ──manifest──▶ Fetched ──load──▶ Loaded
+//!  Declared ──fetch──▶ Fetching ──manifest──▶ Fetched ──load──▶ Loaded ──disable ok──▶ Disabled
 //!     │                    │                    │                 │
 //!     │                    ▼                    ▼                 ▼
-//!     └──blocklist──▶  Blocked            Failed             Disabled
+//!     └──blocklist──▶  Blocked            Failed       DisablingFailed ──retry fail──▶ DisablingFailed
+//!                                                              │
+//!                                                              └────retry ok──────▶ Disabled
 //! ```
 //!
 //! See spec §15.2.
@@ -52,6 +54,17 @@ pub enum PluginState {
         install_dir: PathBuf,
         /// When the plugin became `Loaded`.
         loaded_at: SystemTime,
+    },
+    /// Disable/unload started from `Loaded`, but MCP teardown failed before the
+    /// plugin could be fully removed from all registries. The remaining MCP
+    /// names stay tracked so a later `disable()`/reload pass can retry.
+    DisablingFailed {
+        /// Parsed manifest.
+        manifest: PluginManifest,
+        /// Install directory on disk.
+        install_dir: PathBuf,
+        /// Diagnostic message from the failed unload attempt.
+        error: String,
     },
     /// Plugin is installed but explicitly disabled — components are not in
     /// any registry.

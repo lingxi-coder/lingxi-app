@@ -385,16 +385,32 @@ impl PluginManager {
     /// Transition `id` from `Loaded` to `Disabled` and remove every
     /// registry entry the plugin contributed.
     pub async fn disable(&self, id: &PluginId) -> Result<(), PluginManagerError> {
-        let mut plugins = self.plugins.write().await;
-        let state = plugins.get(id).cloned();
-        if let Some(PluginState::Loaded {
-            manifest,
-            install_dir,
-            ..
-        }) = state
-        {
-            self.unload_plugin(id).await?;
-            plugins.insert(
+        let state = self.plugins.read().await.get(id).cloned();
+        if let Some((manifest, install_dir)) = match state {
+            Some(PluginState::Loaded {
+                manifest,
+                install_dir,
+                ..
+            })
+            | Some(PluginState::DisablingFailed {
+                manifest,
+                install_dir,
+                ..
+            }) => Some((manifest, install_dir)),
+            _ => None,
+        } {
+            if let Err(error) = self.unload_plugin(id).await {
+                self.plugins.write().await.insert(
+                    *id,
+                    PluginState::DisablingFailed {
+                        manifest,
+                        install_dir,
+                        error: error.to_string(),
+                    },
+                );
+                return Err(error);
+            }
+            self.plugins.write().await.insert(
                 *id,
                 PluginState::Disabled {
                     manifest,
@@ -408,16 +424,21 @@ impl PluginManager {
     }
 
     /// The ids of every plugin currently in the `Loaded` state (its components
-    /// are live in the engine registries). Used by the composition-root
-    /// `/reload-plugins` refresh to diff the on-disk enabled set against what is
-    /// materialised, so it can `disable()` only the plugins that were turned off
-    /// and `enable()` only the ones newly turned on (no needless MCP churn).
+    /// are live in the engine registries). A `DisablingFailed` plugin is kept
+    /// in this set so reload/disable passes continue converging its partial
+    /// unload instead of silently treating it as already disabled.
     pub async fn loaded_plugin_ids(&self) -> Vec<PluginId> {
         self.plugins
             .read()
             .await
             .iter()
-            .filter_map(|(id, state)| matches!(state, PluginState::Loaded { .. }).then_some(*id))
+            .filter_map(|(id, state)| {
+                matches!(
+                    state,
+                    PluginState::Loaded { .. } | PluginState::DisablingFailed { .. }
+                )
+                .then_some(*id)
+            })
             .collect()
     }
 
@@ -1018,6 +1039,31 @@ impl PluginManager {
 
     /// Symmetric unload — clean up the exact registries we touched.
     async fn unload_plugin(&self, id: &PluginId) -> Result<(), PluginManagerError> {
+        // MCP teardown is the only fallible unload step. Run it first so a
+        // transport-disconnect failure leaves every other materialized surface
+        // intact and retryable.
+        let tracked_mcp_names = self.plugin_mcp_names.read().await.get(id).cloned();
+        if let Some(names) = tracked_mcp_names {
+            let mut remaining = Vec::new();
+            for (idx, name) in names.iter().enumerate() {
+                match self.mcp_registry.remove_without_revoking_auth(name).await {
+                    Ok(()) => {
+                        self.mcp_registry
+                            .remove_headers_helper_plugin_root(name)
+                            .await;
+                    }
+                    Err(error) => {
+                        remaining.extend(names[idx..].iter().cloned());
+                        self.plugin_mcp_names.write().await.insert(*id, remaining);
+                        return Err(PluginManagerError::Io(format!(
+                            "failed to unload plugin MCP server {name}: {error}"
+                        )));
+                    }
+                }
+            }
+            self.plugin_mcp_names.write().await.remove(id);
+        }
+
         self.command_registry.write().await.unregister_plugin(id);
         self.skill_registry.write().await.unregister_plugin(id);
         self.hook_registry.write().await.unregister_plugin(id);
@@ -1035,19 +1081,6 @@ impl PluginManager {
             }
         }
         let _ = self.lsp_registry.unregister_plugin(id).await;
-        // MCP cleanup: remove exactly the scoped `plugin:{plugin}:*` entries
-        // this plugin seeded into the registry's connection map.
-        if let Some(names) = self.plugin_mcp_names.write().await.remove(id) {
-            for name in &names {
-                self.mcp_registry
-                    .remove_headers_helper_plugin_root(name)
-                    .await;
-            }
-            let mut conns = self.mcp_registry.connections.write().await;
-            for n in &names {
-                conns.remove(n);
-            }
-        }
         // Workflow cleanup: remove exactly the namespaced entries this
         // plugin seeded into the shared registry.
         if let Some(names) = self.plugin_workflow_names.write().await.remove(id) {
@@ -1442,5 +1475,327 @@ mod user_config_tests {
             "mysrv ${user_config.API_KEY}"
         ));
         assert!(!user_config::references_user_config("mysrv --flag"));
+    }
+}
+
+#[cfg(test)]
+mod unload_tests {
+    use super::*;
+    use async_trait::async_trait;
+    use command_api::{CommandRegistry, CommandSource, SlashCommand, SlashCommandKind};
+    use hooks::HookRegistry;
+    use lsp::LspRegistry;
+    use outputstyles::OutputStyleRegistry;
+    use platform_posix::{
+        PlainTextSecureStorage, PosixClock, PosixFileSystem, PosixHttp, PosixLspTransport,
+        PosixRuntime,
+    };
+    use protocol::McpConnectionId;
+    use skill_api::SkillRegistry;
+    use std::collections::HashMap;
+    use std::fs;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tool_api::ToolRegistry;
+    use traits::{
+        ElicitRequestDto, ElicitResultDto, McpError, McpNotificationStream, McpPromptDto,
+        McpRawConnection, McpResourceContentDto, McpResourceDto, McpToolDto, McpToolResultDto,
+        McpTransport, McpTransportKind, McpTransportSpec, ServerCapabilitiesDto,
+    };
+
+    fn write_minimal_plugin(root: &Path, dir_name: &str, plugin_name: &str) {
+        let plugin_dir = root.join(dir_name);
+        fs::create_dir_all(plugin_dir.join(".lingxi-plugin")).unwrap();
+        fs::write(
+            plugin_dir.join(".lingxi-plugin").join("plugin.json"),
+            format!(r#"{{"name":"{plugin_name}","version":"1.0.0"}}"#),
+        )
+        .unwrap();
+    }
+
+    struct FailOnceDisconnectTransport {
+        disconnect_calls: AtomicUsize,
+        fail_on_call: usize,
+    }
+
+    impl FailOnceDisconnectTransport {
+        fn failing_on(call: usize) -> Self {
+            Self {
+                disconnect_calls: AtomicUsize::new(0),
+                fail_on_call: call,
+            }
+        }
+    }
+
+    #[async_trait]
+    impl McpTransport for FailOnceDisconnectTransport {
+        async fn connect(&self, _s: &McpTransportSpec) -> Result<McpRawConnection, McpError> {
+            Err(McpError::Internal("unused in unload test".into()))
+        }
+
+        async fn initialize(
+            &self,
+            _c: &McpRawConnection,
+        ) -> Result<ServerCapabilitiesDto, McpError> {
+            unreachable!("unused in unload test")
+        }
+
+        async fn list_tools(&self, _c: &McpRawConnection) -> Result<Vec<McpToolDto>, McpError> {
+            unreachable!("unused in unload test")
+        }
+
+        async fn list_resources(
+            &self,
+            _c: &McpRawConnection,
+        ) -> Result<Vec<McpResourceDto>, McpError> {
+            unreachable!("unused in unload test")
+        }
+
+        async fn list_resource_templates(
+            &self,
+            _c: &McpRawConnection,
+        ) -> Result<Vec<traits::McpResourceTemplateDto>, McpError> {
+            unreachable!("unused in unload test")
+        }
+
+        async fn list_prompts(&self, _c: &McpRawConnection) -> Result<Vec<McpPromptDto>, McpError> {
+            unreachable!("unused in unload test")
+        }
+
+        async fn call_tool(
+            &self,
+            _c: &McpRawConnection,
+            _t: &str,
+            _i: serde_json::Value,
+        ) -> Result<McpToolResultDto, McpError> {
+            unreachable!("unused in unload test")
+        }
+
+        async fn read_resource(
+            &self,
+            _c: &McpRawConnection,
+            _u: &str,
+        ) -> Result<McpResourceContentDto, McpError> {
+            unreachable!("unused in unload test")
+        }
+
+        async fn ping(&self, _id: McpConnectionId) -> Result<(), McpError> {
+            Ok(())
+        }
+
+        async fn notifications(
+            &self,
+            _c: &McpRawConnection,
+        ) -> Result<McpNotificationStream, McpError> {
+            unreachable!("unused in unload test")
+        }
+
+        async fn handle_elicitation(
+            &self,
+            _c: &McpRawConnection,
+            _r: ElicitRequestDto,
+        ) -> Result<ElicitResultDto, McpError> {
+            unreachable!("unused in unload test")
+        }
+
+        async fn disconnect(&self, _id: McpConnectionId) -> Result<(), McpError> {
+            let call = self.disconnect_calls.fetch_add(1, Ordering::SeqCst) + 1;
+            if call == self.fail_on_call {
+                Err(McpError::Internal("disconnect failed".into()))
+            } else {
+                Ok(())
+            }
+        }
+
+        fn supported_transports(&self) -> Vec<McpTransportKind> {
+            vec![McpTransportKind::Stdio]
+        }
+    }
+
+    #[tokio::test]
+    async fn disable_records_partial_mcp_unload_failure_and_retries_cleanly() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_minimal_plugin(tmp.path(), "plug", "plug");
+
+        let transport = Arc::new(FailOnceDisconnectTransport::failing_on(2));
+        let mcp_registry = Arc::new(McpRegistry::new(transport));
+        let command_registry = Arc::new(RwLock::new(CommandRegistry::new()));
+        let tool_registry = Arc::new(RwLock::new(ToolRegistry::new()));
+        let storage = PlainTextSecureStorage::new(tmp.path().join("secrets"))
+            .await
+            .unwrap();
+        let credentials = Arc::new(CredentialManager::new(
+            Arc::new(storage),
+            Arc::new(PosixClock::new()),
+            Arc::new(PosixHttp::new()),
+        ));
+        let manager = PluginManager::new(
+            tmp.path().to_path_buf(),
+            Arc::new(PosixFileSystem::new(tmp.path().to_path_buf())),
+            Arc::new(PosixHttp::new()),
+            Arc::new(PosixRuntime::new()),
+            credentials,
+            Arc::new(StrictPluginOnlyPolicy::empty()),
+            command_registry.clone(),
+            Arc::new(RwLock::new(SkillRegistry::new())),
+            Arc::new(RwLock::new(HookRegistry::new())),
+            Arc::new(RwLock::new(OutputStyleRegistry::new())),
+            mcp_registry.clone(),
+            Arc::new(LspRegistry::new(Arc::new(PosixLspTransport::new()))),
+            tool_registry.clone(),
+        );
+
+        let discovered = crate::discover_installed_plugins(tmp.path()).await;
+        let (id, manifest, dir) = discovered.into_iter().next().unwrap();
+        let scoped_names = ["plugin:plug:a", "plugin:plug:b", "plugin:plug:c"];
+        manager.plugins.write().await.insert(
+            id,
+            crate::lifecycle::PluginState::Loaded {
+                manifest: manifest.clone(),
+                install_dir: dir.clone(),
+                loaded_at: std::time::SystemTime::now(),
+            },
+        );
+        manager.plugin_mcp_names.write().await.insert(
+            id,
+            scoped_names
+                .iter()
+                .map(|name| (*name).to_string())
+                .collect(),
+        );
+        command_registry.write().await.register_plugin_commands(
+            id,
+            vec![SlashCommand {
+                name: "plug-cmd".into(),
+                description: "plugin command".into(),
+                source: CommandSource::Plugin,
+                kind: SlashCommandKind::Builtin {
+                    handler_id: "plug-cmd".into(),
+                },
+                ..SlashCommand::default()
+            }],
+        );
+        for scoped_name in scoped_names {
+            mcp_registry.connections.write().await.insert(
+                scoped_name.into(),
+                mcp::McpConnectionState::Connected {
+                    config: McpServerConfig {
+                        name: scoped_name.into(),
+                        spec: McpTransportSpec::Stdio {
+                            command: "echo".into(),
+                            args: vec![],
+                            env: HashMap::new(),
+                        },
+                        scope: mcp::ConfigScope::Dynamic,
+                        disabled: false,
+                        timeout_ms: None,
+                        always_load: false,
+                        config_error: None,
+                    },
+                    connection_id: McpConnectionId::new(),
+                    capabilities: ServerCapabilitiesDto {
+                        tools: true,
+                        resources: false,
+                        prompts: false,
+                        directory_read: false,
+                        logging: false,
+                        experimental: HashMap::new(),
+                    },
+                    tools: vec![],
+                    resources: vec![],
+                    resource_templates: vec![],
+                    prompts: vec![],
+                    connected_at: std::time::SystemTime::now(),
+                },
+            );
+        }
+        let first = manager.disable(&id).await.expect_err("first disable fails");
+        assert!(
+            matches!(first, PluginManagerError::Io(ref message) if message.contains("failed to unload plugin MCP server")),
+            "got: {first}"
+        );
+        assert!(
+            mcp_registry
+                .connections
+                .read()
+                .await
+                .contains_key("plugin:plug:b"),
+            "the failing MCP server must stay retryable"
+        );
+        assert!(
+            !mcp_registry
+                .connections
+                .read()
+                .await
+                .contains_key("plugin:plug:a"),
+            "successful teardown before the failure point must stay removed"
+        );
+        assert_eq!(
+            manager.plugin_mcp_names.read().await.get(&id),
+            Some(&vec![
+                "plugin:plug:b".to_string(),
+                "plugin:plug:c".to_string()
+            ]),
+            "failed unload must preserve only the remaining MCP tracking for retry"
+        );
+        assert!(
+            command_registry.read().await.resolve("plug-cmd").is_some(),
+            "failed unload must leave command materialization intact"
+        );
+        assert!(
+            matches!(
+                manager.plugins.read().await.get(&id),
+                Some(crate::lifecycle::PluginState::DisablingFailed {
+                    manifest: failed_manifest,
+                    install_dir,
+                    error,
+                }) if failed_manifest.id == manifest.id
+                    && install_dir == &dir
+                    && error.contains("failed to unload plugin MCP server plugin:plug:b")
+            ),
+            "failed disable must record a retriable partial-unload state"
+        );
+        assert_eq!(
+            manager.loaded_plugin_ids().await,
+            vec![id],
+            "reload/disable loops must keep retrying a partially-unloaded plugin"
+        );
+
+        manager.disable(&id).await.expect("retry disable succeeds");
+        assert!(
+            !mcp_registry
+                .connections
+                .read()
+                .await
+                .contains_key("plugin:plug:b"),
+            "successful retry removes the failing MCP state"
+        );
+        assert!(
+            !mcp_registry
+                .connections
+                .read()
+                .await
+                .contains_key("plugin:plug:c"),
+            "successful retry also removes the untouched trailing MCP state"
+        );
+        assert!(
+            manager.plugin_mcp_names.read().await.get(&id).is_none(),
+            "successful retry clears MCP tracking"
+        );
+        assert!(
+            command_registry.read().await.resolve("plug-cmd").is_none(),
+            "successful retry clears command materialization"
+        );
+        assert!(
+            matches!(
+                manager.plugins.read().await.get(&id),
+                Some(crate::lifecycle::PluginState::Disabled { manifest: disabled_manifest, install_dir })
+                    if disabled_manifest.id == manifest.id && install_dir == &dir
+            ),
+            "successful retry transitions the plugin to Disabled"
+        );
+        assert!(
+            manager.loaded_plugin_ids().await.is_empty(),
+            "Disabled plugins must no longer participate in reload convergence"
+        );
     }
 }

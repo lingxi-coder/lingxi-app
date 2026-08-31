@@ -3937,6 +3937,12 @@ async fn build_mobile_inner_with_ask(
                                 skipped,
                                 "MCP catalog refresh receiver lagged; refreshing every connected catalog"
                             );
+                            let refreshed = tool_mcp::build_registered_mcp_tools(
+                                registry.as_ref(),
+                                live_mcp_tool_ctx.clone(),
+                            )
+                            .await;
+                            live_tools.replace_mcp_tools(refreshed);
                             recovery.extend(registry.catalog_refresh_snapshot().await);
                             continue;
                         }
@@ -3947,9 +3953,13 @@ async fn build_mobile_inner_with_ask(
                     break;
                 };
 
-                if let Some(retired) = change.retired_connection_id {
-                    live_tools.unregister_mcp_tools(retired);
-                    live_tools.refresh_tool_search_view();
+                if change.retired_connection_id.is_some() {
+                    let refreshed = tool_mcp::build_registered_mcp_tools(
+                        registry.as_ref(),
+                        live_mcp_tool_ctx.clone(),
+                    )
+                    .await;
+                    live_tools.replace_mcp_tools(refreshed);
                 }
 
                 tracing::debug!(
@@ -3959,18 +3969,13 @@ async fn build_mobile_inner_with_ask(
                     "Received MCP list_changed notification, refreshing catalog"
                 );
                 match registry.refresh_catalog(&change).await {
-                    Ok(Some(connection_id)) if change.kind == mcp::McpCatalogKind::Tools => {
+                    Ok(Some(_)) if change.kind == mcp::McpCatalogKind::Tools => {
                         let refreshed = tool_mcp::build_registered_mcp_tools(
                             registry.as_ref(),
                             live_mcp_tool_ctx.clone(),
                         )
                         .await;
-                        if let Some((_, handles)) =
-                            refreshed.into_iter().find(|(id, _)| *id == connection_id)
-                        {
-                            live_tools.register_mcp_tools(connection_id, handles);
-                            live_tools.refresh_tool_search_view();
-                        }
+                        live_tools.replace_mcp_tools(refreshed);
                     }
                     Ok(_) => {}
                     Err(error) => {

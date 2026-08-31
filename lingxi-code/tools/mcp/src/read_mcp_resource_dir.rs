@@ -33,11 +33,16 @@
 //! `resources/directory/read` driver (`Cpv`, 20-page cap, cursor omitted on the
 //! first page, InvalidParams tolerated only after page 1).
 //!
-//! `traits::ServerCapabilitiesDto` still decodes only the four presence
-//! booleans plus `experimental` — widening it would have broken 13 struct
-//! literals across nine crates — so the predicate reads the RAW `initialize`
-//! capability object, which `McpClient` now caches alongside the DTO
-//! (`McpClient::server_capabilities_raw`).
+//! Production capability flow is now explicit: POSIX `initialize` decodes the
+//! oracle's `io.modelcontextprotocol/skills.directoryRead === true` extension
+//! into [`traits::ServerCapabilitiesDto::directory_read`], discovery cache
+//! persists that DTO bit, and this tool resolves cached/live registry state,
+//! lazy-dials if needed, then re-verifies the CURRENT live `Connected` DTO
+//! before issuing `resources/directory/read`.
+//!
+//! [`server_declares_directory_read`] remains as the raw oracle predicate for
+//! direct-client semantics and byte-faithful tests; the production tool path
+//! does not treat missing raw capabilities as support.
 //!
 //! **INERT IN A DEFAULT BUILD.** Leg 2's `eA()` gate is
 //! `it("tengu_mcp_skills", !1)` — default FALSE — so every shipped default
@@ -157,31 +162,91 @@ impl ReadMcpResourceDirTool {
     }
 }
 
+fn is_shared_registry_entry(table_key: &str, state: &mcp::McpConnectionState) -> bool {
+    table_key == state.config().name
+}
+
+fn ambiguous_server_message(requested: &str, candidates: &[String]) -> String {
+    format!(
+        "Server \"{requested}\" is ambiguous; matching servers: {}",
+        candidates.join(", ")
+    )
+}
+
 /// Oracle `Ami(clients, name)` (`cc-238.js @224079500`) — resolve a server by
 /// name, erroring with the oracle's three messages in the oracle's order.
 /// Returns the server's raw display name on success.
 async fn resolve_server(registry: &mcp::McpRegistry, requested: &str) -> Result<String, ToolError> {
     use mcp::McpConnectionState;
     let conns = registry.connections.read().await;
-    let mut names: Vec<String> = conns.values().map(|s| s.name().to_string()).collect();
+    let mut names: Vec<String> = conns
+        .iter()
+        .filter_map(|(table_key, state)| {
+            is_shared_registry_entry(table_key, state).then(|| state.name().to_string())
+        })
+        .collect();
     names.sort();
 
-    let matched = conns.values().find(|s| {
-        s.name() == requested
-            || mcp::normalization::normalize_name_for_mcp(s.name())
-                == mcp::normalization::normalize_name_for_mcp(requested)
-    });
-    let Some(state) = matched else {
+    if let Some(state) = conns.get(requested) {
+        if is_shared_registry_entry(requested, state) {
+            let name = state.name().to_string();
+            let capabilities = match state {
+                McpConnectionState::Connected { capabilities, .. }
+                | McpConnectionState::Cached { capabilities, .. } => capabilities,
+                _ => {
+                    return Err(ToolError::InvalidInput(format!(
+                        "Server \"{name}\" is not connected"
+                    )));
+                }
+            };
+            if !capabilities.resources {
+                return Err(ToolError::InvalidInput(format!(
+                    "Server \"{name}\" does not support resources"
+                )));
+            }
+            return Ok(name);
+        }
+    }
+
+    let requested_normalized = mcp::normalization::normalize_name_for_mcp(requested);
+    let mut matched = conns
+        .iter()
+        .filter_map(|(table_key, state)| {
+            if !is_shared_registry_entry(table_key, state) {
+                return None;
+            }
+            let name = state.name();
+            (mcp::normalization::normalize_name_for_mcp(name) == requested_normalized)
+                .then_some(name.to_string())
+        })
+        .collect::<Vec<_>>();
+    matched.sort();
+    matched.dedup();
+    let Some(name) = (match matched.len() {
+        0 => None,
+        1 => matched.pop(),
+        _ => {
+            return Err(ToolError::InvalidInput(ambiguous_server_message(
+                requested, &matched,
+            )));
+        }
+    }) else {
         return Err(ToolError::InvalidInput(format!(
             "Server \"{requested}\" not found. Available servers: {}",
             names.join(", ")
         )));
     };
-    let name = state.name().to_string();
-    let McpConnectionState::Connected { capabilities, .. } = state else {
-        return Err(ToolError::InvalidInput(format!(
-            "Server \"{name}\" is not connected"
-        )));
+    let state = conns
+        .get(&name)
+        .expect("shared raw name candidates must be present by exact key");
+    let capabilities = match state {
+        McpConnectionState::Connected { capabilities, .. }
+        | McpConnectionState::Cached { capabilities, .. } => capabilities,
+        _ => {
+            return Err(ToolError::InvalidInput(format!(
+                "Server \"{name}\" is not connected"
+            )));
+        }
     };
     if !capabilities.resources {
         return Err(ToolError::InvalidInput(format!(
@@ -189,6 +254,39 @@ async fn resolve_server(registry: &mcp::McpRegistry, requested: &str) -> Result<
         )));
     }
     Ok(name)
+}
+
+async fn live_resource_directory_capabilities(
+    registry: &mcp::McpRegistry,
+    requested_raw: &str,
+) -> Result<(String, bool, bool), ToolError> {
+    use mcp::McpConnectionState;
+    let conns = registry.connections.read().await;
+    let Some(state) = conns.get(requested_raw) else {
+        return Err(ToolError::InvalidInput(format!(
+            "Server \"{requested_raw}\" not found"
+        )));
+    };
+    if !is_shared_registry_entry(requested_raw, state) {
+        return Err(ToolError::InvalidInput(format!(
+            "Server \"{requested_raw}\" not found"
+        )));
+    }
+    match state {
+        McpConnectionState::Connected {
+            config,
+            capabilities,
+            ..
+        } => Ok((
+            config.name.clone(),
+            capabilities.resources,
+            capabilities.directory_read,
+        )),
+        _ => Err(ToolError::InvalidInput(format!(
+            "Server \"{}\" is not connected",
+            requested_raw
+        ))),
+    }
 }
 
 #[async_trait]
@@ -308,23 +406,21 @@ impl Tool for ReadMcpResourceDirTool {
         // Leg 3 — oracle
         // `if(!kJp().serverDeclaresDirectoryRead(i.capabilities))return{data:{resources:[],error:…}}`.
         let client = registry
-            .get_client(&mcp::normalization::normalize_name_for_mcp(&server))
-            .await;
-        let declares = match client.as_ref() {
-            Some(c) => server_declares_directory_read(c.server_capabilities_raw().await.as_ref()),
-            None => false,
-        };
-        if !declares {
+            .ensure_connected_client(&name)
+            .await
+            .map_err(|e| ToolError::Io(e.to_string()))?;
+        let (live_name, resources, directory_read) =
+            live_resource_directory_capabilities(registry, &name).await?;
+        if !resources {
             return Ok(dir_error(format!(
-                "Server \"{name}\" does not support directory listing."
+                "Server \"{live_name}\" does not support resources"
             )));
         }
-        // Unwrappable: `declares` is only true when `client` is `Some`.
-        let Some(client) = client else {
+        if !directory_read {
             return Ok(dir_error(format!(
-                "Server \"{name}\" does not support directory listing."
+                "Server \"{live_name}\" does not support directory listing."
             )));
-        };
+        }
 
         // Leg 4 — oracle `a=await kJp().readMcpDirectory(s,o)`, wrapped in the
         // not-a-directory catch:
@@ -455,6 +551,34 @@ fn dir_error(error: String) -> ToolCallResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mcp_tool::cached_resource_test_support::{
+        ctx_with_registry, new_cached_registry, resource_caps, seed_cached_server,
+        CachedServerBehavior,
+    };
+    use once_cell::sync::Lazy;
+    use std::sync::{Mutex, MutexGuard};
+
+    static MCP_SKILLS_FLAG_TEST_MUTEX: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
+
+    struct ScopedMcpSkillsFlag {
+        _guard: MutexGuard<'static, ()>,
+    }
+
+    impl ScopedMcpSkillsFlag {
+        fn set(value: bool) -> Self {
+            let guard = MCP_SKILLS_FLAG_TEST_MUTEX
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            telemetry::test_set_flag(MCP_SKILLS_GATE, value);
+            Self { _guard: guard }
+        }
+    }
+
+    impl Drop for ScopedMcpSkillsFlag {
+        fn drop(&mut self) {
+            telemetry::test_clear_flag(MCP_SKILLS_GATE);
+        }
+    }
 
     #[test]
     fn names_are_byte_exact() {
@@ -610,6 +734,305 @@ mod tests {
             props.get("server_name").is_none(),
             "`server_name` is the port's pre-existing divergence on the two sibling tools; \
              a freshly ported tool matches the oracle"
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_server_accepts_a_cached_resource_server() {
+        let (registry, transport) = new_cached_registry().await;
+        seed_cached_server(
+            &registry,
+            &transport,
+            "cached",
+            CachedServerBehavior::default(),
+        )
+        .await;
+
+        let resolved = resolve_server(&registry, "cached")
+            .await
+            .expect("cached server counts as connectable");
+        assert_eq!(resolved, "cached");
+    }
+
+    #[tokio::test]
+    async fn resolve_server_ignores_scoped_only_entries() {
+        let (registry, _transport) = new_cached_registry().await;
+        let agent_id = protocol::AgentId::new();
+        let scoped_key = mcp::registry::agent_scope_table_key(agent_id, "cached");
+        registry.connections.write().await.insert(
+            scoped_key,
+            mcp::McpConnectionState::Cached {
+                config: crate::mcp_tool::cached_resource_test_support::cached_server_config(
+                    "cached",
+                ),
+                connection_id: protocol::McpConnectionId::new(),
+                capabilities: resource_caps(true),
+                tools: vec![],
+                resources: vec![],
+                resource_templates: vec![],
+                prompts: vec![],
+                cache_saved_at_ms: 0,
+                age_ms: 0,
+            },
+        );
+
+        let err = resolve_server(&registry, "cached")
+            .await
+            .expect_err("scoped-only row must not satisfy shared lookup");
+        assert!(format!("{err}").contains("Server \"cached\" not found"));
+    }
+
+    #[tokio::test]
+    async fn cached_server_directory_listing_lazy_dials_after_gate() {
+        let _flag = ScopedMcpSkillsFlag::set(true);
+
+        let (registry, transport) = new_cached_registry().await;
+        seed_cached_server(
+            &registry,
+            &transport,
+            "cached",
+            CachedServerBehavior {
+                cached_capabilities: resource_caps(true),
+                live_capabilities: resource_caps(true),
+                directory_entries: vec![mcp::McpDirectoryEntry {
+                    uri: "cached://docs/readme.md".into(),
+                    name: "readme.md".into(),
+                    mime_type: Some("text/markdown".into()),
+                }],
+                ..Default::default()
+            },
+        )
+        .await;
+
+        let tool = ReadMcpResourceDirTool::new(ctx_with_registry(registry));
+        let result = tool
+            .call(
+                json!({ "server": "cached", "uri": "cached://docs" }),
+                tool_api::test_support::fresh_ctx(),
+                tool_api::test_support::fresh_tx(),
+            )
+            .await
+            .expect("cached directory read succeeds");
+
+        assert_eq!(
+            result.data["resources"],
+            json!([{
+                "uri": "cached://docs/readme.md",
+                "name": "readme.md",
+                "mimeType": "text/markdown"
+            }])
+        );
+        assert_eq!(transport.connect_calls("cached"), 1);
+        assert_eq!(
+            transport.rpc_call_count("cached", "resources/directory/read"),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn cached_server_directory_exact_raw_name_beats_normalized_collision() {
+        let _flag = ScopedMcpSkillsFlag::set(true);
+
+        let (registry, transport) = new_cached_registry().await;
+        seed_cached_server(
+            &registry,
+            &transport,
+            "my.server",
+            CachedServerBehavior {
+                cached_capabilities: resource_caps(true),
+                live_capabilities: resource_caps(true),
+                directory_entries: vec![mcp::McpDirectoryEntry {
+                    uri: "cached://dot/readme.md".into(),
+                    name: "readme.md".into(),
+                    mime_type: Some("text/markdown".into()),
+                }],
+                ..Default::default()
+            },
+        )
+        .await;
+        seed_cached_server(
+            &registry,
+            &transport,
+            "my_server",
+            CachedServerBehavior {
+                cached_capabilities: resource_caps(true),
+                live_capabilities: traits::ServerCapabilitiesDto {
+                    directory_read: false,
+                    ..resource_caps(false)
+                },
+                directory_entries: vec![mcp::McpDirectoryEntry {
+                    uri: "cached://underscore/should-not-hit".into(),
+                    name: "wrong.md".into(),
+                    mime_type: Some("text/markdown".into()),
+                }],
+                ..Default::default()
+            },
+        )
+        .await;
+
+        let result = ReadMcpResourceDirTool::new(ctx_with_registry(registry))
+            .call(
+                json!({ "server": "my.server", "uri": "cached://dot" }),
+                tool_api::test_support::fresh_ctx(),
+                tool_api::test_support::fresh_tx(),
+            )
+            .await
+            .expect("exact raw dot name should keep dot server across dial and RPC");
+
+        assert_eq!(
+            result.data["resources"],
+            json!([{
+                "uri": "cached://dot/readme.md",
+                "name": "readme.md",
+                "mimeType": "text/markdown"
+            }])
+        );
+        assert_eq!(transport.connect_calls("my.server"), 1);
+        assert_eq!(transport.connect_calls("my_server"), 0);
+        assert_eq!(
+            transport.rpc_call_count("my.server", "resources/directory/read"),
+            1
+        );
+        assert_eq!(
+            transport.rpc_call_count("my_server", "resources/directory/read"),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn cached_server_directory_ambiguous_normalized_alias_fails_closed_without_rpc() {
+        let _flag = ScopedMcpSkillsFlag::set(true);
+
+        let (registry, transport) = new_cached_registry().await;
+        for name in ["my.server", "my_server"] {
+            seed_cached_server(
+                &registry,
+                &transport,
+                name,
+                CachedServerBehavior {
+                    cached_capabilities: resource_caps(true),
+                    live_capabilities: resource_caps(true),
+                    ..Default::default()
+                },
+            )
+            .await;
+        }
+
+        let err = ReadMcpResourceDirTool::new(ctx_with_registry(registry))
+            .call(
+                json!({ "server": "my/server", "uri": "cached://ambiguous" }),
+                tool_api::test_support::fresh_ctx(),
+                tool_api::test_support::fresh_tx(),
+            )
+            .await
+            .expect_err("colliding normalized alias must fail closed");
+        let err_text = format!("{err}");
+        assert!(err_text.contains("ambiguous"));
+        assert!(err_text.contains("my.server"));
+        assert!(err_text.contains("my_server"));
+        assert_eq!(transport.connect_calls("my.server"), 0);
+        assert_eq!(transport.connect_calls("my_server"), 0);
+        assert_eq!(
+            transport.rpc_call_count("my.server", "resources/directory/read"),
+            0
+        );
+        assert_eq!(
+            transport.rpc_call_count("my_server", "resources/directory/read"),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn cached_server_directory_listing_fails_closed_when_live_bit_is_false() {
+        let _flag = ScopedMcpSkillsFlag::set(true);
+
+        let (registry, transport) = new_cached_registry().await;
+        seed_cached_server(
+            &registry,
+            &transport,
+            "cached",
+            CachedServerBehavior {
+                cached_capabilities: resource_caps(true),
+                live_capabilities: resource_caps(false),
+                directory_entries: vec![mcp::McpDirectoryEntry {
+                    uri: "cached://docs/readme.md".into(),
+                    name: "readme.md".into(),
+                    mime_type: Some("text/markdown".into()),
+                }],
+                ..Default::default()
+            },
+        )
+        .await;
+
+        let result = ReadMcpResourceDirTool::new(ctx_with_registry(registry))
+            .call(
+                json!({ "server": "cached", "uri": "cached://docs" }),
+                tool_api::test_support::fresh_ctx(),
+                tool_api::test_support::fresh_tx(),
+            )
+            .await
+            .expect("live false bit returns model-facing error");
+
+        assert_eq!(
+            result.data,
+            json!({
+                "resources": [],
+                "error": "Server \"cached\" does not support directory listing."
+            })
+        );
+        assert_eq!(transport.connect_calls("cached"), 1);
+        assert_eq!(
+            transport.rpc_call_count("cached", "resources/directory/read"),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn cached_server_directory_listing_rechecks_live_resources_before_rpc() {
+        let _flag = ScopedMcpSkillsFlag::set(true);
+
+        let (registry, transport) = new_cached_registry().await;
+        seed_cached_server(
+            &registry,
+            &transport,
+            "cached",
+            CachedServerBehavior {
+                cached_capabilities: resource_caps(true),
+                live_capabilities: traits::ServerCapabilitiesDto {
+                    resources: false,
+                    directory_read: true,
+                    ..resource_caps(false)
+                },
+                directory_entries: vec![mcp::McpDirectoryEntry {
+                    uri: "cached://docs/readme.md".into(),
+                    name: "readme.md".into(),
+                    mime_type: Some("text/markdown".into()),
+                }],
+                ..Default::default()
+            },
+        )
+        .await;
+
+        let result = ReadMcpResourceDirTool::new(ctx_with_registry(registry))
+            .call(
+                json!({ "server": "cached", "uri": "cached://docs" }),
+                tool_api::test_support::fresh_ctx(),
+                tool_api::test_support::fresh_tx(),
+            )
+            .await
+            .expect("live resources downgrade returns model-facing error");
+
+        assert_eq!(
+            result.data,
+            json!({
+                "resources": [],
+                "error": "Server \"cached\" does not support resources"
+            })
+        );
+        assert_eq!(transport.connect_calls("cached"), 1);
+        assert_eq!(
+            transport.rpc_call_count("cached", "resources/directory/read"),
+            0
         );
     }
 }

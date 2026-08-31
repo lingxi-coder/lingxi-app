@@ -1646,46 +1646,238 @@ impl Tool for ListMcpResourcesTool {
             }
         };
 
-        // Determine the set of servers to query.
-        let servers: Vec<String> = match &target_server {
-            Some(name) => {
-                // Single-server path keeps the strict "not registered" error
-                // (the model named a server that doesn't exist).
-                if registry.get_client(name).await.is_none() {
+        if let Some(requested) = target_server.as_deref() {
+            let server_name = match resolve_resource_server_name(registry, requested).await {
+                Ok(name) => name,
+                Err(ResourceServerLookupError::NotRegistered) => {
                     emit(
                         bus,
                         LIST_MCP_RESOURCES_FAILED,
                         &[
-                            ("_PROTO_server_name", pii(name)),
+                            ("_PROTO_server_name", pii(requested)),
                             ("error_kind", verified_str("server_not_registered")),
                         ],
                     )
                     .await;
                     return Err(ToolError::InvalidInput(format!(
-                        "ListMcpResourcesTool: MCP server {name:?} is not registered"
+                        "ListMcpResourcesTool: MCP server {requested:?} is not registered"
                     )));
                 }
-                vec![name.clone()]
-            }
-            // All-servers path: enumerate every `Connected` server.
-            None => connected_server_names(registry).await,
-        };
+                Err(ResourceServerLookupError::NotConnected { raw_name }) => {
+                    emit(
+                        bus,
+                        LIST_MCP_RESOURCES_FAILED,
+                        &[
+                            ("_PROTO_server_name", pii(&raw_name)),
+                            ("error_kind", verified_str("server_not_connected")),
+                        ],
+                    )
+                    .await;
+                    return Err(ToolError::InvalidInput(format!(
+                        "ListMcpResourcesTool: MCP server {raw_name:?} is not connected"
+                    )));
+                }
+                Err(ResourceServerLookupError::NoResources { raw_name }) => {
+                    emit(
+                        bus,
+                        LIST_MCP_RESOURCES_FAILED,
+                        &[
+                            ("_PROTO_server_name", pii(&raw_name)),
+                            ("error_kind", verified_str("unsupported_capability")),
+                        ],
+                    )
+                    .await;
+                    return Err(ToolError::InvalidInput(format!(
+                        "ListMcpResourcesTool: MCP server {raw_name:?} does not support resources"
+                    )));
+                }
+                Err(ResourceServerLookupError::Ambiguous {
+                    requested,
+                    candidates,
+                }) => {
+                    emit(
+                        bus,
+                        LIST_MCP_RESOURCES_FAILED,
+                        &[
+                            ("_PROTO_server_name", pii(&requested)),
+                            ("error_kind", verified_str("ambiguous_server_name")),
+                        ],
+                    )
+                    .await;
+                    return Err(ToolError::InvalidInput(format!(
+                        "ListMcpResourcesTool: {}",
+                        ambiguous_resource_server_message(&requested, &candidates)
+                    )));
+                }
+            };
 
-        // Fetch per server, tagging each resource with its `server` and
-        // ERROR-ISOLATING (one server's failure must not sink the whole call —
-        // `ListMcpResourcesTool.ts:84-96` catches per client and returns []).
+            let client = match registry.ensure_connected_client(&server_name).await {
+                Ok(client) => client,
+                Err(e) => {
+                    emit(
+                        bus,
+                        LIST_MCP_RESOURCES_FAILED,
+                        &[
+                            ("_PROTO_server_name", pii(&server_name)),
+                            ("error_kind", verified_str("rpc")),
+                        ],
+                    )
+                    .await;
+                    return Err(ToolError::Io(format!(
+                        "ListMcpResourcesTool: MCP server {server_name:?} connection error: {e}"
+                    )));
+                }
+            };
+            let server_name = match resolve_live_resource_server_name(registry, &server_name).await
+            {
+                Ok(server_name) => server_name,
+                Err(ResourceServerLookupError::NotRegistered) => {
+                    emit(
+                        bus,
+                        LIST_MCP_RESOURCES_FAILED,
+                        &[
+                            ("_PROTO_server_name", pii(&server_name)),
+                            ("error_kind", verified_str("server_not_registered")),
+                        ],
+                    )
+                    .await;
+                    return Err(ToolError::InvalidInput(format!(
+                        "ListMcpResourcesTool: MCP server {server_name:?} is not registered"
+                    )));
+                }
+                Err(ResourceServerLookupError::NotConnected { raw_name }) => {
+                    emit(
+                        bus,
+                        LIST_MCP_RESOURCES_FAILED,
+                        &[
+                            ("_PROTO_server_name", pii(&raw_name)),
+                            ("error_kind", verified_str("server_not_connected")),
+                        ],
+                    )
+                    .await;
+                    return Err(ToolError::InvalidInput(format!(
+                        "ListMcpResourcesTool: MCP server {raw_name:?} is not connected"
+                    )));
+                }
+                Err(ResourceServerLookupError::NoResources { raw_name }) => {
+                    emit(
+                        bus,
+                        LIST_MCP_RESOURCES_FAILED,
+                        &[
+                            ("_PROTO_server_name", pii(&raw_name)),
+                            ("error_kind", verified_str("unsupported_capability")),
+                        ],
+                    )
+                    .await;
+                    return Err(ToolError::InvalidInput(format!(
+                        "ListMcpResourcesTool: MCP server {raw_name:?} does not support resources"
+                    )));
+                }
+                Err(ResourceServerLookupError::Ambiguous {
+                    requested,
+                    candidates,
+                }) => {
+                    emit(
+                        bus,
+                        LIST_MCP_RESOURCES_FAILED,
+                        &[
+                            ("_PROTO_server_name", pii(&requested)),
+                            ("error_kind", verified_str("ambiguous_server_name")),
+                        ],
+                    )
+                    .await;
+                    return Err(ToolError::InvalidInput(format!(
+                        "ListMcpResourcesTool: {}",
+                        ambiguous_resource_server_message(&requested, &candidates)
+                    )));
+                }
+            };
+
+            let mut resources: Vec<Value> = Vec::new();
+            match client.list_resources().await {
+                Ok(list) => {
+                    for r in list {
+                        resources.push(tag_resource_with_server(&r, &server_name));
+                    }
+                }
+                Err(_e) => {
+                    emit(
+                        bus,
+                        LIST_MCP_RESOURCES_FAILED,
+                        &[
+                            ("_PROTO_server_name", pii(&server_name)),
+                            ("error_kind", verified_str("rpc")),
+                        ],
+                    )
+                    .await;
+                }
+            }
+            let count = resources.len() as u64;
+            emit(
+                bus,
+                LIST_MCP_RESOURCES_COMPLETED,
+                &[
+                    ("_PROTO_server_name", pii(requested)),
+                    ("count", verified_int(count)),
+                    (
+                        "duration_ms",
+                        verified_int(started.elapsed().as_millis() as u64),
+                    ),
+                ],
+            )
+            .await;
+            return Ok(ToolCallResult {
+                data: json!({ "server_name": target_server, "resources": resources }),
+                model_content: None,
+                new_messages: vec![],
+                context_modifier: None,
+                is_error: false,
+                mcp_meta: None,
+            });
+        }
+
+        // All-servers path: enumerate every `Connected` OR `Cached`
+        // resource-capable server, then fetch best-effort per server.
+        let servers = resource_capable_server_names(registry).await;
         let mut resources: Vec<Value> = Vec::new();
         for server in &servers {
-            let Some(client) = registry.get_client(server).await else {
-                // A server vanished between enumeration and fetch — skip it
-                // (the all-servers contract is best-effort; the single-server
-                // path already hard-errored above when the named one is absent).
-                continue;
+            let client = match registry.ensure_connected_client(server).await {
+                Ok(client) => client,
+                Err(_e) => {
+                    emit(
+                        bus,
+                        LIST_MCP_RESOURCES_FAILED,
+                        &[
+                            ("_PROTO_server_name", pii(server)),
+                            ("error_kind", verified_str("rpc")),
+                        ],
+                    )
+                    .await;
+                    continue;
+                }
+            };
+            let server = match resolve_live_resource_server_name(registry, server).await {
+                Ok(server) => server,
+                Err(ResourceServerLookupError::NotRegistered)
+                | Err(ResourceServerLookupError::NotConnected { .. })
+                | Err(ResourceServerLookupError::NoResources { .. })
+                | Err(ResourceServerLookupError::Ambiguous { .. }) => {
+                    emit(
+                        bus,
+                        LIST_MCP_RESOURCES_FAILED,
+                        &[
+                            ("_PROTO_server_name", pii(server)),
+                            ("error_kind", verified_str("unsupported_capability")),
+                        ],
+                    )
+                    .await;
+                    continue;
+                }
             };
             match client.list_resources().await {
                 Ok(list) => {
                     for r in list {
-                        resources.push(tag_resource_with_server(&r, server));
+                        resources.push(tag_resource_with_server(&r, &server));
                     }
                 }
                 Err(_e) => {
@@ -1697,7 +1889,7 @@ impl Tool for ListMcpResourcesTool {
                         bus,
                         LIST_MCP_RESOURCES_FAILED,
                         &[
-                            ("_PROTO_server_name", pii(server)),
+                            ("_PROTO_server_name", pii(&server)),
                             ("error_kind", verified_str("rpc")),
                         ],
                     )
@@ -1737,17 +1929,170 @@ impl Tool for ListMcpResourcesTool {
     }
 }
 
-/// Names of every `Connected` MCP server in `registry`, sorted for determinism
-/// (mirrors `snapshot`'s ordering). Used by the all-servers `ListMcpResources`
-/// path to know which clients to fetch.
-async fn connected_server_names(registry: &McpRegistry) -> Vec<String> {
+enum ResourceServerLookupError {
+    NotRegistered,
+    NotConnected {
+        raw_name: String,
+    },
+    NoResources {
+        raw_name: String,
+    },
+    Ambiguous {
+        requested: String,
+        candidates: Vec<String>,
+    },
+}
+
+fn is_shared_registry_entry(table_key: &str, state: &mcp::McpConnectionState) -> bool {
+    table_key == state.config().name
+}
+
+fn ambiguous_resource_server_message(requested: &str, candidates: &[String]) -> String {
+    format!(
+        "MCP server name {requested:?} is ambiguous; matching servers: {}",
+        candidates.join(", ")
+    )
+}
+
+/// Resolve `requested` to a raw server name when the registry currently holds a
+/// `Connected` or `Cached` entry that declares `capabilities.resources`.
+async fn resolve_resource_server_name(
+    registry: &McpRegistry,
+    requested: &str,
+) -> Result<String, ResourceServerLookupError> {
+    use mcp::McpConnectionState;
+    let conns = registry.connections.read().await;
+    if let Some(state) = conns.get(requested) {
+        if is_shared_registry_entry(requested, state) {
+            return match state {
+                McpConnectionState::Connected {
+                    config,
+                    capabilities,
+                    ..
+                }
+                | McpConnectionState::Cached {
+                    config,
+                    capabilities,
+                    ..
+                } if capabilities.resources => Ok(config.name.clone()),
+                McpConnectionState::Connected { config, .. }
+                | McpConnectionState::Cached { config, .. } => {
+                    Err(ResourceServerLookupError::NoResources {
+                        raw_name: config.name.clone(),
+                    })
+                }
+                _ => Err(ResourceServerLookupError::NotConnected {
+                    raw_name: requested.to_string(),
+                }),
+            };
+        }
+    }
+
+    let requested_normalized = mcp::normalization::normalize_name_for_mcp(requested);
+    let mut matches = conns
+        .iter()
+        .filter_map(|(table_key, state)| {
+            if !is_shared_registry_entry(table_key, state) {
+                return None;
+            }
+            let raw_name = state.config().name.as_str();
+            if mcp::normalization::normalize_name_for_mcp(raw_name) != requested_normalized {
+                return None;
+            }
+            Some((
+                raw_name.to_string(),
+                match state {
+                    McpConnectionState::Connected {
+                        config,
+                        capabilities,
+                        ..
+                    }
+                    | McpConnectionState::Cached {
+                        config,
+                        capabilities,
+                        ..
+                    } if capabilities.resources => Ok(config.name.clone()),
+                    McpConnectionState::Connected { config, .. }
+                    | McpConnectionState::Cached { config, .. } => {
+                        Err(ResourceServerLookupError::NoResources {
+                            raw_name: config.name.clone(),
+                        })
+                    }
+                    _ => Err(ResourceServerLookupError::NotConnected {
+                        raw_name: raw_name.to_string(),
+                    }),
+                },
+            ))
+        })
+        .collect::<Vec<_>>();
+    matches.sort_by(|a, b| a.0.cmp(&b.0));
+    match matches.len() {
+        0 => Err(ResourceServerLookupError::NotRegistered),
+        1 => matches.pop().unwrap().1,
+        _ => Err(ResourceServerLookupError::Ambiguous {
+            requested: requested.to_string(),
+            candidates: matches.into_iter().map(|(name, _)| name).collect(),
+        }),
+    }
+}
+
+/// After a lazy dial, re-check the CURRENT registry state for `requested` and
+/// return its raw server name only when it is live `Connected` and still
+/// advertises resources.
+async fn resolve_live_resource_server_name(
+    registry: &McpRegistry,
+    requested_raw: &str,
+) -> Result<String, ResourceServerLookupError> {
+    use mcp::McpConnectionState;
+    let conns = registry.connections.read().await;
+    let Some(state) = conns.get(requested_raw) else {
+        return Err(ResourceServerLookupError::NotRegistered);
+    };
+    if !is_shared_registry_entry(requested_raw, state) {
+        return Err(ResourceServerLookupError::NotRegistered);
+    }
+    match state {
+        McpConnectionState::Connected {
+            config,
+            capabilities,
+            ..
+        } if capabilities.resources => Ok(config.name.clone()),
+        McpConnectionState::Connected { config, .. } => {
+            Err(ResourceServerLookupError::NoResources {
+                raw_name: config.name.clone(),
+            })
+        }
+        _ => Err(ResourceServerLookupError::NotConnected {
+            raw_name: requested_raw.to_string(),
+        }),
+    }
+}
+
+/// Names of every resource-capable `Connected` OR `Cached` MCP server in
+/// `registry`, sorted for determinism (mirrors `snapshot`'s ordering). Used by
+/// the all-servers `ListMcpResources` path to know which clients to fetch.
+async fn resource_capable_server_names(registry: &McpRegistry) -> Vec<String> {
     use mcp::McpConnectionState;
     let conns = registry.connections.read().await;
     let mut names: Vec<String> = conns
-        .values()
-        .filter_map(|s| match s {
-            McpConnectionState::Connected { config, .. } => Some(config.name.clone()),
-            _ => None,
+        .iter()
+        .filter_map(|(table_key, state)| {
+            if !is_shared_registry_entry(table_key, state) {
+                return None;
+            }
+            match state {
+                McpConnectionState::Connected {
+                    config,
+                    capabilities,
+                    ..
+                }
+                | McpConnectionState::Cached {
+                    config,
+                    capabilities,
+                    ..
+                } if capabilities.resources => Some(config.name.clone()),
+                _ => None,
+            }
         })
         .collect();
     names.sort();
@@ -1866,9 +2211,9 @@ impl Tool for ReadMcpResourceTool {
             }
         };
 
-        let client = match registry.get_client(&server_name).await {
-            Some(c) => c,
-            None => {
+        let server_name = match resolve_resource_server_name(registry, &server_name).await {
+            Ok(server_name) => server_name,
+            Err(ResourceServerLookupError::NotRegistered) => {
                 emit(
                     bus,
                     READ_MCP_RESOURCE_FAILED,
@@ -1880,6 +2225,134 @@ impl Tool for ReadMcpResourceTool {
                 .await;
                 return Err(ToolError::InvalidInput(format!(
                     "ReadMcpResourceTool: MCP server {server_name:?} is not registered"
+                )));
+            }
+            Err(ResourceServerLookupError::NotConnected { raw_name }) => {
+                emit(
+                    bus,
+                    READ_MCP_RESOURCE_FAILED,
+                    &[
+                        ("_PROTO_server_name", pii(&raw_name)),
+                        ("error_kind", verified_str("server_not_connected")),
+                    ],
+                )
+                .await;
+                return Err(ToolError::InvalidInput(format!(
+                    "ReadMcpResourceTool: MCP server {raw_name:?} is not connected"
+                )));
+            }
+            Err(ResourceServerLookupError::NoResources { raw_name }) => {
+                emit(
+                    bus,
+                    READ_MCP_RESOURCE_FAILED,
+                    &[
+                        ("_PROTO_server_name", pii(&raw_name)),
+                        ("error_kind", verified_str("unsupported_capability")),
+                    ],
+                )
+                .await;
+                return Err(ToolError::InvalidInput(format!(
+                    "ReadMcpResourceTool: MCP server {raw_name:?} does not support resources"
+                )));
+            }
+            Err(ResourceServerLookupError::Ambiguous {
+                requested,
+                candidates,
+            }) => {
+                emit(
+                    bus,
+                    READ_MCP_RESOURCE_FAILED,
+                    &[
+                        ("_PROTO_server_name", pii(&requested)),
+                        ("error_kind", verified_str("ambiguous_server_name")),
+                    ],
+                )
+                .await;
+                return Err(ToolError::InvalidInput(format!(
+                    "ReadMcpResourceTool: {}",
+                    ambiguous_resource_server_message(&requested, &candidates)
+                )));
+            }
+        };
+
+        let client = match registry.ensure_connected_client(&server_name).await {
+            Ok(c) => c,
+            Err(e) => {
+                emit(
+                    bus,
+                    READ_MCP_RESOURCE_FAILED,
+                    &[
+                        ("_PROTO_server_name", pii(&server_name)),
+                        ("_PROTO_resource_uri", pii(&uri)),
+                        ("error_kind", verified_str("rpc")),
+                    ],
+                )
+                .await;
+                return Err(ToolError::Io(format!(
+                    "ReadMcpResourceTool: server {server_name:?} read_resource error: {e}"
+                )));
+            }
+        };
+        let server_name = match resolve_live_resource_server_name(registry, &server_name).await {
+            Ok(server_name) => server_name,
+            Err(ResourceServerLookupError::NotRegistered) => {
+                emit(
+                    bus,
+                    READ_MCP_RESOURCE_FAILED,
+                    &[
+                        ("_PROTO_server_name", pii(&server_name)),
+                        ("error_kind", verified_str("server_not_registered")),
+                    ],
+                )
+                .await;
+                return Err(ToolError::InvalidInput(format!(
+                    "ReadMcpResourceTool: MCP server {server_name:?} is not registered"
+                )));
+            }
+            Err(ResourceServerLookupError::NotConnected { raw_name }) => {
+                emit(
+                    bus,
+                    READ_MCP_RESOURCE_FAILED,
+                    &[
+                        ("_PROTO_server_name", pii(&raw_name)),
+                        ("error_kind", verified_str("server_not_connected")),
+                    ],
+                )
+                .await;
+                return Err(ToolError::InvalidInput(format!(
+                    "ReadMcpResourceTool: MCP server {raw_name:?} is not connected"
+                )));
+            }
+            Err(ResourceServerLookupError::NoResources { raw_name }) => {
+                emit(
+                    bus,
+                    READ_MCP_RESOURCE_FAILED,
+                    &[
+                        ("_PROTO_server_name", pii(&raw_name)),
+                        ("error_kind", verified_str("unsupported_capability")),
+                    ],
+                )
+                .await;
+                return Err(ToolError::InvalidInput(format!(
+                    "ReadMcpResourceTool: MCP server {raw_name:?} does not support resources"
+                )));
+            }
+            Err(ResourceServerLookupError::Ambiguous {
+                requested,
+                candidates,
+            }) => {
+                emit(
+                    bus,
+                    READ_MCP_RESOURCE_FAILED,
+                    &[
+                        ("_PROTO_server_name", pii(&requested)),
+                        ("error_kind", verified_str("ambiguous_server_name")),
+                    ],
+                )
+                .await;
+                return Err(ToolError::InvalidInput(format!(
+                    "ReadMcpResourceTool: {}",
+                    ambiguous_resource_server_message(&requested, &candidates)
                 )));
             }
         };
@@ -1998,7 +2471,7 @@ pub async fn build_registered_mcp_tools(
     // resource tools are pushed ONCE, onto the first connected server that
     // declares `capabilities.resources`.
     let mut resource_tools_pushed = false;
-    for state in conns.values() {
+    for (table_key, state) in conns.iter() {
         // §11 Stage 2 (LingXi discovery cache): a `Cached` server was served
         // from disk with NO transport dialed yet — its catalog fields mirror
         // `Connected`'s exactly (see `McpConnectionState::Cached`'s doc), so
@@ -2007,18 +2480,26 @@ pub async fn build_registered_mcp_tools(
         // invocation; a `Cached` server that never appeared here would be
         // hidden from the model entirely, defeating the point of caching it.
         if let McpConnectionState::Connected {
+            config,
             connection_id,
             capabilities,
             tools,
             ..
         }
         | McpConnectionState::Cached {
+            config,
             connection_id,
             capabilities,
             tools,
             ..
         } = state
         {
+            // Shared/session tool registration is keyed by the raw server name.
+            // Agent-scoped entries live under a synthetic table key and are
+            // surfaced only by the dedicated bound-key builder path.
+            if table_key != &config.name {
+                continue;
+            }
             let mut handles: Vec<Arc<dyn Tool>> = tools
                 .iter()
                 .map(|dto| {
@@ -2628,6 +3109,452 @@ mod tests {
         );
         // The model sees the JSON string (NOT content:null, NOT pretty-printed).
         assert_eq!(out, json!(r#"{"rows":[{"id":7}],"total":1}"#));
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod cached_resource_test_support {
+    use super::*;
+    use bytes::Bytes;
+    use jsonrpc::{Connection, Mode};
+    use mcp::{ConfigScope, McpConnectionState, McpServerConfig, RawConnectionProvider};
+    use protocol::McpConnectionId;
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
+    use tokio::sync::mpsc;
+    use traits::{
+        ElicitRequestDto, ElicitResultDto, McpError, McpNotificationStream, McpPromptDto,
+        McpRawConnection, McpResourceContentDto, McpResourceDto, McpResourceTemplateDto,
+        McpToolDto, McpToolResultDto, McpTransport, McpTransportKind, McpTransportSpec,
+        ServerCapabilitiesDto,
+    };
+
+    #[derive(Clone)]
+    pub(crate) struct CachedServerBehavior {
+        pub cached_capabilities: ServerCapabilitiesDto,
+        pub live_capabilities: ServerCapabilitiesDto,
+        pub resources: Vec<McpResourceDto>,
+        pub read_contents: Vec<Value>,
+        pub directory_entries: Vec<mcp::McpDirectoryEntry>,
+        pub connect_error: Option<String>,
+        pub resources_list_rpc_error: bool,
+        pub directory_read_rpc_error: Option<(i32, String)>,
+    }
+
+    impl Default for CachedServerBehavior {
+        fn default() -> Self {
+            Self {
+                cached_capabilities: resource_caps(false),
+                live_capabilities: resource_caps(false),
+                resources: Vec::new(),
+                read_contents: Vec::new(),
+                directory_entries: Vec::new(),
+                connect_error: None,
+                resources_list_rpc_error: false,
+                directory_read_rpc_error: None,
+            }
+        }
+    }
+
+    pub(crate) struct CachedResourceTransport {
+        behaviors: Mutex<HashMap<String, CachedServerBehavior>>,
+        conns: Mutex<HashMap<McpConnectionId, Arc<Connection>>>,
+        conn_to_server: Mutex<HashMap<McpConnectionId, String>>,
+        connect_calls: Mutex<HashMap<String, usize>>,
+        rpc_calls: Arc<Mutex<HashMap<(String, String), usize>>>,
+    }
+
+    impl CachedResourceTransport {
+        #[must_use]
+        pub(crate) fn new() -> Self {
+            Self {
+                behaviors: Mutex::new(HashMap::new()),
+                conns: Mutex::new(HashMap::new()),
+                conn_to_server: Mutex::new(HashMap::new()),
+                connect_calls: Mutex::new(HashMap::new()),
+                rpc_calls: Arc::new(Mutex::new(HashMap::new())),
+            }
+        }
+
+        pub(crate) fn insert_server(&self, name: &str, behavior: CachedServerBehavior) {
+            self.behaviors
+                .lock()
+                .unwrap()
+                .insert(name.to_string(), behavior);
+        }
+
+        #[must_use]
+        pub(crate) fn connect_calls(&self, name: &str) -> usize {
+            *self.connect_calls.lock().unwrap().get(name).unwrap_or(&0)
+        }
+
+        #[must_use]
+        pub(crate) fn rpc_call_count(&self, name: &str, method: &str) -> usize {
+            *self
+                .rpc_calls
+                .lock()
+                .unwrap()
+                .get(&(name.to_string(), method.to_string()))
+                .unwrap_or(&0)
+        }
+    }
+
+    fn responding_connection(
+        server_name: String,
+        behavior: CachedServerBehavior,
+        rpc_calls: Arc<Mutex<HashMap<(String, String), usize>>>,
+    ) -> Arc<Connection> {
+        let (peer_to_us_tx, peer_to_us_rx) = mpsc::channel::<Bytes>(8);
+        let (us_to_peer_tx, mut us_to_peer_rx) = mpsc::channel::<Bytes>(8);
+        let conn = Arc::new(Connection::new_streams(
+            peer_to_us_rx,
+            us_to_peer_tx,
+            Mode::Lines,
+        ));
+        tokio::spawn(async move {
+            while let Some(frame) = us_to_peer_rx.recv().await {
+                let Ok(req) = serde_json::from_slice::<Value>(&frame) else {
+                    continue;
+                };
+                let Some(id) = req.get("id").cloned() else {
+                    continue;
+                };
+                let method = req.get("method").and_then(Value::as_str).unwrap_or("");
+                *rpc_calls
+                    .lock()
+                    .unwrap()
+                    .entry((server_name.clone(), method.to_string()))
+                    .or_insert(0) += 1;
+                let resp = match method {
+                    "initialize" => {
+                        let mut caps = serde_json::Map::new();
+                        if behavior.live_capabilities.tools {
+                            caps.insert("tools".into(), json!({}));
+                        }
+                        if behavior.live_capabilities.resources {
+                            caps.insert("resources".into(), json!({}));
+                        }
+                        if behavior.live_capabilities.prompts {
+                            caps.insert("prompts".into(), json!({}));
+                        }
+                        if behavior.live_capabilities.logging {
+                            caps.insert("logging".into(), json!({}));
+                        }
+                        if behavior.live_capabilities.directory_read {
+                            caps.insert(
+                                "extensions".into(),
+                                json!({
+                                    crate::read_mcp_resource_dir::MCP_SKILLS_EXTENSION_KEY: {
+                                        "directoryRead": true
+                                    }
+                                }),
+                            );
+                        }
+                        json!({
+                            "jsonrpc": "2.0",
+                            "id": id,
+                            "result": {
+                                "protocolVersion": "2024-11-05",
+                                "capabilities": Value::Object(caps),
+                                "serverInfo": { "name": server_name, "version": "0" }
+                            }
+                        })
+                    }
+                    "resources/list" if behavior.resources_list_rpc_error => json!({
+                        "jsonrpc": "2.0",
+                        "id": id,
+                        "error": { "code": -32000, "message": "mock resources/list failure" }
+                    }),
+                    "resources/list" => json!({
+                        "jsonrpc": "2.0",
+                        "id": id,
+                        "result": {
+                            "resources": behavior
+                                .resources
+                                .iter()
+                                .map(|resource| {
+                                    let mut obj = serde_json::Map::new();
+                                    obj.insert("uri".into(), json!(resource.uri));
+                                    obj.insert("name".into(), json!(resource.name));
+                                    if let Some(mime_type) = &resource.mime_type {
+                                        obj.insert("mimeType".into(), json!(mime_type));
+                                    }
+                                    Value::Object(obj)
+                                })
+                                .collect::<Vec<_>>()
+                        }
+                    }),
+                    "resources/read" => json!({
+                        "jsonrpc": "2.0",
+                        "id": id,
+                        "result": { "contents": behavior.read_contents }
+                    }),
+                    "resources/directory/read" => {
+                        if let Some((code, message)) = &behavior.directory_read_rpc_error {
+                            json!({
+                                "jsonrpc": "2.0",
+                                "id": id,
+                                "error": { "code": code, "message": message }
+                            })
+                        } else {
+                            json!({
+                                "jsonrpc": "2.0",
+                                "id": id,
+                                "result": { "resources": behavior.directory_entries }
+                            })
+                        }
+                    }
+                    _ => json!({
+                        "jsonrpc": "2.0",
+                        "id": id,
+                        "result": {}
+                    }),
+                };
+                let mut bytes = serde_json::to_vec(&resp).unwrap();
+                bytes.push(b'\n');
+                if peer_to_us_tx.send(Bytes::from(bytes)).await.is_err() {
+                    break;
+                }
+            }
+        });
+        conn
+    }
+
+    #[async_trait]
+    impl McpTransport for CachedResourceTransport {
+        async fn connect(&self, spec: &McpTransportSpec) -> Result<McpRawConnection, McpError> {
+            let McpTransportSpec::InProcess { registry_key } = spec else {
+                return Err(McpError::Internal(
+                    "test transport expects InProcess spec".into(),
+                ));
+            };
+            let behavior = self
+                .behaviors
+                .lock()
+                .unwrap()
+                .get(registry_key)
+                .cloned()
+                .ok_or_else(|| McpError::Internal(format!("no behavior for {registry_key}")))?;
+            *self
+                .connect_calls
+                .lock()
+                .unwrap()
+                .entry(registry_key.clone())
+                .or_insert(0) += 1;
+            if let Some(error) = &behavior.connect_error {
+                return Err(McpError::Connection(error.clone()));
+            }
+            let conn_id = McpConnectionId::new();
+            let conn =
+                responding_connection(registry_key.clone(), behavior, self.rpc_calls.clone());
+            self.conns.lock().unwrap().insert(conn_id, conn);
+            self.conn_to_server
+                .lock()
+                .unwrap()
+                .insert(conn_id, registry_key.clone());
+            Ok(McpRawConnection {
+                connection_id: conn_id,
+            })
+        }
+
+        async fn initialize(
+            &self,
+            conn: &McpRawConnection,
+        ) -> Result<ServerCapabilitiesDto, McpError> {
+            let server = self
+                .conn_to_server
+                .lock()
+                .unwrap()
+                .get(&conn.connection_id)
+                .cloned()
+                .ok_or_else(|| McpError::Internal("missing conn->server mapping".into()))?;
+            self.behaviors
+                .lock()
+                .unwrap()
+                .get(&server)
+                .map(|behavior| behavior.live_capabilities.clone())
+                .ok_or_else(|| McpError::Internal(format!("no behavior for {server}")))
+        }
+
+        async fn list_tools(&self, _conn: &McpRawConnection) -> Result<Vec<McpToolDto>, McpError> {
+            Ok(Vec::new())
+        }
+
+        async fn list_resources(
+            &self,
+            conn: &McpRawConnection,
+        ) -> Result<Vec<McpResourceDto>, McpError> {
+            let server = self
+                .conn_to_server
+                .lock()
+                .unwrap()
+                .get(&conn.connection_id)
+                .cloned()
+                .ok_or_else(|| McpError::Internal("missing conn->server mapping".into()))?;
+            let behavior = self
+                .behaviors
+                .lock()
+                .unwrap()
+                .get(&server)
+                .cloned()
+                .ok_or_else(|| McpError::Internal(format!("no behavior for {server}")))?;
+            *self
+                .rpc_calls
+                .lock()
+                .unwrap()
+                .entry((server.clone(), "transport::list_resources".to_string()))
+                .or_insert(0) += 1;
+            if behavior.resources_list_rpc_error {
+                return Err(McpError::Internal("mock resources/list failure".into()));
+            }
+            Ok(behavior.resources)
+        }
+
+        async fn list_prompts(
+            &self,
+            _conn: &McpRawConnection,
+        ) -> Result<Vec<McpPromptDto>, McpError> {
+            Ok(Vec::new())
+        }
+
+        async fn call_tool(
+            &self,
+            _conn: &McpRawConnection,
+            _tool: &str,
+            _input: Value,
+        ) -> Result<McpToolResultDto, McpError> {
+            Ok(McpToolResultDto {
+                content: json!("ok"),
+                is_error: false,
+                ..Default::default()
+            })
+        }
+
+        async fn read_resource(
+            &self,
+            _conn: &McpRawConnection,
+            _uri: &str,
+        ) -> Result<McpResourceContentDto, McpError> {
+            Err(McpError::Internal("not used in these tests".into()))
+        }
+
+        async fn ping(&self, _id: McpConnectionId) -> Result<(), McpError> {
+            Ok(())
+        }
+
+        async fn notifications(
+            &self,
+            _conn: &McpRawConnection,
+        ) -> Result<McpNotificationStream, McpError> {
+            use futures::stream::empty;
+            Ok(Box::pin(empty()))
+        }
+
+        async fn handle_elicitation(
+            &self,
+            _conn: &McpRawConnection,
+            _request: ElicitRequestDto,
+        ) -> Result<ElicitResultDto, McpError> {
+            Err(McpError::Internal("not used in these tests".into()))
+        }
+
+        async fn disconnect(&self, conn_id: McpConnectionId) -> Result<(), McpError> {
+            self.conns.lock().unwrap().remove(&conn_id);
+            self.conn_to_server.lock().unwrap().remove(&conn_id);
+            Ok(())
+        }
+
+        fn supported_transports(&self) -> Vec<McpTransportKind> {
+            vec![McpTransportKind::InProcess]
+        }
+    }
+
+    impl RawConnectionProvider for CachedResourceTransport {
+        fn connection_for(&self, id: McpConnectionId) -> Option<Arc<Connection>> {
+            self.conns.lock().unwrap().get(&id).cloned()
+        }
+    }
+
+    #[must_use]
+    pub(crate) fn cached_server_config(name: &str) -> McpServerConfig {
+        McpServerConfig {
+            name: name.into(),
+            spec: McpTransportSpec::InProcess {
+                registry_key: name.into(),
+            },
+            scope: ConfigScope::User,
+            disabled: false,
+            timeout_ms: None,
+            always_load: false,
+            config_error: None,
+        }
+    }
+
+    #[must_use]
+    pub(crate) fn resource_caps(directory_read: bool) -> ServerCapabilitiesDto {
+        ServerCapabilitiesDto {
+            tools: false,
+            resources: true,
+            prompts: false,
+            logging: false,
+            directory_read,
+            experimental: HashMap::new(),
+        }
+    }
+
+    #[must_use]
+    pub(crate) fn ctx_with_registry(registry: Arc<McpRegistry>) -> tool_api::BuiltinToolContext {
+        let fs = tool_api::test_support::make_dummy_fs();
+        let bus = Arc::new(telemetry::AnalyticsBus::new());
+        let mut ctx =
+            tool_api::test_support::ctx_for_file_tools(fs, bus, vec![std::env::temp_dir()]);
+        ctx.mcp_registry = Some(registry);
+        ctx
+    }
+
+    pub(crate) async fn new_cached_registry() -> (Arc<McpRegistry>, Arc<CachedResourceTransport>) {
+        let transport = Arc::new(CachedResourceTransport::new());
+        let registry = Arc::new(McpRegistry::with_raw_conn(
+            transport.clone() as Arc<dyn McpTransport>,
+            transport.clone() as Arc<dyn RawConnectionProvider>,
+        ));
+        (registry, transport)
+    }
+
+    pub(crate) async fn seed_cached_server(
+        registry: &Arc<McpRegistry>,
+        transport: &Arc<CachedResourceTransport>,
+        name: &str,
+        behavior: CachedServerBehavior,
+    ) {
+        transport.insert_server(name, behavior.clone());
+        registry.connections.write().await.insert(
+            name.into(),
+            McpConnectionState::Cached {
+                config: cached_server_config(name),
+                connection_id: McpConnectionId::new(),
+                capabilities: behavior.cached_capabilities,
+                tools: vec![],
+                resources: behavior.resources,
+                resource_templates: Vec::<McpResourceTemplateDto>::new(),
+                prompts: vec![],
+                cache_saved_at_ms: 1,
+                age_ms: 0,
+            },
+        );
+    }
+
+    pub(crate) async fn seed_connected_server(
+        registry: &Arc<McpRegistry>,
+        transport: &Arc<CachedResourceTransport>,
+        name: &str,
+        behavior: CachedServerBehavior,
+    ) {
+        transport.insert_server(name, behavior);
+        registry
+            .connect(cached_server_config(name))
+            .await
+            .expect("seed connected server");
     }
 }
 
@@ -3493,8 +4420,50 @@ mod resource_tool_gating_tests {
             resources,
             prompts: false,
             logging: false,
+            directory_read: false,
             experimental: std::collections::HashMap::new(),
         }
+    }
+
+    fn dto(server_name: &str, tool_name: &str) -> McpToolDto {
+        McpToolDto {
+            server_name: server_name.into(),
+            tool_name: tool_name.into(),
+            description: format!("{tool_name} tool"),
+            input_schema: serde_json::json!({"type":"object"}),
+            full_name: format!(
+                "mcp__{}__{}",
+                mcp::normalization::normalize_name_for_mcp(server_name),
+                tool_name
+            ),
+            search_hint: None,
+            always_load: None,
+            requires_user_interaction: false,
+        }
+    }
+
+    async fn build_names_by_connection(
+        registry: &Arc<McpRegistry>,
+    ) -> Vec<(protocol::McpConnectionId, Vec<String>)> {
+        let mut ctx = tool_api::test_support::ctx_for_file_tools(
+            tool_api::test_support::make_dummy_fs(),
+            Arc::new(telemetry::AnalyticsBus::new()),
+            vec![std::path::PathBuf::from("/tmp")],
+        );
+        ctx.mcp_registry = Some(registry.clone());
+        build_registered_mcp_tools(registry, ctx)
+            .await
+            .into_iter()
+            .map(|(id, tools)| {
+                (
+                    id,
+                    tools
+                        .into_iter()
+                        .map(|tool| tool.name().to_string())
+                        .collect(),
+                )
+            })
+            .collect()
     }
 
     /// Seed one `Connected` server whose `capabilities.resources` is `resources`
@@ -3595,6 +4564,125 @@ mod resource_tool_gating_tests {
         assert_eq!(names.len(), 3, "exactly the trio; got {names:?}");
     }
 
+    #[tokio::test]
+    async fn shared_builder_ignores_agent_scoped_entries_and_keeps_trio_for_shared_server() {
+        let registry = Arc::new(McpRegistry::new(Arc::new(NeverDialled)));
+        let shared_connection_id = protocol::McpConnectionId::new();
+        let scoped_connection_id = protocol::McpConnectionId::new();
+        let agent_id = protocol::AgentId::new();
+        let scoped_key = mcp::registry::agent_scope_table_key(agent_id, "shared");
+
+        let mut conns = registry.connections.write().await;
+        conns.insert(
+            scoped_key,
+            McpConnectionState::Connected {
+                config: config("shared"),
+                connection_id: scoped_connection_id,
+                capabilities: caps(true),
+                tools: vec![dto("shared", "scoped_only")],
+                resources: vec![],
+                resource_templates: vec![],
+                prompts: vec![],
+                connected_at: std::time::SystemTime::now(),
+            },
+        );
+        conns.insert(
+            "shared".into(),
+            McpConnectionState::Connected {
+                config: config("shared"),
+                connection_id: shared_connection_id,
+                capabilities: caps(true),
+                tools: vec![dto("shared", "shared_only")],
+                resources: vec![],
+                resource_templates: vec![],
+                prompts: vec![],
+                connected_at: std::time::SystemTime::now(),
+            },
+        );
+        drop(conns);
+
+        let built = build_names_by_connection(&registry).await;
+        assert_eq!(built.len(), 1, "only shared/session entry should build");
+        assert_eq!(built[0].0, shared_connection_id);
+        assert_eq!(
+            built[0].1,
+            vec![
+                "mcp__shared__shared_only".to_string(),
+                "ListMcpResourcesTool".to_string(),
+                "ReadMcpResourceTool".to_string(),
+                "ReadMcpResourceDirTool".to_string(),
+            ]
+        );
+        assert!(
+            !built[0]
+                .1
+                .iter()
+                .any(|name| name == "mcp__shared__scoped_only"),
+            "agent-scoped tool must not leak into the shared unbound builder"
+        );
+    }
+
+    #[tokio::test]
+    async fn rebuild_reassigns_resource_trio_to_remaining_shared_owner_after_removal() {
+        let registry = Arc::new(McpRegistry::new(Arc::new(NeverDialled)));
+        let a_id = protocol::McpConnectionId::new();
+        let b_id = protocol::McpConnectionId::new();
+        registry.connections.write().await.insert(
+            "a".into(),
+            McpConnectionState::Connected {
+                config: config("a"),
+                connection_id: a_id,
+                capabilities: caps(true),
+                tools: vec![dto("a", "a_only")],
+                resources: vec![],
+                resource_templates: vec![],
+                prompts: vec![],
+                connected_at: std::time::SystemTime::now(),
+            },
+        );
+        registry.connections.write().await.insert(
+            "b".into(),
+            McpConnectionState::Connected {
+                config: config("b"),
+                connection_id: b_id,
+                capabilities: caps(true),
+                tools: vec![dto("b", "b_only")],
+                resources: vec![],
+                resource_templates: vec![],
+                prompts: vec![],
+                connected_at: std::time::SystemTime::now(),
+            },
+        );
+
+        let first = build_names_by_connection(&registry).await;
+        let first_owner = first
+            .iter()
+            .find(|(_, names)| names.iter().any(|name| name == "ListMcpResourcesTool"))
+            .expect("one shared owner gets the trio");
+        assert_eq!(
+            first
+                .iter()
+                .filter(|(_, names)| names.iter().any(|name| name == "ListMcpResourcesTool"))
+                .count(),
+            1
+        );
+
+        let removed_server = if first_owner.0 == a_id { "a" } else { "b" };
+        let remaining_id = if first_owner.0 == a_id { b_id } else { a_id };
+        registry.connections.write().await.remove(removed_server);
+
+        let second = build_names_by_connection(&registry).await;
+        assert_eq!(second.len(), 1, "only remaining shared server should build");
+        assert_eq!(second[0].0, remaining_id);
+        assert!(
+            second[0]
+                .1
+                .iter()
+                .any(|name| name == "ListMcpResourcesTool"),
+            "after a full rebuild the remaining shared resource server must pick up the trio"
+        );
+    }
+
     /// `register_all` must NOT register the trio as builtins — that is the whole
     /// point of `iJ`'s `r`-set name filter.
     #[test]
@@ -3621,5 +4709,653 @@ mod resource_tool_gating_tests {
             names.iter().any(|n| n == "WaitForMcpServers"),
             "WaitForMcpServers IS a base-list tool in both 2.1.220 and 2.1.238; got {names:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod cached_resource_tool_tests {
+    use super::*;
+    use crate::mcp_tool::cached_resource_test_support::{
+        ctx_with_registry, new_cached_registry, resource_caps, seed_cached_server,
+        seed_connected_server, CachedServerBehavior,
+    };
+    use telemetry::InMemorySink;
+
+    async fn call_list_tool(
+        registry: Arc<McpRegistry>,
+        input: Value,
+    ) -> Result<ToolCallResult, ToolError> {
+        ListMcpResourcesTool::new(ctx_with_registry(registry))
+            .call(
+                input,
+                tool_api::test_support::fresh_ctx(),
+                tool_api::test_support::fresh_tx(),
+            )
+            .await
+    }
+
+    async fn call_read_tool(
+        registry: Arc<McpRegistry>,
+        input: Value,
+    ) -> Result<ToolCallResult, ToolError> {
+        ReadMcpResourceTool::new(ctx_with_registry(registry))
+            .call(
+                input,
+                tool_api::test_support::fresh_ctx(),
+                tool_api::test_support::fresh_tx(),
+            )
+            .await
+    }
+
+    #[tokio::test]
+    async fn list_resources_accepts_raw_and_normalized_cached_server_names() {
+        let (registry, transport) = new_cached_registry().await;
+        seed_cached_server(
+            &registry,
+            &transport,
+            "my.server",
+            CachedServerBehavior {
+                resources: vec![traits::McpResourceDto {
+                    uri: "cached://guide".into(),
+                    name: "guide.md".into(),
+                    mime_type: Some("text/markdown".into()),
+                }],
+                ..Default::default()
+            },
+        )
+        .await;
+        seed_cached_server(
+            &registry,
+            &transport,
+            "claude.ai Linear",
+            CachedServerBehavior {
+                resources: vec![traits::McpResourceDto {
+                    uri: "cached://linear".into(),
+                    name: "linear.md".into(),
+                    mime_type: None,
+                }],
+                ..Default::default()
+            },
+        )
+        .await;
+
+        let result = call_list_tool(
+            registry.clone(),
+            json!({ "server_name": mcp::normalization::normalize_name_for_mcp("my.server") }),
+        )
+        .await
+        .expect("normalized cached list succeeds");
+        assert_eq!(
+            result.data["resources"],
+            json!([{
+                "uri": "cached://guide",
+                "name": "guide.md",
+                "mimeType": "text/markdown",
+                "server": "my.server"
+            }])
+        );
+
+        let result = call_list_tool(registry, json!({ "server_name": "claude.ai Linear" }))
+            .await
+            .expect("raw cached list succeeds");
+        assert_eq!(
+            result.data["resources"],
+            json!([{
+                "uri": "cached://linear",
+                "name": "linear.md",
+                "server": "claude.ai Linear"
+            }])
+        );
+        assert_eq!(transport.connect_calls("my.server"), 1);
+        assert_eq!(transport.connect_calls("claude.ai Linear"), 1);
+    }
+
+    #[tokio::test]
+    async fn list_resources_named_cached_dial_failure_returns_error_without_completed_event() {
+        let (registry, transport) = new_cached_registry().await;
+        seed_cached_server(
+            &registry,
+            &transport,
+            "cached",
+            CachedServerBehavior {
+                connect_error: Some("dial exploded".into()),
+                ..Default::default()
+            },
+        )
+        .await;
+
+        let ctx = ctx_with_registry(registry);
+        let sink = Arc::new(InMemorySink::new());
+        ctx.bus.attach_sink(sink.clone()).await;
+
+        let err = ListMcpResourcesTool::new(ctx)
+            .call(
+                json!({ "server_name": "cached" }),
+                tool_api::test_support::fresh_ctx(),
+                tool_api::test_support::fresh_tx(),
+            )
+            .await
+            .expect_err("lazy dial failure must hard-fail named server");
+        assert!(format!("{err}").contains("dial exploded"));
+
+        let events = sink.events().await;
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event.name == LIST_MCP_RESOURCES_FAILED)
+                .count(),
+            1
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event.name == LIST_MCP_RESOURCES_COMPLETED)
+                .count(),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn list_resources_named_capability_downgrade_errors_without_any_resources_list_rpc() {
+        let (registry, transport) = new_cached_registry().await;
+        seed_cached_server(
+            &registry,
+            &transport,
+            "cached",
+            CachedServerBehavior {
+                cached_capabilities: resource_caps(false),
+                live_capabilities: traits::ServerCapabilitiesDto {
+                    resources: false,
+                    ..resource_caps(false)
+                },
+                ..Default::default()
+            },
+        )
+        .await;
+
+        let err = call_list_tool(registry, json!({ "server_name": "cached" }))
+            .await
+            .expect_err("live capability downgrade must fail named list");
+        assert!(format!("{err}").contains("does not support resources"));
+        assert_eq!(transport.connect_calls("cached"), 1);
+        assert_eq!(
+            transport.rpc_call_count("cached", "transport::list_resources"),
+            0
+        );
+        assert_eq!(transport.rpc_call_count("cached", "resources/list"), 0);
+    }
+
+    #[tokio::test]
+    async fn list_resources_all_servers_includes_cached_and_isolates_cached_failures() {
+        let (registry, transport) = new_cached_registry().await;
+        seed_connected_server(
+            &registry,
+            &transport,
+            "alpha",
+            CachedServerBehavior {
+                resources: vec![traits::McpResourceDto {
+                    uri: "live://a".into(),
+                    name: "alpha.txt".into(),
+                    mime_type: None,
+                }],
+                ..Default::default()
+            },
+        )
+        .await;
+        seed_cached_server(
+            &registry,
+            &transport,
+            "beta",
+            CachedServerBehavior {
+                resources: vec![traits::McpResourceDto {
+                    uri: "cached://b".into(),
+                    name: "beta.txt".into(),
+                    mime_type: None,
+                }],
+                ..Default::default()
+            },
+        )
+        .await;
+        seed_cached_server(
+            &registry,
+            &transport,
+            "gamma",
+            CachedServerBehavior {
+                resources_list_rpc_error: true,
+                ..Default::default()
+            },
+        )
+        .await;
+
+        let tool = ListMcpResourcesTool::new(ctx_with_registry(registry));
+        let result = tool
+            .call(
+                json!({}),
+                tool_api::test_support::fresh_ctx(),
+                tool_api::test_support::fresh_tx(),
+            )
+            .await
+            .expect("best-effort all-server listing succeeds");
+
+        assert_eq!(
+            result.data["resources"],
+            json!([
+                { "uri": "live://a", "name": "alpha.txt", "server": "alpha" },
+                { "uri": "cached://b", "name": "beta.txt", "server": "beta" }
+            ])
+        );
+        assert_eq!(transport.connect_calls("alpha"), 1, "connected seed dial");
+        assert_eq!(
+            transport.connect_calls("beta"),
+            1,
+            "cached success lazy dial"
+        );
+        assert_eq!(
+            transport.connect_calls("gamma"),
+            1,
+            "cached failure still isolated"
+        );
+    }
+
+    #[tokio::test]
+    async fn list_resources_all_servers_skips_capability_downgrade_without_any_resources_list_rpc()
+    {
+        let (registry, transport) = new_cached_registry().await;
+        seed_connected_server(
+            &registry,
+            &transport,
+            "alpha",
+            CachedServerBehavior {
+                resources: vec![traits::McpResourceDto {
+                    uri: "live://a".into(),
+                    name: "alpha.txt".into(),
+                    mime_type: None,
+                }],
+                ..Default::default()
+            },
+        )
+        .await;
+        seed_cached_server(
+            &registry,
+            &transport,
+            "beta",
+            CachedServerBehavior {
+                cached_capabilities: resource_caps(false),
+                live_capabilities: traits::ServerCapabilitiesDto {
+                    resources: false,
+                    ..resource_caps(false)
+                },
+                ..Default::default()
+            },
+        )
+        .await;
+
+        let result = call_list_tool(registry, json!({}))
+            .await
+            .expect("all-server list keeps best-effort semantics");
+        assert_eq!(
+            result.data["resources"],
+            json!([{ "uri": "live://a", "name": "alpha.txt", "server": "alpha" }])
+        );
+        assert_eq!(transport.connect_calls("beta"), 1);
+        assert_eq!(
+            transport.rpc_call_count("beta", "transport::list_resources"),
+            0
+        );
+        assert_eq!(transport.rpc_call_count("beta", "resources/list"), 0);
+    }
+
+    #[tokio::test]
+    async fn list_resources_named_and_read_ignore_scoped_only_entries() {
+        let (registry, _transport) = new_cached_registry().await;
+        let agent_id = protocol::AgentId::new();
+        let scoped_key = mcp::registry::agent_scope_table_key(agent_id, "shared");
+        registry.connections.write().await.insert(
+            scoped_key,
+            mcp::McpConnectionState::Cached {
+                config: cached_resource_test_support::cached_server_config("shared"),
+                connection_id: protocol::McpConnectionId::new(),
+                capabilities: resource_caps(true),
+                tools: vec![],
+                resources: vec![],
+                resource_templates: vec![],
+                prompts: vec![],
+                cache_saved_at_ms: 0,
+                age_ms: 0,
+            },
+        );
+
+        let err = call_list_tool(registry.clone(), json!({ "server_name": "shared" }))
+            .await
+            .expect_err("scoped-only entry must not satisfy shared lookup");
+        assert!(format!("{err}").contains("is not registered"));
+
+        let err = call_read_tool(
+            registry,
+            json!({ "server_name": "shared", "uri": "cached://shared" }),
+        )
+        .await
+        .expect_err("scoped-only entry must not satisfy shared lookup");
+        assert!(format!("{err}").contains("is not registered"));
+    }
+
+    #[tokio::test]
+    async fn list_resources_exact_raw_name_beats_normalized_collision() {
+        let (registry, transport) = new_cached_registry().await;
+        seed_connected_server(
+            &registry,
+            &transport,
+            "my.server",
+            CachedServerBehavior {
+                resources: vec![traits::McpResourceDto {
+                    uri: "cached://dot".into(),
+                    name: "dot.md".into(),
+                    mime_type: None,
+                }],
+                ..Default::default()
+            },
+        )
+        .await;
+        seed_connected_server(
+            &registry,
+            &transport,
+            "my_server",
+            CachedServerBehavior {
+                resources: vec![traits::McpResourceDto {
+                    uri: "cached://underscore".into(),
+                    name: "underscore.md".into(),
+                    mime_type: None,
+                }],
+                ..Default::default()
+            },
+        )
+        .await;
+
+        let dot = call_list_tool(registry.clone(), json!({ "server_name": "my.server" }))
+            .await
+            .expect("exact raw dot name should resolve to dot server");
+        assert_eq!(
+            dot.data["resources"],
+            json!([{ "uri": "cached://dot", "name": "dot.md", "server": "my.server" }])
+        );
+        assert_eq!(transport.connect_calls("my.server"), 1);
+        assert_eq!(
+            transport.connect_calls("my_server"),
+            1,
+            "connected fixture dials both exact raw keys up front"
+        );
+        assert_eq!(transport.rpc_call_count("my.server", "resources/list"), 1);
+        assert_eq!(transport.rpc_call_count("my_server", "resources/list"), 0);
+
+        let underscore = call_list_tool(registry, json!({ "server_name": "my_server" }))
+            .await
+            .expect("exact raw underscore name should resolve to underscore server");
+        assert_eq!(
+            underscore.data["resources"],
+            json!([{ "uri": "cached://underscore", "name": "underscore.md", "server": "my_server" }])
+        );
+        assert_eq!(transport.connect_calls("my.server"), 1);
+        assert_eq!(transport.connect_calls("my_server"), 1);
+        assert_eq!(transport.rpc_call_count("my.server", "resources/list"), 1);
+        assert_eq!(transport.rpc_call_count("my_server", "resources/list"), 1);
+    }
+
+    #[tokio::test]
+    async fn list_resources_ambiguous_normalized_alias_fails_closed_without_rpc() {
+        let (registry, transport) = new_cached_registry().await;
+        for name in ["my.server", "my_server"] {
+            seed_cached_server(&registry, &transport, name, CachedServerBehavior::default()).await;
+        }
+
+        let err = call_list_tool(registry, json!({ "server_name": "my/server" }))
+            .await
+            .expect_err("colliding normalized alias must fail closed");
+        let err_text = format!("{err}");
+        assert!(err_text.contains("ambiguous"));
+        assert!(err_text.contains("my.server"));
+        assert!(err_text.contains("my_server"));
+        assert_eq!(transport.connect_calls("my.server"), 0);
+        assert_eq!(transport.connect_calls("my_server"), 0);
+        assert_eq!(transport.rpc_call_count("my.server", "resources/list"), 0);
+        assert_eq!(transport.rpc_call_count("my_server", "resources/list"), 0);
+    }
+
+    #[tokio::test]
+    async fn list_resources_all_servers_ignores_same_named_scoped_entry() {
+        let (registry, transport) = new_cached_registry().await;
+        seed_cached_server(
+            &registry,
+            &transport,
+            "shared",
+            CachedServerBehavior {
+                resources: vec![traits::McpResourceDto {
+                    uri: "cached://shared".into(),
+                    name: "shared.md".into(),
+                    mime_type: Some("text/markdown".into()),
+                }],
+                ..Default::default()
+            },
+        )
+        .await;
+        let agent_id = protocol::AgentId::new();
+        let scoped_key = mcp::registry::agent_scope_table_key(agent_id, "shared");
+        registry.connections.write().await.insert(
+            scoped_key,
+            mcp::McpConnectionState::Cached {
+                config: cached_resource_test_support::cached_server_config("shared"),
+                connection_id: protocol::McpConnectionId::new(),
+                capabilities: resource_caps(true),
+                tools: vec![],
+                resources: vec![traits::McpResourceDto {
+                    uri: "cached://scoped".into(),
+                    name: "scoped.md".into(),
+                    mime_type: None,
+                }],
+                resource_templates: vec![],
+                prompts: vec![],
+                cache_saved_at_ms: 0,
+                age_ms: 0,
+            },
+        );
+
+        let result = call_list_tool(registry, json!({}))
+            .await
+            .expect("same-named scoped row must not duplicate shared listing");
+
+        assert_eq!(
+            result.data["resources"],
+            json!([{
+                "uri": "cached://shared",
+                "name": "shared.md",
+                "mimeType": "text/markdown",
+                "server": "shared"
+            }])
+        );
+        assert_eq!(transport.connect_calls("shared"), 1);
+        assert_eq!(
+            transport.rpc_call_count("shared", "resources/list"),
+            1,
+            "shared row should be listed once even if a same-named scoped row exists"
+        );
+    }
+
+    #[tokio::test]
+    async fn read_resource_accepts_raw_and_normalized_cached_server_names() {
+        let (registry, transport) = new_cached_registry().await;
+        seed_cached_server(
+            &registry,
+            &transport,
+            "my.server",
+            CachedServerBehavior {
+                read_contents: vec![json!({
+                    "uri": "cached://guide",
+                    "mimeType": "text/markdown",
+                    "text": "# Cached"
+                })],
+                ..Default::default()
+            },
+        )
+        .await;
+        seed_cached_server(
+            &registry,
+            &transport,
+            "claude.ai Linear",
+            CachedServerBehavior {
+                read_contents: vec![json!({
+                    "uri": "cached://linear",
+                    "text": "linear"
+                })],
+                ..Default::default()
+            },
+        )
+        .await;
+
+        let result = call_read_tool(
+            registry.clone(),
+            json!({
+                "server_name": mcp::normalization::normalize_name_for_mcp("my.server"),
+                "uri": "cached://guide"
+            }),
+        )
+        .await
+        .expect("normalized cached read succeeds");
+        assert_eq!(
+            result.data["contents"],
+            json!([{
+                "uri": "cached://guide",
+                "mimeType": "text/markdown",
+                "text": "# Cached"
+            }])
+        );
+
+        let result = call_read_tool(
+            registry,
+            json!({ "server_name": "claude.ai Linear", "uri": "cached://linear" }),
+        )
+        .await
+        .expect("raw cached read succeeds");
+        assert_eq!(
+            result.data["contents"],
+            json!([{ "uri": "cached://linear", "text": "linear" }])
+        );
+        assert_eq!(transport.connect_calls("my.server"), 1);
+        assert_eq!(transport.connect_calls("claude.ai Linear"), 1);
+    }
+
+    #[tokio::test]
+    async fn read_resource_exact_raw_name_beats_normalized_collision() {
+        let (registry, transport) = new_cached_registry().await;
+        seed_connected_server(
+            &registry,
+            &transport,
+            "my.server",
+            CachedServerBehavior {
+                read_contents: vec![json!({
+                    "uri": "cached://dot",
+                    "text": "dot"
+                })],
+                ..Default::default()
+            },
+        )
+        .await;
+        seed_connected_server(
+            &registry,
+            &transport,
+            "my_server",
+            CachedServerBehavior {
+                read_contents: vec![json!({
+                    "uri": "cached://underscore",
+                    "text": "underscore"
+                })],
+                ..Default::default()
+            },
+        )
+        .await;
+
+        let dot = call_read_tool(
+            registry.clone(),
+            json!({ "server_name": "my.server", "uri": "cached://dot" }),
+        )
+        .await
+        .expect("exact raw dot name should resolve to dot server");
+        assert_eq!(
+            dot.data["contents"],
+            json!([{ "uri": "cached://dot", "text": "dot" }])
+        );
+        assert_eq!(transport.connect_calls("my.server"), 1);
+        assert_eq!(
+            transport.connect_calls("my_server"),
+            1,
+            "connected fixture dials both exact raw keys up front"
+        );
+        assert_eq!(transport.rpc_call_count("my.server", "resources/read"), 1);
+        assert_eq!(transport.rpc_call_count("my_server", "resources/read"), 0);
+
+        let underscore = call_read_tool(
+            registry,
+            json!({ "server_name": "my_server", "uri": "cached://underscore" }),
+        )
+        .await
+        .expect("exact raw underscore name should resolve to underscore server");
+        assert_eq!(
+            underscore.data["contents"],
+            json!([{ "uri": "cached://underscore", "text": "underscore" }])
+        );
+        assert_eq!(transport.connect_calls("my.server"), 1);
+        assert_eq!(transport.connect_calls("my_server"), 1);
+        assert_eq!(transport.rpc_call_count("my.server", "resources/read"), 1);
+        assert_eq!(transport.rpc_call_count("my_server", "resources/read"), 1);
+    }
+
+    #[tokio::test]
+    async fn read_resource_ambiguous_normalized_alias_fails_closed_without_rpc() {
+        let (registry, transport) = new_cached_registry().await;
+        for name in ["my.server", "my_server"] {
+            seed_cached_server(&registry, &transport, name, CachedServerBehavior::default()).await;
+        }
+
+        let err = call_read_tool(
+            registry,
+            json!({ "server_name": "my/server", "uri": "cached://ambiguous" }),
+        )
+        .await
+        .expect_err("colliding normalized alias must fail closed");
+        let err_text = format!("{err}");
+        assert!(err_text.contains("ambiguous"));
+        assert!(err_text.contains("my.server"));
+        assert!(err_text.contains("my_server"));
+        assert_eq!(transport.connect_calls("my.server"), 0);
+        assert_eq!(transport.connect_calls("my_server"), 0);
+        assert_eq!(transport.rpc_call_count("my.server", "resources/read"), 0);
+        assert_eq!(transport.rpc_call_count("my_server", "resources/read"), 0);
+    }
+
+    #[tokio::test]
+    async fn read_resource_capability_downgrade_errors_without_any_read_rpc() {
+        let (registry, transport) = new_cached_registry().await;
+        seed_cached_server(
+            &registry,
+            &transport,
+            "cached",
+            CachedServerBehavior {
+                cached_capabilities: resource_caps(false),
+                live_capabilities: traits::ServerCapabilitiesDto {
+                    resources: false,
+                    ..resource_caps(false)
+                },
+                ..Default::default()
+            },
+        )
+        .await;
+
+        let err = call_read_tool(
+            registry,
+            json!({ "server_name": "cached", "uri": "cached://guide" }),
+        )
+        .await
+        .expect_err("live capability downgrade must fail read");
+        assert!(format!("{err}").contains("does not support resources"));
+        assert_eq!(transport.connect_calls("cached"), 1);
+        assert_eq!(transport.rpc_call_count("cached", "resources/read"), 0);
     }
 }

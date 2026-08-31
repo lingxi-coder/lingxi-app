@@ -1179,6 +1179,7 @@ mod tests {
 
     #[test]
     fn shape_gate_rejects_oversized_regular_file() {
+        let (_cap, _guard) = install_gate_capture();
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("huge.mcp.json");
         // One byte over the oracle's `mcn = 2097152` cap.
@@ -1206,6 +1207,7 @@ mod tests {
 
     #[test]
     fn shape_gate_accepts_regular_file_at_exactly_the_cap() {
+        let (_cap, _guard) = install_gate_capture();
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("exact.mcp.json");
         let mut body = vec![b' '; MCP_CONFIG_MAX_BYTES as usize - 2];
@@ -1217,6 +1219,7 @@ mod tests {
 
     #[test]
     fn shape_gate_rejects_non_regular_file() {
+        let (_cap, _guard) = install_gate_capture();
         // A directory is not a regular file — same "shape" branch the oracle's
         // suggestion text describes for devices/FIFOs/symlinks-to-those.
         let dir = TempDir::new().unwrap();
@@ -1230,6 +1233,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn shape_gate_rejects_fifo() {
+        let (_cap, _guard) = install_gate_capture();
         let dir = TempDir::new().unwrap();
         let fifo = dir.path().join("pipe");
         let status = std::process::Command::new("mkfifo")
@@ -1251,6 +1255,7 @@ mod tests {
 
     #[test]
     fn missing_file_is_the_not_found_variant() {
+        let (_cap, _guard) = install_gate_capture();
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("absent.mcp.json");
         let err = read_mcp_config_file(&path, ConfigScope::Project).unwrap_err();
@@ -1267,6 +1272,7 @@ mod tests {
 
     #[test]
     fn other_read_error_is_distinct_from_not_found() {
+        let (_cap, _guard) = install_gate_capture();
         // ENAMETOOLONG (not ENOENT): a path component past NAME_MAX. Confirmed
         // at the oracle: `E(A)==="ENOENT"` is the ONLY branch that yields the
         // "file not found" shape — everything else falls to the generic
@@ -1288,6 +1294,7 @@ mod tests {
 
     #[test]
     fn dynamic_scope_bypasses_the_shape_gate() {
+        let (_cap, _guard) = install_gate_capture();
         // Oracle: `o==="dynamic" ? readFileSync(...) : Atr(...,mcn)` — the
         // size/regular-file check is skipped entirely for Dynamic scope.
         let dir = TempDir::new().unwrap();
@@ -1300,6 +1307,7 @@ mod tests {
 
     #[test]
     fn well_formed_small_file_reads_through() {
+        let (_cap, _guard) = install_gate_capture();
         let dir = TempDir::new().unwrap();
         let path = dir.path().join(".mcp.json");
         std::fs::write(&path, r#"{"mcpServers":{}}"#).unwrap();
@@ -1309,6 +1317,7 @@ mod tests {
 
     #[test]
     fn invalid_json_returns_the_short_fixed_message() {
+        let (_cap, _guard) = install_gate_capture();
         // Oracle returns a SHORT literal here — NOT the detailed
         // path/scope/length/first100 string, which is log-only.
         let path = Path::new("/p/.mcp.json");
@@ -1324,6 +1333,7 @@ mod tests {
 
     #[test]
     fn valid_json_parses_through() {
+        let (_cap, _guard) = install_gate_capture();
         let path = Path::new("/p/.mcp.json");
         let v = parse_mcp_config_json(r#"{"mcpServers":{}}"#, path, ConfigScope::Project).unwrap();
         assert_eq!(v, json!({"mcpServers":{}}));
@@ -1334,12 +1344,20 @@ mod tests {
 
     use crate::tracing_capture::GateCapture;
     use tracing_subscriber::prelude::*;
+    use tracing_subscriber::reload;
     use tracing_subscriber::Registry;
+
+    fn install_gate_capture() -> (GateCapture, tracing::subscriber::DefaultGuard) {
+        let cap = GateCapture::default();
+        let (layer, handle) = reload::Layer::new(cap.clone());
+        let guard = tracing::subscriber::set_default(Registry::default().with(layer));
+        handle.modify(|_| {}).unwrap();
+        (cap, guard)
+    }
 
     #[test]
     fn shape_gate_rejection_reports_its_own_reason() {
-        let cap = GateCapture::default();
-        let _guard = tracing::subscriber::set_default(Registry::default().with(cap.clone()));
+        let (cap, _guard) = install_gate_capture();
 
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("huge.mcp.json");
@@ -1357,8 +1375,7 @@ mod tests {
 
     #[test]
     fn read_failure_reports_its_own_reason() {
-        let cap = GateCapture::default();
-        let _guard = tracing::subscriber::set_default(Registry::default().with(cap.clone()));
+        let (cap, _guard) = install_gate_capture();
 
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("a".repeat(300));
@@ -1377,8 +1394,7 @@ mod tests {
     fn missing_file_fires_no_telemetry_at_all() {
         // Oracle: `E(A)==="ENOENT"` returns immediately with no `n(...)` log
         // and no `p(...)` call — a missing ancestor config is routine.
-        let cap = GateCapture::default();
-        let _guard = tracing::subscriber::set_default(Registry::default().with(cap.clone()));
+        let (cap, _guard) = install_gate_capture();
 
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("absent.mcp.json");
@@ -1389,8 +1405,7 @@ mod tests {
 
     #[test]
     fn invalid_json_reports_its_own_reason() {
-        let cap = GateCapture::default();
-        let _guard = tracing::subscriber::set_default(Registry::default().with(cap.clone()));
+        let (cap, _guard) = install_gate_capture();
 
         let path = Path::new("/p/.mcp.json");
         let _ = parse_mcp_config_json("{ not json", path, ConfigScope::Project);
@@ -1406,8 +1421,7 @@ mod tests {
 
     #[test]
     fn successful_project_config_parse_reports_no_reason() {
-        let cap = GateCapture::default();
-        let _guard = tracing::subscriber::set_default(Registry::default().with(cap.clone()));
+        let (cap, _guard) = install_gate_capture();
 
         let dir = TempDir::new().unwrap();
         let project = dir.path().join(".mcp.json");
@@ -1424,6 +1438,7 @@ mod tests {
 
     #[test]
     fn missing_project_mcp_json_yields_no_warnings() {
+        let (_cap, _guard) = install_gate_capture();
         let dir = TempDir::new().unwrap();
         let warnings =
             collect_all_mcp_config_warnings_at(&dir.path().join(".mcp.json"), dir.path(), None);
@@ -1432,6 +1447,7 @@ mod tests {
 
     #[test]
     fn oversized_project_mcp_json_surfaces_the_shape_gate_warning() {
+        let (_cap, _guard) = install_gate_capture();
         let dir = TempDir::new().unwrap();
         let project = dir.path().join(".mcp.json");
         let big = vec![b' '; (MCP_CONFIG_MAX_BYTES + 1) as usize];
@@ -1450,6 +1466,7 @@ mod tests {
 
     #[test]
     fn malformed_project_mcp_json_surfaces_the_invalid_json_warning() {
+        let (_cap, _guard) = install_gate_capture();
         let dir = TempDir::new().unwrap();
         let project = dir.path().join(".mcp.json");
         std::fs::write(&project, "{ not json").unwrap();

@@ -229,6 +229,12 @@ pub struct ServerCapabilitiesDto {
     pub prompts: bool,
     /// Server emits log notifications.
     pub logging: bool,
+    /// Server declares `resources/directory/read` support through the
+    /// `io.modelcontextprotocol/skills.directoryRead` extension. Older
+    /// serialized data or transports that omit this field deserialize to
+    /// `false` via `#[serde(default)]`.
+    #[serde(default)]
+    pub directory_read: bool,
     /// Vendor-specific or experimental capability flags.
     pub experimental: std::collections::HashMap<String, Value>,
 }

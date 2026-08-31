@@ -8082,6 +8082,9 @@ pub async fn build(
             posix as Arc<dyn mcp::RawConnectionProvider>,
         )
         .with_hook_dispatcher(Some(elicitation_dispatcher))
+        .with_discovery_cache_store(mcp::DiscoveryCacheStore::new(
+            cfg.lingxi_home.join("mcp-discovery-cache"),
+        ))
         .with_oauth(mcp_oauth_deps)
         .with_headers_helper_cwd(cwd.clone())
         // Advertise the session's additional working dirs (settings
@@ -12818,6 +12821,25 @@ mod tests {
         assert!(
             !rt.orchestrator.has_mcp_xaa(),
             "XAA must stay opt-in when no `xaaIdp` settings tier is present"
+        );
+    }
+
+    /// The desktop composition root must inject the persistent discovery-cache
+    /// store. The feature flag still defaults off; this assertion only proves
+    /// an enabled deployment can reach the production store.
+    #[tokio::test]
+    async fn build_wires_mcp_discovery_cache_store() {
+        let (_tmp, cfg) = test_config(true);
+        let output: Arc<dyn traits::OutputStream> =
+            Arc::new(orchestrator::test_support::MockOutputStream::new());
+        let perm_sink: Arc<dyn client_adapter::PermissionRequestSink> =
+            Arc::new(RecordingPermissionSink::default());
+
+        let rt = build(cfg, output, perm_sink).await.expect("build() failed");
+
+        assert!(
+            rt.mcp_registry.has_discovery_cache_store(),
+            "DiscoveryCacheStore not wired into the production MCP registry"
         );
     }
 

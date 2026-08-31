@@ -155,6 +155,7 @@ struct LazyUpgradeSlot {
     key: String,
     cached_connection_id: McpConnectionId,
     expected_config: McpServerConfig,
+    refresh_partition: Option<DiscoveryCachePartition>,
     mode: LazyUpgradeMode,
     terminal: StdMutex<Option<LazyUpgradeTerminal>>,
     notify: Notify,
@@ -165,12 +166,14 @@ impl LazyUpgradeSlot {
         key: String,
         cached_connection_id: McpConnectionId,
         expected_config: McpServerConfig,
+        refresh_partition: Option<DiscoveryCachePartition>,
         mode: LazyUpgradeMode,
     ) -> Self {
         Self {
             key,
             cached_connection_id,
             expected_config,
+            refresh_partition,
             mode,
             terminal: StdMutex::new(None),
             notify: Notify::new(),
@@ -261,6 +264,11 @@ struct PromptPredecessor {
 struct DiscoveryCachePartition {
     logical_key: String,
     partition_key: String,
+}
+
+struct DiscoveryCacheConsult {
+    decision: crate::discovery_cache::Decision,
+    partition: Option<DiscoveryCachePartition>,
 }
 
 enum LazyUpgradePreparation {
@@ -379,10 +387,9 @@ pub struct McpRegistry {
     /// §11 — the discovery-cache store. `None` by default (every existing
     /// caller unaffected): no entry is ever written, no decision is ever
     /// consulted, no `tengu_mcp_discovery_source` telemetry fires. Set via
-    /// [`Self::with_discovery_cache_store`]. Resolving the real production
-    /// root directory is a CLI-owned concern (see
-    /// `crate::discovery_cache`'s module doc) — this registry only knows
-    /// how to read/write whatever [`crate::discovery_cache::DiscoveryCacheStore`]
+    /// [`Self::with_discovery_cache_store`]. The desktop composition root
+    /// supplies `<lingxi_home>/mcp-discovery-cache`; this registry only knows
+    /// how to read/write the [`crate::discovery_cache::DiscoveryCacheStore`]
     /// it is handed.
     discovery_cache_store: Option<Arc<crate::discovery_cache::DiscoveryCacheStore>>,
     /// Best-effort cleanup retries for transport ids that MUST be disconnected
@@ -953,6 +960,14 @@ impl McpRegistry {
         self.oauth.is_some()
     }
 
+    /// Whether a discovery-cache store has been injected via
+    /// [`Self::with_discovery_cache_store`]. Used by composition-root tests to
+    /// prove the otherwise optional cache is production-reachable.
+    #[must_use]
+    pub fn has_discovery_cache_store(&self) -> bool {
+        self.discovery_cache_store.is_some()
+    }
+
     /// Whether a Cross-App-Access ([`XaaConfigProvider`]) provider is wired into
     /// the injected [`OAuthDeps`]. `false` (the default, and the state when no
     /// `xaaIdp` settings tier is present) leaves an `oauth.xaa` server on its
@@ -1102,7 +1117,7 @@ impl McpRegistry {
         let lifecycle = self.lifecycle_lock(key);
         let outcome = {
             let _guard = lifecycle.lock().await;
-            self.prepare_lazy_upgrade_slot_locked(key, LazyUpgradeMode::Foreground)
+            self.prepare_lazy_upgrade_slot_locked(key, LazyUpgradeMode::Foreground, None)
                 .await?
         };
         match outcome {
@@ -1387,9 +1402,6 @@ impl McpRegistry {
         let key = table_key.clone().unwrap_or_else(|| config.name.clone());
         let result = self.connect_locked_inner(config.clone(), table_key).await;
         if let Err(error) = &result {
-            // §11 strike accounting — see `record_discovery_cache_connect_failure`'s
-            // doc. Best-effort, before `config` moves into `Disconnected` below.
-            self.record_discovery_cache_connect_failure(&config).await;
             // A failed public connect must never strand the registry in
             // `Connecting`. Reconnect scheduling only considers disconnected
             // states, and `/mcp` should expose the actual last failure.
@@ -1425,7 +1437,11 @@ impl McpRegistry {
         let invalidated_slot = self.invalidate_lazy_upgrade_slot(&key).await;
         Self::finish_invalidated_lazy_upgrade_slot(invalidated_slot.as_ref());
 
-        if let Some(decision) = self.discovery_cache_decision_for(&config).await {
+        if let Some(consult) = self.discovery_cache_decision_for(&config).await {
+            let DiscoveryCacheConsult {
+                decision,
+                partition,
+            } = consult;
             match decision {
                 crate::discovery_cache::Decision::Fresh { entry, age_ms } => {
                     return Ok(self
@@ -1437,7 +1453,11 @@ impl McpRegistry {
                         .serve_discovery_cache_hit(&config, &key, entry, age_ms, false)
                         .await;
                     if let LazyUpgradePreparation::Wait(slot, true) = self
-                        .prepare_lazy_upgrade_slot_locked(&key, LazyUpgradeMode::Background)
+                        .prepare_lazy_upgrade_slot_locked(
+                            &key,
+                            LazyUpgradeMode::Background,
+                            partition,
+                        )
                         .await?
                     {
                         self.spawn_lazy_upgrade_owner(key.clone(), slot);
@@ -1534,6 +1554,7 @@ impl McpRegistry {
         &self,
         key: &str,
         mode: LazyUpgradeMode,
+        refresh_partition: Option<DiscoveryCachePartition>,
     ) -> Result<LazyUpgradePreparation, McpError> {
         enum CachedDialState {
             Connected(McpConnectionId),
@@ -1592,6 +1613,7 @@ impl McpRegistry {
                     key.to_string(),
                     connection_id,
                     config.clone(),
+                    refresh_partition,
                     mode,
                 ));
                 if mode == LazyUpgradeMode::Foreground {
@@ -2213,7 +2235,6 @@ impl McpRegistry {
                             if Self::same_config_snapshot(config, &slot.expected_config)
                     );
                     if current_connecting {
-                        self.record_discovery_cache_connect_failure(&slot.expected_config).await;
                         self.connections.write().await.insert(
                             key.to_string(),
                             McpConnectionState::Disconnected {
@@ -2235,6 +2256,7 @@ impl McpRegistry {
                         key,
                         slot.cached_connection_id,
                         &slot.expected_config,
+                        slot.refresh_partition.as_ref(),
                     )
                     .await;
                 }
@@ -2372,7 +2394,11 @@ impl McpRegistry {
         key: &str,
         cached_connection_id: McpConnectionId,
         config: &McpServerConfig,
+        partition: Option<&DiscoveryCachePartition>,
     ) {
+        let Some(partition) = partition else {
+            return;
+        };
         let still_current = {
             let conns = self.connections.read().await;
             match conns.get(key) {
@@ -2390,7 +2416,7 @@ impl McpRegistry {
         if !still_current {
             return;
         }
-        self.record_discovery_cache_connect_failure(config).await;
+        self.record_discovery_cache_refresh_failure(config, partition);
     }
 
     async fn discovery_cache_partition_for(
@@ -2438,7 +2464,10 @@ impl McpRegistry {
     ) -> Result<Vec<String>, ()> {
         let mut candidates = Self::config_secret_candidates(config);
         if let Some(deps) = &self.oauth {
-            if matches!(config.spec, McpTransportSpec::Sse { .. } | McpTransportSpec::Http { .. }) {
+            if matches!(
+                config.spec,
+                McpTransportSpec::Sse { .. } | McpTransportSpec::Http { .. }
+            ) {
                 let server_key = oauth::server_key(&config.name, &config.spec);
                 let stored = oauth::load_tokens(&deps.storage, &server_key)
                     .await
@@ -2467,6 +2496,21 @@ impl McpRegistry {
                 candidates.push(value.to_string());
             }
         };
+        let push_secret_variants = |candidates: &mut Vec<String>, value: &str| {
+            push_secret(candidates, value);
+            for component in
+                value.split(|ch: char| ch.is_ascii_whitespace() || matches!(ch, ',' | ';'))
+            {
+                let component = component.trim_matches(|ch| matches!(ch, '"' | '\''));
+                push_secret(candidates, component);
+                if let Some((_, suffix)) = component.split_once('=') {
+                    push_secret(
+                        candidates,
+                        suffix.trim_matches(|ch| matches!(ch, '"' | '\'')),
+                    );
+                }
+            }
+        };
         let maybe_push_url_credentials = |candidates: &mut Vec<String>, url: &str| {
             if let Ok(parsed) = url::Url::parse(url) {
                 if !parsed.username().is_empty() {
@@ -2478,24 +2522,24 @@ impl McpRegistry {
                 for (name, value) in parsed.query_pairs() {
                     let lower_name = name.to_ascii_lowercase();
                     let suspicious_name = [
-                        "auth", "token", "key", "secret", "cookie", "session", "sig",
-                        "pass", "cred", "bearer",
+                        "auth", "token", "key", "secret", "cookie", "session", "sig", "pass",
+                        "cred", "bearer",
                     ]
                     .iter()
                     .any(|needle| lower_name.contains(needle));
                     let selector_like = value.len() <= 32
-                        && value
-                            .bytes()
-                            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"-_".contains(&b));
+                        && value.bytes().all(|b| {
+                            b.is_ascii_lowercase() || b.is_ascii_digit() || b"-_".contains(&b)
+                        });
                     if suspicious_name || !selector_like {
                         push_secret(candidates, &value);
                     }
                 }
                 for segment in parsed.path_segments().into_iter().flatten() {
                     let high_entropy = segment.len() >= 24
-                        && segment.bytes().all(|b| {
-                            b.is_ascii_alphanumeric() || b"._~+/=%-".contains(&b)
-                        })
+                        && segment
+                            .bytes()
+                            .all(|b| b.is_ascii_alphanumeric() || b"._~+/=%-".contains(&b))
                         && segment.bytes().any(|b| b.is_ascii_alphabetic())
                         && (segment.bytes().any(|b| b.is_ascii_digit())
                             || (segment.bytes().any(|b| b.is_ascii_lowercase())
@@ -2506,33 +2550,29 @@ impl McpRegistry {
                 }
             }
         };
-        let maybe_push_headers =
-            |candidates: &mut Vec<String>, headers: &traits::McpHeaders| {
-                for (name, value) in headers {
-                    let lower_name = name.to_ascii_lowercase();
-                    let lower_value = value.trim().to_ascii_lowercase();
-                    let suspicious_name = [
-                        "auth", "token", "key", "secret", "cookie", "session", "sig", "pass",
-                        "cred", "bearer",
-                    ]
-                    .iter()
-                    .any(|needle| lower_name.contains(needle));
-                    let suspicious_value =
-                        lower_value.starts_with("bearer ") || lower_value.starts_with("basic ");
-                    let exempt_name = matches!(
-                        lower_name.as_str(),
-                        "origin" | "referer" | "host" | "user-agent"
-                    ) || lower_name.ends_with("-id")
-                        || lower_name.ends_with("-version")
-                        || lower_name.ends_with("-name");
-                    if suspicious_name || suspicious_value || !exempt_name {
-                        push_secret(candidates, value);
-                        if let Some((_, suffix)) = value.split_once(' ') {
-                            push_secret(candidates, suffix);
-                        }
-                    }
+        let maybe_push_headers = |candidates: &mut Vec<String>, headers: &traits::McpHeaders| {
+            for (name, value) in headers {
+                let lower_name = name.to_ascii_lowercase();
+                let lower_value = value.trim().to_ascii_lowercase();
+                let suspicious_name = [
+                    "auth", "token", "key", "secret", "cookie", "session", "sig", "pass", "cred",
+                    "bearer",
+                ]
+                .iter()
+                .any(|needle| lower_name.contains(needle));
+                let suspicious_value =
+                    lower_value.starts_with("bearer ") || lower_value.starts_with("basic ");
+                let exempt_name = matches!(
+                    lower_name.as_str(),
+                    "origin" | "referer" | "host" | "user-agent"
+                ) || lower_name.ends_with("-id")
+                    || lower_name.ends_with("-version")
+                    || lower_name.ends_with("-name");
+                if suspicious_name || suspicious_value || !exempt_name {
+                    push_secret_variants(candidates, value);
                 }
-            };
+            }
+        };
         match &config.spec {
             McpTransportSpec::Sse { url, headers, .. }
             | McpTransportSpec::Http { url, headers, .. }
@@ -2540,7 +2580,9 @@ impl McpRegistry {
                 maybe_push_url_credentials(&mut candidates, url);
                 maybe_push_headers(&mut candidates, headers);
             }
-            McpTransportSpec::WsIde { url, auth_token, .. } => {
+            McpTransportSpec::WsIde {
+                url, auth_token, ..
+            } => {
                 maybe_push_url_credentials(&mut candidates, url);
                 if let Some(auth_token) = auth_token {
                     push_secret(&mut candidates, auth_token);
@@ -2560,17 +2602,47 @@ impl McpRegistry {
     }
 
     fn discovery_cache_entry_reflects_secret(serialized: &str, candidates: &[String]) -> bool {
+        let contains = |candidate: &str| {
+            serialized.contains(candidate)
+                || serde_json::to_string(candidate)
+                    .ok()
+                    .and_then(|escaped| {
+                        escaped
+                            .strip_prefix('"')
+                            .and_then(|s| s.strip_suffix('"'))
+                            .map(str::to_string)
+                    })
+                    .is_some_and(|escaped| serialized.contains(&escaped))
+        };
         candidates.iter().any(|candidate| {
             if candidate.is_empty() {
                 return false;
             }
-            if serialized.contains(candidate) {
+            if contains(candidate) {
                 return true;
             }
-            serde_json::to_string(candidate)
+            let encoded: String =
+                url::form_urlencoded::byte_serialize(candidate.as_bytes()).collect();
+            if encoded == *candidate {
+                return false;
+            }
+            if contains(&encoded) {
+                return true;
+            }
+            let mut lower_percent_hex = encoded.into_bytes();
+            let mut index = 0;
+            while index + 2 < lower_percent_hex.len() {
+                if lower_percent_hex[index] == b'%' {
+                    lower_percent_hex[index + 1].make_ascii_lowercase();
+                    lower_percent_hex[index + 2].make_ascii_lowercase();
+                    index += 3;
+                } else {
+                    index += 1;
+                }
+            }
+            String::from_utf8(lower_percent_hex)
                 .ok()
-                .and_then(|escaped| escaped.strip_prefix('"').and_then(|s| s.strip_suffix('"')).map(str::to_string))
-                .is_some_and(|escaped| serialized.contains(&escaped))
+                .is_some_and(|encoded| contains(&encoded))
         })
     }
 
@@ -2584,11 +2656,10 @@ impl McpRegistry {
     async fn discovery_cache_decision_for(
         &self,
         config: &McpServerConfig,
-    ) -> Option<crate::discovery_cache::Decision> {
+    ) -> Option<DiscoveryCacheConsult> {
         let store = self.discovery_cache_store.as_ref()?;
         let feature_enabled = crate::discovery_cache::feature_enabled();
-        let logical_key = crate::discovery_cache::logical_cache_key(config);
-        let decision = match crate::discovery_cache::cache_gate(
+        let consult = match crate::discovery_cache::cache_gate(
             &config.spec,
             config.discovery_cache,
             feature_enabled,
@@ -2597,30 +2668,41 @@ impl McpRegistry {
                 if reason.purges_existing_entry() {
                     let _ = store.purge_server_family(&config.name);
                 }
-                crate::discovery_cache::Decision::Miss {
-                    reason: reason.miss_reason(),
+                DiscoveryCacheConsult {
+                    decision: crate::discovery_cache::Decision::Miss {
+                        reason: reason.miss_reason(),
+                    },
+                    partition: None,
                 }
             }
             None => {
                 let partition = match self.discovery_cache_partition_for(config).await {
                     Ok(partition) => partition,
-                    Err(reason) => return Some(crate::discovery_cache::Decision::Miss { reason }),
+                    Err(reason) => {
+                        return Some(DiscoveryCacheConsult {
+                            decision: crate::discovery_cache::Decision::Miss { reason },
+                            partition: None,
+                        });
+                    }
                 };
                 let lookup =
                     store.load_partitioned(&partition.logical_key, &partition.partition_key);
                 let policy = crate::discovery_cache::DiscoveryCachePolicy::from_env(
                     crate::discovery_cache::now_ms(),
                 );
-                crate::discovery_cache::decide(
-                    &config.spec,
-                    config.discovery_cache,
-                    feature_enabled,
-                    lookup,
-                    policy,
-                )
+                DiscoveryCacheConsult {
+                    decision: crate::discovery_cache::decide(
+                        &config.spec,
+                        config.discovery_cache,
+                        feature_enabled,
+                        lookup,
+                        policy,
+                    ),
+                    partition: Some(partition),
+                }
             }
         };
-        Some(decision)
+        Some(consult)
     }
 
     /// §11 Stage 2 — serve a `Fresh`/`Stale` discovery-cache hit WITHOUT
@@ -2693,20 +2775,14 @@ impl McpRegistry {
     /// §11 write-through: after a LIVE discovery round completes
     /// (`connect_locked_inner`, right before `config`/`caps`/`tools`/…
     /// move into the `Connected` state), persist the freshly discovered
-    /// catalog for a cache-ELIGIBLE server so a future connect can serve it
-    /// once Stage 2 wires the read side. Oracle `Wo`'s write gate additionally
-    /// checks identity-epoch/in-flight-swap conditions this port has no
-    /// concept of (see `discovery_cache`'s module doc); this is restricted to
-    /// the portion this port CAN evaluate, [`crate::discovery_cache::cache_gate`]
-    /// (the exact port of `JK`'s `me(e)===undefined`).
+    /// catalog for a cache-ELIGIBLE server so a future connect can serve it.
+    /// The authenticated grant partition is captured before catalog RPCs and
+    /// re-resolved before write; a mismatch skips persistence.
     ///
     /// A gate reason [`crate::discovery_cache::CacheGateReason::purges_existing_entry`]
     /// flags instead purges any existing on-disk entry, best-effort — the
-    /// write-side application of the same purge the oracle's read-side
-    /// `cot` performs on an `opt-out`/`headers-helper` miss (this port
-    /// doesn't call `decide` from a real cache-CONSULTING call site yet, so
-    /// applying the purge here, at the one real write opportunity available
-    /// today, is the closest equivalent).
+    /// write-side counterpart of the same purge the oracle's read-side `cot`
+    /// performs on an `opt-out`/`headers-helper` miss.
     ///
     /// Best-effort throughout: any store I/O failure is logged and
     /// swallowed, matching the oracle's `catch(r){Z(e.name, \`Discovery
@@ -2755,7 +2831,8 @@ impl McpRegistry {
                 let Ok(serialized) = serde_json::to_string(&entry) else {
                     return;
                 };
-                let Ok(secret_candidates) = self.discovery_cache_secret_candidates_for(config).await
+                let Ok(secret_candidates) =
+                    self.discovery_cache_secret_candidates_for(config).await
                 else {
                     return;
                 };
@@ -2787,32 +2864,16 @@ impl McpRegistry {
         }
     }
 
-    /// §11 strike accounting: a connect attempt that ultimately FAILS for a
-    /// cache-ELIGIBLE server with an EXISTING on-disk entry increments that
-    /// entry's `consecutive_refresh_failures` (best-effort). A server with
-    /// no entry yet records nothing — there is nothing to strike, and this
-    /// port never fabricates an entry purely to hold a failure count.
-    ///
-    /// This approximates the oracle's background-revalidation strike
-    /// counter (`_6e`, reachable only from a `Stale`-hit's async
-    /// revalidation): this port records the true background refresh failure
-    /// there when a stale hit revalidation fails, and still uses an ordinary
-    /// failed connect as a conservative fallback signal against whatever entry
-    /// already exists.
-    async fn record_discovery_cache_connect_failure(&self, config: &McpServerConfig) {
+    /// Record one oracle `_6e` strike against the exact partition that served
+    /// the stale catalog. Ordinary connection failures never call this path.
+    /// Keeping the captured partition avoids striking a new identity partition
+    /// if the remote MCP refresh grant rotates during background revalidation.
+    fn record_discovery_cache_refresh_failure(
+        &self,
+        config: &McpServerConfig,
+        partition: &DiscoveryCachePartition,
+    ) {
         let Some(store) = &self.discovery_cache_store else {
-            return;
-        };
-        if crate::discovery_cache::cache_gate(
-            &config.spec,
-            config.discovery_cache,
-            crate::discovery_cache::feature_enabled(),
-        )
-        .is_some()
-        {
-            return;
-        }
-        let Ok(partition) = self.discovery_cache_partition_for(config).await else {
             return;
         };
         if let crate::discovery_cache::EntryLookup::Found(mut entry) =
@@ -7761,6 +7822,98 @@ mod tests {
 
     // ── §11 discovery-cache wiring ──────────────────────────────────────
 
+    #[test]
+    fn secret_refusal_extracts_composite_header_values() {
+        let mut cfg = http_cfg("srv", "https://mcp.example.com/v1");
+        let McpTransportSpec::Http { headers, .. } = &mut cfg.spec else {
+            unreachable!()
+        };
+        headers.insert(
+            "Cookie".to_string(),
+            "session=super-secret-value; theme=dark".to_string(),
+        );
+
+        let candidates = McpRegistry::config_secret_candidates(&cfg);
+        assert!(candidates.iter().any(|value| value == "super-secret-value"));
+        let serialized = serde_json::json!({"description": "super-secret-value"}).to_string();
+        assert!(McpRegistry::discovery_cache_entry_reflects_secret(
+            &serialized,
+            &candidates
+        ));
+    }
+
+    #[test]
+    fn secret_refusal_detects_percent_encoded_token_values() {
+        let candidates = vec!["tok+/=value?".to_string()];
+        for reflected in ["tok%2B%2F%3Dvalue%3F", "tok%2b%2f%3dvalue%3f"] {
+            let serialized = serde_json::json!({"description": reflected}).to_string();
+            assert!(McpRegistry::discovery_cache_entry_reflects_secret(
+                &serialized,
+                &candidates
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn secret_refusal_checks_percent_encoded_stored_mcp_tokens() {
+        let mut cfg = http_cfg("srv", "https://mcp.example.com/v1");
+        let McpTransportSpec::Http { oauth, .. } = &mut cfg.spec else {
+            unreachable!()
+        };
+        *oauth = Some(traits::McpOAuthConfigDto {
+            client_id: None,
+            callback_port: None,
+            auth_server_metadata_url: None,
+            scopes: None,
+            xaa: None,
+        });
+
+        let storage = Arc::new(XaaMemStorage::default());
+        let storage_dyn = storage.clone() as Arc<dyn traits::SecureStorage>;
+        let clock = Arc::new(FixedClock(std::time::UNIX_EPOCH)) as Arc<dyn traits::Clock>;
+        let server_key = oauth::server_key(&cfg.name, &cfg.spec);
+        oauth::store_tokens(
+            &storage_dyn,
+            &clock,
+            &server_key,
+            &oauth::StoredTokens {
+                access_token: "access+/=token?".into(),
+                refresh_token: Some("refresh+/=token?".into()),
+                expires_at_unix: 1,
+                client_id: None,
+                client_secret: None,
+                step_up_scope: None,
+            },
+        )
+        .await
+        .expect("store MCP tokens");
+
+        let mock = Arc::new(BridgeMock::new(&[]));
+        let registry = McpRegistry::with_raw_conn(
+            mock.clone() as Arc<dyn McpTransport>,
+            mock as Arc<dyn RawConnectionProvider>,
+        )
+        .with_oauth(OAuthDeps {
+            http: GatedXaaHttp::new() as Arc<dyn traits::HttpTransport>,
+            clock,
+            storage: storage_dyn,
+            on_authorization_url: Arc::new(|_| {}),
+            xaa_config: None,
+        });
+        let candidates = registry
+            .discovery_cache_secret_candidates_for(&cfg)
+            .await
+            .expect("secret candidates");
+
+        for reflected in ["access%2B%2F%3Dtoken%3F", "refresh%2B%2F%3Dtoken%3F"] {
+            let serialized = serde_json::json!({"description": reflected}).to_string();
+            assert!(McpRegistry::discovery_cache_entry_reflects_secret(
+                &serialized,
+                &candidates
+            ));
+        }
+    }
+
     /// A `None` `discovery_cache_store` (every registry not built with
     /// [`McpRegistry::with_discovery_cache_store`]) must leave every §11
     /// helper a total no-op: no store, no write, no purge, no strike, no
@@ -7814,7 +7967,7 @@ mod tests {
         registry.connect(cfg).await.unwrap();
         drop(env);
 
-        let entry = match store.load(&cache_key) {
+        let entry = match load_test_entry(&store, &cache_key) {
             crate::discovery_cache::EntryLookup::Found(entry) => entry,
             other => panic!("expected a persisted entry, got {other:?}"),
         };
@@ -7873,10 +8026,8 @@ mod tests {
     /// [`crate::discovery_cache::CacheGateReason::HeadersHelper`] — the one
     /// gate reason besides `OptOut` that
     /// [`crate::discovery_cache::CacheGateReason::purges_existing_entry`]
-    /// flags, and the only one actually reachable from a real config today
-    /// (`OptOut` requires `discovery_cache_opt_out`, which no production
-    /// call site can produce yet). Called directly (not through `connect`)
-    /// because a real `headersHelper` would spawn an actual subprocess —
+    /// flags. Called directly (not through `connect`) because a real
+    /// `headersHelper` would spawn an actual subprocess —
     /// the gate decision itself does not depend on that subprocess ever
     /// running, only on `config.spec` carrying `headers_helper: Some(_)`.
     #[tokio::test]
@@ -7905,8 +8056,9 @@ mod tests {
 
         // Pre-seed an entry as if it were written before `headersHelper` got
         // configured on this server.
-        store
-            .store(&crate::discovery_cache::DiscoveryCacheEntry::new(
+        store_test_entry(
+            &store,
+            &crate::discovery_cache::DiscoveryCacheEntry::new(
                 cache_key.clone(),
                 1,
                 ServerCapabilitiesDto::default(),
@@ -7914,43 +8066,83 @@ mod tests {
                 vec![],
                 vec![],
                 vec![],
-            ))
-            .expect("seed store");
+            ),
+        );
         assert!(matches!(
-            store.load(&cache_key),
+            load_test_entry(&store, &cache_key),
             crate::discovery_cache::EntryLookup::Found(_)
         ));
 
-        registry.persist_or_purge_discovery_cache(
-            &cfg,
-            None,
-            &ServerCapabilitiesDto::default(),
-            &[],
-            &[],
-            &[],
-            &[],
-        )
-        .await;
+        registry
+            .persist_or_purge_discovery_cache(
+                &cfg,
+                None,
+                &ServerCapabilitiesDto::default(),
+                &[],
+                &[],
+                &[],
+                &[],
+            )
+            .await;
         drop(env);
 
         assert_eq!(
-            store.load(&cache_key),
+            load_test_entry(&store, &cache_key),
             crate::discovery_cache::EntryLookup::Absent,
             "a headersHelper-gated server must have its stale entry purged"
         );
     }
 
-    /// Strike accounting: a connect that ultimately FAILS (here, a
-    /// `tools/list` failure — the same real failure mode
-    /// `connect_survives_a_resource_templates_fetch_that_fails`'s sibling
-    /// tests use) for a cache-ELIGIBLE server with an EXISTING on-disk
-    /// entry must increment that entry's `consecutive_refresh_failures` by
-    /// exactly 1. A server with no prior entry (the OTHER half of this gate)
-    /// is covered by `connect_does_not_persist_for_a_transport_ineligible_server`'s
-    /// sibling assumption implicitly: nothing to strike, nothing written —
-    /// see `record_discovery_cache_connect_failure`'s doc.
+    /// A real parsed/runtime `discoveryCache:false` value must purge the
+    /// server's existing cache family, dial live, and decline write-through.
     #[tokio::test]
-    async fn a_failed_connect_increments_strikes_on_an_existing_entry() {
+    async fn discovery_cache_false_purges_then_dials_without_rewriting() {
+        let _guard = crate::discovery_cache::tests_env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let env = DiscoveryCacheEnvGuard::new();
+        env.set(crate::discovery_cache::ENV_ENABLED, "true");
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = crate::discovery_cache::DiscoveryCacheStore::new(dir.path());
+        let mut cfg = http_cfg("srv", "https://mcp.example.com/v1");
+        cfg.discovery_cache = Some(false);
+        let cache_key = crate::discovery_cache::logical_cache_key(&cfg);
+        store_test_entry(
+            &store,
+            &crate::discovery_cache::DiscoveryCacheEntry::new(
+                cache_key.clone(),
+                1,
+                ServerCapabilitiesDto::default(),
+                vec![],
+                vec![],
+                vec![],
+                vec![],
+            ),
+        );
+
+        let mock = Arc::new(BridgeMock::new(&["alpha"]));
+        let registry = McpRegistry::with_raw_conn(
+            mock.clone() as Arc<dyn McpTransport>,
+            mock.clone() as Arc<dyn RawConnectionProvider>,
+        )
+        .with_discovery_cache_store(crate::discovery_cache::DiscoveryCacheStore::new(dir.path()));
+
+        registry.connect(cfg).await.expect("live opt-out connect");
+        drop(env);
+
+        assert_eq!(mock.connect_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            load_test_entry(&store, &cache_key),
+            crate::discovery_cache::EntryLookup::Absent,
+            "opt-out must purge the old partition and must not write a new one"
+        );
+    }
+
+    /// Oracle `_6e` strikes belong only to stale background revalidation. A
+    /// failed ordinary connect must leave an existing cache entry untouched.
+    #[tokio::test]
+    async fn an_ordinary_failed_connect_does_not_strike_an_existing_entry() {
         let _guard = crate::discovery_cache::tests_env_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -7961,8 +8153,9 @@ mod tests {
         let store = crate::discovery_cache::DiscoveryCacheStore::new(dir.path());
         let cfg = http_cfg("srv", "https://mcp.example.com/v1");
         let cache_key = crate::discovery_cache::logical_cache_key(&cfg);
-        store
-            .store(&crate::discovery_cache::DiscoveryCacheEntry::new(
+        store_test_entry(
+            &store,
+            &crate::discovery_cache::DiscoveryCacheEntry::new(
                 cache_key.clone(),
                 1,
                 ServerCapabilitiesDto::default(),
@@ -7970,8 +8163,8 @@ mod tests {
                 vec![],
                 vec![],
                 vec![],
-            ))
-            .expect("seed store");
+            ),
+        );
 
         let mock = Arc::new(BridgeMock::new(&["alpha"]));
         mock.list_tools_fails.store(true, Ordering::SeqCst);
@@ -7988,13 +8181,73 @@ mod tests {
             result.is_err(),
             "a tools/list failure must fail the connect"
         );
-        let entry = match store.load(&cache_key) {
+        let entry = match load_test_entry(&store, &cache_key) {
             crate::discovery_cache::EntryLookup::Found(entry) => entry,
             other => panic!("expected the seeded entry to survive, got {other:?}"),
         };
         assert_eq!(
-            entry.consecutive_refresh_failures, 1,
-            "exactly one strike must be recorded for the one failed connect"
+            entry.consecutive_refresh_failures, 0,
+            "ordinary connect failure must not record a stale-refresh strike"
+        );
+    }
+
+    #[test]
+    fn stale_refresh_strikes_only_the_partition_that_served_the_hit() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = crate::discovery_cache::DiscoveryCacheStore::new(dir.path());
+        let cfg = http_cfg("srv", "https://mcp.example.com/v1");
+        let logical_key = crate::discovery_cache::logical_cache_key(&cfg);
+        let old_partition = DiscoveryCachePartition {
+            logical_key: logical_key.clone(),
+            partition_key: crate::discovery_cache::partition_key(
+                &logical_key,
+                &crate::discovery_cache::fingerprint("grant:old"),
+            ),
+        };
+        let new_partition = DiscoveryCachePartition {
+            logical_key: logical_key.clone(),
+            partition_key: crate::discovery_cache::partition_key(
+                &logical_key,
+                &crate::discovery_cache::fingerprint("grant:new"),
+            ),
+        };
+        let entry = crate::discovery_cache::DiscoveryCacheEntry::new(
+            logical_key.clone(),
+            1,
+            ServerCapabilitiesDto::default(),
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+        );
+        store
+            .store_partitioned(&entry, &old_partition.partition_key)
+            .expect("seed old partition");
+        store
+            .store_partitioned(&entry, &new_partition.partition_key)
+            .expect("seed rotated partition");
+
+        let mock = Arc::new(BridgeMock::new(&[]));
+        let registry = McpRegistry::with_raw_conn(
+            mock.clone() as Arc<dyn McpTransport>,
+            mock as Arc<dyn RawConnectionProvider>,
+        )
+        .with_discovery_cache_store(crate::discovery_cache::DiscoveryCacheStore::new(dir.path()));
+
+        registry.record_discovery_cache_refresh_failure(&cfg, &old_partition);
+
+        let old = match store.load_partitioned(&logical_key, &old_partition.partition_key) {
+            crate::discovery_cache::EntryLookup::Found(entry) => entry,
+            other => panic!("expected old partition, got {other:?}"),
+        };
+        let new = match store.load_partitioned(&logical_key, &new_partition.partition_key) {
+            crate::discovery_cache::EntryLookup::Found(entry) => entry,
+            other => panic!("expected rotated partition, got {other:?}"),
+        };
+        assert_eq!(old.consecutive_refresh_failures, 1);
+        assert_eq!(
+            new.consecutive_refresh_failures, 0,
+            "a refresh-token rotation must not move the strike to the new partition"
         );
     }
 
@@ -8048,8 +8301,9 @@ mod tests {
         prompts: Vec<McpPromptDto>,
     ) {
         let saved_at_ms = crate::discovery_cache::now_ms().saturating_sub(age_ms);
-        store
-            .store(&crate::discovery_cache::DiscoveryCacheEntry::new(
+        store_test_entry(
+            store,
+            &crate::discovery_cache::DiscoveryCacheEntry::new(
                 cache_key.to_string(),
                 saved_at_ms,
                 capabilities,
@@ -8057,8 +8311,29 @@ mod tests {
                 resources,
                 vec![],
                 prompts,
-            ))
-            .expect("seed store");
+            ),
+        );
+    }
+
+    fn default_test_partition_key(cache_key: &str) -> String {
+        let fingerprint = crate::discovery_cache::fingerprint("grant:none");
+        crate::discovery_cache::partition_key(cache_key, &fingerprint)
+    }
+
+    fn store_test_entry(
+        store: &crate::discovery_cache::DiscoveryCacheStore,
+        entry: &crate::discovery_cache::DiscoveryCacheEntry,
+    ) {
+        store
+            .store_partitioned(entry, &default_test_partition_key(&entry.cache_key))
+            .expect("seed partitioned store");
+    }
+
+    fn load_test_entry(
+        store: &crate::discovery_cache::DiscoveryCacheStore,
+        cache_key: &str,
+    ) -> crate::discovery_cache::EntryLookup {
+        store.load_partitioned(cache_key, &default_test_partition_key(cache_key))
     }
 
     fn seed_entry(
@@ -8296,7 +8571,7 @@ mod tests {
             1,
             "the stale hit must trigger exactly one live revalidation dial"
         );
-        let entry = match store.load(&cache_key) {
+        let entry = match load_test_entry(&store, &cache_key) {
             crate::discovery_cache::EntryLookup::Found(entry) => entry,
             other => panic!("expected refreshed entry, got {other:?}"),
         };
@@ -8343,7 +8618,7 @@ mod tests {
             .expect("stale cache hit connect");
         tokio::time::timeout(Duration::from_secs(2), async {
             loop {
-                let entry = match store.load(&cache_key) {
+                let entry = match load_test_entry(&store, &cache_key) {
                     crate::discovery_cache::EntryLookup::Found(entry) => entry,
                     other => panic!("expected seeded entry, got {other:?}"),
                 };
@@ -8470,7 +8745,7 @@ mod tests {
         let lifecycle = registry.lifecycle_lock("srv");
         let _guard = lifecycle.lock().await;
         let prepare = registry
-            .prepare_lazy_upgrade_slot_locked("srv", LazyUpgradeMode::Background)
+            .prepare_lazy_upgrade_slot_locked("srv", LazyUpgradeMode::Background, None)
             .await
             .expect("background probe");
         drop(_guard);
@@ -8636,7 +8911,7 @@ mod tests {
         let cached_id = registry.connect(cfg).await.expect("stale hit connect");
         tokio::time::timeout(Duration::from_secs(2), async {
             loop {
-                let entry = match store.load(&cache_key) {
+                let entry = match load_test_entry(&store, &cache_key) {
                     crate::discovery_cache::EntryLookup::Found(entry) => entry,
                     other => panic!("expected entry, got {other:?}"),
                 };
@@ -8690,7 +8965,7 @@ mod tests {
         let cached_id = registry.connect(cfg).await.expect("stale cache hit");
         tokio::time::timeout(Duration::from_secs(2), async {
             loop {
-                let struck = match store.load(&cache_key) {
+                let struck = match load_test_entry(&store, &cache_key) {
                     crate::discovery_cache::EntryLookup::Found(entry) => {
                         entry.consecutive_refresh_failures == 1
                     }
@@ -8812,7 +9087,7 @@ mod tests {
         mock.connect_release.notify_one();
         tokio::time::timeout(Duration::from_secs(2), async {
             loop {
-                let entry = match store.load(&cache_key) {
+                let entry = match load_test_entry(&store, &cache_key) {
                     crate::discovery_cache::EntryLookup::Found(entry) => entry,
                     other => panic!("expected entry, got {other:?}"),
                 };
@@ -9321,7 +9596,7 @@ mod tests {
         assert_eq!(config.timeout_ms, Some(1234));
         assert_eq!(tools[0].tool_name, "old");
         drop(conns);
-        let entry = match store.load(&cache_key) {
+        let entry = match load_test_entry(&store, &cache_key) {
             crate::discovery_cache::EntryLookup::Found(entry) => entry,
             other => panic!("seeded cache entry must survive, got {other:?}"),
         };

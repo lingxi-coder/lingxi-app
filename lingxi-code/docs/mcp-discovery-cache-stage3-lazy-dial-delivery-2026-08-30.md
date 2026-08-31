@@ -1,5 +1,7 @@
 # MCP discovery cache Stage 3 与 resources/prompts 惰性拨号交付报告
 
+> 2026-08-31 更新：本文保留 Stage 3 历史交付记录；其 production identity/wiring defer 已由 `mcp-discovery-cache-production-alignment-2.1.251-2026-08-31.md` 关闭。第 9、10 节应结合新报告阅读。
+
 | 项目 | 结果 |
 | --- | --- |
 | 日期 | 2026-08-30 |
@@ -19,7 +21,7 @@ Stage 3 discovery cache、cached resources/prompts lazy dial、plugin refresh si
 
 Sol 已完成最终全 diff 与交付文档复审，结论为 `OVERALL VERDICT: SHIP`，无剩余 P0–P3 finding。
 
-production discovery cache store 仍未在 desktop/mobile composition root 接线。身份 fingerprint、失效边界与生产 wiring 仍是明确 defer，不能把当前状态描述为生产缓存启用。
+本报告交付时 production store 尚未接线；该历史缺口已在 2026-08-31 的 production alignment follow-up 中关闭。
 
 ## 2. 审查—修复闭环
 
@@ -304,19 +306,19 @@ MCP_DISCOVERY_CACHE_TTL_S=1 cargo test -p mcp --lib ttl_and_max_stale_defaults -
 
 - 已验证的 oracle literals、schema 与 behavior alignment 均已对齐到当前实现范围
 - miss reason、capability gate、tool naming、部分 error copy 与 schema 兼容性按可验证范围对齐
-- production store wiring、identity fingerprint 与失效边界仍明确标为 defer，而不是模糊声称“已完全一致”
+- 本文当时明确 defer 的 production store、grant fingerprint 与失效边界，已由 2026-08-31 follow-up 实施并单独验证
 
 ## 9. Production store wiring 的后续边界
 
-production discovery cache store 依旧**没有**在 desktop/mobile composition root 接线。当前明确 defer 的边界包括：
+本文交付时 production discovery cache store 尚未接线；2026-08-31 follow-up 已完成：
 
-- 身份 fingerprint 的稳定输入
-- OAuth/XAA grant、account、tenant 与 resource identity 的隔离规则
-- 凭据更换、reauth、logout、grant replacement 的失效语义
-- plugin-owned namespace 与 composition root 注入时机
-- production cache root 的最终持久化位置与失效触发边界
+- provider-neutral 固定兼容域 + MCP refresh grant fingerprint
+- grant rotation partition isolation 与 exact stale strike
+- plugin unload/remove/disconnect family purge
+- desktop composition-root store injection
+- `<lingxi_home>/mcp-discovery-cache` production root
 
-在这些边界落地前，不能把当前状态描述为 production discovery cache 已启用。
+Mobile 当前只有 cache-ineligible 的 `InProcess` MCP，因此保持 store unwired；未来引入 remote mobile MCP 时再评估平台持久化。
 
 ## 10. 交接清单
 
@@ -327,4 +329,4 @@ production discovery cache store 依旧**没有**在 desktop/mobile composition 
 - [x] mandatory deslop 完成
 - [x] 最终全 diff / 文档复审：Sol xhigh `OVERALL VERDICT: SHIP`
 
-production discovery cache store 的 wiring、身份 fingerprint 与失效边界后续实施，见第 9 节；这是明确 defer，不属于本轮交付范围。
+本文的 production defer 已由 2026-08-31 production alignment follow-up 关闭；剩余长期边界以新报告第 12 节为准。

@@ -91,22 +91,18 @@
 //! * **Write.** After a successful LIVE discovery round, `connect` persists
 //!   the full catalog (tools/resources/resource_templates/prompts +
 //!   capabilities) for a cache-ELIGIBLE server ([`cache_gate`] returning
-//!   `None`) via [`DiscoveryCacheEntry::new`]/[`DiscoveryCacheStore::store`],
-//!   resetting `consecutive_refresh_failures` to 0 (oracle `Wo`/`Mt`,
-//!   restricted to the identity/in-flight-swap-free subset this port can
-//!   evaluate — see the deferred note above). A gate reason that
-//!   [`CacheGateReason::purges_existing_entry`] flags (`HeadersHelper`, and
-//!   `OptOut` if it ever becomes reachable) instead purges any existing
-//!   on-disk entry, best-effort.
-//! * **Strikes.** A connect attempt that ultimately FAILS for a
-//!   cache-eligible server with an EXISTING on-disk entry increments that
-//!   entry's `consecutive_refresh_failures` (best-effort; a server with no
-//!   entry yet records nothing — there is nothing to strike). This is an
-//!   approximation of the oracle's background-revalidation strike counter
-//!   (`_6e`, only reachable from a `Stale`-hit's revalidation path): this
-//!   port now records the real background-refresh failure there, and still
-//!   uses ordinary failed connects as a conservative fallback signal for
-//!   existing cache entries.
+//!   `None`) via [`DiscoveryCacheEntry::new`] and a grant-partitioned
+//!   [`DiscoveryCacheStore`], resetting `consecutive_refresh_failures` to 0
+//!   (oracle `Wo`/`Mt`). The partition is captured after authenticated
+//!   transport setup and checked again before write, so a concurrent MCP
+//!   refresh-grant rotation cannot cross-write catalogs. A gate reason that
+//!   [`CacheGateReason::purges_existing_entry`] flags (`HeadersHelper` or
+//!   `OptOut`) instead purges the server's entire on-disk family, best-effort.
+//! * **Strikes.** Only a failed `Stale` background revalidation increments
+//!   `consecutive_refresh_failures`, matching oracle `_6e`. The lazy-upgrade
+//!   slot retains the exact partition that served the stale hit, so a grant
+//!   rotation cannot move the strike to the new partition. Ordinary initial
+//!   connection failures never strike cached data.
 //! * **Telemetry (MISS side).** Before every dial, [`crate::registry`] calls
 //!   [`decide`] and reports [`MissReason`]s that oracle `Ko` (2.1.251, same
 //!   chunk as `cot`) surfaces (`absent`/`expired`/`corrupt`/
@@ -166,12 +162,17 @@
 //! to `catalog_refresh_snapshot()` as active SHARED generations, while lagged
 //! listeners rebuild the entire shared MCP partition set from those current
 //! generations before applying best-effort catalog refreshes.
+//!
+//! The desktop composition root supplies a persistent store under
+//! `<lingxi_home>/mcp-discovery-cache`. Mobile currently exposes only
+//! `InProcess` MCP transports, which are cache-ineligible, so it deliberately
+//! leaves the optional store unwired.
 
+use sha2::{Digest, Sha256};
 use traits::{
     McpPromptDto, McpResourceDto, McpResourceTemplateDto, McpToolDto, McpTransportSpec,
     ServerCapabilitiesDto,
 };
-use sha2::{Digest, Sha256};
 
 /// Fixed byte-level compatibility domain used when reproducing Claude Code's
 /// discovery-cache fingerprint. This is not LingXi login state and must never
@@ -218,6 +219,26 @@ fn canonicalize_logical_key_value(value: serde_json::Value) -> serde_json::Value
         ),
         other => other,
     }
+}
+
+fn oauth_logical_key_config(oauth: &traits::McpOAuthConfigDto) -> serde_json::Value {
+    let mut map = serde_json::Map::new();
+    if let Some(client_id) = &oauth.client_id {
+        map.insert("clientId".into(), client_id.clone().into());
+    }
+    if let Some(callback_port) = oauth.callback_port {
+        map.insert("callbackPort".into(), callback_port.into());
+    }
+    if let Some(metadata_url) = &oauth.auth_server_metadata_url {
+        map.insert("authServerMetadataUrl".into(), metadata_url.clone().into());
+    }
+    if let Some(scopes) = &oauth.scopes {
+        map.insert("scopes".into(), scopes.clone().into());
+    }
+    if let Some(xaa) = oauth.xaa {
+        map.insert("xaa".into(), xaa.into());
+    }
+    serde_json::Value::Object(map)
 }
 
 fn spec_logical_key_config(spec: &McpTransportSpec) -> serde_json::Value {
@@ -282,10 +303,7 @@ fn spec_logical_key_config(spec: &McpTransportSpec) -> serde_json::Value {
                 map.insert("headersHelper".into(), helper.clone().into());
             }
             if let Some(oauth) = oauth {
-                map.insert(
-                    "oauth".into(),
-                    serde_json::to_value(oauth).expect("OAuth config is serializable"),
-                );
+                map.insert("oauth".into(), oauth_logical_key_config(oauth));
             }
             if url.trim().is_empty() {
                 map.insert("unconfigured".into(), true.into());
@@ -362,8 +380,8 @@ pub(crate) fn logical_cache_key(config: &crate::connection::McpServerConfig) -> 
         map.insert("timeout".into(), timeout.into());
     }
     let canonical = canonicalize_logical_key_value(raw);
-    let canonical_json =
-        serde_json::to_string(&canonical).expect("canonical discovery-cache key config is serializable");
+    let canonical_json = serde_json::to_string(&canonical)
+        .expect("canonical discovery-cache key config is serializable");
     let hash = sha256_hex(canonical_json.as_bytes());
     format!("{}-{}", config.name, &hash[..16])
 }
@@ -794,9 +812,9 @@ pub struct DiscoveryCacheEntry {
     /// Schema version — see [`CACHE_SCHEMA_VERSION`].
     #[serde(rename = "v")]
     pub version: u32,
-    /// Expected value: [`DiscoveryCacheStore::cache_key`] for the server this
-    /// entry belongs to. A mismatch (entry read from the right file path but
-    /// keyed for a different server/config) is treated as [`MissReason::Corrupt`].
+    /// Logical server/config key from [`logical_cache_key`]. A mismatch
+    /// (entry read from the right partition path but keyed for a different
+    /// server/config) is treated as [`MissReason::Corrupt`].
     pub cache_key: String,
     /// When this entry was saved, ms since the Unix epoch.
     pub saved_at_ms: u64,
@@ -1022,7 +1040,10 @@ pub struct DiscoveryCacheStore {
 
 impl DiscoveryCacheStore {
     fn valid_partition_key(key: &str) -> bool {
-        key.len() == 32 && key.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        key.len() == 32
+            && key
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
     }
 
     fn staging_path(&self, key: &str, nonce: u64) -> std::path::PathBuf {
@@ -1143,7 +1164,10 @@ impl DiscoveryCacheStore {
         }
         let bytes = serde_json::to_vec(entry)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-        if u64::try_from(bytes.len()).ok().is_some_and(|len| len > MAX_ENTRY_BYTES) {
+        if u64::try_from(bytes.len())
+            .ok()
+            .is_some_and(|len| len > MAX_ENTRY_BYTES)
+        {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
                 "discovery cache entry exceeds max size",
@@ -1251,6 +1275,7 @@ impl DiscoveryCacheStore {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn purge_family(&self, logical_key: &str) -> std::io::Result<()> {
         let Ok(entries) = std::fs::read_dir(&self.root) else {
             return Ok(());
@@ -2264,7 +2289,11 @@ mod tests {
 
         store.store(&entry).expect("store");
 
-        let root_mode = std::fs::metadata(&root).expect("root metadata").permissions().mode() & 0o777;
+        let root_mode = std::fs::metadata(&root)
+            .expect("root metadata")
+            .permissions()
+            .mode()
+            & 0o777;
         let entry_mode = std::fs::metadata(root.join("abc.json"))
             .expect("entry metadata")
             .permissions()
@@ -2285,7 +2314,8 @@ mod tests {
     }
 
     #[test]
-    fn logical_cache_key_ignores_scope_config_error_and_discovery_cache_but_tracks_timeout_and_always_load() {
+    fn logical_cache_key_ignores_scope_config_error_and_discovery_cache_but_tracks_timeout_and_always_load(
+    ) {
         let mut base = crate::connection::McpServerConfig {
             name: "srv".into(),
             spec: http_spec("https://a.example", None),
@@ -2316,6 +2346,7 @@ mod tests {
         };
 
         let base_key = logical_cache_key(&base);
+        assert_eq!(base_key, "srv-3a9ea8118cd8b809");
         assert_eq!(base_key, logical_cache_key(&same));
         assert_eq!(base_key, logical_cache_key(&different_discovery_cache));
         assert_ne!(base_key, logical_cache_key(&different_timeout));
@@ -2325,5 +2356,37 @@ mod tests {
             *headers_helper = Some("./helper".into());
         }
         assert_ne!(base_key, logical_cache_key(&base));
+    }
+
+    #[test]
+    fn logical_cache_key_omits_absent_oauth_fields_and_tracks_present_fields() {
+        let mut empty_oauth = crate::connection::McpServerConfig {
+            name: "srv".into(),
+            spec: http_spec("https://a.example", None),
+            scope: crate::connection::ConfigScope::User,
+            disabled: false,
+            timeout_ms: Some(10),
+            discovery_cache: None,
+            always_load: false,
+            config_error: None,
+        };
+        let McpTransportSpec::Http { oauth, .. } = &mut empty_oauth.spec else {
+            unreachable!()
+        };
+        *oauth = Some(traits::McpOAuthConfigDto {
+            client_id: None,
+            callback_port: None,
+            auth_server_metadata_url: None,
+            scopes: None,
+            xaa: None,
+        });
+        assert_eq!(logical_cache_key(&empty_oauth), "srv-3e065924e4160070");
+
+        let mut partial_oauth = empty_oauth.clone();
+        let McpTransportSpec::Http { oauth, .. } = &mut partial_oauth.spec else {
+            unreachable!()
+        };
+        oauth.as_mut().expect("oauth config").client_id = Some("client".into());
+        assert_eq!(logical_cache_key(&partial_oauth), "srv-95bfe547b37316e7");
     }
 }

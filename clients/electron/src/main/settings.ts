@@ -20,6 +20,7 @@ import {
 export class SettingsStore {
   readonly settingsPath: string;
   private settings: PersistedSettings;
+  private volatileActiveSession: SessionRef | undefined;
 
   constructor(userData: string) {
     this.settingsPath = join(userData, 'settings.v1.json');
@@ -47,7 +48,12 @@ export class SettingsStore {
   }
 
   getPublic(): PublicSettings {
-    return publicSettings(this.settings);
+    return publicSettings({
+      ...this.settings,
+      activeSession: this.volatileActiveSession
+        ? { ...this.volatileActiveSession }
+        : this.settings.activeSession ? { ...this.settings.activeSession } : undefined,
+    });
   }
 
   getWorkspace(): string | undefined {
@@ -65,16 +71,33 @@ export class SettingsStore {
   }
 
   setActiveSession(ref: SessionRef | undefined): PublicSettings {
+    const previousSettings = this.settings;
+    const previousVolatileActiveSession = this.volatileActiveSession;
     if (ref !== undefined) {
-      if (!this.settings.projects.includes(ref.projectPath)) throw new Error('project is not in the project list');
-      if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(ref.sessionId)) {
-        throw new Error('invalid session id');
-      }
-      this.settings.activeSession = { ...ref };
+      this.validateSessionRef(ref);
+      this.settings = { ...this.settings, activeSession: { ...ref } };
     } else {
-      delete this.settings.activeSession;
+      const { activeSession: _activeSession, ...settings } = this.settings;
+      this.settings = settings;
     }
-    this.persist();
+    try {
+      this.persist();
+    } catch (error) {
+      this.settings = previousSettings;
+      this.volatileActiveSession = previousVolatileActiveSession;
+      throw error;
+    }
+    this.volatileActiveSession = undefined;
+    return this.getPublic();
+  }
+
+  setActiveSessionDraft(ref: SessionRef | undefined): PublicSettings {
+    if (ref !== undefined) {
+      this.validateSessionRef(ref);
+      this.volatileActiveSession = { ...ref };
+    } else {
+      this.volatileActiveSession = undefined;
+    }
     return this.getPublic();
   }
 
@@ -84,6 +107,7 @@ export class SettingsStore {
 
   removeProject(projectPath: string): void {
     this.settings = withoutProject(this.settings, projectPath);
+    if (this.volatileActiveSession?.projectPath === projectPath) this.volatileActiveSession = undefined;
     this.persist();
   }
 
@@ -131,6 +155,13 @@ export class SettingsStore {
     if (accepted) this.settings.bypassPermissionsModeAccepted = true;
     else delete this.settings.bypassPermissionsModeAccepted;
     this.persist();
+  }
+
+  private validateSessionRef(ref: SessionRef): void {
+    if (!this.settings.projects.includes(ref.projectPath)) throw new Error('project is not in the project list');
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(ref.sessionId)) {
+      throw new Error('invalid session id');
+    }
   }
 
 }

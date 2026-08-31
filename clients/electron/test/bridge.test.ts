@@ -115,6 +115,114 @@ test('newSession keeps the generated runtime/session id and does not send a seco
   }
 });
 
+test('newSession reuses one unsent draft per project until the first prompt crosses the bridge', async () => {
+  const projectPath = '/workspace-draft';
+  const commits: string[] = [];
+  let prompts = 0;
+  const originalStart = SessionRuntime.prototype.start;
+  SessionRuntime.prototype.start = async function () {
+    (this as any).activeWorkspace = projectPath;
+    (this as any).activeWorkspaceTrusted = true;
+    (this as any).state = { status: 'connected' };
+  };
+  const manager = new SessionRuntimeManager({
+    launchConfig: (ref) => ({ workspace: ref.projectPath, sessionId: ref.sessionId, trusted: true }),
+    onFirstPromptSent: (ref) => { commits.push(ref.sessionId); },
+  });
+  try {
+    const first = await manager.newSession(projectPath);
+    const second = await manager.newSession(projectPath);
+    assert.equal(second.sessionId, first.sessionId);
+
+    const runtime = manager.require(first) as SessionRuntime & { client: { sendPrompt: () => void } | null };
+    (runtime as any).client = { sendPrompt: () => { prompts += 1; } };
+    runtime.sendPrompt('hello');
+    runtime.sendPrompt('hello again');
+
+    assert.equal(prompts, 2);
+    assert.deepEqual(commits, [first.sessionId]);
+
+    const third = await manager.newSession(projectPath);
+    const fourth = await manager.newSession(projectPath);
+    assert.notEqual(third.sessionId, first.sessionId);
+    assert.equal(fourth.sessionId, third.sessionId);
+  } finally {
+    SessionRuntime.prototype.start = originalStart;
+    await manager.dispose();
+  }
+});
+
+test('newSession deduplicates concurrent draft creation and closeSession clears the draft slot', async () => {
+  const projectPath = '/workspace-race';
+  const gate = deferred<void>();
+  const originalStart = SessionRuntime.prototype.start;
+  let starts = 0;
+  SessionRuntime.prototype.start = async function () {
+    starts += 1;
+    (this as any).activeWorkspace = projectPath;
+    (this as any).activeWorkspaceTrusted = true;
+    (this as any).state = { status: 'connected' };
+    await gate.promise;
+  };
+  const manager = new SessionRuntimeManager({
+    launchConfig: (ref) => ({ workspace: ref.projectPath, sessionId: ref.sessionId, trusted: true }),
+  });
+  try {
+    const first = manager.newSession(projectPath);
+    const second = manager.newSession(projectPath);
+    gate.resolve();
+    const [created, duplicate] = await Promise.all([first, second]);
+    assert.equal(starts, 1);
+    assert.equal(duplicate.sessionId, created.sessionId);
+
+    await manager.closeSession(created);
+    const next = await manager.newSession(projectPath);
+    assert.notEqual(next.sessionId, created.sessionId);
+  } finally {
+    SessionRuntime.prototype.start = originalStart;
+    await manager.dispose();
+  }
+});
+
+test('first-prompt commit failures keep the draft recoverable and retry without making sendPrompt fail', async () => {
+  const projectPath = '/workspace-commit-error';
+  const diagnostics = new DiagnosticBuffer();
+  let commitAttempts = 0;
+  const originalStart = SessionRuntime.prototype.start;
+  SessionRuntime.prototype.start = async function () {
+    (this as any).activeWorkspace = projectPath;
+    (this as any).activeWorkspaceTrusted = true;
+    (this as any).state = { status: 'connected' };
+  };
+  const manager = new SessionRuntimeManager({
+    diagnostics,
+    launchConfig: (ref) => ({ workspace: ref.projectPath, sessionId: ref.sessionId, trusted: true }),
+    onFirstPromptSent: () => {
+      commitAttempts += 1;
+      if (commitAttempts === 1) throw new Error('settings disk is read-only');
+    },
+  });
+  try {
+    const first = await manager.newSession(projectPath);
+    const runtime = manager.require(first) as SessionRuntime & { client: { sendPrompt: () => void } | null };
+    (runtime as any).client = { sendPrompt: () => undefined };
+
+    assert.doesNotThrow(() => runtime.sendPrompt('hello'));
+    assert.match(diagnostics.snapshot().at(-1)?.message ?? '', /failed to commit draft session/);
+
+    const recoverable = await manager.newSession(projectPath);
+    assert.equal(recoverable.sessionId, first.sessionId);
+
+    assert.doesNotThrow(() => runtime.sendPrompt('retry commit'));
+    assert.equal(commitAttempts, 2);
+    const next = await manager.newSession(projectPath);
+    assert.notEqual(next.sessionId, first.sessionId);
+  } finally {
+    SessionRuntime.prototype.start = originalStart;
+    await manager.dispose();
+  }
+});
+
 test('owned resume waits for a matching engine event and never exposes renderer lifecycle commands', async () => {
   const sessionId = '11111111-2222-4333-8444-555555555555';
   const commands: unknown[] = [];

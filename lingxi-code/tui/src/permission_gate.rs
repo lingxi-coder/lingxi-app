@@ -153,7 +153,9 @@ impl TuiPermissionGate {
             _ => None,
         };
         // Step 1: consult session rules (content-aware: a narrowed AllowAlways
-        // rule only short-circuits a matching command/path/domain).
+        // rule only short-circuits a matching command/path/domain). A tool that
+        // requires a human decision on every invocation must not be bypassed by
+        // an older session rule.
         {
             let rules = self.session_allow_rules.lock().await;
             if !suppress_always_allow_rule
@@ -520,6 +522,64 @@ mod tests {
         assert!(matches!(
             task.await.unwrap(),
             PermissionOutcome::AllowAuto { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn tui_gate_maps_eligible_auto_to_rich_outcome_without_persistence() {
+        let (event_tx, mut event_rx) = mpsc::channel::<PermissionExchange>(4);
+        let rules = Arc::new(Mutex::new(Vec::new()));
+        let gate = TuiPermissionGate::new(event_tx, rules.clone());
+        let ctx = permission::gate::PermissionCheckContext {
+            auto_mode_prompt: Some(permission::gate::AutoModePrompt::WorkflowBash),
+            ..Default::default()
+        };
+        let task = tokio::spawn(async move {
+            gate.check_with_context("Bash", &json!({"command": "echo hi"}), &ctx)
+                .await
+        });
+        let exchange = event_rx.recv().await.unwrap();
+        assert_eq!(
+            exchange.auto_mode_prompt,
+            Some(permission::gate::AutoModePrompt::WorkflowBash)
+        );
+        exchange
+            .resp_tx
+            .send(PermissionResponse::AllowAuto)
+            .unwrap();
+        assert!(matches!(
+            task.await.unwrap(),
+            permission::gate::PermissionOutcome::AllowAuto { .. }
+        ));
+        assert!(rules.lock().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn tui_gate_maps_exit_plan_to_plan_request_with_payload() {
+        let (event_tx, mut event_rx) = mpsc::channel::<PermissionExchange>(4);
+        let rules = Arc::new(Mutex::new(Vec::new()));
+        let gate = TuiPermissionGate::new(event_tx, rules);
+        let ctx = permission::gate::PermissionCheckContext {
+            auto_mode_prompt: Some(permission::gate::AutoModePrompt::ExitPlanMode),
+            ..Default::default()
+        };
+        let task = tokio::spawn(async move { gate.check_exit_plan_mode("1. Ship it", &ctx).await });
+        let exchange = event_rx.recv().await.unwrap();
+        match exchange.request {
+            PermissionRequest::ExitPlanMode { plan } => assert_eq!(plan, "1. Ship it"),
+            other => panic!("unexpected request: {other:?}"),
+        }
+        assert_eq!(
+            exchange.auto_mode_prompt,
+            Some(permission::gate::AutoModePrompt::ExitPlanMode)
+        );
+        exchange
+            .resp_tx
+            .send(PermissionResponse::AllowAuto)
+            .unwrap();
+        assert!(matches!(
+            task.await.unwrap(),
+            permission::gate::PermissionOutcome::AllowAuto { .. }
         ));
     }
 

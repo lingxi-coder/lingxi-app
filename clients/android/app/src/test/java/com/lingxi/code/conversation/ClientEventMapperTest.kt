@@ -205,23 +205,23 @@ class ClientEventMapperTest {
     // --- completion / telemetry ------------------------------------------
 
     @Test
-    fun messageComplete_withMessage_mapsToCompleted() {
+    fun messageComplete_withMessage_mapsToNonTerminalBoundary() {
         val r = clientEventToReply(
             ClientEvent.MessageComplete(
                 stopReason = "end_turn",
                 message = MessageDto(role = "assistant", blocks = listOf(MessageBlockDto.Text("done"))),
             ),
         )
-        assertTrue(r is ReplyEvent.Completed)
-        val completed = r as ReplyEvent.Completed
-        assertEquals(Role.Ai, completed.message.role)
-        assertEquals("done", completed.message.text)
+        assertTrue(r is ReplyEvent.MessageComplete)
+        val completed = r as ReplyEvent.MessageComplete
+        assertEquals(Role.Ai, completed.message?.role)
+        assertEquals("done", completed.message?.text)
     }
 
     @Test
-    fun messageComplete_withoutMessage_mapsToEnd() {
+    fun messageComplete_withoutMessage_staysNonTerminal() {
         val r = clientEventToReply(ClientEvent.MessageComplete(stopReason = "end_turn", message = null))
-        assertEquals(ReplyEvent.End, r)
+        assertEquals(ReplyEvent.MessageComplete(null), r)
     }
 
     @Test

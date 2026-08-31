@@ -311,6 +311,114 @@ impl McpPermissionCeiling {
     }
 }
 
+/// Standard MCP icon descriptor for a tool.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpIconDto {
+    /// Verified icon source URI.
+    pub src: String,
+    /// Optional MIME type for the icon.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mime_type: Option<String>,
+    /// Declared size labels.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sizes: Vec<String>,
+    /// Optional theme discriminator.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub theme: Option<String>,
+}
+
+/// Optional MCP tool annotations.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpToolAnnotationsDto {
+    /// Optional user-facing title override.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    /// Whether the tool is host-proven read-only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub read_only_hint: Option<bool>,
+    /// Whether the tool may be destructive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub destructive_hint: Option<bool>,
+    /// Whether the host can prove the tool is idempotent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idempotent_hint: Option<bool>,
+    /// Whether the tool touches the outside world.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub open_world_hint: Option<bool>,
+}
+
+/// MCP task-support declaration for one tool.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum McpToolTaskSupportDto {
+    /// This tool does not participate in MCP Tasks.
+    Forbidden,
+    /// This tool may opt into MCP Tasks.
+    Optional,
+    /// This tool requires MCP Tasks.
+    Required,
+}
+
+/// Optional execution metadata for one tool.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpToolExecutionDto {
+    /// Declared MCP Tasks support level for this tool.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_support: Option<McpToolTaskSupportDto>,
+}
+
+/// Standard MCP 2025-11-25 `Tool` wire definition used by Local App catalogs.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpToolDefinitionDto {
+    /// Raw tool name exposed by the server.
+    pub name: String,
+    /// Optional user-facing title.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    /// Optional user-facing description.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// Input JSON Schema.
+    pub input_schema: Value,
+    /// Optional structured output JSON Schema.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_schema: Option<Value>,
+    /// Optional derived annotations.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub annotations: Option<McpToolAnnotationsDto>,
+    /// Optional execution metadata.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution: Option<McpToolExecutionDto>,
+    /// Optional icon list.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub icons: Vec<McpIconDto>,
+    /// Opaque vendor metadata preserved byte-for-byte.
+    #[serde(rename = "_meta", default, skip_serializing_if = "Option::is_none")]
+    pub meta: Option<Value>,
+}
+
+impl McpToolDefinitionDto {
+    /// Construct a minimal wire `Tool` definition.
+    #[must_use]
+    pub fn new(name: impl Into<String>, input_schema: Value) -> Self {
+        Self {
+            name: name.into(),
+            title: None,
+            description: None,
+            input_schema,
+            output_schema: None,
+            annotations: None,
+            execution: None,
+            icons: Vec::new(),
+            meta: None,
+        }
+    }
+}
+
 /// Config-side policy record used to seed the MCP client's permission map.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -370,6 +478,32 @@ pub struct McpToolDto {
     /// Defaults to `false` for servers/paths that don't set it.
     #[serde(default, skip_serializing_if = "is_false")]
     pub requires_user_interaction: bool,
+}
+
+impl McpToolDto {
+    /// Raw upstream tool name.
+    #[must_use]
+    pub fn tool_name(&self) -> &str {
+        &self.tool_name
+    }
+
+    /// Model-facing tool description.
+    #[must_use]
+    pub fn description(&self) -> &str {
+        &self.description
+    }
+
+    /// Input JSON Schema advertised for the tool.
+    #[must_use]
+    pub const fn input_schema(&self) -> &Value {
+        &self.input_schema
+    }
+
+    /// Whether every invocation requires fresh user interaction.
+    #[must_use]
+    pub const fn requires_user_interaction(&self) -> bool {
+        self.requires_user_interaction
+    }
 }
 
 /// `serde(skip_serializing_if)` helper for a plain `bool` field defaulting to

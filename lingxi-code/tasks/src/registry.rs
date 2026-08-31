@@ -190,6 +190,17 @@ impl Drop for SpawnPublicationGuard {
 /// Durable handoff fields used to rebuild a checkpointed workflow after the
 /// host process restarts. The workflow is registered as `Paused`; no worker is
 /// spawned until the user explicitly invokes `Workflow` with its run id.
+///
+/// Deliberately carries no `scope` field. Every field here is read straight
+/// from the on-disk checkpoint (`adopt.json`), which records whatever the
+/// ORIGINAL caller supplied -- so `workflow_id` and `args` are exactly as
+/// untrustworthy for minting Local App authority as they are everywhere else
+/// in this crate (see [`crate::scope::LocalAppWorkflowTaskScope`]'s module
+/// docs). Putting a `scope` field on this same struct would invite exactly
+/// the mistake this type exists to avoid: deriving authority from the
+/// checkpoint's own `workflow_id`/`args` instead of from state the Host
+/// re-resolves on load. [`TaskRegistry::register_adopted_workflow_with_scope`]
+/// takes the re-derived scope as a separate argument instead.
 #[derive(Debug, Clone)]
 pub struct AdoptedWorkflow {
     /// Original workflow task id.
@@ -901,13 +912,57 @@ impl TaskRegistry {
         })
     }
 
-    /// Return non-terminal local-app build tasks bound to `app_id`.
+    /// Return non-terminal local-app workflow tasks that hold authority over
+    /// `app_id`. Delete flows use this as a guard before removing the app
+    /// directory.
     ///
-    /// Delete flows use this as a guard before removing the app directory. The
-    /// workflow args are persisted as JSON by the launcher, so a malformed or
-    /// missing app id is deliberately not treated as belonging to a specific
-    /// app; the active workspace lease remains the second guard for running
-    /// tasks.
+    /// Reads each task's typed [`crate::scope::LocalAppWorkflowTaskScope`]
+    /// (design §18 Phase -1 step 8 / §8.1) instead of matching `workflow_id`
+    /// against this crate's (since-deleted) `LOCAL_APP_BUILD_WORKFLOWS` array
+    /// and then parsing `app_id` out of caller-supplied `args` JSON. That
+    /// used to be a genuine forgery
+    /// vector: a custom workflow could declare a `workflow_id` naming one of
+    /// this crate's two real build workflows and an `args.app_id` for
+    /// whichever app the forger chose, and this guard would block that
+    /// app's delete on the forger's say-so alone (§8.1: a custom workflow
+    /// must get nothing "即使伪造 `meta.name` 或 `args.app_id`"). `workflow_id`
+    /// and `args` are now IGNORED here entirely -- a task blocks `app_id`'s
+    /// delete iff it carries `Some(scope)` whose `scope.app_id() == app_id`
+    /// (`scope.blocks_delete()`, which every purpose satisfies -- see that
+    /// method's doc comment).
+    ///
+    /// A task with `scope: None` never blocks any app's delete. That is a
+    /// deliberate choice, not an oversight: an unscoped row is one the Host
+    /// never vouched for, and treating it as blocking would either (a) match
+    /// by `workflow_id`/`args` again -- reopening the exact forgery vector
+    /// above -- or (b) block deleting every app while any unscoped workflow
+    /// runs, which a forged workflow could trivially exploit as a
+    /// denial-of-service against unrelated apps. Denying by default is the
+    /// only option that does not reintroduce caller-controlled authority.
+    ///
+    /// A scope reaches a row through
+    /// [`crate::task_trait::TaskSpawnInput::LocalWorkflow`]'s `scope` field,
+    /// minted by the Host that resolved the app -- so a genuine in-flight
+    /// build DOES block its app's delete. See that field's doc comment for
+    /// what a `Some` proves.
+    /// The active workspace lease (checked independently by callers, e.g.
+    /// `engine-mobile`'s `handle_delete_app`) remains a second guard for a
+    /// `Build`-purpose task that has actually acquired it; this guard's job
+    /// is the wider one -- also covering `UseTest`/`McpAuthoring` scopes,
+    /// which never take that lease at all. `registry_test.rs`'s
+    /// `a_build_purpose_blocks_delete_at_the_guard`,
+    /// `a_use_test_purpose_still_blocks_delete_at_the_guard` and
+    /// `an_mcp_authoring_purpose_still_blocks_delete_at_the_guard` pin one
+    /// purpose each HERE, at the guard, which is a stronger claim than
+    /// `scope.rs`'s `every_purpose_blocks_delete` (that one only proves the
+    /// predicate's answer, not that this function asks it).
+    ///
+    /// Only the `Build` arm is reachable in production today: `for_build` is
+    /// the sole scope constructor with a non-test call site, because the
+    /// `UseTest` and `McpAuthoring` workflows do not exist yet (design §18
+    /// Phase 4 / Phase 6). Those two arms are therefore live contract and
+    /// dead traffic -- correct, and exercised only by the tests named above,
+    /// until the workflows that mint them land.
     pub async fn find_nonterminal_local_app_workflows(&self, app_id: &str) -> Vec<String> {
         let tasks = self.tasks.read().await;
         tasks
@@ -915,19 +970,9 @@ impl TaskRegistry {
             .filter_map(|(task_id, state)| match state {
                 TaskState::LocalWorkflow(workflow)
                     if !workflow.base.status.is_terminal()
-                        && crate::LOCAL_APP_BUILD_WORKFLOWS
-                            .contains(&workflow.workflow_id.as_str())
-                        && workflow
-                            .args
-                            .as_deref()
-                            .and_then(|args| serde_json::from_str::<serde_json::Value>(args).ok())
-                            .and_then(|value| {
-                                value
-                                    .get("app_id")
-                                    .and_then(serde_json::Value::as_str)
-                                    .map(str::to_string)
-                            })
-                            == Some(app_id.to_string()) =>
+                        && workflow.scope.as_ref().is_some_and(|scope| {
+                            scope.blocks_delete() && scope.app_id() == app_id
+                        }) =>
                 {
                     Some(task_id.clone())
                 }
@@ -958,11 +1003,63 @@ impl TaskRegistry {
         Ok(())
     }
 
-    /// Rebuild one workflow checkpoint without starting its script. This is the
-    /// mobile equivalent of Claude Code's `registerAdoptedWorkflowTask`.
+    /// Rebuild one workflow checkpoint without starting its script, with NO
+    /// Local App authority (`scope: None`). This is the mobile equivalent of
+    /// Claude Code's `registerAdoptedWorkflowTask`, and it is what a caller
+    /// that has not independently re-validated the checkpoint against
+    /// Host-owned state should call -- it reproduces the exact behavior this
+    /// method has always had.
+    ///
+    /// See [`Self::register_adopted_workflow_with_scope`] for the sibling
+    /// entry point a caller uses once it HAS re-resolved authority, and
+    /// [`AdoptedWorkflow`]'s doc comment for why `scope` is never derived from
+    /// the checkpoint's own fields here.
     pub async fn register_adopted_workflow(
         &self,
         adopted: AdoptedWorkflow,
+    ) -> Result<(), TaskError> {
+        self.register_adopted_workflow_with_scope(adopted, None)
+            .await
+    }
+
+    /// Rebuild one workflow checkpoint, stamping `scope` on the resulting task
+    /// row exactly as
+    /// [`crate::task_trait::TaskSpawnInput::LocalWorkflow`]'s `scope` field
+    /// does for a freshly spawned workflow.
+    ///
+    /// # The residual this closes
+    ///
+    /// [`Self::register_adopted_workflow`] always stamped `scope: None` on an
+    /// adopted row, because [`AdoptedWorkflow`] is built straight from the
+    /// on-disk checkpoint (`adopt.json`), and that checkpoint's fields are
+    /// exactly as untrustworthy here as they are everywhere else in this
+    /// crate: they record whatever the ORIGINAL caller supplied, so a custom
+    /// workflow's checkpoint carries a forged `args.app_id` just as
+    /// faithfully as a real build's. An adopted row is `Paused` --
+    /// non-terminal -- so `scope: None` meant a Local App build in flight
+    /// across an engine restart stopped blocking its app's delete, even
+    /// though the pre-scope, name-matching guard this crate used to have DID
+    /// block it. That is the gap this method closes.
+    ///
+    /// It closes the gap by taking `scope` as a SEPARATE argument rather than
+    /// a field on [`AdoptedWorkflow`] itself, so the type that carries
+    /// checkpoint-recorded (untrusted) fields can never be mistaken for
+    /// Host-vouched authority. The caller (today, `engine-mobile`'s
+    /// `MobileWorkflowCheckpointStore::adopt_session`) is responsible for
+    /// RE-DERIVING `scope` from state it re-resolves on load -- the same
+    /// app-must-exist / must-be-scaffolded / must-be-pinned checks
+    /// `apply_materialized_local_app_collections_with_identity` applies to a
+    /// live launch, run again here against the checkpoint's persisted script
+    /// bytes, with the checkpoint's `app_id` used only as a lookup key, never
+    /// as authority by itself (see that function's doc comment for the full
+    /// reasoning, which applies unchanged). Passing `None` is always safe --
+    /// it reproduces [`Self::register_adopted_workflow`]'s existing behavior
+    /// -- so a caller that cannot or does not want to re-validate loses
+    /// nothing by omitting scope.
+    pub async fn register_adopted_workflow_with_scope(
+        &self,
+        adopted: AdoptedWorkflow,
+        scope: Option<crate::scope::LocalAppWorkflowTaskScope>,
     ) -> Result<(), TaskError> {
         let valid_task_id = adopted.task_id.len() == 9
             && adopted
@@ -1049,6 +1146,18 @@ impl TaskRegistry {
             transcript_dir: Some(std::path::PathBuf::from(adopted.transcript_dir)),
             current_step: 0,
             outcome: Default::default(),
+            // `scope` is exactly what the caller passed to
+            // `register_adopted_workflow_with_scope` -- `None` when reached
+            // via the plain `register_adopted_workflow` wrapper (preserving
+            // that method's pre-existing behavior), or whatever
+            // `adopt_session` re-derived from Host-owned state for this
+            // specific checkpoint. See this method's doc comment for the
+            // residual this closes and why `scope` travels as a separate
+            // argument rather than a field on `AdoptedWorkflow`. Note it is
+            // still never PERSISTED (see `LocalWorkflowTaskState::scope`'s
+            // doc comment) -- it is re-derived fresh on every adoption, same
+            // as a live spawn re-derives it fresh on every launch.
+            scope,
         });
         tasks.insert(adopted.task_id, state);
         Ok(())
@@ -2011,6 +2120,7 @@ fn state_for_spawn(mut base: TaskStateBase, input: &TaskSpawnInput) -> TaskState
             creator_teammate_name: _,
             creator_team_name: _,
             creator_agent_id: _,
+            scope,
         } => TaskState::LocalWorkflow(crate::state::LocalWorkflowTaskState {
             base,
             session_uuid: session_uuid.clone(),
@@ -2025,6 +2135,12 @@ fn state_for_spawn(mut base: TaskStateBase, input: &TaskSpawnInput) -> TaskState
             transcript_dir: transcript_subdir.clone(),
             current_step: 0,
             outcome: Default::default(),
+            // The Host's minted authority, carried through verbatim. There is
+            // deliberately no derivation here from `workflow_id` or `args`:
+            // both are caller-supplied, and reading either would re-open the
+            // forgery vector `find_nonterminal_local_app_workflows`' doc
+            // comment describes. See `LocalWorkflowTaskState::scope`.
+            scope: scope.clone(),
         }),
         TaskSpawnInput::MonitorMcp { server_name, watch } => {
             TaskState::MonitorMcp(crate::state::MonitorMcpTaskState {
@@ -2267,6 +2383,206 @@ pub fn register_dream_handler(
                 .with_status_sink(status_sink),
         ),
     );
+}
+
+/// Registry-API-level tests for the restart-adoption scope seam (P-1.12).
+/// Kept as its own inline module rather than added to `registry_test.rs` so
+/// this task's edits stay confined to files it owns; `registry_test.rs`
+/// already exercises the unscoped `register_adopted_workflow` path
+/// (`adopted_workflow_is_registered_as_paused_and_keeps_resume_metadata`,
+/// `register_adopted_workflow_does_not_replace_existing_live_task_with_same_task_id`)
+/// and is left untouched.
+///
+/// These two tests pin the registry API/plumbing in isolation (a caller
+/// handing `register_adopted_workflow_with_scope` an already-built scope, or
+/// going through the plain unscoped entry point). The two tests named
+/// exactly `an_adopted_in_flight_build_still_blocks_its_apps_delete` and
+/// `an_adopted_forged_workflow_still_gets_no_scope` live in
+/// `engine-mobile`'s `workflow_support::run_id_tests` instead, where they
+/// exercise the real `resolve_adopted_local_app_build_scope` re-derivation
+/// end to end against real checkpoint/manifest fixtures -- that is where the
+/// residual actually lived, so that is where the requested test names carry
+/// the load-bearing coverage.
+#[cfg(test)]
+mod adopted_workflow_scope_test {
+    use super::*;
+    use traits::filesystem::{FileContent, FileEvent, FileSystem, FlockGuard, FsError};
+
+    // ---- Minimal in-memory FileSystem, just enough for `output_manager` ----
+    struct InMemoryFs {
+        files: tokio::sync::Mutex<HashMap<String, String>>,
+    }
+    impl InMemoryFs {
+        fn new() -> Self {
+            Self {
+                files: tokio::sync::Mutex::new(HashMap::new()),
+            }
+        }
+    }
+    #[async_trait]
+    impl FileSystem for InMemoryFs {
+        async fn read_file(
+            &self,
+            path: &str,
+            _offset: Option<u64>,
+            _limit: Option<u64>,
+        ) -> Result<FileContent, FsError> {
+            let map = self.files.lock().await;
+            let content = map.get(path).cloned().unwrap_or_default();
+            let total_lines = content.lines().count() as u64;
+            Ok(FileContent {
+                content,
+                truncated: false,
+                total_lines,
+            })
+        }
+        async fn write_file(&self, path: &str, body: &str) -> Result<(), FsError> {
+            self.files
+                .lock()
+                .await
+                .insert(path.to_string(), body.to_string());
+            Ok(())
+        }
+        fn is_within_workspace(&self, _: &str) -> bool {
+            true
+        }
+        async fn watch(
+            &self,
+            _: &str,
+        ) -> Result<std::pin::Pin<Box<dyn futures::Stream<Item = FileEvent> + Send>>, FsError>
+        {
+            Err(FsError::Io("not supported".into()))
+        }
+        async fn append_file(&self, path: &str, body: &str) -> Result<(), FsError> {
+            self.files
+                .lock()
+                .await
+                .entry(path.to_string())
+                .or_default()
+                .push_str(body);
+            Ok(())
+        }
+        async fn truncate(&self, _: &str, _: u64) -> Result<(), FsError> {
+            Ok(())
+        }
+        async fn file_mtime(&self, _: &str) -> Result<std::time::SystemTime, FsError> {
+            Ok(std::time::SystemTime::UNIX_EPOCH)
+        }
+        async fn file_size(&self, path: &str) -> Result<u64, FsError> {
+            let map = self.files.lock().await;
+            Ok(map.get(path).map_or(0, |s| s.len() as u64))
+        }
+        async fn delete_file(&self, path: &str) -> Result<(), FsError> {
+            self.files.lock().await.remove(path);
+            Ok(())
+        }
+        async fn symlink(&self, _: &str, _: &str) -> Result<(), FsError> {
+            Ok(())
+        }
+        async fn flock_exclusive(&self, _: &str) -> Result<Box<dyn FlockGuard>, FsError> {
+            Err(FsError::Io("not supported".into()))
+        }
+        async fn fsync(&self, _: &str) -> Result<(), FsError> {
+            Ok(())
+        }
+    }
+
+    fn make_registry() -> (tempfile::TempDir, TaskRegistry) {
+        let dir = tempfile::tempdir().unwrap();
+        let fs: Arc<dyn FileSystem> = Arc::new(InMemoryFs::new());
+        let runtime = Arc::new(test_harness::mocks::MockRuntimeSpawner::default());
+        let out_mgr = Arc::new(crate::output_manager::TaskOutputManager::new(
+            std::path::PathBuf::from(dir.path()),
+            fs.clone(),
+        ));
+        (dir, TaskRegistry::new(runtime, fs, out_mgr))
+    }
+
+    fn adopted(task_id: &str, run_id: &str, args_app_id: &str) -> AdoptedWorkflow {
+        AdoptedWorkflow {
+            task_id: task_id.to_string(),
+            session_uuid: Some("session-1".to_string()),
+            // A real build workflow's name -- exactly what a forged
+            // checkpoint would also carry (see `AdoptedWorkflow`'s doc
+            // comment). Both tests below prove the guard no longer cares.
+            workflow_id: "lingxi-local-app:local-app-build".to_string(),
+            run_id: run_id.to_string(),
+            script_path: "/workspace/.lingxi/workflows/build.js".to_string(),
+            args: Some(format!(r#"{{"app_id":"{args_app_id}"}}"#)),
+            transcript_dir: format!("/sessions/s1/subagents/workflows/{run_id}"),
+            description: "Build local app".to_string(),
+            start_time: SystemTime::now(),
+        }
+    }
+
+    /// (1) Registry-level half of the P-1.12 fix: once a caller HAS
+    /// re-derived a scope for an in-flight build (the job
+    /// `engine-mobile`'s `adopt_session` does end to end --
+    /// see `workflow_support::run_id_tests::an_adopted_in_flight_build_still_blocks_its_apps_delete`,
+    /// which is the test carrying this exact name against the real
+    /// resolution logic), `register_adopted_workflow_with_scope` stamps it on
+    /// the adopted (`Paused`, non-terminal) row and the delete guard honors
+    /// it -- independent of how that scope was derived.
+    #[tokio::test]
+    async fn an_adopted_in_flight_build_still_blocks_its_apps_delete_at_the_registry_api() {
+        let (_dir, registry) = make_registry();
+        let scope = crate::scope::LocalAppWorkflowTaskScope::for_build("resumed-app")
+            .expect("well-formed app id");
+
+        registry
+            .register_adopted_workflow_with_scope(
+                adopted("wadopted1", "wf_adopted1", "resumed-app"),
+                Some(scope),
+            )
+            .await
+            .expect("adopt with re-derived scope");
+
+        let state = registry.get("wadopted1").await.expect("adopted state");
+        assert!(
+            !state.base().status.is_terminal(),
+            "an adopted row must be non-terminal (Paused)"
+        );
+        assert_eq!(
+            registry
+                .find_nonterminal_local_app_workflows("resumed-app")
+                .await,
+            vec!["wadopted1".to_string()],
+            "a build re-validated on adoption must still block its app's delete"
+        );
+    }
+
+    /// (2) Registry-level half: a checkpoint adopted through the plain
+    /// (unscoped) `register_adopted_workflow` entry point -- what any caller
+    /// gets by default, and exactly what a forged checkpoint (`workflow_id`
+    /// naming a real build workflow, `args.app_id` naming a victim app) must
+    /// still resolve to once re-validated -- must never block another app's
+    /// delete. See
+    /// `workflow_support::run_id_tests::an_adopted_forged_workflow_still_gets_no_scope`
+    /// for the test carrying this exact name that exercises the real
+    /// re-validation logic end to end.
+    #[tokio::test]
+    async fn an_adopted_forged_workflow_still_gets_no_scope_at_the_registry_api() {
+        let (_dir, registry) = make_registry();
+
+        registry
+            .register_adopted_workflow(adopted("wforged12", "wf_forged1", "victim-app"))
+            .await
+            .expect("adopt without scope");
+
+        let state = registry.get("wforged12").await.expect("adopted state");
+        assert!(
+            !state.base().status.is_terminal(),
+            "an adopted row must be non-terminal (Paused)"
+        );
+        assert!(
+            registry
+                .find_nonterminal_local_app_workflows("victim-app")
+                .await
+                .is_empty(),
+            "a forged workflow_id/args.app_id pair must never block another \
+             app's delete just because it was adopted"
+        );
+    }
 }
 
 #[cfg(test)]

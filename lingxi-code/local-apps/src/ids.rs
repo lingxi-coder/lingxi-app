@@ -3,13 +3,13 @@
 //! App ids follow the repo's feature-scoped persisted-id convention (see
 //! `tools/cron::generate_cron_task_id`): random lowercase hex minted by the
 //! store crate so every entry path (engine command, future FFI) produces the
-//! SAME on-disk format. App ids must match `^[a-z0-9][a-z0-9-]{0,63}$` and are
+//! SAME on-disk format. App ids must match `^[a-z0-9][a-z0-9-]{0,53}$` and are
 //! validated before ever being used in a path.
 
 use crate::error::AppError;
 
-/// Maximum app id length (regex `{0,63}` tail plus the leading character).
-pub const APP_ID_MAX_LEN: usize = 64;
+/// Maximum app id length (regex `{0,53}` tail plus the leading character).
+pub const APP_ID_MAX_LEN: usize = 54;
 
 fn random_hex(len: usize) -> String {
     use rand::Rng;
@@ -41,7 +41,7 @@ pub fn generate_suggestion_id() -> String {
     format!("sugg-{}", random_hex(12))
 }
 
-/// True iff `id` matches `^[a-z0-9][a-z0-9-]{0,63}$`.
+/// True iff `id` matches `^[a-z0-9][a-z0-9-]{0,53}$`.
 #[must_use]
 pub fn is_valid_app_id(id: &str) -> bool {
     let bytes = id.as_bytes();
@@ -63,7 +63,7 @@ pub fn validate_app_id(id: &str) -> Result<(), AppError> {
         Ok(())
     } else {
         Err(AppError::InvalidRequest(format!(
-            "invalid app id {id:?}: must match ^[a-z0-9][a-z0-9-]{{0,63}}$"
+            "invalid app id {id:?}: must match ^[a-z0-9][a-z0-9-]{{0,53}}$"
         )))
     }
 }
@@ -95,7 +95,7 @@ mod tests {
 
     #[test]
     fn accepts_valid_ids() {
-        let max_len = "a".repeat(64);
+        let max_len = "a".repeat(54);
         for id in ["a", "0", "abc-123", "9-", max_len.as_str()] {
             assert!(is_valid_app_id(id), "expected valid: {id}");
         }
@@ -103,7 +103,7 @@ mod tests {
 
     #[test]
     fn rejects_invalid_and_traversal_ids() {
-        let too_long = "a".repeat(65);
+        let too_long = "a".repeat(55);
         for id in [
             "",
             "-leading-dash",

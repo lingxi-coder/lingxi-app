@@ -288,6 +288,68 @@ async fn mid_turn_source_injects_queued_text_into_first_model_call() {
     );
 }
 
+/// A message that arrives while the final model response is streaming must be
+/// drained before the natural end-turn disposition is committed. Otherwise a
+/// text-only turn has no second top-of-loop boundary and silently strands the
+/// pending message.
+#[tokio::test]
+async fn mid_turn_input_arriving_during_final_response_continues_the_turn() {
+    let first = scripted![
+        message_start("m1", "claude-opus-4-7"),
+        content_block_start_text(0),
+        text_delta(0, "first answer"),
+        content_block_stop(0),
+        message_delta_stop("end_turn"),
+        message_stop(),
+    ];
+    let second = scripted![
+        message_start("m2", "claude-opus-4-7"),
+        content_block_start_text(0),
+        text_delta(0, "updated answer"),
+        content_block_stop(0),
+        message_delta_stop("end_turn"),
+        message_stop(),
+    ];
+    let api = Arc::new(MockStreamingApiClient::with_turns(vec![first, second]));
+    let orch = build_orch(api.clone());
+    orch.set_mid_turn_input(DelayedOnceSource::after_empty_polls(1, "late guidance"));
+
+    let outcome = orch
+        .run_turn_streaming_with_cancel("seed", CancellationToken::new())
+        .await
+        .unwrap();
+
+    assert_eq!(outcome, TurnOutcome::EndTurn);
+    let calls = api.captured_calls().await;
+    assert_eq!(
+        calls.len(),
+        2,
+        "late input must trigger another model iteration"
+    );
+    let second_user_text = calls[1]
+        .messages
+        .iter()
+        .filter_map(|message| match message {
+            ConversationMessage::User { content, .. } => Some(
+                content
+                    .iter()
+                    .filter_map(|block| match block {
+                        ContentBlock::Text { text } => Some(text.as_str()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join(""),
+            ),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        second_user_text.contains("late guidance"),
+        "{second_user_text}"
+    );
+}
+
 /// NO SOURCE WIRED: the drain is a strict no-op — the outgoing request carries
 /// ONLY the seed prompt (no extra injected user messages). This is the
 /// regression guard: an un-wired turn is byte-identical to today.

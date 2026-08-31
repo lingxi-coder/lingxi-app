@@ -23,6 +23,7 @@
 //! uniffi-gated like the `host` module — it names the client-protocol DTO
 //! surface, which is pulled only under that feature.
 
+use std::path::Path;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -37,10 +38,11 @@ use client_protocol::local_apps::{
     AppWorkflowStateDto, DeviceContextDto,
 };
 use local_apps::{
-    load_manifest, AppCapability, AppCheckpoint, AppCheckpointKind, AppDependencySnapshot,
-    AppError, AppErrorCode, AppEvent, AppEventObserver, AppLayout, AppManifest, AppRecord,
-    AppRuntimeProfile, AppRuntimeProfileBinding, AppRuntimeRecord, AppRuntimeState, AppService,
-    AppSurface, AppWorkflowState, DataCollectionSchema, DataFieldKind, DataFieldSchema,
+    derive_publication_state, load_manifest, AppCapability, AppCheckpoint, AppCheckpointKind,
+    AppDependencySnapshot, AppError, AppErrorCode, AppEvent, AppEventObserver, AppLayout,
+    AppManifest, AppPublicationState, AppRecord, AppRuntimeProfile, AppRuntimeProfileBinding,
+    AppRuntimeRecord, AppRuntimeState, AppService, AppSurface, DataCollectionSchema, DataFieldKind,
+    DataFieldSchema,
 };
 use tokio::sync::{mpsc, oneshot};
 
@@ -88,7 +90,11 @@ impl AppEmissionQueue {
     /// Create the channel and spawn its single forwarder task on the engine
     /// runtime. The forwarder drains in order, lowers, and awaits
     /// `sink.emit` with no lock held; it exits when the last sender drops.
-    pub(crate) fn spawn(runtime: &tokio::runtime::Handle, sink: Arc<dyn ClientEventSink>) -> Self {
+    pub(crate) fn spawn(
+        runtime: &tokio::runtime::Handle,
+        sink: Arc<dyn ClientEventSink>,
+        app_data_root: std::path::PathBuf,
+    ) -> Self {
         let (tx, mut rx) = mpsc::unbounded_channel();
         runtime.spawn(async move {
             while let Some(emission) = rx.recv().await {
@@ -98,7 +104,7 @@ impl AppEmissionQueue {
                         // an event with no wire representation yet (its own
                         // doc); skip it and keep the forwarder alive instead
                         // of emitting a placeholder.
-                        if let Some(client_event) = lower_app_event(event) {
+                        if let Some(client_event) = lower_app_event(&app_data_root, event) {
                             sink.emit(client_event).await;
                         }
                     }
@@ -215,10 +221,10 @@ impl AppEventObserver for SinkAppEventObserver {
 /// Keeping the `Option` signature means the NEXT domain event that outruns
 /// its DTO can degrade the same safe way instead of reintroducing that
 /// window.
-pub(crate) fn lower_app_event(event: AppEvent) -> Option<ClientEvent> {
+pub(crate) fn lower_app_event(app_data_root: &Path, event: AppEvent) -> Option<ClientEvent> {
     match event {
         AppEvent::AppsChanged { apps } => Some(ClientEvent::AppsChanged {
-            apps: lower_records(&apps),
+            apps: lower_records(app_data_root, &apps),
         }),
         // `request_id` is FORWARDED verbatim, never re-synthesized and never
         // `None`-ed out. This is the whole point of the field: the client that
@@ -230,13 +236,13 @@ pub(crate) fn lower_app_event(event: AppEvent) -> Option<ClientEvent> {
         // compiles, but fails that test.
         AppEvent::AppCreated { record, request_id } => Some(ClientEvent::AppEvent {
             event: AppEventDto::AppCreated {
-                record: lower_record(&record),
+                record: lower_record(app_data_root, &record),
                 request_id,
             },
         }),
         AppEvent::RecordChanged { record } => Some(ClientEvent::AppEvent {
             event: AppEventDto::AppRecordChanged {
-                record: lower_record(&record),
+                record: lower_record(app_data_root, &record),
             },
         }),
         AppEvent::WorkflowChanged {
@@ -264,12 +270,15 @@ pub(crate) fn lower_app_event(event: AppEvent) -> Option<ClientEvent> {
 }
 
 /// Lower a record list for `AppsChanged`.
-pub(crate) fn lower_records(records: &[AppRecord]) -> Vec<AppRecordDto> {
-    records.iter().map(lower_record).collect()
+pub(crate) fn lower_records(app_data_root: &Path, records: &[AppRecord]) -> Vec<AppRecordDto> {
+    records
+        .iter()
+        .map(|record| lower_record(app_data_root, record))
+        .collect()
 }
 
 /// Lower one core [`AppRecord`] to its wire row.
-pub(crate) fn lower_record(record: &AppRecord) -> AppRecordDto {
+pub(crate) fn lower_record(app_data_root: &Path, record: &AppRecord) -> AppRecordDto {
     AppRecordDto {
         id: record.id.clone(),
         name: record.name.clone(),
@@ -277,7 +286,7 @@ pub(crate) fn lower_record(record: &AppRecord) -> AppRecordDto {
         git_enabled: record.git_enabled,
         created_at_ms: record.created_at_ms,
         updated_at_ms: record.updated_at_ms,
-        workflow_state: lower_workflow_state(record.workflow_state),
+        workflow_state: derive_workflow_state(app_data_root, record),
         conversation_id: record.conversation_id.clone(),
         init_session_id: record.init_session_id.clone(),
         workspace_rel: record.workspace_rel.clone(),
@@ -302,10 +311,33 @@ pub(crate) fn lower_error_code(code: AppErrorCode) -> AppErrorCodeDto {
     }
 }
 
-fn lower_workflow_state(state: AppWorkflowState) -> AppWorkflowStateDto {
+fn lower_workflow_state(state: AppPublicationState) -> AppWorkflowStateDto {
     match state {
-        AppWorkflowState::Draft => AppWorkflowStateDto::Draft,
-        AppWorkflowState::Ready => AppWorkflowStateDto::Ready,
+        AppPublicationState::Draft => AppWorkflowStateDto::Draft,
+        AppPublicationState::PublishedUnverified => AppWorkflowStateDto::PublishedUnverified,
+        AppPublicationState::PublishedVerified => AppWorkflowStateDto::PublishedVerified,
+    }
+}
+
+fn derive_workflow_state(app_data_root: &Path, record: &AppRecord) -> AppWorkflowStateDto {
+    if !record.scaffolded {
+        return AppWorkflowStateDto::Draft;
+    }
+    let layout = match AppLayout::new(app_data_root, record.id.clone()) {
+        Ok(layout) => layout,
+        Err(_) => return AppWorkflowStateDto::Draft,
+    };
+    let manifest = match load_manifest(&layout) {
+        Ok(manifest) => manifest,
+        Err(_) => return AppWorkflowStateDto::Draft,
+    };
+    let active_build_id = match crate::local_apps_build::active_build_id(&layout) {
+        Ok(value) => value,
+        Err(_) => return AppWorkflowStateDto::Draft,
+    };
+    match derive_publication_state(&manifest, active_build_id.as_deref(), false) {
+        Ok(state) => lower_workflow_state(state),
+        Err(_) => AppWorkflowStateDto::Draft,
     }
 }
 
@@ -535,7 +567,7 @@ pub(crate) fn lower_details(
     checkpoints: &[AppCheckpoint],
 ) -> Result<AppDetailsDto, AppError> {
     Ok(AppDetailsDto {
-        app: lower_record(record),
+        app: lower_record(root, record),
         manifest: load_manifest_snapshot(root, &record.id)?,
         runtime_profile_status: crate::local_apps_build::derive_runtime_profile_status(
             root, record,
@@ -613,7 +645,7 @@ pub(crate) fn raise_surface(surface: AppSurfaceDto) -> Result<AppSurface, AppErr
 #[cfg(test)]
 mod tests {
     use super::*;
-    use local_apps::AppWorkflowState;
+    use local_apps::AppPublicationState;
 
     #[test]
     fn file_capabilities_lower_to_distinct_wire_kinds() {
@@ -633,12 +665,15 @@ mod tests {
         // serde output guards against either side drifting.
         for (core, dto) in [
             (
-                serde_json::to_string(&AppWorkflowState::Ready).unwrap(),
-                serde_json::to_string(&lower_workflow_state(AppWorkflowState::Ready)).unwrap(),
+                "\"published_unverified\"".to_string(),
+                serde_json::to_string(&lower_workflow_state(
+                    AppPublicationState::PublishedUnverified,
+                ))
+                .unwrap(),
             ),
             (
-                serde_json::to_string(&AppWorkflowState::Draft).unwrap(),
-                serde_json::to_string(&lower_workflow_state(AppWorkflowState::Draft)).unwrap(),
+                "\"draft\"".to_string(),
+                serde_json::to_string(&lower_workflow_state(AppPublicationState::Draft)).unwrap(),
             ),
             (
                 serde_json::to_string(&AppRuntimeState::Stopping).unwrap(),
@@ -682,11 +717,15 @@ mod tests {
 
     #[test]
     fn workflow_event_lowers_onto_the_client_event() {
-        let event = lower_app_event(AppEvent::WorkflowChanged {
-            app_id: "abcd1234".into(),
-            state: AppWorkflowState::Ready,
-            detail: Some("built".into()),
-        })
+        let root = tempfile::tempdir().expect("tempdir");
+        let event = lower_app_event(
+            root.path(),
+            AppEvent::WorkflowChanged {
+                app_id: "abcd1234".into(),
+                state: AppPublicationState::PublishedUnverified,
+                detail: Some("catalog promoted".into()),
+            },
+        )
         .expect("WorkflowChanged always has a wire representation");
         match event {
             ClientEvent::AppWorkflowChanged {
@@ -695,8 +734,8 @@ mod tests {
                 detail,
             } => {
                 assert_eq!(app_id, "abcd1234");
-                assert_eq!(state, AppWorkflowStateDto::Ready);
-                assert_eq!(detail.as_deref(), Some("built"));
+                assert_eq!(state, AppWorkflowStateDto::PublishedUnverified);
+                assert_eq!(detail.as_deref(), Some("catalog promoted"));
             }
             other => panic!("expected AppWorkflowChanged, got {other:?}"),
         }
@@ -733,6 +772,7 @@ mod tests {
     /// empty workspace.
     #[test]
     fn lower_record_carries_the_records_own_scaffolded_flag() {
+        let root = tempfile::tempdir().expect("tempdir");
         let mut record = AppRecord {
             id: "app00001".into(),
             name: "Habits".into(),
@@ -742,18 +782,17 @@ mod tests {
             scaffolded: true,
             created_at_ms: 1,
             updated_at_ms: 2,
-            workflow_state: AppWorkflowState::Draft,
             conversation_id: None,
             init_session_id: None,
             workspace_rel: "apps/app00001/workspace".into(),
         };
         assert!(
-            lower_record(&record).scaffolded,
+            lower_record(root.path(), &record).scaffolded,
             "a formed app lowers formed"
         );
         record.scaffolded = false;
         assert!(
-            !lower_record(&record).scaffolded,
+            !lower_record(root.path(), &record).scaffolded,
             "a shell must lower as a shell — a constant here would pass the true case alone"
         );
     }
@@ -775,7 +814,6 @@ mod tests {
             scaffolded: true,
             created_at_ms: 1,
             updated_at_ms: 2,
-            workflow_state: AppWorkflowState::Draft,
             conversation_id: None,
             init_session_id: None,
             workspace_rel: "apps/app00001/workspace".into(),
@@ -803,7 +841,7 @@ mod tests {
             std::slice::from_ref(&checkpoint),
         )
         .expect("lowers");
-        assert_eq!(details.app, lower_record(&record));
+        assert_eq!(details.app, lower_record(root.path(), &record));
         assert_eq!(
             details.manifest, None,
             "no manifest on disk lowers to None, not an error"
@@ -823,6 +861,7 @@ mod tests {
     /// completeness. Don't trust the claim on faith; verify the count.
     #[test]
     fn every_app_event_arm_lowers_field_exact() {
+        let root = tempfile::tempdir().expect("tempdir");
         let record = AppRecord {
             id: "app00001".into(),
             name: "Habits".into(),
@@ -832,7 +871,6 @@ mod tests {
             scaffolded: true,
             created_at_ms: 11,
             updated_at_ms: 22,
-            workflow_state: AppWorkflowState::Ready,
             conversation_id: Some("conv-9".into()),
             init_session_id: None,
             workspace_rel: "apps/app00001/workspace".into(),
@@ -844,7 +882,7 @@ mod tests {
             git_enabled: true,
             created_at_ms: 11,
             updated_at_ms: 22,
-            workflow_state: AppWorkflowStateDto::Ready,
+            workflow_state: AppWorkflowStateDto::Draft,
             conversation_id: Some("conv-9".into()),
             init_session_id: None,
             workspace_rel: "apps/app00001/workspace".into(),
@@ -896,13 +934,13 @@ mod tests {
             (
                 AppEvent::WorkflowChanged {
                     app_id: "app00001".into(),
-                    state: AppWorkflowState::Ready,
-                    detail: Some("built".into()),
+                    state: AppPublicationState::PublishedUnverified,
+                    detail: Some("catalog promoted".into()),
                 },
                 ClientEvent::AppWorkflowChanged {
                     app_id: "app00001".into(),
-                    state: AppWorkflowStateDto::Ready,
-                    detail: Some("built".into()),
+                    state: AppWorkflowStateDto::PublishedUnverified,
+                    detail: Some("catalog promoted".into()),
                 },
             ),
             (
@@ -960,7 +998,7 @@ mod tests {
         // and nothing here failed. Whoever adds the next variant must add a
         // case here too and recount — do not take this comment's word for it.
         for (domain, expected) in cases {
-            assert_eq!(lower_app_event(domain), Some(expected));
+            assert_eq!(lower_app_event(root.path(), domain), Some(expected));
         }
     }
 }

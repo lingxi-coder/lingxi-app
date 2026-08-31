@@ -115,7 +115,7 @@ struct LocalAppDetailView: View {
                             Button("common_start", systemImage: "play.fill") {
                                 Task { await store.start(appID: appID) }
                             }
-                            .disabled(app.workflow != .ready)
+                            .disabled(!app.workflow.isPublished)
                         }
                         Menu {
                             Button("local_apps_restart", systemImage: "arrow.clockwise") {
@@ -305,7 +305,16 @@ private struct LocalAppOverviewSection: View {
                         .frame(width: 64, height: 64)
                         .background(theme.accent.opacity(0.12), in: .rect(cornerRadius: 16))
                     VStack(alignment: .leading, spacing: 5) {
-                        Text(app.displayName).font(.title2.bold())
+                        HStack(spacing: 8) {
+                            Text(app.displayName).font(.title2.bold())
+                            LocalAppPublicationBadgeView(badge: app.workflow.statusBadge)
+                            if let uiVerification = app.uiVerification {
+                                LocalAppPublicationBadgeView(badge: uiVerification.badge)
+                            }
+                            if let mcpVerification = app.mcpVerification {
+                                LocalAppPublicationBadgeView(badge: mcpVerification.badge)
+                            }
+                        }
                         Text(app.draftStatusLine ?? app.workflow.label)
                             .foregroundStyle(theme.text3)
                         Label(runtime.label, systemImage: runtimeSystemImage)

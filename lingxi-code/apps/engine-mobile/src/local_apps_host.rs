@@ -13,8 +13,12 @@ use client_protocol::local_apps::{
     AppAuthorizationDecisionDto, AppBridgeOperationDto, AppBridgeRequestDto, AppBridgeResponseDto,
     AppCapabilityKindDto, AppCapabilityRequestDto, AppDependencyChangeConfirmationRequestDto,
     AppDependencyChangeDto, AppDependencyChangeKindDto, AppEventDto, AppRuntimeProfileDto,
-    AppRuntimeProfileOptionDto, AppRuntimeProfilePackageDto, AppRuntimeProfileSelectionRequestDto,
-    AppSurfaceDto, AppUiActionKindDto, AppUiRequestDto, AppUiTargetDto,
+    AppRuntimeProfileOptionDto, AppRuntimeProfilePackageDto, AppSurfaceDto, AppUiActionKindDto,
+    AppUiRequestDto, AppUiTargetDto, AppWorkflowStateDto, LocalAppCreateConfirmationRequestDto,
+    LocalAppGateStatusDto, LocalAppMcpProposalApprovalRequestDto, LocalAppMcpToolChangeKindDto,
+    LocalAppMcpToolDiffDto, LocalAppMcpToolFieldDto, LocalAppMcpToolSurfaceDto,
+    LocalAppRejectedCandidateDto, LocalAppTemplateSummaryDto, LocalAppVerificationStatusDto,
+    LocalAppVerificationSummaryDto, ManagedLocalAppMcpServerDto,
 };
 use futures_util::StreamExt;
 use local_apps::{
@@ -26,7 +30,7 @@ use local_apps::{
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::{self, Read};
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Component, Path, PathBuf};
@@ -42,7 +46,7 @@ use traits::{
 };
 
 const APPROVAL_TIMEOUT: Duration = Duration::from_secs(5 * 60);
-const RUNTIME_PROFILE_RECEIPT_TTL: Duration = Duration::from_secs(10 * 60);
+const APPROVAL_RECEIPT_TTL: Duration = Duration::from_secs(10 * 60);
 const UI_TIMEOUT: Duration = Duration::from_secs(2 * 60);
 const MAX_HTTP_REQUEST_BYTES: usize = 16 * 1024;
 const MAX_STATIC_ASSET_BYTES: u64 = 32 * 1024 * 1024;
@@ -81,6 +85,7 @@ const LOCAL_APP_BRIDGE_LLM_BYTES: usize = 8 * 1024 * 1024;
 const LOCAL_APP_BRIDGE_FILE_BYTES: usize = files_ops::MAX_APP_FILE_BYTES.div_ceil(3) * 4 + 1024;
 const FLOW_EXECUTION_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 const FLOW_STEP_TIMEOUT: Duration = Duration::from_secs(60);
+const MCP_FLOW_EXECUTION_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 
 /// Availability of the exact profile dependency lock on this host. The
 /// selector distinguishes a reusable shared snapshot from a device-bundled
@@ -135,14 +140,10 @@ struct UiResolution {
     error: Option<String>,
 }
 
-#[derive(Clone, Debug)]
-struct PendingRuntimeProfileReceipt {
-    receipt_id: String,
+#[derive(Debug)]
+struct PendingNativeApproval {
     app_id: String,
-    binding: local_apps::AppRuntimeProfileBinding,
-    issued_at_ms: u64,
-    expires_at_ms: u64,
-    claimed: bool,
+    sender: oneshot::Sender<bool>,
 }
 
 #[derive(Clone, Debug)]
@@ -156,6 +157,68 @@ struct PendingDependencyChangeReceipt {
     expires_at_ms: u64,
     summary: Vec<DependencyChange>,
     claimed: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PersistedMcpCandidate {
+    validated: local_apps::ValidatedAppMcpProposal,
+    approval_contract_sha256: String,
+    review_surface: Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    verification_sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    catalog_sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    qa_context_sha256: Option<BTreeMap<String, String>>,
+}
+
+#[derive(Clone, Debug)]
+struct CreateProposalContext {
+    selection: crate::local_app_template_catalog::ValidatedTemplateSelection,
+    staging_evidence: Value,
+    design_spec: Option<Value>,
+    design_spec_sha256: Option<String>,
+    contexts: BTreeMap<String, local_apps::AppMcpFlowContext>,
+}
+
+#[derive(Clone, Debug)]
+struct CreateScaffoldSeed {
+    selection: crate::local_app_template_catalog::ValidatedTemplateSelection,
+    template_root: PathBuf,
+    contexts: BTreeMap<String, local_apps::AppMcpFlowContext>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BoundMcpFlowMode {
+    Live,
+    Qa,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BoundMcpStepEvidence {
+    step_id: String,
+    capability: String,
+    input_sha256: String,
+    output_sha256: String,
+}
+
+#[derive(Clone, Debug)]
+struct BoundMcpExecution {
+    result: Value,
+    step_calls: Vec<BoundMcpStepEvidence>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct QaToolExecutionEvidence {
+    tool_name: String,
+    flow_id: String,
+    context_sha256: String,
+    input_sha256: String,
+    result_sha256: String,
+    step_calls: Vec<BoundMcpStepEvidence>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -203,6 +266,96 @@ fn dependency_change_cache_status(kind: &DependencyChangeKind) -> String {
             "unknown_until_resolution".into()
         }
     }
+}
+
+fn value_sha256(value: &Value) -> Result<String, String> {
+    local_apps::approval_contract_sha256(value.clone()).map_err(|issue| issue.message)
+}
+
+fn minimal_schema_witness(schema: &Value) -> Result<Value, String> {
+    if let Some(enum_values) = schema.get("enum").and_then(Value::as_array) {
+        return enum_values
+            .first()
+            .cloned()
+            .ok_or_else(|| "schema witness requires a non-empty enum".to_string());
+    }
+    match schema.get("type").and_then(Value::as_str) {
+        Some("object") => {
+            let required = schema
+                .get("required")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            let properties = schema.get("properties").and_then(Value::as_object);
+            let mut object = Map::new();
+            for key in required {
+                let key = key
+                    .as_str()
+                    .ok_or_else(|| "schema witness required keys must be strings".to_string())?;
+                let child = properties.and_then(|properties| properties.get(key));
+                let value = match child {
+                    Some(child) => minimal_schema_witness(child)?,
+                    None if schema.get("additionalProperties") == Some(&Value::Bool(false)) => {
+                        return Err(format!(
+                            "schema witness cannot satisfy closed object field {key:?}"
+                        ));
+                    }
+                    None => Value::Null,
+                };
+                object.insert(key.to_string(), value);
+            }
+            Ok(Value::Object(object))
+        }
+        Some("array") => Ok(Value::Array(Vec::new())),
+        Some("string") => Ok(Value::String(String::new())),
+        Some("number") => Ok(json!(0)),
+        Some("integer") => Ok(json!(0)),
+        Some("boolean") => Ok(Value::Bool(false)),
+        Some("null") => Ok(Value::Null),
+        Some(other) => Err(format!("schema witness does not support type {other}")),
+        None => Ok(Value::Null),
+    }
+}
+
+fn active_mcp_flow_contexts_bytes(
+    app_id: &str,
+    contexts: &BTreeMap<String, local_apps::AppMcpFlowContext>,
+) -> Result<Vec<u8>, String> {
+    let active = contexts
+        .iter()
+        .map(|(flow_id, context)| {
+            if context.app_id != app_id {
+                return Err(format!(
+                    "create_staging_invalid: staged MCP Flow {flow_id} belongs to {} instead of {app_id}",
+                    context.app_id
+                ));
+            }
+            let mut active = context.clone();
+            active.source = local_apps::FlowSource::Active;
+            Ok((flow_id.clone(), active))
+        })
+        .collect::<Result<BTreeMap<_, _>, _>>()?;
+    serde_json::to_vec_pretty(&active)
+        .map_err(|error| format!("serialize active MCP flow contexts: {error}"))
+}
+
+fn persist_active_mcp_flow_contexts(
+    workspace: &Path,
+    app_id: &str,
+    contexts: &BTreeMap<String, local_apps::AppMcpFlowContext>,
+) -> Result<(), String> {
+    let root = workspace.join(".lingxi");
+    std::fs::create_dir_all(&root)
+        .map_err(|error| format!("create active MCP flow context directory: {error}"))?;
+    let path = root.join("mcp-flow-contexts.json");
+    let temp_path = root.join("mcp-flow-contexts.json.tmp");
+    std::fs::write(
+        &temp_path,
+        active_mcp_flow_contexts_bytes(app_id, contexts)?,
+    )
+    .map_err(|error| format!("write active MCP flow contexts: {error}"))?;
+    std::fs::rename(&temp_path, &path)
+        .map_err(|error| format!("commit active MCP flow contexts: {error}"))
 }
 
 struct DependencyInstallCompletion {
@@ -857,6 +1010,7 @@ pub(crate) struct LocalAppsHostBroker {
     event_sink: Arc<dyn ClientEventSink>,
     runtime_configuration: RwLock<LocalAppsRuntimeConfiguration>,
     service: OnceLock<Arc<AppService>>,
+    mcp_registry: OnceLock<std::sync::Weak<mcp::McpRegistry>>,
     /// Set once at profile load (same call site as `attach_service`), so the
     /// broker's `llm.chat` bridge operation reaches the live model.
     llm: OnceLock<Arc<crate::local_apps_profile::SharedLlm>>,
@@ -920,12 +1074,12 @@ pub(crate) struct LocalAppsHostBroker {
     /// them. Weak so a watcher can never be what keeps the broker alive.
     self_ref: OnceLock<std::sync::Weak<LocalAppsHostBroker>>,
     pending_capabilities: Mutex<HashMap<String, oneshot::Sender<AppAuthorizationDecisionDto>>>,
-    pending_runtime_profile_selections:
-        Mutex<HashMap<String, oneshot::Sender<Option<AppRuntimeProfileDto>>>>,
     pending_dependency_change_confirmations: Mutex<HashMap<String, oneshot::Sender<bool>>>,
+    pending_create_confirmations: Mutex<HashMap<String, PendingNativeApproval>>,
+    pending_mcp_proposal_approvals: Mutex<HashMap<String, PendingNativeApproval>>,
     pending_ui: Mutex<HashMap<String, oneshot::Sender<UiResolution>>>,
-    pending_runtime_profile_receipts: Mutex<HashMap<String, PendingRuntimeProfileReceipt>>,
     pending_dependency_change_receipts: Mutex<HashMap<String, PendingDependencyChangeReceipt>>,
+    pending_mcp_receipts: Mutex<local_apps::McpReceiptBook>,
     session_permissions: Mutex<SessionPermissions>,
     runtimes: Arc<Mutex<HashMap<String, RuntimeEntry>>>,
     /// See [`PortLeases`].  Broker-scoped because a profile's apps are what
@@ -1036,6 +1190,7 @@ impl LocalAppsHostBroker {
                 runtime_root,
             }),
             service: OnceLock::new(),
+            mcp_registry: OnceLock::new(),
             llm: OnceLock::new(),
             device: OnceLock::new(),
             recording: Arc::new(Mutex::new(None)),
@@ -1052,11 +1207,12 @@ impl LocalAppsHostBroker {
             recording_start: Mutex::new(()),
             self_ref: OnceLock::new(),
             pending_capabilities: Mutex::new(HashMap::new()),
-            pending_runtime_profile_selections: Mutex::new(HashMap::new()),
             pending_dependency_change_confirmations: Mutex::new(HashMap::new()),
+            pending_create_confirmations: Mutex::new(HashMap::new()),
+            pending_mcp_proposal_approvals: Mutex::new(HashMap::new()),
             pending_ui: Mutex::new(HashMap::new()),
-            pending_runtime_profile_receipts: Mutex::new(HashMap::new()),
             pending_dependency_change_receipts: Mutex::new(HashMap::new()),
+            pending_mcp_receipts: Mutex::new(local_apps::McpReceiptBook::default()),
             session_permissions: Mutex::new(SessionPermissions::default()),
             runtimes: Arc::new(Mutex::new(HashMap::new())),
             port_leases: Arc::new(std::sync::Mutex::new(HashMap::new())),
@@ -1081,6 +1237,206 @@ impl LocalAppsHostBroker {
 
     pub(crate) fn attach_service(&self, service: Arc<AppService>) -> Result<(), Arc<AppService>> {
         self.service.set(service)
+    }
+
+    pub(crate) fn attach_mcp_registry(
+        &self,
+        registry: std::sync::Weak<mcp::McpRegistry>,
+    ) -> Result<(), std::sync::Weak<mcp::McpRegistry>> {
+        self.mcp_registry.set(registry)
+    }
+
+    fn upgraded_mcp_registry(&self) -> Option<Arc<mcp::McpRegistry>> {
+        self.mcp_registry.get().and_then(std::sync::Weak::upgrade)
+    }
+
+    pub(crate) async fn sync_managed_local_app_publication(
+        &self,
+        app_id: &str,
+    ) -> Result<(), String> {
+        let Some(registry) = self.upgraded_mcp_registry() else {
+            return Ok(());
+        };
+        let layout = self.layout(app_id)?;
+        let manifest = load_manifest(&layout).map_err(|error| error.to_string())?;
+        let active_build_id =
+            crate::local_apps_build::active_build_id(&layout).map_err(|error| error.to_string())?;
+        match local_apps::derive_publication_state(&manifest, active_build_id.as_deref(), false) {
+            Ok(local_apps::AppPublicationState::Draft) => {
+                registry
+                    .unregister_managed_local_app(app_id)
+                    .await
+                    .map_err(|error| error.to_string())?;
+            }
+            Ok(
+                local_apps::AppPublicationState::PublishedUnverified
+                | local_apps::AppPublicationState::PublishedVerified,
+            ) => {
+                let active = manifest.active_mcp_catalog.as_ref().ok_or_else(|| {
+                    "active_state_corrupt: published app is missing its active MCP catalog"
+                        .to_string()
+                })?;
+                let scope = mcp::registry::ConversationExport::new(
+                    app_id,
+                    active.tool_surface_sha256.clone(),
+                )
+                .map_err(|error| error.to_string())?;
+                registry
+                    .register_managed_local_app(scope, active.catalog_sha256.clone(), false)
+                    .await
+                    .map_err(|error| error.to_string())?;
+            }
+            Err(error) => {
+                registry
+                    .unregister_managed_local_app(app_id)
+                    .await
+                    .map_err(|registry_error| registry_error.to_string())?;
+                return Err(error.to_string());
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn unregister_managed_local_app(&self, app_id: &str) -> Result<(), String> {
+        let Some(registry) = self.upgraded_mcp_registry() else {
+            return Ok(());
+        };
+        registry
+            .unregister_managed_local_app(app_id)
+            .await
+            .map_err(|error| error.to_string())?;
+        self.emit_managed_mcp_inventory().await?;
+        Ok(())
+    }
+
+    async fn rebind_active_mcp_catalog_to_current_build(
+        &self,
+        app_id: &str,
+        layout: &AppLayout,
+    ) -> Result<(), String> {
+        let mut manifest = load_manifest(layout).map_err(|error| error.to_string())?;
+        let Some(active) = manifest.active_mcp_catalog.clone() else {
+            return Ok(());
+        };
+        let active_build_id = crate::local_apps_build::active_build_id(layout)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| {
+                "active_state_corrupt: published app is missing its active build".to_string()
+            })?;
+        if active.build_id == active_build_id {
+            self.sync_managed_local_app_publication(app_id).await?;
+            return Ok(());
+        }
+        let mut catalog = local_apps::load_mcp_catalog(layout, &active.catalog_sha256)
+            .map_err(|error| error.to_string())?;
+        if catalog.get("appId").and_then(Value::as_str) != Some(app_id)
+            || catalog.get("buildId").and_then(Value::as_str) != Some(active.build_id.as_str())
+        {
+            return Err("active_state_corrupt: active MCP catalog identity mismatch".into());
+        }
+        catalog["buildId"] = Value::String(active_build_id.clone());
+        let catalog_sha256 =
+            local_apps::hash_mcp_catalog(catalog.clone()).map_err(|error| error.to_string())?;
+        local_apps::save_mcp_catalog(layout, &catalog_sha256, &catalog)
+            .map_err(|error| error.to_string())?;
+        if let Some(current) = manifest.active_mcp_catalog.as_mut() {
+            current.build_id = active_build_id;
+            current.catalog_sha256 = catalog_sha256;
+        }
+        local_apps::save_manifest(layout, &manifest).map_err(|error| error.to_string())?;
+        self.sync_managed_local_app_publication(app_id).await?;
+        self.emit_managed_mcp_inventory().await?;
+        Ok(())
+    }
+
+    pub(crate) async fn emit_managed_mcp_inventory(&self) -> Result<(), String> {
+        let service = self.service()?;
+        let registry = self.upgraded_mcp_registry();
+        let mut servers = Vec::new();
+        for record in service.list_apps().await {
+            let layout = self.layout(&record.id)?;
+            let manifest = load_manifest(&layout).map_err(|error| error.to_string())?;
+            let active_build_id = crate::local_apps_build::active_build_id(&layout)
+                .map_err(|error| error.to_string())?;
+            let publication =
+                local_apps::derive_publication_state(&manifest, active_build_id.as_deref(), false)
+                    .map_err(|error| error.to_string())?;
+            if matches!(publication, local_apps::AppPublicationState::Draft) {
+                continue;
+            }
+            let active = manifest.active_mcp_catalog.as_ref().ok_or_else(|| {
+                "active_state_corrupt: published app is missing its active MCP catalog".to_string()
+            })?;
+            let managed = if let Some(registry) = registry.as_ref() {
+                registry
+                    .managed_local_app(&record.id)
+                    .await
+                    .ok_or_else(|| {
+                        "active_state_corrupt: published app is missing its managed MCP registry entry"
+                            .to_string()
+                    })?
+            } else {
+                mcp::registry::ManagedLocalAppServer {
+                    scope: mcp::registry::ConversationExport::new(
+                        record.id.clone(),
+                        active.tool_surface_sha256.clone(),
+                    )
+                    .map_err(|error| error.to_string())?,
+                    catalog_sha256: active.catalog_sha256.clone(),
+                    surface_generation: 0,
+                }
+            };
+            if managed.catalog_sha256 != active.catalog_sha256
+                || managed.scope.listed_tool_surface_sha256 != active.tool_surface_sha256
+            {
+                return Err("active_state_corrupt: managed MCP registry entry does not match the active catalog".into());
+            }
+            let catalog = local_apps::load_mcp_catalog(&layout, &active.catalog_sha256)
+                .map_err(|error| error.to_string())?;
+            if catalog.get("appId").and_then(Value::as_str) != Some(record.id.as_str())
+                || catalog.get("buildId").and_then(Value::as_str) != Some(active.build_id.as_str())
+            {
+                return Err("active_state_corrupt: active MCP catalog identity mismatch".into());
+            }
+            let tools = mcp_tool_surfaces_from_catalog(&catalog)?;
+            servers.push(ManagedLocalAppMcpServerDto {
+                server_name: managed.scope.server_name(),
+                app_id: record.id,
+                app_name: record.name,
+                build_id: active.build_id.clone(),
+                catalog_sha256: active.catalog_sha256.clone(),
+                tool_surface_sha256: active.tool_surface_sha256.clone(),
+                tool_count: u32::try_from(tools.len()).unwrap_or(u32::MAX),
+                authoring_revision: active.authoring_revision,
+                publication_state: match publication {
+                    local_apps::AppPublicationState::Draft => AppWorkflowStateDto::Draft,
+                    local_apps::AppPublicationState::PublishedUnverified => {
+                        AppWorkflowStateDto::PublishedUnverified
+                    }
+                    local_apps::AppPublicationState::PublishedVerified => {
+                        AppWorkflowStateDto::PublishedVerified
+                    }
+                },
+                mcp_verification: LocalAppVerificationSummaryDto {
+                    status: LocalAppVerificationStatusDto::Passed,
+                    summary: "MCP schema, Flow, call and isolation verification passed.".into(),
+                    code: None,
+                },
+                ui_verification: LocalAppVerificationSummaryDto {
+                    status: LocalAppVerificationStatusDto::Unavailable,
+                    summary: "UI verification evidence is unavailable on this host.".into(),
+                    code: Some("verification_unavailable".into()),
+                },
+                tools,
+            });
+        }
+        servers.sort_by(|left, right| left.app_id.cmp(&right.app_id));
+        self.event_sink
+            .emit(ClientEvent::AppEvent {
+                event: AppEventDto::ManagedMcpInventoryChanged { servers },
+            })
+            .await;
+        Ok(())
     }
 
     pub(crate) fn refresh_runtime_configuration(
@@ -1203,80 +1559,430 @@ impl LocalAppsHostBroker {
         format!("{prefix}-{id}")
     }
 
-    async fn issue_runtime_profile_receipt(
-        &self,
-        app_id: &str,
-        binding: local_apps::AppRuntimeProfileBinding,
-    ) -> Result<PendingRuntimeProfileReceipt, String> {
-        let issued_at_ms = now_ms();
-        let expires_at_ms = issued_at_ms + RUNTIME_PROFILE_RECEIPT_TTL.as_millis() as u64;
-        let mut receipts = self.pending_runtime_profile_receipts.lock().await;
-        if let Some(current) = receipts.get(app_id) {
-            if current.claimed && current.expires_at_ms >= issued_at_ms {
-                return Err(format!(
-                    "runtime profile receipt {} is already in use for app {}",
-                    current.receipt_id, app_id
-                ));
-            }
-        }
-        let receipt = PendingRuntimeProfileReceipt {
-            receipt_id: uuid::Uuid::new_v4().to_string(),
-            app_id: app_id.to_string(),
-            binding,
-            issued_at_ms,
-            expires_at_ms,
-            claimed: false,
-        };
-        receipts.insert(app_id.to_string(), receipt.clone());
-        Ok(receipt)
-    }
-
-    async fn claim_runtime_profile_receipt(
-        &self,
-        app_id: &str,
-        receipt_id: &str,
-    ) -> Result<local_apps::AppRuntimeProfileBinding, String> {
-        let mut receipts = self.pending_runtime_profile_receipts.lock().await;
-        let Some(current) = receipts.get_mut(app_id) else {
-            return Err(format!(
-                "runtime profile receipt {receipt_id} is missing or was already consumed for app {app_id}"
-            ));
-        };
-        if current.receipt_id != receipt_id {
-            return Err(format!(
-                "runtime profile receipt {receipt_id} is stale or superseded for app {app_id}"
-            ));
-        }
-        if current.expires_at_ms < now_ms() {
-            return Err(format!(
-                "runtime profile receipt {receipt_id} expired for app {app_id}"
-            ));
-        }
-        if current.claimed {
-            return Err(format!(
-                "runtime profile receipt {receipt_id} is already in use for app {app_id}"
-            ));
-        }
-        current.claimed = true;
-        Ok(current.binding.clone())
-    }
-
-    async fn release_runtime_profile_receipt_claim(&self, app_id: &str, receipt_id: &str) {
-        let mut receipts = self.pending_runtime_profile_receipts.lock().await;
-        if let Some(current) = receipts.get_mut(app_id) {
-            if current.receipt_id == receipt_id {
-                current.claimed = false;
-            }
-        }
-    }
-
-    async fn consume_runtime_profile_receipt(&self, app_id: &str, receipt_id: &str) {
-        let mut receipts = self.pending_runtime_profile_receipts.lock().await;
-        if receipts
-            .get(app_id)
-            .is_some_and(|current| current.receipt_id == receipt_id)
+    fn validate_workflow_run_id(workflow_run_id: &str) -> Result<(), String> {
+        if workflow_run_id.is_empty()
+            || workflow_run_id.len() > 128
+            || !workflow_run_id
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-')
         {
-            receipts.remove(app_id);
+            return Err("workflow_run_id is invalid".into());
+        }
+        Ok(())
+    }
+
+    fn mcp_candidate_rel(
+        app_id: &str,
+        workflow_run_id: &str,
+    ) -> Result<PathBuf, local_apps::AppError> {
+        local_apps::ids::validate_app_id(app_id)?;
+        Self::validate_workflow_run_id(workflow_run_id)
+            .map_err(local_apps::AppError::InvalidRequest)?;
+        Ok(PathBuf::from("apps")
+            .join(app_id)
+            .join(local_apps::manifest::MCP_CATALOGS_DIR)
+            .join("candidates")
+            .join(format!("{workflow_run_id}.json")))
+    }
+
+    fn save_mcp_candidate(
+        &self,
+        app_id: &str,
+        workflow_run_id: &str,
+        candidate: &PersistedMcpCandidate,
+    ) -> Result<(), String> {
+        let path =
+            Self::mcp_candidate_rel(app_id, workflow_run_id).map_err(|error| error.to_string())?;
+        let mut body = serde_json::to_vec_pretty(candidate)
+            .map_err(|error| format!("serialize MCP candidate: {error}"))?;
+        body.push(b'\n');
+        traits::rooted_fs::atomic_write(
+            &self.root,
+            &path,
+            &body,
+            traits::rooted_fs::AtomicWriteOptions::default(),
+        )
+        .map_err(|error| local_apps::AppError::from_fs("write MCP candidate", &error).to_string())
+    }
+
+    fn load_mcp_candidate(
+        &self,
+        app_id: &str,
+        workflow_run_id: &str,
+    ) -> Result<PersistedMcpCandidate, String> {
+        let path =
+            Self::mcp_candidate_rel(app_id, workflow_run_id).map_err(|error| error.to_string())?;
+        let body = traits::rooted_fs::read_to_string_limited(&self.root, &path, 512 * 1024)
+            .map_err(|error| {
+                local_apps::AppError::from_fs("read MCP candidate", &error).to_string()
+            })?;
+        serde_json::from_str(&body).map_err(|error| format!("parse MCP candidate: {error}"))
+    }
+
+    fn load_active_mcp_flow_contexts(
+        &self,
+        layout: &AppLayout,
+    ) -> Result<BTreeMap<String, local_apps::AppMcpFlowContext>, String> {
+        let rel = layout
+            .workspace_rel()
+            .join(".lingxi/mcp-flow-contexts.json");
+        let body = traits::rooted_fs::read_to_string_limited(&self.root, &rel, 512 * 1024)
+            .map_err(|error| match error {
+                traits::FsError::NotFound(_) => {
+                    "mcp_flow_contexts_missing: Host could not resolve any trusted MCP flow contexts for this app".to_string()
+                }
+                other => local_apps::AppError::from_fs("read MCP flow contexts", &other).to_string(),
+            })?;
+        serde_json::from_str(&body).map_err(|error| format!("parse MCP flow contexts: {error}"))
+    }
+
+    fn build_mcp_review_surface(
+        manifest: &local_apps::AppManifest,
+        validated: &local_apps::ValidatedAppMcpProposal,
+        active_catalog: Option<&local_apps::AppMcpCatalogRef>,
+        create_context: Option<&CreateProposalContext>,
+    ) -> Value {
+        json!({
+            "appId": validated.proposal.app_id,
+            "manifestRevision": manifest.revision,
+            "summary": validated.proposal.summary,
+            "proposalSha256": validated.proposal_sha256,
+            "toolSurfaceSha256": validated.tool_surface_sha256,
+            "tools": validated.tools.iter().map(|tool| json!({
+                "name": tool.definition.name,
+                "title": tool.definition.title,
+                "description": tool.definition.description,
+                "inputSchema": tool.definition.input_schema,
+                "outputSchema": tool.definition.output_schema,
+                "flow": tool.flow,
+                "ceiling": tool.ceiling,
+            })).collect::<Vec<_>>(),
+            "requiredFlowChanges": validated.proposal.required_flow_changes,
+            "excludedCapabilities": validated.proposal.excluded_capabilities,
+            "previousActiveCatalog": active_catalog,
+            "initialCreate": create_context.map(|context| json!({
+                "templateId": context.selection.template_id,
+                "templateCatalogDigest": context.selection.catalog_digest,
+                "templateSha256": context.selection.template_sha256,
+                "templateInventorySha256": context.selection.template_inventory_sha256,
+                "runtimeProfile": context.selection.runtime_profile,
+                "surface": context.selection.surface,
+                "selectionReason": context.selection.reason,
+                "rejectedCandidates": context.selection.rejected,
+                "stagingEvidence": context.staging_evidence,
+                "designSpecSha256": context.design_spec_sha256,
+                "designSpec": context.design_spec,
+            })),
+        })
+    }
+
+    async fn wait_for_native_approval(
+        &self,
+        pending: &Mutex<HashMap<String, PendingNativeApproval>>,
+        request_id: String,
+        app_id: &str,
+        event: AppEventDto,
+    ) -> Result<bool, String> {
+        let (sender, receiver) = oneshot::channel();
+        {
+            let mut requests = pending.lock().await;
+            if requests.values().any(|request| request.app_id == app_id) {
+                return Err(
+                    "approval_pending: this Local App already has a pending approval".into(),
+                );
+            }
+            requests.insert(
+                request_id.clone(),
+                PendingNativeApproval {
+                    app_id: app_id.to_string(),
+                    sender,
+                },
+            );
+        }
+        self.event_sink.emit(ClientEvent::AppEvent { event }).await;
+        match timeout(APPROVAL_TIMEOUT, receiver).await {
+            Ok(Ok(approved)) => Ok(approved),
+            Ok(Err(_)) => {
+                pending.lock().await.remove(&request_id);
+                Err("native Local App approval was cancelled".into())
+            }
+            Err(_) => {
+                pending.lock().await.remove(&request_id);
+                Err("native Local App approval timed out".into())
+            }
+        }
+    }
+
+    fn pending_verification_gates() -> Vec<LocalAppGateStatusDto> {
+        vec![
+            LocalAppGateStatusDto {
+                gate_id: "mcp_qa".into(),
+                label: "MCP schema, Flow, call and isolation QA".into(),
+                status: LocalAppVerificationStatusDto::Pending,
+                available: true,
+                detail: None,
+            },
+            LocalAppGateStatusDto {
+                gate_id: "ui_runner".into(),
+                label: "UI verification runner".into(),
+                status: LocalAppVerificationStatusDto::Unavailable,
+                available: false,
+                detail: Some("UI evidence is unavailable on this host.".into()),
+            },
+        ]
+    }
+
+    fn create_selection_for_run(
+        &self,
+        app_id: &str,
+        workflow_run_id: &str,
+    ) -> Result<crate::local_app_template_catalog::ValidatedTemplateSelection, String> {
+        let handle = self.create_selection_handle_for_run(app_id, workflow_run_id)?;
+        crate::local_app_template_catalog::resolve_typed(
+            &self.root,
+            app_id,
+            workflow_run_id,
+            &handle,
+        )
+    }
+
+    fn create_selection_handle_for_run(
+        &self,
+        app_id: &str,
+        workflow_run_id: &str,
+    ) -> Result<String, String> {
+        let relative = PathBuf::from(".lingxi-build-state/template-candidates")
+            .join(app_id)
+            .join(workflow_run_id)
+            .join("validated-selection.json");
+        let body = traits::rooted_fs::read_to_string_limited(&self.root, &relative, 256 * 1024)
+            .map_err(|error| format!("validated_selection_missing: {error}"))?;
+        let value: Value = serde_json::from_str(&body)
+            .map_err(|error| format!("validated_selection_invalid: {error}"))?;
+        let handle = value
+            .get("handle")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "validated_selection_invalid: handle is missing".to_string())?;
+        Ok(handle.to_string())
+    }
+
+    fn create_staging_root(&self, app_id: &str, workflow_run_id: &str, handle: &str) -> PathBuf {
+        self.root
+            .join(".lingxi-build-state/template-candidates")
+            .join(app_id)
+            .join(workflow_run_id)
+            .join("staging")
+            .join(handle)
+    }
+
+    fn load_create_proposal_context(
+        &self,
+        app_id: &str,
+        workflow_run_id: &str,
+    ) -> Result<CreateProposalContext, String> {
+        let selection = self.create_selection_for_run(app_id, workflow_run_id)?;
+        let staging_handle = self.create_selection_handle_for_run(app_id, workflow_run_id)?;
+        let staging_root = self.create_staging_root(app_id, workflow_run_id, &staging_handle);
+        let evidence_path = staging_root.join("evidence.json");
+        let evidence_body = std::fs::read_to_string(&evidence_path)
+            .map_err(|error| format!("create_staging_evidence_missing: {error}"))?;
+        let staging_evidence: Value = serde_json::from_str(&evidence_body)
+            .map_err(|error| format!("create_staging_evidence_invalid: {error}"))?;
+        let design_path = staging_root.join("design-spec.json");
+        let (design_spec, design_spec_sha256) = match std::fs::read(&design_path) {
+            Ok(bytes) => {
+                let value: Value = serde_json::from_slice(&bytes)
+                    .map_err(|error| format!("create_staging_design_invalid: {error}"))?;
+                (Some(value), Some(format!("{:x}", Sha256::digest(&bytes))))
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => (None, None),
+            Err(error) => return Err(format!("create_staging_design_missing: {error}")),
+        };
+        let context_candidates = [
+            staging_root.join(".lingxi/mcp-flow-contexts.json"),
+            staging_root.join("template/.lingxi/mcp-flow-contexts.json"),
+        ];
+        let mut last_error = None;
+        for path in context_candidates {
+            match std::fs::read_to_string(&path) {
+                Ok(body) => {
+                    let contexts: BTreeMap<String, local_apps::AppMcpFlowContext> =
+                        serde_json::from_str(&body).map_err(|error| {
+                            format!("parse staged MCP flow contexts {}: {error}", path.display())
+                        })?;
+                    return Ok(CreateProposalContext {
+                        selection,
+                        staging_evidence,
+                        design_spec,
+                        design_spec_sha256,
+                        contexts,
+                    });
+                }
+                Err(error) => {
+                    last_error = Some(format!("{}: {error}", path.display()));
+                }
+            }
+        }
+        Err(format!(
+            "mcp_flow_contexts_missing: Host could not resolve trusted staged MCP flow contexts for app {app_id} run {workflow_run_id} ({})",
+            last_error.unwrap_or_else(|| "no staging context candidates".into())
+        ))
+    }
+
+    fn load_create_scaffold_seed(
+        &self,
+        app_id: &str,
+        workflow_run_id: &str,
+    ) -> Result<CreateScaffoldSeed, String> {
+        let create_context = self.load_create_proposal_context(app_id, workflow_run_id)?;
+        let staging_handle = self.create_selection_handle_for_run(app_id, workflow_run_id)?;
+        let template_root = self
+            .create_staging_root(app_id, workflow_run_id, &staging_handle)
+            .join("template");
+        let metadata = std::fs::symlink_metadata(&template_root)
+            .map_err(|error| format!("create_staging_template_missing: {error}"))?;
+        if !metadata.is_dir() || metadata.file_type().is_symlink() {
+            return Err(
+                "create_staging_template_invalid: template root is not a real directory".into(),
+            );
+        }
+        Ok(CreateScaffoldSeed {
+            selection: create_context.selection,
+            template_root,
+            contexts: create_context.contexts,
+        })
+    }
+
+    fn create_runtime_option(
+        &self,
+        binding: &local_apps::AppRuntimeProfileBinding,
+    ) -> Result<AppRuntimeProfileOptionDto, String> {
+        let entry = crate::local_app_runtime_profiles::list_runtime_profiles()
+            .into_iter()
+            .find(|entry| {
+                entry.family == binding.family
+                    && entry.revision == binding.revision
+                    && entry.contract_sha256 == binding.contract_sha256
+            })
+            .ok_or_else(|| "selected runtime profile is no longer available".to_string())?;
+        let dependency_status = if entry.available {
+            self.runtime_profile_dependency_availability(entry.family, entry.revision)
+                .as_str()
+        } else {
+            "unavailable"
+        };
+        Ok(AppRuntimeProfileOptionDto {
+            family: lower_runtime_profile_family(entry.family),
+            revision: entry.revision,
+            contract_sha256: entry.contract_sha256,
+            surface: lower_surface(entry.surface),
+            core_packages: entry
+                .core_packages
+                .into_iter()
+                .map(|(name, version)| AppRuntimeProfilePackageDto {
+                    name: name.into(),
+                    version: version.into(),
+                })
+                .collect(),
+            cache_status: dependency_status.into(),
+            download_status: dependency_status.into(),
+            available: entry.available,
+            reason: entry.availability_reason.map(str::to_string),
+        })
+    }
+
+    async fn request_mcp_candidate_approval(
+        &self,
+        record: &local_apps::AppRecord,
+        workflow_run_id: &str,
+        manifest: &local_apps::AppManifest,
+        candidate: &PersistedMcpCandidate,
+    ) -> Result<bool, String> {
+        let proposed = mcp_tool_surfaces_from_candidate(candidate)?;
+        if !record.scaffolded {
+            let selection = self.create_selection_for_run(&record.id, workflow_run_id)?;
+            let template = crate::local_app_template_catalog::catalog_view()?
+                .templates
+                .into_iter()
+                .find(|template| template.template_id == selection.template_id)
+                .ok_or_else(|| {
+                    "template_unavailable: selected template is unavailable".to_string()
+                })?;
+            let request_id = self.request_id("app-create-confirmation");
+            let event = AppEventDto::CreateConfirmationRequested {
+                request: LocalAppCreateConfirmationRequestDto {
+                    request_id: request_id.clone(),
+                    app_id: record.id.clone(),
+                    name: record.name.clone(),
+                    brief: record.brief.clone(),
+                    selected_template: LocalAppTemplateSummaryDto {
+                        template_id: selection.template_id,
+                        surface: lower_surface(selection.surface),
+                        summary: template.summary,
+                    },
+                    runtime_profile: self.create_runtime_option(&selection.runtime_profile)?,
+                    reason: selection.reason,
+                    rejected: selection
+                        .rejected
+                        .into_iter()
+                        .map(|candidate| LocalAppRejectedCandidateDto {
+                            template_id: candidate.template_id,
+                            reason: candidate.reason,
+                        })
+                        .collect(),
+                    initial_tools: proposed,
+                    required_gates: Self::pending_verification_gates(),
+                    receipt: None,
+                },
+            };
+            self.wait_for_native_approval(
+                &self.pending_create_confirmations,
+                request_id,
+                &record.id,
+                event,
+            )
+            .await
+        } else {
+            let current = if let Some(active) = manifest.active_mcp_catalog.as_ref() {
+                let layout = self.layout(&record.id)?;
+                let catalog = local_apps::load_mcp_catalog(&layout, &active.catalog_sha256)
+                    .map_err(|error| error.to_string())?;
+                mcp_tool_surfaces_from_catalog(&catalog)?
+            } else {
+                Vec::new()
+            };
+            let request_id = self.request_id("app-mcp-proposal-approval");
+            let event = AppEventDto::McpProposalApprovalRequested {
+                request: LocalAppMcpProposalApprovalRequestDto {
+                    request_id: request_id.clone(),
+                    app_id: record.id.clone(),
+                    workflow_run_id: workflow_run_id.to_string(),
+                    summary: candidate.validated.proposal.summary.clone(),
+                    proposal_sha256: candidate.validated.proposal_sha256.clone(),
+                    approval_contract_sha256: candidate.approval_contract_sha256.clone(),
+                    tool_surface_sha256: candidate.validated.tool_surface_sha256.clone(),
+                    tool_diffs: mcp_tool_diffs(current, proposed),
+                    required_flow_changes: candidate
+                        .validated
+                        .proposal
+                        .required_flow_changes
+                        .clone(),
+                    excluded_capabilities: candidate
+                        .validated
+                        .proposal
+                        .excluded_capabilities
+                        .clone(),
+                    pending_gates: Self::pending_verification_gates(),
+                    receipt: None,
+                },
+            };
+            self.wait_for_native_approval(
+                &self.pending_mcp_proposal_approvals,
+                request_id,
+                &record.id,
+                event,
+            )
+            .await
         }
     }
 
@@ -1289,7 +1995,7 @@ impl LocalAppsHostBroker {
         summary: Vec<DependencyChange>,
     ) -> Result<PendingDependencyChangeReceipt, String> {
         let issued_at_ms = now_ms();
-        let expires_at_ms = issued_at_ms + RUNTIME_PROFILE_RECEIPT_TTL.as_millis() as u64;
+        let expires_at_ms = issued_at_ms + APPROVAL_RECEIPT_TTL.as_millis() as u64;
         let mut receipts = self.pending_dependency_change_receipts.lock().await;
         if let Some(current) = receipts.get(app_id) {
             if current.claimed && current.expires_at_ms >= issued_at_ms {
@@ -3606,18 +4312,6 @@ impl LocalAppsHostBroker {
             .is_some_and(|sender| sender.send(decision).is_ok())
     }
 
-    pub(crate) async fn resolve_runtime_profile_selection(
-        &self,
-        request_id: &str,
-        selected_family: Option<AppRuntimeProfileDto>,
-    ) -> bool {
-        self.pending_runtime_profile_selections
-            .lock()
-            .await
-            .remove(request_id)
-            .is_some_and(|sender| sender.send(selected_family).is_ok())
-    }
-
     /// Resolve one native dependency-change confirmation request.  This is a
     /// separate one-shot channel from generic capability approvals so the
     /// package diff and supply-chain policy shown by the client cannot be
@@ -3632,6 +4326,36 @@ impl LocalAppsHostBroker {
             .await
             .remove(request_id)
             .is_some_and(|sender| sender.send(approved).is_ok())
+    }
+
+    pub(crate) async fn resolve_create_confirmation(
+        &self,
+        request_id: &str,
+        approved: bool,
+    ) -> bool {
+        Self::resolve_native_approval(&self.pending_create_confirmations, request_id, approved)
+            .await
+    }
+
+    pub(crate) async fn resolve_mcp_proposal_approval(
+        &self,
+        request_id: &str,
+        approved: bool,
+    ) -> bool {
+        Self::resolve_native_approval(&self.pending_mcp_proposal_approvals, request_id, approved)
+            .await
+    }
+
+    async fn resolve_native_approval(
+        pending: &Mutex<HashMap<String, PendingNativeApproval>>,
+        request_id: &str,
+        approved: bool,
+    ) -> bool {
+        pending
+            .lock()
+            .await
+            .remove(request_id)
+            .is_some_and(|request| request.sender.send(approved).is_ok())
     }
 
     pub(crate) async fn resolve_ui(
@@ -3959,116 +4683,6 @@ impl LocalAppsHostBroker {
         } else {
             RuntimeProfileDependencyAvailability::DownloadRequired
         }
-    }
-
-    async fn confirm_runtime_profile_value(&self, input: Value) -> Result<Value, String> {
-        let app_id = required_string(&input, "app_id")?.to_string();
-        let recommended = input
-            .get("recommended_profile")
-            .and_then(Value::as_str)
-            .map(local_apps::AppRuntimeProfile::parse)
-            .transpose()
-            .map_err(|error| format!("invalid_argument: {error}"))?;
-        let service = self.service()?;
-        let record = service
-            .record(&app_id)
-            .await
-            .map_err(|error| error.to_string())?;
-        if record.scaffolded {
-            return Err(format!(
-                "app {app_id} is already scaffolded; runtime profile is immutable after scaffold"
-            ));
-        }
-        let options = crate::local_app_runtime_profiles::list_runtime_profiles()
-            .into_iter()
-            .map(|entry| {
-                let dependency_status = if entry.available {
-                    self.runtime_profile_dependency_availability(entry.family, entry.revision)
-                } else {
-                    RuntimeProfileDependencyAvailability::DownloadRequired
-                };
-                AppRuntimeProfileOptionDto {
-                    family: lower_runtime_profile_family(entry.family),
-                    revision: entry.revision,
-                    contract_sha256: entry.contract_sha256.clone(),
-                    surface: lower_surface(entry.surface),
-                    core_packages: entry
-                        .core_packages
-                        .into_iter()
-                        .map(|(name, version)| AppRuntimeProfilePackageDto {
-                            name: name.to_string(),
-                            version: version.to_string(),
-                        })
-                        .collect(),
-                    cache_status: if entry.available {
-                        dependency_status.as_str()
-                    } else {
-                        "unavailable"
-                    }
-                    .into(),
-                    download_status: if entry.available {
-                        dependency_status.as_str()
-                    } else {
-                        "gated"
-                    }
-                    .into(),
-                    available: entry.available,
-                    reason: entry.availability_reason.map(str::to_string),
-                }
-            })
-            .collect::<Vec<_>>();
-        let request_id = self.request_id("app-runtime-profile-selection");
-        let (sender, receiver) = oneshot::channel();
-        self.pending_runtime_profile_selections
-            .lock()
-            .await
-            .insert(request_id.clone(), sender);
-        self.event_sink
-            .emit(ClientEvent::AppEvent {
-                event: AppEventDto::AppRuntimeProfileSelectionRequested {
-                    request: AppRuntimeProfileSelectionRequestDto {
-                        request_id: request_id.clone(),
-                        app_id: app_id.clone(),
-                        reason: "Choose the immutable runtime family for this Local App. The family cannot be changed after scaffold; later upgrades require an explicit same-family migration.".into(),
-                        recommended_family: recommended.map(lower_runtime_profile_family),
-                        options,
-                    },
-                },
-            })
-            .await;
-        let selected = match timeout(APPROVAL_TIMEOUT, receiver).await {
-            Ok(Ok(Some(selected))) => raise_runtime_profile_family(selected)?,
-            Ok(Ok(None)) => return Err("user cancelled runtime profile selection".into()),
-            Ok(Err(_)) => return Err("runtime profile selection was cancelled".into()),
-            Err(_) => {
-                self.pending_runtime_profile_selections
-                    .lock()
-                    .await
-                    .remove(&request_id);
-                return Err("runtime profile selection timed out".into());
-            }
-        };
-        let binding = crate::local_app_runtime_profiles::current_binding_for_family(selected)
-            .map_err(|error| format!("selected runtime profile is unavailable: {error}"))?;
-        let receipt = self
-            .issue_runtime_profile_receipt(&app_id, binding.clone())
-            .await?;
-        Ok(json!({
-            "ok": true,
-            "app_id": app_id,
-            "runtime_profile": {
-                "family": binding.family.as_str(),
-                "revision": binding.revision,
-                "contract_sha256": binding.contract_sha256,
-                "surface": binding.family.surface().as_str(),
-            },
-            "receipt": {
-                "id": receipt.receipt_id,
-                "app_id": receipt.app_id,
-                "issued_at_ms": receipt.issued_at_ms,
-                "expires_at_ms": receipt.expires_at_ms,
-            }
-        }))
     }
 
     async fn query_data_value(&self, input: Value) -> Result<Value, String> {
@@ -5094,6 +5708,8 @@ impl LocalAppsHostBroker {
         } else {
             false
         };
+        self.rebind_active_mcp_catalog_to_current_build(&app_id, &layout)
+            .await?;
         Ok(json!({
             "ok": true,
             "app_id": app_id,
@@ -5178,7 +5794,7 @@ impl LocalAppsHostBroker {
             .transpose()
             .map_err(|error| error.to_string())?;
         let (build_lock, recovery_lock, recovery) = self
-            .land_scaffold(record, surface, requested_binding)
+            .land_scaffold(record, surface, requested_binding, None)
             .await?;
         if let Err(error) = self
             .install_uncommitted_create_dependencies(record, &layout)
@@ -5251,23 +5867,48 @@ impl LocalAppsHostBroker {
                 local_apps::service::MAX_BRIEF_BYTES
             ));
         }
-        let runtime_profile_receipt = input
-            .get("runtime_profile_receipt")
+        if input.get("runtime_profile").is_some() || input.get("surface").is_some() {
+            return Err(
+                "invalid_argument: the Host-issued scaffold receipt is authoritative; do not also send runtime_profile or surface".into(),
+            );
+        }
+        let receipt_id = input
+            .get("receipt_id")
             .and_then(Value::as_str)
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .map(str::to_string)
             .ok_or_else(|| {
-                "invalid_argument: runtime_profile_receipt is required; native runtime-profile confirmation must happen before scaffold".to_string()
+                "invalid_argument: receipt_id is required; create scaffold only accepts a Host-issued unified create confirmation receipt".to_string()
             })?;
-        if input.get("runtime_profile").is_some() || input.get("surface").is_some() {
+        let workflow_run_id = required_string(&input, "workflow_run_id")?.to_string();
+        Self::validate_workflow_run_id(&workflow_run_id)?;
+        let layout = self.layout(&app_id)?;
+        let journal =
+            local_apps::load_candidate_journal(&layout).map_err(|error| error.to_string())?;
+        if journal.workflow_run_id != workflow_run_id {
             return Err(
-                "invalid_argument: runtime_profile_receipt is authoritative; do not also send runtime_profile or surface".into(),
+                "receipt_invalid: workflow run does not match the prepared create candidate".into(),
             );
         }
-        let receipt_binding = self
-            .claim_runtime_profile_receipt(&app_id, &runtime_profile_receipt)
-            .await?;
+        if journal.stage < local_apps::McpAuthoringStage::Approved {
+            return Err("approval_required: create candidate is not approved".into());
+        }
+        let candidate = self.load_mcp_candidate(&app_id, &workflow_run_id)?;
+        let create_seed = self.load_create_scaffold_seed(&app_id, &workflow_run_id)?;
+        self.pending_mcp_receipts
+            .lock()
+            .await
+            .claim_candidate(
+                &receipt_id,
+                &app_id,
+                &workflow_run_id,
+                &journal.approval_contract_sha256,
+                &candidate.validated.proposal_sha256,
+                now_ms(),
+            )
+            .map_err(|issue| issue.message)?;
+        let receipt_binding = create_seed.selection.runtime_profile.clone();
         let scaffolded = async {
             let surface = receipt_binding.family.surface();
             let workflow_model = match input.get("workflow_model") {
@@ -5316,7 +5957,12 @@ impl LocalAppsHostBroker {
                 proposed.workflow_model = Some(model.clone());
             }
             let (build_lock, recovery_lock, recovery) = self
-                .land_scaffold(&proposed, surface, Some(receipt_binding.clone()))
+                .land_scaffold(
+                    &proposed,
+                    surface,
+                    Some(receipt_binding.clone()),
+                    Some(create_seed.clone()),
+                )
                 .await?;
             let layout = self.layout(&app_id)?;
             let result: Result<local_apps::AppRecord, String> = async {
@@ -5368,13 +6014,48 @@ impl LocalAppsHostBroker {
         .await;
         let committed = match scaffolded {
             Ok(committed) => {
-                self.consume_runtime_profile_receipt(&app_id, &runtime_profile_receipt)
-                    .await;
+                self.pending_mcp_receipts
+                    .lock()
+                    .await
+                    .commit_claimed_candidate(
+                        &receipt_id,
+                        &app_id,
+                        &workflow_run_id,
+                        &journal.approval_contract_sha256,
+                        &candidate.validated.proposal_sha256,
+                    )
+                    .map_err(|issue| issue.message)?;
+                let layout = self.layout(&app_id)?;
+                match local_apps::load_candidate_journal(&layout)
+                    .map_err(|error| error.to_string())
+                    .and_then(|mut journal| {
+                        if journal.workflow_run_id != workflow_run_id {
+                            return Err(
+                                "journal_invalid: create receipt workflow run changed before scaffold commit"
+                                    .to_string(),
+                            );
+                        }
+                        journal.consumed_receipt_sha256 =
+                            Some(format!("{:x}", Sha256::digest(receipt_id.as_bytes())));
+                        journal = journal.seal().map_err(|issue| issue.message)?;
+                        local_apps::save_candidate_journal(&layout, &journal)
+                            .map_err(|error| error.to_string())
+                    }) {
+                    Ok(()) => {}
+                    Err(error) => tracing::warn!(
+                        app_id = %app_id,
+                        workflow_run_id = %workflow_run_id,
+                        %error,
+                        "create scaffold committed and receipt consumed, but the candidate journal did not record the consumed receipt"
+                    ),
+                }
                 committed
             }
             Err(error) => {
-                self.release_runtime_profile_receipt_claim(&app_id, &runtime_profile_receipt)
-                    .await;
+                self.pending_mcp_receipts
+                    .lock()
+                    .await
+                    .release_claim(&receipt_id);
                 return Err(error);
             }
         };
@@ -5444,6 +6125,7 @@ impl LocalAppsHostBroker {
         proposed: &local_apps::AppRecord,
         surface: local_apps::AppSurface,
         requested_binding: Option<local_apps::AppRuntimeProfileBinding>,
+        create_seed: Option<CreateScaffoldSeed>,
     ) -> Result<
         (
             traits::rooted_fs::RootedFileLock,
@@ -5453,19 +6135,39 @@ impl LocalAppsHostBroker {
         String,
     > {
         let layout = self.layout(&proposed.id)?;
-        let artifacts = scaffold_runtime_profile(requested_binding, surface)?;
-        let target =
-            crate::local_apps_build::LocalAppBuildTarget::from_runtime_binding(&artifacts.binding)
-                .map_err(|error| error.to_string())?;
+        let binding = requested_binding.ok_or_else(|| {
+            "runtime profile binding is required; scaffold must consume a native confirmation receipt"
+                .to_string()
+        })?;
+        if binding.family.surface() != surface {
+            return Err(format!(
+                "runtime profile {} requires the {} surface, but scaffold requested {}",
+                binding.family,
+                binding.family.surface().as_str(),
+                surface.as_str()
+            ));
+        }
+        let target = crate::local_apps_build::LocalAppBuildTarget::from_runtime_binding(&binding)
+            .map_err(|error| error.to_string())?;
+        let template_origin = create_seed
+            .as_ref()
+            .map(|seed| local_apps::AppTemplateOrigin {
+                plugin_id: local_apps::AppTemplateOrigin::BUILTIN_PLUGIN_ID.into(),
+                plugin_version: "builtin".into(),
+                template_id: seed.selection.template_id.clone(),
+                template_sha256: seed.selection.template_sha256.clone(),
+            })
+            .unwrap_or_else(|| builtin_template_origin(&binding));
         // Rendered from the PROPOSED record — the confirmed name and brief.
         // Rendering it from the creation record writes `# Local App: untitled`
         // with an empty brief, permanently: see `formal_workspace_contract`.
-        let context = formal_workspace_contract(proposed, &artifacts.binding);
+        let context = formal_workspace_contract(proposed, &binding);
         let name = proposed.name.clone();
         let brief = proposed.brief.clone();
         let device_context = self.host_device_context();
         let root = self.root.clone();
         let app_id = proposed.id.clone();
+        let create_seed = create_seed.clone();
         tokio::task::spawn_blocking(
             move ||
                 -> Result<
@@ -5496,7 +6198,7 @@ impl LocalAppsHostBroker {
                 let landed: Result<(), String> = (|| {
                     // 3c — the manifest's `surface` and `name`, under the
                     // §C.1.4 invariant.
-                    stamp_scaffold_identity(&layout, &name, &artifacts)?;
+                    stamp_scaffold_identity(&layout, &name, &binding, template_origin)?;
                     // 3d — wipe the editable surface, then seed it. `true` is
                     // the first-scaffold flag: everything an agent wrote during
                     // the interview is removed before the seed lands, because
@@ -5506,7 +6208,13 @@ impl LocalAppsHostBroker {
                         .map_err(|error| error.to_string())?;
                     // 3e — the formal contract, overwriting the guided one.
                     let workspace = layout.root().join(layout.workspace_rel());
-                    persist_runtime_profile_files(&workspace, &artifacts)?;
+                    if let Some(seed) = create_seed.as_ref() {
+                        copy_directory_contents(&seed.template_root, &workspace)?;
+                        persist_active_mcp_flow_contexts(&workspace, &app_id, &seed.contexts)?;
+                    } else {
+                        let artifacts = scaffold_runtime_profile(Some(binding.clone()), surface)?;
+                        persist_runtime_profile_files(&workspace, &artifacts)?;
+                    }
                     std::fs::write(workspace.join("LINGXI.md"), &context)
                         .map_err(|error| format!("write workspace LINGXI.md: {error}"))?;
                     // The native target, on the same manifest, so a formed app
@@ -5557,7 +6265,8 @@ impl LocalAppsHostBroker {
 fn stamp_scaffold_identity(
     layout: &AppLayout,
     name: &str,
-    artifacts: &crate::local_app_runtime_profiles::RuntimeProfileScaffoldArtifacts,
+    binding: &local_apps::AppRuntimeProfileBinding,
+    template_origin: local_apps::AppTemplateOrigin,
 ) -> Result<(), String> {
     let database = layout.database_path();
     if database.exists() {
@@ -5570,9 +6279,10 @@ fn stamp_scaffold_identity(
         ));
     }
     let mut manifest = local_apps::load_manifest(layout).map_err(|error| error.to_string())?;
-    manifest.surface = Some(artifacts.binding.family.surface());
-    manifest.runtime_profile = Some(artifacts.binding.clone());
+    manifest.surface = Some(binding.family.surface());
+    manifest.runtime_profile = Some(binding.clone());
     manifest.dependency_snapshot = None;
+    manifest.template_origin = Some(template_origin);
     manifest.name = name.to_string();
     local_apps::save_manifest(layout, &manifest).map_err(|error| error.to_string())
 }
@@ -5606,6 +6316,71 @@ fn persist_runtime_profile_files(
             .map_err(|error| error.to_string())?;
     }
     Ok(())
+}
+
+fn copy_directory_contents(source: &Path, destination: &Path) -> Result<(), String> {
+    for entry in std::fs::read_dir(source)
+        .map_err(|error| format!("read create staging {}: {error}", source.display()))?
+    {
+        let entry = entry
+            .map_err(|error| format!("read create staging entry {}: {error}", source.display()))?;
+        let source_path = entry.path();
+        let file_type = entry.file_type().map_err(|error| {
+            format!(
+                "inspect create staging entry {}: {error}",
+                source_path.display()
+            )
+        })?;
+        let destination_path = destination.join(entry.file_name());
+        if file_type.is_symlink() {
+            return Err(format!(
+                "create_staging_invalid: staged template contains symlink {}",
+                source_path.display()
+            ));
+        }
+        if file_type.is_dir() {
+            std::fs::create_dir_all(&destination_path).map_err(|error| {
+                format!(
+                    "create destination directory {}: {error}",
+                    destination_path.display()
+                )
+            })?;
+            copy_directory_contents(&source_path, &destination_path)?;
+            continue;
+        }
+        if !file_type.is_file() {
+            return Err(format!(
+                "create_staging_invalid: staged template contains special file {}",
+                source_path.display()
+            ));
+        }
+        let bytes = std::fs::read(&source_path)
+            .map_err(|error| format!("read staged file {}: {error}", source_path.display()))?;
+        let relative = destination_path
+            .strip_prefix(destination)
+            .expect("staged file destination stays within workspace");
+        let relative_str = relative.to_str().ok_or_else(|| {
+            "create_staging_invalid: staged template path is not valid UTF-8".to_string()
+        })?;
+        crate::local_apps_build::write_file(destination, relative_str, &bytes, true)
+            .map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
+fn builtin_template_origin(
+    binding: &local_apps::AppRuntimeProfileBinding,
+) -> local_apps::AppTemplateOrigin {
+    local_apps::AppTemplateOrigin {
+        plugin_id: local_apps::AppTemplateOrigin::BUILTIN_PLUGIN_ID.into(),
+        plugin_version: "builtin".into(),
+        template_id: format!(
+            "{}-r{}",
+            binding.family.as_str().replace('_', "-"),
+            binding.revision
+        ),
+        template_sha256: binding.contract_sha256.clone(),
+    }
 }
 
 fn canonicalize_json(value: Value) -> Value {
@@ -5938,10 +6713,12 @@ fn scaffold_next_step_guidance() -> String {
     "The app now has its shape and its source tree. Re-read this workspace's LINGXI.md before \
      doing anything else: it has been REPLACED by the formal contract for the surface you just \
      committed, and it names the editable entry points, the host-managed files you must not \
-     touch, and the build workflow for this surface. Anything written into the workspace before \
-     this call is gone, as the guided contract said it would be. Do not create a second \
-     scaffold, do not run a package manager, and do not call LocalAppScaffold again — the shape \
-     and the name are now fixed."
+     touch, and the rules this surface must be written to. It names no build workflow, and you \
+     do not need one: the host authorizes exactly one build workflow for this surface and \
+     refuses any other, so ask for a build without naming one. Anything written into the \
+     workspace before this call is gone, as the guided contract said it would be. Do not create \
+     a second scaffold, do not run a package manager, and do not call LocalAppScaffold again — \
+     the shape and the name are now fixed."
         .into()
 }
 
@@ -5974,7 +6751,7 @@ fn formal_workspace_contract(
     let setup_path = match binding.family {
         local_apps::AppRuntimeProfile::ReactDom => format!(
             "{profile_identity}\
-             - This app's surface is `dom`, so its build workflow is `local-app-build`. The surface and runtime profile are fixed at creation; do not infer them from source or launch the other workflow.\n\
+             - This app's surface is `dom`. The host authorizes exactly one build workflow for this surface and refuses any other; you never name or choose a workflow yourself, and a request that named a different one would be refused. The surface and runtime profile are fixed at creation; do not infer them from source.\n\
              - This workspace already contains the repository-verified Vite + Ionic foundation. The host prepares app-local dependencies in `workspace/node_modules`. Do not run `npm create vite`, do not create a second scaffold, do not add a wrapper build layer, and do not run a package manager in this local-app workspace.\n\
              - Host-managed files are `.gitignore`, `package.json`, `pnpm-lock.yaml`, `pnpm-workspace.yaml`, `jsconfig.json`, `index.html`, `vite.config.mjs`, `.lingxi/source-policy.json`, `lib/lingxi-bridge.js`, `lib/device-context.js`, `lib/platform-adapter.js`, `lib/lingxi-provider.jsx`, and `styles/foundation.css`. Do not edit them.\n\
              - Default editable entry points are `app/screens/home-screen.jsx`, `app/screens/detail-screen.jsx`, and `app/globals.css`. You may edit files under `app/`, `src/`, `styles/`, `public/`, and add non-host-managed helpers under `lib/`.\n\
@@ -6007,7 +6784,7 @@ fn formal_workspace_contract(
             };
             format!(
                 "{profile_identity}\
-                 - This app's surface is `canvas`, so its build workflow is `local-canvas-build` — NOT `local-app-build`. It is one drawn surface plus overlays; do not infer a screen hierarchy or launch the DOM workflow.\n\
+                 - This app's surface is `canvas`. The host authorizes exactly one build workflow for this surface and refuses any other; you never name or choose a workflow yourself, and a request that named a different one would be refused. It is one drawn surface plus overlays; do not infer a screen hierarchy or the surface from source.\n\
                  - This workspace already contains the repository-verified Vite + Ionic foundation, scaffolded for a single DRAWN SURFACE. The host prepares app-local dependencies in `workspace/node_modules`. Do not run `npm create vite`, do not create a second scaffold, do not add a wrapper build layer, and do not run a package manager in this local-app workspace.\n\
                  - Host-managed files are `.gitignore`, `package.json`, `pnpm-lock.yaml`, `pnpm-workspace.yaml`, `jsconfig.json`, `index.html`, `vite.config.mjs`, `.lingxi/source-policy.json`, `lib/lingxi-bridge.js`, `lib/device-context.js`, `lib/platform-adapter.js`, `lib/lingxi-provider.jsx`, `{helper}`, and `styles/foundation.css`. Do not edit them; `{helper}` is the profile's checked-in runtime adapter.\n\
                  - Default editable entry points are `app/screens/game-screen.jsx`, `src/stores/game-store.js`, and `app/globals.css`. You may edit files under `app/`, `src/`, `styles/`, `public/`, and add non-host-managed helpers under `lib/`, but never edit the managed adapter `{helper}`.\n\
@@ -6141,6 +6918,355 @@ fn guided_workspace_contract(record: &local_apps::AppRecord) -> String {
 }
 
 impl LocalAppsHostBroker {
+    async fn execute_bound_mcp_flow(
+        &self,
+        app_id: &str,
+        tool_input: Value,
+        definition: &traits::McpToolDefinitionDto,
+        binding: &local_apps::AppMcpFlowBinding,
+        context: &local_apps::AppMcpFlowContext,
+        catalog_ceiling: traits::McpPermissionCeiling,
+        mode: BoundMcpFlowMode,
+    ) -> Result<BoundMcpExecution, String> {
+        let input_bytes = serde_json::to_vec(&tool_input)
+            .map_err(|_| "invalid_argument: tool input is not serializable".to_string())?
+            .len();
+        if input_bytes > local_apps::mcp_authoring::MAX_MCP_CALL_BYTES {
+            return Err("call_payload_limit: MCP call payload exceeds 256 KiB".into());
+        }
+        if !local_apps::value_matches_schema(&tool_input, &definition.input_schema) {
+            return Err("invalid_argument: tool input does not satisfy its schema".into());
+        }
+        if context.app_id != app_id || context.source != local_apps::FlowSource::Active {
+            return Err("cross_app_flow: active typed Flow is not owned by this App".into());
+        }
+        if context.input_schema != definition.input_schema
+            || definition
+                .output_schema
+                .as_ref()
+                .is_some_and(|schema| *schema != context.output_schema)
+        {
+            return Err("binding_invalid: Flow schemas do not match the active tool".into());
+        }
+        let capability_registry = local_apps::CapabilityRegistry::default();
+        local_apps::validate_app_mcp_flow_binding(binding, app_id, context, &capability_registry)
+            .map_err(|issues| format_binding_issue(&issues))?;
+        if context.flow.steps.len() > local_apps::mcp_authoring::MAX_MCP_FLOW_STEPS {
+            return Err("flow_step_limit: MCP-bound Flow exceeds 32 steps".into());
+        }
+        let derived_ceiling =
+            local_apps::derive_local_app_mcp_ceiling(&capability_registry, &context.flow);
+        if derived_ceiling != catalog_ceiling {
+            return Err(
+                "permission_ceiling_drift: active Flow ceiling does not match the approved catalog"
+                    .into(),
+            );
+        }
+        if matches!(derived_ceiling, traits::McpPermissionCeiling::Deny)
+            || matches!(catalog_ceiling, traits::McpPermissionCeiling::Deny)
+        {
+            return Err("permission_ceiling: Host denied this MCP Flow".into());
+        }
+
+        let mut binding_slots = HashSet::new();
+        for step in &context.flow.steps {
+            let Ok(Value::Object(object)) = serde_json::from_str::<Value>(&step.input_json) else {
+                continue;
+            };
+            binding_slots.extend(
+                binding
+                    .inputs
+                    .keys()
+                    .filter(|name| object.contains_key(*name))
+                    .cloned(),
+            );
+        }
+        if binding_slots.len() != binding.inputs.len() {
+            return Err("binding_input_missing: active Flow has no slot for a typed input".into());
+        }
+
+        let result = timeout(MCP_FLOW_EXECUTION_TIMEOUT, async {
+            let mut outputs = BTreeMap::new();
+            let mut step_calls = Vec::new();
+            let mut materialized_inputs = HashSet::new();
+            let mut call_bytes = input_bytes;
+            for (index, step) in context.flow.steps.iter().enumerate() {
+                let mut step_input: Value =
+                    serde_json::from_str(&step.input_json).map_err(|_| {
+                        format!("flow_step_invalid: step {} input is invalid", step.step_id)
+                    })?;
+                if let Some(object) = step_input.as_object_mut() {
+                    for (name, value_binding) in &binding.inputs {
+                        if !object.contains_key(name) || !materialized_inputs.insert(name.clone()) {
+                            continue;
+                        }
+                        if let local_apps::FlowValueBinding::StepOutput { step_id, .. } =
+                            value_binding
+                        {
+                            let source_index = context
+                                .flow
+                                .steps
+                                .iter()
+                                .position(|candidate| candidate.step_id == *step_id)
+                                .ok_or_else(|| {
+                                    "step_not_found: Flow binding references an unknown step"
+                                        .to_string()
+                                })?;
+                            if source_index >= index {
+                                return Err(
+                                    "forward_step_output: StepOutput must reference a prior step"
+                                        .into(),
+                                );
+                            }
+                        }
+                        let value = local_apps::materialize_flow_value_binding(
+                            value_binding,
+                            &tool_input,
+                            &outputs,
+                        )
+                        .map_err(|issue| format_binding_issue(std::slice::from_ref(&issue)))?;
+                        object.insert(name.clone(), value);
+                    }
+                } else if !binding.inputs.is_empty() {
+                    return Err(format!(
+                        "flow_step_invalid: step {} input must be an object",
+                        step.step_id
+                    ));
+                }
+                let bytes = serde_json::to_vec(&step_input)
+                    .map_err(|_| "step_payload_limit: step input is not serializable".to_string())?
+                    .len();
+                if bytes > local_apps::mcp_authoring::MAX_MCP_STEP_RESULT_BYTES {
+                    return Err("step_payload_limit: step input exceeds 64 KiB".into());
+                }
+                call_bytes = call_bytes.saturating_add(bytes);
+                if call_bytes > local_apps::mcp_authoring::MAX_MCP_CALL_BYTES {
+                    return Err("call_payload_limit: Flow payload exceeds 256 KiB".into());
+                }
+                if !local_apps::allowed_for_synchronous_flow(step.capability) {
+                    return Err(format!(
+                        "forbidden_capability: {} is not allowed for MCP Flow",
+                        step.capability.as_str()
+                    ));
+                }
+                let step_schema =
+                    context
+                        .step_output_schemas
+                        .get(&step.step_id)
+                        .ok_or_else(|| {
+                            format!(
+                                "step_schema_missing: output schema for step {} is unavailable",
+                                step.step_id
+                            )
+                        })?;
+                let value = match mode {
+                    BoundMcpFlowMode::Live => timeout(
+                        FLOW_STEP_TIMEOUT,
+                        self.execute_flow_step(
+                            app_id,
+                            &context.flow.flow_id,
+                            &step.step_id,
+                            step.capability,
+                            step_input.clone(),
+                        ),
+                    )
+                    .await
+                    .map_err(|_| format!("timeout: flow step {} timed out", step.step_id))??,
+                    BoundMcpFlowMode::Qa => {
+                        minimal_schema_witness(step_schema).map_err(|error| {
+                            format!(
+                                "qa_witness_unavailable: step {} output witness failed: {error}",
+                                step.step_id
+                            )
+                        })?
+                    }
+                };
+                local_apps::validate_generated_structured_result(&value)
+                    .map_err(|issue| format!("output_schema_mismatch: {}", issue.message))?;
+                if !local_apps::value_matches_schema(&value, step_schema) {
+                    return Err(format!(
+                        "output_schema_mismatch: step {} result does not satisfy its schema",
+                        step.step_id
+                    ));
+                }
+                let output_bytes = serde_json::to_vec(&value)
+                    .map_err(|_| {
+                        "output_schema_mismatch: step result is not serializable".to_string()
+                    })?
+                    .len();
+                if output_bytes > local_apps::mcp_authoring::MAX_MCP_STEP_RESULT_BYTES {
+                    return Err("step_payload_limit: step result exceeds 64 KiB".into());
+                }
+                call_bytes = call_bytes.saturating_add(output_bytes);
+                if call_bytes > local_apps::mcp_authoring::MAX_MCP_CALL_BYTES {
+                    return Err("call_payload_limit: Flow result values exceed 256 KiB".into());
+                }
+                step_calls.push(BoundMcpStepEvidence {
+                    step_id: step.step_id.clone(),
+                    capability: step.capability.as_str().to_string(),
+                    input_sha256: value_sha256(&step_input)?,
+                    output_sha256: value_sha256(&value)?,
+                });
+                outputs.insert(step.step_id.clone(), value);
+            }
+            let result =
+                local_apps::materialize_flow_value_binding(&binding.result, &tool_input, &outputs)
+                    .map_err(|issue| format_binding_issue(std::slice::from_ref(&issue)))?;
+            if !local_apps::value_matches_schema(&result, &context.output_schema) {
+                return Err(
+                    "output_schema_mismatch: result does not satisfy the tool output schema".into(),
+                );
+            }
+            local_apps::validate_generated_structured_result(&result)
+                .map_err(|issue| format!("output_schema_mismatch: {}", issue.message))?;
+            let result_bytes = serde_json::to_vec(&result)
+                .map_err(|_| "output_schema_mismatch: result is not serializable".to_string())?
+                .len();
+            if result_bytes > local_apps::mcp_authoring::MAX_MCP_STEP_RESULT_BYTES {
+                return Err("step_payload_limit: final result exceeds 64 KiB".into());
+            }
+            if call_bytes.saturating_add(result_bytes)
+                > local_apps::mcp_authoring::MAX_MCP_CALL_BYTES
+            {
+                return Err("call_payload_limit: Flow result exceeds 256 KiB".into());
+            }
+            Ok::<BoundMcpExecution, String>(BoundMcpExecution { result, step_calls })
+        })
+        .await
+        .map_err(|_| "timeout: Local App MCP Flow exceeded 5 minutes".to_string())??;
+        Ok(result)
+    }
+
+    /// Execute one generated Local App MCP tool through a Host-owned typed
+    /// Flow. The request envelope is intentionally treated as untrusted even
+    /// though the transport has already bound its app scope: the Host
+    /// re-reads the active manifest/catalog/build and the final binding before
+    /// any capability handler runs.
+    async fn execute_mcp_flow_value(&self, input: Value) -> Result<Value, String> {
+        let app_id = required_string(&input, "app_id")?.to_string();
+        local_apps::ids::validate_app_id(&app_id)
+            .map_err(|_| "invalid Local App identity".to_string())?;
+        let tool_name = required_string(&input, "tool_name")?.to_string();
+        let requested_catalog = required_string(&input, "catalog_sha256")?.to_string();
+        let tool_input = input
+            .get("input")
+            .cloned()
+            .ok_or_else(|| "invalid_argument: tool input is required".to_string())?;
+        let input_bytes = serde_json::to_vec(&tool_input)
+            .map_err(|_| "invalid_argument: tool input is not serializable".to_string())?
+            .len();
+        if input_bytes > local_apps::mcp_authoring::MAX_MCP_CALL_BYTES {
+            return Err("call_payload_limit: MCP call payload exceeds 256 KiB".into());
+        }
+
+        let service = self.service()?;
+        service
+            .record(&app_id)
+            .await
+            .map_err(|_| "local app is unavailable".to_string())?;
+        let layout = self.layout(&app_id)?;
+        let manifest =
+            load_manifest(&layout).map_err(|_| "local app manifest unavailable".to_string())?;
+        let active = manifest
+            .active_mcp_catalog
+            .as_ref()
+            .ok_or_else(|| "catalog_not_found: Local App has no active MCP catalog".to_string())?;
+        if active.catalog_sha256 != requested_catalog {
+            return Err("catalog_stale: active Local App catalog changed".into());
+        }
+        let active_build_id = crate::local_apps_build::active_build_id(&layout)
+            .map_err(|_| "active build unavailable".to_string())?
+            .ok_or_else(|| "active build unavailable".to_string())?;
+        if active.build_id != active_build_id {
+            return Err("catalog_invalid: active build does not match MCP catalog".into());
+        }
+        let catalog = local_apps::load_mcp_catalog(&layout, &active.catalog_sha256)
+            .map_err(|_| "active Local App catalog unavailable".to_string())?;
+        if catalog.get("appId").and_then(Value::as_str) != Some(app_id.as_str())
+            || catalog.get("buildId").and_then(Value::as_str) != Some(active.build_id.as_str())
+        {
+            return Err("catalog_invalid: active catalog identity mismatch".into());
+        }
+        let entry = catalog
+            .get("tools")
+            .and_then(Value::as_array)
+            .and_then(|tools| {
+                tools.iter().find(|entry| {
+                    entry
+                        .get("definition")
+                        .unwrap_or(entry)
+                        .get("name")
+                        .and_then(Value::as_str)
+                        == Some(tool_name.as_str())
+                })
+            })
+            .ok_or_else(|| {
+                "unknown_tool: Local App tool is not in the active catalog".to_string()
+            })?;
+        let definition_value = entry.get("definition").unwrap_or(entry);
+        let definition: traits::McpToolDefinitionDto =
+            serde_json::from_value(definition_value.clone())
+                .map_err(|_| "catalog_invalid: active tool definition is invalid".to_string())?;
+        let binding_value = entry.get("flow").cloned().ok_or_else(|| {
+            "binding_not_found: active tool has no typed Flow binding".to_string()
+        })?;
+        let binding: local_apps::AppMcpFlowBinding = serde_json::from_value(binding_value)
+            .map_err(|_| "binding_invalid: active typed Flow binding is invalid".to_string())?;
+        let execution_entry = catalog
+            .get("execution")
+            .and_then(Value::as_array)
+            .and_then(|bindings| {
+                bindings.iter().find(|binding| {
+                    binding
+                        .get("definition")
+                        .and_then(|definition| definition.get("name"))
+                        .and_then(Value::as_str)
+                        == Some(tool_name.as_str())
+                })
+            })
+            .ok_or_else(|| {
+                "catalog_invalid: active tool execution binding is missing".to_string()
+            })?;
+        if execution_entry.get("definition") != entry.get("definition")
+            || execution_entry.get("flow") != entry.get("flow")
+            || execution_entry.get("ceiling") != entry.get("ceiling")
+        {
+            return Err("catalog_invalid: active tool execution binding diverged".into());
+        }
+        let contexts = self.load_active_mcp_flow_contexts(&layout)?;
+        let context = contexts
+            .get(&binding.flow_id)
+            .ok_or_else(|| "flow_not_found: active typed Flow is unavailable".to_string())?;
+        let expected_context_sha256 = execution_entry
+            .get("contextSha256")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "catalog_invalid: active Flow context digest is missing".to_string())?;
+        let actual_context_sha256 = value_sha256(
+            &serde_json::to_value(context)
+                .map_err(|error| format!("serialize active MCP Flow context: {error}"))?,
+        )?;
+        if actual_context_sha256 != expected_context_sha256 {
+            return Err("catalog_stale: active MCP Flow context changed after QA".into());
+        }
+        let catalog_ceiling = entry
+            .get("ceiling")
+            .and_then(Value::as_str)
+            .and_then(traits::McpPermissionCeiling::from_policy_str)
+            .ok_or_else(|| "permission_ceiling: active tool ceiling is invalid".to_string())?;
+        Ok(self
+            .execute_bound_mcp_flow(
+                &app_id,
+                tool_input,
+                &definition,
+                &binding,
+                context,
+                catalog_ceiling,
+                BoundMcpFlowMode::Live,
+            )
+            .await?
+            .result)
+    }
+
     async fn flow_execute_value(&self, input: Value) -> Result<Value, String> {
         let app_id = required_string(&input, "app_id")?.to_string();
         self.service()?
@@ -6381,6 +7507,23 @@ fn capture_ui_value(input: &Value) -> Result<Option<String>, String> {
     ))
 }
 
+fn validate_create_stage_quality(
+    quality_level: &str,
+    family: local_apps::AppRuntimeProfile,
+) -> Result<(), String> {
+    if !matches!(quality_level, "fast" | "balanced" | "thorough") {
+        return Err(
+            "create_staging_invalid: quality_level must be fast, balanced, or thorough".into(),
+        );
+    }
+    if quality_level == "fast" && family != local_apps::AppRuntimeProfile::ReactDom {
+        return Err(
+            "create_staging_invalid: canvas profiles require balanced or thorough quality".into(),
+        );
+    }
+    Ok(())
+}
+
 #[async_trait]
 impl LocalAppsMcpHost for LocalAppsHostBroker {
     fn create_next_step(&self) -> String {
@@ -6391,8 +7534,772 @@ impl LocalAppsMcpHost for LocalAppsHostBroker {
         self.runtime_profiles_value(input).await
     }
 
-    async fn confirm_runtime_profile(&self, input: Value) -> Result<Value, String> {
-        self.confirm_runtime_profile_value(input).await
+    async fn template_catalog(&self, _input: Value) -> Result<Value, String> {
+        let view = crate::local_app_template_catalog::catalog_view()?;
+        serde_json::to_value(view).map_err(|error| format!("serialize template catalog: {error}"))
+    }
+
+    async fn validate_template_selection(&self, input: Value) -> Result<Value, String> {
+        let app_id = required_string(&input, "app_id")?;
+        let workflow_run_id = required_string(&input, "workflow_run_id")?;
+        if input.get("caller_role").is_some() {
+            return Err(
+                "template_selector_only: caller_role is not an authority proof; use the Host-issued selector_capability"
+                    .into(),
+            );
+        }
+        let record = self
+            .service()?
+            .record(app_id)
+            .await
+            .map_err(|error| error.to_string())?;
+        if record.scaffolded {
+            return Err("template_selection_rejected: app is already scaffolded; update/verify must use its persisted profile".into());
+        }
+        crate::local_app_template_catalog::validate_and_journal(
+            &self.root,
+            app_id,
+            workflow_run_id,
+            &input,
+        )
+    }
+
+    async fn resolve_template_selection(&self, input: Value) -> Result<Value, String> {
+        let app_id = required_string(&input, "app_id")?;
+        let workflow_run_id = required_string(&input, "workflow_run_id")?;
+        let handle = required_string(&input, "validated_selection_handle")?;
+        self.service()?
+            .record(app_id)
+            .await
+            .map_err(|error| error.to_string())?;
+        crate::local_app_template_catalog::resolve(&self.root, app_id, workflow_run_id, handle)
+    }
+
+    async fn stage_create(&self, input: Value) -> Result<Value, String> {
+        let app_id = required_string(&input, "app_id")?;
+        let workflow_run_id = required_string(&input, "workflow_run_id")?;
+        let handle = required_string(&input, "validated_selection_handle")?;
+        let quality_level = required_string(&input, "quality_level")?;
+        let design_spec = input.get("design_spec").cloned();
+        let record = self
+            .service()?
+            .record(app_id)
+            .await
+            .map_err(|error| error.to_string())?;
+        if record.scaffolded {
+            return Err("create_staging_rejected: app is already scaffolded".into());
+        }
+        let selection = crate::local_app_template_catalog::resolve_typed(
+            &self.root,
+            app_id,
+            workflow_run_id,
+            handle,
+        )?;
+        validate_create_stage_quality(quality_level, selection.runtime_profile.family)?;
+        let artifacts = crate::local_app_runtime_profiles::scaffold_artifacts_for_binding(
+            &selection.runtime_profile,
+        )
+        .map_err(|error| format!("stage template dependencies: {error}"))?;
+        let requested = artifacts
+            .files
+            .iter()
+            .find(|(path, _)| *path == crate::local_app_runtime_profiles::REQUESTED_FILE_REL)
+            .map(|(_, bytes)| bytes.as_slice())
+            .ok_or_else(|| {
+                "create_staging_invalid: requested dependency input missing".to_string()
+            })?;
+        let effective = artifacts
+            .files
+            .iter()
+            .find(|(path, _)| {
+                *path == crate::local_app_runtime_profiles::EFFECTIVE_PACKAGE_FILE_REL
+            })
+            .map(|(_, bytes)| bytes.as_slice())
+            .ok_or_else(|| "create_staging_invalid: effective package input missing".to_string())?;
+        let lock = artifacts
+            .files
+            .iter()
+            .find(|(path, _)| *path == crate::local_app_runtime_profiles::LOCKFILE_FILE_REL)
+            .map(|(_, bytes)| bytes.as_slice())
+            .ok_or_else(|| "create_staging_invalid: base lock input missing".to_string())?;
+        let dependency_input_sha256 = crate::local_app_template_catalog::dependency_input_sha256(
+            requested,
+            effective,
+            lock,
+            crate::local_app_runtime_profiles::RUNTIME_PROFILE_TOOLCHAIN_KEY,
+        );
+        let verified_dependency_input_sha256 =
+            crate::local_app_template_catalog::dependency_input_sha256(
+                requested,
+                effective,
+                lock,
+                crate::local_app_runtime_profiles::RUNTIME_PROFILE_TOOLCHAIN_KEY,
+            );
+        if dependency_input_sha256 != verified_dependency_input_sha256 {
+            return Err(
+                "create_staging_invalid: dependency_input_sha256 verification mismatch".into(),
+            );
+        }
+        let staging = self
+            .root
+            .join(".lingxi-build-state/template-candidates")
+            .join(app_id)
+            .join(workflow_run_id)
+            .join("staging")
+            .join(handle);
+        std::fs::create_dir_all(&staging)
+            .map_err(|error| format!("create isolated staging: {error}"))?;
+        let design_spec_sha256 = if let Some(design_spec) = design_spec.as_ref() {
+            let design_bytes = serde_json::to_vec_pretty(design_spec)
+                .map_err(|error| format!("serialize design spec: {error}"))?;
+            let design_path = staging.join("design-spec.json");
+            let temp_path = staging.join("design-spec.json.tmp");
+            std::fs::write(&temp_path, &design_bytes)
+                .map_err(|error| format!("write design spec: {error}"))?;
+            std::fs::rename(&temp_path, &design_path)
+                .map_err(|error| format!("commit design spec: {error}"))?;
+            Some(format!("{:x}", Sha256::digest(&design_bytes)))
+        } else {
+            None
+        };
+        // Materialize only the install-before-build inputs in the run-scoped
+        // candidate staging area.  The app workspace and Manifest remain
+        // untouched until the later receipt/publish phase.  Each file is
+        // written atomically and read back before evidence is emitted so the
+        // dependency digest covers bytes that actually reached staging.
+        let template_root = staging.join("template");
+        let mut staged_files = Vec::with_capacity(artifacts.files.len());
+        for (relative, bytes) in artifacts.files {
+            let relative_path = std::path::Path::new(relative);
+            if relative_path.is_absolute()
+                || relative_path
+                    .components()
+                    .any(|component| matches!(component, std::path::Component::ParentDir))
+            {
+                return Err(format!(
+                    "create_staging_invalid: unsafe template artifact path {relative:?}"
+                ));
+            }
+            let target = template_root.join(relative_path);
+            let parent = target.parent().ok_or_else(|| {
+                "create_staging_invalid: template artifact has no parent".to_string()
+            })?;
+            std::fs::create_dir_all(parent)
+                .map_err(|error| format!("create template staging directory: {error}"))?;
+            let temporary = target.with_file_name(format!(
+                ".{}.tmp",
+                target
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .ok_or_else(|| {
+                        "create_staging_invalid: template artifact has invalid filename".to_string()
+                    })?
+            ));
+            std::fs::write(&temporary, &bytes).map_err(|error| {
+                format!("write template staging artifact {relative:?}: {error}")
+            })?;
+            std::fs::rename(&temporary, &target).map_err(|error| {
+                format!("commit template staging artifact {relative:?}: {error}")
+            })?;
+            let materialized = std::fs::read(&target)
+                .map_err(|error| format!("read template staging artifact {relative:?}: {error}"))?;
+            if materialized != bytes {
+                return Err(format!(
+                    "create_staging_invalid: template artifact changed while staging {relative:?}"
+                ));
+            }
+            staged_files.push(serde_json::json!({
+                "path": relative,
+                "sha256": format!("{:x}", sha2::Sha256::digest(&materialized)),
+            }));
+        }
+        let evidence = serde_json::json!({
+            "schemaVersion": 1,
+            "staging": "isolated",
+            "appId": app_id,
+            "workflowRunId": workflow_run_id,
+            "validatedSelectionHandle": handle,
+            "templateId": selection.template_id,
+            "dependencyInputSha256": dependency_input_sha256,
+            "designSpecSha256": design_spec_sha256,
+            "stagedFiles": staged_files,
+            "published": false,
+            "manifestCommitted": false,
+        });
+        let evidence_path = staging.join("evidence.json");
+        let bytes = serde_json::to_vec_pretty(&evidence)
+            .map_err(|error| format!("serialize staging evidence: {error}"))?;
+        let temp_path = staging.join("evidence.json.tmp");
+        std::fs::write(&temp_path, bytes)
+            .map_err(|error| format!("write staging evidence: {error}"))?;
+        std::fs::rename(&temp_path, &evidence_path)
+            .map_err(|error| format!("commit staging evidence: {error}"))?;
+        Ok(json!({
+            "ok": true,
+            "summary": "Create candidate staged in isolated Host storage.",
+            "dependency_input_sha256": dependency_input_sha256,
+            "design_spec_sha256": design_spec_sha256,
+            "evidence": evidence,
+        }))
+    }
+
+    async fn validate_mcp_proposal(&self, input: Value) -> Result<Value, String> {
+        let app_id = required_string(&input, "app_id")?.to_string();
+        let workflow_run_id = required_string(&input, "workflow_run_id")?.to_string();
+        Self::validate_workflow_run_id(&workflow_run_id)?;
+        let proposal_value = input
+            .get("proposal")
+            .cloned()
+            .ok_or_else(|| "proposal is required".to_string())?;
+        let service = self.service()?;
+        let record = service
+            .record(&app_id)
+            .await
+            .map_err(|error| error.to_string())?;
+        let layout = self.layout(&app_id)?;
+        let manifest = load_manifest(&layout).map_err(|error| error.to_string())?;
+        let proposal: local_apps::AppMcpProposal = serde_json::from_value(proposal_value)
+            .map_err(|error| format!("proposal_invalid: {error}"))?;
+        let create_context = if record.scaffolded {
+            None
+        } else {
+            Some(self.load_create_proposal_context(&app_id, &workflow_run_id)?)
+        };
+        let contexts = if let Some(context) = create_context.as_ref() {
+            context.contexts.clone()
+        } else {
+            self.load_active_mcp_flow_contexts(&layout)?
+        };
+        let validated = local_apps::validate_app_mcp_proposal(
+            proposal,
+            &app_id,
+            manifest.revision,
+            &contexts,
+            &local_apps::CapabilityRegistry::default(),
+        )
+        .map_err(|issues| {
+            format!(
+                "proposal_invalid: {}",
+                issues
+                    .into_iter()
+                    .map(|issue| format!("{}: {}", issue.code, issue.message))
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            )
+        })?;
+        let review_surface = Self::build_mcp_review_surface(
+            &manifest,
+            &validated,
+            manifest.active_mcp_catalog.as_ref(),
+            create_context.as_ref(),
+        );
+        let approval_contract_sha256 = local_apps::approval_contract_sha256(review_surface.clone())
+            .map_err(|issue| format!("proposal_invalid: {}", issue.message))?;
+        let active_build_id =
+            crate::local_apps_build::active_build_id(&layout).map_err(|error| error.to_string())?;
+        let mut journal = local_apps::McpCandidateJournal {
+            schema_version: local_apps::APPS_SCHEMA_VERSION,
+            app_id: app_id.clone(),
+            workflow_run_id: workflow_run_id.clone(),
+            stage: local_apps::McpAuthoringStage::Prepared,
+            previous_build_id: active_build_id,
+            previous_catalog_sha256: manifest
+                .active_mcp_catalog
+                .as_ref()
+                .map(|catalog| catalog.catalog_sha256.clone()),
+            proposal_sha256: validated.proposal_sha256.clone(),
+            approval_contract_sha256: approval_contract_sha256.clone(),
+            tool_surface_sha256: validated.tool_surface_sha256.clone(),
+            catalog_sha256: None,
+            consumed_receipt_sha256: None,
+            integrity_sha256: String::new(),
+        }
+        .seal()
+        .map_err(|issue| issue.message)?;
+        let unchanged_approval = manifest.active_mcp_catalog.as_ref().is_some_and(|catalog| {
+            catalog.approval_contract_sha256 == approval_contract_sha256
+                && catalog.tool_surface_sha256 == validated.tool_surface_sha256
+        });
+        if unchanged_approval {
+            journal = journal
+                .advance(local_apps::McpAuthoringStage::Approved)
+                .map_err(|issue| issue.message)?;
+        }
+        local_apps::save_candidate_journal(&layout, &journal).map_err(|error| error.to_string())?;
+        self.save_mcp_candidate(
+            &app_id,
+            &workflow_run_id,
+            &PersistedMcpCandidate {
+                validated: validated.clone(),
+                approval_contract_sha256: approval_contract_sha256.clone(),
+                review_surface: review_surface.clone(),
+                verification_sha256: None,
+                catalog_sha256: None,
+                qa_context_sha256: None,
+            },
+        )?;
+        Ok(json!({
+            "ok": true,
+            "status": if unchanged_approval { "approved_reusable" } else { "approval_required" },
+            "proposal_sha256": validated.proposal_sha256,
+            "approval_contract_sha256": approval_contract_sha256,
+            "tool_surface_sha256": validated.tool_surface_sha256,
+            "findings": [],
+            "review_surface": review_surface,
+        }))
+    }
+
+    async fn approve_mcp_proposal(&self, input: Value) -> Result<Value, String> {
+        let app_id = required_string(&input, "app_id")?.to_string();
+        let workflow_run_id = required_string(&input, "workflow_run_id")?.to_string();
+        let approval_contract_sha256 =
+            required_string(&input, "approval_contract_sha256")?.to_string();
+        let layout = self.layout(&app_id)?;
+        let mut journal =
+            local_apps::load_candidate_journal(&layout).map_err(|error| error.to_string())?;
+        if journal.workflow_run_id != workflow_run_id {
+            return Err(
+                "receipt_invalid: workflow run does not match the prepared candidate".into(),
+            );
+        }
+        if journal.approval_contract_sha256 != approval_contract_sha256 {
+            return Err(
+                "receipt_invalid: approval contract digest does not match the prepared candidate"
+                    .into(),
+            );
+        }
+        if journal.stage == local_apps::McpAuthoringStage::Prepared {
+            let service = self.service()?;
+            let record = service
+                .record(&app_id)
+                .await
+                .map_err(|error| error.to_string())?;
+            let manifest = load_manifest(&layout).map_err(|error| error.to_string())?;
+            let candidate = self.load_mcp_candidate(&app_id, &workflow_run_id)?;
+            if candidate.approval_contract_sha256 != approval_contract_sha256
+                || candidate.validated.proposal_sha256 != journal.proposal_sha256
+                || candidate.validated.tool_surface_sha256 != journal.tool_surface_sha256
+                || local_apps::approval_contract_sha256(candidate.review_surface.clone())
+                    .map_err(|issue| issue.message)?
+                    != approval_contract_sha256
+            {
+                return Err("receipt_invalid: persisted MCP review surface changed".into());
+            }
+            if !self
+                .request_mcp_candidate_approval(&record, &workflow_run_id, &manifest, &candidate)
+                .await?
+            {
+                return Err("user denied the Local App MCP proposal".into());
+            }
+            // The native sheet may remain open for minutes. Re-read the sealed
+            // journal and candidate before minting a receipt so approval cannot
+            // be applied to a superseding/tampered proposal.
+            journal =
+                local_apps::load_candidate_journal(&layout).map_err(|error| error.to_string())?;
+            let current_candidate = self.load_mcp_candidate(&app_id, &workflow_run_id)?;
+            if journal.stage != local_apps::McpAuthoringStage::Prepared
+                || journal.workflow_run_id != workflow_run_id
+                || journal.approval_contract_sha256 != approval_contract_sha256
+                || journal.proposal_sha256 != candidate.validated.proposal_sha256
+                || journal.tool_surface_sha256 != candidate.validated.tool_surface_sha256
+                || current_candidate.approval_contract_sha256 != candidate.approval_contract_sha256
+                || current_candidate.validated.proposal_sha256
+                    != candidate.validated.proposal_sha256
+                || current_candidate.validated.tool_surface_sha256
+                    != candidate.validated.tool_surface_sha256
+            {
+                return Err(
+                    "receipt_invalid: MCP candidate changed while awaiting approval".into(),
+                );
+            }
+            let receipt = local_apps::McpConfirmationReceipt::new(
+                &app_id,
+                &workflow_run_id,
+                approval_contract_sha256.clone(),
+                journal.proposal_sha256.clone(),
+                now_ms(),
+            );
+            let receipt_id = receipt.receipt_id.clone();
+            self.pending_mcp_receipts
+                .lock()
+                .await
+                .issue(receipt)
+                .map_err(|issue| issue.message)?;
+            journal = journal
+                .advance(local_apps::McpAuthoringStage::Approved)
+                .map_err(|issue| issue.message)?;
+            local_apps::save_candidate_journal(&layout, &journal)
+                .map_err(|error| error.to_string())?;
+            return Ok(json!({
+                "approved": true,
+                "receipt_id": receipt_id,
+                "status": "approved",
+            }));
+        }
+        Ok(json!({
+            "approved": true,
+            "receipt_id": Value::Null,
+            "status": "approved_reusable",
+        }))
+    }
+
+    async fn qa_mcp_candidate(&self, input: Value) -> Result<Value, String> {
+        let app_id = required_string(&input, "app_id")?.to_string();
+        let workflow_run_id = required_string(&input, "workflow_run_id")?.to_string();
+        let layout = self.layout(&app_id)?;
+        let mut journal =
+            local_apps::load_candidate_journal(&layout).map_err(|error| error.to_string())?;
+        if journal.workflow_run_id != workflow_run_id {
+            return Err(
+                "journal_invalid: workflow run does not match the candidate journal".into(),
+            );
+        }
+        if journal.stage < local_apps::McpAuthoringStage::Approved {
+            return Err("approval_required: MCP candidate is not approved".into());
+        }
+        let mut candidate = self.load_mcp_candidate(&app_id, &workflow_run_id)?;
+        let definitions = candidate
+            .validated
+            .tools
+            .iter()
+            .map(|tool| tool.definition.clone())
+            .collect::<Vec<_>>();
+        local_apps::validate_generated_mcp_catalog(&definitions).map_err(|issues| {
+            format!(
+                "mcp_qa_failed: {}",
+                issues
+                    .into_iter()
+                    .map(|issue| format!("{}: {}", issue.code, issue.message))
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            )
+        })?;
+        let build_id = crate::local_apps_build::active_build_id(&layout)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "mcp_qa_failed: app has no active build".to_string())?;
+        let contexts = self.load_active_mcp_flow_contexts(&layout)?;
+        let mut tool_evidence = Vec::new();
+        let mut context_sha256 = BTreeMap::new();
+        let mut first_isolation_probe = None;
+        for tool in &candidate.validated.tools {
+            let witness = minimal_schema_witness(&tool.definition.input_schema)
+                .map_err(|error| format!("mcp_qa_failed: {}: {error}", tool.definition.name))?;
+            let context = contexts.get(&tool.flow.flow_id).ok_or_else(|| {
+                format!(
+                    "mcp_qa_failed: flow_not_found: active typed Flow {} is unavailable",
+                    tool.flow.flow_id
+                )
+            })?;
+            let execution = self
+                .execute_bound_mcp_flow(
+                    &app_id,
+                    witness.clone(),
+                    &tool.definition,
+                    &tool.flow,
+                    context,
+                    tool.ceiling,
+                    BoundMcpFlowMode::Qa,
+                )
+                .await
+                .map_err(|error| format!("mcp_qa_failed: {}: {error}", tool.definition.name))?;
+            let expected_steps = context
+                .flow
+                .steps
+                .iter()
+                .map(|step| step.step_id.as_str())
+                .collect::<Vec<_>>();
+            let visited_steps = execution
+                .step_calls
+                .iter()
+                .map(|step| step.step_id.as_str())
+                .collect::<Vec<_>>();
+            if visited_steps != expected_steps {
+                return Err(format!(
+                    "mcp_qa_failed: {}: flow_call_evidence_incomplete",
+                    tool.definition.name
+                ));
+            }
+            if first_isolation_probe.is_none() {
+                first_isolation_probe = Some((tool.clone(), witness.clone(), context.clone()));
+            }
+            let context_digest = value_sha256(
+                &serde_json::to_value(context)
+                    .map_err(|error| format!("serialize MCP Flow context: {error}"))?,
+            )?;
+            context_sha256.insert(tool.flow.flow_id.clone(), context_digest.clone());
+            tool_evidence.push(QaToolExecutionEvidence {
+                tool_name: tool.definition.name.clone(),
+                flow_id: tool.flow.flow_id.clone(),
+                context_sha256: context_digest,
+                input_sha256: value_sha256(&witness)?,
+                result_sha256: value_sha256(&execution.result)?,
+                step_calls: execution.step_calls,
+            });
+        }
+        let isolation = if let Some((tool, witness, mut mismatched_context)) = first_isolation_probe
+        {
+            mismatched_context.app_id = format!("{app_id}-other");
+            let error = self
+                .execute_bound_mcp_flow(
+                    &app_id,
+                    witness,
+                    &tool.definition,
+                    &tool.flow,
+                    &mismatched_context,
+                    tool.ceiling,
+                    BoundMcpFlowMode::Qa,
+                )
+                .await
+                .expect_err("cross-app QA probe must be rejected");
+            if !error.starts_with("cross_app_flow") {
+                return Err(format!(
+                    "mcp_qa_failed: isolation_probe_unexpected: {error}"
+                ));
+            }
+            json!({
+                "status": "passed",
+                "toolName": tool.definition.name,
+                "flowId": tool.flow.flow_id,
+                "rejection": error,
+            })
+        } else {
+            json!({
+                "status": "not_applicable",
+                "reason": "candidate exposes no tools",
+            })
+        };
+        let execution = serde_json::to_value(
+            candidate
+                .validated
+                .tools
+                .iter()
+                .map(|tool| {
+                    json!({
+                        "definition": tool.definition,
+                        "flow": tool.flow,
+                        "ceiling": tool.ceiling,
+                        "contextSha256": context_sha256.get(&tool.flow.flow_id),
+                    })
+                })
+                .collect::<Vec<_>>(),
+        )
+        .map_err(|error| format!("serialize execution bindings: {error}"))?;
+        let catalog_sha256 = local_apps::catalog_sha256(&candidate.validated, &build_id, execution)
+            .map_err(|issue| issue.message)?;
+        let verification_sha256 = local_apps::approval_contract_sha256(json!({
+            "appId": app_id,
+            "workflowRunId": workflow_run_id,
+            "catalogSha256": catalog_sha256,
+            "toolEvidence": tool_evidence,
+            "isolation": isolation,
+        }))
+        .map_err(|issue| issue.message)?;
+        journal.catalog_sha256 = Some(catalog_sha256.clone());
+        journal = journal.seal().map_err(|issue| issue.message)?;
+        while journal.stage < local_apps::McpAuthoringStage::McpVerified {
+            let next_stage = match journal.stage {
+                local_apps::McpAuthoringStage::Approved => local_apps::McpAuthoringStage::Built,
+                local_apps::McpAuthoringStage::Built => local_apps::McpAuthoringStage::SmokePassed,
+                local_apps::McpAuthoringStage::SmokePassed => {
+                    local_apps::McpAuthoringStage::McpVerified
+                }
+                _ => local_apps::McpAuthoringStage::McpVerified,
+            };
+            journal = journal.advance(next_stage).map_err(|issue| issue.message)?;
+        }
+        candidate.verification_sha256 = Some(verification_sha256.clone());
+        candidate.catalog_sha256 = Some(catalog_sha256.clone());
+        candidate.qa_context_sha256 = Some(context_sha256);
+        // Persist the evidence-bearing candidate before advancing the durable
+        // journal. If this write fails, the journal must remain at its prior
+        // stage so a caller can retry QA; an `McpVerified` journal pointing at
+        // a candidate with no verification evidence would be a false commit.
+        self.save_mcp_candidate(&app_id, &workflow_run_id, &candidate)?;
+        local_apps::save_candidate_journal(&layout, &journal).map_err(|error| error.to_string())?;
+        Ok(json!({
+            "ok": true,
+            "findings": [],
+            "mcp_schema": "passed",
+            "flow_binding": "passed",
+            "calls": "passed",
+            "isolation": isolation["status"],
+            "tool_evidence": tool_evidence,
+            "isolation_evidence": isolation,
+            "verification_sha256": verification_sha256,
+            "summary": "Host-side MCP schema, binding, call evidence and isolation gates passed.",
+        }))
+    }
+
+    async fn promote_mcp_candidate(&self, input: Value) -> Result<Value, String> {
+        let app_id = required_string(&input, "app_id")?.to_string();
+        let workflow_run_id = required_string(&input, "workflow_run_id")?.to_string();
+        let receipt_id = input
+            .get("receipt_id")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        let service = self.service()?;
+        let layout = self.layout(&app_id)?;
+        let mut journal =
+            local_apps::load_candidate_journal(&layout).map_err(|error| error.to_string())?;
+        if journal.workflow_run_id != workflow_run_id {
+            return Err(
+                "journal_invalid: workflow run does not match the candidate journal".into(),
+            );
+        }
+        if journal.stage < local_apps::McpAuthoringStage::McpVerified {
+            return Err("mcp_qa_failed: MCP candidate has not completed QA".into());
+        }
+        let candidate = self.load_mcp_candidate(&app_id, &workflow_run_id)?;
+        if candidate.validated.proposal_sha256 != journal.proposal_sha256
+            || candidate.validated.tool_surface_sha256 != journal.tool_surface_sha256
+            || candidate.approval_contract_sha256 != journal.approval_contract_sha256
+        {
+            return Err(
+                "promotion_failed: persisted candidate identity changed after approval".into(),
+            );
+        }
+        let qa_context_sha256 = candidate
+            .qa_context_sha256
+            .as_ref()
+            .ok_or_else(|| "promotion_failed: QA context digests are missing".to_string())?;
+        let active_contexts = self.load_active_mcp_flow_contexts(&layout)?;
+        for tool in &candidate.validated.tools {
+            let expected = qa_context_sha256.get(&tool.flow.flow_id).ok_or_else(|| {
+                format!(
+                    "promotion_failed: QA context digest is missing for Flow {}",
+                    tool.flow.flow_id
+                )
+            })?;
+            let context = active_contexts.get(&tool.flow.flow_id).ok_or_else(|| {
+                format!(
+                    "promotion_failed: active Flow {} disappeared after QA",
+                    tool.flow.flow_id
+                )
+            })?;
+            let actual = value_sha256(
+                &serde_json::to_value(context)
+                    .map_err(|error| format!("serialize MCP Flow context: {error}"))?,
+            )?;
+            if &actual != expected {
+                return Err(format!(
+                    "promotion_failed: active Flow {} changed after QA",
+                    tool.flow.flow_id
+                ));
+            }
+        }
+        let catalog_sha256 = candidate
+            .catalog_sha256
+            .clone()
+            .or_else(|| journal.catalog_sha256.clone())
+            .ok_or_else(|| "catalog_invalid: candidate catalog digest is missing".to_string())?;
+        let build_id = crate::local_apps_build::active_build_id(&layout)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "promotion_failed: app has no active build".to_string())?;
+        let execution = serde_json::to_value(
+            candidate
+                .validated
+                .tools
+                .iter()
+                .map(|tool| {
+                    json!({
+                        "definition": tool.definition,
+                        "flow": tool.flow,
+                        "ceiling": tool.ceiling,
+                        "contextSha256": qa_context_sha256.get(&tool.flow.flow_id),
+                    })
+                })
+                .collect::<Vec<_>>(),
+        )
+        .map_err(|error| format!("serialize execution bindings: {error}"))?;
+        let recomputed_catalog_sha256 =
+            local_apps::catalog_sha256(&candidate.validated, &build_id, execution.clone())
+                .map_err(|issue| issue.message)?;
+        if journal.catalog_sha256.as_deref() != Some(recomputed_catalog_sha256.as_str())
+            || candidate.catalog_sha256.as_deref() != Some(recomputed_catalog_sha256.as_str())
+            || catalog_sha256 != recomputed_catalog_sha256
+        {
+            return Err("promotion_failed: candidate catalog digest changed after QA".into());
+        }
+        if let Some(receipt_id) = receipt_id.as_deref() {
+            self.pending_mcp_receipts
+                .lock()
+                .await
+                .consume_candidate(
+                    receipt_id,
+                    &app_id,
+                    &workflow_run_id,
+                    &journal.approval_contract_sha256,
+                    &journal.proposal_sha256,
+                    now_ms(),
+                )
+                .map_err(|issue| issue.message)?;
+            journal.consumed_receipt_sha256 =
+                Some(format!("{:x}", Sha256::digest(receipt_id.as_bytes())));
+            journal = journal.seal().map_err(|issue| issue.message)?;
+        }
+        let manifest = load_manifest(&layout).map_err(|error| error.to_string())?;
+        let catalog_body = json!({
+            "appId": app_id,
+            "buildId": build_id,
+            "proposal": candidate.validated.proposal.clone(),
+            "tools": candidate.validated.tools.iter().map(|tool| json!({
+                "definition": tool.definition,
+                "flow": tool.flow,
+                "ceiling": tool.ceiling,
+            })).collect::<Vec<_>>(),
+            "execution": execution,
+        });
+        local_apps::save_mcp_catalog(&layout, &catalog_sha256, &catalog_body)
+            .map_err(|error| error.to_string())?;
+        let previous = manifest.active_mcp_catalog.clone();
+        let mut promoted_manifest = manifest.clone();
+        if promoted_manifest.revision == 0 {
+            promoted_manifest.revision = 1;
+        }
+        promoted_manifest.active_mcp_catalog = Some(local_apps::AppMcpCatalogRef {
+            build_id,
+            manifest_revision: promoted_manifest.revision,
+            authoring_revision: previous
+                .as_ref()
+                .map(|catalog| {
+                    if catalog.tool_surface_sha256 == candidate.validated.tool_surface_sha256 {
+                        catalog.authoring_revision
+                    } else {
+                        catalog.authoring_revision + 1
+                    }
+                })
+                .unwrap_or(1),
+            user_goal_sha256: candidate.validated.proposal.user_goal_sha256.clone(),
+            proposal_sha256: candidate.validated.proposal_sha256.clone(),
+            approval_contract_sha256: candidate.approval_contract_sha256.clone(),
+            tool_surface_sha256: candidate.validated.tool_surface_sha256.clone(),
+            catalog_sha256: catalog_sha256.clone(),
+            mcp_verification_sha256: candidate
+                .verification_sha256
+                .clone()
+                .ok_or_else(|| "promotion_failed: verification digest is missing".to_string())?,
+        });
+        local_apps::save_manifest(&layout, &promoted_manifest)
+            .map_err(|error| error.to_string())?;
+        if journal.stage < local_apps::McpAuthoringStage::Promoted {
+            journal = journal
+                .advance(local_apps::McpAuthoringStage::Promoted)
+                .map_err(|issue| issue.message)?;
+            local_apps::save_candidate_journal(&layout, &journal)
+                .map_err(|error| error.to_string())?;
+        } else if receipt_id.is_some() {
+            local_apps::save_candidate_journal(&layout, &journal)
+                .map_err(|error| error.to_string())?;
+        }
+        self.sync_managed_local_app_publication(&app_id).await?;
+        self.emit_managed_mcp_inventory().await?;
+        let _ = service.announce_record(&app_id).await;
+        Ok(json!({
+            "promoted": true,
+            "catalog_sha256": catalog_sha256,
+            "status": "promoted",
+            "publication_state": "published_unverified",
+        }))
     }
 
     async fn manage_runtime(&self, input: Value) -> Result<Value, String> {
@@ -6433,10 +8340,11 @@ impl LocalAppsMcpHost for LocalAppsHostBroker {
                 served_index.display()
             ));
         }
-        service
-            .mark_ready(&app_id)
-            .await
-            .map_err(|e| e.to_string())?;
+        // Publication state is derived from the active build/catalog pair in
+        // schema v3. A successful build alone must not mutate a persistent
+        // workflow state or advertise an active MCP surface.
+        self.rebind_active_mcp_catalog_to_current_build(&app_id, &layout)
+            .await?;
         let dependencies = service
             .dependency_record(&app_id)
             .await
@@ -6854,6 +8762,8 @@ impl LocalAppsMcpHost for LocalAppsHostBroker {
                 .map_err(|error| format!("dependency update production build failed: {error}"))?;
             crate::local_apps_build::validate_build_for_launch(&layout)
                 .map_err(|error| format!("dependency update profile smoke failed: {error}"))?;
+            self.rebind_active_mcp_catalog_to_current_build(&app_id, &layout)
+                .await?;
             let mut committed_journal = recovery_journal.clone();
             committed_journal.status = DependencyUpdateRecoveryStatus::Committed;
             Self::write_dependency_update_recovery_journal(&layout, &committed_journal)?;
@@ -7337,6 +9247,10 @@ impl LocalAppsMcpHost for LocalAppsHostBroker {
         self.flow_execute_value(input).await
     }
 
+    async fn execute_mcp_flow(&self, input: Value) -> Result<Value, String> {
+        self.execute_mcp_flow_value(input).await
+    }
+
     async fn background_schedule(&self, input: Value) -> Result<Value, String> {
         self.background_schedule_value(input).await
     }
@@ -7398,6 +9312,175 @@ fn required_string<'a>(input: &'a Value, key: &str) -> Result<&'a str, String> {
         .ok_or_else(|| format!("missing non-empty {key:?}"))
 }
 
+fn format_binding_issue(issues: &[local_apps::GeneratedMcpIssue]) -> String {
+    issues.first().map_or_else(
+        || "binding_invalid: typed Flow binding is invalid".to_string(),
+        |issue| format!("{}: {}", issue.code, issue.message),
+    )
+}
+
+fn optional_json_string<T: Serialize>(value: Option<&T>) -> Result<Option<String>, String> {
+    value
+        .map(|value| serde_json::to_string(value).map_err(|error| error.to_string()))
+        .transpose()
+}
+
+fn mcp_tool_surface(
+    definition: traits::McpToolDefinitionDto,
+    flow: Value,
+    ceiling: traits::McpPermissionCeiling,
+) -> Result<LocalAppMcpToolSurfaceDto, String> {
+    Ok(LocalAppMcpToolSurfaceDto {
+        name: definition.name,
+        title: definition.title,
+        description: definition.description,
+        input_schema_json: serde_json::to_string(&definition.input_schema)
+            .map_err(|error| error.to_string())?,
+        output_schema_json: optional_json_string(definition.output_schema.as_ref())?,
+        annotations_json: optional_json_string(definition.annotations.as_ref())?,
+        execution_json: optional_json_string(definition.execution.as_ref())?,
+        visible_meta_json: optional_json_string(definition.meta.as_ref())?,
+        semantic_flow_json: serde_json::to_string(&flow).map_err(|error| error.to_string())?,
+        permission_ceiling: match ceiling {
+            traits::McpPermissionCeiling::Allow => "allow",
+            traits::McpPermissionCeiling::Ask => "ask",
+            traits::McpPermissionCeiling::Deny => "deny",
+        }
+        .into(),
+    })
+}
+
+fn mcp_tool_surfaces_from_catalog(
+    catalog: &Value,
+) -> Result<Vec<LocalAppMcpToolSurfaceDto>, String> {
+    let entries = catalog
+        .get("tools")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "catalog_invalid: active catalog tools are missing".to_string())?;
+    let mut tools = Vec::with_capacity(entries.len());
+    for entry in entries {
+        let definition: traits::McpToolDefinitionDto =
+            serde_json::from_value(entry.get("definition").unwrap_or(entry).clone())
+                .map_err(|_| "catalog_invalid: active tool definition is invalid".to_string())?;
+        let flow = entry
+            .get("flow")
+            .cloned()
+            .ok_or_else(|| "catalog_invalid: active tool Flow binding is missing".to_string())?;
+        let ceiling = entry
+            .get("ceiling")
+            .and_then(Value::as_str)
+            .and_then(traits::McpPermissionCeiling::from_policy_str)
+            .ok_or_else(|| "catalog_invalid: active tool ceiling is invalid".to_string())?;
+        tools.push(mcp_tool_surface(definition, flow, ceiling)?);
+    }
+    tools.sort_by(|left, right| left.name.cmp(&right.name));
+    Ok(tools)
+}
+
+fn mcp_tool_surfaces_from_candidate(
+    candidate: &PersistedMcpCandidate,
+) -> Result<Vec<LocalAppMcpToolSurfaceDto>, String> {
+    let mut tools = candidate
+        .validated
+        .tools
+        .iter()
+        .map(|tool| {
+            mcp_tool_surface(
+                tool.definition.clone(),
+                serde_json::to_value(&tool.flow).map_err(|error| error.to_string())?,
+                tool.ceiling,
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    tools.sort_by(|left, right| left.name.cmp(&right.name));
+    Ok(tools)
+}
+
+fn changed_mcp_fields(
+    before: &LocalAppMcpToolSurfaceDto,
+    after: &LocalAppMcpToolSurfaceDto,
+) -> Vec<LocalAppMcpToolFieldDto> {
+    let mut fields = Vec::new();
+    if before.title != after.title {
+        fields.push(LocalAppMcpToolFieldDto::Title);
+    }
+    if before.description != after.description {
+        fields.push(LocalAppMcpToolFieldDto::Description);
+    }
+    if before.input_schema_json != after.input_schema_json {
+        fields.push(LocalAppMcpToolFieldDto::InputSchema);
+    }
+    if before.output_schema_json != after.output_schema_json {
+        fields.push(LocalAppMcpToolFieldDto::OutputSchema);
+    }
+    if before.annotations_json != after.annotations_json {
+        fields.push(LocalAppMcpToolFieldDto::Annotations);
+    }
+    if before.execution_json != after.execution_json {
+        fields.push(LocalAppMcpToolFieldDto::Execution);
+    }
+    if before.visible_meta_json != after.visible_meta_json {
+        fields.push(LocalAppMcpToolFieldDto::VisibleMeta);
+    }
+    if before.semantic_flow_json != after.semantic_flow_json {
+        fields.push(LocalAppMcpToolFieldDto::SemanticFlow);
+    }
+    if before.permission_ceiling != after.permission_ceiling {
+        fields.push(LocalAppMcpToolFieldDto::PermissionCeiling);
+    }
+    fields
+}
+
+fn mcp_tool_diffs(
+    before: Vec<LocalAppMcpToolSurfaceDto>,
+    after: Vec<LocalAppMcpToolSurfaceDto>,
+) -> Vec<LocalAppMcpToolDiffDto> {
+    let mut before = before
+        .into_iter()
+        .map(|tool| (tool.name.clone(), tool))
+        .collect::<BTreeMap<_, _>>();
+    let mut after = after
+        .into_iter()
+        .map(|tool| (tool.name.clone(), tool))
+        .collect::<BTreeMap<_, _>>();
+    let names = before
+        .keys()
+        .chain(after.keys())
+        .cloned()
+        .collect::<std::collections::BTreeSet<_>>();
+    let mut diffs = Vec::new();
+    for name in names {
+        match (before.remove(&name), after.remove(&name)) {
+            (None, Some(after)) => diffs.push(LocalAppMcpToolDiffDto {
+                kind: LocalAppMcpToolChangeKindDto::Added,
+                name,
+                before: None,
+                after: Some(after),
+                changed_fields: Vec::new(),
+            }),
+            (Some(before), None) => diffs.push(LocalAppMcpToolDiffDto {
+                kind: LocalAppMcpToolChangeKindDto::Removed,
+                name,
+                before: Some(before),
+                after: None,
+                changed_fields: Vec::new(),
+            }),
+            (Some(before), Some(after)) if before != after => {
+                let changed_fields = changed_mcp_fields(&before, &after);
+                diffs.push(LocalAppMcpToolDiffDto {
+                    kind: LocalAppMcpToolChangeKindDto::Changed,
+                    name,
+                    before: Some(before),
+                    after: Some(after),
+                    changed_fields,
+                });
+            }
+            _ => {}
+        }
+    }
+    diffs
+}
+
 fn parse_background_status(value: &str) -> Result<BackgroundTaskStatus, String> {
     match value {
         "scheduled" => Ok(BackgroundTaskStatus::Scheduled),
@@ -7434,19 +9517,6 @@ fn lower_runtime_profile_family(profile: AppRuntimeProfile) -> AppRuntimeProfile
         AppRuntimeProfile::Three3d => AppRuntimeProfileDto::Three3d,
         AppRuntimeProfile::Phaser2d => AppRuntimeProfileDto::Phaser2d,
         AppRuntimeProfile::Babylon3d => AppRuntimeProfileDto::Babylon3d,
-    }
-}
-
-fn raise_runtime_profile_family(
-    profile: AppRuntimeProfileDto,
-) -> Result<AppRuntimeProfile, String> {
-    match profile {
-        AppRuntimeProfileDto::ReactDom => Ok(AppRuntimeProfile::ReactDom),
-        AppRuntimeProfileDto::Canvas2d => Ok(AppRuntimeProfile::Canvas2d),
-        AppRuntimeProfileDto::Three3d => Ok(AppRuntimeProfile::Three3d),
-        AppRuntimeProfileDto::Phaser2d => Ok(AppRuntimeProfile::Phaser2d),
-        AppRuntimeProfileDto::Babylon3d => Ok(AppRuntimeProfile::Babylon3d),
-        _ => Err("unknown runtime profile selection returned by the client".into()),
     }
 }
 
@@ -9627,6 +11697,229 @@ mod tests {
         record.id
     }
 
+    #[tokio::test]
+    async fn execute_mcp_flow_runs_the_host_reloaded_typed_binding() {
+        let (root, service, broker) = create_broker(false, None).await;
+        let app_id = create_app_fixture(&root, &service, "Typed MCP Flow").await;
+        let layout = AppLayout::new(root.path().to_path_buf(), app_id.clone()).expect("layout");
+
+        // The fixture's build receipt predates the v3 build-id field. Replace
+        // it with the smallest valid immutable active-build receipt so the
+        // runtime exercises the same pair check as a published app.
+        let build_id = "typed-flow-build";
+        fs::write(
+            root.path().join(layout.build_rel(false)).join("build.json"),
+            serde_json::to_vec_pretty(&json!({
+                "version": 3,
+                "buildId": build_id,
+                "buildKey": "typed-flow",
+                "runtimeContractSha256": "0".repeat(64),
+                "dependencySnapshotSha256": "0".repeat(64),
+                "outputSha256": "0".repeat(64),
+            }))
+            .expect("serialize build receipt"),
+        )
+        .expect("write build receipt");
+
+        let input_schema = json!({
+            "type": "object",
+            "properties": {"query": {"type": "string"}},
+            "required": ["query"],
+            "additionalProperties": false,
+        });
+        let output_schema = runtime_record_output_schema();
+        let flow = local_apps::FlowDefinition {
+            flow_id: "runtime-status-flow".into(),
+            version: 1,
+            steps: vec![
+                local_apps::FlowStep {
+                    step_id: "status1".into(),
+                    capability: local_apps::CapabilityId::RuntimeStatus,
+                    depends_on: Vec::new(),
+                    input_json: r#"{"query":null}"#.into(),
+                },
+                local_apps::FlowStep {
+                    step_id: "status2".into(),
+                    capability: local_apps::CapabilityId::RuntimeStatus,
+                    depends_on: vec!["status1".into()],
+                    input_json: r#"{"previous":null}"#.into(),
+                },
+            ],
+        };
+        let context = local_apps::AppMcpFlowContext {
+            app_id: app_id.clone(),
+            source: local_apps::FlowSource::Active,
+            flow,
+            input_schema: input_schema.clone(),
+            output_schema: output_schema.clone(),
+            step_output_schemas: std::collections::BTreeMap::from([
+                ("status1".into(), runtime_status_step_output_schema()),
+                ("status2".into(), runtime_status_step_output_schema()),
+            ]),
+        };
+        let context_sha256 =
+            value_sha256(&serde_json::to_value(&context).expect("serialize active Flow context"))
+                .expect("active Flow context digest");
+        let workspace = root.path().join(layout.workspace_rel());
+        fs::create_dir_all(workspace.join(".lingxi")).expect("create flow context directory");
+        fs::write(
+            workspace.join(".lingxi/mcp-flow-contexts.json"),
+            serde_json::to_vec_pretty(&json!({"runtime-status-flow": context}))
+                .expect("serialize flow contexts"),
+        )
+        .expect("write flow contexts");
+
+        let mut definition = traits::McpToolDefinitionDto::new("runtime_status", input_schema);
+        definition.output_schema = Some(output_schema);
+        let binding = json!({
+            "flowId": "runtime-status-flow",
+            "inputs": {
+                "query": {"tool_input": {"json_pointer": "/query"}},
+                "previous": {
+                    "step_output": {"step_id": "status1", "json_pointer": "/runtime"}
+                }
+            },
+            "result": {
+                "step_output": {"step_id": "status2", "json_pointer": "/runtime"}
+            }
+        });
+        let catalog = json!({
+            "appId": app_id,
+            "buildId": build_id,
+            "tools": [{
+                "definition": definition,
+                "flow": binding,
+                "ceiling": "allow",
+            }],
+            "execution": [{
+                "definition": definition,
+                "flow": binding,
+                "ceiling": "allow",
+                "contextSha256": context_sha256,
+            }],
+        });
+        let catalog_sha256 =
+            local_apps::approval_contract_sha256(catalog.clone()).expect("catalog digest");
+        local_apps::save_mcp_catalog(&layout, &catalog_sha256, &catalog).expect("save catalog");
+
+        let mut manifest = load_manifest(&layout).expect("fixture manifest");
+        if manifest.revision == 0 {
+            manifest.revision = 1;
+        }
+        manifest.active_mcp_catalog = Some(local_apps::AppMcpCatalogRef {
+            build_id: build_id.into(),
+            manifest_revision: manifest.revision,
+            authoring_revision: 1,
+            user_goal_sha256: "0".repeat(64),
+            proposal_sha256: "0".repeat(64),
+            approval_contract_sha256: "0".repeat(64),
+            tool_surface_sha256: "0".repeat(64),
+            catalog_sha256: catalog_sha256.clone(),
+            mcp_verification_sha256: "0".repeat(64),
+        });
+        local_apps::save_manifest(&layout, &manifest).expect("publish catalog pointer");
+
+        let result = broker
+            .execute_mcp_flow_value(json!({
+                "app_id": app_id,
+                "tool_name": "runtime_status",
+                "catalog_sha256": catalog_sha256,
+                "input": {"query": "hello"},
+            }))
+            .await
+            .expect("typed MCP flow succeeds");
+        assert!(result.is_object(), "structured StepOutput result: {result}");
+        assert!(
+            result.get("state").is_some(),
+            "runtime status is returned: {result}"
+        );
+    }
+
+    #[tokio::test]
+    async fn published_rebuild_rebinds_the_active_mcp_catalog_to_the_new_build() {
+        let (root, service, broker) = create_broker(false, None).await;
+        let app_id = create_app_fixture(&root, &service, "Rebind MCP Build").await;
+        let layout = AppLayout::new(root.path().to_path_buf(), app_id.clone()).expect("layout");
+
+        let initial_build_id = "build-1";
+        fs::write(
+            root.path().join(layout.build_rel(false)).join("build.json"),
+            serde_json::to_vec_pretty(&json!({
+                "version": 3,
+                "buildId": initial_build_id,
+                "buildKey": "typed-flow",
+                "runtimeContractSha256": "0".repeat(64),
+                "dependencySnapshotSha256": "0".repeat(64),
+                "outputSha256": "0".repeat(64),
+            }))
+            .expect("serialize build receipt"),
+        )
+        .expect("write build receipt");
+
+        let catalog = json!({
+            "appId": app_id,
+            "buildId": initial_build_id,
+            "tools": [{
+                "definition": {
+                    "name": "read_value",
+                    "inputSchema": {"type":"object","additionalProperties":false}
+                },
+                "flow": {"flowId":"flow","inputs":{},"result":{"literal":{"ok":true}}},
+                "ceiling": "allow",
+            }],
+        });
+        let catalog_sha256 = local_apps::hash_mcp_catalog(catalog.clone()).expect("catalog hash");
+        local_apps::save_mcp_catalog(&layout, &catalog_sha256, &catalog).expect("save catalog");
+        let mut manifest = load_manifest(&layout).expect("manifest");
+        manifest.revision = manifest.revision.max(1);
+        manifest.active_mcp_catalog = Some(local_apps::AppMcpCatalogRef {
+            build_id: initial_build_id.into(),
+            manifest_revision: manifest.revision,
+            authoring_revision: 1,
+            user_goal_sha256: "0".repeat(64),
+            proposal_sha256: "0".repeat(64),
+            approval_contract_sha256: "0".repeat(64),
+            tool_surface_sha256: "1".repeat(64),
+            catalog_sha256: catalog_sha256.clone(),
+            mcp_verification_sha256: "0".repeat(64),
+        });
+        local_apps::save_manifest(&layout, &manifest).expect("publish catalog");
+
+        let rebuilt_build_id = "build-2";
+        fs::write(
+            root.path().join(layout.build_rel(false)).join("build.json"),
+            serde_json::to_vec_pretty(&json!({
+                "version": 3,
+                "buildId": rebuilt_build_id,
+                "buildKey": "typed-flow",
+                "runtimeContractSha256": "0".repeat(64),
+                "dependencySnapshotSha256": "0".repeat(64),
+                "outputSha256": "0".repeat(64),
+            }))
+            .expect("serialize replacement build receipt"),
+        )
+        .expect("write replacement build receipt");
+
+        broker
+            .rebind_active_mcp_catalog_to_current_build(&app_id, &layout)
+            .await
+            .expect("rebind active catalog to current build");
+
+        let rebound = load_manifest(&layout).expect("reload manifest");
+        let active = rebound
+            .active_mcp_catalog
+            .as_ref()
+            .expect("published app keeps active catalog");
+        assert_eq!(active.build_id, rebuilt_build_id);
+        assert_ne!(active.catalog_sha256, catalog_sha256);
+        let rebound_catalog = local_apps::load_mcp_catalog(&layout, &active.catalog_sha256)
+            .expect("load rebound catalog");
+        assert_eq!(
+            rebound_catalog.get("buildId").and_then(Value::as_str),
+            Some(rebuilt_build_id)
+        );
+    }
+
     fn collect_fixture_files(current: &Path, files: &mut Vec<PathBuf>) {
         let metadata = fs::symlink_metadata(current).expect("inspect fixture output");
         assert!(
@@ -9686,7 +11979,13 @@ mod tests {
         let artifacts =
             scaffold_runtime_profile(Some(binding.clone()), local_apps::AppSurface::Dom)
                 .expect("react-dom scaffold artifacts");
-        stamp_scaffold_identity(&layout, name, &artifacts).expect("stamp fixture scaffold");
+        stamp_scaffold_identity(
+            &layout,
+            name,
+            &artifacts.binding,
+            builtin_template_origin(&artifacts.binding),
+        )
+        .expect("stamp fixture scaffold");
         persist_runtime_profile_files(&workspace, &artifacts)
             .expect("persist fixture runtime profile files");
 
@@ -10002,13 +12301,119 @@ mod tests {
         record
     }
 
-    fn scaffold_input(app_id: &str, name: &str, brief: &str, surface: &str) -> Value {
+    fn scaffold_input(app_id: &str, name: &str, brief: &str, _surface: &str) -> Value {
         json!({
             "app_id": app_id,
             "name": name,
             "brief": brief,
-            "surface": surface,
         })
+    }
+
+    fn template_id_for_scaffold_surface(surface: &str) -> &'static str {
+        match surface {
+            "dom" => "react-dom-r1",
+            "canvas" => "canvas-2d-r1",
+            other => panic!("unsupported test scaffold surface {other}"),
+        }
+    }
+
+    async fn approved_create_receipt(
+        broker: &Arc<LocalAppsHostBroker>,
+        app_id: &str,
+        surface: &str,
+    ) -> (String, String) {
+        approved_create_receipt_with_design(broker, app_id, surface, None).await
+    }
+
+    async fn approved_create_receipt_with_design(
+        broker: &Arc<LocalAppsHostBroker>,
+        app_id: &str,
+        surface: &str,
+        design_spec: Option<Value>,
+    ) -> (String, String) {
+        let workflow_run_id = format!("wf_create_{}", uuid::Uuid::new_v4().simple());
+        let catalog = crate::local_app_template_catalog::catalog_view().expect("template catalog");
+        let selector_capability = crate::local_app_template_catalog::issue_selector_capability(
+            &broker.root,
+            app_id,
+            &workflow_run_id,
+        )
+        .expect("selector capability");
+        let selection = broker
+            .validate_template_selection(json!({
+                "app_id": app_id,
+                "workflow_run_id": workflow_run_id,
+                "catalog_digest": catalog.catalog_digest,
+                "template_id": template_id_for_scaffold_surface(surface),
+                "reason": "test create receipt",
+                "rejected": [],
+                "selector_capability": selector_capability,
+            }))
+            .await
+            .expect("validated selection");
+        let handle = selection["validated_selection_handle"]
+            .as_str()
+            .expect("selection handle");
+        broker
+            .stage_create(json!({
+                "app_id": app_id,
+                "workflow_run_id": workflow_run_id,
+                "validated_selection_handle": handle,
+                "quality_level": if surface == "canvas" { "balanced" } else { "fast" },
+                "design_spec": design_spec,
+            }))
+            .await
+            .expect("stage create");
+        write_initial_staging_flow_contexts(broker, app_id, &workflow_run_id, handle);
+        let approval_contract_sha256 =
+            persist_initial_mcp_candidate_fixture(broker, app_id, &workflow_run_id);
+        let approval = tokio::spawn({
+            let broker = broker.clone();
+            let app_id = app_id.to_string();
+            let workflow_run_id = workflow_run_id.clone();
+            let approval_contract_sha256 = approval_contract_sha256.clone();
+            async move {
+                broker
+                    .approve_mcp_proposal(json!({
+                        "app_id": app_id,
+                        "workflow_run_id": workflow_run_id,
+                        "approval_contract_sha256": approval_contract_sha256,
+                    }))
+                    .await
+            }
+        });
+        let request_id = timeout(Duration::from_secs(2), async {
+            loop {
+                if let Some(request_id) = broker
+                    .pending_create_confirmations
+                    .lock()
+                    .await
+                    .keys()
+                    .next()
+                    .cloned()
+                {
+                    break request_id;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("create confirmation request");
+        assert!(
+            broker.resolve_create_confirmation(&request_id, true).await,
+            "approval resolver must consume the pending create confirmation"
+        );
+        let approved = approval
+            .await
+            .expect("approval task")
+            .expect("approved proposal");
+        (
+            workflow_run_id,
+            approved["receipt_id"]
+                .as_str()
+                .expect("create receipt id")
+                .to_string(),
+        )
     }
 
     async fn confirmed_scaffold_input(
@@ -10018,23 +12423,225 @@ mod tests {
         brief: &str,
         surface: &str,
     ) -> Value {
-        let profile = match surface {
-            "dom" => local_apps::AppRuntimeProfile::ReactDom,
-            "canvas" => local_apps::AppRuntimeProfile::Canvas2d,
-            other => panic!("unsupported test scaffold surface {other}"),
-        };
-        let binding = crate::local_app_runtime_profiles::current_binding_for_family(profile)
-            .expect("published runtime profile");
-        let receipt = broker
-            .issue_runtime_profile_receipt(app_id, binding)
-            .await
-            .expect("issue test runtime-profile receipt");
+        let (workflow_run_id, receipt_id) = approved_create_receipt(broker, app_id, surface).await;
         json!({
             "app_id": app_id,
             "name": name,
             "brief": brief,
-            "runtime_profile_receipt": receipt.receipt_id,
+            "workflow_run_id": workflow_run_id,
+            "receipt_id": receipt_id,
         })
+    }
+
+    fn initial_mcp_proposal_fixture(app_id: &str, manifest_revision: u64) -> Value {
+        serde_json::to_value(initial_mcp_proposal_model(app_id, manifest_revision))
+            .expect("serialize initial MCP proposal fixture")
+    }
+
+    fn runtime_record_output_schema() -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "schemaVersion": {"type": "integer"},
+                "appId": {"type": "string"},
+                "state": {"type": "string"},
+                "mode": {"type": "string"},
+                "port": {"type": "integer"},
+                "pid": {"type": "integer"},
+                "lastError": {"type": "string"},
+                "updatedAtMs": {"type": "integer"}
+            },
+            "required": ["schemaVersion", "appId", "state", "updatedAtMs"],
+            "additionalProperties": false
+        })
+    }
+
+    fn runtime_status_step_output_schema() -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "app_id": {"type": "string"},
+                "runtime": runtime_record_output_schema()
+            },
+            "required": ["app_id", "runtime"],
+            "additionalProperties": false
+        })
+    }
+
+    fn initial_mcp_proposal_model(
+        app_id: &str,
+        manifest_revision: u64,
+    ) -> local_apps::AppMcpProposal {
+        local_apps::AppMcpProposal {
+            app_id: app_id.to_string(),
+            manifest_revision,
+            user_goal_sha256: "2".repeat(64),
+            summary: "Expose the staged status check as one MCP tool.".into(),
+            tools: vec![local_apps::AppMcpToolProposal {
+                name: "runtime_status".into(),
+                title: Some("Runtime status".into()),
+                description: Some("Read the current runtime status from the staged flow.".into()),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {"query": {"type": "string"}},
+                    "required": ["query"],
+                    "additionalProperties": false,
+                }),
+                output_schema: Some(runtime_record_output_schema()),
+                semantic_flow_id: "runtime-status-flow".into(),
+                inputs: std::collections::BTreeMap::from([(
+                    "query".into(),
+                    local_apps::FlowValueBinding::ToolInput {
+                        json_pointer: "/query".into(),
+                    },
+                )]),
+                result: local_apps::FlowValueBinding::StepOutput {
+                    step_id: "status1".into(),
+                    json_pointer: "/runtime".into(),
+                },
+            }],
+            required_flow_changes: Vec::new(),
+            excluded_capabilities: Vec::new(),
+        }
+    }
+
+    fn persist_initial_mcp_candidate_fixture(
+        broker: &Arc<LocalAppsHostBroker>,
+        app_id: &str,
+        workflow_run_id: &str,
+    ) -> String {
+        let layout = broker.layout(app_id).expect("layout");
+        let manifest = load_manifest(&layout).expect("manifest");
+        let proposal = initial_mcp_proposal_model(app_id, manifest.revision);
+        let input_schema = json!({
+            "type": "object",
+            "properties": {"query": {"type": "string"}},
+            "required": ["query"],
+            "additionalProperties": false,
+        });
+        let output_schema = runtime_record_output_schema();
+        let mut definition = traits::McpToolDefinitionDto::new("runtime_status", input_schema);
+        definition.title = Some("Runtime status".into());
+        definition.description =
+            Some("Read the current runtime status from the staged flow.".into());
+        definition.output_schema = Some(output_schema);
+        let flow = local_apps::AppMcpFlowBinding {
+            flow_id: "runtime-status-flow".into(),
+            inputs: std::collections::BTreeMap::from([(
+                "query".into(),
+                local_apps::FlowValueBinding::ToolInput {
+                    json_pointer: "/query".into(),
+                },
+            )]),
+            result: local_apps::FlowValueBinding::StepOutput {
+                step_id: "status1".into(),
+                json_pointer: "/runtime".into(),
+            },
+        };
+        let validated = local_apps::ValidatedAppMcpProposal {
+            proposal: proposal.clone(),
+            tools: vec![local_apps::HostValidatedMcpTool {
+                definition: definition.clone(),
+                flow,
+                ceiling: traits::McpPermissionCeiling::Allow,
+            }],
+            proposal_sha256: local_apps::approval_contract_sha256(
+                serde_json::to_value(&proposal).expect("serialize proposal"),
+            )
+            .expect("proposal digest"),
+            tool_surface_sha256: local_apps::approval_contract_sha256(
+                serde_json::to_value(vec![definition.clone()]).expect("serialize tool surface"),
+            )
+            .expect("tool surface digest"),
+        };
+        let create_context = broker
+            .load_create_proposal_context(app_id, workflow_run_id)
+            .expect("create proposal context");
+        let review_surface = LocalAppsHostBroker::build_mcp_review_surface(
+            &manifest,
+            &validated,
+            manifest.active_mcp_catalog.as_ref(),
+            Some(&create_context),
+        );
+        let approval_contract_sha256 =
+            local_apps::approval_contract_sha256(review_surface.clone()).expect("approval digest");
+        let journal = local_apps::McpCandidateJournal {
+            schema_version: local_apps::APPS_SCHEMA_VERSION,
+            app_id: app_id.to_string(),
+            workflow_run_id: workflow_run_id.to_string(),
+            stage: local_apps::McpAuthoringStage::Prepared,
+            previous_build_id: crate::local_apps_build::active_build_id(&layout)
+                .expect("active build id"),
+            previous_catalog_sha256: manifest
+                .active_mcp_catalog
+                .as_ref()
+                .map(|catalog| catalog.catalog_sha256.clone()),
+            proposal_sha256: validated.proposal_sha256.clone(),
+            approval_contract_sha256: approval_contract_sha256.clone(),
+            tool_surface_sha256: validated.tool_surface_sha256.clone(),
+            catalog_sha256: None,
+            consumed_receipt_sha256: None,
+            integrity_sha256: String::new(),
+        }
+        .seal()
+        .expect("seal candidate journal");
+        local_apps::save_candidate_journal(&layout, &journal).expect("save candidate journal");
+        broker
+            .save_mcp_candidate(
+                app_id,
+                workflow_run_id,
+                &PersistedMcpCandidate {
+                    validated,
+                    approval_contract_sha256: approval_contract_sha256.clone(),
+                    review_surface,
+                    verification_sha256: None,
+                    catalog_sha256: None,
+                    qa_context_sha256: None,
+                },
+            )
+            .expect("save staged candidate");
+        approval_contract_sha256
+    }
+
+    fn write_initial_staging_flow_contexts(
+        broker: &Arc<LocalAppsHostBroker>,
+        app_id: &str,
+        workflow_run_id: &str,
+        handle: &str,
+    ) {
+        let staging_root = broker.create_staging_root(app_id, workflow_run_id, handle);
+        fs::create_dir_all(staging_root.join(".lingxi")).expect("create staging flow context dir");
+        let context = local_apps::AppMcpFlowContext {
+            app_id: app_id.to_string(),
+            source: local_apps::FlowSource::Staging,
+            flow: local_apps::FlowDefinition {
+                flow_id: "runtime-status-flow".into(),
+                version: 1,
+                steps: vec![local_apps::FlowStep {
+                    step_id: "status1".into(),
+                    capability: local_apps::CapabilityId::RuntimeStatus,
+                    depends_on: Vec::new(),
+                    input_json: r#"{"query":null}"#.into(),
+                }],
+            },
+            input_schema: json!({
+                "type": "object",
+                "properties": {"query": {"type": "string"}},
+                "required": ["query"],
+                "additionalProperties": false,
+            }),
+            output_schema: runtime_record_output_schema(),
+            step_output_schemas: std::collections::BTreeMap::from([(
+                "status1".into(),
+                runtime_status_step_output_schema(),
+            )]),
+        };
+        fs::write(
+            staging_root.join(".lingxi/mcp-flow-contexts.json"),
+            serde_json::to_vec_pretty(&json!({"runtime-status-flow": context}))
+                .expect("serialize staging flow contexts"),
+        )
+        .expect("write staging flow contexts");
     }
 
     fn workspace_of(root: &TempDir, app_id: &str) -> PathBuf {
@@ -10141,7 +12748,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn scaffold_requires_a_runtime_profile_receipt() {
+    async fn scaffold_requires_a_unified_create_receipt() {
         let (root, service, broker) = create_broker(false, None).await;
         let shell = shell_app_fixture(&broker, &service).await;
 
@@ -10149,7 +12756,7 @@ mod tests {
             .scaffold_shell_app_value(scaffold_input(&shell.id, "A", "b", "dom"))
             .await
             .expect_err("scaffold must fail closed without a native-confirmed receipt");
-        assert!(error.contains("runtime_profile_receipt"), "{error}");
+        assert!(error.contains("receipt_id is required"), "{error}");
         assert!(!service.record(&shell.id).await.expect("record").scaffolded);
         assert!(
             fs::read_to_string(workspace_of(&root, &shell.id).join("LINGXI.md"))
@@ -10159,122 +12766,384 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn invalid_workflow_model_releases_the_runtime_profile_receipt_claim() {
-        let (_root, service, broker) = create_broker(false, None).await;
+    async fn invalid_workflow_model_releases_the_unified_create_receipt_claim() {
+        let runtime = MockMobileLinuxRuntime::new(Duration::ZERO);
+        let (_root, service, broker) = create_broker(false, Some(runtime)).await;
         let shell = shell_app_fixture(&broker, &service).await;
-        let binding = crate::local_app_runtime_profiles::current_binding_for_family(
-            local_apps::AppRuntimeProfile::ReactDom,
-        )
-        .expect("published dom profile");
-        let receipt = broker
-            .issue_runtime_profile_receipt(&shell.id, binding)
-            .await
-            .expect("issue receipt");
+        let (workflow_run_id, receipt_id) =
+            approved_create_receipt(&broker, &shell.id, "dom").await;
 
         let error = broker
             .scaffold_shell_app_value(json!({
                 "app_id": shell.id,
                 "name": "bad workflow model",
                 "brief": "b",
-                "runtime_profile_receipt": receipt.receipt_id,
+                "workflow_run_id": workflow_run_id,
+                "receipt_id": receipt_id,
                 "workflow_model": 123,
             }))
             .await
             .expect_err("invalid workflow_model must fail before scaffold");
         assert!(error.contains("workflow_model must be a string"), "{error}");
 
-        let replacement = broker
-            .issue_runtime_profile_receipt(
-                &shell.id,
-                crate::local_app_runtime_profiles::current_binding_for_family(
-                    local_apps::AppRuntimeProfile::ReactDom,
-                )
-                .expect("published dom profile"),
-            )
+        broker
+            .scaffold_shell_app_value(json!({
+                "app_id": shell.id,
+                "name": "valid workflow model",
+                "brief": "b",
+                "workflow_run_id": workflow_run_id,
+                "receipt_id": receipt_id,
+            }))
             .await
-            .expect("claim must have been released");
-        assert_ne!(replacement.receipt_id, receipt.receipt_id);
+            .expect("claim must have been released for retry");
+        assert!(service.record(&shell.id).await.expect("record").scaffolded);
     }
 
     #[tokio::test]
-    async fn runtime_profile_receipts_enforce_claim_supersede_cross_app_and_ttl() {
+    async fn create_review_surface_binds_staged_design_spec_digest() {
         let (_root, service, broker) = create_broker(false, None).await;
-        let first = shell_app_fixture(&broker, &service).await;
-        let second = shell_app_fixture(&broker, &service).await;
-        let binding = crate::local_app_runtime_profiles::current_binding_for_family(
-            local_apps::AppRuntimeProfile::ReactDom,
+        let shell = shell_app_fixture(&broker, &service).await;
+        let workflow_run_id = format!("wf_design_{}", uuid::Uuid::new_v4().simple());
+        let catalog = crate::local_app_template_catalog::catalog_view().expect("template catalog");
+        let selector_capability = crate::local_app_template_catalog::issue_selector_capability(
+            &broker.root,
+            &shell.id,
+            &workflow_run_id,
         )
-        .expect("published dom profile");
-
-        let original = broker
-            .issue_runtime_profile_receipt(&first.id, binding.clone())
+        .expect("selector capability");
+        let selection = broker
+            .validate_template_selection(json!({
+                "app_id": shell.id,
+                "workflow_run_id": workflow_run_id,
+                "catalog_digest": catalog.catalog_digest,
+                "template_id": "react-dom-r1",
+                "reason": "bind design review surface",
+                "rejected": [],
+                "selector_capability": selector_capability,
+            }))
             .await
-            .expect("issue receipt");
+            .expect("validated selection");
+        let handle = selection["validated_selection_handle"]
+            .as_str()
+            .expect("selection handle");
+        let design_spec = json!({
+            "runtime_family": "react_dom",
+            "acceptance_checks": ["render list", "save item"],
+            "summary": "two-screen recipe list"
+        });
+        let stage = broker
+            .stage_create(json!({
+                "app_id": shell.id,
+                "workflow_run_id": workflow_run_id,
+                "validated_selection_handle": handle,
+                "quality_level": "balanced",
+                "design_spec": design_spec,
+            }))
+            .await
+            .expect("stage create");
+        assert_eq!(stage["ok"], true);
+        assert!(stage["design_spec_sha256"].as_str().is_some(), "{stage}");
+        write_initial_staging_flow_contexts(&broker, &shell.id, &workflow_run_id, handle);
+
+        let manifest = load_manifest(&broker.layout(&shell.id).expect("layout")).expect("manifest");
+        let validated = broker
+            .validate_mcp_proposal(json!({
+                "app_id": shell.id,
+                "workflow_run_id": workflow_run_id,
+                "proposal": initial_mcp_proposal_fixture(&shell.id, manifest.revision),
+            }))
+            .await
+            .expect("validate staged proposal");
         assert_eq!(
-            broker
-                .claim_runtime_profile_receipt(&first.id, &original.receipt_id)
-                .await
-                .expect("claim")
-                .family,
-            binding.family
+            validated["review_surface"]["initialCreate"]["designSpecSha256"],
+            stage["design_spec_sha256"]
         );
-        let in_use = broker
-            .issue_runtime_profile_receipt(&first.id, binding.clone())
-            .await
-            .expect_err("claimed receipt must block supersede");
-        assert!(in_use.contains("already in use"), "{in_use}");
-        let cross_app = broker
-            .claim_runtime_profile_receipt(&second.id, &original.receipt_id)
-            .await
-            .expect_err("receipt must be app-scoped");
-        assert!(cross_app.contains(&second.id), "{cross_app}");
+        assert_eq!(
+            validated["review_surface"]["initialCreate"]["designSpec"]["summary"],
+            "two-screen recipe list"
+        );
+    }
 
-        broker
-            .release_runtime_profile_receipt_claim(&first.id, &original.receipt_id)
-            .await;
-        let replacement = broker
-            .issue_runtime_profile_receipt(&first.id, binding)
+    #[tokio::test]
+    async fn unscaffolded_create_uses_single_confirmation_then_scaffolds_builds_and_promotes() {
+        let runtime = MockMobileLinuxRuntime::new(Duration::ZERO);
+        let root = TempDir::new().expect("tempdir");
+        let service = test_service(&root).await;
+        let sink = MockSink::arc();
+        let broker = LocalAppsHostBroker::new(
+            root.path().to_path_buf(),
+            sink.clone(),
+            Some(runtime.clone()),
+            false,
+            None,
+        );
+        assert!(broker.attach_service(service.clone()).is_ok());
+        let shell = shell_app_fixture(&broker, &service).await;
+
+        let workflow_run_id = format!("wf_e2e_{}", uuid::Uuid::new_v4().simple());
+        let catalog = crate::local_app_template_catalog::catalog_view().expect("template catalog");
+        let selector_capability = crate::local_app_template_catalog::issue_selector_capability(
+            &broker.root,
+            &shell.id,
+            &workflow_run_id,
+        )
+        .expect("selector capability");
+        let selection = broker
+            .validate_template_selection(json!({
+                "app_id": shell.id,
+                "workflow_run_id": workflow_run_id,
+                "catalog_digest": catalog.catalog_digest,
+                "template_id": "react-dom-r1",
+                "reason": "full create e2e",
+                "rejected": [],
+                "selector_capability": selector_capability,
+            }))
             .await
-            .expect("issue replacement");
-        let stale = broker
-            .claim_runtime_profile_receipt(&first.id, &original.receipt_id)
+            .expect("validated selection");
+        let handle = selection["validated_selection_handle"]
+            .as_str()
+            .expect("selection handle");
+        let stage = broker
+            .stage_create(json!({
+                "app_id": shell.id,
+                "workflow_run_id": workflow_run_id,
+                "validated_selection_handle": handle,
+                "quality_level": "balanced",
+                "design_spec": {
+                    "runtime_family": "react_dom",
+                    "acceptance_checks": ["render shell"],
+                    "summary": "e2e design"
+                }
+            }))
             .await
-            .expect_err("superseded receipt must not claim");
-        assert!(stale.contains("stale or superseded"), "{stale}");
-        broker
-            .consume_runtime_profile_receipt(&first.id, &replacement.receipt_id)
-            .await;
-        let consumed = broker
-            .claim_runtime_profile_receipt(&first.id, &replacement.receipt_id)
+            .expect("stage create");
+        assert_eq!(stage["ok"], true);
+        write_initial_staging_flow_contexts(&broker, &shell.id, &workflow_run_id, handle);
+        let layout = broker.layout(&shell.id).expect("layout");
+        let manifest = load_manifest(&layout).expect("manifest");
+        let validated = broker
+            .validate_mcp_proposal(json!({
+                "app_id": shell.id,
+                "workflow_run_id": workflow_run_id,
+                "proposal": initial_mcp_proposal_fixture(&shell.id, manifest.revision),
+            }))
             .await
-            .expect_err("consumed receipt must not replay");
+            .expect("validate mcp proposal");
+        let approval_contract_sha256 = validated["approval_contract_sha256"]
+            .as_str()
+            .expect("approval digest")
+            .to_string();
+
+        let approval_task = tokio::spawn({
+            let broker = broker.clone();
+            let app_id = shell.id.clone();
+            let workflow_run_id = workflow_run_id.clone();
+            async move {
+                broker
+                    .approve_mcp_proposal(json!({
+                        "app_id": app_id,
+                        "workflow_run_id": workflow_run_id,
+                        "approval_contract_sha256": approval_contract_sha256,
+                    }))
+                    .await
+            }
+        });
+
+        let request = timeout(Duration::from_secs(2), async {
+            loop {
+                if let Some(request) = sink.events().await.into_iter().find_map(|event| {
+                    if let ClientEvent::AppEvent {
+                        event: AppEventDto::CreateConfirmationRequested { request },
+                    } = event
+                    {
+                        Some(request)
+                    } else {
+                        None
+                    }
+                }) {
+                    break request;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("create confirmation event");
+        assert_eq!(request.app_id, shell.id);
+        assert_eq!(request.selected_template.template_id, "react-dom-r1");
+        assert_eq!(request.initial_tools.len(), 1);
         assert!(
-            consumed.contains("missing or was already consumed"),
-            "{consumed}"
+            !sink.events().await.iter().any(|event| matches!(
+                event,
+                ClientEvent::AppEvent {
+                    event: AppEventDto::McpProposalApprovalRequested { .. }
+                }
+            )),
+            "initial create must use a single native confirmation sheet"
+        );
+        assert!(
+            broker
+                .resolve_create_confirmation(&request.request_id, true)
+                .await
+        );
+        let approval = approval_task
+            .await
+            .expect("approval task")
+            .expect("approved");
+        let receipt_id = approval["receipt_id"].as_str().expect("receipt id");
+
+        broker
+            .scaffold_shell_app_value(json!({
+                "app_id": shell.id,
+                "name": "Create E2E",
+                "brief": "single confirmation",
+                "workflow_run_id": workflow_run_id,
+                "receipt_id": receipt_id,
+            }))
+            .await
+            .expect("scaffold from unified create receipt");
+        let record = service.record(&shell.id).await.expect("record");
+        assert!(record.scaffolded);
+        let manifest = load_manifest(&layout).expect("scaffolded manifest");
+        assert_eq!(
+            manifest
+                .template_origin
+                .as_ref()
+                .expect("template origin")
+                .template_id,
+            "react-dom-r1"
+        );
+        assert!(
+            workspace_of(&root, &shell.id).join("app/app.jsx").is_file(),
+            "staged template must be committed into the real workspace"
+        );
+        let active_contexts: BTreeMap<String, local_apps::AppMcpFlowContext> =
+            serde_json::from_slice(
+                &fs::read(workspace_of(&root, &shell.id).join(".lingxi/mcp-flow-contexts.json"))
+                    .expect("active MCP flow contexts"),
+            )
+            .expect("parse active MCP flow contexts");
+        assert_eq!(
+            active_contexts
+                .get("runtime-status-flow")
+                .expect("runtime-status-flow")
+                .source,
+            local_apps::FlowSource::Active
         );
 
-        let expired = broker
-            .issue_runtime_profile_receipt(
-                &first.id,
-                crate::local_app_runtime_profiles::current_binding_for_family(
-                    local_apps::AppRuntimeProfile::ReactDom,
-                )
-                .expect("published dom profile"),
-            )
-            .await
-            .expect("issue expiring receipt");
         broker
-            .pending_runtime_profile_receipts
-            .lock()
+            .build_app(json!({ "app_id": shell.id }))
             .await
-            .get_mut(&first.id)
-            .expect("stored receipt")
-            .expires_at_ms = now_ms().saturating_sub(1);
-        let expired_error = broker
-            .claim_runtime_profile_receipt(&first.id, &expired.receipt_id)
+            .expect("build scaffolded app");
+        let qa = broker
+            .qa_mcp_candidate(json!({
+                "app_id": shell.id,
+                "workflow_run_id": workflow_run_id,
+            }))
             .await
-            .expect_err("expired receipt must fail");
-        assert!(expired_error.contains("expired"), "{expired_error}");
+            .expect("qa candidate");
+        assert_eq!(qa["isolation"], "passed");
+        assert_eq!(
+            qa["isolation_evidence"]["rejection"]
+                .as_str()
+                .expect("cross-app rejection")
+                .split(':')
+                .next(),
+            Some("cross_app_flow")
+        );
+        let promoted = broker
+            .promote_mcp_candidate(json!({
+                "app_id": shell.id,
+                "workflow_run_id": workflow_run_id,
+            }))
+            .await
+            .expect("promote candidate");
+        assert_eq!(promoted["publication_state"], "published_unverified");
+        let promoted_manifest = load_manifest(&layout).expect("promoted manifest");
+        assert!(promoted_manifest.active_mcp_catalog.is_some());
+        let flow_result = broker
+            .execute_mcp_flow_value(json!({
+                "app_id": shell.id,
+                "tool_name": "runtime_status",
+                "catalog_sha256": promoted["catalog_sha256"],
+                "input": {"query": "hello"},
+            }))
+            .await
+            .expect("promoted tool executes through active contexts");
+        assert!(flow_result.get("state").is_some(), "{flow_result}");
+    }
+
+    #[tokio::test]
+    async fn qa_mcp_candidate_rejects_tampered_active_contexts() {
+        let runtime = MockMobileLinuxRuntime::new(Duration::ZERO);
+        let (root, service, broker) = create_broker(false, Some(runtime)).await;
+        let shell = shell_app_fixture(&broker, &service).await;
+        let layout = broker.layout(&shell.id).expect("layout");
+        let (workflow_run_id, receipt_id) =
+            approved_create_receipt(&broker, &shell.id, "dom").await;
+        broker
+            .scaffold_shell_app_value(json!({
+                "app_id": shell.id,
+                "name": "Tampered contexts",
+                "brief": "qa must re-read active contexts",
+                "workflow_run_id": workflow_run_id,
+                "receipt_id": receipt_id,
+            }))
+            .await
+            .expect("scaffold");
+        broker
+            .build_app(json!({ "app_id": shell.id }))
+            .await
+            .expect("build scaffolded app");
+        let workspace = workspace_of(&root, &shell.id);
+        let mut contexts: BTreeMap<String, local_apps::AppMcpFlowContext> = serde_json::from_slice(
+            &fs::read(workspace.join(".lingxi/mcp-flow-contexts.json"))
+                .expect("active MCP flow contexts"),
+        )
+        .expect("parse active MCP flow contexts");
+        contexts
+            .get_mut("runtime-status-flow")
+            .expect("runtime-status-flow")
+            .app_id = "other-app".into();
+        fs::write(
+            workspace.join(".lingxi/mcp-flow-contexts.json"),
+            serde_json::to_vec_pretty(&contexts).expect("serialize tampered contexts"),
+        )
+        .expect("write tampered contexts");
+
+        let error = broker
+            .qa_mcp_candidate(json!({
+                "app_id": shell.id,
+                "workflow_run_id": workflow_run_id,
+            }))
+            .await
+            .expect_err("QA must reject tampered active contexts");
+        assert!(error.contains("cross_app_flow"), "{error}");
+
+        let context = contexts
+            .get_mut("runtime-status-flow")
+            .expect("runtime-status-flow");
+        context.app_id = shell.id.clone();
+        context.flow.steps[0].capability = local_apps::CapabilityId::DataMutate;
+        fs::write(
+            workspace.join(".lingxi/mcp-flow-contexts.json"),
+            serde_json::to_vec_pretty(&contexts).expect("serialize ceiling-drift contexts"),
+        )
+        .expect("write ceiling-drift contexts");
+        let error = broker
+            .qa_mcp_candidate(json!({
+                "app_id": shell.id,
+                "workflow_run_id": workflow_run_id,
+            }))
+            .await
+            .expect_err("QA must reject a Flow whose permission ceiling drifted");
+        assert!(error.contains("permission_ceiling_drift"), "{error}");
+        assert_eq!(
+            local_apps::load_candidate_journal(&layout)
+                .expect("candidate journal")
+                .stage,
+            local_apps::McpAuthoringStage::Approved,
+            "a failed QA probe must not advance the durable journal"
+        );
     }
 
     #[tokio::test]
@@ -10367,66 +13236,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn native_runtime_profile_selection_is_authoritative_over_the_recommendation() {
-        let root = TempDir::new().expect("tempdir");
-        let service = test_service(&root).await;
-        let sink = MockSink::arc();
-        let broker =
-            LocalAppsHostBroker::new(root.path().to_path_buf(), sink.clone(), None, false, None);
-        assert!(broker.attach_service(service.clone()).is_ok());
-        let shell = shell_app_fixture(&broker, &service).await;
-
-        let resolver = {
-            let sink = sink.clone();
-            let broker = broker.clone();
-            tokio::spawn(async move {
-                loop {
-                    for event in sink.events().await {
-                        if let ClientEvent::AppEvent {
-                            event: AppEventDto::AppRuntimeProfileSelectionRequested { request },
-                        } = event
-                        {
-                            assert_eq!(
-                                request.recommended_family,
-                                Some(AppRuntimeProfileDto::Babylon3d)
-                            );
-                            assert_eq!(request.options.len(), 5);
-                            let babylon = request
-                                .options
-                                .iter()
-                                .find(|option| option.family == AppRuntimeProfileDto::Babylon3d)
-                                .expect("Babylon catalog option");
-                            assert!(!babylon.available);
-                            assert_eq!(babylon.download_status, "gated");
-                            assert!(
-                                broker
-                                    .resolve_runtime_profile_selection(
-                                        &request.request_id,
-                                        Some(AppRuntimeProfileDto::Canvas2d),
-                                    )
-                                    .await
-                            );
-                            return;
-                        }
-                    }
-                    tokio::time::sleep(Duration::from_millis(5)).await;
-                }
-            })
-        };
-
-        let selected = broker
-            .confirm_runtime_profile_value(json!({
-                "app_id": shell.id,
-                "recommended_profile": "babylon_3d",
-            }))
-            .await
-            .expect("native selection returns a receipt");
-        resolver.await.expect("selection resolver");
-        assert_eq!(selected["runtime_profile"]["family"], "canvas_2d");
-        assert_ne!(selected["runtime_profile"]["family"], "babylon_3d");
-    }
-
-    #[tokio::test]
     async fn a_failed_scaffold_releases_the_receipt_claim_for_retry() {
         let runtime = MockMobileLinuxRuntime::new(Duration::ZERO);
         let (root, service, broker) = create_broker(false, Some(runtime.clone())).await;
@@ -10439,23 +13248,12 @@ mod tests {
             .dependency_record(&shell.id)
             .await
             .expect("shell dependency record");
-        let binding = crate::local_app_runtime_profiles::current_binding_for_family(
-            local_apps::AppRuntimeProfile::Canvas2d,
-        )
-        .expect("published canvas profile");
-        let receipt = broker
-            .issue_runtime_profile_receipt(&shell.id, binding)
-            .await
-            .expect("issue receipt");
+        let retriable_input =
+            confirmed_scaffold_input(&broker, &shell.id, "打飞机", "b", "canvas").await;
         break_the_final_landing_step(&root, &shell.id);
 
         let first = broker
-            .scaffold_shell_app_value(json!({
-                "app_id": shell.id,
-                "name": "打飞机",
-                "brief": "b",
-                "runtime_profile_receipt": receipt.receipt_id,
-            }))
+            .scaffold_shell_app_value(retriable_input.clone())
             .await
             .expect_err("broken landing must fail");
         assert!(first.contains("LINGXI.md"), "{first}");
@@ -10489,12 +13287,7 @@ mod tests {
         repair_the_final_landing_step(&root, &shell.id);
 
         broker
-            .scaffold_shell_app_value(json!({
-                "app_id": shell.id,
-                "name": "打飞机",
-                "brief": "b",
-                "runtime_profile_receipt": receipt.receipt_id,
-            }))
+            .scaffold_shell_app_value(retriable_input)
             .await
             .expect("same receipt can retry after the claim is released");
         assert!(service.record(&shell.id).await.expect("record").scaffolded);
@@ -10514,24 +13307,17 @@ mod tests {
         let original_guided = fs::read(workspace_of(&root, &shell.id).join("LINGXI.md"))
             .expect("guided workspace contract");
         let original_index = break_index_commit(&root);
-        let receipt = broker
-            .issue_runtime_profile_receipt(
-                &shell.id,
-                crate::local_app_runtime_profiles::current_binding_for_family(
-                    local_apps::AppRuntimeProfile::ReactDom,
-                )
-                .expect("published DOM profile"),
-            )
-            .await
-            .expect("issue receipt");
+        let retriable_input = confirmed_scaffold_input(
+            &broker,
+            &shell.id,
+            "回滚测试",
+            "dependency snapshot then commit failure",
+            "dom",
+        )
+        .await;
 
         let error = broker
-            .scaffold_shell_app_value(json!({
-                "app_id": shell.id,
-                "name": "回滚测试",
-                "brief": "dependency snapshot then commit failure",
-                "runtime_profile_receipt": receipt.receipt_id,
-            }))
+            .scaffold_shell_app_value(retriable_input.clone())
             .await
             .expect_err("the occupied index must fail after dependency snapshot");
         assert!(error.contains("index.json"), "{error}");
@@ -10571,12 +13357,7 @@ mod tests {
         // The receipt claim is released and the repaired shell can retry from
         // the exact pre-landing state.
         broker
-            .scaffold_shell_app_value(json!({
-                "app_id": shell.id,
-                "name": "回滚测试",
-                "brief": "dependency snapshot then commit failure",
-                "runtime_profile_receipt": receipt.receipt_id,
-            }))
+            .scaffold_shell_app_value(retriable_input)
             .await
             .expect("same receipt retries after rollback");
         assert!(service.record(&shell.id).await.expect("record").scaffolded);
@@ -10617,7 +13398,13 @@ mod tests {
             "crash recovery",
         )
         .expect("durable recovery journal");
-        stamp_scaffold_identity(&layout, "冷启动回滚", &artifacts).expect("stamp partial identity");
+        stamp_scaffold_identity(
+            &layout,
+            "冷启动回滚",
+            &artifacts.binding,
+            builtin_template_origin(&artifacts.binding),
+        )
+        .expect("stamp partial identity");
         crate::local_apps_build::scaffold_workspace_initialized(&layout, target, true)
             .expect("land partial workspace");
         persist_runtime_profile_files(&workspace_of(&root, &shell.id), &artifacts)
@@ -11137,7 +13924,7 @@ mod tests {
                     requested_json,
                     effective_package_json,
                     issued_at_ms: now_ms(),
-                    expires_at_ms: now_ms() + RUNTIME_PROFILE_RECEIPT_TTL.as_millis() as u64,
+                    expires_at_ms: now_ms() + APPROVAL_RECEIPT_TTL.as_millis() as u64,
                     summary: vec![DependencyChange {
                         kind: DependencyChangeKind::Add,
                         package: "dayjs".into(),
@@ -11842,9 +14629,21 @@ mod tests {
             "the guided contract must be overwritten, not appended to"
         );
         assert!(
-            contract.contains("local-canvas-build"),
+            contract.contains("This app's surface is `canvas`"),
             "the contract must be the one for the CONFIRMED surface: {contract}"
         );
+        for workflow in [
+            crate::local_app_plugin_binding::PLUGIN_BUILD_WORKFLOW_ID,
+            crate::local_app_plugin_binding::PLUGIN_USE_TEST_WORKFLOW_ID,
+            crate::local_app_plugin_binding::PLUGIN_MCP_AUTHORING_WORKFLOW_ID,
+        ] {
+            assert!(
+                !contract.contains(workflow),
+                "the contract must not name a build workflow: the host authorizes one and \
+                 refuses any other, the model does not choose it — found `{workflow}` in \
+                 {contract}"
+            );
+        }
         assert!(
             contract.contains("runtime profile `canvas_2d` revision `1`"),
             "the formal contract must mirror the persisted profile identity: {contract}"
@@ -11880,6 +14679,83 @@ mod tests {
                 .state,
             local_apps::AppDependencyState::Ready
         );
+    }
+
+    /// Phase -1 (P-1.4), §19.3: the Host contract carries no workflow/skill/
+    /// agent names. `formal_workspace_contract` used to tell the model which
+    /// build workflow to launch and which one NOT to launch; that authority
+    /// is now the Host's alone — `LocalAppPluginBinding::resolve` computes the
+    /// one workflow authorized for a build target and `enforce` refuses a
+    /// caller-supplied mismatch by naming both ids in the error, so the model
+    /// never needs (and must never be told) a workflow name to act correctly.
+    /// This pins the absence for BOTH surfaces, not just the one the test
+    /// above happens to exercise, so a name reintroduced on only one branch
+    /// of `formal_workspace_contract`'s `match` still goes red — and over the
+    /// next-step guidance family as well, which is model-visible tool-result
+    /// prose that no test other than the component scanner covered.
+    #[tokio::test]
+    async fn lingxi_md_contract_prose_names_no_workflow() {
+        // The needle set is derived from the PRODUCTION registry, never a
+        // pair of names typed in here. Phase 9's live source is the plugin
+        // workflow inventory rather than the removed built-in registry.
+        let workflows = vec![
+            crate::local_app_plugin_binding::PLUGIN_BUILD_WORKFLOW_ID,
+            crate::local_app_plugin_binding::PLUGIN_USE_TEST_WORKFLOW_ID,
+            crate::local_app_plugin_binding::PLUGIN_MCP_AUTHORING_WORKFLOW_ID,
+        ];
+        // An empty needle set would make every assertion below vacuously
+        // true, which is the failure mode this whole test exists to prevent.
+        assert!(
+            !workflows.is_empty(),
+            "the build-workflow registry must be non-trivially populated, or the absence \
+             assertions below prove nothing: {workflows:?}"
+        );
+
+        for surface in ["dom", "canvas"] {
+            let runtime = MockMobileLinuxRuntime::new(Duration::ZERO);
+            let (root, service, broker) = create_broker(false, Some(runtime)).await;
+            let shell = shell_app_fixture(&broker, &service).await;
+            let input =
+                confirmed_scaffold_input(&broker, &shell.id, "测试", "一个测试应用", surface).await;
+            broker
+                .scaffold_shell_app_value(input)
+                .await
+                .expect("scaffold");
+            let contract = fs::read_to_string(workspace_of(&root, &shell.id).join("LINGXI.md"))
+                .expect("read the formal contract");
+            for workflow in &workflows {
+                assert!(
+                    !contract.contains(workflow),
+                    "surface {surface}: the contract must name no build workflow — the host \
+                     authorizes one and refuses any other, the model does not choose it — \
+                     found `{workflow}` in {contract}"
+                );
+            }
+        }
+
+        // The contract file is not the only Host-authored prose the model
+        // reads. The next-step guidance family is returned INSIDE the
+        // `LocalAppCreate` / `LocalAppScaffold` tool results, so a workflow
+        // name there reaches the model on exactly the turn it is deciding
+        // what to do next — and it is otherwise guarded only by the component
+        // scanner, whose documented ritual (change the constant, change the
+        // allowlist in the same diff) is a sanctioned route back in.
+        // Demonstrated by mutation: a build-workflow name planted in
+        // `scaffold_next_step_guidance` left this test GREEN before this arm
+        // existed, while only the scanner fired.
+        for (generator, prose) in [
+            ("scaffold_next_step_guidance", scaffold_next_step_guidance()),
+            ("create_next_step_guidance", create_next_step_guidance()),
+        ] {
+            for workflow in &workflows {
+                assert!(
+                    !prose.contains(workflow),
+                    "{generator} must name no build workflow — it is model-visible tool-result \
+                     prose, and a name here reintroduces the model↔workflow-name coupling the \
+                     Host-side resolve/enforce exists to remove — found `{workflow}` in {prose}"
+                );
+            }
+        }
     }
 
     /// The branch's central guarantee, pinned at its PRODUCTION call site:
@@ -12152,7 +15028,7 @@ mod tests {
             let binding = binding.clone();
             async move {
                 broker
-                    .land_scaffold(&proposed, local_apps::AppSurface::Dom, Some(binding))
+                    .land_scaffold(&proposed, local_apps::AppSurface::Dom, Some(binding), None)
                     .await
             }
         });
@@ -12275,7 +15151,7 @@ mod tests {
             .await
             .expect_err("surface overrides must be rejected");
         assert!(
-            error.contains("runtime_profile_receipt is authoritative"),
+            error.contains("Host-issued scaffold receipt is authoritative"),
             "got {error}"
         );
         let over_long = "x".repeat(local_apps::service::MAX_NAME_BYTES + 1);
@@ -12339,8 +15215,13 @@ mod tests {
             local_apps::AppSurface::Dom,
         )
         .expect("react-dom profile");
-        let error = stamp_scaffold_identity(&layout, "B", &artifacts)
-            .expect_err("a name rewrite after the store exists must be refused");
+        let error = stamp_scaffold_identity(
+            &layout,
+            "B",
+            &artifacts.binding,
+            builtin_template_origin(&artifacts.binding),
+        )
+        .expect_err("a name rewrite after the store exists must be refused");
         assert!(error.contains("database"), "got {error}");
         assert_eq!(
             load_manifest(&layout).expect("manifest").name,
@@ -13206,6 +16087,19 @@ mod tests {
             value, None,
             "an explicit null must collapse to the same no-value payload as an absent rect"
         );
+    }
+
+    #[test]
+    fn create_staging_quality_gate_rejects_fast_canvas_profiles() {
+        assert!(
+            validate_create_stage_quality("fast", local_apps::AppRuntimeProfile::ReactDom).is_ok()
+        );
+        let error = validate_create_stage_quality("fast", local_apps::AppRuntimeProfile::Canvas2d)
+            .expect_err("canvas create staging must reject fast quality");
+        assert!(error.contains("balanced or thorough"));
+        let error = validate_create_stage_quality("turbo", local_apps::AppRuntimeProfile::ReactDom)
+            .expect_err("unknown quality must fail closed");
+        assert!(error.contains("quality_level"));
     }
 
     #[tokio::test]
@@ -14228,6 +17122,54 @@ mod tests {
             .await
             .expect("a stray key never fails the call");
         assert_eq!(result["device_context"]["formFactor"], "ipad");
+    }
+
+    /// The surface is fixed at creation, and `update_manifest` is the one
+    /// mutation path an agent can reach after that. Its refusal was the only
+    /// member of the family without a test — `create` (`local_apps_mcp.rs`:
+    /// `create_rejects_runtime_profile_and_surface_overrides`), `scaffold`
+    /// (`scaffold_rejects_an_empty_brief_and_an_unknown_surface`) and the
+    /// shell-mode create (`host.rs`:
+    /// `create_app_in_shell_mode_rejects_a_surface`) are all covered — so
+    /// deleting the four-line `if` was a silent green.
+    ///
+    /// It must REFUSE, not ignore: `manifest.surface` is carried through the
+    /// load-modify-save untouched, so a dropped refusal returns `ok` to an
+    /// agent that then believes it converted the app, while the workspace on
+    /// disk still holds the other scaffold's source.
+    #[tokio::test]
+    async fn update_manifest_rejects_a_caller_supplied_surface() {
+        let root = TempDir::new().expect("tempdir");
+        let service = test_service(&root).await;
+        let broker = LocalAppsHostBroker::new(
+            root.path().to_path_buf(),
+            MockSink::arc(),
+            None,
+            false,
+            None,
+        );
+        assert!(broker.attach_service(service.clone()).is_ok());
+        let app_id = create_app_fixture(&root, &service, "Fixed").await;
+        let layout = AppLayout::new(root.path().to_path_buf(), app_id.clone()).expect("layout");
+        let before = load_manifest(&layout).expect("manifest").surface;
+
+        let error = broker
+            .update_manifest(json!({
+                "app_id": app_id,
+                "surface": "canvas",
+            }))
+            .await
+            .expect_err("a caller-supplied surface must be refused, not silently ignored");
+        assert!(
+            error.contains("an app's surface is fixed when the app is created"),
+            "got {error}"
+        );
+
+        let after = load_manifest(&layout).expect("manifest").surface;
+        assert_eq!(
+            before, after,
+            "the refusal must happen before the manifest is saved"
+        );
     }
 
     #[tokio::test]

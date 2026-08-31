@@ -8,7 +8,7 @@ import { renderToStaticMarkup } from 'react-dom/server';
 (globalThis as { React?: typeof React }).React = React;
 
 import { canResumePendingSession } from '../src/renderer/bridge/useBridge';
-import { BetaSidebar } from '../src/renderer/components/BetaDesktop';
+import { BetaComposer, BetaSidebar } from '../src/renderer/components/BetaDesktop';
 import { Theme } from '../src/renderer/theme/ThemeContext';
 import { tokens } from '../src/renderer/theme/tokens';
 import { formatRelativeSessionTime, formatSessionMetadata } from '../src/renderer/bridge/sessionPresentation';
@@ -76,6 +76,38 @@ function openingTag(markup: string, marker: string): string {
   return markup.slice(start, end + 1);
 }
 
+function composerBridgeFixture() {
+  const bridge = bridgeFixture();
+  return {
+    ...bridge,
+    activeSession: bridge.bootstrap.activeSession,
+    desktop: {
+      ...bridge.desktop,
+      models: [],
+      modelDetails: [],
+      currentModel: null,
+      conversationControls: null,
+      fastMode: false,
+      permissionMode: 'default',
+      slashCommands: [],
+      tasks: {},
+      taskOutput: {},
+    },
+    running: true,
+    isCancelling: false,
+    searchWorkspaceFiles: async () => ({ files: [], truncated: false }),
+    setModel: async () => undefined,
+    setReasoningSelection: async () => undefined,
+    setFastMode: async () => undefined,
+    setPermissionMode: async () => undefined,
+    emitCommandOutput: () => undefined,
+    beginLocalCommand: () => undefined,
+    runSlashCommand: async () => undefined,
+    sendPrompt: async () => undefined,
+    cancel: async () => undefined,
+  };
+}
+
 test('pending sessions resume only after the matching project is trusted and connected', () => {
   const pending = { projectPath, sessionId: '11111111-1111-4111-8111-111111111111' };
   assert.equal(canResumePendingSession(pending, { path: projectPath, trusted: true }, { status: 'connected' }), true);
@@ -104,6 +136,19 @@ test('sidebar renders global pins before projects and limits each project sessio
   assert.match(markup, /disabled/); // project actions remain independently guarded by project activity
 });
 
+test('project rows omit the disclosure arrow and the active session uses the accent background', () => {
+  const markup = renderToStaticMarkup(React.createElement(
+    Theme.Provider,
+    { value: tokens(true) },
+    React.createElement(BetaSidebar, { bridge: bridgeFixture() as any, onOpenSettings: () => undefined }),
+  ));
+  const activeSessionTag = openingTag(markup, 'aria-current="page" title="Session 1"');
+  const source = readFileSync(join(process.cwd(), 'src/renderer/components/BetaDesktop.tsx'), 'utf8');
+
+  assert.doesNotMatch(source, /\{active \? <Icon name="chevron"[^\n]+rotate/);
+  assert.match(activeSessionTag, /background:oklch\(72% 0\.18 268 \/ 0\.14\)/);
+});
+
 test('a running session does not lock global project and session navigation', () => {
   const bridge = bridgeFixture();
   bridge.running = true;
@@ -122,6 +167,53 @@ test('a running session does not lock global project and session navigation', ()
   ]) {
     assert.doesNotMatch(openingTag(markup, marker), /\bdisabled\b/, `${marker} must remain interactive`);
   }
+});
+
+test('a running turn keeps drafting and local composer controls interactive', () => {
+  const markup = renderToStaticMarkup(React.createElement(
+    Theme.Provider,
+    { value: tokens(true) },
+    React.createElement(BetaComposer, {
+      bridge: composerBridgeFixture() as any,
+      ready: true,
+      onOpenSettings: () => undefined,
+      onSetTheme: () => undefined,
+    }),
+  ));
+  const promptMarker = 'aria-label="Prompt"';
+  const markerIndex = markup.indexOf(promptMarker);
+  const promptStart = markup.lastIndexOf('<div', markerIndex);
+  const promptEnd = markup.indexOf('>', markerIndex);
+  assert.ok(markerIndex >= 0 && promptStart >= 0 && promptEnd > markerIndex);
+  const promptTag = markup.slice(promptStart, promptEnd + 1);
+
+  assert.match(promptTag, /contentEditable="true"/i);
+  assert.match(promptTag, /aria-disabled="false"/);
+  for (const marker of ['aria-label="Attach image"', 'aria-label="Search workspace files"', 'aria-label="Toggle goal mode"', 'aria-label="Start ordinary recording"']) {
+    assert.doesNotMatch(openingTag(markup, marker), /\bdisabled\b/, `${marker} must remain interactive`);
+  }
+  assert.doesNotMatch(openingTag(markup, 'aria-label="Stop current turn"'), /\bdisabled\b/);
+  assert.match(markup, /aria-label="Send pending message"/);
+
+  const source = readFileSync(join(process.cwd(), 'src/renderer/components/BetaDesktop.tsx'), 'utf8');
+  const submitStart = source.indexOf('const submit = async');
+  const submitEnd = source.indexOf('const chooseSlashCommand', submitStart);
+  assert.ok(submitStart >= 0 && submitEnd > submitStart);
+  assert.doesNotMatch(source.slice(submitStart, submitEnd), /if \(!ready \|\| bridge\.running\) return/);
+});
+
+test('each project row exposes a focused edit action routed to that project draft', () => {
+  const markup = renderToStaticMarkup(React.createElement(
+    Theme.Provider,
+    { value: tokens(true) },
+    React.createElement(BetaSidebar, { bridge: bridgeFixture() as any, onOpenSettings: () => undefined }),
+  ));
+
+  assert.match(markup, /aria-label="Edit LingXi-Next"/);
+  assert.match(markup, /aria-label="Edit MLPlatform"/);
+
+  const source = readFileSync(join(process.cwd(), 'src/renderer/components/BetaDesktop.tsx'), 'utf8');
+  assert.match(source, /bridge\.newSession\(projectPath\)/);
 });
 
 test('session navigation exposes immediate opening feedback instead of failing silently', () => {

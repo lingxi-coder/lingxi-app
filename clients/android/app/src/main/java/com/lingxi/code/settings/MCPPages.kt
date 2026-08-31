@@ -148,7 +148,7 @@ private fun MCPServerRow(
             }
             Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                 Text(
-                    server.name,
+                    server.managedLocalApp?.stableServerName ?: server.name,
                     color = t.text,
                     fontSize = 14.sp,
                     fontWeight = FontWeight.Medium,
@@ -158,7 +158,22 @@ private fun MCPServerRow(
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(5.dp)) {
                     Box(Modifier.size(6.dp).clip(CircleShape).background(server.status.dot(t)))
                     Text(
-                        stringResource(R.string.mcp_server_status_tools_fmt, server.status.label, server.tools, server.transport),
+                        server.managedLocalApp?.let { managed ->
+                            buildString {
+                                append(managed.appName)
+                                append(" · ")
+                                append(stringResource(R.string.local_apps_authorization_app_id, managed.appId))
+                                append(" · ")
+                                append(stringResource(R.string.mcp_stat_available_tools))
+                                append(" ")
+                                append(managed.toolCount)
+                            }
+                        } ?: stringResource(
+                            R.string.mcp_server_status_tools_fmt,
+                            server.status.label,
+                            server.tools,
+                            server.transport,
+                        ),
                         color = t.text4,
                         fontSize = 11.5f.sp,
                         fontFamily = LXFont.mono,
@@ -170,6 +185,7 @@ private fun MCPServerRow(
             LXToggle(
                 checked = server.enabled,
                 onCheckedChange = { v -> store.updateMcp(server.id) { it.copy(enabled = v) } },
+                enabled = server.managedLocalApp == null,
             )
         }
         if (!isLast) Box(Modifier.fillMaxWidth().size(0.5.dp).background(t.border))
@@ -252,70 +268,141 @@ fun MCPEditPage(
             }
         }
 
-        FieldLabel(stringResource(R.string.settings_display_name))
-        SettingsField(
-            value = s.name,
-            onValueChange = { v -> store.updateMcp(mcpId) { it.copy(name = v) } },
-            mono = false,
-            modifier = Modifier.padding(bottom = 14.dp),
-        )
+        val managed = s.managedLocalApp
+        if (managed == null) {
+            FieldLabel(stringResource(R.string.settings_display_name))
+            SettingsField(
+                value = s.name,
+                onValueChange = { v -> store.updateMcp(mcpId) { it.copy(name = v) } },
+                mono = false,
+                modifier = Modifier.padding(bottom = 14.dp),
+            )
 
-        FieldLabel(stringResource(R.string.mcp_endpoint))
-        SettingsField(
-            value = s.url,
-            onValueChange = { v -> store.updateMcp(mcpId) { it.copy(url = v) } },
-        )
-        FieldHint(stringResource(R.string.mcp_endpoint_hint))
+            FieldLabel(stringResource(R.string.mcp_endpoint))
+            SettingsField(
+                value = s.url,
+                onValueChange = { v -> store.updateMcp(mcpId) { it.copy(url = v) } },
+            )
+            FieldHint(stringResource(R.string.mcp_endpoint_hint))
 
-        SettingsSection(label = stringResource(R.string.mcp_section_transport_auth)) {
-            SettingsRow(label = stringResource(R.string.mcp_transport_mode), value = s.transport, onTap = {})
-            SettingsRow(label = stringResource(R.string.mcp_auth), value = s.auth ?: stringResource(R.string.common_none), isLast = true, onTap = {})
-        }
-
-        SettingsSection(label = stringResource(R.string.mcp_section_tool_permissions), footer = stringResource(R.string.mcp_tool_permissions_footer)) {
-            val tools = McpToolNames.take(minOf(6, s.tools))
-            tools.forEachIndexed { i, tn ->
+            SettingsSection(label = stringResource(R.string.mcp_section_transport_auth)) {
+                SettingsRow(label = stringResource(R.string.mcp_transport_mode), value = s.transport, onTap = {})
+                SettingsRow(label = stringResource(R.string.mcp_auth), value = s.auth ?: stringResource(R.string.common_none), isLast = true, onTap = {})
+            }
+        } else {
+            SettingsSection(label = stringResource(R.string.local_apps_plugin_managed_mcp_source)) {
                 SettingsRow(
-                    label = tn,
-                    sub = if (i % 2 == 0) stringResource(R.string.mcp_tool_readonly) else stringResource(R.string.mcp_tool_writable),
+                    label = stringResource(R.string.settings_display_name),
+                    value = managed.stableServerName,
                     chevron = false,
-                    isLast = i == tools.size - 1,
-                    trailing = { LocalToggle(seed = i < 4) },
+                )
+                SettingsRow(
+                    label = stringResource(R.string.local_apps_name),
+                    sub = managed.appId,
+                    value = managed.appName,
+                    chevron = false,
+                )
+                SettingsRow(
+                    label = stringResource(R.string.local_apps_plugin_bundle_digest),
+                    sub = managed.catalogDigestSummary,
+                    value = managed.buildDigestSummary,
+                    chevron = false,
+                )
+                SettingsRow(
+                    label = stringResource(R.string.mcp_stat_available_tools),
+                    sub = managed.authoringRevision,
+                    value = managed.toolCount.toString(),
+                    chevron = false,
+                )
+                SettingsRow(
+                    label = stringResource(R.string.local_apps_verification_ui),
+                    value = managed.uiVerification,
+                    chevron = false,
+                )
+                SettingsRow(
+                    label = stringResource(R.string.local_apps_verification_mcp),
+                    value = managed.mcpVerification,
+                    chevron = false,
+                )
+                SettingsRow(
+                    label = stringResource(R.string.local_apps_mcp_proposal_field_input_schema),
+                    value = managed.schemaSummary,
+                    chevron = false,
+                )
+                SettingsRow(
+                    label = stringResource(R.string.local_apps_mcp_proposal_field_annotations),
+                    value = managed.annotationSummary,
+                    chevron = false,
+                )
+                SettingsRow(
+                    label = stringResource(R.string.local_apps_mcp_proposal_field_permission_ceiling),
+                    value = managed.permissionCeiling,
+                    chevron = false,
+                    isLast = true,
                 )
             }
         }
 
-        SettingsSection {
-            SettingsRow(
-                label = stringResource(R.string.mcp_enable_server),
-                chevron = false,
-                trailing = {
-                    LXToggle(
-                        checked = s.enabled,
-                        onCheckedChange = { v -> store.updateMcp(mcpId) { it.copy(enabled = v) } },
-                    )
-                },
-            )
-            SettingsRow(
-                label = stringResource(R.string.mcp_auto_start),
-                chevron = false,
-                isLast = true,
-                trailing = { LocalToggle(seed = true) },
-            )
+        SettingsSection(label = stringResource(R.string.mcp_section_tool_permissions), footer = stringResource(R.string.mcp_tool_permissions_footer)) {
+            val tools = if (managed == null) {
+                McpToolNames.take(minOf(6, s.tools)).map { it to null }
+            } else {
+                managed.toolSchemas.map { it.name to it.permissionSummary }
+            }
+            tools.forEachIndexed { i, tn ->
+                SettingsRow(
+                    label = tn.first,
+                    sub = tn.second ?: if (i % 2 == 0) {
+                        stringResource(R.string.mcp_tool_readonly)
+                    } else {
+                        stringResource(R.string.mcp_tool_writable)
+                    },
+                    chevron = false,
+                    isLast = i == tools.size - 1,
+                    trailing = if (managed == null) {
+                        { LocalToggle(seed = i < 4) }
+                    } else {
+                        {}
+                    },
+                )
+            }
         }
 
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.Center,
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(top = 8.dp)
-                .clip(RoundedCornerShape(11.dp))
-                .border(0.5.dp, t.border, RoundedCornerShape(11.dp))
-                .clickable { store.removeMcp(mcpId); onPop() }
-                .padding(12.dp),
-        ) {
-            Text(stringResource(R.string.mcp_remove_server), color = t.danger, fontSize = 13.5f.sp, fontWeight = FontWeight.Medium)
+        if (managed == null) {
+            SettingsSection {
+                SettingsRow(
+                    label = stringResource(R.string.mcp_enable_server),
+                    chevron = false,
+                    trailing = {
+                        LXToggle(
+                            checked = s.enabled,
+                            onCheckedChange = { v -> store.updateMcp(mcpId) { it.copy(enabled = v) } },
+                        )
+                    },
+                )
+                SettingsRow(
+                    label = stringResource(R.string.mcp_auto_start),
+                    chevron = false,
+                    isLast = true,
+                    trailing = { LocalToggle(seed = true) },
+                )
+            }
+        }
+
+        if (managed == null) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.Center,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(top = 8.dp)
+                    .clip(RoundedCornerShape(11.dp))
+                    .border(0.5.dp, t.border, RoundedCornerShape(11.dp))
+                    .clickable { store.removeMcp(mcpId); onPop() }
+                    .padding(12.dp),
+            ) {
+                Text(stringResource(R.string.mcp_remove_server), color = t.danger, fontSize = 13.5f.sp, fontWeight = FontWeight.Medium)
+            }
         }
     }
 }

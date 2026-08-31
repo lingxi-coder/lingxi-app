@@ -68,6 +68,10 @@ data class LocalAppItem(
     val scaffolded: Boolean,
     /** Last host-derived health snapshot; absent until details are loaded. */
     val runtimeProfileStatus: LocalAppRuntimeProfileStatus? = null,
+    /** Last host-derived verification projection; absent until host emits it. */
+    val mcpVerification: LocalAppVerificationSummary? = null,
+    /** Last host-derived verification projection; absent until host emits it. */
+    val uiVerification: LocalAppVerificationSummary? = null,
 )
 
 /** Title and subtitle a library card renders for one app. */
@@ -126,11 +130,87 @@ internal fun appsForWidgetSnapshot(apps: List<LocalAppItem>): List<LocalAppItem>
     apps.filter(LocalAppItem::scaffolded)
 
 /**
- * Workflow state of an app — mirrors the v3 wire `AppWorkflowStateDto`, which
- * collapsed the whole design/generation pipeline to `draft` / `ready`
- * (local apps are agent-driven now; there is no client-side designer).
+ * Publication state of an app — the client projection of the v3 wire
+ * `AppWorkflowStateDto`.
+ *
+ * The Android bindings in this branch still decode the pre-Phase-8 `READY`
+ * variant, so the reducer maps that legacy name to
+ * [PublishedUnverified]. Once the shared DTO regeneration lands the same UI
+ * state already accepts the final `published_*` names with no contract churn.
  */
-enum class LocalAppWorkflow { Draft, Ready }
+enum class LocalAppWorkflow {
+    Draft,
+    PublishedUnverified,
+    PublishedVerified,
+}
+
+val LocalAppWorkflow.isPublished: Boolean
+    get() = this != LocalAppWorkflow.Draft
+
+enum class LocalAppStatusBadgeKind {
+    Draft,
+    PublishedUnverified,
+    PublishedVerified,
+    VerificationPending,
+    VerificationFailed,
+    Error,
+}
+
+enum class LocalAppVerificationStatus {
+    Pending,
+    Passed,
+    Failed,
+    Unverified,
+    Unavailable,
+}
+
+@Immutable
+data class LocalAppVerificationSummary(
+    val status: LocalAppVerificationStatus,
+    val summary: String,
+    val code: String? = null,
+)
+
+internal fun localAppStatusBadges(
+    workflow: LocalAppWorkflow,
+    runtimeError: String?,
+    runtimeProfileStatus: LocalAppRuntimeProfileStatus?,
+    mcpVerification: LocalAppVerificationSummary?,
+    uiVerification: LocalAppVerificationSummary?,
+): List<LocalAppStatusBadgeKind> {
+    val badges = mutableListOf(
+        when (workflow) {
+            LocalAppWorkflow.Draft -> LocalAppStatusBadgeKind.Draft
+            LocalAppWorkflow.PublishedUnverified -> LocalAppStatusBadgeKind.PublishedUnverified
+            LocalAppWorkflow.PublishedVerified -> LocalAppStatusBadgeKind.PublishedVerified
+        },
+    )
+    if (
+        workflow == LocalAppWorkflow.PublishedUnverified ||
+        mcpVerification?.status == LocalAppVerificationStatus.Pending ||
+        uiVerification?.status == LocalAppVerificationStatus.Pending
+    ) {
+        badges += LocalAppStatusBadgeKind.VerificationPending
+    }
+    if (
+        mcpVerification?.status == LocalAppVerificationStatus.Failed ||
+        uiVerification?.status == LocalAppVerificationStatus.Failed
+    ) {
+        badges += LocalAppStatusBadgeKind.VerificationFailed
+    }
+    if (!runtimeError.isNullOrBlank() || runtimeProfileStatus in setOf(
+            LocalAppRuntimeProfileStatus.DependenciesDirty,
+            LocalAppRuntimeProfileStatus.CoreDependencyDrift,
+            LocalAppRuntimeProfileStatus.RebuildRequired,
+            LocalAppRuntimeProfileStatus.MigrationAvailable,
+            LocalAppRuntimeProfileStatus.RuntimeBundleMissing,
+            LocalAppRuntimeProfileStatus.RuntimeContractCorrupt,
+        )
+    ) {
+        badges += LocalAppStatusBadgeKind.Error
+    }
+    return badges
+}
 
 enum class LocalAppRuntimeState { Stopped, Starting, Running, Stopping, Failed }
 
@@ -206,6 +286,10 @@ data class LocalAppDetails(
     val runtime: LocalAppRuntime = LocalAppRuntime(),
     /** Host-derived profile health from the same detail snapshot. */
     val runtimeProfileStatus: LocalAppRuntimeProfileStatus? = null,
+    /** Host-derived MCP verification projection from the same app lifecycle. */
+    val mcpVerification: LocalAppVerificationSummary? = null,
+    /** Host-derived UI verification projection from the same app lifecycle. */
+    val uiVerification: LocalAppVerificationSummary? = null,
 )
 
 /**
@@ -282,15 +366,6 @@ data class LocalAppRuntimeProfileOption(
     val reason: String? = null,
 )
 
-@Immutable
-data class LocalAppRuntimeProfileSelectionRequest(
-    val requestId: String,
-    val appId: String,
-    val reason: String,
-    val recommendedFamily: LocalAppRuntimeProfileFamily?,
-    val options: List<LocalAppRuntimeProfileOption>,
-)
-
 enum class LocalAppDependencyChangeKind {
     Add,
     Update,
@@ -343,15 +418,122 @@ data class LocalAppBridgeResult(
     val errorCode: String? = null,
 )
 
+enum class LocalAppApprovalReceiptState {
+    Pending,
+    Expired,
+    Superseded,
+}
+
 @Immutable
-data class LocalAppProfileProposal(
-    val appId: String,
-    val approvalToken: String,
+data class LocalAppApprovalDependency(
+    val packageName: String,
+    val version: String? = null,
+    val downloadStatus: String? = null,
+)
+
+@Immutable
+data class LocalAppApprovalInitialTool(
+    val name: String,
+    val summary: String,
+    val permissionCeiling: String? = null,
+)
+
+@Immutable
+data class LocalAppApprovalGate(
+    val name: String,
+    val status: LocalAppVerificationStatus,
+    val available: Boolean,
+    val detail: String? = null,
+)
+
+@Immutable
+data class LocalAppApprovalToolSurface(
+    val name: String,
+    val title: String? = null,
+    val description: String? = null,
+    val inputSchemaJson: String,
+    val outputSchemaJson: String? = null,
+    val annotationsJson: String? = null,
+    val executionJson: String? = null,
+    val visibleMetaJson: String? = null,
+    val semanticFlowJson: String,
+    val permissionCeiling: String,
+)
+
+sealed interface LocalAppApprovalSheet {
+    val appId: String
+    val requestId: String
+    val receiptId: String
+    val state: LocalAppApprovalReceiptState
+    val expiresAtMs: Long?
+}
+
+enum class LocalAppApprovalToolField {
+    Name,
+    Title,
+    Description,
+    InputSchema,
+    OutputSchema,
+    Annotations,
+    Execution,
+    VisibleMeta,
+    SemanticFlow,
+    PermissionCeiling,
+}
+
+@Immutable
+data class LocalAppApprovalToolDiff(
+    val name: String,
+    val before: LocalAppApprovalToolSurface? = null,
+    val after: LocalAppApprovalToolSurface? = null,
+    val changedFields: List<LocalAppApprovalToolField> = emptyList(),
+)
+
+@Immutable
+data class LocalAppCreateApprovalSheet(
+    override val appId: String,
+    override val requestId: String,
+    override val receiptId: String,
+    override val state: LocalAppApprovalReceiptState = LocalAppApprovalReceiptState.Pending,
+    override val expiresAtMs: Long? = null,
+    val appName: String,
+    val brief: String,
+    val templateName: String,
+    val runtimeProfile: LocalAppRuntimeProfileOption,
+    val reason: String,
+    val rejectedCandidates: List<String> = emptyList(),
+    val dependencies: List<LocalAppApprovalDependency> = emptyList(),
+    val initialTools: List<LocalAppApprovalInitialTool> = emptyList(),
+    val permissionCeilings: List<String> = emptyList(),
+    val gates: List<LocalAppApprovalGate> = emptyList(),
+) : LocalAppApprovalSheet
+
+@Immutable
+data class LocalAppMcpProposalApprovalSheet(
+    override val appId: String,
+    override val requestId: String,
+    override val receiptId: String,
+    override val state: LocalAppApprovalReceiptState = LocalAppApprovalReceiptState.Pending,
+    override val expiresAtMs: Long? = null,
+    val summary: String,
+    val toolDiffs: List<LocalAppApprovalToolDiff> = emptyList(),
+    val requiredChanges: List<String> = emptyList(),
+    val excludedCapabilities: List<String> = emptyList(),
+    val pendingGates: List<LocalAppApprovalGate> = emptyList(),
+) : LocalAppApprovalSheet
+
+@Immutable
+data class LocalAppProfileApprovalSheet(
+    override val appId: String,
+    override val requestId: String,
+    override val receiptId: String,
+    override val state: LocalAppApprovalReceiptState = LocalAppApprovalReceiptState.Pending,
+    override val expiresAtMs: Long? = null,
     val baseRevision: ULong,
     val currentRevision: ULong,
     val instructions: String,
     val reason: String,
-)
+) : LocalAppApprovalSheet
 
 /**
  * Details tabs. [Sessions] is FIRST and the default: an app is a conversation
@@ -382,9 +564,8 @@ data class LocalAppsUiState(
     val selectedAppId: String? = null,
     val selectedDetailsTab: LocalAppDetailsTab = LocalAppDetailsTab.Sessions,
     val pendingAuthorization: LocalAppAuthorizationRequest? = null,
-    val pendingRuntimeProfileSelection: LocalAppRuntimeProfileSelectionRequest? = null,
     val pendingDependencyChangeConfirmation: LocalAppDependencyChangeConfirmationRequest? = null,
-    val pendingProfileProposal: LocalAppProfileProposal? = null,
+    val pendingApprovalSheet: LocalAppApprovalSheet? = null,
     val bridgeResults: Map<LocalAppBridgeRequestKey, LocalAppBridgeResult> = emptyMap(),
     val pendingUiAction: LocalAppPendingUiAction? = null,
     val error: String? = null,
@@ -445,9 +626,8 @@ sealed interface LocalAppsAction {
     data class BridgeRequest(val message: LocalAppBridgeMessage) : LocalAppsAction
     data class AcknowledgeBridgeResult(val appId: String, val requestId: String) : LocalAppsAction
     data class ResolveAuthorization(val decision: LocalAppAuthorizationDecision) : LocalAppsAction
-    data class ResolveRuntimeProfileSelection(val family: LocalAppRuntimeProfileFamily?) : LocalAppsAction
     data class ResolveDependencyChangeConfirmation(val approved: Boolean) : LocalAppsAction
-    data class ResolveProfileProposal(val approved: Boolean) : LocalAppsAction
+    data class ResolveApprovalSheet(val approved: Boolean) : LocalAppsAction
     data class UiActionHandled(
         val requestId: String,
         val resultJson: String?,

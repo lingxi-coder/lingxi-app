@@ -38,6 +38,9 @@ final class LocalAppsStore {
     private(set) var checkpoints: [String: [LocalAppCheckpoint]] = [:]
     private(set) var isRefreshing = false
     private(set) var errorMessage: String?
+    private(set) var builtinPluginInventory: LocalAppBuiltinPluginInventory?
+    private(set) var builtinPluginStatus: LocalAppBuiltinPluginStatus?
+    private(set) var builtinPluginCommandError: String?
     private(set) var lastRefreshAt: Date?
     /// The id of the app the last `createApp` produced, consumed once by the
     /// library so the user lands on the new app's detail screen. The FALLBACK
@@ -72,8 +75,9 @@ final class LocalAppsStore {
 
     private(set) var pendingWidgetSetup: PendingWidgetSetup?
     private(set) var pendingPermission: LocalAppPermissionPrompt?
-    private(set) var pendingRuntimeProfileSelection: LocalAppRuntimeProfileSelectionPrompt?
     private(set) var pendingDependencyChangeConfirmation: LocalAppDependencyChangeConfirmationPrompt?
+    private(set) var pendingCreateConfirmation: LocalAppCreateConfirmationPrompt?
+    private(set) var pendingMcpProposalApproval: LocalAppMcpProposalApprovalPrompt?
     private(set) var pendingProfileProposal: LocalAppProfileProposal?
     private(set) var requestedPresentationAppID: String?
     /// requestId → appID for every UI request still awaiting a decision.
@@ -151,11 +155,14 @@ final class LocalAppsStore {
             prompt: LocalAppPermissionPrompt,
             source: PendingPermissionSource
         )] = []
-        @ObservationIgnored private var runtimeProfileSelectionQueue: [LocalAppRuntimeProfileSelectionPrompt] = []
         @ObservationIgnored private var dependencyChangeConfirmationQueue: [LocalAppDependencyChangeConfirmationPrompt] = []
+        @ObservationIgnored private var createConfirmationQueue: [LocalAppCreateConfirmationPrompt] = []
+        @ObservationIgnored private var mcpProposalApprovalQueue: [LocalAppMcpProposalApprovalPrompt] = []
     #endif
     @ObservationIgnored private var approvedUIAutomation: [String: LocalAppCapabilityDecision] = [:]
     @ObservationIgnored private var runtimeLastUsedAt: [String: Date] = [:]
+    @ObservationIgnored private var pendingBuiltinPluginEnabled: Bool?
+    @ObservationIgnored private var managedMcpInventories: [String: LocalAppManagedMcpInventory] = [:]
     @ObservationIgnored private let websiteDataStoreRegistry: LocalAppWebsiteDataStoreRegistry
     @ObservationIgnored private var websiteDataCleanupTask: Task<Void, Never>?
     /// Coalesces simultaneous library/detail refreshes into one bridge call.
@@ -174,6 +181,11 @@ final class LocalAppsStore {
     #if canImport(engine_mobileFFI)
         @ObservationIgnored private var submitCommand: ((ClientCommand) async throws -> Void)?
         @ObservationIgnored private var pendingBackgroundMutationRequests: Set<String> = []
+
+        private enum PendingApprovalKind {
+            case createConfirmation
+            case mcpProposal
+        }
     #endif
 
     init(websiteDataStoreRegistry: LocalAppWebsiteDataStoreRegistry? = nil) {
@@ -194,10 +206,113 @@ final class LocalAppsStore {
     }
 
     var distributionMode: LocalAppsDistributionMode { .current }
+    var builtinPluginDescriptor: LocalAppBuiltinPluginDescriptor {
+        if let inventory = builtinPluginInventory {
+            return LocalAppBuiltinPluginDescriptor(
+                pluginID: inventory.pluginID,
+                displayName: inventory.displayName,
+                version: inventory.version,
+                archiveDigest: inventory.bundleDigest,
+                skillCount: inventory.skillCount,
+                agentCount: inventory.agentCount,
+                workflowCount: inventory.workflowCount,
+                templateCount: inventory.templateCount,
+                defaultEnabled: inventory.manifestDefaultEnabled
+            )
+        }
+        return .current
+    }
+
+    var builtinPluginEffectiveEnabled: Bool {
+        pendingBuiltinPluginEnabled
+            ?? builtinPluginStatus?.isEnabled
+            ?? builtinPluginDescriptor.defaultEnabled
+    }
+
+    func clearBuiltinPluginCommandError() {
+        builtinPluginCommandError = nil
+    }
+
+    func managedMcpInventory(
+        serverName: String,
+        appSandboxRoot: String? = nil
+    ) -> LocalAppManagedMcpInventory? {
+        managedMcpInventories[serverName] ?? LocalAppManagedMcpInventoryReader(
+            appSandboxRoot: appSandboxRoot ?? ConversationSourceFactory.appSandboxRoot()
+        ).read(serverName: serverName, apps: apps)
+    }
 
     #if canImport(engine_mobileFFI)
         func configure(submit: @escaping (ClientCommand) async throws -> Void) {
             submitCommand = submit
+        }
+
+        func refreshBuiltinPluginStatus() async {
+            builtinPluginCommandError = nil
+            async let statusSent = send(
+                .pluginCommand(
+                    command: .getStatus(pluginId: builtinPluginDescriptor.pluginID)
+                )
+            )
+            async let inventorySent = send(
+                .pluginCommand(
+                    command: .getInventory(pluginId: builtinPluginDescriptor.pluginID)
+                )
+            )
+            async let managedInventorySent = send(
+                .pluginCommand(command: .getManagedMcpInventory)
+            )
+            let sent = await statusSent
+            let inventory = await inventorySent
+            let managed = await managedInventorySent
+            if !sent || !inventory || !managed {
+                builtinPluginCommandError = String(localized: "local_apps_plugin_status_unavailable")
+            }
+        }
+
+        func setBuiltinPluginEnabled(_ enabled: Bool) async {
+            pendingBuiltinPluginEnabled = enabled
+            builtinPluginCommandError = nil
+            let sent = await send(
+                .pluginCommand(
+                    command: .setEnabled(
+                        pluginId: builtinPluginDescriptor.pluginID,
+                        enabled: enabled
+                    )
+                )
+            )
+            if !sent {
+                pendingBuiltinPluginEnabled = nil
+                builtinPluginCommandError = String(localized: "local_apps_plugin_toggle_failed")
+            }
+        }
+
+        func resolvePendingCreateConfirmation(_ approved: Bool) async {
+            guard let prompt = pendingCreateConfirmation else { return }
+            pendingCreateConfirmation = nil
+            defer { presentNextCreateConfirmation() }
+            _ = await send(
+                .pluginCommand(
+                    command: .resolveCreateConfirmation(
+                        requestId: prompt.requestID,
+                        approved: approved
+                    )
+                )
+            )
+        }
+
+        func resolvePendingMcpProposalApproval(_ approved: Bool) async {
+            guard let prompt = pendingMcpProposalApproval else { return }
+            pendingMcpProposalApproval = nil
+            defer { presentNextMcpProposalApproval() }
+            _ = await send(
+                .pluginCommand(
+                    command: .resolveMcpProposalApproval(
+                        requestId: prompt.requestID,
+                        approved: approved
+                    )
+                )
+            )
         }
 
         func resolveProfileProposal(_ approved: Bool) {
@@ -221,14 +336,13 @@ final class LocalAppsStore {
             switch event {
             case let .appsChanged(records):
                 let updatedApps = records.map { record in
-                    var summary = LocalAppsProtocolAdapter.app(record)
-                    summary.runtimeProfileStatus = runtimeProfileStatuses[record.id]
-                    return summary
+                    hydratedSummary(for: record)
                 }.sorted {
                     $0.updatedAt > $1.updatedAt
                 }
                 let liveAppIDs = Set(updatedApps.map(\.id))
                 runtimeProfileStatuses = runtimeProfileStatuses.filter { liveAppIDs.contains($0.key) }
+                managedMcpInventories = managedMcpInventories.filter { liveAppIDs.contains($0.value.appID) }
                 apps = updatedApps
                 scheduleWidgetSnapshotPublish()
                 scheduleWebsiteDataCleanup(activeAppIDs: Set(updatedApps.map(\.id)))
@@ -392,7 +506,7 @@ final class LocalAppsStore {
                     name: "UI 测试应用",
                     brief: "UI 测试用的本地应用",
                     updatedAt: Date(timeIntervalSince1970: 1_700_000_000),
-                    workflow: .ready,
+                    workflow: .publishedVerified,
                     workspaceRelativePath: "apps/\(Self.uiTestSeedAppID)/workspace"
                 )
             ]
@@ -825,20 +939,6 @@ final class LocalAppsStore {
         #endif
     }
 
-    func resolvePendingRuntimeProfileSelection(_ family: LocalAppRuntimeProfileFamily?) async {
-        guard let prompt = pendingRuntimeProfileSelection else { return }
-        pendingRuntimeProfileSelection = nil
-        #if canImport(engine_mobileFFI)
-            defer { presentNextRuntimeProfileSelection() }
-            _ = await send(
-                .resolveAppRuntimeProfileSelection(
-                    requestId: prompt.id,
-                    selectedFamily: family.map(LocalAppsProtocolAdapter.runtimeProfileFamilyDto)
-                )
-            )
-        #endif
-    }
-
     func resolvePendingDependencyChangeConfirmation(_ approved: Bool) async {
         guard let prompt = pendingDependencyChangeConfirmation else { return }
         pendingDependencyChangeConfirmation = nil
@@ -937,6 +1037,21 @@ final class LocalAppsStore {
         mutation(&apps[index])
     }
 
+    #if canImport(engine_mobileFFI)
+        private func hydratedSummary(for record: AppRecordDto) -> LocalAppSummary {
+            var summary = LocalAppsProtocolAdapter.app(record)
+            summary.runtimeProfileStatus = runtimeProfileStatuses[record.id]
+            if let existing = apps.first(where: { $0.id == record.id }) {
+                summary.uiVerification = existing.uiVerification
+                summary.mcpVerification = existing.mcpVerification
+            } else if let inventory = managedMcpInventories.values.first(where: { $0.appID == record.id }) {
+                summary.uiVerification = inventory.uiVerification
+                summary.mcpVerification = inventory.mcpVerification
+            }
+            return summary
+        }
+    #endif
+
     /// Serializes WebKit cleanup and retries with the newest authoritative app
     /// set if another snapshot arrives while an async removal is in progress.
     private func scheduleWebsiteDataCleanup(activeAppIDs: Set<String>) {
@@ -974,8 +1089,7 @@ final class LocalAppsStore {
                 // create in another conversation, a create this store already
                 // resolved, anything arriving after a reconnect cleared the
                 // pending id — falls through to `break` and is ignored.
-                var summary = LocalAppsProtocolAdapter.app(record)
-                summary.runtimeProfileStatus = runtimeProfileStatuses[record.id]
+                let summary = hydratedSummary(for: record)
                 upsertApp(summary)
                 guard let pending = pendingCreateRequestID,
                       let requestId,
@@ -1010,7 +1124,7 @@ final class LocalAppsStore {
             case let .appDetailsChanged(details):
                 let status = details.runtimeProfileStatus.map(LocalAppsProtocolAdapter.runtimeProfileStatus)
                 runtimeProfileStatuses[details.app.id] = status
-                var summary = LocalAppsProtocolAdapter.app(details.app)
+                var summary = hydratedSummary(for: details.app)
                 summary.runtimeProfileStatus = status
                 upsertApp(summary)
                 collections[summary.id] = details.manifest.map {
@@ -1026,8 +1140,7 @@ final class LocalAppsStore {
                 scheduleWidgetSnapshotPublish()
 
             case let .appRecordChanged(record):
-                var summary = LocalAppsProtocolAdapter.app(record)
-                summary.runtimeProfileStatus = runtimeProfileStatuses[record.id]
+                let summary = hydratedSummary(for: record)
                 upsertApp(summary)
                 // The create handshake's second half: the pin the engine minted
                 // right after `AppCreated`. Publishing the landing HERE — with
@@ -1137,15 +1250,67 @@ final class LocalAppsStore {
                     source: .capability(appID: request.appId, kind: request.capability)
                 )
 
-            case let .appRuntimeProfileSelectionRequested(request):
-                enqueueRuntimeProfileSelection(
-                    LocalAppsProtocolAdapter.runtimeProfileSelection(request)
-                )
-
             case let .appDependencyChangeConfirmationRequested(request):
                 enqueueDependencyChangeConfirmation(
                     LocalAppsProtocolAdapter.dependencyChangeConfirmation(request)
                 )
+
+            case let .pluginStatusChanged(status):
+                guard status.pluginId == builtinPluginDescriptor.pluginID else { break }
+                pendingBuiltinPluginEnabled = nil
+                builtinPluginStatus = LocalAppBuiltinPluginStatus(
+                    state: status.state,
+                    manifestDefaultEnabled: status.manifestDefaultEnabled,
+                    validationError: builtinPluginInventory?.validationError ?? builtinPluginCommandError
+                )
+                builtinPluginCommandError = nil
+
+            case let .pluginInventoryChanged(inventory):
+                guard inventory.pluginId == builtinPluginDescriptor.pluginID else { break }
+                builtinPluginInventory = LocalAppsProtocolAdapter.builtinPluginInventory(inventory)
+                builtinPluginStatus = LocalAppBuiltinPluginStatus(
+                    state: inventory.state,
+                    manifestDefaultEnabled: inventory.manifestDefaultEnabled,
+                    validationError: inventory.validationError ?? builtinPluginCommandError
+                )
+
+            case let .createConfirmationRequested(request):
+                enqueueCreateConfirmation(
+                    LocalAppsProtocolAdapter.createConfirmation(request)
+                )
+
+            case let .mcpProposalApprovalRequested(request):
+                let prompt = LocalAppsProtocolAdapter.mcpProposalApproval(request)
+                guard prompt.hasVisibleChanges else {
+                    Task { await self.resolve(promptID: prompt.requestID, as: .mcpProposal, approved: false) }
+                    break
+                }
+                enqueueMcpProposalApproval(prompt)
+
+            case let .managedMcpInventoryChanged(servers):
+                managedMcpInventories = Dictionary(
+                    uniqueKeysWithValues: servers.map {
+                        let inventory = LocalAppsProtocolAdapter.managedMcpInventory($0)
+                        return (inventory.serverName, inventory)
+                    }
+                )
+
+            case let .verificationSummaryChanged(appId, publicationState, mcpVerification, uiVerification):
+                updateApp(appID: appId) { app in
+                    app.workflow = LocalAppsProtocolAdapter.workflow(publicationState)
+                    app.mcpVerification = LocalAppsProtocolAdapter.verificationSummary(mcpVerification)
+                    app.uiVerification = LocalAppsProtocolAdapter.verificationSummary(uiVerification)
+                    app.updatedAt = .now
+                }
+
+            case let .localAppOperationFailed(appId, _, message, requestId):
+                if let requestId {
+                    discardPendingApproval(requestID: requestId)
+                }
+                if let appId {
+                    updateManagedInventoryFailure(appID: appId, message: message)
+                }
+                errorMessage = message
 
             case let .appCheckpointsChanged(appId, checkpoints):
                 replaceCheckpoints(checkpoints, appID: appId)
@@ -1203,23 +1368,6 @@ final class LocalAppsStore {
             pendingPermissionSource = next.source
         }
 
-        private func enqueueRuntimeProfileSelection(
-            _ prompt: LocalAppRuntimeProfileSelectionPrompt
-        ) {
-            guard pendingRuntimeProfileSelection != nil else {
-                pendingRuntimeProfileSelection = prompt
-                return
-            }
-            runtimeProfileSelectionQueue.append(prompt)
-        }
-
-        private func presentNextRuntimeProfileSelection() {
-            guard pendingRuntimeProfileSelection == nil, !runtimeProfileSelectionQueue.isEmpty else {
-                return
-            }
-            pendingRuntimeProfileSelection = runtimeProfileSelectionQueue.removeFirst()
-        }
-
         private func enqueueDependencyChangeConfirmation(
             _ prompt: LocalAppDependencyChangeConfirmationPrompt
         ) {
@@ -1235,6 +1383,125 @@ final class LocalAppsStore {
                   !dependencyChangeConfirmationQueue.isEmpty
             else { return }
             pendingDependencyChangeConfirmation = dependencyChangeConfirmationQueue.removeFirst()
+        }
+
+        private func enqueueCreateConfirmation(
+            _ prompt: LocalAppCreateConfirmationPrompt
+        ) {
+            if pendingCreateConfirmation?.requestID == prompt.requestID
+                || createConfirmationQueue.contains(where: { $0.requestID == prompt.requestID })
+            {
+                return
+            }
+            if let pendingCreateConfirmation, pendingCreateConfirmation.appID == prompt.appID {
+                self.pendingCreateConfirmation = prompt
+                Task { await self.resolve(promptID: pendingCreateConfirmation.requestID, as: .createConfirmation, approved: false) }
+                return
+            }
+            if let index = createConfirmationQueue.firstIndex(where: { $0.appID == prompt.appID }) {
+                let superseded = createConfirmationQueue[index]
+                createConfirmationQueue[index] = prompt
+                Task { await self.resolve(promptID: superseded.requestID, as: .createConfirmation, approved: false) }
+                return
+            }
+            guard pendingCreateConfirmation != nil else {
+                pendingCreateConfirmation = prompt
+                return
+            }
+            createConfirmationQueue.append(prompt)
+        }
+
+        private func presentNextCreateConfirmation() {
+            guard pendingCreateConfirmation == nil, !createConfirmationQueue.isEmpty else { return }
+            pendingCreateConfirmation = createConfirmationQueue.removeFirst()
+        }
+
+        private func enqueueMcpProposalApproval(
+            _ prompt: LocalAppMcpProposalApprovalPrompt
+        ) {
+            if pendingMcpProposalApproval?.requestID == prompt.requestID
+                || mcpProposalApprovalQueue.contains(where: { $0.requestID == prompt.requestID })
+            {
+                return
+            }
+            if let pendingMcpProposalApproval, pendingMcpProposalApproval.appID == prompt.appID {
+                self.pendingMcpProposalApproval = prompt
+                Task { await self.resolve(promptID: pendingMcpProposalApproval.requestID, as: .mcpProposal, approved: false) }
+                return
+            }
+            if let index = mcpProposalApprovalQueue.firstIndex(where: { $0.appID == prompt.appID }) {
+                let superseded = mcpProposalApprovalQueue[index]
+                mcpProposalApprovalQueue[index] = prompt
+                Task { await self.resolve(promptID: superseded.requestID, as: .mcpProposal, approved: false) }
+                return
+            }
+            guard pendingMcpProposalApproval != nil else {
+                pendingMcpProposalApproval = prompt
+                return
+            }
+            mcpProposalApprovalQueue.append(prompt)
+        }
+
+        private func presentNextMcpProposalApproval() {
+            guard pendingMcpProposalApproval == nil, !mcpProposalApprovalQueue.isEmpty else { return }
+            pendingMcpProposalApproval = mcpProposalApprovalQueue.removeFirst()
+        }
+
+        private func discardPendingApproval(requestID: String) {
+            if pendingCreateConfirmation?.requestID == requestID {
+                pendingCreateConfirmation = nil
+                presentNextCreateConfirmation()
+                return
+            }
+            if let index = createConfirmationQueue.firstIndex(where: { $0.requestID == requestID }) {
+                createConfirmationQueue.remove(at: index)
+                return
+            }
+            if pendingMcpProposalApproval?.requestID == requestID {
+                pendingMcpProposalApproval = nil
+                presentNextMcpProposalApproval()
+                return
+            }
+            if let index = mcpProposalApprovalQueue.firstIndex(where: { $0.requestID == requestID }) {
+                mcpProposalApprovalQueue.remove(at: index)
+            }
+        }
+
+        private func resolve(
+            promptID: String,
+            as kind: PendingApprovalKind,
+            approved: Bool
+        ) async {
+            let command: PluginCommandDto
+            switch kind {
+            case .createConfirmation:
+                command = .resolveCreateConfirmation(requestId: promptID, approved: approved)
+            case .mcpProposal:
+                command = .resolveMcpProposalApproval(requestId: promptID, approved: approved)
+            }
+            _ = await send(.pluginCommand(command: command))
+        }
+
+        private func updateManagedInventoryFailure(appID: String, message: String) {
+            for (serverName, inventory) in managedMcpInventories where inventory.appID == appID {
+                managedMcpInventories[serverName] = LocalAppManagedMcpInventory(
+                    serverName: inventory.serverName,
+                    appID: inventory.appID,
+                    appName: inventory.appName,
+                    buildID: inventory.buildID,
+                    catalogDigest: inventory.catalogDigest,
+                    toolSurfaceDigest: inventory.toolSurfaceDigest,
+                    authoringRevision: inventory.authoringRevision,
+                    publicationState: inventory.publicationState,
+                    mcpVerification: LocalAppVerificationSummary(
+                        status: .failed,
+                        summary: message,
+                        code: inventory.mcpVerification.code
+                    ),
+                    uiVerification: inventory.uiVerification,
+                    tools: inventory.tools
+                )
+            }
         }
 
         private func resolveUIRequest(
@@ -1479,32 +1746,133 @@ final class LocalAppBackgroundTaskBridge: @unchecked Sendable {
     }
 
     private func resolveHandler() async -> Handler? {
-        lock.lock()
-        if let handler {
-            lock.unlock()
+        if let handler = currentHandler() {
             return handler
         }
         let id = UUID()
-        lock.unlock()
         return await withTaskCancellationHandler {
             await withCheckedContinuation { continuation in
-                lock.lock()
-                if let handler {
-                    lock.unlock()
+                if let handler = currentHandler() {
                     continuation.resume(returning: handler)
                 } else if Task.isCancelled {
-                    lock.unlock()
                     continuation.resume(returning: nil)
                 } else {
-                    waiters[id] = continuation
-                    lock.unlock()
+                    storeWaiter(continuation, id: id)
                 }
             }
         } onCancel: {
-            lock.lock()
-            let continuation = waiters.removeValue(forKey: id)
-            lock.unlock()
+            let continuation = removeWaiter(id: id)
             continuation?.resume(returning: nil)
         }
+    }
+
+    private func currentHandler() -> Handler? {
+        lock.lock()
+        defer { lock.unlock() }
+        return handler
+    }
+
+    private func storeWaiter(_ continuation: CheckedContinuation<Handler?, Never>, id: UUID) {
+        lock.lock()
+        defer { lock.unlock() }
+        waiters[id] = continuation
+    }
+
+    private func removeWaiter(id: UUID) -> CheckedContinuation<Handler?, Never>? {
+        lock.lock()
+        defer { lock.unlock() }
+        return waiters.removeValue(forKey: id)
+    }
+}
+
+struct LocalAppManagedMcpInventoryReader {
+    let appSandboxRoot: String
+
+    func read(serverName: String, apps: [LocalAppSummary]) -> LocalAppManagedMcpInventory? {
+        guard let appID = managedLocalAppID(serverName: serverName),
+              let app = apps.first(where: { $0.id == appID })
+        else { return nil }
+        let manifestURL = URL(fileURLWithPath: appSandboxRoot, isDirectory: true)
+            .appendingPathComponent("apps/\(appID)/workspace/.lingxi/manifest.json")
+        guard let manifestObject = jsonObject(at: manifestURL),
+              let activeCatalog = manifestObject["activeMcpCatalog"] as? [String: Any],
+              let buildID = activeCatalog["buildId"] as? String,
+              let catalogDigest = activeCatalog["catalogSha256"] as? String,
+              let toolSurfaceDigest = activeCatalog["toolSurfaceSha256"] as? String,
+              let verificationDigest = activeCatalog["mcpVerificationSha256"] as? String,
+              let authoringRevision = activeCatalog["authoringRevision"] as? NSNumber
+        else { return nil }
+
+        let catalogURL = URL(fileURLWithPath: appSandboxRoot, isDirectory: true)
+            .appendingPathComponent("apps/\(appID)/mcp/catalogs/\(catalogDigest).json")
+        guard let catalogObject = jsonObject(at: catalogURL),
+              let tools = catalogObject["tools"] as? [[String: Any]]
+        else { return nil }
+
+        return LocalAppManagedMcpInventory(
+            serverName: serverName,
+            appID: appID,
+            appName: app.displayName,
+            buildID: buildID,
+            catalogDigest: catalogDigest,
+            toolSurfaceDigest: toolSurfaceDigest,
+            authoringRevision: authoringRevision.uint64Value,
+            publicationState: app.workflow,
+            mcpVerification: LocalAppVerificationSummary(
+                status: verificationDigest.isEmpty ? .unverified : .passed,
+                summary: verificationDigest.isEmpty ? "MCP verification pending." : "MCP verification evidence available.",
+                code: verificationDigest.isEmpty ? nil : verificationDigest
+            ),
+            uiVerification: LocalAppVerificationSummary(
+                status: app.workflow == .publishedVerified ? .passed : .unverified,
+                summary: app.workflow == .publishedVerified ? "Published UI verification passed." : "UI verification pending.",
+                code: nil
+            ),
+            tools: tools.compactMap(tool)
+        )
+    }
+
+    func managedLocalAppID(serverName: String) -> String? {
+        let prefix = "local_app_"
+        guard serverName.hasPrefix(prefix) else { return nil }
+        let appID = String(serverName.dropFirst(prefix.count))
+        return appID.isEmpty ? nil : appID
+    }
+
+    private func tool(_ object: [String: Any]) -> LocalAppManagedMcpTool? {
+        guard let definition = object["definition"] as? [String: Any],
+              let name = definition["name"] as? String
+        else { return nil }
+        return LocalAppManagedMcpTool(
+            name: name,
+            title: definition["title"] as? String,
+            description: definition["description"] as? String,
+            inputSchemaSummary: jsonSummary(definition["inputSchema"]) ?? "{}",
+            outputSchemaSummary: jsonSummary(definition["outputSchema"]),
+            annotationsSummary: jsonSummary(definition["annotations"]),
+            executionSummary: jsonSummary(definition["execution"] ?? object["execution"]),
+            visibleMetaSummary: jsonSummary(definition["_meta"] ?? definition["meta"]),
+            semanticFlowSummary: jsonSummary(object["flow"]) ?? "{}",
+            ceilingSummary: jsonSummary(object["ceiling"]) ?? String(describing: object["ceiling"] ?? "deny")
+        )
+    }
+
+    private func jsonObject(at url: URL) -> [String: Any]? {
+        guard let data = try? Data(contentsOf: url),
+              let json = try? JSONSerialization.jsonObject(with: data),
+              let object = json as? [String: Any]
+        else { return nil }
+        return object
+    }
+
+    private func jsonSummary(_ value: Any?) -> String? {
+        guard let value else { return nil }
+        guard JSONSerialization.isValidJSONObject(value),
+              let data = try? JSONSerialization.data(withJSONObject: value, options: [.prettyPrinted, .sortedKeys]),
+              let string = String(data: data, encoding: .utf8)
+        else {
+            return String(describing: value)
+        }
+        return string
     }
 }

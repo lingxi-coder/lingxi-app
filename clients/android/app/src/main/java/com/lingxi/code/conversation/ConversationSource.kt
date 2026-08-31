@@ -817,7 +817,10 @@ sealed interface ReplyEvent {
     /** A terminal error to surface (engine `Error`, or a build/submit failure). */
     data class Error(val message: String) : ReplyEvent
 
-    /** The final assistant message (MessageComplete / no-stream path). */
+    /** One assistant API-response boundary; the enclosing turn can continue. */
+    data class MessageComplete(val message: Message?) : ReplyEvent
+
+    /** The final assistant message used by sources without engine boundaries. */
     data class Completed(val message: Message) : ReplyEvent
 
     /** Terminal marker: the turn ended cleanly. The stream completes after this. */
@@ -915,9 +918,8 @@ fun clientEventToReply(
     )
     is ClientEvent.CoordinatorStatus ->
         ReplyEvent.Coordinator(event.activeWorkers.toInt(), event.team)
-    is ClientEvent.MessageComplete -> event.message
-        ?.let { ReplyEvent.Completed(messageDtoToMessage(it, strings)) }
-        ?: ReplyEvent.End
+    is ClientEvent.MessageComplete ->
+        ReplyEvent.MessageComplete(event.message?.let { messageDtoToMessage(it, strings) })
     is ClientEvent.TurnEnded -> ReplyEvent.End
     is ClientEvent.Error -> ReplyEvent.Error(
         userFacingEngineError(event.kind, event.message, strings),

@@ -32,6 +32,9 @@ pub mod events;
 pub mod ids;
 pub mod mailbox;
 pub mod manifest;
+pub mod mcp_authoring;
+pub mod packer;
+pub mod performance_thresholds;
 pub mod permissions;
 pub mod runtime_migration;
 pub mod runtime_v2;
@@ -58,9 +61,31 @@ pub use events::{
     RecordingAppEventObserver,
 };
 pub use manifest::{
-    load_manifest, save_manifest, AppDependencySnapshot, AppLayout, AppManifest,
-    AppRuntimeProfileBinding, AppSurface, DataCollectionSchema, DataFieldKind, DataFieldSchema,
-    DeviceContext, WORKSPACE_SETTINGS_LOCAL_FILE,
+    derive_publication_state, hash_mcp_catalog, load_manifest, load_mcp_catalog, save_manifest,
+    save_mcp_catalog, AppDependencySnapshot, AppLayout, AppManifest, AppMcpCatalogRef,
+    AppPublicationState, AppRuntimeProfileBinding, AppSurface, AppTemplateOrigin,
+    DataCollectionSchema, DataFieldKind, DataFieldSchema, DeviceContext,
+    WORKSPACE_SETTINGS_LOCAL_FILE,
+};
+pub use mcp_authoring::{
+    approval_contract_sha256, catalog_sha256, derive_local_app_mcp_ceiling, load_candidate_journal,
+    materialize_flow_value_binding, save_candidate_journal, validate_app_mcp_flow_binding,
+    validate_app_mcp_flow_binding_for_consumer, validate_app_mcp_proposal,
+    validate_generated_mcp_catalog, validate_generated_structured_result, value_matches_schema,
+    AppMcpFlowBinding, AppMcpFlowContext, AppMcpProposal, AppMcpToolProposal, FlowSource,
+    FlowValueBinding, GeneratedMcpBudget, GeneratedMcpIssue, HostValidatedMcpTool,
+    McpAuthoringStage, McpCandidateJournal, McpConfirmationReceipt, McpReceiptBook,
+    ValidatedAppMcpProposal, MAX_EXPOSED_MCP_DEFINITIONS_TOKENS, MAX_EXPOSED_MCP_DEFINITIONS_UTF16,
+    MAX_GENERATED_MCP_DEFINITION_TOKENS, MAX_GENERATED_MCP_DEFINITION_UTF16,
+    MAX_GENERATED_MCP_SCHEMA_BYTES, MAX_GENERATED_MCP_STRUCTURED_RESULT_BYTES,
+    MAX_GENERATED_MCP_TOOLS,
+};
+pub use packer::{
+    pack, sha256_hex, InventoryEntry, PackResult, PackedFile, PackerError, PRUNE_DIR_NAMES,
+};
+pub use performance_thresholds::{
+    load_baseline, validate as validate_performance_thresholds, PerformanceThresholds,
+    ThresholdError,
 };
 pub use permissions::{
     load_permissions, save_permissions, save_workspace_permission_settings, AppCapability,
@@ -86,6 +111,6 @@ pub use service::{AppService, CreateMode, PLACEHOLDER_APP_NAME};
 pub use state::{runtime_transition_allowed, AppState};
 pub use types::{
     AppCheckpoint, AppCheckpointKind, AppDependencyRecord, AppDependencyState, AppRecord,
-    AppRuntimeMode, AppRuntimeProfile, AppRuntimeRecord, AppRuntimeState, AppWorkflowState,
-    APPS_SCHEMA_VERSION, DEFAULT_GIT_VERSION_CONTROL,
+    AppRuntimeMode, AppRuntimeProfile, AppRuntimeRecord, AppRuntimeState, APPS_SCHEMA_VERSION,
+    DEFAULT_GIT_VERSION_CONTROL,
 };

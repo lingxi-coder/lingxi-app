@@ -292,6 +292,28 @@ impl MessageQueueManager {
         *self.active_turn.write().await = None;
     }
 
+    /// Consume the next batch of human prompts that belongs inside the running
+    /// main-thread turn.
+    ///
+    /// This is the canonical mid-turn queue operation used by every host. It
+    /// accepts only `Next` priority, main-thread, non-slash user input. `Now`
+    /// remains queued after cancelling the active token so the between-turn
+    /// driver can run it as the interrupting turn; `Later` waits for the normal
+    /// between-turn drain.
+    pub async fn take_mid_turn_prompt(&self) -> Option<String> {
+        let batch = self
+            .get_by_max_priority(QueuePriority::Next, |command| {
+                command.is_main_thread()
+                    && !command.is_slash_command()
+                    && command.priority == QueuePriority::Next
+            })
+            .await;
+        let (joined, consumed) = join_prompt_values(&batch)?;
+        self.consume(&consumed, "drained mid-turn into running turn")
+            .await;
+        Some(joined)
+    }
+
     /// Append `cmd` to the queue; wakes one waiter and logs an `Enqueue`.
     ///
     /// If `cmd` is `Now`-priority, the active turn's cancellation token (if any)
@@ -816,6 +838,20 @@ mod tests {
             }
             other => panic!("expected Remove, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn mid_turn_prompt_consumes_only_next_main_thread_plain_input() {
+        let q = MessageQueueManager::new();
+        q.enqueue(mk(QueuePriority::Next, "first")).await;
+        q.enqueue(mk(QueuePriority::Now, "urgent")).await;
+        q.enqueue(mk(QueuePriority::Later, "later")).await;
+
+        assert_eq!(q.take_mid_turn_prompt().await.as_deref(), Some("first"));
+        let remaining = q.snapshot().await;
+        assert_eq!(remaining.len(), 2);
+        assert_eq!(remaining[0].text(), Some("urgent"));
+        assert_eq!(remaining[1].text(), Some("later"));
     }
 
     #[tokio::test]

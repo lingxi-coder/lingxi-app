@@ -48,6 +48,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use thiserror::Error;
+use tokio::io::AsyncReadExt;
 use tokio::sync::RwLock;
 use tool_api::ToolRegistry;
 use traits::{FileSystem, HttpTransport, RuntimeSpawner};
@@ -217,6 +218,19 @@ impl PluginManager {
         self
     }
 
+    /// Composition-test seam for confirming consumers share one live workflow
+    /// registry allocation.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn shares_plugin_workflows(
+        &self,
+        registry: &Arc<workflow::PluginWorkflowRegistry>,
+    ) -> bool {
+        self.plugin_workflows
+            .as_ref()
+            .is_some_and(|wired| Arc::ptr_eq(wired, registry))
+    }
+
     /// The live plugin-theme registry (§14, [`theme_registry::PluginThemeRegistry`]).
     /// `PluginManager` is the sole owner today (see the field doc), but hands
     /// out the same `Arc` so a future TUI theme-selection surface can read
@@ -382,6 +396,102 @@ impl PluginManager {
         Ok(())
     }
 
+    /// Register an engine-compiled-in plugin whose `(id, manifest,
+    /// install_dir)` triple is already resolved and trusted — the second,
+    /// narrow door §19.1 requires alongside [`Self::install`]'s continued
+    /// rejection of `PluginSource::BuiltIn`.
+    ///
+    /// [`Self::install`] cannot take a `BuiltIn` source itself: the variant
+    /// carries no path/URL for it to fetch from, and that arm keeps
+    /// returning [`PluginManagerError::Io`] unconditionally — this method
+    /// does not touch `install`'s match at all. Instead the caller (the
+    /// composition root, for a plugin compiled into or embedded in the
+    /// binary) supplies the manifest and the directory its component files
+    /// already live in directly, exactly as `install`'s own `LocalPath` arm
+    /// hands a caller-resolved directory straight to [`Self::enable`].
+    ///
+    /// This is a thin wrapper, not a parallel implementation: every
+    /// remaining invariant `enable`/`load_plugin` enforce for a network
+    /// install runs here too, unmodified —
+    ///   - the blocklist check (`PluginManagerError::Blocked`) — with the
+    ///     same caveat it carries on every other path:
+    ///     `PluginBlocklist::is_blocked` matches on `PluginId`, and
+    ///     `PluginId::new()` is a fresh v4 UUID per process, so the check
+    ///     runs but can only match an id the host minted and blocked
+    ///     within the same run,
+    ///   - the managed-marketplace-block check,
+    ///   - `userConfig` resolution (secrets + `pluginConfigs` substitution),
+    ///   - and full component materialization: privilege-stripped agents,
+    ///     commands, skills, output styles, hooks, MCP servers, LSP servers.
+    ///
+    /// Three things are stamped unconditionally, overwriting whatever the
+    /// caller's `manifest` already carried, so a mistakenly-populated field
+    /// on the way in can never survive into the live state:
+    ///   - `manifest.source` becomes [`PluginSource::BuiltIn`],
+    ///   - `manifest.trust_level` becomes the trust
+    ///     [`crate::trust::default_trust_for_source`] assigns `BuiltIn`
+    ///     (`AdminTrusted`) — mirroring [`Self::finalize_install`]'s
+    ///     stamp-then-`enable` pattern for the network arms, and
+    ///   - `manifest.id` becomes `*id`, the value the plugin state map is
+    ///     keyed by. Every `install` arm gets `(id, manifest)` from
+    ///     `discovery::load_plugin_from_path`, which mints one id and puts
+    ///     that same value in `manifest.id`; only this door takes the two
+    ///     from a caller that built the manifest by hand, so only here can
+    ///     they diverge — and a divergence silently makes the plugin
+    ///     impossible to unload (see the stamp's own comment below).
+    ///
+    /// What this path deliberately skips, because "verified" means the root
+    /// never passed through untrusted, attacker-influenced input in the
+    /// first place:
+    ///   - fetch/download (git clone, marketplace HTTP, `.mcpb` unzip) — the
+    ///     `BuiltIn` variant has nothing to fetch from,
+    ///   - the `.mcpb` sha256 integrity compare — no archive is unpacked,
+    ///   - the marketplace clone's symlink/path-traversal escape guard — the
+    ///     directory is not a freshly-cloned untrusted repo,
+    ///   - the `installed_plugins.json` durable record `copy_into_cache`
+    ///     writes — a compiled-in plugin is deterministically reconstructed
+    ///     by the host at every startup, so there is nothing to re-discover
+    ///     across a restart, and
+    ///   - the "`install_dir` is a real plugin root" check `install`'s
+    ///     `LocalPath` arm gets for free from
+    ///     `discovery::discover_installed_plugins` (a directory with no
+    ///     `plugin.json` yields `no plugin manifest found at ..`). A
+    ///     compiled-in plugin need not have a manifest file on disk at all —
+    ///     the caller supplies the parsed manifest — so requiring one here
+    ///     would defeat the purpose. The cost is that a host packaging bug
+    ///     (component files missing from `install_dir`) registers a plugin
+    ///     with zero components and returns `Ok`: `load_plugin` skips an
+    ///     unreadable component file rather than failing, on this path
+    ///     exactly as on every other.
+    ///
+    /// Not addressed by this method, and not unique to it: `enable`/
+    /// `load_plugin` perform no `depends_on`/`dependencies` resolution for
+    /// ANY install path today — a pre-existing gap this method inherits
+    /// rather than introduces.
+    pub async fn register_verified_builtin(
+        &self,
+        id: &PluginId,
+        mut manifest: PluginManifest,
+        install_dir: PathBuf,
+    ) -> Result<(), PluginManagerError> {
+        // `load_plugin` files every registry entry under `manifest.id`
+        // (`register_plugin_commands(manifest.id, ..)`, `plugin_mcp_names`,
+        // `plugin_agent_names`, …) while `disable`/`unload_plugin` remove
+        // them by the `id` argument this state map is keyed by. Every
+        // `install` arm gets both from `discovery::load_plugin_from_path`,
+        // which mints ONE id and stores that same value in `manifest.id`, so
+        // they cannot diverge there. Here the caller hand-builds the manifest
+        // and passes the id separately, so they can — and a divergence is
+        // silent: registration succeeds, then `disable` reports success while
+        // leaving the plugin's commands, hooks, agents, MCP and LSP servers
+        // live and permanently unreachable. Stamp it, exactly like `source`
+        // and `trust_level` below.
+        manifest.id = *id;
+        manifest.source = PluginSource::BuiltIn;
+        manifest.trust_level = crate::trust::default_trust_for_source(&PluginSource::BuiltIn);
+        self.enable(id, manifest, install_dir).await
+    }
+
     /// Transition `id` from `Loaded` to `Disabled` and remove every
     /// registry entry the plugin contributed.
     pub async fn disable(&self, id: &PluginId) -> Result<(), PluginManagerError> {
@@ -442,6 +552,13 @@ impl PluginManager {
             .collect()
     }
 
+    /// Snapshot one plugin's lifecycle state. Builtin hosts use this to
+    /// distinguish an explicitly present `Disabled` plugin from a bundle that
+    /// failed before registration and is therefore absent.
+    pub async fn plugin_state(&self, id: &PluginId) -> Option<PluginState> {
+        self.plugins.read().await.get(id).cloned()
+    }
+
     /// Materialise `manifest`'s components into the 8 registries.
     #[allow(clippy::too_many_lines)] // Wiring layer — validate-then-mutate over 7 component slots.
     async fn load_plugin(
@@ -486,14 +603,34 @@ impl PluginManager {
         // All-or-nothing ordering: VALIDATE every fallible input BEFORE
         // mutating any live registry, so a rejected plugin never leaves an
         // orphaned command / hook behind. claude-code loads a plugin as a
-        // single unit; a privilege-escalating agent rejects the whole plugin,
-        // not just the agent.
+        // single unit. NOTE: a privilege-escalating AGENT is no longer one of
+        // those fallible inputs — per §19.1 it is warned about and stripped
+        // (see the agent loop directly below), never rejected. The
+        // all-or-nothing ordering still governs every other component.
 
-        // (a) Agents — validate the privilege boundary, then parse the same
+        // (a) Agents — scan the privilege boundary, then parse the same
         //     declared paths discovery returned (including custom/nested agent
         //     directories). Names are plugin-qualified so they cannot shadow a
         //     user/project agent. Registry mutation remains below the complete
         //     validation phase.
+        //
+        //     §19.1: `permissionMode` / `mcpServers` / `hooks` in a plugin
+        //     agent's frontmatter must never reach the agent's runtime
+        //     execution state, and all three are handled IDENTICALLY now.
+        //     This is *normal* validation (see
+        //     `agent_validation::scan_plugin_agent_privileged_fields`): it
+        //     only WARNS per privileged field found, never fails — a
+        //     malformed or over-privileged agent file must not remove an
+        //     otherwise-valid agent from the registry, and must never take
+        //     the whole plugin down with it. (Previously `permissionMode` /
+        //     `hooks` failed the ENTIRE plugin load via
+        //     `validate_plugin_agent_frontmatter`, now the STRICT validator
+        //     — unused on this path — while `mcpServers` alone degraded
+        //     silently. That inconsistency was the bug.) The three fields
+        //     are then unconditionally stripped from `def` below too,
+        //     independent of what the scan found, so a future parser change
+        //     (a new alias, a nested-field promotion, …) can't smuggle
+        //     privilege through a gap in the scan.
         let mut agent_defs = Vec::new();
         for ap in &manifest.components.agents {
             let abs = if ap.path.is_absolute() {
@@ -503,11 +640,37 @@ impl PluginManager {
             };
             if let Ok(raw) = tokio::fs::read_to_string(&abs).await {
                 if let Some(yaml) = extract_frontmatter(&raw) {
-                    if let Err(e) = crate::validate_plugin_agent_frontmatter(yaml) {
-                        return Err(PluginManagerError::Validation(format!(
-                            "agent {}: {e}",
-                            abs.display()
-                        )));
+                    match crate::agent_validation::scan_plugin_agent_privileged_fields(yaml) {
+                        Ok(fields) => {
+                            for field in fields {
+                                tracing::warn!(
+                                    path = %abs.display(),
+                                    plugin = %manifest.name,
+                                    field = field.key(),
+                                    "plugin agent frontmatter declares a privileged field; \
+                                     stripping it before load — it will not reach execution state"
+                                );
+                            }
+                        }
+                        // Frontmatter that will not parse as a YAML mapping
+                        // cannot be scanned — but it also cannot be parsed
+                        // into an `AgentDefinition` by
+                        // `parse_agent_markdown` two lines below (its
+                        // `Frontmatter` target is strictly less permissive
+                        // than `serde_yaml::Value`), so nothing from this
+                        // file can reach execution state. Failing the load
+                        // here would take the WHOLE plugin down over one
+                        // unparseable agent file, which §19.1 forbids: warn
+                        // and let the parse below drop just this agent.
+                        Err(e) => {
+                            tracing::warn!(
+                                path = %abs.display(),
+                                plugin = %manifest.name,
+                                error = %e,
+                                "plugin agent frontmatter could not be scanned for privileged \
+                                 fields; skipping this agent (the plugin still loads)"
+                            );
+                        }
                     }
                 }
                 match agent::parse_agent_markdown(
@@ -517,15 +680,11 @@ impl PluginManager {
                     &abs,
                 ) {
                     Ok(mut def) => {
-                        if !def.mcp_servers.is_empty() {
-                            tracing::warn!(
-                                agent = %def.agent_type,
-                                plugin = %manifest.name,
-                                skipped_entries = def.mcp_servers.len(),
-                                "plugin agent MCP entries are ignored; configure plugin MCP servers in the plugin manifest"
-                            );
-                            def.mcp_servers.clear();
-                        }
+                        // §19.1 defense in depth: strip regardless of what the
+                        // scan above found (see the loop comment).
+                        def.permission_mode = agent::AgentPermissionMode::Bubble;
+                        def.mcp_servers.clear();
+                        def.frontmatter_hooks.clear();
                         let root = component_root(ap, install_dir.join("agents"));
                         let namespace = abs
                             .parent()
@@ -638,6 +797,7 @@ impl PluginManager {
         let plugin_name = &manifest.name;
         let mut skills: Vec<skill_api::Skill> = Vec::new();
         {
+            let mut sources = Vec::new();
             for sp in &manifest.components.skills {
                 let abs = if sp.path.is_absolute() {
                     sp.path.clone()
@@ -647,8 +807,27 @@ impl PluginManager {
                 let Ok(raw) = tokio::fs::read_to_string(&abs).await else {
                     continue;
                 };
-                let Ok(mut skill) = parse_skill_markdown(
+                let Ok(skill) = parse_skill_markdown(
                     &raw,
+                    abs.clone(),
+                    SkillSource::Plugin,
+                    LoadedFrom::Plugin,
+                ) else {
+                    continue;
+                };
+                sources.push((abs, raw, skill.name));
+            }
+            let bare_names: HashSet<String> =
+                sources.iter().map(|(_, _, name)| name.clone()).collect();
+            for (abs, raw, _) in sources {
+                // Plugin-authored handoffs commonly use `$other-skill` in the
+                // checked-in Markdown. Keep the package bytes source-faithful,
+                // but qualify references to sibling skills in the live prompt
+                // so the Skill tool cannot miss or resolve a same-name project
+                // skill outside this plugin.
+                let scoped_raw = scope_plugin_skill_references(&raw, plugin_name, &bare_names);
+                let Ok(mut skill) = parse_skill_markdown(
+                    &scoped_raw,
                     abs.clone(),
                     SkillSource::Plugin,
                     LoadedFrom::Plugin,
@@ -664,7 +843,7 @@ impl PluginManager {
                 // direct `/plugin:skill` invocation all observe it.
                 let skill_root = abs.parent().unwrap_or(install_dir).to_path_buf();
                 let file = command_api::parse_skill_command_markdown(
-                    &raw,
+                    &scoped_raw,
                     abs.clone(),
                     skill_root,
                     command_api::CommandSource::Plugin,
@@ -1094,6 +1273,55 @@ impl PluginManager {
             self.plugin_themes.unregister(&slugs);
         }
         Ok(())
+    }
+}
+
+fn scope_plugin_skill_references(
+    source: &str,
+    plugin_name: &str,
+    bare_names: &HashSet<String>,
+) -> String {
+    let mut output = String::with_capacity(source.len());
+    let mut cursor = 0;
+    for (dollar, _) in source.match_indices('$') {
+        if dollar < cursor {
+            continue;
+        }
+        let token_start = dollar + 1;
+        let token_len = source[token_start..]
+            .chars()
+            .take_while(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_'))
+            .map(char::len_utf8)
+            .sum::<usize>();
+        let token_end = token_start + token_len;
+        let token = &source[token_start..token_end];
+        if !token.is_empty() && bare_names.contains(token) {
+            output.push_str(&source[cursor..dollar]);
+            output.push('$');
+            output.push_str(plugin_name);
+            output.push(':');
+            output.push_str(token);
+            cursor = token_end;
+        }
+    }
+    output.push_str(&source[cursor..]);
+    output
+}
+
+#[cfg(test)]
+mod plugin_skill_reference_tests {
+    use super::*;
+
+    #[test]
+    fn sibling_skill_references_are_qualified_without_rewriting_other_tokens() {
+        let names = HashSet::from(["frontend-design".to_string(), "device".to_string()]);
+        let source =
+            "Use $frontend-design, $device and $ARGUMENTS. Keep $other and $plugin:device.";
+        assert_eq!(
+            scope_plugin_skill_references(source, "lingxi-local-app", &names),
+            "Use $lingxi-local-app:frontend-design, $lingxi-local-app:device and \
+             $ARGUMENTS. Keep $other and $plugin:device."
+        );
     }
 }
 

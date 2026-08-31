@@ -356,8 +356,9 @@ Generated source may be edited only under:
 - `public/`
 
 The pinned scaffold is an Ionic-only React/Vite foundation, with separate
-host-owned routed-DOM and drawn-canvas variants (`vite-react-static-v1` and
-`vite-react-canvas-v1`). Both variants use `app/providers.jsx` to wrap
+host-owned runtime profiles rooted at `runtime-profiles/react-dom/r1` and
+`runtime-profiles/canvas-2d/r1` for the routed DOM and drawn-canvas families.
+Both variants use `app/providers.jsx` to wrap
 `LingXiBridgeProvider` and `ErrorBoundary`; the DOM provider adds
 `IonReactHashRouter`, while the canvas provider intentionally has no router.
 Ionic is configured from the host platform adapter through

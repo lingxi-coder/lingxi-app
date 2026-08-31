@@ -339,7 +339,7 @@ mod tests {
         let error = load_runtime_profile_migration_journal(&layout)
             .expect_err("old schema journal must be rejected");
         assert_eq!(error.code(), crate::error::AppErrorCode::StorageCorrupt);
-        assert!(error.to_string().contains("schemaVersion 1 is unsupported"));
+        assert!(error.to_string().contains("schemaVersion 2 is unsupported"));
     }
 
     #[test]

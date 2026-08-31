@@ -1,0 +1,28 @@
+{
+  "name": "lingxi-local-app",
+  "private": true,
+  "version": "1.0.0",
+  "packageManager": "pnpm@11.22.0",
+  "type": "module",
+  "engines": {
+    "node": "24.18.1"
+  },
+  "scripts": {
+    "build": "vite build",
+    "dev": "vite",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@ionic/react": "9.0.0",
+    "@ionic/react-router": "9.0.0",
+    "@vitejs/plugin-react": "6.0.4",
+    "react": "19.2.8",
+    "react-dom": "19.2.8",
+    "react-router": "6.30.6",
+    "react-router-dom": "6.30.6",
+    "vite": "8.2.1",
+    "zod": "4.4.3",
+    "zustand": "5.0.15",
+    "phaser": "4.2.1"
+  }
+}

@@ -68,10 +68,16 @@ use client_protocol::local_apps::{
     AppDependencyChangeDto, AppDependencyChangeKindDto, AppDependencySnapshotDto, AppDetailsDto,
     AppErrorCodeDto, AppEventDto, AppManifestDto, AppRecordDto, AppRuntimeDetailsDto,
     AppRuntimeModeDto, AppRuntimeProfileBindingDto, AppRuntimeProfileDto,
-    AppRuntimeProfileOptionDto, AppRuntimeProfilePackageDto, AppRuntimeProfileSelectionRequestDto,
-    AppRuntimeRecoveryStateDto, AppRuntimeStateDto, AppRuntimeSuspensionReasonDto,
-    AppSessionKindDto, AppSessionRowDto, AppSurfaceDto, AppUiActionKindDto, AppUiRequestDto,
-    AppWorkflowStateDto, DeviceContextDto,
+    AppRuntimeProfileOptionDto, AppRuntimeProfilePackageDto, AppRuntimeRecoveryStateDto,
+    AppRuntimeStateDto, AppRuntimeSuspensionReasonDto, AppSessionKindDto, AppSessionRowDto,
+    AppSurfaceDto, AppUiActionKindDto, AppUiRequestDto, AppWorkflowStateDto, DeviceContextDto,
+    LocalAppCreateConfirmationRequestDto, LocalAppGateStatusDto,
+    LocalAppMcpProposalApprovalRequestDto, LocalAppMcpToolChangeKindDto, LocalAppMcpToolDiffDto,
+    LocalAppMcpToolFieldDto, LocalAppMcpToolSurfaceDto, LocalAppPluginComponentCountsDto,
+    LocalAppPluginErrorCodeDto, LocalAppPluginInventoryDto, LocalAppReceiptStatusDto,
+    LocalAppRejectedCandidateDto, LocalAppTemplateSummaryDto, LocalAppVerificationStatusDto,
+    LocalAppVerificationSummaryDto, ManagedLocalAppMcpServerDto, PluginActivationStateDto,
+    PluginCommandDto, PluginStatusDto,
 };
 use client_protocol::message::{MessageBlockDto, MessageDto};
 use client_protocol::permission::{
@@ -633,7 +639,7 @@ fn event_goldens() -> Vec<(&'static str, ClientEvent)> {
             "event/app_workflow_changed.json",
             ClientEvent::AppWorkflowChanged {
                 app_id: "habits-1a2b".to_string(),
-                state: AppWorkflowStateDto::Ready,
+                state: AppWorkflowStateDto::PublishedUnverified,
                 detail: None,
             },
         ),
@@ -685,57 +691,6 @@ fn event_goldens() -> Vec<(&'static str, ClientEvent)> {
                         capability: AppCapabilityKindDto::NetworkDomain,
                         domain: Some("api.example.com".to_string()),
                         reason: "Fetch approved remote data".to_string(),
-                    },
-                },
-            },
-        ),
-        (
-            "event/app_runtime_profile_selection_requested.json",
-            ClientEvent::AppEvent {
-                event: AppEventDto::AppRuntimeProfileSelectionRequested {
-                    request: AppRuntimeProfileSelectionRequestDto {
-                        request_id: "runtime-00000001".to_string(),
-                        app_id: "habits-1a2b".to_string(),
-                        reason: "Choose the runtime profile before scaffold".to_string(),
-                        recommended_family: Some(AppRuntimeProfileDto::Three3d),
-                        options: vec![
-                            AppRuntimeProfileOptionDto {
-                                family: AppRuntimeProfileDto::ReactDom,
-                                revision: 1,
-                                contract_sha256: "react-contract-sha".to_string(),
-                                surface: AppSurfaceDto::Dom,
-                                core_packages: vec![
-                                    AppRuntimeProfilePackageDto {
-                                        name: "react".to_string(),
-                                        version: "19.0.0".to_string(),
-                                    },
-                                    AppRuntimeProfilePackageDto {
-                                        name: "ionic".to_string(),
-                                        version: "9.0.0".to_string(),
-                                    },
-                                ],
-                                cache_status: "bundled".to_string(),
-                                download_status: "bundled".to_string(),
-                                available: true,
-                                reason: None,
-                            },
-                            AppRuntimeProfileOptionDto {
-                                family: AppRuntimeProfileDto::Babylon3d,
-                                revision: 1,
-                                contract_sha256:
-                                    "a908c3b2ffcf8c61f526238e0325b45125c795ea38406029b99708f2fea86c16"
-                                        .to_string(),
-                                surface: AppSurfaceDto::Canvas,
-                                core_packages: vec![AppRuntimeProfilePackageDto {
-                                    name: "@babylonjs/core".to_string(),
-                                    version: "9.22.1".to_string(),
-                                }],
-                                cache_status: "unavailable".to_string(),
-                                download_status: "gated".to_string(),
-                                available: false,
-                                reason: Some("Pending iOS/Android device spike".to_string()),
-                            },
-                        ],
                     },
                 },
             },
@@ -805,6 +760,205 @@ fn event_goldens() -> Vec<(&'static str, ClientEvent)> {
                 event: AppEventDto::AppCheckpointsChanged {
                     app_id: "habits-1a2b".to_string(),
                     checkpoints: vec![],
+                },
+            },
+        ),
+        // ── PluginStatusChanged (§17.1 / §19.2) ───────────────────────────
+        //
+        // The READ half of the plugin enable/disable protocol, goldened one
+        // row per NESTED `AppEventDto` variant like every `app_event` row
+        // above — `every_variant_has_a_golden` compares TOP-LEVEL
+        // `ClientEvent` tags only, and `app_event` is already covered, so
+        // nothing in the repo would ask for this file. It is here because the
+        // convention requires it, not because a gate demanded it.
+        //
+        // What the canonical instance is contracted to hold:
+        //
+        // 1. The payload is nested under the single `app_event` envelope, so
+        //    `AppEventDto`'s variants stay off `ClientEvent`'s UniFFI enum
+        //    metadata budget — the same structural reason the write half is
+        //    nested under `ClientCommand::PluginCommand`.
+        // 2. `plugin_id` is the BARE `enabledPlugins` key, spelled identically
+        //    to the `command/plugin_command_*.json` pair. One name on the
+        //    wire, read or write.
+        // 3. `state` is a PRESENT, distinctly-tagged value — never `null`,
+        //    never omitted. "Explicitly disabled" and "not found" must not
+        //    collapse into the same payload (§19.2), which is why `disabled`
+        //    is the value pinned here rather than the cheerier `loaded`.
+        // 4. `state: "disabled"` is paired with `manifest_default_enabled:
+        //    true` ON PURPOSE — the two fields DISAGREE. A golden where they
+        //    agreed would still pass if an implementation derived one from
+        //    the other; this pair can only be produced by carrying both
+        //    across the wire independently, which is the actual contract
+        //    (an explicit override beats the manifest default).
+        (
+            "event/plugin_status_changed.json",
+            ClientEvent::AppEvent {
+                event: AppEventDto::PluginStatusChanged {
+                    status: PluginStatusDto {
+                        plugin_id: "lingxi-local-app".to_string(),
+                        state: PluginActivationStateDto::Disabled,
+                        manifest_default_enabled: true,
+                    },
+                },
+            },
+        ),
+        (
+            "event/plugin_inventory_changed.json",
+            ClientEvent::AppEvent {
+                event: AppEventDto::PluginInventoryChanged {
+                    inventory: LocalAppPluginInventoryDto {
+                        plugin_id: "lingxi-local-app".to_string(),
+                        display_name: "Local App Plugin".to_string(),
+                        source: "builtin".to_string(),
+                        version: "2.0.0-dev".to_string(),
+                        bundle_sha256: "a".repeat(64),
+                        state: PluginActivationStateDto::Loaded,
+                        manifest_default_enabled: true,
+                        counts: LocalAppPluginComponentCountsDto {
+                            skills: 27,
+                            agents: 1,
+                            workflows: 6,
+                            templates: 4,
+                        },
+                        validation_error: Some(
+                            "The verified builtin bundle root is missing.".to_string(),
+                        ),
+                    },
+                },
+            },
+        ),
+        (
+            "event/create_confirmation_requested.json",
+            ClientEvent::AppEvent {
+                event: AppEventDto::CreateConfirmationRequested {
+                    request: LocalAppCreateConfirmationRequestDto {
+                        request_id: "create-0001".to_string(),
+                        app_id: "habits-1a2b".to_string(),
+                        name: "Habits".to_string(),
+                        brief: "Track streaks and notes".to_string(),
+                        selected_template: LocalAppTemplateSummaryDto {
+                            template_id: "react-dom-r1".to_string(),
+                            surface: AppSurfaceDto::Dom,
+                            summary: "Best for forms and lists".to_string(),
+                        },
+                        runtime_profile: canonical_local_app_profile(),
+                        reason: "The user asked for a compact habit list.".to_string(),
+                        rejected: vec![LocalAppRejectedCandidateDto {
+                            template_id: "three-3d-r1".to_string(),
+                            reason: "3D is unnecessary for this brief.".to_string(),
+                        }],
+                        initial_tools: vec![canonical_local_app_tool("save_habit")],
+                        required_gates: vec![canonical_local_app_gate()],
+                        receipt: Some(canonical_local_app_receipt()),
+                    },
+                },
+            },
+        ),
+        (
+            "event/mcp_proposal_approval_requested.json",
+            ClientEvent::AppEvent {
+                event: AppEventDto::McpProposalApprovalRequested {
+                    request: LocalAppMcpProposalApprovalRequestDto {
+                        request_id: "proposal-0001".to_string(),
+                        app_id: "habits-1a2b".to_string(),
+                        workflow_run_id: "wf-0002".to_string(),
+                        summary: "Add save_habit and remove summarize_habits".to_string(),
+                        proposal_sha256: "3".repeat(64),
+                        approval_contract_sha256: "4".repeat(64),
+                        tool_surface_sha256: "5".repeat(64),
+                        tool_diffs: vec![
+                            LocalAppMcpToolDiffDto {
+                                kind: LocalAppMcpToolChangeKindDto::Removed,
+                                name: "summarize_habits".to_string(),
+                                before: Some(canonical_local_app_tool("summarize_habits")),
+                                after: None,
+                                changed_fields: vec![],
+                            },
+                            LocalAppMcpToolDiffDto {
+                                kind: LocalAppMcpToolChangeKindDto::Changed,
+                                name: "save_habit".to_string(),
+                                before: Some(canonical_local_app_tool("save_habit")),
+                                after: Some(LocalAppMcpToolSurfaceDto {
+                                    description: Some(
+                                        "Create or update one completed-habits entry.".to_string(),
+                                    ),
+                                    ..canonical_local_app_tool("save_habit")
+                                }),
+                                changed_fields: vec![
+                                    LocalAppMcpToolFieldDto::Description,
+                                    LocalAppMcpToolFieldDto::InputSchema,
+                                    LocalAppMcpToolFieldDto::PermissionCeiling,
+                                ],
+                            },
+                        ],
+                        required_flow_changes: vec!["Add a save step for notes.".to_string()],
+                        excluded_capabilities: vec!["calendar".to_string()],
+                        pending_gates: vec![canonical_local_app_gate()],
+                        receipt: Some(LocalAppReceiptStatusDto {
+                            superseded: true,
+                            ..canonical_local_app_receipt()
+                        }),
+                    },
+                },
+            },
+        ),
+        (
+            "event/managed_mcp_inventory_changed.json",
+            ClientEvent::AppEvent {
+                event: AppEventDto::ManagedMcpInventoryChanged {
+                    servers: vec![ManagedLocalAppMcpServerDto {
+                        server_name: "local_app_habits-1a2b".to_string(),
+                        app_id: "habits-1a2b".to_string(),
+                        app_name: "Habits".to_string(),
+                        build_id: "build-0001".to_string(),
+                        catalog_sha256: "6".repeat(64),
+                        tool_surface_sha256: "7".repeat(64),
+                        tool_count: 2,
+                        authoring_revision: 3,
+                        publication_state: AppWorkflowStateDto::PublishedUnverified,
+                        mcp_verification: LocalAppVerificationSummaryDto {
+                            status: LocalAppVerificationStatusDto::Passed,
+                            summary: "MCP schema, binding and isolation checks passed.".to_string(),
+                            code: None,
+                        },
+                        ui_verification: LocalAppVerificationSummaryDto {
+                            status: LocalAppVerificationStatusDto::Unavailable,
+                            summary: "UI verification runner is unavailable.".to_string(),
+                            code: Some("verification_unavailable".to_string()),
+                        },
+                        tools: vec![canonical_local_app_tool("save_habit")],
+                    }],
+                },
+            },
+        ),
+        (
+            "event/verification_summary_changed.json",
+            ClientEvent::AppEvent {
+                event: AppEventDto::VerificationSummaryChanged {
+                    app_id: "habits-1a2b".to_string(),
+                    publication_state: AppWorkflowStateDto::PublishedVerified,
+                    mcp_verification: LocalAppVerificationSummaryDto {
+                        status: LocalAppVerificationStatusDto::Passed,
+                        summary: "Catalog and MCP verification are current.".to_string(),
+                        code: None,
+                    },
+                    ui_verification: LocalAppVerificationSummaryDto {
+                        status: LocalAppVerificationStatusDto::Unverified,
+                        summary: "UI verification has not run on this build.".to_string(),
+                        code: None,
+                    },
+                },
+            },
+        ),
+        (
+            "event/local_app_operation_failed.json",
+            ClientEvent::AppEvent {
+                event: AppEventDto::LocalAppOperationFailed {
+                    app_id: None,
+                    code: LocalAppPluginErrorCodeDto::BuiltinBundleUnavailable,
+                    message: "The verified builtin bundle root is missing.".to_string(),
+                    request_id: Some("plugin-read-1".to_string()),
                 },
             },
         ),
@@ -1138,13 +1292,6 @@ fn command_goldens() -> Vec<(&'static str, ClientCommand)> {
             },
         ),
         (
-            "command/resolve_app_runtime_profile_selection.json",
-            ClientCommand::ResolveAppRuntimeProfileSelection {
-                request_id: "runtime-00000001".to_string(),
-                selected_family: Some(AppRuntimeProfileDto::Three3d),
-            },
-        ),
-        (
             "command/resolve_app_dependency_change_confirmation.json",
             ClientCommand::ResolveAppDependencyChangeConfirmation {
                 request_id: "dependency-00000001".to_string(),
@@ -1210,6 +1357,86 @@ fn command_goldens() -> Vec<(&'static str, ClientCommand)> {
             ClientCommand::CancelAskUserQuestion { request_id: 9 },
         ),
         ("command/request_exit.json", ClientCommand::RequestExit),
+        // ── PluginCommand (§17.1 / §19.2) ─────────────────────────────────
+        //
+        // TWO rows for ONE `ClientCommand` variant, on purpose.
+        //
+        // `every_variant_has_a_golden` compares TOP-LEVEL tags only, so a
+        // single `plugin_command` row satisfies it while leaving the nested
+        // `PluginCommandDto` — where every field of this feature actually
+        // lives — entirely unpinned. That is the same blind spot the
+        // `AppEventDto` rows above already work around: they are goldened one
+        // row per NESTED variant (`event/app_details_changed.json`, …), never
+        // one row for the `app_event` envelope. These follow that convention.
+        //
+        // What the pair is contracted to hold, beyond "whatever serde emits":
+        //
+        // 1. The operation is a nested OBJECT under `command`, never
+        //    `#[serde(flatten)]`ed onto the envelope. Flattening would move
+        //    §17.1's operations onto `ClientCommand`'s 16 KiB UniFFI metadata
+        //    budget (see `CLIENT_COMMAND_METADATA_BUDGET`), which detonates at
+        //    const-eval on both mobile builds. The `command` sub-object in
+        //    both goldens is what makes that structural choice byte-visible.
+        // 2. `plugin_id` is the BARE `enabledPlugins` key — no `@marketplace`
+        //    suffix — and it is spelled identically on the write path
+        //    (`set_enabled`) and the read path (`get_status`). One name on the
+        //    wire, read or write (`PluginStatusDto::plugin_id`).
+        // 3. `set_enabled` carries exactly `{plugin_id, enabled}`. There is no
+        //    companion "override" / "use default" flag: writing `enabled` IS
+        //    the only way to toggle, and `manifest_default_enabled` is
+        //    reported back on the event, never sent up. A third key appearing
+        //    here is a contract change, not a detail.
+        // 4. `get_status` carries exactly `{plugin_id}` — a pure read with no
+        //    payload; its answer arrives as `AppEventDto::PluginStatusChanged`.
+        (
+            "command/plugin_command_set_enabled.json",
+            ClientCommand::PluginCommand {
+                command: PluginCommandDto::SetEnabled {
+                    plugin_id: "lingxi-local-app".to_string(),
+                    enabled: true,
+                },
+            },
+        ),
+        (
+            "command/plugin_command_get_status.json",
+            ClientCommand::PluginCommand {
+                command: PluginCommandDto::GetStatus {
+                    plugin_id: "lingxi-local-app".to_string(),
+                },
+            },
+        ),
+        (
+            "command/plugin_command_get_inventory.json",
+            ClientCommand::PluginCommand {
+                command: PluginCommandDto::GetInventory {
+                    plugin_id: "lingxi-local-app".to_string(),
+                },
+            },
+        ),
+        (
+            "command/plugin_command_resolve_create_confirmation.json",
+            ClientCommand::PluginCommand {
+                command: PluginCommandDto::ResolveCreateConfirmation {
+                    request_id: "create-0001".to_string(),
+                    approved: true,
+                },
+            },
+        ),
+        (
+            "command/plugin_command_resolve_mcp_proposal_approval.json",
+            ClientCommand::PluginCommand {
+                command: PluginCommandDto::ResolveMcpProposalApproval {
+                    request_id: "proposal-0001".to_string(),
+                    approved: false,
+                },
+            },
+        ),
+        (
+            "command/plugin_command_get_managed_mcp_inventory.json",
+            ClientCommand::PluginCommand {
+                command: PluginCommandDto::GetManagedMcpInventory,
+            },
+        ),
     ]
 }
 
@@ -1736,6 +1963,73 @@ fn canonical_app_details() -> AppDetailsDto {
             last_error: None,
         },
         checkpoints: vec![],
+    }
+}
+
+fn canonical_local_app_gate() -> LocalAppGateStatusDto {
+    LocalAppGateStatusDto {
+        gate_id: "ui_runner".to_string(),
+        label: "UI runner available".to_string(),
+        status: LocalAppVerificationStatusDto::Pending,
+        available: true,
+        detail: Some("Will run after approval.".to_string()),
+    }
+}
+
+fn canonical_local_app_tool(name: &str) -> LocalAppMcpToolSurfaceDto {
+    LocalAppMcpToolSurfaceDto {
+        name: name.to_string(),
+        title: Some("Track habits".to_string()),
+        description: Some("Create or update one habit entry.".to_string()),
+        input_schema_json:
+            r#"{"type":"object","properties":{"date":{"type":"string"}},"required":["date"]}"#
+                .to_string(),
+        output_schema_json: Some(
+            r#"{"type":"object","properties":{"ok":{"type":"boolean"}},"required":["ok"]}"#
+                .to_string(),
+        ),
+        annotations_json: Some(r#"{"readOnlyHint":false}"#.to_string()),
+        execution_json: Some(r#"{"taskSupport":"optional"}"#.to_string()),
+        visible_meta_json: Some(r#"{"anthropic/requiresUserInteraction":true}"#.to_string()),
+        semantic_flow_json: r#"{"flowId":"local-app-save","source":"active"}"#.to_string(),
+        permission_ceiling: "ask".to_string(),
+    }
+}
+
+fn canonical_local_app_receipt() -> LocalAppReceiptStatusDto {
+    LocalAppReceiptStatusDto {
+        receipt_id: "receipt-0001".to_string(),
+        app_id: "habits-1a2b".to_string(),
+        workflow_run_id: "wf-0001".to_string(),
+        approval_contract_sha256: "1".repeat(64),
+        candidate_digest: "2".repeat(64),
+        issued_at_ms: 1_750_000_000_000,
+        expires_at_ms: 1_750_000_030_000,
+        consumed: false,
+        superseded: false,
+    }
+}
+
+fn canonical_local_app_profile() -> AppRuntimeProfileOptionDto {
+    AppRuntimeProfileOptionDto {
+        family: AppRuntimeProfileDto::ReactDom,
+        revision: 1,
+        contract_sha256: "8".repeat(64),
+        surface: AppSurfaceDto::Dom,
+        core_packages: vec![
+            AppRuntimeProfilePackageDto {
+                name: "react".to_string(),
+                version: "19.0.0".to_string(),
+            },
+            AppRuntimeProfilePackageDto {
+                name: "@ionic/react".to_string(),
+                version: "9.0.0".to_string(),
+            },
+        ],
+        cache_status: "bundled".to_string(),
+        download_status: "bundled".to_string(),
+        available: true,
+        reason: None,
     }
 }
 

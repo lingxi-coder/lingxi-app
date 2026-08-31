@@ -54,7 +54,10 @@ use client_protocol::controls::{
 use client_protocol::error::ClientError;
 use client_protocol::events::{ClientEvent, ErrorKindDto, TurnOutcomeDto};
 use client_protocol::listings::{ModelDetailsDto, SessionAgentSummaryDto, SlashCommandDto};
-use client_protocol::local_apps::{AppCreateOriginDto, AppEventDto, AppSurfaceDto};
+use client_protocol::local_apps::{
+    AppCreateOriginDto, AppEventDto, AppSurfaceDto, LocalAppPluginComponentCountsDto,
+    LocalAppPluginInventoryDto, PluginActivationStateDto, PluginCommandDto, PluginStatusDto,
+};
 use client_protocol::permission::{
     PermissionKindDto, PermissionRequest as PermissionRequestDto, PermissionResponseDto,
 };
@@ -425,6 +428,67 @@ pub struct MobileRuntime {
     /// must not maintain a second slash-command table beside the live engine
     /// registry.
     pub slash_registry: Arc<RwLock<command_api::CommandRegistry>>,
+    /// D1 (P-1.5 review): the VERY handle `build_mobile` passed to
+    /// `.with_skill_listing(...)`, retained so a test can interrogate the
+    /// per-turn skill listing the orchestrator actually reads.
+    ///
+    /// A test that rebuilds its own provider from [`Self::slash_registry`]
+    /// proves only that a provider over that registry works — it never
+    /// observes which registry the WIRED provider was handed, so a refactor
+    /// that gives the listing provider a registry of its own leaves the
+    /// model's per-turn skill listing permanently empty on device with the
+    /// whole suite still green. Test-only: nothing in production reads it, and
+    /// retaining it in shipping builds would only keep an `Arc` alive.
+    #[cfg(test)]
+    pub(crate) wired_skill_listing_provider:
+        Arc<dyn orchestrator::prompt::skill_listing::SkillListingProvider>,
+    /// D1 (P-1.5 review): the VERY `SkillLoader` `build_mobile` handed to the
+    /// mobile tool registry, retained for the same reason as
+    /// [`Self::wired_skill_listing_provider`] — the Skill tool's view of the
+    /// registry must be observable, not re-derived by the test.
+    #[cfg(test)]
+    pub(crate) wired_skill_loader: Arc<dyn tool_skill::skill::SkillLoader>,
+    /// P1.8 (§19.2): the mobile `PluginManager` `build_mobile_inner` composed
+    /// and registered the compiled-in plugin through, retained so a test can
+    /// materialize a REAL fixture plugin via [`plugin::PluginManager::enable`]
+    /// (never `register_verified_builtin` — that symbol keeps its single
+    /// production call site in `lib.rs`) and observe the mutation through the
+    /// SAME live surfaces the model reads, rather than asserting against a
+    /// manager the test built itself.
+    #[cfg(test)]
+    pub(crate) wired_plugin_manager: Arc<plugin::PluginManager>,
+    /// Test-only handles for proving every plugin-workflow consumer shares one
+    /// production registry allocation.
+    #[cfg(test)]
+    pub(crate) wired_plugin_workflow_registry: Arc<workflow::PluginWorkflowRegistry>,
+    #[cfg(test)]
+    pub(crate) wired_local_workflow_handler: Arc<tasks::handlers::LocalWorkflowHandler>,
+    #[cfg(test)]
+    pub(crate) wired_workflow_tool: Arc<tool_workflow::WorkflowTool>,
+    /// The live plugin lifecycle manager used by the mobile plugin command
+    /// route.  This is deliberately the same allocation retained by the
+    /// test-only `wired_plugin_manager` field above, so enable/disable/status
+    /// commands mutate the registries that the rest of this runtime reads.
+    pub(crate) plugin_manager: Arc<plugin::PluginManager>,
+    /// P1.8: the VERY agent catalog `plugin_manager` was built
+    /// `.with_agent_catalog(..)` over. A plugin-declared agent lands here.
+    #[cfg(test)]
+    pub(crate) wired_agent_catalog: Arc<tokio::sync::RwLock<Vec<agent::AgentDefinition>>>,
+    /// P1.8: the subagent spawner's OWN set-once agent-catalog cell — the
+    /// object the real invocation path (`PoolSubagentSpawner::spawn`)
+    /// actually consults. Retained separately from
+    /// [`Self::wired_agent_catalog`] so a test can prove the two are
+    /// `Arc::ptr_eq` — i.e. the SAME allocation — rather than two catalogs
+    /// that merely started out holding equal builtin content.
+    #[cfg(test)]
+    pub(crate) wired_subagent_agent_catalog_cell:
+        Arc<std::sync::OnceLock<Arc<tokio::sync::RwLock<Vec<agent::AgentDefinition>>>>>,
+    /// The real subagent spawner's skill-preload cell. Phase 2 Plugin agents
+    /// declare frontmatter skills, so leaving this empty makes every declared
+    /// preload silently warn-and-skip on mobile.
+    #[cfg(test)]
+    pub(crate) wired_subagent_skill_loader_cell:
+        Arc<std::sync::OnceLock<Arc<dyn traits::skill_loader::SkillLoader>>>,
     /// Auth handle for `/login` and `/logout`.
     pub auth: Arc<dyn AuthHandle>,
     /// Native mobile OAuth coordinator. It owns the provider-specific handles
@@ -2369,6 +2433,22 @@ fn mobile_skill_listing_provider(
     )
 }
 
+async fn mobile_live_plugin_skill_count(
+    registry: &Arc<RwLock<command_api::CommandRegistry>>,
+) -> usize {
+    let prefix = format!("{}:", crate::MOBILE_BUILTIN_PLUGIN_NAME);
+    registry
+        .read()
+        .await
+        .list_all()
+        .into_iter()
+        .filter(|command| {
+            command.source == command_api::CommandSource::Plugin
+                && command.name.starts_with(&prefix)
+        })
+        .count()
+}
+
 fn mobile_reload_skills_handler(
     registry: Arc<RwLock<command_api::CommandRegistry>>,
     cwd: std::path::PathBuf,
@@ -2386,7 +2466,10 @@ fn mobile_reload_skills_handler(
     )
     .with_locked_post_reload_finalizer(
         true,
-        Arc::new(|reg| crate::register_mobile_bundled_prompt_commands(reg)),
+        Arc::new(|reg| {
+            reg.unregister_non_plugin_prefix(&format!("{}:", crate::MOBILE_BUILTIN_PLUGIN_NAME));
+            crate::register_mobile_bundled_prompt_commands(reg);
+        }),
     )
 }
 
@@ -2467,6 +2550,13 @@ async fn build_mobile_inner_with_ask(
     let mcp_registry = Arc::new(McpRegistry::new(
         local_apps_mcp.clone() as Arc<dyn traits::McpTransport>
     ));
+    local_apps_mcp
+        .attach_registry(Arc::downgrade(&mcp_registry))
+        .map_err(|_| {
+            MobileBuildError::Orchestrator(
+                "local apps MCP registry was already attached during bootstrap".into(),
+            )
+        })?;
     // Subscribe before connecting so initialization-time catalog notifications
     // are retained until the shared ToolRegistry is ready below.
     let mut mcp_catalog_changes = mcp_registry.subscribe_catalog_changes();
@@ -2497,6 +2587,15 @@ async fn build_mobile_inner_with_ask(
         &cfg.lingxi_home.join("settings.json"),
         &cwd,
     );
+    // Keep the config-side policy declarations while the connection list is
+    // consumed by `connect_all`; these rules are composed into the same
+    // `PermissionPolicy` as settings rules below.
+    let configured_mcp_policy_rules: Vec<permission::PermissionRule> = configured_mcp
+        .iter()
+        .flat_map(|server| {
+            permission::permission_rules_from_mcp_tool_policies(&server.name, &server.tools)
+        })
+        .collect();
     for (name, result) in mcp_registry.connect_all(configured_mcp).await {
         if let Err(error) = result {
             tracing::debug!(server = %name, error = %error, "mobile MCP server is unavailable");
@@ -3095,6 +3194,7 @@ async fn build_mobile_inner_with_ask(
         Arc<permission::PolicyPermissionGate>,
     ) = {
         let mut rules = Vec::new();
+        rules.extend(configured_mcp_policy_rules.iter().cloned());
         // Auto is the built-in default.  `apply_auto_mode_gate` below retains
         // the existing safety downgrade for unsupported models/providers or
         // disabled auto mode.
@@ -3633,6 +3733,7 @@ async fn build_mobile_inner_with_ask(
     let subagent_tool_registry_cell = subagent_spawner_concrete.tool_registry_handle();
     let subagent_agent_catalog_cell = subagent_spawner_concrete.agent_catalog_handle();
     let subagent_hook_executor_cell = subagent_spawner_concrete.hook_executor_handle();
+    let subagent_skill_loader_cell = subagent_spawner_concrete.skill_loader_handle();
     let subagent_default_model_selection_provider_cell =
         subagent_spawner_concrete.default_model_selection_provider_handle();
     let subagent_provider_first_party_resolver_cell =
@@ -3663,6 +3764,7 @@ async fn build_mobile_inner_with_ask(
     // `Arc` exists) — without it a finished workflow is stuck `Running`
     // forever and the client never sees its terminal state. The output-pool
     // cells are published after the orchestrator is built.
+    let plugin_workflow_registry = Arc::new(workflow::PluginWorkflowRegistry::new());
     let local_workflow_invoker = Arc::new(crate::workflow_support::DeferredToolInvoker::new());
     let local_workflow_status_sink =
         Arc::new(crate::workflow_support::MobileWorkflowStatusSink::new(
@@ -3674,25 +3776,27 @@ async fn build_mobile_inner_with_ask(
         Arc::new(std::sync::OnceLock::new());
     let local_workflow_turn_baseline: Arc<std::sync::OnceLock<Arc<std::sync::atomic::AtomicU64>>> =
         Arc::new(std::sync::OnceLock::new());
+    let local_workflow_handler = Arc::new(
+        tasks::handlers::LocalWorkflowHandler::new(
+            subagent_spawner.clone(),
+            local_workflow_invoker.clone() as Arc<dyn traits::tool_invoker::ToolInvoker>,
+            budget_enforcer.clone(),
+            task_registry_inner.output_manager.clone(),
+        )
+        .with_token_budget(orch_cfg.token_budget)
+        .with_workflow_progress_sink(local_workflow_status_sink.clone()
+            as Arc<dyn tasks::handlers::local_workflow::WorkflowProgressSink>)
+        .with_output_pool_cell(local_workflow_output_pool.clone())
+        .with_turn_baseline_cell(local_workflow_turn_baseline.clone())
+        .with_workspace_permission_leases(workspace_leases.clone(), mobile_apps_data_root(&cfg))
+        .with_plugin_workflows(plugin_workflow_registry.clone())
+        .with_status_sink(
+            local_workflow_status_sink.clone() as Arc<dyn tasks::handlers::TaskStatusSink>
+        ),
+    );
     task_registry_inner.register_handler(
         tasks::TaskType::LocalWorkflow,
-        Arc::new(
-            tasks::handlers::LocalWorkflowHandler::new(
-                subagent_spawner.clone(),
-                local_workflow_invoker.clone() as Arc<dyn traits::tool_invoker::ToolInvoker>,
-                budget_enforcer.clone(),
-                task_registry_inner.output_manager.clone(),
-            )
-            .with_token_budget(orch_cfg.token_budget)
-            .with_workflow_progress_sink(local_workflow_status_sink.clone()
-                as Arc<dyn tasks::handlers::local_workflow::WorkflowProgressSink>)
-            .with_output_pool_cell(local_workflow_output_pool.clone())
-            .with_turn_baseline_cell(local_workflow_turn_baseline.clone())
-            .with_workspace_permission_leases(workspace_leases.clone(), mobile_apps_data_root(&cfg))
-            .with_status_sink(
-                local_workflow_status_sink.clone() as Arc<dyn tasks::handlers::TaskStatusSink>
-            ),
-        ),
+        local_workflow_handler.clone(),
     );
     let task_registry = Arc::new(task_registry_inner);
 
@@ -3706,7 +3810,10 @@ async fn build_mobile_inner_with_ask(
         // `PermissionPolicy` built above (empty when no Read-deny rule ⇒
         // unchanged default).
         read_deny_exclude_globs,
-        fs,
+        // P1.8: kept a clone rather than a move — `build_mobile_inner` needs
+        // `fs` again below to compose the mobile `PluginManager` with the
+        // SAME filesystem handle the rest of the boot path uses.
+        fs: fs.clone(),
         bus: analytics_bus.clone(),
         process,
         sandbox,
@@ -3825,13 +3932,91 @@ async fn build_mobile_inner_with_ask(
     // listing all observe one live command set.
     let shared_command_registry: Arc<RwLock<command_api::CommandRegistry>> =
         Arc::new(RwLock::new(command_api::CommandRegistry::new()));
+    // P1.8 (§19.2): compose the mobile `PluginManager` — P1.6 registered the
+    // one compiled-in plugin through `register_verified_builtin`, but nothing
+    // called that composition from `build_mobile_inner` yet, and the manager
+    // was never handed the SAME live registries the rest of this function
+    // wires for listing/dispatch. Handing it a registry of its own here would
+    // leave a future plugin-declared command/skill invisible to the model's
+    // listing (or a plugin-declared agent unspawnable) while every existing
+    // test — none of which exercised `PluginManager` at all — stayed green.
+    // So every registry below is the EXACT live object this function already
+    // threads through the dispatcher / listing provider / subagent spawner,
+    // not a fresh stand-in:
+    //   - `command_registry` is `shared_command_registry` itself, the one
+    //     `CommandRegistry` the slash dispatcher, `wired_skill_listing_provider`,
+    //     and the Skill tool's loader all read below;
+    //   - `hook_registry` / `mcp_registry` are the real live hook + MCP
+    //     registries this connection already runs;
+    //   - `skill_registry` / `output_style_registry` / `lsp_registry` /
+    //     `tool_registry` have no mobile equivalent to share (mobile mirrors
+    //     plugin skills into `command_registry` instead, and starts no
+    //     output-style/LSP/second-tool-registry subsystem), so they stay
+    //     freshly constructed and inert — `PluginManager::new` still requires
+    //     them by signature (it does not re-export `LspRegistry`/
+    //     `OutputStyleRegistry`, hence this crate's direct `lsp`/`outputstyles`
+    //     deps).
+    // P1.10 (§19.2): the compiled-in plugin's manifest USED to declare zero
+    // components (`lib.rs`'s `mobile_builtin_plugin_manifest`), which made
+    // registering it below a no-op over live state — a manifest with nothing
+    // behind it, indistinguishable from "registration failed" from outside
+    // this crate. `register_mobile_builtin_plugins_materialized` below
+    // instead first materializes the packer's compiled-in bundle to a
+    // verified, digest-checked on-disk root (`builtin_bundle::
+    // materialize_compiled_in_plugin_bundle`) and builds the manifest's
+    // `components` from THAT root's own resolved inventory, so the plugin
+    // this boot registers actually contributes its real agents/skills/
+    // workflows into the live registries wired above. The plugin-manager
+    // tests below additionally materialize a SEPARATE fixture plugin through
+    // `wired_plugin_manager.enable(..)` to prove the registries are shared by
+    // identity, not merely seeded with equal content — that property does not
+    // depend on which plugin is registered.
+    let plugin_agent_catalog: Arc<tokio::sync::RwLock<Vec<agent::AgentDefinition>>> = Arc::new(
+        tokio::sync::RwLock::new(agent::builtins::builtin_agent_definitions()),
+    );
+    let plugin_manager = Arc::new(
+        plugin::PluginManager::new(
+            cfg.lingxi_home.join("plugins"),
+            fs.clone(),
+            http.clone(),
+            Arc::new(platform_posix_minimal::PosixRuntime::new())
+                as Arc<dyn traits::RuntimeSpawner>,
+            credentials.clone(),
+            Arc::new(plugin::StrictPluginOnlyPolicy::empty()),
+            shared_command_registry.clone(),
+            Arc::new(RwLock::new(skill_api::SkillRegistry::new())),
+            hook_registry.clone(),
+            Arc::new(RwLock::new(outputstyles::OutputStyleRegistry::new())),
+            mcp_registry.clone(),
+            Arc::new(lsp::LspRegistry::new(Arc::new(
+                platform_posix_minimal::PosixLsp::new(),
+            ))),
+            Arc::new(RwLock::new(ToolRegistry::new())),
+        )
+        .with_agent_catalog(plugin_agent_catalog.clone())
+        .with_plugin_workflows(plugin_workflow_registry.clone()),
+    );
     // Audit fix (#14): wire the mobile Skill tool to the SAME live registry the
     // slash dispatcher and listing provider use. The registry is filled below
     // once the orchestrator handle is available, and later `/reload-skills`
     // mutations stay visible to all three surfaces.
-    let skill_loader: Arc<dyn tool_skill::skill::SkillLoader> = Arc::new(
-        crate::skill_loader::MobileDiskSkillLoader::new(shared_command_registry.clone()),
-    );
+    let live_skill_loader = Arc::new(crate::skill_loader::MobileDiskSkillLoader::new(
+        shared_command_registry.clone(),
+    ));
+    let skill_loader: Arc<dyn tool_skill::skill::SkillLoader> = live_skill_loader.clone();
+    let agent_skill_loader: Arc<dyn traits::skill_loader::SkillLoader> = live_skill_loader;
+    // D1 (P-1.5 review): bind the per-turn skill-listing provider HERE, in the
+    // same breath as the Skill loader above, and retain both handles on the
+    // returned `MobileRuntime`. There is then exactly ONE construction site per
+    // surface, and `mobile_listing_dispatcher_and_skill_tool_share_one_live_registry`
+    // asserts against these objects rather than against replacements it builds
+    // itself — so handing either surface a registry other than
+    // `shared_command_registry` fails that test instead of silently emptying
+    // the model's skill listing on device.
+    let wired_skill_listing_provider =
+        mobile_skill_listing_provider(shared_command_registry.clone());
+    #[cfg(test)]
+    let wired_skill_loader = skill_loader.clone();
     // (#3 shell-expansion) Build the shared prompt shell-expansion provider from
     // `tool_ctx` (carrying the base `permission_policy` + process/sandbox seams)
     // BEFORE `tool_ctx` is moved into the tool registry below, then chain it onto
@@ -3876,6 +4061,7 @@ async fn build_mobile_inner_with_ask(
         session_uuid: active_session_uuid.clone(),
         checkpoints: workflow_checkpoints.clone(),
         status_sink: local_workflow_status_sink.clone(),
+        plugin_workflows: plugin_workflow_registry.clone(),
     });
     let workflow_policy_enabled = tool_workflow::workflows_enabled(false);
     let workflow_size_guideline_state = traits::session_flags::WorkflowSizeGuidelineState::new(
@@ -3888,28 +4074,28 @@ async fn build_mobile_inner_with_ask(
         workflow_policy_enabled && workflow_session_enabled,
         !workflow_policy_enabled,
     );
-    {
-        tools.register_builtin(Arc::new(
-            tool_workflow::WorkflowTool::new(Some(
-                workflow_launcher.clone() as Arc<dyn tool_workflow::WorkflowLauncher>
-            ))
-            .with_current_cwd(workflow_cwd)
-            .with_size_guideline_state(workflow_size_guideline_state.clone())
-            .with_size_guideline_source(
-                workflow_size_guideline,
-                false,
-                workflow_size_guideline_is_default,
-            )
-            .with_dynamic_workflows_gate(dynamic_workflows_gate.clone())
-            .with_session_enabled(workflow_session_enabled)
-            .with_permission_gate(perms.clone())
-            .with_permission_policy(
-                boot_permission_policy
-                    .clone()
-                    .expect("mobile workflow permission policy is always wired"),
-            ),
-        ));
-    }
+    let workflow_tool = Arc::new(
+        tool_workflow::WorkflowTool::new(Some(
+            workflow_launcher.clone() as Arc<dyn tool_workflow::WorkflowLauncher>
+        ))
+        .with_current_cwd(workflow_cwd)
+        .with_size_guideline_state(workflow_size_guideline_state.clone())
+        .with_size_guideline_source(
+            workflow_size_guideline,
+            false,
+            workflow_size_guideline_is_default,
+        )
+        .with_dynamic_workflows_gate(dynamic_workflows_gate.clone())
+        .with_session_enabled(workflow_session_enabled)
+        .with_plugin_workflows(plugin_workflow_registry.clone())
+        .with_permission_gate(perms.clone())
+        .with_permission_policy(
+            boot_permission_policy
+                .clone()
+                .expect("mobile workflow permission policy is always wired"),
+        ),
+    );
+    tools.register_builtin(workflow_tool.clone());
     // First-party local-app host operations as ORDINARY builtins. Registered
     // here, while `tools` is still `&mut` — `register_builtin` cannot run once
     // the registry is `Arc`-wrapped below. The DYNAMIC per-app tools stay on
@@ -4012,11 +4198,19 @@ async fn build_mobile_inner_with_ask(
     // gate; the agent catalog serves the builtin definitions (incl.
     // `workflow-subagent`); the deferred workflow invoker + status sink bind
     // to their real targets.
+    //
+    // P1.8: this MUST be `plugin_agent_catalog` itself, not a fresh
+    // `Vec`-seeded catalog of equal starting content — `plugin_manager` above
+    // was built `.with_agent_catalog(plugin_agent_catalog.clone())`, so a
+    // plugin-declared agent lands in whichever catalog this cell is filled
+    // with. A second, separately-allocated catalog here would make the
+    // subagent spawner (the actual invocation path) permanently blind to
+    // anything `plugin_manager` ever registers, even though both catalogs
+    // start out holding the identical builtin definitions.
     let _ = subagent_tool_registry_cell.set(tools.clone());
-    let _ = subagent_agent_catalog_cell.set(Arc::new(tokio::sync::RwLock::new(
-        agent::builtins::builtin_agent_definitions(),
-    )));
+    let _ = subagent_agent_catalog_cell.set(plugin_agent_catalog.clone());
     let _ = subagent_hook_executor_cell.set(hooks.clone());
+    let _ = subagent_skill_loader_cell.set(agent_skill_loader);
     let profile_first_party = profile_auto_mode_provider
         .iter()
         .map(|(profile, provider)| (profile.clone(), provider == "firstParty"))
@@ -4024,11 +4218,9 @@ async fn build_mobile_inner_with_ask(
     let _ = subagent_provider_first_party_resolver_cell.set(Arc::new(move |profile| {
         profile_first_party.get(profile).copied()
     }));
-    // Skill-preload cell deliberately left unfilled: it serves a subagent's
-    // frontmatter `skills:` preload (desktop wires `AgentSkillLoader` over the
-    // shared command registry), and no mobile-reachable agent definition —
-    // incl. `workflow-subagent` — declares one. The Skill TOOL itself still
-    // works inside subagents via the shared registry.
+    // Phase 2 Plugin agents declare frontmatter `skills:`. Their preload cell
+    // therefore reads the same live registry as the Skill tool and listing;
+    // bare agent entries resolve through the agent's plugin namespace.
     local_workflow_invoker.set(Arc::new(
         tool_api::RegistryToolInvoker::new(tools.clone()).with_gate(perms.clone()),
     ));
@@ -4154,9 +4346,7 @@ async fn build_mobile_inner_with_ask(
     // SKILLLIST.1: enumerate model-invocable skills each turn so the model
     // can discover bundled and user skills. Reads the shared registry lazily;
     // the registry is populated after the orchestrator handle is available.
-    .with_skill_listing(mobile_skill_listing_provider(
-        shared_command_registry.clone(),
-    ))
+    .with_skill_listing(wired_skill_listing_provider.clone())
     // P1-06: share the ONE `readFileState` map with the file tools (created
     // above) so post-compact file restore + staleness consumers see a tool's
     // `readFileState.set` — mirror of desktop.
@@ -4343,6 +4533,51 @@ async fn build_mobile_inner_with_ask(
         cwd.clone(),
     )));
     *shared_command_registry.write().await = reg;
+    // P1.10 (§19.2): materialize and register only after the base command
+    // registry has been installed. The plugin manager writes into this shared
+    // Arc; registering earlier would be overwritten by the composition-root
+    // assignment above and silently drop the plugin's skills/commands.
+    let builtin_plugin_bundle_root = cfg.lingxi_home.join("builtin-plugin-bundle");
+    match crate::register_mobile_builtin_plugins_materialized(
+        &plugin_manager,
+        &builtin_plugin_bundle_root,
+        None,
+    )
+    .await
+    {
+        Ok(_) => {
+            let settings_path = cfg.lingxi_home.join("settings.json");
+            let enabled = match mobile_builtin_plugin_enabled(
+                &settings_path,
+                crate::MOBILE_BUILTIN_PLUGIN_DEFAULT_ENABLED,
+            ) {
+                Ok(enabled) => enabled,
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        "invalid mobile builtin plugin setting; using manifest default"
+                    );
+                    crate::MOBILE_BUILTIN_PLUGIN_DEFAULT_ENABLED
+                }
+            };
+            if !enabled {
+                if let Err(error) = plugin_manager
+                    .disable(&crate::mobile_builtin_plugin_id())
+                    .await
+                {
+                    tracing::warn!(
+                        %error,
+                        "failed to apply disabled mobile builtin plugin setting"
+                    );
+                }
+            }
+        }
+        Err(error) => tracing::warn!(
+            %error,
+            "failed to materialize/register the compiled-in mobile plugin; any \
+             commands/skills/agents it would have contributed are unavailable this boot"
+        ),
+    }
     let background_command_handle = handle.clone();
     let dispatcher = RegistrySlashDispatcher::new(shared_command_registry.clone())
         .with_skill_usage_home(cfg.lingxi_home.clone())
@@ -4411,6 +4646,25 @@ async fn build_mobile_inner_with_ask(
         orchestrator: orch,
         dispatcher,
         slash_registry: shared_command_registry,
+        #[cfg(test)]
+        wired_skill_listing_provider,
+        #[cfg(test)]
+        wired_skill_loader,
+        #[cfg(test)]
+        wired_plugin_manager: plugin_manager.clone(),
+        #[cfg(test)]
+        wired_plugin_workflow_registry: plugin_workflow_registry,
+        #[cfg(test)]
+        wired_local_workflow_handler: local_workflow_handler,
+        #[cfg(test)]
+        wired_workflow_tool: workflow_tool,
+        plugin_manager,
+        #[cfg(test)]
+        wired_agent_catalog: plugin_agent_catalog,
+        #[cfg(test)]
+        wired_subagent_agent_catalog_cell: subagent_agent_catalog_cell,
+        #[cfg(test)]
+        wired_subagent_skill_loader_cell: subagent_skill_loader_cell,
         auth,
         oauth,
         permission_gate: adapter_gate,
@@ -4513,16 +4767,21 @@ pub struct MobileEngineHandle {
     /// `submit(SendPrompt)` and fired by `submit(Cancel)`. `None` when no turn is
     /// active. One connection ⇒ one in-flight turn (§0.5), so a single slot.
     active_cancel: Arc<Mutex<Option<Arc<ActiveTurn>>>>,
+    /// The same priority-aware message queue used by desktop/CLI. Running
+    /// prompts enter at `Next` and are consumed inside the existing turn loop.
+    message_queue: Arc<msgqueue::MessageQueueManager>,
+    cancel_reason: orchestrator::prompt::mid_turn_input::CancelReasonFlag,
     /// Correlates interactive `AskUserQuestion` events with inbound answers.
     ask_user_question_broker: Arc<client_adapter::BridgeAskUserQuestionBroker>,
-    /// Number of builtin mobile skills assembled (the M8 smoke signal, retained
-    /// so the existing Swift/Kotlin smoke test keeps working).
-    skill_count: usize,
     /// The `~/.claude`-equivalent root the session enumerator walks
     /// (`<lingxi_home>/projects/<sanitized cwd>/*.jsonl`). Captured from the
     /// `MobileConfig` so `submit(ListSessions)` can read the on-disk catalog
     /// without re-deriving it (SESSIONS/HISTORY).
     lingxi_home: std::path::PathBuf,
+    /// Process-wide per-settings-file transaction lock shared by every mobile
+    /// engine handle in this process. Plugin toggles and reasoning selection
+    /// both read-modify-write the same document.
+    settings_write_lock: Arc<Mutex<()>>,
     /// The session enumerator's `cwd` key (its sanitized form selects the project
     /// subdir under `lingxi_home/projects/`). Captured from the `MobileConfig`.
     session_cwd: String,
@@ -4702,6 +4961,136 @@ fn unix_time_ms() -> u64 {
         .ok()
         .and_then(|duration| u64::try_from(duration.as_millis()).ok())
         .unwrap_or(0)
+}
+
+/// Resolve the mobile builtin's persisted `enabledPlugins` override. Missing
+/// files, missing maps and a missing key all mean "use manifest default".
+fn mobile_builtin_plugin_enabled(
+    settings_path: &std::path::Path,
+    manifest_default_enabled: bool,
+) -> Result<bool, String> {
+    let raw = match std::fs::read_to_string(settings_path) {
+        Ok(raw) => raw,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(manifest_default_enabled)
+        }
+        Err(error) => return Err(error.to_string()),
+    };
+    let root: serde_json::Value = serde_json::from_str(&raw).map_err(|error| {
+        format!(
+            "invalid settings JSON at {}: {error}",
+            settings_path.display()
+        )
+    })?;
+    let Some(enabled) = root.get("enabledPlugins") else {
+        return Ok(manifest_default_enabled);
+    };
+    let Some(enabled) = enabled.as_object() else {
+        return Err(format!(
+            "settings enabledPlugins must be an object at {}",
+            settings_path.display()
+        ));
+    };
+    match enabled.get(crate::MOBILE_BUILTIN_PLUGIN_NAME) {
+        None => Ok(manifest_default_enabled),
+        Some(value) => value.as_bool().ok_or_else(|| {
+            format!(
+                "settings enabledPlugins[{}] must be boolean at {}",
+                crate::MOBILE_BUILTIN_PLUGIN_NAME,
+                settings_path.display()
+            )
+        }),
+    }
+}
+
+/// Persist one mobile builtin toggle without dropping unrelated settings.
+/// Write a sibling temp file and rename it so a process interruption cannot
+/// leave a truncated settings document.
+fn persist_mobile_builtin_plugin_enabled(
+    settings_path: &std::path::Path,
+    plugin_id: &str,
+    enabled: bool,
+) -> Result<(), String> {
+    let mut root = match std::fs::read_to_string(settings_path) {
+        Ok(raw) => serde_json::from_str::<serde_json::Value>(&raw)
+            .map_err(|error| format!("invalid settings JSON: {error}"))?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => serde_json::json!({}),
+        Err(error) => return Err(error.to_string()),
+    };
+    let object = root
+        .as_object_mut()
+        .ok_or_else(|| "settings JSON root must be an object".to_string())?;
+    let enabled_plugins = object
+        .entry("enabledPlugins")
+        .or_insert_with(|| serde_json::json!({}));
+    let enabled_plugins = enabled_plugins
+        .as_object_mut()
+        .ok_or_else(|| "settings enabledPlugins must be an object".to_string())?;
+    enabled_plugins.insert(plugin_id.to_string(), serde_json::Value::Bool(enabled));
+    let bytes = serde_json::to_vec_pretty(&root)
+        .map_err(|error| format!("serialize settings JSON: {error}"))?;
+    if let Some(parent) = settings_path.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
+    let file_name = settings_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| format!("invalid settings path {}", settings_path.display()))?;
+    static SETTINGS_TEMP_SEQUENCE: std::sync::atomic::AtomicU64 =
+        std::sync::atomic::AtomicU64::new(0);
+    let sequence = SETTINGS_TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or(0);
+    let tmp_path = settings_path.with_file_name(format!(
+        ".{file_name}.tmp-{}-{nanos}-{sequence}",
+        std::process::id()
+    ));
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
+    }
+    let write_result = (|| -> Result<(), String> {
+        let mut file = options.open(&tmp_path).map_err(|error| error.to_string())?;
+        {
+            use std::io::Write as _;
+            file.write_all(&bytes).map_err(|error| error.to_string())?;
+        }
+        file.sync_all().map_err(|error| error.to_string())?;
+        drop(file);
+        std::fs::rename(&tmp_path, settings_path).map_err(|error| error.to_string())?;
+        Ok(())
+    })();
+    if let Err(error) = write_result {
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err(error);
+    }
+    if let Some(parent) = settings_path.parent() {
+        if let Ok(directory) = std::fs::File::open(parent) {
+            let _ = directory.sync_all();
+        }
+    }
+    Ok(())
+}
+
+fn mobile_settings_write_lock(settings_path: &std::path::Path) -> Arc<Mutex<()>> {
+    static LOCKS: std::sync::OnceLock<
+        StdMutex<HashMap<std::path::PathBuf, std::sync::Weak<Mutex<()>>>>,
+    > = std::sync::OnceLock::new();
+    let locks = LOCKS.get_or_init(|| StdMutex::new(HashMap::new()));
+    let mut locks = locks
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(existing) = locks.get(settings_path).and_then(std::sync::Weak::upgrade) {
+        return existing;
+    }
+    let lock = Arc::new(Mutex::new(()));
+    locks.insert(settings_path.to_path_buf(), Arc::downgrade(&lock));
+    lock
 }
 
 fn live_session_agent_activity(message: &protocol::ConversationMessage) -> Option<String> {
@@ -4988,6 +5377,31 @@ struct ActiveTurn {
     completion: Notify,
 }
 
+struct MobileMsgQueueInput {
+    queue: Arc<msgqueue::MessageQueueManager>,
+}
+
+#[async_trait]
+impl orchestrator::prompt::mid_turn_input::MidTurnInputSource for MobileMsgQueueInput {
+    async fn take_mid_turn_input(&self) -> Option<String> {
+        self.queue.take_mid_turn_prompt().await
+    }
+}
+
+fn mobile_prompt_command(text: String) -> msgqueue::QueuedCommand {
+    static SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    msgqueue::QueuedCommand {
+        uuid: format!("mobile-prompt-{}", SEQUENCE.fetch_add(1, Ordering::Relaxed)),
+        content: msgqueue::QueuedCommandContent::UserInput { text },
+        priority: msgqueue::QueuePriority::Next,
+        queued_at: std::time::SystemTime::now(),
+        source: msgqueue::QueueSource::PromptInput,
+        agent_id: None,
+        skip_slash_commands: false,
+        is_meta: false,
+    }
+}
+
 impl ActiveTurn {
     fn new(turn_id: Option<u64>) -> Self {
         Self {
@@ -5182,11 +5596,16 @@ impl MobileEngineHandle {
         ))
     }
 
-    /// Number of builtin mobile skills assembled. (Under `uniffi`:
-    /// `#[uniffi::export]`.)
+    /// Number of currently-live builtin mobile Plugin skills. This is read
+    /// from the same registry used by listing and invocation, so a runtime
+    /// disable immediately reports zero rather than a boot-time constant.
+    /// (Under `uniffi`: `#[uniffi::export]`.)
     #[must_use]
     pub fn skill_count(&self) -> u32 {
-        u32::try_from(self.skill_count).unwrap_or(u32::MAX)
+        let count = self
+            .runtime
+            .block_on(mobile_live_plugin_skill_count(&self.inner.slash_registry));
+        u32::try_from(count).unwrap_or(u32::MAX)
     }
 
     /// Create a conversation session for `model`.
@@ -5487,7 +5906,11 @@ impl MobileEngineHandle {
                     .await;
                 self.inner
                     .workflow_checkpoints
-                    .adopt_session(&uuid.to_string(), self.inner.task_registry.as_ref())
+                    .adopt_session(
+                        &uuid.to_string(),
+                        self.inner.task_registry.as_ref(),
+                        &self.inner.workflow_launcher.app_data_root,
+                    )
                     .await;
                 let messages = client_adapter::lowering::lower_transcript(&replayed.state.history);
                 self.event_sink
@@ -5561,7 +5984,11 @@ impl MobileEngineHandle {
                     .await;
                 self.inner
                     .workflow_checkpoints
-                    .adopt_session(&uuid.to_string(), self.inner.task_registry.as_ref())
+                    .adopt_session(
+                        &uuid.to_string(),
+                        self.inner.task_registry.as_ref(),
+                        &self.inner.workflow_launcher.app_data_root,
+                    )
                     .await;
                 self.event_sink
                     .emit(ClientEvent::SessionResumed {
@@ -5649,6 +6076,7 @@ impl MobileEngineHandle {
                     *active = None;
                 }
                 drop(active);
+                self.message_queue.clear_active_turn().await;
                 turn.mark_completed();
                 if let Some(owner_id) = turn.permission_owner_id {
                     self.inner.permission_gate.end_main_turn(owner_id);
@@ -5676,8 +6104,23 @@ impl MobileEngineHandle {
         &self,
         text: String,
         turn_id: Option<u64>,
+        queue_if_busy: bool,
     ) -> Result<(), ClientError> {
-        let turn = self.reserve_turn(turn_id).await?;
+        let turn = match self.reserve_turn(turn_id).await {
+            Ok(turn) => turn,
+            Err(ClientError::Rejected { .. }) if queue_if_busy => {
+                self.message_queue
+                    .enqueue(mobile_prompt_command(text))
+                    .await;
+                return Ok(());
+            }
+            Err(error) => return Err(error),
+        };
+
+        self.cancel_reason.reset();
+        self.message_queue
+            .register_active_turn(turn.cancel.clone())
+            .await;
 
         #[cfg(debug_assertions)]
         eprintln!(
@@ -5694,6 +6137,7 @@ impl MobileEngineHandle {
         let active_cancel = self.active_cancel.clone();
         let message_output = self.inner.message_output.clone();
         let permission_gate = self.inner.permission_gate.clone();
+        let message_queue = self.message_queue.clone();
         let task_turn = turn.clone();
         let task = self.runtime.spawn(async move {
             let result = orch
@@ -5722,6 +6166,7 @@ impl MobileEngineHandle {
             if let Some(owner_id) = task_turn.permission_owner_id {
                 permission_gate.end_main_turn(owner_id);
             }
+            message_queue.clear_active_turn().await;
             // Notify only after the slot is released: Cancel returning is the
             // guarantee that New/Resume/Clear can no longer observe this turn.
             task_turn.mark_completed();
@@ -5739,6 +6184,202 @@ impl MobileEngineHandle {
             .await
             .map_err(|e| MobileEngineError::Internal(format!("mobile_linux_status failed: {e}")))?;
         Ok(lower_mobile_linux_status(capability, status))
+    }
+
+    async fn emit_builtin_plugin_status(&self, plugin_id: &str) -> Result<(), ClientError> {
+        if plugin_id != crate::MOBILE_BUILTIN_PLUGIN_NAME {
+            return Err(ClientError::NotFound {
+                message: format!("mobile plugin {plugin_id:?}"),
+            });
+        }
+        let state = self
+            .inner
+            .plugin_manager
+            .plugin_state(&crate::mobile_builtin_plugin_id())
+            .await
+            .ok_or_else(|| ClientError::Internal {
+                message: "mobile builtin plugin bundle is unavailable".to_string(),
+            })?;
+        self.event_sink
+            .emit(ClientEvent::AppEvent {
+                event: AppEventDto::PluginStatusChanged {
+                    status: PluginStatusDto {
+                        plugin_id: plugin_id.to_string(),
+                        state: match state {
+                            plugin::PluginState::Loaded { .. } => PluginActivationStateDto::Loaded,
+                            plugin::PluginState::Disabled { .. } => {
+                                PluginActivationStateDto::Disabled
+                            }
+                            _ => {
+                                return Err(ClientError::Internal {
+                                    message:
+                                        "mobile builtin plugin is not in a stable activation state"
+                                            .to_string(),
+                                })
+                            }
+                        },
+                        manifest_default_enabled: crate::MOBILE_BUILTIN_PLUGIN_DEFAULT_ENABLED,
+                    },
+                },
+            })
+            .await;
+        Ok(())
+    }
+
+    async fn emit_builtin_plugin_inventory(&self, plugin_id: &str) -> Result<(), ClientError> {
+        if plugin_id != crate::MOBILE_BUILTIN_PLUGIN_NAME {
+            return Err(ClientError::NotFound {
+                message: format!("mobile plugin {plugin_id:?}"),
+            });
+        }
+        let state = self
+            .inner
+            .plugin_manager
+            .plugin_state(&crate::mobile_builtin_plugin_id())
+            .await
+            .ok_or_else(|| ClientError::Internal {
+                message: "mobile builtin plugin bundle is unavailable".to_string(),
+            })?;
+        let state = match state {
+            plugin::PluginState::Loaded { .. } => PluginActivationStateDto::Loaded,
+            plugin::PluginState::Disabled { .. } => PluginActivationStateDto::Disabled,
+            _ => {
+                return Err(ClientError::Internal {
+                    message: "mobile builtin plugin is not in a stable activation state".into(),
+                })
+            }
+        };
+        let inventory = crate::builtin_bundle::COMPILED_PLUGIN_INVENTORY;
+        let count = |prefix: &str, suffix: &str| {
+            u32::try_from(
+                inventory
+                    .iter()
+                    .filter(|(path, _, _)| path.starts_with(prefix) && path.ends_with(suffix))
+                    .count(),
+            )
+            .unwrap_or(u32::MAX)
+        };
+        let templates = serde_json::from_slice::<serde_json::Value>(
+            crate::builtin_bundle::compiled_plugin_catalog_bytes(),
+        )
+        .ok()
+        .and_then(|value| {
+            value
+                .get("templates")
+                .and_then(serde_json::Value::as_array)
+                .and_then(|items| u32::try_from(items.len()).ok())
+        })
+        .ok_or_else(|| ClientError::Internal {
+            message: "mobile builtin plugin catalog is invalid".into(),
+        })?;
+        self.event_sink
+            .emit(ClientEvent::AppEvent {
+                event: AppEventDto::PluginInventoryChanged {
+                    inventory: LocalAppPluginInventoryDto {
+                        plugin_id: plugin_id.to_string(),
+                        display_name: crate::builtin_bundle::COMPILED_PLUGIN_DISPLAY_NAME.into(),
+                        source: "builtin".into(),
+                        version: crate::builtin_bundle::COMPILED_PLUGIN_VERSION.into(),
+                        bundle_sha256: crate::builtin_bundle::compiled_plugin_bundle_digest()
+                            .into(),
+                        state,
+                        manifest_default_enabled: crate::MOBILE_BUILTIN_PLUGIN_DEFAULT_ENABLED,
+                        counts: LocalAppPluginComponentCountsDto {
+                            skills: count("skills/", "/SKILL.md"),
+                            agents: count("agents/", ".md"),
+                            workflows: count("workflows/", ".js"),
+                            templates,
+                        },
+                        validation_error: None,
+                    },
+                },
+            })
+            .await;
+        Ok(())
+    }
+
+    /// Apply a builtin plugin toggle and persist the same bare
+    /// `enabledPlugins[plugin_id]` key that the desktop settings surface uses.
+    /// The registry mutation happens before the settings write; a failed write
+    /// is rolled back so the in-memory and on-disk states cannot diverge.
+    async fn set_builtin_plugin_enabled(
+        &self,
+        plugin_id: String,
+        enabled: bool,
+    ) -> Result<(), ClientError> {
+        if plugin_id != crate::MOBILE_BUILTIN_PLUGIN_NAME {
+            return Err(ClientError::NotFound {
+                message: format!("mobile plugin {plugin_id:?}"),
+            });
+        }
+
+        let _settings_guard = self.settings_write_lock.lock().await;
+
+        let id = crate::mobile_builtin_plugin_id();
+        let was_loaded = self
+            .inner
+            .plugin_manager
+            .loaded_plugin_ids()
+            .await
+            .contains(&id);
+        if enabled && !was_loaded {
+            let bundle_root = self.lingxi_home.join("builtin-plugin-bundle");
+            crate::register_mobile_builtin_plugins_materialized(
+                &self.inner.plugin_manager,
+                &bundle_root,
+                None,
+            )
+            .await
+            .map_err(|error| ClientError::Rejected {
+                message: format!("enable mobile plugin failed: {error}"),
+            })?;
+        } else if !enabled && was_loaded {
+            self.inner
+                .plugin_manager
+                .disable(&id)
+                .await
+                .map_err(|error| ClientError::Rejected {
+                    message: format!("disable mobile plugin failed: {error}"),
+                })?;
+        }
+
+        if let Err(error) = persist_mobile_builtin_plugin_enabled(
+            &self.lingxi_home.join("settings.json"),
+            plugin_id.as_str(),
+            enabled,
+        ) {
+            // Roll back to the state observed before the request while the
+            // per-settings-file transaction lock is still held.
+            let now_loaded = self
+                .inner
+                .plugin_manager
+                .loaded_plugin_ids()
+                .await
+                .contains(&id);
+            let rollback = if was_loaded && !now_loaded {
+                let bundle_root = self.lingxi_home.join("builtin-plugin-bundle");
+                crate::register_mobile_builtin_plugins_materialized(
+                    &self.inner.plugin_manager,
+                    &bundle_root,
+                    None,
+                )
+                .await
+                .map(|_| ())
+            } else if !was_loaded && now_loaded {
+                self.inner.plugin_manager.disable(&id).await
+            } else {
+                Ok(())
+            };
+            return Err(ClientError::Internal {
+                message: match rollback {
+                    Ok(()) => format!("persist mobile plugin setting failed: {error}"),
+                    Err(rollback_error) => format!(
+                        "persist mobile plugin setting failed: {error}; rollback failed: {rollback_error}"
+                    ),
+                },
+            });
+        }
+        self.emit_builtin_plugin_status(&plugin_id).await
     }
 
     // ── Local apps (phase 1) ────────────────────────────────────────────────
@@ -6225,6 +6866,20 @@ impl MobileEngineHandle {
         // record set via its own `AppsChanged` domain event.
         if let Err(error) = service.delete_app(&app_id).await {
             self.emit_app_failure(Some(app_id), &error).await;
+            return;
+        }
+        if let Err(message) = self
+            .local_apps_host
+            .unregister_managed_local_app(&app_id)
+            .await
+        {
+            self.emit_app_failure(
+                Some(app_id),
+                &AppError::Io(format!(
+                    "delete local app registry cleanup failed: {message}"
+                )),
+            )
+            .await;
         }
     }
 }
@@ -6394,7 +7049,7 @@ impl MobileEngineHandle {
         match command {
             // ── Turn driving (SPAWN + return promptly) ─────────────────────
             ClientCommand::SendPrompt { text, turn_id, .. } => {
-                self.start_streaming_turn(text, turn_id).await
+                self.start_streaming_turn(text, turn_id, true).await
             }
 
             ClientCommand::Cancel { turn_id } => self.cancel_active_turn(turn_id).await,
@@ -6468,6 +7123,7 @@ impl MobileEngineHandle {
             }
 
             ClientCommand::SetReasoningSelection { selection } => {
+                let _settings_guard = self.settings_write_lock.lock().await;
                 let handle: Arc<dyn OrchestratorHandle> = self.inner.orchestrator.clone();
                 let requested = decode_reasoning_selection(selection);
                 let previous = handle.conversation_controls().await.map(|controls| {
@@ -6696,7 +7352,7 @@ impl MobileEngineHandle {
                 let before = self.capture_slash_authority().await;
                 match self.inner.dispatcher.dispatch(&raw).await {
                     traits::SlashDispatchResult::RunAsTurn { prompt } => {
-                        self.start_streaming_turn(prompt, turn_id).await?;
+                        self.start_streaming_turn(prompt, turn_id, false).await?;
                     }
                     traits::SlashDispatchResult::Handled { display } => {
                         self.event_sink
@@ -7011,6 +7667,57 @@ impl MobileEngineHandle {
             // resolves `Ok(())` and surfaces its failure as a typed
             // `AppOperationFailed { code, message }` event (see the handler
             // section in the plain impl block above).
+            ClientCommand::PluginCommand { command } => match command {
+                PluginCommandDto::GetStatus { plugin_id } => {
+                    self.emit_builtin_plugin_status(&plugin_id).await
+                }
+                PluginCommandDto::SetEnabled { plugin_id, enabled } => {
+                    self.set_builtin_plugin_enabled(plugin_id, enabled).await
+                }
+                PluginCommandDto::GetInventory { plugin_id } => {
+                    self.emit_builtin_plugin_inventory(&plugin_id).await
+                }
+                PluginCommandDto::ResolveCreateConfirmation {
+                    request_id,
+                    approved,
+                } => {
+                    if self
+                        .local_apps_host
+                        .resolve_create_confirmation(&request_id, approved)
+                        .await
+                    {
+                        Ok(())
+                    } else {
+                        Err(ClientError::Rejected {
+                            message: "unknown or expired Local App create confirmation".into(),
+                        })
+                    }
+                }
+                PluginCommandDto::ResolveMcpProposalApproval {
+                    request_id,
+                    approved,
+                } => {
+                    if self
+                        .local_apps_host
+                        .resolve_mcp_proposal_approval(&request_id, approved)
+                        .await
+                    {
+                        Ok(())
+                    } else {
+                        Err(ClientError::Rejected {
+                            message: "unknown or expired Local App MCP proposal approval".into(),
+                        })
+                    }
+                }
+                PluginCommandDto::GetManagedMcpInventory => self
+                    .local_apps_host
+                    .emit_managed_mcp_inventory()
+                    .await
+                    .map_err(|message| ClientError::Rejected { message }),
+                _ => Err(ClientError::Rejected {
+                    message: "unsupported mobile plugin command".to_string(),
+                }),
+            },
             ClientCommand::ListApps => {
                 self.handle_list_apps().await;
                 Ok(())
@@ -7095,22 +7802,6 @@ impl MobileEngineHandle {
                     tracing::debug!(
                         request_id,
                         "unknown or completed local-app capability request"
-                    );
-                }
-                Ok(())
-            }
-            ClientCommand::ResolveAppRuntimeProfileSelection {
-                request_id,
-                selected_family,
-            } => {
-                if !self
-                    .local_apps_host
-                    .resolve_runtime_profile_selection(&request_id, selected_family)
-                    .await
-                {
-                    tracing::debug!(
-                        request_id,
-                        "unknown or completed local-app runtime profile selection"
                     );
                 }
                 Ok(())
@@ -9751,7 +10442,27 @@ pub fn build_mobile_engine_inner(
     });
     let (session_lifecycle_tx, _) = tokio::sync::watch::channel(initial_session_key);
 
-    let skill_count = crate::mobile_skill_registry().len();
+    let message_queue = Arc::new(msgqueue::MessageQueueManager::new());
+    inner
+        .orchestrator
+        .set_mid_turn_input(Arc::new(MobileMsgQueueInput {
+            queue: message_queue.clone(),
+        }));
+    let cancel_reason = orchestrator::prompt::mid_turn_input::CancelReasonFlag::new();
+    inner.orchestrator.set_cancel_reason(cancel_reason.clone());
+    runtime.block_on({
+        let message_queue = message_queue.clone();
+        let cancel_reason = cancel_reason.clone();
+        async move {
+            message_queue
+                .set_now_abort_hook(Arc::new(move || {
+                    cancel_reason
+                        .set(orchestrator::prompt::mid_turn_input::CancelReason::QueueNowCommand);
+                }))
+                .await;
+        }
+    });
+
     let event_sink = inner.event_sink.clone();
     let ask_user_question_broker = Arc::new(client_adapter::BridgeAskUserQuestionBroker::new(
         event_sink.clone(),
@@ -9764,8 +10475,11 @@ pub fn build_mobile_engine_inner(
     // LOCAL-APPS: one process-wide service per profile root. Conversation or
     // provider source changes only add/remove event subscribers; they do not
     // open a second SQLite/Git/generation owner for the same application data.
-    let app_emissions =
-        crate::local_apps_bridge::AppEmissionQueue::spawn(runtime.handle(), event_sink.clone());
+    let app_emissions = crate::local_apps_bridge::AppEmissionQueue::spawn(
+        runtime.handle(),
+        event_sink.clone(),
+        mobile_apps_data_root(&firer_cfg),
+    );
     let loaded_profile = runtime.block_on(profile_apps(
         mobile_apps_data_root(&firer_cfg),
         firer_platform.clock(),
@@ -9837,6 +10551,12 @@ pub fn build_mobile_engine_inner(
         tracing::warn!("local-apps MCP host was already attached");
     }
     if local_apps_host
+        .attach_mcp_registry(Arc::downgrade(&inner.mcp_registry))
+        .is_err()
+    {
+        tracing::warn!("local-apps MCP registry was already attached");
+    }
+    if local_apps_host
         .attach_agent_executor(inner.app_agent_executor.clone())
         .is_err()
     {
@@ -9876,6 +10596,20 @@ pub fn build_mobile_engine_inner(
             {
                 tracing::warn!("local-apps MCP service was already attached");
             }
+            runtime.block_on(async {
+                for record in service.list_apps().await {
+                    if let Err(error) = local_apps_host
+                        .sync_managed_local_app_publication(&record.id)
+                        .await
+                    {
+                        tracing::warn!(
+                            app_id = %record.id,
+                            %error,
+                            "local-apps managed MCP publication sync deferred"
+                        );
+                    }
+                }
+            });
             // v3 Phase 4: repair init-session pins, drifted catalogs and
             // placeholder titles for every app. Runs as a background sweep on
             // the shared worker runtime (this builder is sync); see
@@ -9897,14 +10631,17 @@ pub fn build_mobile_engine_inner(
         }
     }
 
+    let settings_write_lock = mobile_settings_write_lock(&lingxi_home.join("settings.json"));
     let handle = Arc::new(MobileEngineHandle {
         runtime,
         inner,
         event_sink,
         active_cancel,
+        message_queue,
+        cancel_reason,
         ask_user_question_broker,
-        skill_count,
         lingxi_home,
+        settings_write_lock,
         session_cwd,
         session_lifecycle_tx,
         fs,
@@ -9931,7 +10668,7 @@ mod tests {
     use async_trait::async_trait;
     use client_adapter::{ClientEventListener, ListenerSink, PermissionRequestSink};
     use client_protocol::events::ClientEvent;
-    use tool_skill::skill::{SkillCommandType, SkillLoader as _};
+    use tool_skill::skill::SkillCommandType;
     use traits::subagent_spawn::{SubagentObservation, SubagentSpawnObserver};
     use traits::{OrchestratorHandle as _, SlashCommandDispatcher as _, SlashDispatchResult};
 
@@ -10006,6 +10743,54 @@ mod tests {
         test_config, CollectingPermissionSink as RecordingPermissionSink, FakeListener,
         HostFakePlatform,
     };
+
+    /// Composition regression for the mobile registration path: the Workflow
+    /// instance retained by `build_mobile` must use the enforcing policy gate
+    /// that the runtime built. A directory at `scriptPath` makes any
+    /// pre-authorization read fail, while the settings deny proves the live
+    /// Read policy is consulted first.
+    #[tokio::test]
+    async fn mobile_workflow_script_path_is_read_gated_before_launcher_io() {
+        use permission::PermissionResult;
+        use tool_api::Tool as _;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let settings_dir = tmp.path().join(branding::DOT_DIR);
+        std::fs::create_dir_all(&settings_dir).expect("settings directory");
+        std::fs::write(
+            settings_dir.join("settings.json"),
+            r#"{"permissions":{"deny":["Read(./secret.js)"]}}"#,
+        )
+        .expect("permission settings");
+        let script_path = tmp.path().join("secret.js");
+        std::fs::create_dir(&script_path).expect("directory path must be unreadable as a script");
+
+        let platform: Arc<dyn traits::Platform> =
+            Arc::new(HostFakePlatform::new(tmp.path().to_path_buf()));
+        let listener: Arc<dyn ClientEventListener> = Arc::new(FakeListener::default());
+        let permission_sink: Arc<dyn PermissionRequestSink> =
+            Arc::new(RecordingPermissionSink::default());
+        let runtime = build_mobile(test_config(tmp.path()), platform, listener, permission_sink)
+            .await
+            .expect("mobile build must succeed without reading scriptPath");
+        let input = serde_json::json!({
+            "scriptPath": script_path.to_string_lossy().into_owned()
+        });
+        let ctx = tool_api::test_support::fresh_ctx();
+
+        runtime
+            .wired_workflow_tool
+            .validate_input(&input, &ctx)
+            .await
+            .expect("scriptPath shape validation must not touch the directory");
+        let decision = runtime
+            .wired_workflow_tool
+            .check_permissions(&input, &ctx)
+            .await;
+        assert!(matches!(decision, PermissionResult::Deny { .. }));
+        let rendered = format!("{decision:?}");
+        assert!(!rendered.contains("secret workflow contents"));
+    }
 
     #[tokio::test]
     async fn session_agent_helpers_find_nested_workflow_transcripts() {
@@ -10692,26 +11477,23 @@ mod tests {
             .await;
         let listed_names: std::collections::BTreeSet<_> =
             listed.iter().map(|entry| entry.name.as_str()).collect();
-        let expected_names = [
-            "accessibility",
-            "babylon-3d-local-app",
-            "canvas-2d-local-app",
-            "create-local-app",
-            "frontend-design",
-            "frontend-qa",
-            "ionic-react-local-app",
-            "phaser-2d-local-app",
-            "react-best-practices",
-            "threejs-local-app",
-        ];
-        for name in expected_names {
+        let expected_names: Vec<String> = crate::mobile_plugin_skill_names()
+            .into_iter()
+            .map(|name| format!("{}:{name}", crate::MOBILE_BUILTIN_PLUGIN_NAME))
+            .collect();
+        assert_eq!(
+            expected_names.len(),
+            27,
+            "the Local App Plugin must ship exactly 27 skills"
+        );
+        for name in &expected_names {
             assert!(
-                listed_names.contains(name),
+                listed_names.contains(name.as_str()),
                 "mobile skill-listing provider must expose bundled skill {name:?}: {listed_names:?}"
             );
         }
         let registry = rt.slash_registry.read().await;
-        for name in expected_names {
+        for name in &expected_names {
             assert!(
                 registry.resolve(name).is_some(),
                 "compiled-in mobile skill {name:?} must be present in the live slash registry"
@@ -10739,6 +11521,12 @@ mod tests {
             "Decoy frontend-design",
             "DECOY FRONTEND DESIGN",
         );
+        write_skill(
+            tmp.path(),
+            "lingxi-local-app:frontend-design",
+            "Reserved namespace decoy",
+            "RESERVED NAMESPACE DECOY",
+        );
         let commands_dir = tmp.path().join(".lingxi").join("commands");
         std::fs::create_dir_all(&commands_dir).expect("create commands dir");
         std::fs::write(
@@ -10756,29 +11544,34 @@ mod tests {
             .await
             .expect("build_mobile failed");
 
-        let provider = mobile_skill_listing_provider(rt.slash_registry.clone());
-        let loader = crate::skill_loader::MobileDiskSkillLoader::new(rt.slash_registry.clone());
+        // D1: interrogate the handles `build_mobile` ACTUALLY wired — the
+        // provider the orchestrator reads for its per-turn skill listing and
+        // the loader the Skill tool calls — instead of building fresh ones over
+        // `rt.slash_registry`. Rebuilt handles would only prove that a provider
+        // over the shared registry works; they would stay green if the
+        // composition root handed either surface a registry of its own, leaving
+        // the model's skill listing permanently empty on device while slash
+        // invocation kept working.
+        let provider = rt.wired_skill_listing_provider.clone();
+        let loader = rt.wired_skill_loader.clone();
 
         let listed = provider.skill_entries().await;
         let listed_names: std::collections::BTreeSet<_> =
             listed.iter().map(|entry| entry.name.as_str()).collect();
-        let expected = [
-            "loop",
-            "accessibility",
-            "babylon-3d-local-app",
-            "canvas-2d-local-app",
-            "create-local-app",
-            "foo",
-            "frontend-design",
-            "frontend-qa",
-            "ionic-react-local-app",
-            "phaser-2d-local-app",
-            "react-best-practices",
-            "threejs-local-app",
-        ];
-        for name in expected {
+        let mut expected = vec!["loop".to_string(), "foo".to_string()];
+        expected.extend(
+            crate::mobile_plugin_skill_names()
+                .into_iter()
+                .map(|name| format!("{}:{name}", crate::MOBILE_BUILTIN_PLUGIN_NAME)),
+        );
+        assert_eq!(
+            expected.len(),
+            29,
+            "loop + foo + 27 Plugin skills must be listed"
+        );
+        for name in &expected {
             assert!(
-                listed_names.contains(name),
+                listed_names.contains(name.as_str()),
                 "live mobile listing must contain {name:?}: {listed_names:?}"
             );
             let desc = loader
@@ -10798,19 +11591,15 @@ mod tests {
             .expect("load ok")
             .expect("foo present");
         assert!(foo_v1.body.contains("FOO BODY v1"));
+        let frontend_design_name = format!("{}:frontend-design", crate::MOBILE_BUILTIN_PLUGIN_NAME);
         let frontend_design = loader
-            .load("frontend-design")
+            .load(&frontend_design_name)
             .await
             .expect("load ok")
             .expect("frontend-design present");
-        let bundled_frontend_prompt = frontend_design
-            .dynamic_body
-            .as_ref()
-            .expect("bundled frontend-design stays programmatic")
-            .build("");
         assert!(
-            !bundled_frontend_prompt.contains("DECOY FRONTEND DESIGN"),
-            "same-name disk decoy must not override bundled frontend-design"
+            !frontend_design.body.contains("DECOY FRONTEND DESIGN"),
+            "same-name disk decoy must not override the file-backed Plugin frontend-design"
         );
         let loop_desc = loader
             .load("loop")
@@ -10886,19 +11675,19 @@ mod tests {
             "deleted disk skill must disappear from the shared Skill loader"
         );
         let frontend_design_after_delete = loader
-            .load("frontend-design")
+            .load(&frontend_design_name)
             .await
             .expect("load ok")
             .expect("frontend-design still present");
-        let bundled_frontend_prompt_after_delete = frontend_design_after_delete
-            .dynamic_body
-            .as_ref()
-            .expect("bundled frontend-design stays programmatic")
-            .build("");
         assert!(
-            !bundled_frontend_prompt_after_delete.contains("DECOY FRONTEND DESIGN"),
-            "bundled precedence must survive repeated reloads"
+            !frontend_design_after_delete
+                .body
+                .contains("DECOY FRONTEND DESIGN"),
+            "the file-backed Plugin frontend-design must survive repeated reloads"
         );
+        assert!(!frontend_design_after_delete
+            .body
+            .contains("RESERVED NAMESPACE DECOY"));
         let loop_after_delete = loader
             .load("loop")
             .await
@@ -10921,6 +11710,508 @@ mod tests {
             resolved_loop_after_delete.loaded_from.as_deref(),
             Some("bundled"),
             "loop must still resolve from bundled after repeated reloads"
+        );
+        drop(registry_after_delete);
+
+        let plugin_id = crate::mobile_builtin_plugin_id();
+        rt.wired_plugin_manager
+            .disable(&plugin_id)
+            .await
+            .expect("disable builtin Plugin");
+        match rt.dispatcher.dispatch("/reload-skills").await {
+            SlashDispatchResult::Handled { .. } => {}
+            other => panic!("reload-skills after disable must be handled, got {other:?}"),
+        }
+        assert!(
+            loader
+                .load(&frontend_design_name)
+                .await
+                .expect("load after disable/reload")
+                .is_none(),
+            "a disk decoy cannot resurrect a disabled Plugin namespace"
+        );
+        let (manifest, install_dir) = match rt.wired_plugin_manager.plugin_state(&plugin_id).await {
+            Some(plugin::PluginState::Disabled {
+                manifest,
+                install_dir,
+            }) => (manifest, install_dir),
+            other => panic!("expected disabled builtin Plugin, got {other:?}"),
+        };
+        rt.wired_plugin_manager
+            .enable(&plugin_id, manifest, install_dir)
+            .await
+            .expect("re-enable builtin Plugin");
+        let restored = loader
+            .load(&frontend_design_name)
+            .await
+            .expect("load after re-enable")
+            .expect("Plugin skill restored");
+        assert!(!restored.body.contains("RESERVED NAMESPACE DECOY"));
+    }
+
+    /// Write a minimal fixture plugin directory `root/{plugin_name}` with one
+    /// namespaced command (`commands/{cmd_name}.md`) and one namespaced agent
+    /// (`agents/{agent_name}.md`), in the exact on-disk shape
+    /// `plugin::discovery::discover_installed_plugins` auto-detects (mirrors
+    /// `plugin::manager::agent_privilege_tests::write_single_agent_plugin`).
+    fn write_plugin_fixture(
+        root: &Path,
+        plugin_name: &str,
+        cmd_name: &str,
+        cmd_body: &str,
+        agent_name: &str,
+    ) {
+        let plugin_dir = root.join(plugin_name);
+        std::fs::create_dir_all(plugin_dir.join(".lingxi-plugin")).expect("plugin manifest dir");
+        std::fs::write(
+            plugin_dir.join(".lingxi-plugin").join("plugin.json"),
+            format!(r#"{{"name":"{plugin_name}","version":"1.0.0"}}"#),
+        )
+        .expect("write plugin.json");
+        std::fs::create_dir_all(plugin_dir.join("commands")).expect("commands dir");
+        std::fs::write(
+            plugin_dir.join("commands").join(format!("{cmd_name}.md")),
+            format!("---\ndescription: fixture command\n---\n{cmd_body}\n"),
+        )
+        .expect("write fixture command");
+        std::fs::create_dir_all(plugin_dir.join("agents")).expect("agents dir");
+        std::fs::write(
+            plugin_dir.join("agents").join(format!("{agent_name}.md")),
+            format!("---\nname: {agent_name}\ndescription: fixture agent\n---\nI am a fixture.\n"),
+        )
+        .expect("write fixture agent");
+    }
+
+    /// P1.8 (§19.2) — the required gate: the command, skill, and agent
+    /// surfaces `plugin::PluginManager` materializes into must be the SAME
+    /// live objects the model's listing and invocation paths already read —
+    /// not copies seeded with equal content — and the pre-existing workflow
+    /// task registry must remain the one object both the `Workflow` tool and
+    /// the `/workflows` listing command share.
+    ///
+    /// Every check below is discriminating, not merely descriptive: each one
+    /// is answered by mutating state through ONE named surface and observing
+    /// the change through a DIFFERENT, independently-retained handle. Two
+    /// registries seeded with identical starting content (see
+    /// `two_separately_allocated_catalogs_with_equal_content_are_not_the_same_registry`
+    /// below) would satisfy every assertion here UNTIL the mutation step,
+    /// where only genuine identity keeps them in sync.
+    #[tokio::test]
+    async fn listing_and_invocation_share_one_registry() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let plugin_name = "p18-fixture-plugin";
+        let cmd_name = "hello";
+        let agent_name = "helper";
+        write_plugin_fixture(
+            tmp.path(),
+            plugin_name,
+            cmd_name,
+            "FIXTURE COMMAND BODY",
+            agent_name,
+        );
+
+        let platform: Arc<dyn traits::Platform> =
+            Arc::new(HostFakePlatform::new(tmp.path().to_path_buf()));
+        let listener: Arc<dyn ClientEventListener> = Arc::new(FakeListener::default());
+        let perm_sink: Arc<dyn PermissionRequestSink> =
+            Arc::new(RecordingPermissionSink::default());
+        let rt = build_mobile(test_config(tmp.path()), platform, listener, perm_sink)
+            .await
+            .expect("build_mobile failed");
+
+        // --- Workflow leg: pre-existing sharing, asserted here so all four
+        // §19.2 surfaces are covered by one gate. `WorkflowsHandler` (the
+        // `/workflows` listing command) and `MobileWorkflowLauncher` (what the
+        // `Workflow` tool actually invokes through) must read the SAME
+        // `TaskRegistry`, or a run the tool starts could go unlisted, or a
+        // listed run could be unreachable to invoke against.
+        assert!(
+            Arc::ptr_eq(&rt.task_registry, &rt.workflow_launcher.registry),
+            "the Workflow tool's launcher and the /workflows listing command must \
+             share one live TaskRegistry, not two separately-constructed ones"
+        );
+
+        // --- Command/skill leg: materialize a REAL fixture plugin through the
+        // VERY `PluginManager` `build_mobile` composed (never a manager the
+        // test builds itself, and never `register_verified_builtin` — that
+        // symbol's one production call site stays in `lib.rs`).
+        let discovered = plugin::discovery::discover_installed_plugins(tmp.path()).await;
+        let (id, manifest, install_dir) = discovered
+            .into_iter()
+            .find(|(_, m, _)| m.name == plugin_name)
+            .expect("fixture plugin discovered on disk");
+        rt.wired_plugin_manager
+            .enable(&id, manifest, install_dir)
+            .await
+            .expect("fixture plugin must enable cleanly");
+
+        let namespaced_cmd = format!("{plugin_name}:{cmd_name}");
+        let namespaced_agent = format!("{plugin_name}:{agent_name}");
+
+        // Listing: the model's per-turn skill/command listing must now name
+        // the plugin's command — read through `wired_skill_listing_provider`,
+        // the VERY handle the orchestrator's per-turn prompt reads, not a
+        // provider the test builds fresh over `rt.slash_registry`.
+        let listed = rt.wired_skill_listing_provider.skill_entries().await;
+        assert!(
+            listed.iter().any(|entry| entry.name == namespaced_cmd),
+            "the plugin's command must appear in the live listing after \
+             PluginManager::enable: {:?}",
+            listed.iter().map(|e| e.name.as_str()).collect::<Vec<_>>()
+        );
+
+        // Invocation: the Skill tool's OWN loader — `wired_skill_loader` —
+        // must resolve the identical name to the identical body. If
+        // `PluginManager` had been handed a `CommandRegistry` of its own
+        // instead of `shared_command_registry`, the listing check above and
+        // this one could both still fail (or, worse, only one of them would),
+        // which is exactly the split §19.2 forbids.
+        let loaded = rt
+            .wired_skill_loader
+            .load(&namespaced_cmd)
+            .await
+            .expect("load ok")
+            .unwrap_or_else(|| panic!("plugin command {namespaced_cmd:?} must be invocable"));
+        assert!(
+            loaded.body.contains("FIXTURE COMMAND BODY"),
+            "invoked body must be the fixture plugin command's own content: {:?}",
+            loaded.body
+        );
+
+        // --- Agent leg: PluginManager's `agent_catalog` must be the exact
+        // object the real subagent spawner's set-once cell was filled with,
+        // not a second catalog that merely started with equal builtin
+        // content.
+        let via_spawner_cell = rt
+            .wired_subagent_agent_catalog_cell
+            .get()
+            .expect("subagent spawner's agent-catalog cell must be filled by boot")
+            .clone();
+        assert!(
+            Arc::ptr_eq(&via_spawner_cell, &rt.wired_agent_catalog),
+            "PluginManager's agent_catalog and the subagent spawner's live \
+             catalog must be the SAME Arc allocation, not two catalogs seeded \
+             with equal content"
+        );
+        // Listing surface: PluginManager's own catalog (mutated by `enable`
+        // above) must already show the fixture agent.
+        let listing_names: Vec<String> = rt
+            .wired_agent_catalog
+            .read()
+            .await
+            .iter()
+            .map(|def| def.agent_type.clone())
+            .collect();
+        assert!(
+            listing_names.contains(&namespaced_agent),
+            "the plugin's agent must be present in PluginManager's live catalog: \
+             {listing_names:?}"
+        );
+        // Invocation surface: read through the SPAWNER'S OWN cell — a
+        // genuinely independent handle from `wired_agent_catalog` above —
+        // proving the mutation `enable()` made is visible on the invocation
+        // path itself, not merely on the handle the test happened to mutate
+        // through.
+        let invocation_names: Vec<String> = via_spawner_cell
+            .read()
+            .await
+            .iter()
+            .map(|def| def.agent_type.clone())
+            .collect();
+        assert!(
+            invocation_names.contains(&namespaced_agent),
+            "the plugin's agent must be resolvable through the subagent \
+             spawner's own catalog handle: {invocation_names:?}"
+        );
+    }
+
+    /// P1.10 (§19.2) — the required gate: after booting through the REAL
+    /// production path (`build_mobile` → `build_mobile_inner`, never a
+    /// hand-built `PluginManager` or a direct call to
+    /// `builtin_bundle`/`local_apps::pack`), the ONE compiled-in mobile
+    /// plugin's live components must come from a materialized,
+    /// digest-verified on-disk root — not from a manifest registered over
+    /// `PathBuf::new()` with `PluginComponents::default()`, the pre-P1.10
+    /// state in which registration trivially "succeeded" having loaded
+    /// nothing.
+    ///
+    /// Every assertion below is deliberately non-vacuous: a component COUNT
+    /// derived from the packer's OWN resolved inventory (never a hardcoded
+    /// literal that could rot independently of the embedded file set), and a
+    /// NAMED skill's body content asserted equal to what a completely
+    /// separate call to the SAME materializer function finds on disk at the
+    /// verified root. Two zero counts, or two empty bodies, would both
+    /// satisfy a weaker version of this test — see the module docs on why
+    /// that shape is exactly the defect class this task exists to close.
+    #[tokio::test]
+    async fn mobile_boot_materializes_the_builtin_bundle() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let platform: Arc<dyn traits::Platform> =
+            Arc::new(HostFakePlatform::new(tmp.path().to_path_buf()));
+        let listener: Arc<dyn ClientEventListener> = Arc::new(FakeListener::default());
+        let perm_sink: Arc<dyn PermissionRequestSink> =
+            Arc::new(RecordingPermissionSink::default());
+        let rt = build_mobile(test_config(tmp.path()), platform, listener, perm_sink)
+            .await
+            .expect("build_mobile failed");
+
+        // --- Independent, non-production re-derivation of what the boot
+        // path SHOULD have materialized: the exact same bundle_root
+        // `build_mobile_inner` computes (`test_config`'s `lingxi_home` is
+        // `<cwd>/.claude`), fed to the very same materializer function. This
+        // is not a second implementation to compare against — it is the
+        // identical function, called a second time, which the §6.2
+        // short-circuit makes a cheap no-op if boot already promoted this
+        // digest. It exists so the test can name a concrete on-disk path and
+        // read real file content from it, without reaching into
+        // `PluginManager`'s private state.
+        let bundle_root = tmp
+            .path()
+            .join(branding::DOT_DIR)
+            .join("builtin-plugin-bundle");
+        let (verified_root, resolved_inventory) =
+            crate::builtin_bundle::materialize_compiled_in_plugin_bundle(&bundle_root, None)
+                .expect("the compiled-in bundle must already be materialized by boot");
+        assert!(
+            verified_root.is_dir(),
+            "the verified root boot promoted must exist on disk: {}",
+            verified_root.display()
+        );
+        let root_dir_name = verified_root
+            .file_name()
+            .and_then(|n| n.to_str())
+            .expect("verified root must have a UTF-8 directory name");
+        let digest_suffix = root_dir_name
+            .strip_prefix("root-")
+            .expect("the verified root must be digest-named (root-<sha256>)");
+        assert_eq!(
+            digest_suffix.len(),
+            64,
+            "the digest suffix must be a full SHA-256 hex string, got {digest_suffix:?} \
+             — a shorter/synthetic name would mean this was never actually digest-verified"
+        );
+
+        // Real content, read straight off the verified root — not a fixture
+        // string this test invented.
+        let device_skill_on_disk =
+            std::fs::read_to_string(verified_root.join("skills/device/SKILL.md"))
+                .expect("skills/device/SKILL.md must exist at the verified root");
+        let real_skill_marker = ["window", ".", "lingxi", ".v2"].concat();
+        assert!(
+            device_skill_on_disk.contains(&real_skill_marker),
+            "the verified root's own file content must be the real plugin skill, got: \
+             {device_skill_on_disk}"
+        );
+
+        // --- The production-visible half: the plugin `PluginManager` loaded
+        // through `build_mobile_inner` must have actually READ that root, not
+        // merely have a manifest that happens to name it.
+        let plugin_id = crate::mobile_builtin_plugin_id();
+        assert!(
+            rt.wired_plugin_manager
+                .loaded_plugin_ids()
+                .await
+                .contains(&plugin_id),
+            "the compiled-in plugin must be Loaded after boot"
+        );
+
+        // Agents: count derived from the packer's OWN resolved inventory, so
+        // this can never rot into a hardcoded literal independent of
+        // `EMBEDDED_PLUGIN_FILES`. Nonzero and specific — not the "0 == 0"
+        // shape a manifest-over-nothing would also satisfy.
+        let expected_agent_count = resolved_inventory
+            .iter()
+            .filter(|entry| entry.path.starts_with("agents/") && entry.path.ends_with(".md"))
+            .count();
+        assert!(
+            expected_agent_count > 0,
+            "fixture bug: the compiled-in plugin must embed at least one agent"
+        );
+        let plugin_agent_names: Vec<String> = rt
+            .wired_agent_catalog
+            .read()
+            .await
+            .iter()
+            .map(|def| def.agent_type.clone())
+            .filter(|name| name.starts_with(&format!("{}:", crate::MOBILE_BUILTIN_PLUGIN_NAME)))
+            .collect();
+        assert_eq!(
+            plugin_agent_names.len(),
+            expected_agent_count,
+            "the live agent catalog must carry exactly the packer-resolved agent count \
+             for this plugin, got {plugin_agent_names:?}"
+        );
+        assert!(
+            plugin_agent_names.contains(&format!("{}:builder", crate::MOBILE_BUILTIN_PLUGIN_NAME)),
+            "the real `builder` agent must be present, named, in the live catalog: \
+             {plugin_agent_names:?}"
+        );
+
+        // Skills: the plugin's skills are registered as namespaced slash
+        // commands (`plugin::manager::load_plugin`'s skill arm) into the SAME
+        // shared command registry the model's per-turn listing and the Skill
+        // tool's loader both read — `wired_skill_listing_provider` /
+        // `wired_skill_loader` below, exactly as
+        // `listing_and_invocation_share_one_registry` above exercises for a
+        // fixture plugin.
+        let namespaced_device_skill = format!("{}:device", crate::MOBILE_BUILTIN_PLUGIN_NAME);
+        let listed = rt.wired_skill_listing_provider.skill_entries().await;
+        assert!(
+            listed
+                .iter()
+                .any(|entry| entry.name == namespaced_device_skill),
+            "the plugin's `device` skill must appear in the live per-turn listing: {:?}",
+            listed.iter().map(|e| e.name.as_str()).collect::<Vec<_>>()
+        );
+        let loaded_device_skill = rt
+            .wired_skill_loader
+            .load(&namespaced_device_skill)
+            .await
+            .expect("load ok")
+            .unwrap_or_else(|| panic!("{namespaced_device_skill} must be invocable"));
+        // The decisive tie: the LIVE, invocable body must be the SAME real
+        // content this test read directly off the verified root above — not
+        // merely both non-empty, but the actual materialized bytes.
+        assert!(
+            loaded_device_skill.body.contains(&real_skill_marker),
+            "the live skill body must be the verified root's own real content, got: {:?}",
+            loaded_device_skill.body
+        );
+
+        // The real subagent spawner must preload the bare skills declared by
+        // Plugin agents through that same registry. The plugin prefix is
+        // derived from `lingxi-local-app:designer`, exactly like desktop.
+        let agent_skill_loader = rt
+            .wired_subagent_skill_loader_cell
+            .get()
+            .expect("mobile subagent skill-preload cell must be filled");
+        let preloaded = agent_skill_loader
+            .resolve_and_load("frontend-design", "lingxi-local-app:designer")
+            .await
+            .expect("Plugin agent bare skill must resolve through its namespace");
+        assert!(matches!(
+            preloaded.content.as_slice(),
+            [protocol::ContentBlock::Text { text }]
+                if text.contains("# Frontend design")
+                    && text.contains("Write one `presentation` per target")
+                    && text.contains("## Bundled resource: references/router.md")
+        ));
+
+        let frontend_root = loaded_device_skill
+            .skill_root
+            .as_ref()
+            .and_then(|device_root| device_root.parent())
+            .map(|skills_root| skills_root.join("frontend-design"))
+            .expect("materialized Plugin skill root");
+        assert!(
+            frontend_root.join("references/router.md").is_file(),
+            "file-backed migrated references must remain reachable from the materialized skill root"
+        );
+        assert!(rt
+            .wired_skill_loader
+            .load("lingxi-local-app:openai")
+            .await
+            .expect("load ok")
+            .is_none());
+
+        // Workflows: the manager, model-facing tool, launcher, and nested task
+        // handler must share the exact same registry allocation. The loaded
+        // snapshot must be the real verified-root bytes under its namespaced
+        // meta.name, not a hand-seeded test entry.
+        let workflow_registry = &rt.wired_plugin_workflow_registry;
+        assert!(rt
+            .wired_plugin_manager
+            .shares_plugin_workflows(workflow_registry));
+        assert!(rt
+            .wired_workflow_tool
+            .shares_plugin_workflows(workflow_registry));
+        assert!(rt
+            .wired_local_workflow_handler
+            .shares_plugin_workflows(workflow_registry));
+        assert!(Arc::ptr_eq(
+            &rt.workflow_launcher.plugin_workflows,
+            workflow_registry
+        ));
+        let namespaced_workflow =
+            format!("{}:local-app-use-test", crate::MOBILE_BUILTIN_PLUGIN_NAME);
+        let resolved = workflow_registry
+            .resolve(&namespaced_workflow)
+            .unwrap_or_else(|| panic!("{namespaced_workflow} must resolve after production boot"));
+        let workflow_on_disk =
+            std::fs::read_to_string(verified_root.join("workflows/local-app-use-test.js"))
+                .expect("materialized workflow");
+        assert_eq!(
+            std::fs::read_to_string(&resolved).expect("resolved workflow"),
+            workflow_on_disk
+        );
+        assert_eq!(
+            resolved,
+            std::fs::canonicalize(verified_root.join("workflows/local-app-use-test.js"))
+                .expect("canonical materialized workflow")
+        );
+    }
+
+    /// House-defect guard for the test above: prove the discriminating
+    /// assertions above are actually discriminating. Two catalogs built from
+    /// the SAME seed content (`agent::builtins::builtin_agent_definitions()`)
+    /// are NOT `Arc::ptr_eq`, and mutating one is invisible through the
+    /// other — the exact failure shape `listing_and_invocation_share_one_registry`
+    /// exists to catch, reproduced here in isolation without booting a whole
+    /// `MobileRuntime`.
+    #[tokio::test]
+    async fn two_separately_allocated_catalogs_with_equal_content_are_not_the_same_registry() {
+        let listing: Arc<tokio::sync::RwLock<Vec<agent::AgentDefinition>>> = Arc::new(
+            tokio::sync::RwLock::new(agent::builtins::builtin_agent_definitions()),
+        );
+        let invocation: Arc<tokio::sync::RwLock<Vec<agent::AgentDefinition>>> = Arc::new(
+            tokio::sync::RwLock::new(agent::builtins::builtin_agent_definitions()),
+        );
+
+        // Equal content at construction — this is the trap: a value-equality
+        // assertion here would pass despite these being two independent
+        // allocations.
+        assert_eq!(
+            listing.read().await.len(),
+            invocation.read().await.len(),
+            "fixture setup: both catalogs must start with equal content"
+        );
+        assert!(
+            !Arc::ptr_eq(&listing, &invocation),
+            "two separately Arc::new-allocated catalogs must never be ptr_eq, \
+             even with identical content"
+        );
+
+        // Mutate ONLY `listing` (as `PluginManager::enable` would through
+        // whichever catalog it was actually wired to) and confirm the
+        // "invocation" surface never sees it — the discriminating behavior
+        // `listing_and_invocation_share_one_registry` depends on to fail loud
+        // if a future refactor re-splits the two catalogs.
+        let planted = agent::builtins::builtin_agent_definitions()
+            .into_iter()
+            .next()
+            .expect("at least one builtin agent definition exists")
+            .clone();
+        let mut planted = planted;
+        planted.agent_type = "planted:only-in-listing".to_string();
+        listing.write().await.push(planted.clone());
+
+        assert!(
+            listing
+                .read()
+                .await
+                .iter()
+                .any(|def| def.agent_type == planted.agent_type),
+            "the mutation must actually have landed in `listing`"
+        );
+        assert!(
+            !invocation
+                .read()
+                .await
+                .iter()
+                .any(|def| def.agent_type == planted.agent_type),
+            "a mutation through `listing` must NEVER appear in a separately-\
+             allocated `invocation` catalog — if it does, this fixture no \
+             longer demonstrates the failure shape the real gate depends on"
         );
     }
 
@@ -11142,6 +12433,7 @@ mod tests {
             session_uuid: rt.active_session_uuid.clone(),
             checkpoints: rt.workflow_checkpoints.clone(),
             status_sink: rt.workflow_status_sink.clone(),
+            plugin_workflows: rt.wired_plugin_workflow_registry.clone(),
         };
         let launched = launcher
             .launch(tool_workflow::WorkflowLaunchSpec {
@@ -11266,6 +12558,7 @@ mod tests {
             session_uuid: rt.active_session_uuid.clone(),
             checkpoints: rt.workflow_checkpoints.clone(),
             status_sink: rt.workflow_status_sink.clone(),
+            plugin_workflows: rt.wired_plugin_workflow_registry.clone(),
         };
 
         let launched = launcher
@@ -11455,6 +12748,352 @@ mod tests {
             .expect("build_mobile_engine failed");
         handle.set_local_apps_model(ScriptedModel::new());
         (handle, listener)
+    }
+
+    #[test]
+    fn plugin_command_reaches_the_manager_and_reports_status() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let (handle, listener) = build_submit_handle(tmp.path());
+
+        handle.runtime().block_on(async {
+            handle
+                .submit(ClientCommand::PluginCommand {
+                    command: client_protocol::local_apps::PluginCommandDto::GetStatus {
+                        plugin_id: crate::MOBILE_BUILTIN_PLUGIN_NAME.to_string(),
+                    },
+                })
+                .await
+                .expect("GetStatus should route to the live plugin manager");
+            let events = listener.received.lock().await.clone();
+            assert!(
+                events.iter().any(|event| {
+                    matches!(
+                        event,
+                        Ev::AppEvent {
+                            event: client_protocol::local_apps::AppEventDto::PluginStatusChanged {
+                                status,
+                            },
+                        } if status.plugin_id == crate::MOBILE_BUILTIN_PLUGIN_NAME
+                            && matches!(
+                                status.state,
+                                client_protocol::local_apps::PluginActivationStateDto::Loaded
+                            )
+                    )
+                }),
+                "GetStatus must emit a Loaded PluginStatusChanged event: {events:?}"
+            );
+        });
+    }
+
+    #[test]
+    fn enabled_plugins_three_way_uses_manifest_default() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let settings = tmp.path().join("settings.json");
+
+        assert!(!super::mobile_builtin_plugin_enabled(&settings, false).unwrap());
+        std::fs::write(&settings, r#"{"enabledPlugins":{}}"#).unwrap();
+        assert!(!super::mobile_builtin_plugin_enabled(&settings, false).unwrap());
+        std::fs::write(&settings, r#"{"enabledPlugins":{"lingxi-local-app":true}}"#).unwrap();
+        assert!(super::mobile_builtin_plugin_enabled(&settings, false).unwrap());
+        std::fs::write(
+            &settings,
+            r#"{"enabledPlugins":{"lingxi-local-app":false}}"#,
+        )
+        .unwrap();
+        assert!(!super::mobile_builtin_plugin_enabled(&settings, true).unwrap());
+
+        std::fs::write(&settings, r#"{"enabledPlugins":[]}"#).unwrap();
+        assert!(super::mobile_builtin_plugin_enabled(&settings, true).is_err());
+        std::fs::write(
+            &settings,
+            r#"{"enabledPlugins":{"lingxi-local-app":"false"}}"#,
+        )
+        .unwrap();
+        assert!(super::mobile_builtin_plugin_enabled(&settings, true).is_err());
+    }
+
+    #[test]
+    fn toggling_enabled_emits_plugin_status_changed_and_persists_the_bare_key() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let (handle, listener) = build_submit_handle(tmp.path());
+
+        handle.runtime().block_on(async {
+            let command = |enabled| ClientCommand::PluginCommand {
+                command: client_protocol::local_apps::PluginCommandDto::SetEnabled {
+                    plugin_id: crate::MOBILE_BUILTIN_PLUGIN_NAME.to_string(),
+                    enabled,
+                },
+            };
+            handle
+                .submit(command(false))
+                .await
+                .expect("disable should route to PluginManager::disable");
+            let disabled = listener.received.lock().await.clone();
+            assert!(
+                disabled.iter().any(|event| {
+                    matches!(
+                        event,
+                        Ev::AppEvent {
+                            event: client_protocol::local_apps::AppEventDto::PluginStatusChanged {
+                                status,
+                            },
+                        } if status.plugin_id == crate::MOBILE_BUILTIN_PLUGIN_NAME
+                            && matches!(
+                                status.state,
+                                client_protocol::local_apps::PluginActivationStateDto::Disabled
+                            )
+                    )
+                }),
+                "disable must emit Disabled PluginStatusChanged: {disabled:?}"
+            );
+            assert_eq!(
+                handle
+                    .inner
+                    .wired_plugin_workflow_registry
+                    .resolve("lingxi-local-app:local-app-use-test"),
+                None,
+                "disable must unload plugin workflows from the shared registry"
+            );
+            let namespaced_skill = "lingxi-local-app:frontend-design";
+            assert!(handle
+                .inner
+                .wired_skill_loader
+                .load(namespaced_skill)
+                .await
+                .expect("load after disable")
+                .is_none());
+            assert!(!handle
+                .inner
+                .wired_skill_listing_provider
+                .skill_entries()
+                .await
+                .iter()
+                .any(|entry| entry.name == namespaced_skill));
+            assert_eq!(
+                super::mobile_live_plugin_skill_count(&handle.inner.slash_registry).await,
+                0,
+                "live FFI count source must agree with disabled listing"
+            );
+            let settings =
+                std::fs::read_to_string(tmp.path().join(branding::DOT_DIR).join("settings.json"))
+                    .expect("disable should persist settings.json");
+            let settings: serde_json::Value = serde_json::from_str(&settings).expect("settings");
+            assert_eq!(
+                settings["enabledPlugins"][crate::MOBILE_BUILTIN_PLUGIN_NAME],
+                false
+            );
+
+            handle
+                .submit(command(true))
+                .await
+                .expect("enable should materialize and route to PluginManager");
+            let enabled = listener.received.lock().await.clone();
+            assert!(
+                enabled.iter().any(|event| {
+                    matches!(
+                        event,
+                        Ev::AppEvent {
+                            event: client_protocol::local_apps::AppEventDto::PluginStatusChanged {
+                                status,
+                            },
+                        } if status.plugin_id == crate::MOBILE_BUILTIN_PLUGIN_NAME
+                            && matches!(
+                                status.state,
+                                client_protocol::local_apps::PluginActivationStateDto::Loaded
+                            )
+                    )
+                }),
+                "enable must emit Loaded PluginStatusChanged: {enabled:?}"
+            );
+            assert!(
+                handle
+                    .inner
+                    .wired_plugin_workflow_registry
+                    .resolve("lingxi-local-app:local-app-use-test")
+                    .is_some(),
+                "enable must restore plugin workflows in the shared registry"
+            );
+            assert!(handle
+                .inner
+                .wired_skill_loader
+                .load(namespaced_skill)
+                .await
+                .expect("load after re-enable")
+                .is_some());
+            assert!(handle
+                .inner
+                .wired_skill_listing_provider
+                .skill_entries()
+                .await
+                .iter()
+                .any(|entry| entry.name == namespaced_skill));
+            assert_eq!(
+                super::mobile_live_plugin_skill_count(&handle.inner.slash_registry).await,
+                crate::mobile_plugin_skill_names().len(),
+                "live FFI count source must agree with re-enabled listing"
+            );
+            let settings =
+                std::fs::read_to_string(tmp.path().join(branding::DOT_DIR).join("settings.json"))
+                    .expect("enable should persist settings.json");
+            let settings: serde_json::Value = serde_json::from_str(&settings).expect("settings");
+            assert_eq!(
+                settings["enabledPlugins"][crate::MOBILE_BUILTIN_PLUGIN_NAME],
+                true
+            );
+        });
+    }
+
+    #[test]
+    fn disabled_state_is_present_and_survives_restart() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        {
+            let (handle, _) = build_submit_handle(tmp.path());
+            handle.runtime().block_on(async {
+                handle
+                    .submit(ClientCommand::PluginCommand {
+                        command: client_protocol::local_apps::PluginCommandDto::SetEnabled {
+                            plugin_id: crate::MOBILE_BUILTIN_PLUGIN_NAME.to_string(),
+                            enabled: false,
+                        },
+                    })
+                    .await
+                    .expect("disable");
+                assert!(matches!(
+                    handle
+                        .inner
+                        .plugin_manager
+                        .plugin_state(&crate::mobile_builtin_plugin_id())
+                        .await,
+                    Some(plugin::PluginState::Disabled { .. })
+                ));
+            });
+        }
+
+        let (restarted, listener) = build_submit_handle(tmp.path());
+        assert_eq!(
+            restarted.skill_count(),
+            0,
+            "an explicitly disabled Plugin must report zero live skills after restart"
+        );
+        restarted.runtime().block_on(async {
+            assert!(matches!(
+                restarted
+                    .inner
+                    .plugin_manager
+                    .plugin_state(&crate::mobile_builtin_plugin_id())
+                    .await,
+                Some(plugin::PluginState::Disabled { .. })
+            ));
+            assert!(restarted
+                .inner
+                .wired_plugin_workflow_registry
+                .resolve("lingxi-local-app:local-app-use-test")
+                .is_none());
+            restarted
+                .submit(ClientCommand::PluginCommand {
+                    command: client_protocol::local_apps::PluginCommandDto::GetStatus {
+                        plugin_id: crate::MOBILE_BUILTIN_PLUGIN_NAME.to_string(),
+                    },
+                })
+                .await
+                .expect("status after restart");
+            assert!(listener.received.lock().await.iter().any(|event| {
+                matches!(
+                    event,
+                    Ev::AppEvent {
+                        event: client_protocol::local_apps::AppEventDto::PluginStatusChanged {
+                            status,
+                        },
+                    } if matches!(
+                        status.state,
+                        client_protocol::local_apps::PluginActivationStateDto::Disabled
+                    )
+                )
+            }));
+        });
+    }
+
+    #[test]
+    fn concurrent_plugin_toggles_leave_disk_and_registry_consistent() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let (handle, _) = build_submit_handle(tmp.path());
+
+        handle.runtime().block_on(async {
+            for _ in 0..4 {
+                let disable = handle.submit(ClientCommand::PluginCommand {
+                    command: client_protocol::local_apps::PluginCommandDto::SetEnabled {
+                        plugin_id: crate::MOBILE_BUILTIN_PLUGIN_NAME.to_string(),
+                        enabled: false,
+                    },
+                });
+                let enable = handle.submit(ClientCommand::PluginCommand {
+                    command: client_protocol::local_apps::PluginCommandDto::SetEnabled {
+                        plugin_id: crate::MOBILE_BUILTIN_PLUGIN_NAME.to_string(),
+                        enabled: true,
+                    },
+                });
+                let (disable, enable) = tokio::join!(disable, enable);
+                disable.expect("concurrent disable");
+                enable.expect("concurrent enable");
+
+                let is_loaded = matches!(
+                    handle
+                        .inner
+                        .plugin_manager
+                        .plugin_state(&crate::mobile_builtin_plugin_id())
+                        .await,
+                    Some(plugin::PluginState::Loaded { .. })
+                );
+                let settings = std::fs::read_to_string(
+                    tmp.path().join(branding::DOT_DIR).join("settings.json"),
+                )
+                .expect("settings after concurrent toggles");
+                let settings: serde_json::Value =
+                    serde_json::from_str(&settings).expect("valid settings JSON");
+                assert_eq!(
+                    settings["enabledPlugins"][crate::MOBILE_BUILTIN_PLUGIN_NAME].as_bool(),
+                    Some(is_loaded),
+                    "atomic settings transaction must agree with the live registry"
+                );
+            }
+        });
+    }
+
+    #[test]
+    fn failed_plugin_setting_write_rolls_live_state_back() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let (handle, _) = build_submit_handle(tmp.path());
+        let settings = tmp.path().join(branding::DOT_DIR).join("settings.json");
+        let _ = std::fs::remove_file(&settings);
+        std::fs::create_dir_all(&settings).expect("replace settings file with directory");
+
+        handle.runtime().block_on(async {
+            let error = handle
+                .submit(ClientCommand::PluginCommand {
+                    command: client_protocol::local_apps::PluginCommandDto::SetEnabled {
+                        plugin_id: crate::MOBILE_BUILTIN_PLUGIN_NAME.to_string(),
+                        enabled: false,
+                    },
+                })
+                .await
+                .expect_err("settings write must fail");
+            assert!(error
+                .to_string()
+                .contains("persist mobile plugin setting failed"));
+            assert!(matches!(
+                handle
+                    .inner
+                    .plugin_manager
+                    .plugin_state(&crate::mobile_builtin_plugin_id())
+                    .await,
+                Some(plugin::PluginState::Loaded { .. })
+            ));
+            assert!(handle
+                .inner
+                .wired_plugin_workflow_registry
+                .resolve("lingxi-local-app:local-app-use-test")
+                .is_some());
+        });
     }
 
     /// `build_submit_handle` with a caller-supplied config, for tests that need
@@ -11671,6 +13310,8 @@ mod tests {
                         creator_teammate_name: None,
                         creator_team_name: None,
                         creator_agent_id: None,
+                        // Not a Local App workflow.
+                        scope: None,
                     },
                     "workflow".to_string(),
                 )
@@ -12328,11 +13969,10 @@ mod tests {
         ));
     }
 
-    /// A connection owns at most one live turn. A second `SendPrompt` must be
-    /// rejected instead of replacing the first turn's cancellation token,
-    /// otherwise Cancel and session guards start controlling the wrong task.
+    /// A connection owns at most one live turn. A second `SendPrompt` must join
+    /// the bounded mid-turn queue instead of replacing the first turn's owner.
     #[test]
-    fn submit_send_prompt_rejects_overlapping_turn() {
+    fn submit_send_prompt_queues_overlapping_turn() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let (handle, _listener) = build_submit_handle(tmp.path());
 
@@ -12341,7 +13981,7 @@ mod tests {
 
             let result = handle
                 .submit(ClientCommand::SendPrompt {
-                    text: "must be rejected".into(),
+                    text: "pending guidance".into(),
                     prompt_mode: None,
                     images: Vec::new(),
                     turn_id: Some(99),
@@ -12349,8 +13989,12 @@ mod tests {
                 .await;
 
             assert!(
-                matches!(result, Err(ClientError::Rejected { .. })),
-                "overlapping SendPrompt must be rejected, got {result:?}"
+                result.is_ok(),
+                "overlapping SendPrompt must queue: {result:?}"
+            );
+            assert_eq!(
+                handle.message_queue.take_mid_turn_prompt().await.as_deref(),
+                Some("pending guidance")
             );
         });
     }
@@ -13736,9 +15380,6 @@ mod tests {
             let (record, _) = created_row(&events).expect("CreateApp must announce AppCreated");
             let app_id = record.id;
             let service = handle.local_apps().expect("local-apps service");
-            // v3 seeding: the only surviving workflow mutation is the ready
-            // stamp (the build tool's success path).
-            service.mark_ready(&app_id).await.expect("mark_ready");
             app_id
         });
         // The store lives at the per-profile data root (`<root>/apps/…`) —
@@ -13763,13 +15404,6 @@ mod tests {
             let apps = apps_changed_rows(&events).expect("ListApps replies with AppsChanged");
             assert_eq!(apps.len(), 1);
             assert_eq!(apps[0].id, app_id);
-            let service = handle.local_apps().expect("local-apps service");
-            assert_eq!(
-                service.record(&app_id).await.unwrap().workflow_state,
-                local_apps::AppWorkflowState::Ready,
-                "the ready stamp survives the engine rebuild"
-            );
-
             handle
                 .submit(ClientCommand::DeleteApp {
                     app_id: app_id.clone(),
@@ -14145,7 +15779,7 @@ mod tests {
                 .record(&row.id)
                 .await
                 .expect("the committed record");
-            let dto = crate::local_apps_bridge::lower_record(&record);
+            let dto = crate::local_apps_bridge::lower_record(tmp.path(), &record);
             assert!(
                 !dto.scaffolded,
                 "lower_record must carry the shell's own flag — no extra IO"
@@ -14167,15 +15801,18 @@ mod tests {
             scaffolded: false,
             created_at_ms: 1,
             updated_at_ms: 2,
-            workflow_state: local_apps::AppWorkflowState::Draft,
             conversation_id: None,
             init_session_id: None,
             workspace_rel: "apps/app00001/workspace".into(),
         };
-        let lowered = crate::local_apps_bridge::lower_app_event(local_apps::AppEvent::AppCreated {
-            record,
-            request_id: Some("req-1".into()),
-        })
+        let root = tempfile::tempdir().expect("tempdir");
+        let lowered = crate::local_apps_bridge::lower_app_event(
+            root.path(),
+            local_apps::AppEvent::AppCreated {
+                record,
+                request_id: Some("req-1".into()),
+            },
+        )
         .expect("AppCreated always has a wire representation");
         match lowered {
             Ev::AppEvent {

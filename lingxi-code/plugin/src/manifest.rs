@@ -2,9 +2,10 @@
 //!
 //! A `PluginManifest` is the canonical description of a plugin: identity,
 //! source provenance, declared components (commands / agents / skills /
-//! hooks / output styles / MCP servers / LSP servers), trust level, and
-//! optional user-config schema. Materialization into the 8 engine
-//! registries is handled by [`crate::manager::PluginManager::load_plugin`].
+//! hooks / output styles / MCP servers / LSP servers / workflows), trust
+//! level, and optional user-config schema. Materialization into the engine
+//! registries is handled by [`crate::manager::PluginManager::load_plugin`],
+//! including the shared plugin-workflow registry.
 //!
 //! See spec §15.1.
 
@@ -65,7 +66,7 @@ pub struct PluginManifest {
     pub homepage: Option<String>,
     /// Where the plugin came from.
     pub source: PluginSource,
-    /// Declared components (the 7-tuple materialised into engine registries).
+    /// Declared components (the 8-tuple materialised into engine registries).
     pub components: PluginComponents,
     /// Trust classification (defaults to [`crate::trust::default_trust_for_source`]).
     pub trust_level: PluginTrustLevel,
@@ -227,8 +228,8 @@ pub struct PluginMonitor {
 
 /// The component slots a plugin can populate.
 ///
-/// Each slot is materialized into its matching engine registry by
-/// [`crate::manager::PluginManager::load_plugin`].
+/// Every slot is materialized by [`crate::manager::PluginManager::load_plugin`]
+/// when its corresponding registry is wired by the composition root.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PluginComponents {
     /// Markdown slash-command files.

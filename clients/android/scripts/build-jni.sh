@@ -274,10 +274,11 @@ done
 # ---------------------------------------------------------------------------
 # 2. Generate Kotlin bindings (uniffi-bindgen --library, offline patched bin)
 # ---------------------------------------------------------------------------
-# `--library` introspection can read the UniFFI metadata sections out of any
-# built library carrying them. We point it at the arm64 `.so` we just built (it
-# carries the same metadata as the host dylib but needs no extra host build).
-INTROSPECT_LIB="${JNILIBS_DIR}/$(abi_of aarch64-linux-android)/${SONAME}"
+# `--library` introspection needs the UNSTRIPPED cdylib: llvm-strip drops the
+# custom UniFFI metadata section, which makes bindgen fail with
+# "no UniFFI metadata groups found in the library". Point bindgen at the
+# cargo target artifact and keep the stripped copy only for APK packaging.
+INTROSPECT_LIB="${CARGO_TARGET_DIR}/aarch64-linux-android/${PROFILE_DIR}/${SONAME}"
 
 # The bindgen bin's `--library` metadata extractor expects to find a cdylib name
 # it can compute; build the bin first (cli feature), then run it.

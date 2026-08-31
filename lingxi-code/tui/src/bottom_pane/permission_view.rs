@@ -501,6 +501,38 @@ mod tests {
     }
 
     #[test]
+    fn eligible_workflow_bash_renders_exact_auto_row_and_response() {
+        let (exchange, resp_rx) = auto_tool_exchange();
+        let mut view = PermissionView::new(exchange);
+        let text = buffer_text(&view, Rect::new(0, 0, 80, 9));
+        assert!(text.contains("Yes, and switch to auto mode"), "{text}");
+        assert!(!text.contains("allow always"), "{text}");
+        assert!(matches!(
+            view.handle_key(press(KeyCode::Char('2'))),
+            ViewOutcome::PermissionResponse(PermissionResponse::AllowAuto)
+        ));
+        assert_eq!(
+            resp_rx.blocking_recv().unwrap(),
+            PermissionResponse::AllowAuto
+        );
+    }
+
+    #[test]
+    fn suppressed_prompt_hides_allow_always_and_remaps_keys() {
+        let (mut exchange, resp_rx) = tool_exchange();
+        exchange.suppress_always_allow_rule = true;
+        let mut view = PermissionView::new(exchange);
+
+        // The second visible row is now Deny, and there is no third row for
+        // the old AllowAlways shortcut.
+        assert!(matches!(
+            view.handle_key(press(KeyCode::Char('2'))),
+            ViewOutcome::PermissionResponse(PermissionResponse::Deny)
+        ));
+        assert_eq!(resp_rx.blocking_recv().unwrap(), PermissionResponse::Deny);
+    }
+
+    #[test]
     fn esc_denies() {
         let (exchange, resp_rx) = tool_exchange();
         let mut view = PermissionView::new(exchange);

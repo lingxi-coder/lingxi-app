@@ -34,7 +34,7 @@ use telemetry::tengu::tool::{
     READ_MCP_RESOURCE_STARTED,
 };
 use telemetry::AnalyticsBus;
-use traits::McpTransportSpec;
+use traits::{McpPermissionCeiling, McpTransportSpec};
 
 use tool_api::context::ToolUseContext;
 use tool_api::progress::{ToolProgress, ToolProgressSender};
@@ -136,6 +136,212 @@ fn build_mcp_meta(meta: Option<Value>, structured_content: Option<Value>) -> Opt
         obj.insert("structuredContent".to_string(), sc);
     }
     Some(Value::Object(obj))
+}
+
+const MAX_OUTPUT_SCHEMA_ERRORS: usize = 8;
+
+fn json_type_name(value: &Value) -> &'static str {
+    match value {
+        Value::Null => "null",
+        Value::Bool(_) => "boolean",
+        Value::Number(number) if number.is_i64() || number.is_u64() => "integer",
+        Value::Number(_) => "number",
+        Value::String(_) => "string",
+        Value::Array(_) => "array",
+        Value::Object(_) => "object",
+    }
+}
+
+fn push_schema_error(errors: &mut Vec<String>, message: String) {
+    if errors.len() < MAX_OUTPUT_SCHEMA_ERRORS {
+        errors.push(message);
+    }
+}
+
+fn value_matches_type(value: &Value, expected: &str) -> bool {
+    match expected {
+        "null" => value.is_null(),
+        "boolean" => value.is_boolean(),
+        "integer" => value.as_i64().is_some() || value.as_u64().is_some(),
+        "number" => value.as_f64().is_some(),
+        "string" => value.is_string(),
+        "array" => value.is_array(),
+        "object" => value.is_object(),
+        _ => true,
+    }
+}
+
+fn validate_schema_value(schema: &Value, value: &Value, path: &str, errors: &mut Vec<String>) {
+    let Some(object) = schema.as_object() else {
+        return;
+    };
+
+    if let Some(expected) = object.get("const") {
+        if value != expected {
+            push_schema_error(errors, format!("at '{path}': expected const {expected}"));
+            return;
+        }
+    }
+    if let Some(enum_values) = object.get("enum").and_then(Value::as_array) {
+        if !enum_values.iter().any(|candidate| candidate == value) {
+            push_schema_error(errors, format!("at '{path}': value is not in enum"));
+        }
+    }
+    if let Some(type_value) = object.get("type") {
+        let matches = match type_value {
+            Value::String(expected) => value_matches_type(value, expected),
+            Value::Array(items) => items
+                .iter()
+                .filter_map(Value::as_str)
+                .any(|expected| value_matches_type(value, expected)),
+            _ => true,
+        };
+        if !matches {
+            push_schema_error(
+                errors,
+                format!(
+                    "at '{path}': expected {type_value}, got {}",
+                    json_type_name(value)
+                ),
+            );
+            return;
+        }
+    }
+    if let Some(min) = object.get("minimum").and_then(Value::as_f64) {
+        if value.as_f64().is_some_and(|actual| actual < min) {
+            push_schema_error(errors, format!("at '{path}': value is below minimum {min}"));
+        }
+    }
+    if let Some(max) = object.get("maximum").and_then(Value::as_f64) {
+        if value.as_f64().is_some_and(|actual| actual > max) {
+            push_schema_error(errors, format!("at '{path}': value exceeds maximum {max}"));
+        }
+    }
+    if let Some(min) = object.get("minLength").and_then(Value::as_u64) {
+        if value
+            .as_str()
+            .is_some_and(|actual| actual.chars().count() < min as usize)
+        {
+            push_schema_error(
+                errors,
+                format!("at '{path}': string shorter than minLength {min}"),
+            );
+        }
+    }
+    if let Some(max) = object.get("maxLength").and_then(Value::as_u64) {
+        if value
+            .as_str()
+            .is_some_and(|actual| actual.chars().count() > max as usize)
+        {
+            push_schema_error(
+                errors,
+                format!("at '{path}': string exceeds maxLength {max}"),
+            );
+        }
+    }
+    if let Some(min) = object.get("minItems").and_then(Value::as_u64) {
+        if value
+            .as_array()
+            .is_some_and(|actual| actual.len() < min as usize)
+        {
+            push_schema_error(
+                errors,
+                format!("at '{path}': array shorter than minItems {min}"),
+            );
+        }
+    }
+    if let Some(max) = object.get("maxItems").and_then(Value::as_u64) {
+        if value
+            .as_array()
+            .is_some_and(|actual| actual.len() > max as usize)
+        {
+            push_schema_error(errors, format!("at '{path}': array exceeds maxItems {max}"));
+        }
+    }
+    if let Some(items_schema) = object.get("items") {
+        if let Some(items) = value.as_array() {
+            for (index, item) in items.iter().enumerate() {
+                validate_schema_value(items_schema, item, &format!("{path}/{index}"), errors);
+            }
+        }
+    }
+    let properties = object.get("properties").and_then(Value::as_object);
+    // `required` is valid even when `properties` is omitted (for example a
+    // schema that only constrains a closed object or uses additional
+    // properties).  Keep this check independent of the properties map.
+    if let Some(required) = object.get("required").and_then(Value::as_array) {
+        for key in required.iter().filter_map(Value::as_str) {
+            if !value.as_object().is_some_and(|map| map.contains_key(key)) {
+                push_schema_error(
+                    errors,
+                    format!("at '{path}': missing required property {key:?}"),
+                );
+            }
+        }
+    }
+    if let Some(map) = value.as_object() {
+        let closed = object.get("additionalProperties").and_then(Value::as_bool) == Some(false);
+        let additional_schema = object
+            .get("additionalProperties")
+            .filter(|schema| schema.is_object());
+        for (key, item) in map {
+            if properties.is_none_or(|known| !known.contains_key(key)) {
+                if closed {
+                    push_schema_error(errors, format!("at '{path}': unexpected property {key:?}"));
+                } else if let Some(schema) = additional_schema {
+                    validate_schema_value(schema, item, &format!("{path}/{key}"), errors);
+                }
+            }
+        }
+        if let Some(properties) = properties {
+            for (key, schema) in properties {
+                if let Some(item) = map.get(key) {
+                    validate_schema_value(schema, item, &format!("{path}/{key}"), errors);
+                }
+            }
+        }
+    }
+    for key in ["allOf", "anyOf", "oneOf"] {
+        let Some(variants) = object.get(key).and_then(Value::as_array) else {
+            continue;
+        };
+        let mut matched = 0usize;
+        for variant in variants {
+            let mut scratch = Vec::new();
+            validate_schema_value(variant, value, path, &mut scratch);
+            if scratch.is_empty() {
+                matched += 1;
+            }
+        }
+        match key {
+            "allOf" if matched != variants.len() => {
+                push_schema_error(errors, format!("at '{path}': allOf branch mismatch"));
+            }
+            "anyOf" if matched == 0 => {
+                push_schema_error(errors, format!("at '{path}': anyOf branch mismatch"));
+            }
+            "oneOf" if matched != 1 => {
+                push_schema_error(errors, format!("at '{path}': oneOf branch mismatch"));
+            }
+            _ => {}
+        }
+    }
+}
+
+fn validate_structured_content_against_output_schema(
+    schema: &Value,
+    structured_content: Option<&Value>,
+) -> Result<(), String> {
+    let Some(value) = structured_content else {
+        return Err("missing structuredContent for outputSchema-bound MCP result".into());
+    };
+    let mut errors = Vec::new();
+    validate_schema_value(schema, value, "(root)", &mut errors);
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors.join("; "))
+    }
 }
 
 /// Build the model-facing `mcp_progress` / `progress` event payload for one
@@ -400,6 +606,8 @@ pub struct MCPTool {
     /// The server's (truncated) description for a per-tool wire entry; `None`
     /// falls back to the generic dispatcher blurb.
     bound_desc: Option<String>,
+    /// Optional per-tool structured output schema from the MCP wire definition.
+    bound_output_schema: Option<Value>,
     /// Optional server-provided search hint used by ToolSearch ranking.
     search_hint: Option<String>,
     /// `_meta.anthropic/alwaysLoad` / server-level `alwaysLoad` opt-out.
@@ -455,6 +663,7 @@ impl MCPTool {
             full_name: None,
             bound_schema: None,
             bound_desc: None,
+            bound_output_schema: None,
             search_hint: None,
             always_load: true,
             requires_user_interaction: false,
@@ -478,6 +687,8 @@ impl MCPTool {
         full_name: String,
         description: String,
         input_schema: Value,
+        output_schema: Option<Value>,
+        effective_max_permission: Option<McpPermissionCeiling>,
         search_hint: Option<String>,
         always_load: bool,
         requires_user_interaction: bool,
@@ -491,10 +702,11 @@ impl MCPTool {
             // defensive no-op for in-band descriptions but keeps the per-tool
             // wire entry within the documented bound for any out-of-band source.
             bound_desc: Some(mcp::truncate_description(&description).into_owned()),
+            bound_output_schema: output_schema,
             search_hint,
             always_load,
             requires_user_interaction,
-            effective_max_permission: None,
+            effective_max_permission: effective_max_permission.map(max_permission_from_ceiling),
             bound_server_key: None,
         }
     }
@@ -644,6 +856,7 @@ async fn process_mcp_call_result(
     output_dir: std::path::PathBuf,
     token_counter: Arc<tool_api::AnthropicRequestBuilder>,
     default_model: String,
+    output_schema: Option<Value>,
     server: String,
     tool: String,
     tool_use_id: Option<protocol::ToolUseId>,
@@ -675,6 +888,26 @@ async fn process_mcp_call_result(
                 )
                 .await;
                 return Err(ToolError::Io(error_details));
+            }
+            if let Some(schema) = output_schema.as_ref() {
+                if let Err(detail) = validate_structured_content_against_output_schema(
+                    schema,
+                    dto.structured_content.as_ref(),
+                ) {
+                    emit(
+                        &bus,
+                        MCP_FAILED,
+                        &[
+                            ("_PROTO_server_name", pii(&server)),
+                            ("_PROTO_tool_name", pii(&tool)),
+                            ("error_kind", verified_str("output_schema_mismatch")),
+                        ],
+                    )
+                    .await;
+                    return Err(ToolError::Io(format!(
+                        "mcp_output_schema_mismatch: {detail}"
+                    )));
+                }
             }
 
             emit(
@@ -886,6 +1119,9 @@ impl Tool for MCPTool {
         // (client.ts:1808 `inputJSONSchema = tool.inputSchema`); generic
         // dispatcher → the `{full_name, arguments}` envelope schema.
         self.bound_schema.as_ref().unwrap_or(&MCP_TOOL_SCHEMA)
+    }
+    fn output_schema(&self) -> Option<&Value> {
+        self.bound_output_schema.as_ref()
     }
     fn is_enabled(&self, _: &ToolStaticContext) -> bool {
         true
@@ -1226,6 +1462,7 @@ impl Tool for MCPTool {
                 output_dir,
                 token_counter,
                 default_model,
+                self.bound_output_schema.clone(),
                 server,
                 tool,
                 tool_use_id,
@@ -1256,6 +1493,7 @@ impl Tool for MCPTool {
         // task with no cancel path at all.
         let cancel = tokio_util::sync::CancellationToken::new();
         let parent_cancel = ctx.cancel.clone();
+        let bound_output_schema = self.bound_output_schema.clone();
         let mut call_task = {
             let registry = registry.clone();
             let bus = bus.clone();
@@ -1269,6 +1507,7 @@ impl Tool for MCPTool {
             let progress = progress.clone();
             let dispatch_full_name = dispatch_full_name.clone();
             let tool_use_id_str = tool_use_id_str.clone();
+            let output_schema = bound_output_schema.clone();
             let cancel = cancel.clone();
             let parent_cancel = parent_cancel.clone();
             tokio::spawn(async move {
@@ -1305,6 +1544,7 @@ impl Tool for MCPTool {
                             output_dir,
                             token_counter,
                             default_model,
+                            output_schema,
                             server,
                             tool,
                             tool_use_id,
@@ -2608,6 +2848,8 @@ pub async fn build_registered_mcp_tools(
                         dto.full_name.clone(),
                         dto.description.clone(),
                         dto.input_schema.clone(),
+                        None,
+                        None,
                         dto.search_hint.clone(),
                         dto.always_load.unwrap_or(false),
                         dto.requires_user_interaction,
@@ -3238,6 +3480,128 @@ mod tests {
         );
         // The model sees the JSON string (NOT content:null, NOT pretty-printed).
         assert_eq!(out, json!(r#"{"rows":[{"id":7}],"total":1}"#));
+    }
+
+    #[test]
+    fn output_schema_requires_structured_content() {
+        let schema = json!({
+            "type":"object",
+            "properties":{"ok":{"type":"boolean"}},
+            "required":["ok"],
+            "additionalProperties":false
+        });
+        let err = validate_structured_content_against_output_schema(&schema, None).unwrap_err();
+        assert!(err.contains("missing structuredContent"));
+    }
+
+    #[test]
+    fn output_schema_mismatch_is_reported_as_tool_error_detail() {
+        let schema = json!({
+            "type":"object",
+            "properties":{"ok":{"type":"boolean"}},
+            "required":["ok"],
+            "additionalProperties":false
+        });
+        let err =
+            validate_structured_content_against_output_schema(&schema, Some(&json!({"ok":"nope"})))
+                .unwrap_err();
+        assert!(err.contains("/ok") || err.contains("expected"));
+    }
+
+    #[test]
+    fn output_schema_required_does_not_need_properties() {
+        let schema = json!({
+            "type": "object",
+            "required": ["token"],
+            "additionalProperties": {"type": "string"}
+        });
+        let err = validate_structured_content_against_output_schema(
+            &schema,
+            Some(&json!({"other": "ok"})),
+        )
+        .unwrap_err();
+        assert!(err.contains("missing required property \"token\""));
+    }
+
+    #[test]
+    fn output_schema_validates_schema_valued_additional_properties_recursively() {
+        let schema = json!({
+            "type": "object",
+            "properties": {"known": {"type": "boolean"}},
+            "additionalProperties": {
+                "type": "object",
+                "additionalProperties": {"type": "integer"}
+            }
+        });
+        let err = validate_structured_content_against_output_schema(
+            &schema,
+            Some(&json!({"known": true, "extra": {"count": "one"}})),
+        )
+        .unwrap_err();
+        assert!(err.contains("/extra/count"));
+    }
+
+    #[tokio::test]
+    async fn per_tool_permission_ceiling_tightens_tool_check() {
+        let ctx = tool_api::test_support::ctx_for_file_tools(
+            tool_api::test_support::make_dummy_fs(),
+            Arc::new(telemetry::AnalyticsBus::new()),
+            vec![std::path::PathBuf::from("/tmp")],
+        );
+        let tool = MCPTool::new_for_tool(
+            ctx,
+            "mcp__srv__write".into(),
+            "write".into(),
+            json!({"type": "object"}),
+            None,
+            false,
+            Some(McpPermissionCeiling::Ask),
+            None,
+            false,
+        );
+        assert!(matches!(
+            tool.check_permissions(&json!({}), &tool_api::test_support::fresh_ctx())
+                .await,
+            PermissionResult::Ask { .. }
+        ));
+
+        let interaction_tool = MCPTool::new_for_tool(
+            tool.ctx.clone(),
+            "mcp__srv__interactive".into(),
+            "interactive".into(),
+            json!({"type": "object"}),
+            None,
+            true,
+            None,
+            None,
+            false,
+        );
+        assert!(matches!(
+            interaction_tool
+                .check_permissions(&json!({}), &tool_api::test_support::fresh_ctx())
+                .await,
+            PermissionResult::Ask {
+                reason: PermissionDecisionReason::PermissionPromptTool { tool_name },
+                ..
+            } if tool_name == "mcp__srv__interactive"
+        ));
+
+        let tool = MCPTool::new_for_tool(
+            tool.ctx.clone(),
+            "mcp__srv__blocked".into(),
+            "blocked".into(),
+            json!({"type": "object"}),
+            None,
+            false,
+            Some(McpPermissionCeiling::Deny),
+            None,
+            false,
+        );
+        assert!(matches!(
+            tool.check_permissions(&json!({}), &tool_api::test_support::fresh_ctx())
+                .await,
+            PermissionResult::Deny { .. }
+        ));
     }
 }
 

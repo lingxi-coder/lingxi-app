@@ -134,6 +134,172 @@ pub struct McpCatalogChanged {
     pub kind: McpCatalogKind,
 }
 
+/// Scope for a Local App conversation-export connection. The scope is bound
+/// when the Host creates the connection; it is never taken from a tool input.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConversationExport {
+    /// Stable Local App identity.
+    pub app_id: String,
+    /// Digest of the tool surface last exposed to the conversation.
+    pub listed_tool_surface_sha256: String,
+}
+
+impl ConversationExport {
+    /// Validate the schema-v3 App ID and the connection's last-listed surface.
+    pub fn new(
+        app_id: impl Into<String>,
+        listed_tool_surface_sha256: impl Into<String>,
+    ) -> Result<Self, McpError> {
+        let app_id = app_id.into();
+        let digest = listed_tool_surface_sha256.into();
+        if !is_local_app_id(&app_id) {
+            return Err(McpError::Internal("invalid Local App identity".into()));
+        }
+        if !is_sha256(&digest) {
+            return Err(McpError::Internal(
+                "invalid Local App tool surface identity".into(),
+            ));
+        }
+        Ok(Self {
+            app_id,
+            listed_tool_surface_sha256: digest,
+        })
+    }
+
+    /// Logical MCP server name for this app.
+    #[must_use]
+    pub fn server_name(&self) -> String {
+        format!("local_app_{}", self.app_id)
+    }
+
+    /// Registry key for this logical server.
+    #[must_use]
+    pub fn registry_key(&self) -> String {
+        format!("local_apps:conversation-export:{}", self.app_id)
+    }
+
+    /// Build the transport registry key for one conversation-scoped export.
+    pub fn scoped_registry_key(&self, conversation_id: &str) -> Result<String, McpError> {
+        if !is_conversation_scope_id(conversation_id) {
+            return Err(McpError::Internal(
+                "invalid Local App conversation scope".into(),
+            ));
+        }
+        Ok(format!(
+            "local_apps:conversation-export:{conversation_id}:{}:{}",
+            self.app_id, self.listed_tool_surface_sha256
+        ))
+    }
+
+    /// Parse a conversation-scoped Local App transport registry key.
+    pub fn parse_scoped_registry_key(
+        key: &str,
+    ) -> Result<Option<(String, ConversationExport)>, McpError> {
+        let Some(rest) = key.strip_prefix("local_apps:conversation-export:") else {
+            return Ok(None);
+        };
+        let mut parts = rest.splitn(3, ':');
+        let (Some(conversation_id), Some(app_id), Some(surface)) =
+            (parts.next(), parts.next(), parts.next())
+        else {
+            return Ok(None);
+        };
+        if !is_conversation_scope_id(conversation_id) {
+            return Err(McpError::Internal(
+                "invalid Local App conversation scope".into(),
+            ));
+        }
+        Ok(Some((
+            conversation_id.to_string(),
+            Self::new(app_id.to_string(), surface.to_string())?,
+        )))
+    }
+
+    /// Stable wire identity shared by every logical Local App server.
+    #[must_use]
+    pub const fn server_info_name(&self) -> &'static str {
+        "lingxi-local-app"
+    }
+
+    /// Build and validate one model-facing tool name.
+    pub fn tool_full_name(&self, tool_name: &str) -> Result<String, McpError> {
+        if tool_name.is_empty()
+            || tool_name.len() > 64
+            || !tool_name.bytes().enumerate().all(|(index, byte)| {
+                byte.is_ascii_lowercase() || byte.is_ascii_digit() || (byte == b'_' && index > 0)
+            })
+            || tool_name.starts_with('_')
+            || tool_name.ends_with('_')
+            || tool_name.contains("__")
+        {
+            return Err(McpError::ToolNotFound(tool_name.into()));
+        }
+        Ok(format!("mcp__{}__{}", self.server_name(), tool_name))
+    }
+}
+
+fn is_local_app_id(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    !bytes.is_empty()
+        && bytes.len() <= 54
+        && (bytes[0].is_ascii_lowercase() || bytes[0].is_ascii_digit())
+        && bytes[1..]
+            .iter()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || *byte == b'-')
+}
+
+fn is_sha256(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+}
+
+fn is_conversation_scope_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+}
+
+/// Host-managed logical Local App server metadata.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ManagedLocalAppServer {
+    /// Conversation-export scope.
+    pub scope: ConversationExport,
+    /// Digest of the currently active catalog.
+    pub catalog_sha256: String,
+    /// Generation of the exposed tool surface.
+    pub surface_generation: u64,
+}
+
+/// One lazily exposed Local App in a conversation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocalAppExposure {
+    /// Stable Local App identity.
+    pub app_id: String,
+    /// Whether the conversation has explicitly pinned the app.
+    pub pinned: bool,
+    /// Number of calls currently in flight.
+    pub in_flight: usize,
+    /// Monotonic recency sequence.
+    pub last_used: u64,
+    /// Generation of the exposure metadata.
+    pub exposure_generation: u64,
+}
+
+#[derive(Debug, Default)]
+struct ConversationExposureState {
+    entries: HashMap<String, LocalAppExposure>,
+    next_sequence: u64,
+    next_generation: u64,
+}
+
+const LOCAL_APP_MAX_EXPOSED: usize = 8;
+const LOCAL_APP_MAX_IN_FLIGHT_PER_APP: usize = 4;
+const LOCAL_APP_MAX_IN_FLIGHT_PER_CONVERSATION: usize = 8;
+
 struct RegisteredClient {
     connection_id: Option<McpConnectionId>,
     client: Arc<McpClient>,
@@ -292,6 +458,11 @@ pub struct McpRegistry {
     /// `Disconnected` entries read from `.mcp.json` before the engine
     /// connects, and so engine-side tests can seed states directly.
     pub connections: Arc<RwLock<HashMap<String, McpConnectionState>>>,
+    /// Host-managed Local App logical servers. This is metadata only; all
+    /// entries share the registry's physical transport substrate.
+    managed_local_apps: Arc<RwLock<HashMap<String, ManagedLocalAppServer>>>,
+    /// Per-conversation bounded, lazy Local App exposure state.
+    local_app_exposures: Arc<RwLock<HashMap<String, ConversationExposureState>>>,
     /// Synchronous mirror of claude-code 2.1.238's `eZf()`
     /// (`bdl(b7e()??[]).length>0`, `cc-238.js @229641619`) — "at least one MCP
     /// client is `type === "pending"`".
@@ -467,6 +638,8 @@ impl McpRegistry {
     fn clone_for_background(&self) -> Self {
         Self {
             connections: Arc::clone(&self.connections),
+            managed_local_apps: Arc::clone(&self.managed_local_apps),
+            local_app_exposures: Arc::clone(&self.local_app_exposures),
             pending_servers: Arc::clone(&self.pending_servers),
             lifecycle_locks: Arc::clone(&self.lifecycle_locks),
             xaa_refresh_locks: Arc::clone(&self.xaa_refresh_locks),
@@ -503,6 +676,8 @@ impl McpRegistry {
         let (catalog_changes, _unused_rx) = broadcast::channel(64);
         Self {
             connections: Arc::new(RwLock::new(HashMap::new())),
+            managed_local_apps: Arc::new(RwLock::new(HashMap::new())),
+            local_app_exposures: Arc::new(RwLock::new(HashMap::new())),
             pending_servers: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             lifecycle_locks: Arc::new(StdMutex::new(HashMap::new())),
             xaa_refresh_locks: Arc::new(StdMutex::new(HashMap::new())),
@@ -619,6 +794,280 @@ impl McpRegistry {
     #[must_use]
     pub fn subscribe_catalog_changes(&self) -> broadcast::Receiver<McpCatalogChanged> {
         self.catalog_changes.subscribe()
+    }
+
+    /// Register or refresh one published Local App logical server. Only a
+    /// changed tool surface advances the logical generation and emits the
+    /// shared tools/list_changed notification; build/execution-only changes
+    /// update the catalog pointer without invalidating connections.
+    pub async fn register_managed_local_app(
+        &self,
+        scope: ConversationExport,
+        catalog_sha256: String,
+        _surface_changed: bool,
+    ) -> Result<ManagedLocalAppServer, McpError> {
+        if !is_sha256(&catalog_sha256) {
+            return Err(McpError::Internal(
+                "invalid Local App catalog identity".into(),
+            ));
+        }
+        let mut apps = self.managed_local_apps.write().await;
+        // The catalog commit is the authority for whether the exposed tool
+        // surface changed. Do not trust a caller-supplied boolean: a stale or
+        // forged hint must not produce duplicate listChanged notifications,
+        // nor suppress one when a new surface is actually committed.
+        let actual_surface_changed = apps.get(&scope.app_id).is_none_or(|server| {
+            server.scope.listed_tool_surface_sha256 != scope.listed_tool_surface_sha256
+        });
+        let generation = apps
+            .get(&scope.app_id)
+            .map(|server| server.surface_generation + u64::from(actual_surface_changed))
+            .unwrap_or(1);
+        let server = ManagedLocalAppServer {
+            scope: scope.clone(),
+            catalog_sha256,
+            surface_generation: generation,
+        };
+        apps.insert(scope.app_id.clone(), server.clone());
+        drop(apps);
+        if actual_surface_changed {
+            let _ = self.catalog_changes.send(McpCatalogChanged {
+                server_name: scope.server_name(),
+                connection_id: McpConnectionId::new(),
+                retired_connection_id: None,
+                kind: McpCatalogKind::Tools,
+            });
+        }
+        Ok(server)
+    }
+
+    /// Remove a published Local App logical server after Host has stopped new
+    /// calls. The notification tells consumers to evict its exposed tools.
+    pub async fn unregister_managed_local_app(&self, app_id: &str) -> Result<bool, McpError> {
+        if !is_local_app_id(app_id) {
+            return Err(McpError::Internal("invalid Local App identity".into()));
+        }
+        let removed = self.managed_local_apps.write().await.remove(app_id);
+        if removed.is_some() {
+            // A deleted app can no longer be selected or called. Remove its
+            // logical exposure from every conversation in the same commit
+            // boundary; no stale FQN survives deletion.
+            let mut conversations = self.local_app_exposures.write().await;
+            for state in conversations.values_mut() {
+                if state.entries.remove(app_id).is_some() {
+                    state.next_generation = state.next_generation.saturating_add(1);
+                }
+            }
+            let _ = self.catalog_changes.send(McpCatalogChanged {
+                server_name: format!("local_app_{app_id}"),
+                connection_id: McpConnectionId::new(),
+                retired_connection_id: None,
+                kind: McpCatalogKind::Tools,
+            });
+        }
+        Ok(removed.is_some())
+    }
+
+    /// Lightweight logical-server count; all entries continue to use this
+    /// registry's one physical transport substrate.
+    pub async fn managed_local_app_count(&self) -> usize {
+        self.managed_local_apps.read().await.len()
+    }
+
+    /// There is exactly one physical transport owned by this registry.
+    #[must_use]
+    pub fn physical_transport_count(&self) -> usize {
+        1
+    }
+
+    pub async fn managed_local_app(&self, app_id: &str) -> Option<ManagedLocalAppServer> {
+        self.managed_local_apps.read().await.get(app_id).cloned()
+    }
+
+    /// Expose a published Local App in one conversation. Exposure is lazy and
+    /// bounded: at most eight logical apps are retained, with unpinned,
+    /// idle least-recently-used entries evicted first. A pinned entry is the
+    /// only hard pin; merely listing or calling an app keeps it recent but
+    /// does not make it ineligible for eviction.
+    pub async fn expose_managed_local_app(
+        &self,
+        conversation_id: &str,
+        app_id: &str,
+        pin: bool,
+    ) -> Result<LocalAppExposure, McpError> {
+        if conversation_id.is_empty() || !is_local_app_id(app_id) {
+            return Err(McpError::Internal(
+                "invalid Local App exposure scope".into(),
+            ));
+        }
+        if self.managed_local_app(app_id).await.is_none() {
+            return Err(McpError::ToolNotFound(app_id.into()));
+        }
+
+        let mut conversations = self.local_app_exposures.write().await;
+        let state = conversations
+            .entry(conversation_id.to_string())
+            .or_default();
+        state.next_sequence = state.next_sequence.saturating_add(1);
+        if let Some(entry) = state.entries.get_mut(app_id) {
+            entry.last_used = state.next_sequence;
+            if pin && !entry.pinned {
+                state.next_generation = state.next_generation.saturating_add(1);
+                entry.pinned = true;
+                entry.exposure_generation = state.next_generation;
+            }
+            return Ok(entry.clone());
+        }
+
+        if state.entries.len() >= LOCAL_APP_MAX_EXPOSED {
+            let evict = state
+                .entries
+                .iter()
+                .filter(|(_, entry)| !entry.pinned && entry.in_flight == 0)
+                .min_by_key(|(_, entry)| entry.last_used)
+                .map(|(id, _)| id.clone());
+            let Some(evict) = evict else {
+                let mut pinned: Vec<&str> = state
+                    .entries
+                    .values()
+                    .filter(|entry| entry.pinned)
+                    .map(|entry| entry.app_id.as_str())
+                    .collect();
+                pinned.sort_unstable();
+                return Err(McpError::Internal(format!(
+                    "exposure_capacity_reached: pinned apps [{}]",
+                    pinned.join(",")
+                )));
+            };
+            state.entries.remove(&evict);
+        }
+
+        state.next_generation = state.next_generation.saturating_add(1);
+        let entry = LocalAppExposure {
+            app_id: app_id.to_string(),
+            pinned: pin,
+            in_flight: 0,
+            last_used: state.next_sequence,
+            exposure_generation: state.next_generation,
+        };
+        state.entries.insert(app_id.to_string(), entry.clone());
+        Ok(entry)
+    }
+
+    /// Mark an already exposed app as recently used without hard-pinning it.
+    pub async fn touch_local_app_exposure(
+        &self,
+        conversation_id: &str,
+        app_id: &str,
+    ) -> Result<LocalAppExposure, McpError> {
+        if conversation_id.is_empty() || !is_local_app_id(app_id) {
+            return Err(McpError::Internal(
+                "invalid Local App exposure scope".into(),
+            ));
+        }
+        let mut conversations = self.local_app_exposures.write().await;
+        let state = conversations
+            .get_mut(conversation_id)
+            .ok_or_else(|| McpError::ToolNotFound(app_id.into()))?;
+        state.next_sequence = state.next_sequence.saturating_add(1);
+        let entry = state
+            .entries
+            .get_mut(app_id)
+            .ok_or_else(|| McpError::ToolNotFound(app_id.into()))?;
+        entry.last_used = state.next_sequence;
+        Ok(entry.clone())
+    }
+
+    /// Change the hard-pin bit for one exposed app. Pin state is explicit and
+    /// therefore advances the exposure generation independently of catalog or
+    /// authoring revisions.
+    pub async fn pin_local_app_exposure(
+        &self,
+        conversation_id: &str,
+        app_id: &str,
+        pinned: bool,
+    ) -> Result<LocalAppExposure, McpError> {
+        if conversation_id.is_empty() || !is_local_app_id(app_id) {
+            return Err(McpError::Internal(
+                "invalid Local App exposure scope".into(),
+            ));
+        }
+        let mut conversations = self.local_app_exposures.write().await;
+        let state = conversations
+            .get_mut(conversation_id)
+            .ok_or_else(|| McpError::ToolNotFound(app_id.into()))?;
+        let changed = state
+            .entries
+            .get(app_id)
+            .map(|entry| entry.pinned != pinned)
+            .ok_or_else(|| McpError::ToolNotFound(app_id.into()))?;
+        if changed {
+            state.next_generation = state.next_generation.saturating_add(1);
+        }
+        let entry = state.entries.get_mut(app_id).expect("checked above");
+        if changed {
+            entry.exposure_generation = state.next_generation;
+        }
+        entry.pinned = pinned;
+        Ok(entry.clone())
+    }
+
+    /// Begin one call through an exposed app. The registry rejects calls
+    /// instead of queueing them without bound; callers must release the lease
+    /// with [`Self::end_local_app_call`] on completion/cancellation.
+    pub async fn begin_local_app_call(
+        &self,
+        conversation_id: &str,
+        app_id: &str,
+    ) -> Result<LocalAppExposure, McpError> {
+        if conversation_id.is_empty() || !is_local_app_id(app_id) {
+            return Err(McpError::Internal(
+                "invalid Local App exposure scope".into(),
+            ));
+        }
+        let mut conversations = self.local_app_exposures.write().await;
+        let state = conversations
+            .get_mut(conversation_id)
+            .ok_or_else(|| McpError::ToolNotFound(app_id.into()))?;
+        let total_in_flight: usize = state.entries.values().map(|entry| entry.in_flight).sum();
+        let entry = state
+            .entries
+            .get_mut(app_id)
+            .ok_or_else(|| McpError::ToolNotFound(app_id.into()))?;
+        if entry.in_flight >= LOCAL_APP_MAX_IN_FLIGHT_PER_APP
+            || total_in_flight >= LOCAL_APP_MAX_IN_FLIGHT_PER_CONVERSATION
+        {
+            return Err(McpError::Internal(
+                "rate_limited: retry after 1000ms".into(),
+            ));
+        }
+        entry.in_flight += 1;
+        state.next_sequence = state.next_sequence.saturating_add(1);
+        entry.last_used = state.next_sequence;
+        Ok(entry.clone())
+    }
+
+    /// Release a call lease. Releasing an unknown lease is intentionally
+    /// idempotent so timeout/cancel cleanup cannot turn into a second error.
+    pub async fn end_local_app_call(&self, conversation_id: &str, app_id: &str) {
+        let mut conversations = self.local_app_exposures.write().await;
+        if let Some(state) = conversations.get_mut(conversation_id) {
+            if let Some(entry) = state.entries.get_mut(app_id) {
+                entry.in_flight = entry.in_flight.saturating_sub(1);
+            }
+        }
+    }
+
+    /// Snapshot the logical exposure metadata for one conversation in recency
+    /// order. Tool DTOs are intentionally not part of this API.
+    pub async fn local_app_exposures(&self, conversation_id: &str) -> Vec<LocalAppExposure> {
+        let conversations = self.local_app_exposures.read().await;
+        let Some(state) = conversations.get(conversation_id) else {
+            return Vec::new();
+        };
+        let mut entries: Vec<LocalAppExposure> = state.entries.values().cloned().collect();
+        entries.sort_by_key(|entry| std::cmp::Reverse(entry.last_used));
+        entries
     }
 
     /// Return one refresh request for every catalog currently advertised by
@@ -12222,5 +12671,249 @@ mod snapshot_tests {
         assert_eq!(snap.len(), 2);
         assert_eq!(snap[0].name, "filesystem");
         assert_eq!(snap[1].name, "memory");
+    }
+
+    #[test]
+    fn conversation_export_identity_preserves_hyphens_and_split_boundaries() {
+        let scope = ConversationExport::new("abc--1", "0".repeat(64)).unwrap();
+        assert_eq!(scope.server_name(), "local_app_abc--1");
+        assert_eq!(scope.server_info_name(), "lingxi-local-app");
+        assert_eq!(
+            scope.registry_key(),
+            "local_apps:conversation-export:abc--1"
+        );
+        assert_eq!(
+            scope.tool_full_name("read_value").unwrap(),
+            "mcp__local_app_abc--1__read_value"
+        );
+        assert!(ConversationExport::new("abc_1", "0".repeat(64)).is_err());
+        assert!(scope.tool_full_name("bad__name").is_err());
+    }
+
+    #[test]
+    fn conversation_export_uses_schema_v3_app_id_boundaries() {
+        let id_54 = format!("a{}", "b".repeat(53));
+        let id_55 = format!("a{}", "b".repeat(54));
+        assert!(ConversationExport::new(id_54, "0".repeat(64)).is_ok());
+        assert!(ConversationExport::new(id_55, "0".repeat(64)).is_err());
+        assert!(ConversationExport::new("A123", "0".repeat(64)).is_err());
+        assert!(ConversationExport::new("-leading", "0".repeat(64)).is_err());
+    }
+
+    #[tokio::test]
+    async fn managed_local_apps_share_one_physical_hub_and_only_surface_changes_notify() {
+        let registry = McpRegistry::new(Arc::new(StubTransport));
+        let mut events = registry.subscribe_catalog_changes();
+        for index in 0..100 {
+            let scope = ConversationExport::new(format!("app-{index}"), "0".repeat(64)).unwrap();
+            registry
+                .register_managed_local_app(scope, "1".repeat(64), true)
+                .await
+                .unwrap();
+            let change = events.recv().await.unwrap();
+            assert_eq!(change.server_name, format!("local_app_app-{index}"));
+        }
+        assert_eq!(registry.managed_local_app_count().await, 100);
+        assert_eq!(registry.physical_transport_count(), 1);
+        let scope = ConversationExport::new("app-0", "0".repeat(64)).unwrap();
+        registry
+            .register_managed_local_app(scope, "2".repeat(64), false)
+            .await
+            .unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(10), events.recv())
+                .await
+                .is_err()
+        );
+        // A bad `surface_changed=true` hint cannot duplicate the event when
+        // the committed surface digest is unchanged.
+        let same_surface = ConversationExport::new("app-0", "0".repeat(64)).unwrap();
+        let refreshed = registry
+            .register_managed_local_app(same_surface, "3".repeat(64), true)
+            .await
+            .unwrap();
+        assert_eq!(refreshed.surface_generation, 1);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(10), events.recv())
+                .await
+                .is_err()
+        );
+        let changed_surface = ConversationExport::new("app-0", "f".repeat(64)).unwrap();
+        let changed = registry
+            .register_managed_local_app(changed_surface, "4".repeat(64), false)
+            .await
+            .unwrap();
+        assert_eq!(changed.surface_generation, 2);
+        assert_eq!(events.recv().await.unwrap().server_name, "local_app_app-0");
+        assert!(registry
+            .unregister_managed_local_app("app-0")
+            .await
+            .unwrap());
+    }
+
+    #[tokio::test]
+    async fn local_app_exposure_is_bounded_lru_and_pin_aware() {
+        let registry = McpRegistry::new(Arc::new(StubTransport));
+        for index in 0..10 {
+            let scope = ConversationExport::new(format!("app-{index}"), "0".repeat(64)).unwrap();
+            registry
+                .register_managed_local_app(scope, "1".repeat(64), false)
+                .await
+                .unwrap();
+        }
+
+        assert!(registry
+            .local_app_exposures("conversation")
+            .await
+            .is_empty());
+        for index in 0..8 {
+            registry
+                .expose_managed_local_app("conversation", &format!("app-{index}"), false)
+                .await
+                .unwrap();
+        }
+        assert_eq!(registry.local_app_exposures("conversation").await.len(), 8);
+
+        // app-0 is the oldest unpinned entry and is the only one evicted.
+        registry
+            .expose_managed_local_app("conversation", "app-8", false)
+            .await
+            .unwrap();
+        let ids: Vec<String> = registry
+            .local_app_exposures("conversation")
+            .await
+            .into_iter()
+            .map(|entry| entry.app_id)
+            .collect();
+        assert!(!ids.iter().any(|id| id == "app-0"));
+        assert!(ids.iter().any(|id| id == "app-8"));
+
+        // Pinning is explicit. The next eviction skips app-1 even though it
+        // is older than the unpinned entries.
+        registry
+            .pin_local_app_exposure("conversation", "app-1", true)
+            .await
+            .unwrap();
+        registry
+            .expose_managed_local_app("conversation", "app-9", false)
+            .await
+            .unwrap();
+        let ids: Vec<String> = registry
+            .local_app_exposures("conversation")
+            .await
+            .into_iter()
+            .map(|entry| entry.app_id)
+            .collect();
+        assert!(ids.iter().any(|id| id == "app-1"));
+        assert!(ids.iter().any(|id| id == "app-9"));
+    }
+
+    #[tokio::test]
+    async fn local_app_exposure_rejects_ninth_when_all_are_pinned_and_tracks_calls() {
+        let registry = McpRegistry::new(Arc::new(StubTransport));
+        for index in 0..9 {
+            let scope = ConversationExport::new(format!("pin-{index}"), "0".repeat(64)).unwrap();
+            registry
+                .register_managed_local_app(scope, "1".repeat(64), false)
+                .await
+                .unwrap();
+        }
+        for index in 0..8 {
+            registry
+                .expose_managed_local_app("conversation", &format!("pin-{index}"), true)
+                .await
+                .unwrap();
+        }
+        let err = registry
+            .expose_managed_local_app("conversation", "pin-8", false)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("exposure_capacity_reached"));
+        assert!(err.to_string().contains("pin-0"));
+
+        for _ in 0..4 {
+            registry
+                .begin_local_app_call("conversation", "pin-0")
+                .await
+                .unwrap();
+        }
+        let err = registry
+            .begin_local_app_call("conversation", "pin-0")
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("rate_limited"));
+        for _ in 0..5 {
+            registry.end_local_app_call("conversation", "pin-0").await;
+        }
+        assert_eq!(
+            registry
+                .local_app_exposures("conversation")
+                .await
+                .iter()
+                .find(|entry| entry.app_id == "pin-0")
+                .unwrap()
+                .in_flight,
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn local_app_exposure_never_evicts_an_inflight_entry() {
+        let registry = McpRegistry::new(Arc::new(StubTransport));
+        for index in 0..9 {
+            let scope = ConversationExport::new(format!("busy-{index}"), "0".repeat(64)).unwrap();
+            registry
+                .register_managed_local_app(scope, "1".repeat(64), false)
+                .await
+                .unwrap();
+        }
+        for index in 0..8 {
+            registry
+                .expose_managed_local_app("conversation", &format!("busy-{index}"), false)
+                .await
+                .unwrap();
+        }
+        registry
+            .begin_local_app_call("conversation", "busy-0")
+            .await
+            .unwrap();
+        registry
+            .expose_managed_local_app("conversation", "busy-8", false)
+            .await
+            .unwrap();
+        let exposed = registry.local_app_exposures("conversation").await;
+        assert!(exposed.iter().any(|entry| entry.app_id == "busy-0"));
+        assert!(exposed.iter().any(|entry| entry.app_id == "busy-8"));
+        assert_eq!(
+            exposed
+                .iter()
+                .find(|entry| entry.app_id == "busy-0")
+                .unwrap()
+                .in_flight,
+            1
+        );
+        registry.end_local_app_call("conversation", "busy-0").await;
+    }
+
+    #[tokio::test]
+    async fn deleting_managed_local_app_removes_all_conversation_exposure() {
+        let registry = McpRegistry::new(Arc::new(StubTransport));
+        let scope = ConversationExport::new("delete-me", "0".repeat(64)).unwrap();
+        registry
+            .register_managed_local_app(scope, "1".repeat(64), false)
+            .await
+            .unwrap();
+        registry
+            .expose_managed_local_app("conversation", "delete-me", true)
+            .await
+            .unwrap();
+        assert!(registry
+            .unregister_managed_local_app("delete-me")
+            .await
+            .unwrap());
+        assert!(registry
+            .local_app_exposures("conversation")
+            .await
+            .is_empty());
     }
 }

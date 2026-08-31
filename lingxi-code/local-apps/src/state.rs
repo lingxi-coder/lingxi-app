@@ -10,8 +10,7 @@
 use crate::error::AppError;
 use crate::storage;
 use crate::types::{
-    AppRecord, AppRuntimeMode, AppRuntimeRecord, AppRuntimeState, AppWorkflowState,
-    APPS_SCHEMA_VERSION,
+    AppRecord, AppRuntimeMode, AppRuntimeRecord, AppRuntimeState, APPS_SCHEMA_VERSION,
 };
 
 /// True iff `from -> to` is one of the legal runtime transitions:
@@ -103,7 +102,6 @@ impl AppState {
                 init_session_id: None,
                 created_at_ms: now_ms,
                 updated_at_ms: now_ms,
-                workflow_state: AppWorkflowState::Draft,
                 conversation_id,
                 workspace_rel,
                 // Every direct caller of this constructor (seed/test
@@ -189,9 +187,8 @@ mod tests {
     }
 
     #[test]
-    fn a_new_app_starts_in_draft_with_a_stopped_runtime() {
+    fn a_new_app_starts_with_a_stopped_runtime() {
         let a = app();
-        assert_eq!(a.record.workflow_state, AppWorkflowState::Draft);
         assert_eq!(a.record.created_at_ms, 10);
         assert_eq!(a.record.updated_at_ms, 10);
         assert!(a.record.git_enabled, "git is on by default");
@@ -214,7 +211,6 @@ mod tests {
         );
         assert!(!a.record.git_enabled);
         assert_eq!(a.record.conversation_id.as_deref(), Some("conv-1"));
-        assert_eq!(a.record.workflow_state, AppWorkflowState::Draft);
     }
 
     #[test]

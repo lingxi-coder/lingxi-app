@@ -13,6 +13,7 @@ enum VoiceInteractionMode: Equatable {
 }
 
 enum VoiceInteractionPhase: Equatable {
+    case requestingPermission
     case configurationRequired
     case listening
     case recognizing
@@ -502,6 +503,7 @@ final class VoiceInteractionController {
     private let speechPlayer: any VoiceSpeechPlaying
     private let bargeInRecognizer: (any VoiceBargeInRecognizing)?
     private let readinessOverride: (@MainActor () -> VoiceConfigurationReadiness)?
+    private let permissionRequester: @MainActor () async -> Void
     private let loopDelay: Duration
     private let flowSilenceInterval: Duration
     private var source: (any ConversationSource)?
@@ -526,10 +528,12 @@ final class VoiceInteractionController {
 
     init() {
         voiceCapture = VoiceCapture()
-        capability = VoiceCapabilityModel()
+        let capability = VoiceCapabilityModel()
+        self.capability = capability
         speechPlayer = SystemVoiceSpeechPlayer()
         bargeInRecognizer = VoiceBargeInRecognizer()
         readinessOverride = nil
+        permissionRequester = { await capability.requestPermissions() }
         loopDelay = .milliseconds(350)
         flowSilenceInterval = .milliseconds(1_200)
     }
@@ -540,6 +544,7 @@ final class VoiceInteractionController {
         speechPlayer: any VoiceSpeechPlaying,
         bargeInRecognizer: (any VoiceBargeInRecognizing)? = nil,
         readinessOverride: (@MainActor () -> VoiceConfigurationReadiness)? = nil,
+        permissionRequester: (@MainActor () async -> Void)? = nil,
         loopDelay: Duration = .milliseconds(350),
         flowSilenceInterval: Duration = .milliseconds(1_200)
     ) {
@@ -548,6 +553,9 @@ final class VoiceInteractionController {
         self.speechPlayer = speechPlayer
         self.bargeInRecognizer = bargeInRecognizer
         self.readinessOverride = readinessOverride
+        self.permissionRequester = permissionRequester ?? {
+            await capability.requestPermissions()
+        }
         self.loopDelay = loopDelay
         self.flowSilenceInterval = flowSilenceInterval
     }
@@ -561,12 +569,13 @@ final class VoiceInteractionController {
         case .thinking: return .thinking
         case .speaking: return .speaking
         case .interrupting: return .listening
-        case .configurationRequired, .paused, .failed: return .idle
+        case .requestingPermission, .configurationRequired, .paused, .failed: return .idle
         }
     }
 
     var statusTitle: String {
         switch phase {
+        case .requestingPermission: return String(localized: "voice_waiting_permission")
         case .configurationRequired: return String(localized: "voice_status_config_required")
         case .listening: return String(localized: "voice_status_listening")
         case .recognizing: return String(localized: "voice_status_recognizing")
@@ -581,6 +590,7 @@ final class VoiceInteractionController {
     var statusDetail: String {
         if let detailOverride, !detailOverride.isEmpty { return detailOverride }
         switch phase {
+        case .requestingPermission: return String(localized: "voice_needs_permission_setup")
         case .configurationRequired:
             guard let mode else { return String(localized: "voice_detail_config_required_default") }
             return configurationMessage(for: mode)
@@ -600,7 +610,7 @@ final class VoiceInteractionController {
         case .listening, .recognizing, .interrupting: return Color(okl: 0.72, 0.18, 150)
         case .speaking: return Color(okl: 0.75, 0.19, 300)
         case .configurationRequired, .failed: return Color(okl: 0.75, 0.18, 50)
-        case .thinking, .paused: return Color(okl: 0.70, 0.16, 260)
+        case .requestingPermission, .thinking, .paused: return Color(okl: 0.70, 0.16, 260)
         }
     }
 
@@ -620,10 +630,11 @@ final class VoiceInteractionController {
 
     func startDictation(onTranscript: @escaping (String) -> Void) {
         guard mode != .flow else { return }
+        guard phase != .requestingPermission else { return }
         beginOperation(mode: .dictation)
         dictationCompletion = onTranscript
         guard currentReadiness.isReadyForDictation else {
-            requireConfiguration(for: .dictation)
+            recoverUnavailablePermissionsOrRequireConfiguration(for: .dictation)
             return
         }
         scheduleListening()
@@ -635,7 +646,7 @@ final class VoiceInteractionController {
         beginOperation(mode: .flow)
         self.source = source
         guard currentReadiness.isReadyForFlow else {
-            requireConfiguration(for: .flow)
+            recoverUnavailablePermissionsOrRequireConfiguration(for: .flow)
             return
         }
         guard !source.model.streaming,
@@ -649,6 +660,10 @@ final class VoiceInteractionController {
     }
 
     func finishListening() {
+        if phase == .requestingPermission, mode == .dictation {
+            close()
+            return
+        }
         guard phase == .listening else { return }
         transition(to: .recognizing)
         voiceCapture.finish()
@@ -667,7 +682,7 @@ final class VoiceInteractionController {
             cancelFlowTurnAndRelisten()
         case .paused, .failed:
             retry()
-        case .configurationRequired, .recognizing, .interrupting:
+        case .requestingPermission, .configurationRequired, .recognizing, .interrupting:
             break
         }
     }
@@ -680,7 +695,7 @@ final class VoiceInteractionController {
             ? currentReadiness.isReadyForFlow
             : currentReadiness.isReadyForDictation
         guard ready else {
-            requireConfiguration(for: mode)
+            recoverUnavailablePermissionsOrRequireConfiguration(for: mode)
             return
         }
         if mode == .flow,
@@ -866,6 +881,43 @@ final class VoiceInteractionController {
         resumeAfterConfiguration = true
         detailOverride = configurationMessage(for: mode)
         transition(to: .configurationRequired)
+    }
+
+    private func recoverUnavailablePermissionsOrRequireConfiguration(
+        for mode: VoiceInteractionMode
+    ) {
+        let hasUndeterminedPermission = currentReadiness.issues.contains { issue in
+            issue.kind == .permissionUndetermined
+                && (issue.component == .speech || issue.component == .microphone)
+        }
+        guard hasUndeterminedPermission else {
+            requireConfiguration(for: mode)
+            return
+        }
+
+        detailOverride = String(localized: "voice_needs_permission_setup")
+        transition(to: .requestingPermission)
+        let operation = nextGeneration()
+        transitionTask?.cancel()
+        transitionTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            await self.permissionRequester()
+            guard !Task.isCancelled,
+                  self.generation == operation,
+                  self.mode == mode
+            else { return }
+
+            self.capability.reloadFromDefaults()
+            let isReady = mode == .flow
+                ? self.currentReadiness.isReadyForFlow
+                : self.currentReadiness.isReadyForDictation
+            self.transitionTask = nil
+            if isReady {
+                self.scheduleListening()
+            } else {
+                self.requireConfiguration(for: mode)
+            }
+        }
     }
 
     private func configurationMessage(for mode: VoiceInteractionMode) -> String {

@@ -52,8 +52,8 @@ struct Composer: View {
     var slashCommandsLoaded: Bool = false
     var slashCommandPending: Bool = false
 
-    // PR-4 items 1 & 2: while a turn is in flight the send affordance becomes a
-    // Stop button (interrupt the turn), and we never start an overlapping turn.
+    // A running turn keeps both controls available: Stop interrupts it, while
+    // Send places new text into Rust's canonical pending-message queue.
     var streaming: Bool = false
     var isCancelling: Bool = false
     /// Session transitions and cancellation can temporarily make a draft
@@ -239,23 +239,24 @@ struct Composer: View {
                             .tint(t.text3)
                             .frame(width: 40, height: 40)
                             .accessibilityLabel(isCancelling ? "composer_stopping" : "slash_command_running")
-                    } else if streaming {
-                        // PR-4 item 2: the Stop button replaces Send while a turn
-                        // is in flight — tapping it cancels the in-flight turn.
-                        Button(action: onStop) {
-                            ComposerTurnActionIcon(
-                                systemName: "stop.fill",
-                                symbolSize: 11,
-                                background: t.danger
-                            )
-                        }
-                        .buttonStyle(ComposerActionButtonStyle())
-                        .accessibilityLabel("composer_stop")
-                        .accessibilityIdentifier("composer.stop")
-                    } else if draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                        // Match Android: ordinary recording and Flow Mode are
-                        // distinct controls instead of overloading one tap.
+                    } else {
                         HStack(spacing: 6) {
+                            if streaming {
+                                Button(action: onStop) {
+                                    ComposerTurnActionIcon(
+                                        systemName: "stop.fill",
+                                        symbolSize: 11,
+                                        background: t.danger
+                                    )
+                                }
+                                .buttonStyle(ComposerActionButtonStyle())
+                                .accessibilityLabel("composer_stop")
+                                .accessibilityIdentifier("composer.stop")
+                            }
+
+                            if draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                                // Match Android: ordinary recording and Flow Mode
+                                // remain available while the agent is working.
                             Button(action: handleMicTap) {
                                 if voiceCapturePhase == .finishing {
                                     ProgressView()
@@ -308,21 +309,22 @@ struct Composer: View {
                             .accessibilityLabel("composer_flow_mode")
                             .accessibilityIdentifier("composer.flow")
                             .disabled(!sendEnabled || voiceInteractionMode != nil)
+                            } else {
+                                Button(action: send) {
+                                    ComposerTurnActionIcon(
+                                        systemName: "arrow.up",
+                                        symbolSize: 15,
+                                        background: t.accent
+                                    )
+                                }
+                                .buttonStyle(ComposerActionButtonStyle())
+                                .accessibilityLabel(streaming ? "composer_queue" : "composer_send")
+                                .accessibilityIdentifier("composer.send")
+                                .disabled(!canSubmitDraft)
+                                .opacity(canSubmitDraft ? 1 : 0.45)
+                            }
                         }
                         .opacity(sendEnabled ? 1 : 0.45)
-                    } else {
-                        Button(action: send) {
-                            ComposerTurnActionIcon(
-                                systemName: "arrow.up",
-                                symbolSize: 15,
-                                background: t.accent
-                            )
-                        }
-                        .buttonStyle(ComposerActionButtonStyle())
-                        .accessibilityLabel("composer_send")
-                        .accessibilityIdentifier("composer.send")
-                        .disabled(!canSubmitDraft)
-                        .opacity(canSubmitDraft ? 1 : 0.45)
                     }
                 }
             }
@@ -540,7 +542,14 @@ struct Composer: View {
     }
 
     private var canSubmitDraft: Bool {
-        sendEnabled && !isWaitingForSlashCatalog
+        sendEnabled
+            && !isWaitingForSlashCatalog
+            && !(streaming
+                && slashCommandsLoaded
+                && SlashCommandMatcher.exactCommand(
+                    in: draft.trimmingCharacters(in: .whitespacesAndNewlines),
+                    catalog: slashCommands
+                ) != nil)
     }
 
     private func acceptSlashCommand(_ command: ConversationSlashCommand) {
@@ -553,7 +562,6 @@ struct Composer: View {
     private func send() {
         let trimmed = draft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty,
-              !streaming,
               !isCancelling,
               !slashCommandPending,
               canSubmitDraft

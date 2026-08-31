@@ -278,6 +278,10 @@ def main(argv=None):
         Path(args.android_out) if args.android_out else repo_root / "clients" / "android" / "app" / "src" / "main" / "res"
     )
 
+    if args.check and (args.ios_out or args.android_out):
+        print("error: --check cannot be combined with --ios-out or --android-out", file=sys.stderr)
+        return 1
+
     try:
         if args.check:
             if not args.ios_out and not args.android_out:

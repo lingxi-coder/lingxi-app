@@ -513,14 +513,26 @@ fn local_app_workspace_root(data_root: &std::path::Path, app_id: &str) -> std::p
     data_root.join("apps").join(app_id).join("workspace")
 }
 
-/// Whether this workflow builds a local app and therefore must hold that app's
-/// workspace lease for its whole run.
+/// Whether this workflow run must hold its app's exclusive workspace lease.
 ///
-/// Named rather than inlined so the branch is reachable from a test: the only
-/// other way in is `spawn`, which needs a lease registry, a data root and a
-/// live runtime, so the predicate would otherwise be covered only indirectly.
-fn requires_workspace_lease(workflow_id: &str) -> bool {
-    crate::LOCAL_APP_BUILD_WORKFLOWS.contains(&workflow_id)
+/// Reads the task's typed [`crate::scope::LocalAppWorkflowTaskScope`]
+/// (design §18 Phase -1 step 8 / §8.1) instead of matching `workflow_id`
+/// against this crate's (since-deleted) `LOCAL_APP_BUILD_WORKFLOWS` array: a
+/// `workflow_id` is a string the *caller* supplies when launching a
+/// workflow, so a custom workflow that happens to reuse a real build
+/// workflow's name used to collect the exact same lease. `None` -- no scope
+/// at all -- never requires the lease; only a
+/// `Some` scope whose [`LocalAppWorkflowPurpose`](crate::scope::LocalAppWorkflowPurpose)
+/// is `Build` does (`LocalAppWorkflowTaskScope::requires_workspace_lease`).
+///
+/// `pub(crate)` (not private) so `registry_test.rs` can exercise it directly
+/// alongside [`crate::registry::TaskRegistry::find_nonterminal_local_app_workflows`]
+/// in the same integration test, without needing a full spawn (which needs a
+/// lease registry, a data root and a live runtime).
+pub(crate) fn requires_workspace_lease(
+    scope: Option<&crate::scope::LocalAppWorkflowTaskScope>,
+) -> bool {
+    scope.is_some_and(crate::scope::LocalAppWorkflowTaskScope::requires_workspace_lease)
 }
 
 /// Claude Code `k6a` — the per-run lifetime cap on real `agent()` calls. The
@@ -928,6 +940,18 @@ impl LocalWorkflowHandler {
         self
     }
 
+    /// Composition-test seam for asserting the nested resolver shares the
+    /// host's one live plugin-workflow table.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn shares_plugin_workflows(
+        &self,
+        registry: &Arc<workflow::PluginWorkflowRegistry>,
+    ) -> bool {
+        self.plugin_workflows
+            .as_ref()
+            .is_some_and(|wired| Arc::ptr_eq(wired, registry))
+    }
     /// Attach a [`TaskStatusSink`] so terminal transitions are reported.
     #[must_use]
     pub fn with_status_sink(mut self, sink: Arc<dyn TaskStatusSink>) -> Self {
@@ -2545,10 +2569,8 @@ async fn run_workflow_script_with_live_updates(
 /// Resolve a `workflow()` reference (`{ name }` or `{ scriptPath }`) to a script
 /// source: `scriptPath` is read through the workflow filesystem; `name` resolves
 /// under project `.lingxi/workflows` first, then the user config workflow
-/// directory (`$LINGXI_CONFIG_DIR/workflows` or `~/.lingxi/workflows`), then —
-/// when a plugin-workflow registry is wired (§14) — a plugin's declared/
-/// auto-scanned workflow by its namespaced name (checked LAST, so a project/
-/// user file always wins a name collision).
+/// directory (`$LINGXI_CONFIG_DIR/workflows` or `~/.lingxi/workflows`), then
+/// a wired plugin registry as the final tier.
 async fn resolve_nested_script(
     spec: &Value,
     fs: Option<&Arc<dyn FileSystem>>,
@@ -2629,6 +2651,7 @@ impl Task for LocalWorkflowHandler {
             creator_teammate_name: _,
             creator_team_name: _,
             creator_agent_id: _,
+            scope,
         } = input
         else {
             return Err(TaskError::Internal(
@@ -2640,22 +2663,21 @@ impl Task for LocalWorkflowHandler {
         // workspace. Do this validation before allocating task/spool state so
         // a malformed scope cannot start a prompt-heavy workflow with a
         // generic cwd or leave an orphaned spool file behind.
-        let workspace_lease = if requires_workspace_lease(workflow_id.as_str()) {
-            let app_id = workflow_args
-                .as_deref()
-                .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
-                .and_then(|value| {
-                    value
-                        .get("app_id")
-                        .and_then(serde_json::Value::as_str)
-                        .map(str::to_string)
-                })
-                .filter(|app_id| !app_id.is_empty())
-                .ok_or_else(|| {
-                    TaskError::Internal(format!(
-                        "{workflow_id} requires a non-empty workflow args.app_id"
-                    ))
-                })?;
+        //
+        // `scope` is whatever the Host put on the spawn input -- a value only
+        // a purpose constructor can produce, for an app id the Host resolved
+        // itself. Deriving `app_id` from `workflow_args` here instead --
+        // caller-supplied JSON, exactly like `workflow_id` -- is the exact
+        // vector this migration exists to close (design §8.1: a custom
+        // workflow must get nothing "即使伪造 meta.name 或 args.app_id"), so it
+        // is deliberately NOT restored as a fallback: an unscoped run simply
+        // takes no lease.
+        let workspace_lease = if requires_workspace_lease(scope.as_ref()) {
+            let app_id = scope
+                .as_ref()
+                .expect("requires_workspace_lease(Some(_)) implies scope is Some")
+                .app_id()
+                .to_string();
             let registry = self.workspace_leases.clone().ok_or_else(|| {
                 TaskError::Internal(format!(
                     "{workflow_id} requires a workspace permission lease registry"

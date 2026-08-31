@@ -30,6 +30,14 @@ impl CommandRegistry {
     /// any of its alternate names. Mirrors the TS `findCommand` search over
     /// `name` + `aliases` (`claude-code/src/commands.ts:690`).
     pub fn register_command(&mut self, cmd: SlashCommand) {
+        // Plugin names are qualified namespaces. A later project/user reload
+        // must not replace the live owner behind `plugin:skill`; otherwise a
+        // disk skill can impersonate a verified Plugin until the next boot.
+        if self.commands.get(&cmd.name).is_some_and(|current| {
+            current.source == CommandSource::Plugin && cmd.source != CommandSource::Plugin
+        }) {
+            return;
+        }
         self.index_aliases(&cmd.name, &cmd.aliases);
         self.commands.insert(cmd.name.clone(), cmd);
     }
@@ -187,6 +195,25 @@ impl CommandRegistry {
         self.aliases.retain(|_, target| !names.contains(target));
         names.len()
     }
+
+    /// Remove non-Plugin commands attempting to occupy a reserved Plugin
+    /// namespace. Hosts use this after disk reload so a disabled builtin
+    /// plugin cannot be impersonated by a same-name project skill.
+    pub fn unregister_non_plugin_prefix(&mut self, prefix: &str) -> usize {
+        let names: Vec<String> = self
+            .commands
+            .iter()
+            .filter(|(name, command)| {
+                name.starts_with(prefix) && command.source != CommandSource::Plugin
+            })
+            .map(|(name, _)| name.clone())
+            .collect();
+        for name in &names {
+            self.commands.remove(name);
+        }
+        self.aliases.retain(|_, target| !names.contains(target));
+        names.len()
+    }
 }
 
 impl Default for CommandRegistry {
@@ -293,6 +320,35 @@ mod tests {
         assert!(reg.resolve("rv").is_none());
         assert!(reg.resolve("keep").is_some());
         assert!(reg.resolve("k").is_some());
+    }
+
+    #[test]
+    fn disk_reload_cannot_replace_or_resurrect_a_reserved_plugin_command() {
+        let plugin_id = PluginId::new();
+        let mut plugin = markdown_cmd("lingxi-local-app:frontend-design", vec![]);
+        plugin.source = CommandSource::Plugin;
+        plugin.kind = SlashCommandKind::Plugin {
+            plugin_id,
+            file_path: "verified/SKILL.md".into(),
+            frontmatter: Default::default(),
+            prompt_template: "VERIFIED".into(),
+        };
+        let mut reg = CommandRegistry::new();
+        reg.register_plugin_commands(plugin_id, vec![plugin]);
+
+        let mut decoy = markdown_cmd("lingxi-local-app:frontend-design", vec![]);
+        decoy.loaded_from = Some("skills".into());
+        reg.register_command(decoy.clone());
+        assert_eq!(
+            reg.resolve("lingxi-local-app:frontend-design")
+                .map(|command| command.source),
+            Some(CommandSource::Plugin)
+        );
+
+        reg.unregister_plugin(&plugin_id);
+        reg.register_command(decoy);
+        assert_eq!(reg.unregister_non_plugin_prefix("lingxi-local-app:"), 1);
+        assert!(reg.resolve("lingxi-local-app:frontend-design").is_none());
     }
 
     /// `get_handler` canonicalizes through the aliases map (mirroring `resolve`),

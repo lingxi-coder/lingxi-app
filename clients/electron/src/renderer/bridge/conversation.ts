@@ -7,7 +7,7 @@
  * thin and lets the accumulation be unit-tested in isolation.
  *
  * Mapping (event → RunItem), chosen to reuse the design's existing cards:
- *  - `turn_started`       → `running = true` (drives the composer's thinking
+ *  - `turn_started`       → `running = true` (drives the turn affordances and
  *                           affordance); no item is emitted.
  *  - `text_delta`         → appended to the open assistant `narration` line
  *                           (a new one is opened if none is currently streaming).
@@ -205,7 +205,7 @@ export function beginSlashCommand(state: ConversationState, raw: string): Conver
   if (!trimmed) return state;
   const next = appendUserPrompt(state, trimmed);
   const name = trimmed.split(/\s/, 1)[0] ?? '';
-  // Pre-claim the composer exactly as `appendPendingUserPrompt` does for an
+  // Pre-claim the renderer turn state exactly as `appendPendingUserPrompt` does for an
   // ordinary prompt: most slash commands are display-only and release this
   // in `slash_command_result` below, but a command that expands into a real
   // turn hands ownership of `running` to `turn_started` instead (which also
@@ -218,8 +218,8 @@ export function beginSlashCommand(state: ConversationState, raw: string): Conver
  *
  * Same as {@link beginSlashCommand} except it makes no `running` claim: a
  * local command runs synchronously and never starts a turn, so there is no
- * engine event coming to release the composer. Claiming it here would leave
- * the composer permanently read-only after a bare `/model`.
+ * engine event coming to release the turn state. Claiming it here would leave
+ * the session permanently marked as running after a bare `/model`.
  */
 export function beginLocalSlashCommand(state: ConversationState, raw: string): ConversationState {
   const trimmed = raw.trim();
@@ -241,7 +241,7 @@ export function appendPendingUserPrompt(state: ConversationState, text: string, 
   // command (`/model`, `/permissions`, `/effort`, `/theme`, `/config` with no
   // argument) that never emitted anything to consume it: without this, an
   // unrelated `error` arriving before `turn_started` would find a non-null
-  // name and take the slash release path, unlocking the composer while this
+  // name and take the slash release path, clearing running state while this
   // prompt's turn is still starting.
   return next === state ? state : { ...next, running: true, pendingSlashName: null };
 }
@@ -474,7 +474,7 @@ export function reduceEvent(state: ConversationState, event: ClientEvent): Conve
         // that already reached `turn_started` cleared `pendingSlashName` and
         // handed `running` to the ordinary turn lifecycle, so
         // `bridge-server/src/router.rs:938`'s display-only fallback arm for
-        // an already-started turn must not unlock the composer mid-turn.
+        // an already-started turn must not clear running state mid-turn.
         ...(state.pendingSlashName !== null ? { running: false } : {}),
         pendingSlashName: null,
         openAssistantIndex: -1,
@@ -487,7 +487,7 @@ export function reduceEvent(state: ConversationState, event: ClientEvent): Conve
       // Error is shared by turn failures and unrelated commands/listings. A
       // hard turn failure is followed by an explicit turn_ended from the
       // bridge server, so only that lifecycle event may release the
-      // composer -- EXCEPT a slash command's own outstanding pre-claim,
+      // running turn state -- EXCEPT a slash command's own outstanding pre-claim,
       // which has no turn_ended coming: a transport failure never reaches
       // the engine at all, and `bridge-server/src/router.rs:953` emits this
       // very `error` event instead of a `slash_command_result` when no
@@ -495,7 +495,7 @@ export function reduceEvent(state: ConversationState, event: ClientEvent): Conve
       // terminal event, so it must release the claim itself. Gated on
       // `pendingSlashName` still being set: `turn_started` already clears it
       // for a command that expanded into a real turn, so an ordinary turn's
-      // error handling is unchanged.
+        // error handling is unchanged.
       const releaseSlashClaim = state.pendingSlashName !== null;
       const next = pushError(state, event.message);
       // In-flight tool cards do settle here, because `turn_ended` is exactly

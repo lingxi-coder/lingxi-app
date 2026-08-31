@@ -71,12 +71,17 @@ const UTF8_BOM: char = '\u{feff}';
 ///   `hooks`, `mcpServers`, `lspServers`, `channels`.
 /// - Metadata: `keywords`, `license`, `repository`, `metadata`.
 ///
-/// `name` is required; all other fields are optional. Unknown top-level
-/// fields are silently ignored by serde. Component path fields follow Claude
+/// `name` is required; all other fields are optional. An unrecognized
+/// top-level field never breaks parsing here — it is captured into
+/// [`Self::unknown_fields`], which normal validation
+/// ([`scan_unknown_manifest_fields`]) reports and strict validation
+/// ([`validate_manifest_fields`]) rejects (§19.1 "manifest field / default /
+/// unknown-field / strict validation"). Component path fields follow Claude
 /// Code's field-specific merge rules in [`detect_components`]: commands,
-/// agents, and output styles replace their default directories; skills extend
-/// the default; hooks, MCP, and LSP declarations merge with their conventional
-/// files. Binary: `PluginManifestSchema` in `schemas.ts`.
+/// agents, output styles, and workflows replace their default directories;
+/// skills extend the default; hooks, MCP, and LSP declarations merge with
+/// their conventional files.
+/// Binary: `PluginManifestSchema` in `schemas.ts`.
 #[derive(Debug, Deserialize)]
 struct RawManifest {
     name: String,

@@ -79,6 +79,8 @@ impl std::fmt::Display for AppRuntimeProfileStatus {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct BuildProvenance {
     version: u8,
+    #[serde(rename = "buildId")]
+    build_id: String,
     #[serde(rename = "buildKey")]
     build_key: String,
     #[serde(rename = "runtimeContractSha256")]
@@ -140,9 +142,8 @@ impl LocalAppBuildTarget {
     }
 
     /// The scaffold id reported back to the model. Derived, never spelled at
-    /// the emission site: a hardcoded `"vite-react-static-v1"` told a canvas
-    /// app it was the routed scaffold, and a model that believes it goes
-    /// looking for screens and a router that workspace does not contain.
+    /// the emission site: hardcoding the routed DOM scaffold id told a canvas
+    /// app it owned screens and a router its workspace does not contain.
     pub(crate) fn template_id(self) -> &'static str {
         match self {
             Self::ReactDomR1 => "runtime-profile/react-dom/r1",
@@ -1446,6 +1447,7 @@ fn write_build_provenance(
     let temp = parent.join(format!(".{BUILD_PROVENANCE_FILE}.tmp-{}", now_stamp()));
     let body = serde_json::to_vec_pretty(&BuildProvenance {
         version: BUILD_PROVENANCE_VERSION,
+        build_id: output_sha256.to_string(),
         build_key: build_key.to_string(),
         runtime_contract_sha256: runtime_contract_sha256.to_string(),
         dependency_snapshot_sha256: dependency_snapshot_sha256.to_string(),
@@ -1458,6 +1460,27 @@ fn write_build_provenance(
         let _ = std::fs::remove_file(&temp);
         AppError::Io(format!("publish build provenance: {error}"))
     })
+}
+
+pub(crate) fn active_build_id(layout: &AppLayout) -> Result<Option<String>, AppError> {
+    let build_root = layout.root().join(layout.build_rel(false));
+    let provenance_path = build_provenance_path(&build_root);
+    let body = match std::fs::read_to_string(&provenance_path) {
+        Ok(body) => body,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(AppError::Io(format!("read build receipt: {error}")));
+        }
+    };
+    let provenance: BuildProvenance = serde_json::from_str(&body).map_err(|error| {
+        AppError::StorageCorrupt(format!(
+            "runtime_contract_corrupt: invalid build receipt: {error}"
+        ))
+    })?;
+    if provenance.version != BUILD_PROVENANCE_VERSION {
+        return Ok(None);
+    }
+    Ok(Some(provenance.build_id))
 }
 
 /// Validate only the immutable launch identity and promoted output. This gate
@@ -4152,7 +4175,7 @@ mod tests {
     fn the_locked_bridge_exposes_the_native_wire_contract() {
         let bridge = include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../local-apps/templates/runtime-profiles/react-dom/r1/lib/lingxi-bridge.js"
+            "/../../plugins/lingxi-local-app/assets/templates/react-dom/r1/lib/lingxi-bridge.js"
         ));
         for anchor in [
             "records[].document",
@@ -4205,15 +4228,15 @@ mod tests {
     fn platform_adapter_declares_distinct_phone_and_tablet_presentations() {
         let adapter = include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../local-apps/templates/runtime-profiles/react-dom/r1/lib/platform-adapter.js"
+            "/../../plugins/lingxi-local-app/assets/templates/react-dom/r1/lib/platform-adapter.js"
         ));
         let foundation = include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../local-apps/templates/runtime-profiles/react-dom/r1/styles/foundation.css"
+            "/../../plugins/lingxi-local-app/assets/templates/react-dom/r1/styles/foundation.css"
         ));
         let vite_config = include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../local-apps/templates/runtime-profiles/react-dom/r1/vite.config.mjs"
+            "/../../plugins/lingxi-local-app/assets/templates/react-dom/r1/vite.config.mjs"
         ));
         for marker in [
             "ios:iphone",
@@ -4314,26 +4337,18 @@ mod tests {
         assert_ne!(first, third, "changed source must still invalidate the key");
     }
 
-    /// The lease/delete guards (`tasks`) and the `workflowModel` default
-    /// (`tool-workflow`) each keep their own list of the local-app build
-    /// workflows, because the two crates share no natural home -- their only
-    /// common dependencies are the QuickJS runtime and `traits`.
-    ///
-    /// This crate depends on BOTH, so it is the only place the two can be
-    /// compared. Add a third build workflow to one list and this fails until
-    /// the other knows about it.
-    #[cfg(feature = "uniffi")]
-    #[test]
-    fn local_app_build_workflow_sets_agree() {
-        assert_eq!(
-            tasks::LOCAL_APP_BUILD_WORKFLOWS,
-            tool_workflow::LOCAL_APP_BUILD_WORKFLOWS,
-            "the lease/delete guard list and the workflowModel list must name \
-             the same build workflows"
-        );
-        assert!(
-            tasks::LOCAL_APP_BUILD_WORKFLOWS.contains(&"local-canvas-build"),
-            "the drawn-surface build is a local-app build"
-        );
-    }
+    // `local_app_build_workflow_sets_agree` used to pin
+    // `tasks::LOCAL_APP_BUILD_WORKFLOWS` and
+    // `tool_workflow::LOCAL_APP_BUILD_WORKFLOWS` byte-for-byte equal because
+    // the two crates each kept an independent hand-typed copy of "which
+    // workflows build a local app" and shared no natural home to hold ONE
+    // copy. P-1.9 deleted both arrays: `tasks`'s own guards read a task's
+    // typed `scope::LocalAppWorkflowTaskScope` and never needed a name list
+    // at all (this test was the array's only reader in that crate), and
+    // `tool_workflow` now answers the same question from a typed field on
+    // its own `BuiltinWorkflowDescriptor` (`is_local_app_build`) -- see
+    // `tools/workflow/src/builtins.rs`'s
+    // `local_app_build_is_the_exact_two_build_workflows` for the
+    // single-source-of-truth test this one is replaced by. There is no
+    // second list left anywhere to twin against.
 }

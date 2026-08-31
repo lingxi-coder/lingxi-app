@@ -1,0 +1,86 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://lingxi.local/local-app/use-test-report.schema.json",
+  "title": "UseTestReport (local-app-use-test workflow output)",
+  "$comment": "DESIGN-ONLY, best-effort transcription of design §11.3's field list ('app_id, build_id, runtime profile contract, verification policy, scenario results, render_check, motion_check when required, logs/console/errors, bridge/data roundtrip, evidence handles'). §11.3 gives these as a bare list of nouns, not a JSON/Rust struct, and no Rust type for UseTestReport exists anywhere in this repo (grepped; zero hits). Every field name and type below is this file's inference from that prose plus the closest existing shapes this plugin already has: render_check/motion_check/data_roundtrip are reused BY REFERENCE from qa-report.schema.json, whose own shapes ARE built (lingxi-code/tools/workflow/src/local_app_build_workflow.js:145-237, local_app_canvas_workflow.js:166-239) — reusing them here rather than re-deriving a third shape is a Phase 2 authoring choice, not something §11.3 mandates. scenario_results and evidence_handles have no concrete shape ANYWHERE (not in the design doc, not in code); their entries below are the minimum this schema needed to be checkable and are flagged inferred rather than sourced. Treat every field here as a draft for whoever implements design §18 Phase 4/6's operator/tester pipeline to confirm or replace.",
+  "type": "object",
+  "properties": {
+    "app_id": {
+      "type": "string",
+      "$comment": "DESIGN-ONLY — §11.3 field list."
+    },
+    "build_id": {
+      "type": "string",
+      "$comment": "DESIGN-ONLY — §11.3 field list ('build_id')."
+    },
+    "runtime_profile_contract": {
+      "type": "object",
+      "$comment": "Sub-shape {family, revision, contract_sha256} IS built and validated — lingxi-code/tools/workflow/src/local_app_workflow_core.js:99-134. The top-level field name 'runtime_profile_contract' itself is this file's naming for §11.3's prose 'runtime profile contract'.",
+      "properties": {
+        "family": {
+          "type": "string",
+          "enum": ["react_dom", "canvas_2d", "three_3d", "phaser_2d", "babylon_3d"]
+        },
+        "revision": { "type": "integer", "minimum": 1 },
+        "contract_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+      },
+      "required": ["family", "revision", "contract_sha256"]
+    },
+    "verification_policy": {
+      "type": "string",
+      "enum": ["dom", "canvas_2d", "three_3d", "phaser_2d", "babylon_3d"],
+      "$comment": "DESIGN-ONLY. Design §11.2 names this concept as a Rust enum `LocalAppVerificationPolicy { Dom, Canvas2d, Three3d, Phaser2d, Babylon3d }` that does not exist anywhere in this repo (grepped; zero hits) — it is a design-doc code block, not shipped code. This schema uses the lower_snake family-name spellings that ARE already load-bearing wire values elsewhere in this plugin's build workflows (e.g. runtime_profile.family), rather than the PascalCase Rust variant names, as the more likely eventual wire form; that mapping is this file's guess, not a settled contract."
+    },
+    "scenario_results": {
+      "type": "array",
+      "$comment": "DESIGN-ONLY, inferred shape. §11.3 says only 'scenario results'; item shape below is inferred from the local-app-test skill's scenario concept (a bounded set of {starting state, actions, pass criteria}) at lingxi-code/plugins/lingxi-local-app/skills/local-app-test/SKILL.md, not from any struct.",
+      "items": {
+        "type": "object",
+        "properties": {
+          "name": { "type": "string" },
+          "status": { "type": "string", "enum": ["passed", "failed"] },
+          "evidence": { "type": "string" }
+        },
+        "required": ["name", "status", "evidence"]
+      }
+    },
+    "render_check": {
+      "$ref": "qa-report.schema.json#/properties/render_check",
+      "$comment": "Reused BY REFERENCE from the built render_check shape — see qa-report.schema.json's own provenance comment."
+    },
+    "motion_check": {
+      "$ref": "qa-report.schema.json#/properties/motion_check",
+      "$comment": "'when required' per §11.3 — present only for the canvas family, same conditional-required posture as qa-report.schema.json. Reused BY REFERENCE."
+    },
+    "logs": {
+      "type": "object",
+      "$comment": "DESIGN-ONLY, inferred shape for §11.3's 'logs/console/errors'.",
+      "properties": {
+        "console": { "type": "array", "items": { "type": "string" } },
+        "errors": { "type": "array", "items": { "type": "string" } },
+        "runtime_or_build_logs": { "type": "array", "items": { "type": "string" } }
+      },
+      "required": ["console", "errors", "runtime_or_build_logs"]
+    },
+    "bridge_data_roundtrip": {
+      "$ref": "qa-report.schema.json#/properties/data_roundtrip",
+      "$comment": "§11.3's 'bridge/data roundtrip', reused BY REFERENCE from the built data_roundtrip shape."
+    },
+    "evidence_handles": {
+      "type": "array",
+      "items": { "type": "string" },
+      "$comment": "DESIGN-ONLY, inferred shape for §11.3's 'evidence handles'. Modeled as opaque string handles by analogy with §8.3's validated_selection_handle (an unpredictable Host-issued opaque handle) — no concrete shape for THIS field exists in the design doc or code."
+    }
+  },
+  "required": [
+    "app_id",
+    "build_id",
+    "runtime_profile_contract",
+    "verification_policy",
+    "scenario_results",
+    "render_check",
+    "logs",
+    "bridge_data_roundtrip",
+    "evidence_handles"
+  ]
+}

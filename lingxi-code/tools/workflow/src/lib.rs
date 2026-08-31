@@ -252,9 +252,6 @@ pub fn workflow_source_for_name(
     name: &str,
     plugin_workflows: Option<&workflow::PluginWorkflowRegistry>,
 ) -> Option<&'static str> {
-    if BUILTIN_WORKFLOWS.get(name).is_some() {
-        return Some("built-in");
-    }
     let project = cwd.join(branding::DOT_DIR).join("workflows");
     if WORKFLOW_EXTENSIONS
         .iter()
@@ -274,6 +271,9 @@ pub fn workflow_source_for_name(
     }
     if plugin_workflows.is_some_and(|registry| registry.resolve(name).is_some()) {
         return Some("plugin");
+    }
+    if BUILTIN_WORKFLOWS.get(name).is_some() {
+        return Some("built-in");
     }
     None
 }
@@ -344,25 +344,26 @@ where
             .map_err(|e| WorkflowLaunchError(format!("cannot read scriptPath '{path}': {e}")));
     }
     if let Some(name) = nonempty(&spec.name) {
-        let named = if let Some(descriptor) = BUILTIN_WORKFLOWS.get(&name) {
-            descriptor.script.to_string()
-        } else {
-            let mut resolved = None;
-            for candidate in saved_workflow_candidates(cwd, &name) {
-                if let Ok(src) = read(&path_for_read(&candidate)) {
-                    resolved = Some(src);
-                    break;
-                }
+        let mut resolved = None;
+        for candidate in saved_workflow_candidates(cwd, &name) {
+            if let Ok(src) = read(&path_for_read(&candidate)) {
+                resolved = Some(src);
+                break;
             }
-            if resolved.is_none() {
-                if let Some(path) = plugin_workflows.and_then(|registry| registry.resolve(&name)) {
-                    resolved = read(&path_for_read(&path)).ok();
-                }
+        }
+        if resolved.is_none() {
+            if let Some(path) = plugin_workflows.and_then(|registry| registry.resolve(&name)) {
+                resolved = read(&path_for_read(&path)).ok();
             }
-            resolved.ok_or_else(|| {
-                WorkflowLaunchError(format!("Workflow \"{name}\" not found. Available: (none)"))
-            })?
-        };
+        }
+        if resolved.is_none() {
+            resolved = BUILTIN_WORKFLOWS
+                .get(&name)
+                .map(|descriptor| descriptor.script.to_string());
+        }
+        let named = resolved.ok_or_else(|| {
+            WorkflowLaunchError(format!("Workflow \"{name}\" not found. Available: (none)"))
+        })?;
         return Ok(nonempty(&spec.script).unwrap_or(named));
     }
     if let Some(script) = nonempty(&spec.script) {
@@ -380,82 +381,6 @@ where
     R: Fn(&str) -> std::io::Result<String>,
 {
     resolve_script_at(Path::new(""), spec, read, None)
-}
-
-/// Every workflow that builds a local app and therefore honours the app's
-/// configured `workflowModel`.
-///
-/// A LIST, not a single name: the drawn-surface workflow is a sibling of the
-/// routed one, and keying this on `"local-app-build"` alone would have made a
-/// canvas app silently ignore the model the user picked for it — with nothing
-/// failing, because the default is simply not applied.
-/// ⚠️ `tasks::LOCAL_APP_BUILD_WORKFLOWS` is the twin of this list, for the
-/// lease and delete guards. `engine-mobile`'s
-/// `local_app_build_workflow_sets_agree` pins the two equal.
-pub const LOCAL_APP_BUILD_WORKFLOWS: &[&str] = &["local-app-build", "local-canvas-build"];
-
-/// Apply the configured local-app workflow model as a DEFAULT for the local-app
-/// build workflows. An explicit `args.model` wins and is never overwritten.
-pub fn apply_local_app_build_default_model(
-    cwd: &Path,
-    workflow_name: Option<&str>,
-    args: &mut Option<Value>,
-) -> Result<(), WorkflowLaunchError> {
-    if !workflow_name.is_some_and(|name| LOCAL_APP_BUILD_WORKFLOWS.contains(&name)) {
-        return Ok(());
-    }
-    // `args.model` is the call-site authority. Do not even read app metadata
-    // when it is present: a stale or malformed `.lingxi/app.json` must not
-    // make an otherwise self-contained explicit launch fail.
-    if args
-        .as_ref()
-        .and_then(Value::as_object)
-        .is_some_and(|object| object.contains_key("model"))
-    {
-        return Ok(());
-    }
-    let path = cwd.join(".lingxi").join("app.json");
-    let metadata = match std::fs::read_to_string(&path) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(error) => {
-            return Err(WorkflowLaunchError(format!(
-                "cannot read app workflow model from '{}': {error}",
-                path.display()
-            )));
-        }
-    };
-    let metadata: Value = serde_json::from_str(&metadata).map_err(|error| {
-        WorkflowLaunchError(format!(
-            "cannot parse app workflow model from '{}': {error}",
-            path.display()
-        ))
-    })?;
-    let Some(model) = metadata
-        .pointer("/app/workflowModel")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|model| !model.is_empty())
-    else {
-        return Ok(());
-    };
-    let object = match args {
-        Some(Value::Object(object)) => object,
-        None => {
-            *args = Some(Value::Object(serde_json::Map::new()));
-            args.as_mut()
-                .and_then(Value::as_object_mut)
-                .expect("new object")
-        }
-        Some(_) => {
-            return Err(WorkflowLaunchError(
-                "local-app-build args must be an object so the configured model can be applied"
-                    .to_string(),
-            ));
-        }
-    };
-    object.insert("model".to_string(), Value::String(model.to_string()));
-    Ok(())
 }
 
 // ── Save dynamic workflow (claude-code `eya` / `uQ_`, dialog mode:"save") ─────
@@ -797,6 +722,19 @@ impl WorkflowTool {
     ) -> Self {
         self.plugin_workflows = Some(registry);
         self
+    }
+
+    /// Composition-test seam for asserting registry identity across the
+    /// manager, tool, launcher, and nested resolver.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn shares_plugin_workflows(
+        &self,
+        registry: &Arc<workflow::PluginWorkflowRegistry>,
+    ) -> bool {
+        self.plugin_workflows
+            .as_ref()
+            .is_some_and(|wired| Arc::ptr_eq(wired, registry))
     }
 
     fn current_cwd(&self) -> PathBuf {
@@ -1336,8 +1274,10 @@ impl Tool for WorkflowTool {
             ));
         }
 
-        // errorCode 1 — script resolution (sub-errors 1a–1f, byte-exact per §8.1)
-        // Reproduces the binary's D7a() resolution logic with exact error strings.
+        // errorCode 1 — selector/path shape. Content resolution is deliberately
+        // not part of validate_input: the dispatcher invokes this method before
+        // permission checks, so reading a caller-selected script here would
+        // bypass the `Read` policy and could leak file bytes/errors.
         let s = |k: &str| input.get(k).and_then(Value::as_str).map(str::to_string);
         let script_path = s("scriptPath").filter(|v| !v.is_empty());
         let script = s("script").filter(|v| !v.is_empty());
@@ -1444,6 +1384,14 @@ impl Tool for WorkflowTool {
                     };
                     return Err(ValidationError(msg));
                 }
+            }
+        } else if let Some(name) = name {
+            // Named workflows are resolved and validated by the launcher after
+            // permission. Keep this branch intentionally I/O-free.
+            if name.contains('\0') {
+                return Err(ValidationError(
+                    "workflow name contains a NUL character".into(),
+                ));
             }
         }
 
@@ -1764,6 +1712,36 @@ mod tests {
     }
 
     #[test]
+    fn plugin_workflow_registry_reaches_resolver_and_source_telemetry() {
+        let cwd = unique_temp_path("plugin-resolver");
+        std::fs::create_dir_all(&cwd).expect("create resolver cwd");
+        let script_path = cwd.join("plugin-workflow.js");
+        std::fs::write(&script_path, VALID_SCRIPT).expect("write plugin workflow");
+        let registry = workflow::PluginWorkflowRegistry::new();
+        registry.register(vec![workflow::PluginWorkflowEntry {
+            name: "acme:review".to_string(),
+            script_path: script_path.clone(),
+        }]);
+
+        let resolved = resolve_script_at(
+            &cwd,
+            &WorkflowLaunchSpec {
+                name: Some("acme:review".to_string()),
+                ..Default::default()
+            },
+            |path| std::fs::read_to_string(path),
+            Some(&registry),
+        )
+        .expect("plugin workflow name must resolve");
+        assert_eq!(resolved, VALID_SCRIPT);
+        assert_eq!(
+            workflow_source_for_name(&cwd, "acme:review", Some(&registry)),
+            Some("plugin")
+        );
+        let _ = std::fs::remove_dir_all(cwd);
+    }
+
+    #[test]
     fn max_result_size_is_100000() {
         assert_eq!(tool(None).max_result_size_chars(), 100000);
     }
@@ -1830,7 +1808,7 @@ mod tests {
     }
 
     #[test]
-    fn builtin_name_cannot_be_shadowed_by_project_workflow() {
+    fn saved_workflow_shadows_builtin_name() {
         let read = |path: &str| {
             if path == ".lingxi/workflows/deep-research.js" {
                 Ok("MALICIOUS_PROJECT_OVERRIDE".to_string())
@@ -1846,8 +1824,7 @@ mod tests {
             read,
         )
         .expect("built-in resolves");
-        assert!(resolved.contains("const VOTES_PER_CLAIM = 3"));
-        assert!(!resolved.contains("MALICIOUS_PROJECT_OVERRIDE"));
+        assert_eq!(resolved, "MALICIOUS_PROJECT_OVERRIDE");
     }
 
     #[test]
@@ -1856,54 +1833,6 @@ mod tests {
             .list_available_workflow_names()
             .expect("built-ins");
         assert!(names.split(", ").any(|name| name == "deep-research"));
-    }
-
-    #[test]
-    fn explicit_local_app_model_bypasses_malformed_app_metadata() {
-        let cwd = unique_temp_path("explicit-model-malformed-metadata");
-        std::fs::create_dir_all(cwd.join(".lingxi")).expect("create app metadata dir");
-        std::fs::write(cwd.join(".lingxi/app.json"), b"{not-json")
-            .expect("write malformed app metadata");
-        let mut args = Some(serde_json::json!({
-            "model": "deepseek::deepseek-chat",
-            "app_id": "demo"
-        }));
-
-        apply_local_app_build_default_model(&cwd, Some("local-app-build"), &mut args)
-            .expect("an explicit model must not parse app metadata");
-
-        assert_eq!(
-            args,
-            Some(serde_json::json!({
-                "model": "deepseek::deepseek-chat",
-                "app_id": "demo"
-            }))
-        );
-        let _ = std::fs::remove_dir_all(cwd);
-    }
-
-    #[test]
-    fn local_app_metadata_model_remains_the_default_without_an_explicit_model() {
-        let cwd = unique_temp_path("metadata-default-model");
-        std::fs::create_dir_all(cwd.join(".lingxi")).expect("create app metadata dir");
-        std::fs::write(
-            cwd.join(".lingxi/app.json"),
-            br#"{"app":{"workflowModel":"deepseek::deepseek-chat"}}"#,
-        )
-        .expect("write app metadata");
-        let mut args = Some(serde_json::json!({"app_id": "demo"}));
-
-        apply_local_app_build_default_model(&cwd, Some("local-app-build"), &mut args)
-            .expect("metadata default applies");
-
-        assert_eq!(
-            args,
-            Some(serde_json::json!({
-                "app_id": "demo",
-                "model": "deepseek::deepseek-chat"
-            }))
-        );
-        let _ = std::fs::remove_dir_all(cwd);
     }
 
     #[test]
@@ -2653,7 +2582,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn builtin_validation_cannot_be_blocked_by_project_shadow() {
+    async fn saved_shadow_is_validated_before_builtin() {
         let t = tool(None);
         let ctx = tool_api::test_support::fresh_ctx();
         let _guard = ENV_LOCK.lock().unwrap();
@@ -2674,7 +2603,72 @@ mod tests {
         } else {
             let _ = std::fs::remove_file(&shadow);
         }
-        result.expect("immutable built-in must validate independently of project shadow");
+        result.expect("script content is validated by the post-authorization launcher");
+    }
+
+    #[tokio::test]
+    async fn saved_plugin_builtin_precedence_is_identical_across_all_tool_paths() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        std::env::remove_var("LINGXI_DISABLE_WORKFLOWS");
+        let cwd = unique_temp_path("three-tier-precedence");
+        let saved_dir = cwd.join(branding::DOT_DIR).join("workflows");
+        std::fs::create_dir_all(&saved_dir).unwrap();
+        let saved_path = saved_dir.join("deep-research.js");
+        std::fs::write(&saved_path, "invalid saved workflow").unwrap();
+        let plugin_path = cwd.join("plugin.js");
+        std::fs::write(&plugin_path, "invalid plugin workflow").unwrap();
+
+        let registry = Arc::new(workflow::PluginWorkflowRegistry::new());
+        registry.register(vec![workflow::PluginWorkflowEntry {
+            name: "deep-research".to_string(),
+            script_path: plugin_path,
+        }]);
+        let spec = WorkflowLaunchSpec {
+            name: Some("deep-research".to_string()),
+            ..Default::default()
+        };
+        let resolve = || {
+            resolve_script_at(
+                &cwd,
+                &spec,
+                |path| std::fs::read_to_string(path),
+                Some(registry.as_ref()),
+            )
+        };
+        let tool = WorkflowTool::new(None)
+            .with_current_cwd(Arc::new(std::sync::Mutex::new(cwd.clone())))
+            .with_plugin_workflows(registry.clone());
+        let ctx = tool_api::test_support::fresh_ctx();
+
+        assert_eq!(resolve().unwrap(), "invalid saved workflow");
+        assert_eq!(
+            workflow_source_for_name(&cwd, "deep-research", Some(registry.as_ref())),
+            Some("projectSettings")
+        );
+        tool.validate_input(&json!({"name": "deep-research"}), &ctx)
+            .await
+            .expect("named workflow validation must not read the saved winner");
+
+        std::fs::remove_file(&saved_path).unwrap();
+        assert_eq!(resolve().unwrap(), "invalid plugin workflow");
+        assert_eq!(
+            workflow_source_for_name(&cwd, "deep-research", Some(registry.as_ref())),
+            Some("plugin")
+        );
+        tool.validate_input(&json!({"name": "deep-research"}), &ctx)
+            .await
+            .expect("named workflow validation must not read the plugin winner");
+
+        registry.unregister(&["deep-research".to_string()]);
+        assert!(resolve().unwrap().contains("const VOTES_PER_CLAIM = 3"));
+        assert_eq!(
+            workflow_source_for_name(&cwd, "deep-research", Some(registry.as_ref())),
+            Some("built-in")
+        );
+        tool.validate_input(&json!({"name": "deep-research"}), &ctx)
+            .await
+            .expect("builtin is the final fallback");
+        let _ = std::fs::remove_dir_all(cwd);
     }
 
     #[tokio::test]

@@ -1,6 +1,7 @@
 package com.lingxi.code.localapps
 
 import com.lingxi.code.bindings.AppAuthorizationDecisionDto
+import com.lingxi.code.bindings.AppAgentProfileProposalDto
 import com.lingxi.code.bindings.AppBridgeResponseDto
 import com.lingxi.code.bindings.AppCapabilityKindDto
 import com.lingxi.code.bindings.AppCreateModeDto
@@ -15,7 +16,6 @@ import com.lingxi.code.bindings.AppRecordDto
 import com.lingxi.code.bindings.AppRuntimeProfileDto
 import com.lingxi.code.bindings.AppRuntimeProfileOptionDto
 import com.lingxi.code.bindings.AppRuntimeProfilePackageDto
-import com.lingxi.code.bindings.AppRuntimeProfileSelectionRequestDto
 import com.lingxi.code.bindings.AppRuntimeProfileStatusDto
 import com.lingxi.code.bindings.AppRuntimeDetailsDto
 import com.lingxi.code.bindings.AppRuntimeStateDto
@@ -29,6 +29,19 @@ import com.lingxi.code.bindings.AppWorkflowStateDto
 import com.lingxi.code.bindings.ClientCommand
 import com.lingxi.code.bindings.ClientEvent
 import com.lingxi.code.bindings.AppEventDto
+import com.lingxi.code.bindings.LocalAppCreateConfirmationRequestDto
+import com.lingxi.code.bindings.LocalAppGateStatusDto
+import com.lingxi.code.bindings.LocalAppMcpProposalApprovalRequestDto
+import com.lingxi.code.bindings.LocalAppMcpToolChangeKindDto
+import com.lingxi.code.bindings.LocalAppMcpToolDiffDto
+import com.lingxi.code.bindings.LocalAppMcpToolFieldDto
+import com.lingxi.code.bindings.LocalAppMcpToolSurfaceDto
+import com.lingxi.code.bindings.LocalAppReceiptStatusDto
+import com.lingxi.code.bindings.LocalAppRejectedCandidateDto
+import com.lingxi.code.bindings.LocalAppTemplateSummaryDto
+import com.lingxi.code.bindings.LocalAppVerificationStatusDto
+import com.lingxi.code.bindings.LocalAppVerificationSummaryDto
+import com.lingxi.code.bindings.PluginCommandDto
 import com.lingxi.code.conversation.ConversationSource
 import com.lingxi.code.localapps.widget.LocalAppWidgetSnapshotSync
 import com.lingxi.code.conversation.ReplyEvent
@@ -1047,7 +1060,7 @@ class LocalAppsViewModelTest {
     }
 
     @Test
-    fun `a workflow change event moves an app between draft and ready`() = runTest {
+    fun `a workflow change event moves an app between draft and published unverified`() = runTest {
         Dispatchers.setMain(StandardTestDispatcher(testScheduler))
         try {
             val source = RecordingSource()
@@ -1060,9 +1073,307 @@ class LocalAppsViewModelTest {
             runCurrent()
             assertEquals(LocalAppWorkflow.Draft, viewModel.uiState.value.apps.single().workflow)
 
-            source.emit(ClientEvent.AppWorkflowChanged(APP_ID, AppWorkflowStateDto.READY, detail = null))
+            source.emit(ClientEvent.AppWorkflowChanged(APP_ID, AppWorkflowStateDto.PUBLISHED_UNVERIFIED, detail = null))
             runCurrent()
-            assertEquals(LocalAppWorkflow.Ready, viewModel.uiState.value.apps.single().workflow)
+            assertEquals(LocalAppWorkflow.PublishedUnverified, viewModel.uiState.value.apps.single().workflow)
+        } finally {
+            releaseMain()
+        }
+    }
+
+    @Test
+    fun `a newer profile proposal supersedes the current approval sheet for the same app`() = runTest {
+        Dispatchers.setMain(StandardTestDispatcher(testScheduler))
+        try {
+            val source = RecordingSource()
+            val viewModel = LocalAppsViewModel(
+                sourceFlow = MutableStateFlow<ConversationSource>(source),
+                distributionChannel = "store",
+            )
+            runCurrent()
+
+            source.emit(
+                ClientEvent.AppEvent(
+                    AppEventDto.AppProfileProposal(
+                        AppAgentProfileProposalDto(
+                            appId = APP_ID,
+                            approvalToken = "token-1",
+                            baseRevision = 2u,
+                            currentRevision = 3u,
+                            instructions = "first instructions",
+                            reason = "first reason",
+                        ),
+                    ),
+                ),
+            )
+            runCurrent()
+            val first = viewModel.uiState.value.pendingApprovalSheet as? LocalAppProfileApprovalSheet
+                ?: throw AssertionError("first profile proposal must surface as the pending approval sheet")
+            assertEquals("token-1", first.receiptId)
+
+            source.emit(
+                ClientEvent.AppEvent(
+                    AppEventDto.AppProfileProposal(
+                        AppAgentProfileProposalDto(
+                            appId = APP_ID,
+                            approvalToken = "token-2",
+                            baseRevision = 3u,
+                            currentRevision = 4u,
+                            instructions = "second instructions",
+                            reason = "second reason",
+                        ),
+                    ),
+                ),
+            )
+            runCurrent()
+
+            val current = viewModel.uiState.value.pendingApprovalSheet as? LocalAppProfileApprovalSheet
+                ?: throw AssertionError("replacement profile proposal must remain visible")
+            assertEquals("token-2", current.receiptId)
+            assertEquals("second instructions", current.instructions)
+            assertEquals("second reason", current.reason)
+            val reject = source.commands.filterIsInstance<ClientCommand.ResolveAppProfileProposal>().single()
+            assertEquals(APP_ID, reject.appId)
+            assertEquals("token-1", reject.approvalToken)
+            assertFalse(reject.approved)
+        } finally {
+            releaseMain()
+        }
+    }
+
+    @Test
+    fun `create confirmation events map to the approval sheet and approve emits PluginCommand`() = runTest {
+        Dispatchers.setMain(StandardTestDispatcher(testScheduler))
+        try {
+            val source = RecordingSource()
+            val viewModel = LocalAppsViewModel(
+                sourceFlow = MutableStateFlow<ConversationSource>(source),
+                distributionChannel = "store",
+            )
+            runCurrent()
+
+            source.emit(
+                ClientEvent.AppEvent(
+                    AppEventDto.CreateConfirmationRequested(
+                        LocalAppCreateConfirmationRequestDto(
+                            requestId = "create-1",
+                            appId = APP_ID,
+                            name = "客户跟进",
+                            brief = "记录客户跟进情况",
+                            selectedTemplate = LocalAppTemplateSummaryDto(
+                                templateId = "template.crm",
+                                surface = AppSurfaceDto.DOM,
+                                summary = "CRM board",
+                            ),
+                            runtimeProfile = AppRuntimeProfileOptionDto(
+                                family = AppRuntimeProfileDto.REACT_DOM,
+                                revision = 2u,
+                                contractSha256 = "contract-1",
+                                surface = AppSurfaceDto.DOM,
+                                corePackages = listOf(AppRuntimeProfilePackageDto("react", "19.1.1")),
+                                cacheStatus = "bundled",
+                                downloadStatus = "not_needed",
+                                available = true,
+                                reason = null,
+                            ),
+                            reason = "Best match for CRM workflows",
+                            rejected = listOf(
+                                LocalAppRejectedCandidateDto("template.simple", "Too little structure"),
+                            ),
+                            initialTools = listOf(
+                                LocalAppMcpToolSurfaceDto(
+                                    name = "crm.search",
+                                    title = "Search records",
+                                    description = "Find CRM rows",
+                                    inputSchemaJson = "{}",
+                                    outputSchemaJson = "{}",
+                                    annotationsJson = "{\"readOnly\":true}",
+                                    executionJson = "{\"runner\":\"local\"}",
+                                    visibleMetaJson = "{\"kind\":\"search\"}",
+                                    semanticFlowJson = "{\"flow\":\"search\"}",
+                                    permissionCeiling = "allow_session",
+                                ),
+                            ),
+                            requiredGates = listOf(
+                                LocalAppGateStatusDto(
+                                    gateId = "ui-smoke",
+                                    label = "UI smoke",
+                                    status = LocalAppVerificationStatusDto.PENDING,
+                                    available = true,
+                                    detail = "queued",
+                                ),
+                            ),
+                            receipt = receiptStatus("receipt-create", "create-run"),
+                        ),
+                    ),
+                ),
+            )
+            runCurrent()
+
+            val pending = viewModel.uiState.value.pendingApprovalSheet as? LocalAppCreateApprovalSheet
+                ?: throw AssertionError("create confirmation must surface as the pending approval sheet")
+            assertEquals("create-1", pending.requestId)
+            assertEquals("receipt-create", pending.receiptId)
+            assertEquals("CRM board", pending.templateName)
+            assertEquals(LocalAppRuntimeProfileFamily.ReactDom, pending.runtimeProfile.family)
+
+            viewModel.onAction(LocalAppsAction.ResolveApprovalSheet(true))
+            runCurrent()
+
+            val command = source.commands.last() as? ClientCommand.PluginCommand
+                ?: throw AssertionError("approving the create confirmation must emit PluginCommand")
+            val resolve = command.command as? PluginCommandDto.ResolveCreateConfirmation
+                ?: throw AssertionError("approval must resolve the create confirmation request")
+            assertEquals("create-1", resolve.requestId)
+            assertTrue(resolve.approved)
+            assertNull(viewModel.uiState.value.pendingApprovalSheet)
+        } finally {
+            releaseMain()
+        }
+    }
+
+    @Test
+    fun `mcp proposal events map to the approval sheet and dismiss rejects via PluginCommand`() = runTest {
+        Dispatchers.setMain(StandardTestDispatcher(testScheduler))
+        try {
+            val source = RecordingSource()
+            val viewModel = LocalAppsViewModel(
+                sourceFlow = MutableStateFlow<ConversationSource>(source),
+                distributionChannel = "store",
+            )
+            runCurrent()
+
+            source.emit(
+                ClientEvent.AppEvent(
+                    AppEventDto.McpProposalApprovalRequested(
+                        LocalAppMcpProposalApprovalRequestDto(
+                            requestId = "mcp-1",
+                            appId = APP_ID,
+                            workflowRunId = "wf-1",
+                            summary = "Add searchable CRM tools",
+                            proposalSha256 = "proposal-1",
+                            approvalContractSha256 = "approval-1",
+                            toolSurfaceSha256 = "surface-1",
+                            toolDiffs = listOf(
+                                LocalAppMcpToolDiffDto(
+                                    kind = LocalAppMcpToolChangeKindDto.CHANGED,
+                                    name = "crm.search",
+                                    before = LocalAppMcpToolSurfaceDto(
+                                        name = "crm.search",
+                                        title = "Search",
+                                        description = "Find rows",
+                                        inputSchemaJson = "{\"old\":true}",
+                                        outputSchemaJson = null,
+                                        annotationsJson = null,
+                                        executionJson = null,
+                                        visibleMetaJson = null,
+                                        semanticFlowJson = "{\"old\":true}",
+                                        permissionCeiling = "allow_once",
+                                    ),
+                                    after = LocalAppMcpToolSurfaceDto(
+                                        name = "crm.search",
+                                        title = "Search",
+                                        description = "Find rows quickly",
+                                        inputSchemaJson = "{\"new\":true}",
+                                        outputSchemaJson = "{\"items\":[]}",
+                                        annotationsJson = "{\"readOnly\":true}",
+                                        executionJson = "{\"runner\":\"local\"}",
+                                        visibleMetaJson = "{\"kind\":\"search\"}",
+                                        semanticFlowJson = "{\"new\":true}",
+                                        permissionCeiling = "allow_session",
+                                    ),
+                                    changedFields = listOf(
+                                        LocalAppMcpToolFieldDto.DESCRIPTION,
+                                        LocalAppMcpToolFieldDto.INPUT_SCHEMA,
+                                        LocalAppMcpToolFieldDto.OUTPUT_SCHEMA,
+                                        LocalAppMcpToolFieldDto.ANNOTATIONS,
+                                        LocalAppMcpToolFieldDto.EXECUTION,
+                                        LocalAppMcpToolFieldDto.VISIBLE_META,
+                                        LocalAppMcpToolFieldDto.SEMANTIC_FLOW,
+                                        LocalAppMcpToolFieldDto.PERMISSION_CEILING,
+                                    ),
+                                ),
+                            ),
+                            requiredFlowChanges = listOf("Publish the new search result card"),
+                            excludedCapabilities = listOf("write access"),
+                            pendingGates = listOf(
+                                LocalAppGateStatusDto(
+                                    gateId = "mcp-verify",
+                                    label = "MCP verify",
+                                    status = LocalAppVerificationStatusDto.PENDING,
+                                    available = true,
+                                    detail = "waiting",
+                                ),
+                            ),
+                            receipt = receiptStatus("receipt-mcp", "mcp-run"),
+                        ),
+                    ),
+                ),
+            )
+            runCurrent()
+
+            val pending = viewModel.uiState.value.pendingApprovalSheet as? LocalAppMcpProposalApprovalSheet
+                ?: throw AssertionError("MCP proposal must surface as the pending approval sheet")
+            assertEquals("mcp-1", pending.requestId)
+            assertEquals("Add searchable CRM tools", pending.summary)
+            assertEquals(1, pending.toolDiffs.size)
+            assertEquals(
+                listOf(LocalAppApprovalToolField.Description, LocalAppApprovalToolField.InputSchema),
+                pending.toolDiffs.single().changedFields.take(2),
+            )
+
+            viewModel.onAction(LocalAppsAction.ResolveApprovalSheet(false))
+            runCurrent()
+
+            val command = source.commands.last() as? ClientCommand.PluginCommand
+                ?: throw AssertionError("rejecting the MCP proposal must emit PluginCommand")
+            val resolve = command.command as? PluginCommandDto.ResolveMcpProposalApproval
+                ?: throw AssertionError("dismiss must resolve the MCP proposal request")
+            assertEquals("mcp-1", resolve.requestId)
+            assertFalse(resolve.approved)
+            assertNull(viewModel.uiState.value.pendingApprovalSheet)
+        } finally {
+            releaseMain()
+        }
+    }
+
+    @Test
+    fun `verification summary events project workflow and verification badges onto app state`() = runTest {
+        Dispatchers.setMain(StandardTestDispatcher(testScheduler))
+        try {
+            val source = RecordingSource()
+            val viewModel = LocalAppsViewModel(
+                sourceFlow = MutableStateFlow<ConversationSource>(source),
+                distributionChannel = "store",
+            )
+            runCurrent()
+            source.emit(ClientEvent.AppsChanged(listOf(appRecord(workflow = AppWorkflowStateDto.DRAFT))))
+            runCurrent()
+
+            source.emit(
+                ClientEvent.AppEvent(
+                    AppEventDto.VerificationSummaryChanged(
+                        appId = APP_ID,
+                        publicationState = AppWorkflowStateDto.PUBLISHED_VERIFIED,
+                        mcpVerification = LocalAppVerificationSummaryDto(
+                            status = LocalAppVerificationStatusDto.PASSED,
+                            summary = "MCP smoke passed",
+                            code = null,
+                        ),
+                        uiVerification = LocalAppVerificationSummaryDto(
+                            status = LocalAppVerificationStatusDto.PENDING,
+                            summary = "UI run queued",
+                            code = null,
+                        ),
+                    ),
+                ),
+            )
+            runCurrent()
+
+            val app = viewModel.uiState.value.apps.single()
+            assertEquals(LocalAppWorkflow.PublishedVerified, app.workflow)
+            assertEquals(LocalAppVerificationStatus.Passed, app.mcpVerification?.status)
+            assertEquals(LocalAppVerificationStatus.Pending, app.uiVerification?.status)
         } finally {
             releaseMain()
         }
@@ -1199,8 +1510,8 @@ class LocalAppsViewModelTest {
             source.emit(
                 ClientEvent.AppsChanged(
                     listOf(
-                        appRecord(workflow = AppWorkflowStateDto.READY),
-                        appRecord(OTHER_APP_ID, "订单", AppWorkflowStateDto.READY),
+                        appRecord(workflow = AppWorkflowStateDto.PUBLISHED_UNVERIFIED),
+                        appRecord(OTHER_APP_ID, "订单", AppWorkflowStateDto.PUBLISHED_UNVERIFIED),
                     ),
                 ),
             )
@@ -1221,7 +1532,7 @@ class LocalAppsViewModelTest {
                 viewModel.uiState.value.destination,
             )
 
-            source.emit(ClientEvent.AppsChanged(listOf(appRecord(OTHER_APP_ID, "订单", AppWorkflowStateDto.READY))))
+            source.emit(ClientEvent.AppsChanged(listOf(appRecord(OTHER_APP_ID, "订单", AppWorkflowStateDto.PUBLISHED_UNVERIFIED))))
             runCurrent()
 
             assertEquals(LocalAppsDestination.Library, viewModel.uiState.value.destination)
@@ -1261,7 +1572,7 @@ class LocalAppsViewModelTest {
                 distributionChannel = "store",
             )
             runCurrent()
-            source.emit(ClientEvent.AppsChanged(listOf(appRecord(workflow = AppWorkflowStateDto.READY))))
+            source.emit(ClientEvent.AppsChanged(listOf(appRecord(workflow = AppWorkflowStateDto.PUBLISHED_UNVERIFIED))))
             runCurrent()
 
             // Descend from the library onto this app's Details page.
@@ -1319,7 +1630,7 @@ class LocalAppsViewModelTest {
                 distributionChannel = "store",
             )
             runCurrent()
-            source.emit(ClientEvent.AppsChanged(listOf(appRecord(workflow = AppWorkflowStateDto.READY))))
+            source.emit(ClientEvent.AppsChanged(listOf(appRecord(workflow = AppWorkflowStateDto.PUBLISHED_UNVERIFIED))))
             runCurrent()
             assertEquals(LocalAppsDestination.Library, viewModel.uiState.value.destination)
 
@@ -1361,8 +1672,8 @@ class LocalAppsViewModelTest {
             source.emit(
                 ClientEvent.AppsChanged(
                     listOf(
-                        appRecord(workflow = AppWorkflowStateDto.READY),
-                        appRecord(OTHER_APP_ID, "订单", AppWorkflowStateDto.READY),
+                        appRecord(workflow = AppWorkflowStateDto.PUBLISHED_UNVERIFIED),
+                        appRecord(OTHER_APP_ID, "订单", AppWorkflowStateDto.PUBLISHED_UNVERIFIED),
                     ),
                 ),
             )
@@ -1636,9 +1947,9 @@ class LocalAppsViewModelTest {
                         AppCapabilityRequestDto(
                             requestId = "cap-runtime-1",
                             appId = APP_ID,
-                            capability = AppCapabilityKindDto.RUNTIME_PROFILE_SELECTION,
+                            capability = AppCapabilityKindDto.DEPENDENCY_CHANGE,
                             domain = null,
-                            reason = "Choose the runtime profile",
+                            reason = "Review dependency change",
                         ),
                     ),
                 ),
@@ -1662,77 +1973,6 @@ class LocalAppsViewModelTest {
     }
 
     @Test
-    fun `runtime profile selection request returns the chosen family`() = runTest {
-        Dispatchers.setMain(StandardTestDispatcher(testScheduler))
-        try {
-            val source = RecordingSource()
-            val viewModel = LocalAppsViewModel(
-                sourceFlow = MutableStateFlow<ConversationSource>(source),
-                distributionChannel = "full",
-            )
-            runCurrent()
-
-            source.emit(
-                ClientEvent.AppEvent(
-                    AppEventDto.AppRuntimeProfileSelectionRequested(
-                        AppRuntimeProfileSelectionRequestDto(
-                            requestId = "runtime-select-1",
-                            appId = APP_ID,
-                            reason = "Pick the runtime profile before scaffold",
-                            recommendedFamily = AppRuntimeProfileDto.THREE3D,
-                            options = listOf(
-                                AppRuntimeProfileOptionDto(
-                                    family = AppRuntimeProfileDto.THREE3D,
-                                    revision = 1u,
-                                    contractSha256 = "three-contract",
-                                    surface = AppSurfaceDto.CANVAS,
-                                    corePackages = listOf(
-                                        AppRuntimeProfilePackageDto("three", "0.185.1"),
-                                    ),
-                                    cacheStatus = "bundled",
-                                    downloadStatus = "bundled",
-                                    available = true,
-                                    reason = null,
-                                ),
-                                AppRuntimeProfileOptionDto(
-                                    family = AppRuntimeProfileDto.BABYLON3D,
-                                    revision = 1u,
-                                    contractSha256 = "babylon-contract",
-                                    surface = AppSurfaceDto.CANVAS,
-                                    corePackages = listOf(
-                                        AppRuntimeProfilePackageDto("@babylonjs/core", "9.22.1"),
-                                    ),
-                                    cacheStatus = "unavailable",
-                                    downloadStatus = "gated",
-                                    available = false,
-                                    reason = "Pending device validation",
-                                ),
-                            ),
-                        ),
-                    ),
-                ),
-            )
-            runCurrent()
-
-            assertEquals("runtime-select-1", viewModel.uiState.value.pendingRuntimeProfileSelection?.requestId)
-            assertEquals(LocalAppRuntimeProfileFamily.Three3d, viewModel.uiState.value.pendingRuntimeProfileSelection?.recommendedFamily)
-            assertEquals(2, viewModel.uiState.value.pendingRuntimeProfileSelection?.options?.size)
-            assertEquals(false, viewModel.uiState.value.pendingRuntimeProfileSelection?.options?.last()?.available)
-
-            viewModel.onAction(LocalAppsAction.ResolveRuntimeProfileSelection(LocalAppRuntimeProfileFamily.Three3d))
-            runCurrent()
-
-            val resolution = source.commands
-                .filterIsInstance<ClientCommand.ResolveAppRuntimeProfileSelection>()
-                .single()
-            assertEquals("runtime-select-1", resolution.requestId)
-            assertEquals(AppRuntimeProfileDto.THREE3D, resolution.selectedFamily)
-            assertNull(viewModel.uiState.value.pendingRuntimeProfileSelection)
-        } finally {
-            releaseMain()
-        }
-    }
-
     @Test
     fun `app details projects runtime profile status to card and details state`() = runTest {
         Dispatchers.setMain(StandardTestDispatcher(testScheduler))
@@ -1748,7 +1988,7 @@ class LocalAppsViewModelTest {
                 ClientEvent.AppEvent(
                     AppEventDto.AppDetailsChanged(
                         AppDetailsDto(
-                            app = appRecord(id = APP_ID, workflow = AppWorkflowStateDto.READY),
+                            app = appRecord(id = APP_ID, workflow = AppWorkflowStateDto.PUBLISHED_UNVERIFIED),
                             manifest = null,
                             runtimeProfileStatus = AppRuntimeProfileStatusDto.RUNTIME_CONTRACT_CORRUPT,
                             runtime = AppRuntimeDetailsDto(
@@ -2077,6 +2317,21 @@ class LocalAppsViewModelTest {
         initSessionId = "00000000-0000-4000-8000-00000000$id".take(36),
         workspaceRel = "apps/$id/workspace",
         scaffolded = scaffolded,
+    )
+
+    private fun receiptStatus(
+        receiptId: String,
+        workflowRunId: String,
+    ) = LocalAppReceiptStatusDto(
+        receiptId = receiptId,
+        appId = APP_ID,
+        workflowRunId = workflowRunId,
+        approvalContractSha256 = "approval-contract",
+        candidateDigest = "candidate-digest",
+        issuedAtMs = 1u,
+        expiresAtMs = ULong.MAX_VALUE,
+        consumed = false,
+        superseded = false,
     )
 
     private companion object {

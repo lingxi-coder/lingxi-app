@@ -6,7 +6,8 @@
 //! [`crate::error::AppError`]s and the engine synthesizes
 //! `AppOperationFailed { code, message }` from them.
 
-use crate::types::{AppCheckpoint, AppRecord, AppRuntimeRecord, AppWorkflowState};
+use crate::manifest::AppPublicationState;
+use crate::types::{AppCheckpoint, AppRecord, AppRuntimeRecord};
 use async_trait::async_trait;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -43,12 +44,12 @@ pub enum AppEvent {
         /// The updated app record.
         record: AppRecord,
     },
-    /// The workflow state advanced (draft -> ready).
+    /// The derived publication state changed.
     WorkflowChanged {
-        /// App whose workflow advanced.
+        /// App whose publication state changed.
         app_id: String,
-        /// New workflow state.
-        state: AppWorkflowState,
+        /// New publication state.
+        state: AppPublicationState,
         /// Optional human-readable detail (e.g. failure summary).
         detail: Option<String>,
     },

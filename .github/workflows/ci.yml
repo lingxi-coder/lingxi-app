@@ -5,6 +5,17 @@ on:
     branches: [main]
 
 jobs:
+  script-gates:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run every checked-in repository gate
+        working-directory: lingxi-code
+        run: ./scripts/check-all.sh
+      - name: Verify every gate and the trigger chain
+        working-directory: lingxi-code
+        run: python3 scripts/test_gate_triggers.py
+
   compile-check:
     runs-on: ubuntu-latest
     steps:
@@ -172,12 +183,6 @@ jobs:
         # pass can parse the edition2024 WASI manifest. The architectural
         # dependency-graph rules (design §8.1) are a separate step below.
         run: cargo deny check
-      - name: scripts/check-deps.sh (M8 dependency-graph gate)
-        working-directory: lingxi-code
-        # Enforces the composition-root edges (tool independence, platform
-        # isolation, apps-are-leaves, API-crate purity). Pure cargo-metadata +
-        # python3 — no extra toolchain. See scripts/check_deps.py.
-        run: ./scripts/check-deps.sh
       - name: cargo audit
         working-directory: lingxi-code
         run: cargo audit --deny warnings

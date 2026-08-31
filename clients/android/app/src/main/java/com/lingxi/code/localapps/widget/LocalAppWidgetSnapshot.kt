@@ -127,7 +127,8 @@ class AndroidLocalAppWidgetSnapshotSync private constructor(
                     brief = app.brief,
                     workflow = when (app.workflow) {
                         LocalAppWorkflow.Draft -> "draft"
-                        LocalAppWorkflow.Ready -> "ready"
+                        LocalAppWorkflow.PublishedUnverified -> "published_unverified"
+                        LocalAppWorkflow.PublishedVerified -> "published_verified"
                     },
                     runtimeState = when (app.runtime.state) {
                         LocalAppRuntimeState.Stopped -> "stopped"

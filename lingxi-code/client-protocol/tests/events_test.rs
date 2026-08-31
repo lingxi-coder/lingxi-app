@@ -21,9 +21,13 @@ use client_protocol::local_apps::{
     AppCheckpointKindDto, AppDependencyChangeConfirmationRequestDto, AppDependencyChangeDto,
     AppDependencyChangeKindDto, AppErrorCodeDto, AppEventDto, AppRecordDto, AppRuntimeModeDto,
     AppRuntimeProfileDto, AppRuntimeProfileOptionDto, AppRuntimeProfilePackageDto,
-    AppRuntimeProfileSelectionRequestDto, AppRuntimeRecoveryStateDto, AppRuntimeStateDto,
-    AppRuntimeSuspensionReasonDto, AppSurfaceDto, AppUiActionKindDto, AppUiRequestDto,
-    AppWorkflowStateDto,
+    AppRuntimeRecoveryStateDto, AppRuntimeStateDto, AppRuntimeSuspensionReasonDto, AppSurfaceDto,
+    AppUiActionKindDto, AppUiRequestDto, AppWorkflowStateDto, LocalAppCreateConfirmationRequestDto,
+    LocalAppGateStatusDto, LocalAppMcpProposalApprovalRequestDto, LocalAppMcpToolChangeKindDto,
+    LocalAppMcpToolDiffDto, LocalAppMcpToolFieldDto, LocalAppMcpToolSurfaceDto,
+    LocalAppPluginErrorCodeDto, LocalAppReceiptStatusDto, LocalAppRejectedCandidateDto,
+    LocalAppTemplateSummaryDto, LocalAppVerificationStatusDto, LocalAppVerificationSummaryDto,
+    ManagedLocalAppMcpServerDto,
 };
 use client_protocol::message::{MessageBlockDto, MessageDto};
 use client_protocol::permission::PermissionResolutionDto;
@@ -506,13 +510,13 @@ fn apps_changed_round_trips() {
 fn app_workflow_changed_round_trips() {
     let ev = ClientEvent::AppWorkflowChanged {
         app_id: "habits-1a2b".to_string(),
-        state: AppWorkflowStateDto::Ready,
-        detail: Some("build approved".to_string()),
+        state: AppWorkflowStateDto::PublishedUnverified,
+        detail: Some("catalog promoted".to_string()),
     };
     let json = serde_json::to_value(&ev).expect("serialize AppWorkflowChanged");
     assert_eq!(json["type"], "app_workflow_changed");
-    assert_eq!(json["state"], "ready");
-    assert_eq!(json["detail"], "build approved");
+    assert_eq!(json["state"], "published_unverified");
+    assert_eq!(json["detail"], "catalog promoted");
     let back: ClientEvent = serde_json::from_value(json).expect("deserialize AppWorkflowChanged");
     assert_eq!(back, ev);
 
@@ -603,48 +607,6 @@ fn extended_local_app_events_round_trip() {
             },
         },
         ClientEvent::AppEvent {
-            event: AppEventDto::AppRuntimeProfileSelectionRequested {
-                request: AppRuntimeProfileSelectionRequestDto {
-                    request_id: "runtime-1".to_string(),
-                    app_id: "habits-1a2b".to_string(),
-                    reason: "Choose a runtime profile".to_string(),
-                    recommended_family: Some(AppRuntimeProfileDto::ReactDom),
-                    options: vec![
-                        AppRuntimeProfileOptionDto {
-                            family: AppRuntimeProfileDto::ReactDom,
-                            revision: 1,
-                            contract_sha256: "abc123".to_string(),
-                            surface: AppSurfaceDto::Dom,
-                            core_packages: vec![AppRuntimeProfilePackageDto {
-                                name: "react".to_string(),
-                                version: "19.0.0".to_string(),
-                            }],
-                            cache_status: "bundled".to_string(),
-                            download_status: "bundled".to_string(),
-                            available: true,
-                            reason: None,
-                        },
-                        AppRuntimeProfileOptionDto {
-                            family: AppRuntimeProfileDto::Babylon3d,
-                            revision: 1,
-                            contract_sha256:
-                                "a908c3b2ffcf8c61f526238e0325b45125c795ea38406029b99708f2fea86c16"
-                                    .to_string(),
-                            surface: AppSurfaceDto::Canvas,
-                            core_packages: vec![AppRuntimeProfilePackageDto {
-                                name: "@babylonjs/core".to_string(),
-                                version: "9.22.1".to_string(),
-                            }],
-                            cache_status: "unavailable".to_string(),
-                            download_status: "gated".to_string(),
-                            available: false,
-                            reason: Some("Pending device validation".to_string()),
-                        },
-                    ],
-                },
-            },
-        },
-        ClientEvent::AppEvent {
             event: AppEventDto::AppCheckpointsChanged {
                 app_id: "habits-1a2b".to_string(),
                 checkpoints: vec![],
@@ -659,7 +621,8 @@ fn extended_local_app_events_round_trip() {
                     git_enabled: true,
                     created_at_ms: 11,
                     updated_at_ms: 22,
-                    workflow_state: client_protocol::local_apps::AppWorkflowStateDto::Ready,
+                    workflow_state:
+                        client_protocol::local_apps::AppWorkflowStateDto::PublishedUnverified,
                     conversation_id: Some("conv-9".to_string()),
                     init_session_id: Some("init-1".to_string()),
                     workspace_rel: "apps/habits-1a2b/workspace".to_string(),
@@ -677,22 +640,17 @@ fn extended_local_app_events_round_trip() {
         "app_bridge_response",
         "app_ui_request",
         "app_capability_requested",
-        "app_runtime_profile_selection_requested",
         "app_checkpoints_changed",
         "app_record_changed",
     ];
     // One leaf field name per variant, so a renamed FIELD (not just a renamed
     // variant tag) is caught too.
-    let expected_leaves: [(&str, serde_json::Value); 6] = [
+    let expected_leaves: [(&str, serde_json::Value); 5] = [
         ("/event/response/result_json", serde_json::Value::from("[]")),
         ("/event/request/action", serde_json::Value::from("inspect")),
         (
             "/event/request/capability",
             serde_json::Value::from("network_domain"),
-        ),
-        (
-            "/event/request/recommendedFamily",
-            serde_json::Value::from("react_dom"),
         ),
         ("/event/app_id", serde_json::Value::from("habits-1a2b")),
         (
@@ -840,6 +798,192 @@ fn dependency_change_confirmation_round_trips_with_supply_chain_policy() {
         serde_json::from_value::<ClientEvent>(json).expect("deserialize dependency confirmation"),
         ev
     );
+}
+
+#[test]
+fn phase8_local_app_events_round_trip_with_exact_nested_keys() {
+    let receipt = LocalAppReceiptStatusDto {
+        receipt_id: "receipt-0001".to_string(),
+        app_id: "habits-1a2b".to_string(),
+        workflow_run_id: "wf-0001".to_string(),
+        approval_contract_sha256: "1".repeat(64),
+        candidate_digest: "2".repeat(64),
+        issued_at_ms: 1_750_000_000_000,
+        expires_at_ms: 1_750_000_030_000,
+        consumed: false,
+        superseded: true,
+    };
+    let tool = LocalAppMcpToolSurfaceDto {
+        name: "save_habit".to_string(),
+        title: Some("Track habits".to_string()),
+        description: Some("Create or update one habit entry.".to_string()),
+        input_schema_json:
+            r#"{"type":"object","properties":{"date":{"type":"string"}},"required":["date"]}"#
+                .to_string(),
+        output_schema_json: None,
+        annotations_json: Some(r#"{"readOnlyHint":false}"#.to_string()),
+        execution_json: None,
+        visible_meta_json: None,
+        semantic_flow_json: r#"{"flowId":"local-app-save","source":"active"}"#.to_string(),
+        permission_ceiling: "ask".to_string(),
+    };
+    let events = [
+        ClientEvent::AppEvent {
+            event: AppEventDto::CreateConfirmationRequested {
+                request: LocalAppCreateConfirmationRequestDto {
+                    request_id: "create-0001".to_string(),
+                    app_id: "habits-1a2b".to_string(),
+                    name: "Habits".to_string(),
+                    brief: "Track streaks and notes".to_string(),
+                    selected_template: LocalAppTemplateSummaryDto {
+                        template_id: "react-dom-r1".to_string(),
+                        surface: AppSurfaceDto::Dom,
+                        summary: "Best for forms and lists".to_string(),
+                    },
+                    runtime_profile: AppRuntimeProfileOptionDto {
+                        family: AppRuntimeProfileDto::ReactDom,
+                        revision: 1,
+                        contract_sha256: "8".repeat(64),
+                        surface: AppSurfaceDto::Dom,
+                        core_packages: vec![AppRuntimeProfilePackageDto {
+                            name: "react".to_string(),
+                            version: "19.0.0".to_string(),
+                        }],
+                        cache_status: "bundled".to_string(),
+                        download_status: "bundled".to_string(),
+                        available: true,
+                        reason: None,
+                    },
+                    reason: "Compact list app.".to_string(),
+                    rejected: vec![LocalAppRejectedCandidateDto {
+                        template_id: "three-3d-r1".to_string(),
+                        reason: "3D is unnecessary.".to_string(),
+                    }],
+                    initial_tools: vec![tool.clone()],
+                    required_gates: vec![LocalAppGateStatusDto {
+                        gate_id: "ui_runner".to_string(),
+                        label: "UI runner available".to_string(),
+                        status: LocalAppVerificationStatusDto::Pending,
+                        available: true,
+                        detail: None,
+                    }],
+                    receipt: Some(receipt.clone()),
+                },
+            },
+        },
+        ClientEvent::AppEvent {
+            event: AppEventDto::McpProposalApprovalRequested {
+                request: LocalAppMcpProposalApprovalRequestDto {
+                    request_id: "proposal-0001".to_string(),
+                    app_id: "habits-1a2b".to_string(),
+                    workflow_run_id: "wf-0002".to_string(),
+                    summary: "Remove summarize_habits".to_string(),
+                    proposal_sha256: "3".repeat(64),
+                    approval_contract_sha256: "4".repeat(64),
+                    tool_surface_sha256: "5".repeat(64),
+                    tool_diffs: vec![LocalAppMcpToolDiffDto {
+                        kind: LocalAppMcpToolChangeKindDto::Removed,
+                        name: "summarize_habits".to_string(),
+                        before: Some(tool.clone()),
+                        after: None,
+                        changed_fields: vec![LocalAppMcpToolFieldDto::Description],
+                    }],
+                    required_flow_changes: vec!["Add a save step".to_string()],
+                    excluded_capabilities: vec!["calendar".to_string()],
+                    pending_gates: vec![],
+                    receipt: Some(receipt.clone()),
+                },
+            },
+        },
+        ClientEvent::AppEvent {
+            event: AppEventDto::ManagedMcpInventoryChanged {
+                servers: vec![ManagedLocalAppMcpServerDto {
+                    server_name: "local_app_habits-1a2b".to_string(),
+                    app_id: "habits-1a2b".to_string(),
+                    app_name: "Habits".to_string(),
+                    build_id: "build-0001".to_string(),
+                    catalog_sha256: "6".repeat(64),
+                    tool_surface_sha256: "7".repeat(64),
+                    tool_count: 1,
+                    authoring_revision: 2,
+                    publication_state: AppWorkflowStateDto::PublishedUnverified,
+                    mcp_verification: LocalAppVerificationSummaryDto {
+                        status: LocalAppVerificationStatusDto::Passed,
+                        summary: "MCP verification passed.".to_string(),
+                        code: None,
+                    },
+                    ui_verification: LocalAppVerificationSummaryDto {
+                        status: LocalAppVerificationStatusDto::Unavailable,
+                        summary: "UI runner unavailable.".to_string(),
+                        code: Some("verification_unavailable".to_string()),
+                    },
+                    tools: vec![tool.clone()],
+                }],
+            },
+        },
+        ClientEvent::AppEvent {
+            event: AppEventDto::VerificationSummaryChanged {
+                app_id: "habits-1a2b".to_string(),
+                publication_state: AppWorkflowStateDto::PublishedVerified,
+                mcp_verification: LocalAppVerificationSummaryDto {
+                    status: LocalAppVerificationStatusDto::Passed,
+                    summary: "MCP verification passed.".to_string(),
+                    code: None,
+                },
+                ui_verification: LocalAppVerificationSummaryDto {
+                    status: LocalAppVerificationStatusDto::Unverified,
+                    summary: "UI verification not run.".to_string(),
+                    code: None,
+                },
+            },
+        },
+        ClientEvent::AppEvent {
+            event: AppEventDto::LocalAppOperationFailed {
+                app_id: None,
+                code: LocalAppPluginErrorCodeDto::PluginDisabled,
+                message: "Enable the Local App plugin and retry once.".to_string(),
+                request_id: Some("plugin-read-1".to_string()),
+            },
+        },
+    ];
+
+    let expected = [
+        (
+            "create_confirmation_requested",
+            "/event/request/receipt/superseded",
+            serde_json::Value::Bool(true),
+        ),
+        (
+            "mcp_proposal_approval_requested",
+            "/event/request/toolDiffs/0/kind",
+            serde_json::Value::String("removed".to_string()),
+        ),
+        (
+            "managed_mcp_inventory_changed",
+            "/event/servers/0/toolCount",
+            serde_json::Value::from(1_u64),
+        ),
+        (
+            "verification_summary_changed",
+            "/event/ui_verification/status",
+            serde_json::Value::String("unverified".to_string()),
+        ),
+        (
+            "local_app_operation_failed",
+            "/event/code",
+            serde_json::Value::String("plugin_disabled".to_string()),
+        ),
+    ];
+
+    for (event, (tag, pointer, leaf)) in events.into_iter().zip(expected) {
+        let json = serde_json::to_value(&event).expect("serialize phase8 local app event");
+        assert_eq!(json["type"], "app_event");
+        assert_eq!(json["event"]["type"], tag);
+        assert_eq!(json.pointer(pointer), Some(&leaf));
+        let back: ClientEvent =
+            serde_json::from_value(json).expect("deserialize phase8 local app event");
+        assert_eq!(back, event);
+    }
 }
 
 /// Enumerate every `TurnOutcomeDto` variant and assert the `snake_case` wire

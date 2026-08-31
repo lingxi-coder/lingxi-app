@@ -281,7 +281,7 @@ async fn list_tools_prefixes_full_name_with_double_underscores() {
     let tools = client.list_tools().await.expect("list");
     assert_eq!(tools.len(), 2);
     assert_eq!(tools[0].server_name, "filesystem");
-    assert_eq!(tools[0].tool_name, "read_file");
+    assert_eq!(tools[0].tool_name(), "read_file");
     // LITERAL full-name format: mcp__<server>__<tool>.
     assert_eq!(tools[0].full_name, "mcp__filesystem__read_file");
     assert_eq!(tools[1].full_name, "mcp__filesystem__write_file");
@@ -480,12 +480,12 @@ async fn list_tools_truncates_oversized_descriptions() {
     let tools = client.list_tools().await.expect("list");
     assert_eq!(tools.len(), 1);
     assert!(
-        tools[0].description.ends_with("\u{2026} [truncated]"),
+        tools[0].description().ends_with("\u{2026} [truncated]"),
         "must end with truncation sentinel, got: …{}",
-        &tools[0].description[tools[0].description.len().saturating_sub(40)..],
+        &tools[0].description()[tools[0].description().len().saturating_sub(40)..],
     );
     assert!(
-        tools[0].description.chars().count()
+        tools[0].description().chars().count()
             <= mcp::MAX_MCP_DESCRIPTION_LENGTH + "\u{2026} [truncated]".chars().count(),
         "must not exceed MAX_MCP_DESCRIPTION_LENGTH + sentinel length",
     );

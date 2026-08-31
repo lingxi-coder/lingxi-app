@@ -10,7 +10,7 @@ class LocalAppsContractTest {
     ) = LocalAppsUiState(
         loading = false,
         apps = listOf(
-            LocalAppItem("a", "客户跟进", brief = "记录客户跟进情况", workflow = LocalAppWorkflow.Ready, updatedAtMs = 2, scaffolded = true),
+            LocalAppItem("a", "客户跟进", brief = "记录客户跟进情况", workflow = LocalAppWorkflow.PublishedUnverified, updatedAtMs = 2, scaffolded = true),
             LocalAppItem("b", "运营看板", brief = "运营数据看板", workflow = LocalAppWorkflow.Draft, updatedAtMs = 1, scaffolded = true),
         ),
         query = query,
@@ -58,7 +58,7 @@ class LocalAppsContractTest {
             id = "a",
             name = "记事本",
             brief = "一个记事本 app",
-            workflow = LocalAppWorkflow.Ready,
+            workflow = LocalAppWorkflow.PublishedUnverified,
             updatedAtMs = 0,
             workspaceRel = "apps/a/workspace",
             initSessionId = "11111111-1111-4111-8111-111111111111",
@@ -86,7 +86,7 @@ class LocalAppsContractTest {
                     "a",
                     "客户跟进",
                     "记录客户跟进情况",
-                    LocalAppWorkflow.Ready,
+                    LocalAppWorkflow.PublishedUnverified,
                     runtime = running,
                     updatedAtMs = 2,
                     scaffolded = true,
@@ -110,6 +110,45 @@ class LocalAppsContractTest {
             "the details snapshot's runtime url is the fallback",
             "http://127.0.0.1:3200",
             stopped.previewUrl("a"),
+        )
+    }
+
+    @Test
+    fun `published unverified apps remain searchable and published`() {
+        val published = state().apps.first()
+
+        assertEquals(LocalAppWorkflow.PublishedUnverified, published.workflow)
+        assertEquals(true, published.workflow.isPublished)
+        assertEquals(listOf("a"), state(query = "客户").filteredApps.map { it.id })
+    }
+
+    @Test
+    fun `published badges separate verification pending from runtime errors`() {
+        assertEquals(
+            listOf(
+                LocalAppStatusBadgeKind.PublishedUnverified,
+                LocalAppStatusBadgeKind.VerificationPending,
+            ),
+            localAppStatusBadges(
+                workflow = LocalAppWorkflow.PublishedUnverified,
+                runtimeError = null,
+                runtimeProfileStatus = null,
+                mcpVerification = null,
+                uiVerification = null,
+            ),
+        )
+        assertEquals(
+            listOf(
+                LocalAppStatusBadgeKind.PublishedVerified,
+                LocalAppStatusBadgeKind.Error,
+            ),
+            localAppStatusBadges(
+                workflow = LocalAppWorkflow.PublishedVerified,
+                runtimeError = "build failed",
+                runtimeProfileStatus = null,
+                mcpVerification = null,
+                uiVerification = null,
+            ),
         )
     }
 }

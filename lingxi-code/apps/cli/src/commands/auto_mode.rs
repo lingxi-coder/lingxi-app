@@ -34,12 +34,12 @@ use serde_json::Value;
 
 use crate::exit_codes::{RUNTIME_ERROR, SUCCESS};
 
-/// The default auto-mode rule set, embedded verbatim from claude 2.1.245's
+/// The default auto-mode rule set, embedded verbatim from claude 2.1.251's
 /// `auto-mode defaults` output. Parsed + re-serialised at runtime so the
 /// emitted JSON is canonical 2-space-pretty (matching the reference binary).
 ///
-/// Regenerated from 2.1.245 after behaviour diffs against the oracle found
-/// this literal was still 2.1.191's: 35 of the oracle's 67 `soft_deny` rules,
+/// Regenerated from 2.1.251 after behaviour diffs against the oracle found
+/// this literal was still 2.1.191's: 35 of the oracle's 68 `soft_deny` rules,
 /// 9 of its 17 `allow` rules, and 15 of its 20 `environment` entries were
 /// absent, and several shared rules had since gained qualifying clauses.
 ///

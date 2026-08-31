@@ -12,7 +12,7 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 use std::time::{Duration, Instant};
 use traits::{
@@ -419,6 +419,7 @@ pub struct LocalAppsMcpTransport {
     agent_session_id: Option<String>,
     call_budget: Option<Arc<AgentCallBudget>>,
     connections: StdMutex<HashSet<McpConnectionId>>,
+    cancellations: Arc<StdMutex<HashMap<McpConnectionId, Arc<AtomicBool>>>>,
     local_app_calls: Arc<StdMutex<LocalAppCallState>>,
     audit: Arc<StdMutex<Vec<LocalAppAuditEntry>>>,
 }
@@ -536,6 +537,7 @@ impl LocalAppsMcpTransport {
             let _ = scoped.init_session_minter.set(value.clone());
         }
         scoped.local_app_calls = Arc::clone(&self.local_app_calls);
+        scoped.cancellations = Arc::clone(&self.cancellations);
         scoped.audit = Arc::clone(&self.audit);
         Ok(scoped)
     }
@@ -552,6 +554,7 @@ impl LocalAppsMcpTransport {
             agent_session_id: None,
             call_budget: None,
             connections: StdMutex::new(HashSet::new()),
+            cancellations: Arc::new(StdMutex::new(HashMap::new())),
             local_app_calls: Arc::new(StdMutex::new(LocalAppCallState::default())),
             audit: Arc::new(StdMutex::new(Vec::new())),
         }
@@ -645,6 +648,7 @@ impl LocalAppsMcpTransport {
             let _ = scoped.init_session_minter.set(value.clone());
         }
         scoped.local_app_calls = Arc::clone(&self.local_app_calls);
+        scoped.cancellations = Arc::clone(&self.cancellations);
         scoped.audit = Arc::clone(&self.audit);
         // A budget is deliberately never inherited from the global
         // Conversation Agent transport. It belongs to exactly one app Agent
@@ -725,6 +729,26 @@ impl LocalAppsMcpTransport {
             Err(McpError::Connection(
                 "local apps MCP connection is no longer active".into(),
             ))
+        }
+    }
+
+    fn cancellation_for(
+        &self,
+        connection_id: McpConnectionId,
+    ) -> Result<Arc<AtomicBool>, McpError> {
+        self.cancellations
+            .lock()
+            .map_err(|_| McpError::Internal("local apps cancellation registry poisoned".into()))?
+            .get(&connection_id)
+            .cloned()
+            .ok_or_else(|| {
+                McpError::Connection("local apps MCP connection is no longer active".into())
+            })
+    }
+
+    async fn wait_cancelled(cancelled: Arc<AtomicBool>) {
+        while !cancelled.load(Ordering::Acquire) {
+            tokio::time::sleep(Duration::from_millis(25)).await;
         }
     }
 
@@ -1368,10 +1392,8 @@ impl LocalAppsMcpTransport {
         let Some(active) = manifest.active_mcp_catalog.as_ref() else {
             return Ok(Vec::new());
         };
-        let catalog =
-            local_apps::load_mcp_catalog(layout, &active.catalog_sha256).map_err(|error| {
-                McpError::Internal(format!("active Local App catalog unavailable: {error}"))
-            })?;
+        let catalog = local_apps::load_mcp_catalog(layout, &active.catalog_sha256)
+            .map_err(|_| McpError::Internal("active Local App catalog unavailable".into()))?;
         let entries = catalog
             .get("tools")
             .and_then(Value::as_array)
@@ -1416,10 +1438,8 @@ impl LocalAppsMcpTransport {
         let Some(active) = manifest.active_mcp_catalog.as_ref() else {
             return Ok(None);
         };
-        let catalog =
-            local_apps::load_mcp_catalog(layout, &active.catalog_sha256).map_err(|error| {
-                McpError::Internal(format!("active Local App catalog unavailable: {error}"))
-            })?;
+        let catalog = local_apps::load_mcp_catalog(layout, &active.catalog_sha256)
+            .map_err(|_| McpError::Internal("active Local App catalog unavailable".into()))?;
         let entries = catalog
             .get("tools")
             .and_then(Value::as_array)
@@ -1624,30 +1644,46 @@ impl LocalAppsMcpTransport {
             "{:x}",
             Sha256::digest(serde_json::to_vec(&request).unwrap_or_default())
         );
-        let result = match tokio::time::timeout(
-            LOCAL_APP_CALL_TIMEOUT,
-            self.host()?.execute_mcp_flow(request),
-        )
-        .await
-        {
-            Ok(Ok(value)) => match local_apps::validate_generated_structured_result(&value) {
-                Ok(())
-                    if definition
-                        .output_schema
-                        .as_ref()
-                        .is_none_or(|schema| local_apps::value_matches_schema(&value, schema)) =>
-                {
-                    Self::result(value)
+        let cancellation = self.cancellation_for(conn.connection_id)?;
+        let (result, cancelled) = tokio::select! {
+            outcome = tokio::time::timeout(
+                LOCAL_APP_CALL_TIMEOUT,
+                self.host()?.execute_mcp_flow(request),
+            ) => {
+                match outcome {
+                    Ok(Ok(value)) => {
+                        let result = match local_apps::validate_generated_structured_result(&value) {
+                            Ok(())
+                                if definition
+                                    .output_schema
+                                    .as_ref()
+                                    .is_none_or(|schema| local_apps::value_matches_schema(&value, schema)) =>
+                            {
+                                Self::result(value)
+                            }
+                            Ok(()) => Self::tool_error(
+                                "output_schema_mismatch: Host Flow result does not satisfy output schema",
+                            ),
+                            Err(issue) => Self::tool_error(format!(
+                                "output_schema_mismatch: {}",
+                                issue.message
+                            )),
+                        };
+                        (result, false)
+                    }
+                    Ok(Err(message)) => {
+                        (Self::tool_error(format!("flow_failed: {message}")), false)
+                    }
+                    Err(_) => (
+                        Self::tool_error("timeout: Local App MCP call exceeded 5 minutes"),
+                        true,
+                    ),
                 }
-                Ok(()) => Self::tool_error(
-                    "output_schema_mismatch: Host Flow result does not satisfy output schema",
-                ),
-                Err(issue) => {
-                    Self::tool_error(format!("output_schema_mismatch: {}", issue.message))
-                }
-            },
-            Ok(Err(message)) => Self::tool_error(format!("flow_failed: {message}")),
-            Err(_) => Self::tool_error("timeout: Local App MCP call exceeded 5 minutes"),
+            }
+            _ = Self::wait_cancelled(Arc::clone(&cancellation)) => (
+                Self::tool_error("cancelled: Local App MCP call was cancelled"),
+                true,
+            ),
         };
         self.append_export_audit(LocalAppAuditEntry {
             app_id: scope.app_id.clone(),
@@ -1660,7 +1696,7 @@ impl LocalAppsMcpTransport {
                 "ok".into()
             },
             latency_ms: started.elapsed().as_millis() as u64,
-            cancelled: false,
+            cancelled,
         });
         Ok(result)
     }
@@ -2440,6 +2476,10 @@ impl McpTransport for LocalAppsMcpTransport {
             .lock()
             .map_err(|_| McpError::Internal("local apps connection registry poisoned".into()))?
             .insert(connection_id);
+        self.cancellations
+            .lock()
+            .map_err(|_| McpError::Internal("local apps cancellation registry poisoned".into()))?
+            .insert(connection_id, Arc::new(AtomicBool::new(false)));
         Ok(McpRawConnection { connection_id })
     }
 
@@ -2580,6 +2620,14 @@ impl McpTransport for LocalAppsMcpTransport {
             .lock()
             .map_err(|_| McpError::Internal("local apps connection registry poisoned".into()))?
             .remove(&connection_id);
+        if let Some(cancelled) = self
+            .cancellations
+            .lock()
+            .map_err(|_| McpError::Internal("local apps cancellation registry poisoned".into()))?
+            .remove(&connection_id)
+        {
+            cancelled.store(true, Ordering::Release);
+        }
         Ok(())
     }
 
@@ -2769,6 +2817,66 @@ mod tests {
             .await
             .unwrap();
         assert!(result.is_error);
+    }
+
+    #[tokio::test]
+    async fn disconnect_cancels_inflight_local_app_calls() {
+        let transport = LocalAppsMcpTransport::new(PathBuf::from("/tmp/local-apps"));
+        let connection = transport
+            .connect(&McpTransportSpec::InProcess {
+                registry_key: LOCAL_APPS_REGISTRY_KEY.into(),
+            })
+            .await
+            .unwrap();
+        let cancelled = transport
+            .cancellation_for(connection.connection_id)
+            .expect("connection cancellation token");
+        let waiter = tokio::spawn(LocalAppsMcpTransport::wait_cancelled(cancelled));
+        transport
+            .disconnect(connection.connection_id)
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(1), waiter)
+            .await
+            .expect("disconnect wakes a pending call")
+            .expect("cancellation waiter did not panic");
+    }
+
+    #[test]
+    fn local_app_export_rate_limits_are_bounded_and_retryable() {
+        let transport = LocalAppsMcpTransport::new(PathBuf::from("/tmp/local-apps"));
+        for _ in 0..60 {
+            drop(
+                transport
+                    .reserve_export_call("abc12345", "read_value", true)
+                    .expect("first 60 read calls are allowed"),
+            );
+        }
+        let read_limited = match transport.reserve_export_call("abc12345", "read_value", true) {
+            Ok(_) => panic!("61st read call must be rejected"),
+            Err(error) => error,
+        };
+        assert_eq!(
+            read_limited.structured_content.unwrap()["code"],
+            "rate_limited"
+        );
+
+        for _ in 0..10 {
+            drop(
+                transport
+                    .reserve_export_call("abc12345", "write_value", false)
+                    .expect("first 10 mutation calls are allowed"),
+            );
+        }
+        let mutation_limited = match transport.reserve_export_call("abc12345", "write_value", false)
+        {
+            Ok(_) => panic!("11th mutation call must be rejected"),
+            Err(error) => error,
+        };
+        assert_eq!(
+            mutation_limited.structured_content.unwrap()["code"],
+            "rate_limited"
+        );
     }
 
     #[tokio::test]

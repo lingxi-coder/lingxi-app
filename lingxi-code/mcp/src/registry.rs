@@ -173,6 +173,14 @@ impl ConversationExport {
         format!("local_apps:conversation-export:{}", self.app_id)
     }
 
+    /// Stable wire identity shared by every logical Local App server. The
+    /// configured server name remains app-specific; MCP `serverInfo.name` is
+    /// deliberately the product identity.
+    #[must_use]
+    pub const fn server_info_name(&self) -> &'static str {
+        "lingxi-local-app"
+    }
+
     pub fn tool_full_name(&self, tool_name: &str) -> Result<String, McpError> {
         if tool_name.is_empty()
             || tool_name.len() > 64
@@ -4500,6 +4508,7 @@ mod snapshot_tests {
     fn conversation_export_identity_preserves_hyphens_and_split_boundaries() {
         let scope = ConversationExport::new("abc--1", "0".repeat(64)).unwrap();
         assert_eq!(scope.server_name(), "local_app_abc--1");
+        assert_eq!(scope.server_info_name(), "lingxi-local-app");
         assert_eq!(
             scope.registry_key(),
             "local_apps:conversation-export:abc--1"

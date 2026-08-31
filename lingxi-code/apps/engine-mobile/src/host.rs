@@ -4513,6 +4513,10 @@ pub struct MobileEngineHandle {
     /// `submit(SendPrompt)` and fired by `submit(Cancel)`. `None` when no turn is
     /// active. One connection ⇒ one in-flight turn (§0.5), so a single slot.
     active_cancel: Arc<Mutex<Option<Arc<ActiveTurn>>>>,
+    /// The same priority-aware message queue used by desktop/CLI. Running
+    /// prompts enter at `Next` and are consumed inside the existing turn loop.
+    message_queue: Arc<msgqueue::MessageQueueManager>,
+    cancel_reason: orchestrator::prompt::mid_turn_input::CancelReasonFlag,
     /// Correlates interactive `AskUserQuestion` events with inbound answers.
     ask_user_question_broker: Arc<client_adapter::BridgeAskUserQuestionBroker>,
     /// Number of builtin mobile skills assembled (the M8 smoke signal, retained
@@ -4986,6 +4990,31 @@ struct ActiveTurn {
     /// Any subsequent live-turn event is stale and must be discarded.
     terminal_emitted: AtomicBool,
     completion: Notify,
+}
+
+struct MobileMsgQueueInput {
+    queue: Arc<msgqueue::MessageQueueManager>,
+}
+
+#[async_trait]
+impl orchestrator::prompt::mid_turn_input::MidTurnInputSource for MobileMsgQueueInput {
+    async fn take_mid_turn_input(&self) -> Option<String> {
+        self.queue.take_mid_turn_prompt().await
+    }
+}
+
+fn mobile_prompt_command(text: String) -> msgqueue::QueuedCommand {
+    static SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    msgqueue::QueuedCommand {
+        uuid: format!("mobile-prompt-{}", SEQUENCE.fetch_add(1, Ordering::Relaxed)),
+        content: msgqueue::QueuedCommandContent::UserInput { text },
+        priority: msgqueue::QueuePriority::Next,
+        queued_at: std::time::SystemTime::now(),
+        source: msgqueue::QueueSource::PromptInput,
+        agent_id: None,
+        skip_slash_commands: false,
+        is_meta: false,
+    }
 }
 
 impl ActiveTurn {
@@ -5649,6 +5678,7 @@ impl MobileEngineHandle {
                     *active = None;
                 }
                 drop(active);
+                self.message_queue.clear_active_turn().await;
                 turn.mark_completed();
                 if let Some(owner_id) = turn.permission_owner_id {
                     self.inner.permission_gate.end_main_turn(owner_id);
@@ -5676,8 +5706,23 @@ impl MobileEngineHandle {
         &self,
         text: String,
         turn_id: Option<u64>,
+        queue_if_busy: bool,
     ) -> Result<(), ClientError> {
-        let turn = self.reserve_turn(turn_id).await?;
+        let turn = match self.reserve_turn(turn_id).await {
+            Ok(turn) => turn,
+            Err(ClientError::Rejected { .. }) if queue_if_busy => {
+                self.message_queue
+                    .enqueue(mobile_prompt_command(text))
+                    .await;
+                return Ok(());
+            }
+            Err(error) => return Err(error),
+        };
+
+        self.cancel_reason.reset();
+        self.message_queue
+            .register_active_turn(turn.cancel.clone())
+            .await;
 
         #[cfg(debug_assertions)]
         eprintln!(
@@ -5694,6 +5739,7 @@ impl MobileEngineHandle {
         let active_cancel = self.active_cancel.clone();
         let message_output = self.inner.message_output.clone();
         let permission_gate = self.inner.permission_gate.clone();
+        let message_queue = self.message_queue.clone();
         let task_turn = turn.clone();
         let task = self.runtime.spawn(async move {
             let result = orch
@@ -5722,6 +5768,7 @@ impl MobileEngineHandle {
             if let Some(owner_id) = task_turn.permission_owner_id {
                 permission_gate.end_main_turn(owner_id);
             }
+            message_queue.clear_active_turn().await;
             // Notify only after the slot is released: Cancel returning is the
             // guarantee that New/Resume/Clear can no longer observe this turn.
             task_turn.mark_completed();
@@ -6394,7 +6441,7 @@ impl MobileEngineHandle {
         match command {
             // ── Turn driving (SPAWN + return promptly) ─────────────────────
             ClientCommand::SendPrompt { text, turn_id, .. } => {
-                self.start_streaming_turn(text, turn_id).await
+                self.start_streaming_turn(text, turn_id, true).await
             }
 
             ClientCommand::Cancel { turn_id } => self.cancel_active_turn(turn_id).await,
@@ -6696,7 +6743,7 @@ impl MobileEngineHandle {
                 let before = self.capture_slash_authority().await;
                 match self.inner.dispatcher.dispatch(&raw).await {
                     traits::SlashDispatchResult::RunAsTurn { prompt } => {
-                        self.start_streaming_turn(prompt, turn_id).await?;
+                        self.start_streaming_turn(prompt, turn_id, false).await?;
                     }
                     traits::SlashDispatchResult::Handled { display } => {
                         self.event_sink
@@ -9752,6 +9799,27 @@ pub fn build_mobile_engine_inner(
     let (session_lifecycle_tx, _) = tokio::sync::watch::channel(initial_session_key);
 
     let skill_count = crate::mobile_skill_registry().len();
+    let message_queue = Arc::new(msgqueue::MessageQueueManager::new());
+    inner
+        .orchestrator
+        .set_mid_turn_input(Arc::new(MobileMsgQueueInput {
+            queue: message_queue.clone(),
+        }));
+    let cancel_reason = orchestrator::prompt::mid_turn_input::CancelReasonFlag::new();
+    inner.orchestrator.set_cancel_reason(cancel_reason.clone());
+    runtime.block_on({
+        let message_queue = message_queue.clone();
+        let cancel_reason = cancel_reason.clone();
+        async move {
+            message_queue
+                .set_now_abort_hook(Arc::new(move || {
+                    cancel_reason
+                        .set(orchestrator::prompt::mid_turn_input::CancelReason::QueueNowCommand);
+                }))
+                .await;
+        }
+    });
+
     let event_sink = inner.event_sink.clone();
     let ask_user_question_broker = Arc::new(client_adapter::BridgeAskUserQuestionBroker::new(
         event_sink.clone(),
@@ -9902,6 +9970,8 @@ pub fn build_mobile_engine_inner(
         inner,
         event_sink,
         active_cancel,
+        message_queue,
+        cancel_reason,
         ask_user_question_broker,
         skill_count,
         lingxi_home,
@@ -12328,11 +12398,10 @@ mod tests {
         ));
     }
 
-    /// A connection owns at most one live turn. A second `SendPrompt` must be
-    /// rejected instead of replacing the first turn's cancellation token,
-    /// otherwise Cancel and session guards start controlling the wrong task.
+    /// A connection owns at most one live turn. A second `SendPrompt` must join
+    /// the bounded mid-turn queue instead of replacing the first turn's owner.
     #[test]
-    fn submit_send_prompt_rejects_overlapping_turn() {
+    fn submit_send_prompt_queues_overlapping_turn() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let (handle, _listener) = build_submit_handle(tmp.path());
 
@@ -12341,7 +12410,7 @@ mod tests {
 
             let result = handle
                 .submit(ClientCommand::SendPrompt {
-                    text: "must be rejected".into(),
+                    text: "pending guidance".into(),
                     prompt_mode: None,
                     images: Vec::new(),
                     turn_id: Some(99),
@@ -12349,8 +12418,12 @@ mod tests {
                 .await;
 
             assert!(
-                matches!(result, Err(ClientError::Rejected { .. })),
-                "overlapping SendPrompt must be rejected, got {result:?}"
+                result.is_ok(),
+                "overlapping SendPrompt must queue: {result:?}"
+            );
+            assert_eq!(
+                handle.message_queue.take_mid_turn_prompt().await.as_deref(),
+                Some("pending guidance")
             );
         });
     }

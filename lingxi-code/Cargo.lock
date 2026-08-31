@@ -1880,6 +1880,7 @@ dependencies = [
  "llm-client",
  "local-apps",
  "mcp",
+ "msgqueue",
  "orchestrator",
  "permission",
  "platform-android",

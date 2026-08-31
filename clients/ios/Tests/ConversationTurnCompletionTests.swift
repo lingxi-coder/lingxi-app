@@ -35,15 +35,16 @@ final class ConversationTurnCompletionTests: XCTestCase {
         XCTAssertEqual(source.model.turnCompletion?.finalAssistantText, "")
     }
 
-    func testMockBlockedSendDoesNotMintTokenOrConsumeMessage() {
+    func testMockRunningSendQueuesPendingMessage() {
         let source = MockConversationSource()
         let originalCount = source.model.messages.count
 
-        XCTAssertNotNil(source.send("first"))
-        XCTAssertNil(source.send("blocked"))
+        let token = source.send("first")
+        XCTAssertNotNil(token)
+        XCTAssertEqual(source.send("pending"), token)
 
-        XCTAssertEqual(source.model.messages.count, originalCount + 1)
-        XCTAssertEqual(source.model.messages.last?.text, "first")
+        XCTAssertEqual(source.model.messages.count, originalCount + 2)
+        XCTAssertEqual(source.model.messages.last?.text, "pending")
         source.cancel()
     }
 
@@ -110,6 +111,30 @@ final class ConversationTurnCompletionTests: XCTestCase {
             XCTAssertTrue(source.model.streaming)
             XCTAssertNil(source.model.turnCompletion)
             source.cancel()
+        }
+
+        func testEngineRunningSendSubmitsPendingMessageWithoutReplacingActiveTurn() async {
+            let source = makeSource()
+            var submitted: [ClientCommand] = []
+            source.setCommandSubmitterForTesting { command in submitted.append(command) }
+
+            guard let token = source.send("first") else {
+                return XCTFail("expected a turn token")
+            }
+            await flushTasks()
+            source.applyForTesting(.turnStarted(turnId: token.clientTurnId))
+
+            XCTAssertEqual(source.send("pending"), token)
+            await flushTasks()
+
+            XCTAssertTrue(source.model.streaming)
+            XCTAssertEqual(source.model.messages.suffix(2).map(\.text), ["first", "pending"])
+            XCTAssertEqual(submitted.count, 2)
+            guard case let .sendPrompt(text, _, images, _) = submitted.last else {
+                return XCTFail("pending send must use SendPrompt")
+            }
+            XCTAssertEqual(text, "pending")
+            XCTAssertTrue(images.isEmpty)
         }
 
         func testEnginePublishesSequencedSpeechDeltasForOwnedTurn() {

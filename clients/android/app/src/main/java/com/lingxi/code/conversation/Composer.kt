@@ -157,10 +157,10 @@ fun Composer(
                     cursorBrush = SolidColor(t.accent),
                     maxLines = 5,
                     keyboardActions = androidx.compose.foundation.text.KeyboardActions(
-                        // Don't start a second turn from the IME Send key while one
-                        // is already streaming (the VM also guards this).
+                        // Running submits join Rust's pending-message queue; the
+                        // existing reply collector remains the sole turn owner.
                         onSend = {
-                            if (enabled && !isStreaming) {
+                            if (enabled) {
                                 if (modelSetupRequired) onOpenModelSettings() else onSend()
                             }
                         },
@@ -216,25 +216,49 @@ fun Composer(
                 val flowModeOnDescription = stringResource(R.string.voice_close_flow_mode_a11y)
                 val flowModeOffDescription = stringResource(R.string.composer_flow_mode)
                 when {
-                    // Streaming: the send action becomes a Stop button that
-                    // cancels the in-flight turn (a filled square — the universal
-                    // stop glyph — inside the accent slot).
-                    isStreaming -> Box(
-                        modifier = Modifier
-                            .size(34.dp)
-                            .clip(RoundedCornerShape(10.dp))
-                            .background(t.accent)
-                            .clickable(onClick = onStop)
-                            .testTag(UiTags.COMPOSER_STOP),
-                        contentAlignment = Alignment.Center,
+                    // Keep Stop and pending Send available together while the
+                    // agent is working.
+                    isStreaming -> Row(
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        verticalAlignment = Alignment.CenterVertically,
                     ) {
                         Box(
                             modifier = Modifier
-                                .size(12.dp)
-                                .clip(RoundedCornerShape(3.dp))
-                                .background(Color.White)
-                                .clearAndSetSemantics { contentDescription = stopGeneratingDescription },
-                        )
+                                .size(34.dp)
+                                .clip(RoundedCornerShape(10.dp))
+                                .background(t.accent)
+                                .clickable(onClick = onStop)
+                                .testTag(UiTags.COMPOSER_STOP),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(12.dp)
+                                    .clip(RoundedCornerShape(3.dp))
+                                    .background(Color.White)
+                                    .clearAndSetSemantics { contentDescription = stopGeneratingDescription },
+                            )
+                        }
+                        if (hasText) {
+                            Box(
+                                modifier = Modifier
+                                    .size(34.dp)
+                                    .clip(RoundedCornerShape(10.dp))
+                                    .background(t.accent)
+                                    .clickable(enabled = enabled) {
+                                        if (modelSetupRequired) onOpenModelSettings() else onSend()
+                                    }
+                                    .testTag(UiTags.COMPOSER_SEND),
+                                contentAlignment = Alignment.Center,
+                            ) {
+                                LXIcon(
+                                    name = LXIconName.ArrowUp,
+                                    size = 16.dp,
+                                    color = Color.White,
+                                    contentDescription = sendDescription,
+                                )
+                            }
+                        }
                     }
                     // Idle with text: the accent Send button.
                     hasText -> Box(

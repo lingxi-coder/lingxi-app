@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, realpathSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, realpathSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -38,6 +38,7 @@ test('adding the first project uses the real settings store, trusts it, and star
     assert.deepEqual(calls, [`new:${canonical}`]);
     assert.equal(result.trusted, true);
     assert.deepEqual(settings.getPublic().activeSession, { projectPath: canonical, sessionId });
+    assert.equal(JSON.parse(readFileSync(settings.settingsPath, 'utf8')).activeSession, undefined);
   } finally {
     rmSync(userData, { recursive: true, force: true });
     rmSync(workspace, { recursive: true, force: true });
@@ -177,6 +178,30 @@ test('historical startup opens the catalog session before persisting it active',
     await host.restoreProjectSession(project);
     assert.deepEqual(calls, [`open:${sessionId}`]);
     assert.deepEqual(settings.getPublic().activeSession, { projectPath: project, sessionId });
+  } finally {
+    rmSync(userData, { recursive: true, force: true });
+    rmSync(projectDirectory, { recursive: true, force: true });
+  }
+});
+
+test('history-less startup keeps the host-created session volatile until first prompt', async () => {
+  const userData = mkdtempSync(join(tmpdir(), 'lingxi-restore-draft-settings-'));
+  const projectDirectory = mkdtempSync(join(tmpdir(), 'lingxi-restore-draft-project-'));
+  const project = realpathSync.native(projectDirectory);
+  const sessionId = '34343434-4444-4555-8666-777777777777';
+  const settings = new SettingsStore(userData);
+  settings.addProject(project);
+  const bridge = {
+    newSession: async () => ({ projectPath: project, sessionId }),
+  };
+  const catalog = {
+    list: async () => ({ sessions: [] }),
+  };
+  const host = new HostController(settings, bridge as any, new DiagnosticBuffer(), catalog as any);
+  try {
+    await host.restoreProjectSession(project);
+    assert.deepEqual(settings.getPublic().activeSession, { projectPath: project, sessionId });
+    assert.equal(JSON.parse(readFileSync(settings.settingsPath, 'utf8')).activeSession, undefined);
   } finally {
     rmSync(userData, { recursive: true, force: true });
     rmSync(projectDirectory, { recursive: true, force: true });

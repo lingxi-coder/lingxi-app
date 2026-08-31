@@ -1800,6 +1800,13 @@ impl StreamingTurnDriver<'_> {
             {
                 StreamingIterationDisposition::Continue => continue,
                 StreamingIterationDisposition::Complete(message_id) => {
+                    // Pending input can arrive while the final response is
+                    // streaming, after the top-of-loop drain has already run.
+                    // Give it one final drain before committing the natural
+                    // end-turn so it continues this same turn.
+                    if orch.drain_mid_turn_input().await {
+                        continue;
+                    }
                     final_message_id = message_id;
                     break;
                 }

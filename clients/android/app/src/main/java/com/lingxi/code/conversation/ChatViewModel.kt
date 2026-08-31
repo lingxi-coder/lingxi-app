@@ -1167,11 +1167,9 @@ class ChatViewModel(
      * on, and collects the [ConversationSource] reply stream — appending the
      * completed assistant message and clearing the streaming flag.
      *
-     * OVERLAPPING-SUBMIT GUARD: a submit while a turn is already streaming is
-     * IGNORED (the composer shows Stop, not Send, then — but a stale tap / IME
-     * Send / programmatic call must not start a second concurrent turn). The
-     * guard is here (not only in the UI) so the contract holds regardless of who
-     * calls `send`.
+     * While a turn is streaming, a submit is appended to Rust's canonical
+     * pending-message queue. The existing collector remains the sole owner of
+     * reply events for the whole turn loop.
      */
     fun send(
         text: String,
@@ -1180,9 +1178,47 @@ class ChatViewModel(
     ) {
         val trimmed = text.trim()
         if (trimmed.isEmpty()) return
-        if (_state.value.streaming) return // ignore overlapping submit while streaming
         if (!_state.value.sessionReady || _state.value.sessionTransitioning) return
         if (explicitCancellation?.isActive == true) return
+
+        if (_state.value.streaming) {
+            if (_sourceScope.value !is ConversationScope.LocalApp) {
+                savedState?.set(KEY_DRAFT, "")
+            }
+            _state.update {
+                it.copy(
+                    isNew = false,
+                    error = null,
+                    messages = it.messages + Message(
+                        role = Role.User,
+                        text = trimmed,
+                        images = images,
+                    ),
+                )
+            }
+            viewModelScope.launch {
+                runCatching {
+                    source.submitClientCommand(
+                        ClientCommand.SendPrompt(
+                            text = trimmed,
+                            promptMode = null,
+                            images = images,
+                            turnId = null,
+                        ),
+                    )
+                }.onFailure { failure ->
+                    _state.update {
+                        it.copy(
+                            error = ChatError(
+                                failure.message ?: failure::class.simpleName.orEmpty(),
+                                ChatErrorKind.GENERIC,
+                            ),
+                        )
+                    }
+                }
+            }
+            return
+        }
 
         // A new turn supersedes any prior (e.g. just-cancelled) one — bump the
         // token so a lingering old coroutine's events are dropped by `reduce`, and
@@ -1515,6 +1551,20 @@ class ChatViewModel(
                     _state.update { it.copy(agentRun = AgentRunState(turnId = token)) }
                 }
                 updateCoordinatorWorkers(event.activeWorkers, event.team)
+            }
+
+            is ReplyEvent.MessageComplete -> {
+                val message = event.message ?: return
+                _state.update { state ->
+                    val completed = state.streamingMessage
+                        ?.let { live -> message.copy(id = live.id) }
+                        ?: message
+                    state.copy(
+                        messages = state.messages + completed,
+                        streamingMessage = null,
+                        streaming = true,
+                    )
+                }
             }
 
             is ReplyEvent.Error -> {

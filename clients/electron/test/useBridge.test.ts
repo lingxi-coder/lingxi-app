@@ -213,7 +213,7 @@ test('a display-only slash command releases the turn it pre-claimed', () => {
   const pending = new Map<string, boolean>();
   claimSlashTurn(pending, 's1');
 
-  // /status never starts a turn; its result must hand the composer back.
+  // /status never starts a turn; its result must release the pre-claim.
   assert.equal(shouldReleaseSlashTurn(pending, 's1'), true);
 });
 
@@ -224,7 +224,7 @@ test('a slash command that expanded into a turn does NOT release it', () => {
   clearSlashTurnClaim(pending, 's1');
 
   // router.rs:938 can still emit a display-only result as a fallback; if that
-  // released the turn, the composer would unlock mid-turn.
+  // released the turn, running state would clear mid-turn.
   assert.equal(shouldReleaseSlashTurn(pending, 's1'), false);
 });
 
@@ -264,7 +264,7 @@ test('beginLocalCommand calls the non-claiming echo, never the engine-claiming o
   // /config) never receives the slash_command_result/error/turn_ended that
   // would release a claim made by beginSlashCommand. Calling beginSlashCommand
   // here instead — the exact mistake this test exists to catch — would leave
-  // the composer permanently read-only after any of those commands.
+  // the session permanently marked as running after any of those commands.
   const source = readFileSync(join(process.cwd(), 'src/renderer/bridge/useBridge.ts'), 'utf8');
 
   const runSlashCommandBody = sliceBetweenMarkers(
@@ -281,7 +281,7 @@ test('beginLocalCommand calls the non-claiming echo, never the engine-claiming o
   );
 
   // The converse, so the gate also catches the opposite mistake: the
-  // engine-forwarded path must keep pre-claiming the composer.
+  // engine-forwarded path must keep pre-claiming running state.
   assert.match(
     runSlashCommandBody,
     /\bbeginSlashCommand\b/,
@@ -298,9 +298,9 @@ test('beginLocalCommand calls the non-claiming echo, never the engine-claiming o
   assert.doesNotMatch(
     beginLocalCommandBody,
     /\bbeginSlashCommand\b/,
-    'beginLocalCommand calls beginSlashCommand — this is the composer-bricking regression: a locally '
+    'beginLocalCommand calls beginSlashCommand — this is the stale-running-state regression: a locally '
       + 'handled command would pre-claim `running` and never receive an event that releases it, '
-      + 'permanently locking the composer after a bare /model.',
+      + 'permanently marking the session as running after a bare /model.',
   );
 });
 
@@ -308,11 +308,25 @@ function useBridgeSource(): string {
   return readFileSync(join(process.cwd(), 'src/renderer/bridge/useBridge.ts'), 'utf8');
 }
 
+test('a failed pending prompt does not release the turn already in progress', () => {
+  const sendPromptBody = sliceBetweenMarkers(
+    useBridgeSource(),
+    'const sendPrompt = useCallback',
+    'const runSlashCommand = useCallback',
+    'sendPrompt',
+  );
+
+  assert.match(sendPromptBody, /const wasTurnActive = turnActiveRefs\.current\.get\(sessionId\) === true/);
+  assert.match(sendPromptBody, /turnActiveRefs\.current\.set\(sessionId, wasTurnActive\)/);
+  assert.match(sendPromptBody, /Failed to queue the pending message/);
+  assert.match(sendPromptBody, /running: wasTurnActive/);
+});
+
 test('a slash release resets the cancellation runtime, not just the turn claims (event fan-out)', () => {
   // Regression under test (FINDING 1): cancel() gates on turnActiveRefs, which
   // this branch sets true even for a display-only command like /status. While
-  // that command is in flight the composer is read-only, so Stop is the only
-  // affordance -- pressing it sets cancelling.current/isCancelling. Those are
+  // that command is in flight Stop is available; pressing it sets
+  // cancelling.current/isCancelling. Those are
   // normally cleared only by turn_ended/session_ended, neither of which a
   // display-only command ever produces. Left set: isCancelling stays true (the
   // Stop button renders disabled on the user's NEXT real turn), and

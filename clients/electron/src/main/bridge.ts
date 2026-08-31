@@ -99,6 +99,7 @@ export interface BridgeManagerOptions {
   registerIpc?: boolean;
   diagnostics?: DiagnosticBuffer;
   onModelChanged?: (model: string) => void;
+  onFirstPromptSent?: () => boolean | void;
   /** SECURITY: consulted before a `set_permission_mode: bypassPermissions`
    * command is forwarded to the engine. Must show a blocking acceptance dialog
    * (once — persisted) and resolve `true` only on explicit consent. When absent,
@@ -280,10 +281,11 @@ export interface SessionRuntimeSummary {
   runtimeVersions?: BridgeRuntimeVersions;
 }
 
-export interface SessionRuntimeManagerOptions extends Omit<BridgeManagerOptions, 'launchConfig' | 'accessState' | 'onModelChanged' | 'sessionId' | 'projectPath' | 'envelopeEvents' | 'registerIpc'> {
+export interface SessionRuntimeManagerOptions extends Omit<BridgeManagerOptions, 'launchConfig' | 'accessState' | 'onModelChanged' | 'onFirstPromptSent' | 'sessionId' | 'projectPath' | 'envelopeEvents' | 'registerIpc'> {
   launchConfig: (ref: SessionRef) => BridgeLaunchConfig | Promise<BridgeLaunchConfig>;
   accessState?: (ref: SessionRef) => { workspace?: string; trusted: boolean };
   onModelChanged?: (ref: SessionRef, model: string) => void;
+  onFirstPromptSent?: (ref: SessionRef) => boolean | void;
   sessionIdAvailable?: (ref: SessionRef) => boolean | Promise<boolean>;
 }
 
@@ -329,6 +331,7 @@ export class SessionRuntime {
   private readonly pendingAskUserQuestionRequests = new Map<number, PendingAskUserQuestionRequest>();
   private pendingSessionResume: PendingSessionResume | null = null;
   private sessionHasHistory = false;
+  private sessionIdentityCommitted = false;
   private eventSequence = 0;
   private replayEvents: SequencedRuntimeEventEnvelope<ClientEvent>[] = [];
   private readonly targets = new Map<WebContents, Set<string>>();
@@ -771,6 +774,7 @@ export class SessionRuntime {
           return;
         }
         this.sessionHasHistory = true;
+        this.sessionIdentityCommitted = true;
         this.resolvePendingSessionResume();
       }
       if (event.type === 'error' && this.pendingSessionResume) {
@@ -891,8 +895,12 @@ export class SessionRuntime {
   sendPrompt(text: unknown, images: unknown = []): void {
     const prompt = validatePrompt(text);
     const validatedImages = validateImageRefs(images);
+    const needsIdentityCommit = !this.sessionIdentityCommitted;
     this.requireClient().sendPrompt(prompt, { images: validatedImages });
     this.sessionHasHistory = true;
+    if (needsIdentityCommit && this.opts.onFirstPromptSent?.() !== false) {
+      this.sessionIdentityCommitted = true;
+    }
     // Claim the local slot as soon as the command crossed the authenticated
     // bridge boundary. `turn_started` may arrive on a later event-loop tick;
     // without this pending owner an immediate Cancel (or permission request)
@@ -1263,6 +1271,8 @@ export class BridgeManager extends SessionRuntime {}
 export class SessionRuntimeManager {
   private readonly runtimes = new Map<string, SessionRuntime>();
   private readonly openingSessions = new Map<string, { projectPath: string; promise: Promise<SessionRuntime> }>();
+  private readonly draftSessions = new Map<string, SessionRef>();
+  private readonly openingDraftSessions = new Map<string, Promise<SessionRef>>();
   private readonly closingProjects = new Set<string>();
   private readonly targets = new Map<WebContents, Set<string>>();
   private readonly targetDestroyedHandlers = new Map<WebContents, () => void>();
@@ -1388,6 +1398,22 @@ export class SessionRuntimeManager {
   async newSession(projectPath: string, _model?: string): Promise<SessionRef> {
     if (typeof projectPath !== 'string' || projectPath.length === 0) throw new Error('invalid project path');
     this.assertProjectNotClosing(projectPath);
+    const pendingDraft = this.openingDraftSessions.get(projectPath);
+    if (pendingDraft) return pendingDraft;
+    const draft = this.draftSessions.get(projectPath);
+    if (draft) {
+      await this.ensure(draft, true);
+      return { ...draft };
+    }
+    const promise = this.allocateDraftSession(projectPath);
+    const trackedPromise = promise.finally(() => {
+      if (this.openingDraftSessions.get(projectPath) === trackedPromise) this.openingDraftSessions.delete(projectPath);
+    });
+    this.openingDraftSessions.set(projectPath, trackedPromise);
+    return trackedPromise;
+  }
+
+  private async allocateDraftSession(projectPath: string): Promise<SessionRef> {
     let ref: SessionRef | undefined;
     for (let attempt = 0; attempt < 5; attempt += 1) {
       const candidate = { projectPath, sessionId: randomUUID() } satisfies SessionRef;
@@ -1397,11 +1423,17 @@ export class SessionRuntimeManager {
       }
     }
     if (!ref) throw new Error('could not allocate a new session id');
-    await this.ensure(ref, true);
+    this.draftSessions.set(projectPath, ref);
+    try {
+      await this.ensure(ref, true);
+    } catch (error) {
+      this.clearDraftSession(ref);
+      throw error;
+    }
     // The boot argument is the source of truth for a new session. Sending a
     // second `new_session` command would create/switch the engine to another
     // UUID and leave the runtime key pointing at the wrong transcript.
-    return ref;
+    return { ...ref };
   }
 
   async restart(ref: SessionRef): Promise<void> {
@@ -1414,12 +1446,15 @@ export class SessionRuntimeManager {
     const runtime = this.require(ref);
     await runtime.dispose();
     this.runtimes.delete(ref.sessionId);
+    this.clearDraftSession(ref);
   }
 
   async closeProject(projectPath: string): Promise<void> {
     this.assertProjectNotClosing(projectPath);
     if (this.hasActiveWork(projectPath)) throw new Error('cancel active turns and pending interactions before removing a project');
     this.closingProjects.add(projectPath);
+    this.draftSessions.delete(projectPath);
+    this.openingDraftSessions.delete(projectPath);
     const projectRuntimes = [...this.runtimes.values()].filter((runtime) => runtime.projectPath === projectPath);
     // Remove runtimes from the routable map before the first await. A prompt
     // arriving while disposal is in progress must fail instead of entering a
@@ -1447,6 +1482,8 @@ export class SessionRuntimeManager {
     const runtimes = [...this.runtimes.values()];
     this.runtimes.clear();
     this.openingSessions.clear();
+    this.draftSessions.clear();
+    this.openingDraftSessions.clear();
     await Promise.all(runtimes.map((runtime) => runtime.dispose().catch(() => undefined)));
     this.unregisterIpc();
     for (const webContents of [...this.targets.keys()]) this.detachWindow(webContents);
@@ -1506,6 +1543,7 @@ export class SessionRuntimeManager {
       launchConfig,
       accessState,
       onModelChanged,
+      onFirstPromptSent,
       ...base
     } = this.opts;
     return {
@@ -1517,7 +1555,26 @@ export class SessionRuntimeManager {
       launchConfig: () => launchConfig(ref),
       ...(accessState ? { accessState: () => accessState(ref) } : {}),
       ...(onModelChanged ? { onModelChanged: (model: string) => onModelChanged(ref, model) } : {}),
+      onFirstPromptSent: () => {
+        if (!onFirstPromptSent) {
+          this.clearDraftSession(ref);
+          return true;
+        }
+        try {
+          onFirstPromptSent(ref);
+          this.clearDraftSession(ref);
+          return true;
+        } catch (error) {
+          base.diagnostics?.add('error', 'bridge', `failed to commit draft session ${ref.sessionId}: ${sanitizeDiagnostic(error)}`);
+          return false;
+        }
+      },
     };
+  }
+
+  private clearDraftSession(ref: SessionRef): void {
+    const current = this.draftSessions.get(ref.projectPath);
+    if (current?.sessionId === ref.sessionId) this.draftSessions.delete(ref.projectPath);
   }
 
   private requireById(value: unknown): SessionRuntime {

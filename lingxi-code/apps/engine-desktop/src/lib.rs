@@ -4614,7 +4614,8 @@ fn load_merged_http_hook_policy(
 /// (`Rft`). LingXi's [`agent::AgentSource`] maps (see
 /// `agent::handle::agent_source_to_claude_str`): `BuiltIn`→"built-in",
 /// `Plugin`→"plugin", `PolicySettings`→"policySettings" are the trusted three;
-/// `UserDefined`/`Project`/`Flag` are NOT. (LingXi has no "bundled" source.)
+/// `UserDefined`/`Project`/`Flag`/`AdditionalDirectory` are NOT. (LingXi has no
+/// "bundled" source.)
 fn agent_source_is_trusted(source: agent::AgentSource) -> bool {
     matches!(
         source,
@@ -4783,6 +4784,7 @@ async fn build_agent_mcp_tool_set(
     let mut cleanups = Vec::new();
     for entry in scoped {
         let plain_name = entry.config.name.clone();
+        let config_role = entry.config.metadata.role;
         let (table_key, bound_key): (String, Option<String>) = if entry.is_newly_created {
             match mcp_registry
                 .connect_agent_scoped(entry.config, agent_id)
@@ -4848,6 +4850,9 @@ async fn build_agent_mcp_tool_set(
                 Some(key) => tool.with_bound_server_key(key.clone()),
                 None => tool,
             };
+            let tool = tool.with_mcp_role(
+                (config_role == Some(mcp::McpServerRole::Comms)).then(|| "comms".to_string()),
+            );
             tools.push(Arc::new(tool) as Arc<dyn tool_api::Tool>);
         }
         if entry.is_newly_created {
@@ -7161,6 +7166,10 @@ pub async fn build(
     // below from `policy.tool_wide_deny_names()`; left empty otherwise ⇒ the
     // subagent tool pool is unfiltered (byte-identical to before).
     let subagent_tool_wide_deny_cell = subagent_spawner_concrete.tool_wide_deny_names_handle();
+    // Coordinator mode is constructed below because it owns the session
+    // lifecycle. Capture the spawner's set-once seam now and fill it once the
+    // live mode exists, so each spawn consults `is_enabled()` at spawn time.
+    let subagent_coordinator_mode_cell = subagent_spawner_concrete.coordinator_mode_handle();
     // FIX (B-agent-model-inheritance): grab the set-once live-default-model cell
     // BEFORE boxing, to fill once the orchestrator (which owns the LIVE
     // `session.model`) exists — same cycle-break as the cells above. Once filled,
@@ -8231,6 +8240,8 @@ pub async fn build(
         }
         Arc::new(mode)
     };
+    let _ = subagent_coordinator_mode_cell
+        .set(coordinator_mode.clone() as Arc<dyn traits::coordinator_mode::CoordinatorModeHandle>);
 
     // (5.46-prompt) D1 ITEM 4: coordinator-mode system prompt + user context.
     //        Mirrors TS `buildEffectiveSystemPrompt` (systemPrompt.ts:59-75):
@@ -11749,6 +11760,7 @@ mod tests {
                 always_load: false,
                 discovery_cache: None,
                 config_error: None,
+                metadata: mcp::McpServerMetadata::default(),
             }
         }
         // No `--mcp-config` servers in most cases below.
@@ -14030,6 +14042,9 @@ mod tests {
         ));
         assert!(!super::agent_source_is_trusted(agent::AgentSource::Project));
         assert!(!super::agent_source_is_trusted(agent::AgentSource::Flag));
+        assert!(!super::agent_source_is_trusted(
+            agent::AgentSource::AdditionalDirectory
+        ));
     }
 
     /// (M3 cc2.1.198) `CustomizationGates` — pure-logic lock of the binary's
@@ -16626,6 +16641,7 @@ mod tests {
                 directory_read: false,
                 logging: false,
                 experimental: std::collections::HashMap::new(),
+                extensions: std::collections::HashMap::new(),
             })
         }
 
@@ -16744,6 +16760,7 @@ mod tests {
                 directory_read: false,
                 logging: false,
                 experimental: std::collections::HashMap::new(),
+                extensions: std::collections::HashMap::new(),
             })
         }
 

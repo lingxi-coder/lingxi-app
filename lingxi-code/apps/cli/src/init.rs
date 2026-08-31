@@ -399,7 +399,10 @@ pub(crate) fn parse_cli_mcp_servers(entries: Option<&Vec<String>>) -> Vec<mcp::M
         // over discovered servers is enforced by the name-merge in
         // `engine_desktop::build`, not the scope.
         match mcp::json_config::parse_mcp_json_string(&content, mcp::ConfigScope::Dynamic) {
-            Ok(cfgs) => out.extend(cfgs),
+            Ok(cfgs) => out.extend(cfgs.into_iter().map(|mut cfg| {
+                cfg.metadata.cli_owned = true;
+                cfg
+            })),
             Err(e) => eprintln!("lingxi-cli: invalid --mcp-config entry: {e}"),
         }
     }

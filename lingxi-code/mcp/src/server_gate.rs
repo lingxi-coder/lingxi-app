@@ -408,6 +408,7 @@ mod tests {
             always_load: false,
             discovery_cache: None,
             config_error: None,
+            metadata: Default::default(),
         };
 
         // Write a global config with a denylist entry for one server.
@@ -493,6 +494,7 @@ mod tests {
             always_load: false,
             discovery_cache: None,
             config_error: None,
+            metadata: Default::default(),
         };
 
         let dir = tempfile::tempdir().unwrap();
@@ -542,6 +544,7 @@ mod tests {
             always_load: false,
             discovery_cache: None,
             config_error: None,
+            metadata: Default::default(),
         };
 
         let dir = tempfile::tempdir().unwrap();
@@ -587,6 +590,7 @@ mod tests {
             always_load: false,
             discovery_cache: None,
             config_error: None,
+            metadata: Default::default(),
         };
         assert_eq!(
             policy.decide(&server),
@@ -610,6 +614,7 @@ mod tests {
             always_load: false,
             discovery_cache: None,
             config_error: None,
+            metadata: Default::default(),
         };
         assert_eq!(
             policy.decide(&make(ConfigScope::Project)),

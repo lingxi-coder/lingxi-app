@@ -85,6 +85,8 @@ mod local_apps_llm;
 mod local_apps_mcp;
 #[cfg(feature = "uniffi")]
 mod local_apps_profile;
+#[cfg(feature = "uniffi")]
+mod mcp_transport;
 
 #[cfg(feature = "uniffi")]
 pub use client_protocol::listings::{

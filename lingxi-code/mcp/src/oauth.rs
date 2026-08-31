@@ -2093,10 +2093,7 @@ mod tests {
             service: &str,
             account: &str,
         ) -> Result<Option<protocol::SecureStorageData>, traits::SecureStorageError> {
-            if self
-                .fail_retrieve
-                .load(std::sync::atomic::Ordering::SeqCst)
-            {
+            if self.fail_retrieve.load(std::sync::atomic::Ordering::SeqCst) {
                 return Err(traits::SecureStorageError::BackendUnavailable(
                     "storage failed".to_string(),
                 ));
@@ -2255,9 +2252,12 @@ mod tests {
         let storage = Arc::new(DiscoveryCacheTestStorage::default());
         let clock: Arc<dyn Clock> = Arc::new(TestClock::new(1_000));
         assert_eq!(
-            discovery_cache_grant_token(&(storage.clone() as Arc<dyn traits::SecureStorage>), "key")
-                .await
-                .expect("no row"),
+            discovery_cache_grant_token(
+                &(storage.clone() as Arc<dyn traits::SecureStorage>),
+                "key"
+            )
+            .await
+            .expect("no row"),
             Some("grant:none".to_string())
         );
 
@@ -2277,9 +2277,12 @@ mod tests {
         .await
         .expect("store access-only");
         assert_eq!(
-            discovery_cache_grant_token(&(storage.clone() as Arc<dyn traits::SecureStorage>), "key")
-                .await
-                .expect("access-only"),
+            discovery_cache_grant_token(
+                &(storage.clone() as Arc<dyn traits::SecureStorage>),
+                "key"
+            )
+            .await
+            .expect("access-only"),
             None
         );
 

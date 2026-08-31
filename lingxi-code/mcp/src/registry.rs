@@ -156,6 +156,10 @@ struct LazyUpgradeSlot {
     cached_connection_id: McpConnectionId,
     expected_config: McpServerConfig,
     refresh_partition: Option<DiscoveryCachePartition>,
+    /// Actual protocol era recorded by the stale entry. This is distinct
+    /// from the partition's expected era: auto negotiation can select the
+    /// modern partition and still fall back to a legacy live handshake.
+    refresh_entry_era: Option<String>,
     mode: LazyUpgradeMode,
     terminal: StdMutex<Option<LazyUpgradeTerminal>>,
     notify: Notify,
@@ -167,6 +171,7 @@ impl LazyUpgradeSlot {
         cached_connection_id: McpConnectionId,
         expected_config: McpServerConfig,
         refresh_partition: Option<DiscoveryCachePartition>,
+        refresh_entry_era: Option<String>,
         mode: LazyUpgradeMode,
     ) -> Self {
         Self {
@@ -174,6 +179,7 @@ impl LazyUpgradeSlot {
             cached_connection_id,
             expected_config,
             refresh_partition,
+            refresh_entry_era,
             mode,
             terminal: StdMutex::new(None),
             notify: Notify::new(),
@@ -233,6 +239,7 @@ impl LazyUpgradeSlot {
 #[derive(Clone)]
 struct LiveDiscovery {
     connection_id: McpConnectionId,
+    negotiated: traits::McpNegotiatedProtocol,
     capabilities: ServerCapabilitiesDto,
     tools: Vec<traits::McpToolDto>,
     resources: Vec<traits::McpResourceDto>,
@@ -264,6 +271,7 @@ struct PromptPredecessor {
 struct DiscoveryCachePartition {
     logical_key: String,
     partition_key: String,
+    expected_era: &'static str,
 }
 
 struct DiscoveryCacheConsult {
@@ -419,6 +427,30 @@ pub struct McpRegistry {
 /// `"No URL configured for this server"`).
 pub const UNCONFIGURED_MESSAGE: &str = "No URL configured for this server";
 
+fn negotiated_protocol_from_cache_entry(
+    entry: &crate::discovery_cache::DiscoveryCacheEntry,
+) -> traits::McpNegotiatedProtocol {
+    let era = match entry.negotiated_era.as_deref() {
+        Some("modern") => traits::McpProtocolEra::Modern,
+        _ => traits::McpProtocolEra::Legacy,
+    };
+    traits::McpNegotiatedProtocol {
+        era,
+        version: match era {
+            traits::McpProtocolEra::Modern => "2026-07-28",
+            traits::McpProtocolEra::Legacy => "2025-11-25",
+        }
+        .to_string(),
+    }
+}
+
+fn negotiated_era_label(era: traits::McpProtocolEra) -> &'static str {
+    match era {
+        traits::McpProtocolEra::Modern => "modern",
+        traits::McpProtocolEra::Legacy => "legacy",
+    }
+}
+
 fn clone_mcp_error(error: &McpError) -> McpError {
     match error {
         McpError::UnsupportedTransport(kind) => McpError::UnsupportedTransport(*kind),
@@ -446,6 +478,15 @@ fn lazy_upgrade_panic_error(server_name: &str, phase: &str) -> McpError {
     McpError::Internal(format!(
         "MCP server \"{server_name}\" panicked during {phase}"
     ))
+}
+
+fn panic_payload_mentions_connect(payload: &(dyn std::any::Any + Send)) -> bool {
+    payload
+        .downcast_ref::<&str>()
+        .is_some_and(|message| message.to_ascii_lowercase().contains("connect"))
+        || payload
+            .downcast_ref::<String>()
+            .is_some_and(|message| message.to_ascii_lowercase().contains("connect"))
 }
 
 /// Is this a remote (url-bearing) spec whose URL is blank?
@@ -968,6 +1009,21 @@ impl McpRegistry {
         self.discovery_cache_store.is_some()
     }
 
+    /// Whether any shared MCP server currently carries the coordinator-only
+    /// `role:"comms"` marker.  Cached catalogs count as well as live
+    /// connections, because routing decisions must not change during lazy
+    /// dialing.
+    pub async fn has_comms_roled_server(&self) -> bool {
+        self.connections.read().await.values().any(|state| {
+            matches!(
+                state,
+                McpConnectionState::Connected { config, .. }
+                    | McpConnectionState::Cached { config, .. }
+                    if config.metadata.role == Some(crate::connection::McpServerRole::Comms)
+            )
+        })
+    }
+
     /// Whether a Cross-App-Access ([`XaaConfigProvider`]) provider is wired into
     /// the injected [`OAuthDeps`]. `false` (the default, and the state when no
     /// `xaaIdp` settings tier is present) leaves an `oauth.xaa` server on its
@@ -1117,7 +1173,7 @@ impl McpRegistry {
         let lifecycle = self.lifecycle_lock(key);
         let outcome = {
             let _guard = lifecycle.lock().await;
-            self.prepare_lazy_upgrade_slot_locked(key, LazyUpgradeMode::Foreground, None)
+            self.prepare_lazy_upgrade_slot_locked(key, LazyUpgradeMode::Foreground, None, None)
                 .await?
         };
         match outcome {
@@ -1449,6 +1505,10 @@ impl McpRegistry {
                         .await);
                 }
                 crate::discovery_cache::Decision::Stale { entry, age_ms } => {
+                    let entry_era = entry
+                        .negotiated_era
+                        .clone()
+                        .unwrap_or_else(|| "legacy".into());
                     let connection_id = self
                         .serve_discovery_cache_hit(&config, &key, entry, age_ms, false)
                         .await;
@@ -1457,6 +1517,7 @@ impl McpRegistry {
                             &key,
                             LazyUpgradeMode::Background,
                             partition,
+                            Some(entry_era),
                         )
                         .await?
                     {
@@ -1555,6 +1616,7 @@ impl McpRegistry {
         key: &str,
         mode: LazyUpgradeMode,
         refresh_partition: Option<DiscoveryCachePartition>,
+        refresh_entry_era: Option<String>,
     ) -> Result<LazyUpgradePreparation, McpError> {
         enum CachedDialState {
             Connected(McpConnectionId),
@@ -1614,6 +1676,7 @@ impl McpRegistry {
                     connection_id,
                     config.clone(),
                     refresh_partition,
+                    refresh_entry_era,
                     mode,
                 ));
                 if mode == LazyUpgradeMode::Foreground {
@@ -1692,6 +1755,7 @@ impl McpRegistry {
                 config: config.clone(),
                 connection_id: discovery.connection_id,
                 capabilities: discovery.capabilities.clone(),
+                negotiated: discovery.negotiated.clone(),
                 tools: discovery.tools.clone(),
                 resources: discovery.resources.clone(),
                 resource_templates: discovery.resource_templates.clone(),
@@ -1759,10 +1823,17 @@ impl McpRegistry {
             "MCP protocol-era negotiation resolved"
         );
 
-        let attempt =
-            |spec: McpTransportSpec| self.connect_attempt(spec, connect_timeout, &config.name);
+        let expected_era = match negotiation_mode {
+            crate::protocol_negotiation::NegotiationMode::Auto { .. } => {
+                traits::McpProtocolEra::Modern
+            }
+            crate::protocol_negotiation::NegotiationMode::Legacy => traits::McpProtocolEra::Legacy,
+        };
+        let attempt = |spec: McpTransportSpec| {
+            self.connect_attempt(spec, connect_timeout, &config.name, expected_era)
+        };
 
-        let (conn, caps) = match attempt(connect_spec.clone()).await {
+        let (conn, caps, negotiated) = match attempt(connect_spec.clone()).await {
             Ok(pair) => pair,
             Err(e) if oauth_key.is_some() => {
                 let resource_metadata_url = error_resource_metadata_url(&e);
@@ -1830,10 +1901,11 @@ impl McpRegistry {
         // rotation cannot bind results fetched under the old grant to the new
         // cache partition.
         let discovery_cache_partition = if self.discovery_cache_store.is_some()
-            && crate::discovery_cache::cache_gate(
+            && crate::discovery_cache::cache_gate_with_metadata(
                 &config.spec,
                 config.discovery_cache,
                 crate::discovery_cache::feature_enabled(),
+                &config.metadata,
             )
             .is_none()
         {
@@ -1857,10 +1929,11 @@ impl McpRegistry {
                 } else {
                     Vec::new()
                 };
-                let templates_eligible = crate::discovery_cache::cache_gate(
+                let templates_eligible = crate::discovery_cache::cache_gate_with_metadata(
                     &config.spec,
                     config.discovery_cache,
                     crate::discovery_cache::feature_enabled(),
+                    &config.metadata,
                 )
                 .is_none();
                 let resource_templates = if caps.resources && templates_eligible {
@@ -1989,14 +2062,22 @@ impl McpRegistry {
                         .await
                         .with_config_options(config.timeout_ms, config.always_load)
                         .with_transport_kind(config.spec.transport_kind())
+                        .with_negotiated_protocol(negotiated.clone())
                         .with_server_url(gate_url.clone()),
                     ));
-                    listener_connection = Some(connection);
+                    // Modern connections deliberately do not install the
+                    // unsolicited custom-notification catalog handler. The
+                    // legacy protocol retains the established list_changed
+                    // listener behavior.
+                    if negotiated.era == traits::McpProtocolEra::Legacy {
+                        listener_connection = Some(connection);
+                    }
                 }
             }
 
             Ok(LiveDiscovery {
                 connection_id,
+                negotiated,
                 capabilities: caps,
                 tools,
                 resources,
@@ -2114,6 +2195,7 @@ impl McpRegistry {
             &resources,
             &resource_templates,
             &prompts,
+            Some(&discovery.negotiated),
         )
         .await;
         if let Some(connection) = listener_connection {
@@ -2170,14 +2252,34 @@ impl McpRegistry {
                     ),
                 };
                 if expected_current {
-                    self.publish_connected_state(
-                        key,
-                        &slot.expected_config,
-                        &discovery,
-                        Some(slot.cached_connection_id),
-                    )
-                    .await;
-                    true
+                    let era_changed = slot.mode == LazyUpgradeMode::Background
+                        && slot.refresh_partition.is_some()
+                        && slot.refresh_entry_era.as_deref().unwrap_or("legacy")
+                            != negotiated_era_label(discovery.negotiated.era);
+                    if era_changed {
+                        if let (Some(store), Some(partition)) =
+                            (&self.discovery_cache_store, slot.refresh_partition.as_ref())
+                        {
+                            if let Err(error) = store.purge_partitioned(&partition.partition_key) {
+                                tracing::warn!(
+                                    server = %slot.expected_config.name,
+                                    partition = %partition.partition_key,
+                                    %error,
+                                    "Discovery cache stale partition purge skipped after protocol-era change"
+                                );
+                            }
+                        }
+                        false
+                    } else {
+                        self.publish_connected_state(
+                            key,
+                            &slot.expected_config,
+                            &discovery,
+                            Some(slot.cached_connection_id),
+                        )
+                        .await;
+                        true
+                    }
                 } else {
                     false
                 }
@@ -2194,6 +2296,7 @@ impl McpRegistry {
             &resources,
             &resource_templates,
             &prompts,
+            Some(&discovery.negotiated),
         )
         .await;
         if let Some(connection) = listener_connection {
@@ -2423,10 +2526,10 @@ impl McpRegistry {
         &self,
         config: &McpServerConfig,
     ) -> Result<DiscoveryCachePartition, crate::discovery_cache::MissReason> {
-        // Claude's key retains a stable `agentSource`. The Rust config model
-        // does not carry that source yet; fail closed rather than sharing an
+        // Agent catalogs are safe to cache only when their stable source is
+        // present.  A missing source fails closed rather than sharing an
         // agent-scoped catalog under the plain server name/spec.
-        if config.scope == ConfigScope::Agent {
+        if config.scope == ConfigScope::Agent && config.metadata.agent_source.is_none() {
             return Err(crate::discovery_cache::MissReason::NoFingerprint);
         }
         let logical_key = crate::discovery_cache::logical_cache_key(config);
@@ -2451,10 +2554,19 @@ impl McpRegistry {
             _ => "grant:none".to_string(),
         };
         let fingerprint = crate::discovery_cache::fingerprint(&grant_token);
-        let partition_key = crate::discovery_cache::partition_key(&logical_key, &fingerprint);
+        let expected_era = match crate::protocol_negotiation::resolve_for_spec(
+            &config.spec,
+            mcp_connection_timeout().as_millis() as u64,
+        ) {
+            crate::protocol_negotiation::NegotiationMode::Auto { .. } => "modern",
+            crate::protocol_negotiation::NegotiationMode::Legacy => "legacy",
+        };
+        let partition_key =
+            crate::discovery_cache::partition_key_for_era(&logical_key, &fingerprint, expected_era);
         Ok(DiscoveryCachePartition {
             logical_key,
             partition_key,
+            expected_era,
         })
     }
 
@@ -2659,10 +2771,11 @@ impl McpRegistry {
     ) -> Option<DiscoveryCacheConsult> {
         let store = self.discovery_cache_store.as_ref()?;
         let feature_enabled = crate::discovery_cache::feature_enabled();
-        let consult = match crate::discovery_cache::cache_gate(
+        let consult = match crate::discovery_cache::cache_gate_with_metadata(
             &config.spec,
             config.discovery_cache,
             feature_enabled,
+            &config.metadata,
         ) {
             Some(reason) => {
                 if reason.purges_existing_entry() {
@@ -2685,18 +2798,22 @@ impl McpRegistry {
                         });
                     }
                 };
-                let lookup =
-                    store.load_partitioned(&partition.logical_key, &partition.partition_key);
+                let lookup = store.load_partitioned_for_era(
+                    &partition.logical_key,
+                    &partition.partition_key,
+                    partition.expected_era,
+                );
                 let policy = crate::discovery_cache::DiscoveryCachePolicy::from_env(
                     crate::discovery_cache::now_ms(),
                 );
                 DiscoveryCacheConsult {
-                    decision: crate::discovery_cache::decide(
+                    decision: crate::discovery_cache::decide_with_metadata(
                         &config.spec,
                         config.discovery_cache,
                         feature_enabled,
                         lookup,
                         policy,
+                        &config.metadata,
                     ),
                     partition: Some(partition),
                 }
@@ -2725,6 +2842,7 @@ impl McpRegistry {
         is_fresh: bool,
     ) -> McpConnectionId {
         let connection_id = McpConnectionId::new();
+        let negotiated = negotiated_protocol_from_cache_entry(&entry);
         let invalidated_slot = self.invalidate_lazy_upgrade_slot(key).await;
         Self::finish_invalidated_lazy_upgrade_slot(invalidated_slot.as_ref());
         self.clear_prompt_predecessors_for_key(key).await;
@@ -2734,6 +2852,7 @@ impl McpRegistry {
                 config: config.clone(),
                 connection_id,
                 capabilities: entry.capabilities,
+                negotiated,
                 tools: entry.tools,
                 resources: entry.resources,
                 resource_templates: entry.resource_templates,
@@ -2797,15 +2916,17 @@ impl McpRegistry {
         resources: &[traits::McpResourceDto],
         resource_templates: &[traits::McpResourceTemplateDto],
         prompts: &[traits::McpPromptDto],
+        negotiated: Option<&traits::McpNegotiatedProtocol>,
     ) {
         let Some(store) = &self.discovery_cache_store else {
             return;
         };
         let feature_enabled = crate::discovery_cache::feature_enabled();
-        let gate = crate::discovery_cache::cache_gate(
+        let gate = crate::discovery_cache::cache_gate_with_metadata(
             &config.spec,
             config.discovery_cache,
             feature_enabled,
+            &config.metadata,
         );
         let cache_key = crate::discovery_cache::logical_cache_key(config);
         match gate {
@@ -2827,6 +2948,11 @@ impl McpRegistry {
                     resources.to_vec(),
                     resource_templates.to_vec(),
                     prompts.to_vec(),
+                )
+                .with_negotiated_era(
+                    negotiated
+                        .map(|protocol| negotiated_era_label(protocol.era))
+                        .unwrap_or("legacy"),
                 );
                 let Ok(serialized) = serde_json::to_string(&entry) else {
                     return;
@@ -2899,7 +3025,15 @@ impl McpRegistry {
         spec: McpTransportSpec,
         timeout: Duration,
         server_name: &str,
-    ) -> Result<(McpRawConnection, ServerCapabilitiesDto), McpError> {
+        expected_era: traits::McpProtocolEra,
+    ) -> Result<
+        (
+            McpRawConnection,
+            ServerCapabilitiesDto,
+            traits::McpNegotiatedProtocol,
+        ),
+        McpError,
+    > {
         let deadline = tokio::time::Instant::now() + timeout;
         let timeout_error = || {
             McpError::Connection(format!(
@@ -2907,31 +3041,34 @@ impl McpRegistry {
                 timeout.as_millis()
             ))
         };
-        let conn = tokio::time::timeout_at(deadline, self.transport.connect(&spec))
-            .await
-            .map_err(|_| timeout_error())??;
         match std::panic::AssertUnwindSafe(async {
-            tokio::time::timeout_at(deadline, self.transport.initialize(&conn)).await
+            tokio::time::timeout_at(
+                deadline,
+                self.transport.connect_and_initialize(
+                    &spec,
+                    traits::McpConnectOptions {
+                        expected_era: Some(expected_era),
+                        deadline_ms: timeout.as_millis() as u64,
+                    },
+                ),
+            )
+            .await
         })
         .catch_unwind()
         .await
         {
-            Ok(Ok(Ok(capabilities))) => Ok((conn, capabilities)),
-            Ok(Ok(Err(error))) => {
-                self.disconnect_or_schedule_cleanup(conn.connection_id)
-                    .await;
-                Err(error)
+            Ok(Ok(Ok(result))) => Ok((result.connection, result.capabilities, result.negotiated)),
+            Ok(Ok(Err(error))) => Err(error),
+            Ok(Err(_)) => Err(timeout_error()),
+            Err(payload) if panic_payload_mentions_connect(payload.as_ref()) => {
+                // A panic before a raw connection is returned belongs to the
+                // detached lazy-upgrade owner, which records the terminal
+                // "cached lazy-upgrade task panicked" error. Initialize
+                // panics, in contrast, have a known connection and retain
+                // the existing phase-specific error/cleanup behavior.
+                std::panic::resume_unwind(payload);
             }
-            Ok(Err(_)) => {
-                self.disconnect_or_schedule_cleanup(conn.connection_id)
-                    .await;
-                Err(timeout_error())
-            }
-            Err(_) => {
-                self.disconnect_or_schedule_cleanup(conn.connection_id)
-                    .await;
-                Err(lazy_upgrade_panic_error(server_name, "initialize"))
-            }
+            Err(_) => Err(lazy_upgrade_panic_error(server_name, "initialize")),
         }
     }
 
@@ -5417,6 +5554,7 @@ mod tests {
                 directory_read: false,
                 logging: false,
                 experimental: HashMap::new(),
+                extensions: HashMap::new(),
             })
         }
         async fn list_resource_templates(
@@ -5573,6 +5711,7 @@ mod tests {
                 directory_read: false,
                 logging: false,
                 experimental: HashMap::new(),
+                extensions: HashMap::new(),
             })
         }
 
@@ -5853,6 +5992,7 @@ mod tests {
             always_load: false,
             discovery_cache: None,
             config_error: None,
+            metadata: Default::default(),
         }
     }
 
@@ -5902,6 +6042,7 @@ mod tests {
                 always_load: true,
                 discovery_cache: None,
                 config_error: None,
+                metadata: Default::default(),
             })
             .await
             .unwrap();
@@ -6955,6 +7096,11 @@ mod tests {
                     directory_read: false,
                     logging: false,
                     experimental: HashMap::new(),
+                    extensions: HashMap::new(),
+                },
+                negotiated: traits::McpNegotiatedProtocol {
+                    era: traits::McpProtocolEra::Legacy,
+                    version: "2025-11-25".into(),
                 },
                 tools: BridgeMock::new(&["old"]).tools,
                 resources: Vec::new(),
@@ -7031,6 +7177,11 @@ mod tests {
                     directory_read: false,
                     logging: false,
                     experimental: HashMap::new(),
+                    extensions: HashMap::new(),
+                },
+                negotiated: traits::McpNegotiatedProtocol {
+                    era: traits::McpProtocolEra::Legacy,
+                    version: "2025-11-25".into(),
                 },
                 tools: Vec::new(),
                 resources: Vec::new(),
@@ -7073,6 +7224,11 @@ mod tests {
                     directory_read: false,
                     logging: false,
                     experimental: HashMap::new(),
+                    extensions: HashMap::new(),
+                },
+                negotiated: traits::McpNegotiatedProtocol {
+                    era: traits::McpProtocolEra::Legacy,
+                    version: "2025-11-25".into(),
                 },
                 tools: Vec::new(),
                 resources: Vec::new(),
@@ -7131,6 +7287,7 @@ mod tests {
                 directory_read: false,
                 logging: false,
                 experimental: HashMap::new(),
+                extensions: HashMap::new(),
             },
             vec![],
             vec![],
@@ -7180,6 +7337,11 @@ mod tests {
                     directory_read: false,
                     logging: false,
                     experimental: HashMap::new(),
+                    extensions: HashMap::new(),
+                },
+                negotiated: traits::McpNegotiatedProtocol {
+                    era: traits::McpProtocolEra::Legacy,
+                    version: "2025-11-25".into(),
                 },
                 tools: Vec::new(),
                 resources: Vec::new(),
@@ -7302,6 +7464,7 @@ mod tests {
                 directory_read: false,
                 logging: false,
                 experimental: HashMap::new(),
+                extensions: HashMap::new(),
             },
             vec![],
             vec![],
@@ -7426,6 +7589,7 @@ mod tests {
                 directory_read: false,
                 logging: false,
                 experimental: HashMap::new(),
+                extensions: HashMap::new(),
             },
             vec![],
             vec![],
@@ -7531,6 +7695,7 @@ mod tests {
                 directory_read: false,
                 logging: false,
                 experimental: HashMap::new(),
+                extensions: HashMap::new(),
             },
             vec![],
             vec![],
@@ -8082,6 +8247,7 @@ mod tests {
                 &[],
                 &[],
                 &[],
+                None,
             )
             .await;
         drop(env);
@@ -8091,6 +8257,79 @@ mod tests {
             crate::discovery_cache::EntryLookup::Absent,
             "a headersHelper-gated server must have its stale entry purged"
         );
+    }
+
+    #[tokio::test]
+    async fn provenance_gates_skip_cache_read_and_purge() {
+        let _guard = crate::discovery_cache::tests_env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let env = DiscoveryCacheEnvGuard::new();
+        env.set(crate::discovery_cache::ENV_ENABLED, "true");
+
+        let mut cli_owned = http_cfg("cli-owned", "https://mcp.example.com/v1");
+        cli_owned.metadata.cli_owned = true;
+        let env_placeholder = http_cfg("env-placeholder", "https://${MCP_HOST}/v1");
+        let mut ambient_credential = http_cfg("ambient-credential", "https://mcp.example.com/v1");
+        ambient_credential.metadata.ambient_credential = true;
+        let scenarios = [
+            (cli_owned, crate::discovery_cache::MissReason::CliOwned),
+            (
+                env_placeholder,
+                crate::discovery_cache::MissReason::EnvPlaceholder,
+            ),
+            (
+                ambient_credential,
+                crate::discovery_cache::MissReason::AmbientCredential,
+            ),
+        ];
+
+        for (config, expected_reason) in scenarios {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let store = crate::discovery_cache::DiscoveryCacheStore::new(dir.path());
+            let cache_key = crate::discovery_cache::logical_cache_key(&config);
+            store_test_entry(
+                &store,
+                &crate::discovery_cache::DiscoveryCacheEntry::new(
+                    cache_key.clone(),
+                    1,
+                    ServerCapabilitiesDto::default(),
+                    vec![],
+                    vec![],
+                    vec![],
+                    vec![],
+                ),
+            );
+            let mock = Arc::new(BridgeMock::new(&[]));
+            let registry = McpRegistry::with_raw_conn(
+                mock.clone() as Arc<dyn McpTransport>,
+                mock as Arc<dyn RawConnectionProvider>,
+            )
+            .with_discovery_cache_store(
+                crate::discovery_cache::DiscoveryCacheStore::new(dir.path()),
+            );
+
+            let consult = registry
+                .discovery_cache_decision_for(&config)
+                .await
+                .expect("store is configured");
+            assert_eq!(
+                consult.decision,
+                crate::discovery_cache::Decision::Miss {
+                    reason: expected_reason
+                },
+                "provenance gate must short-circuit before an on-disk lookup"
+            );
+            assert!(
+                consult.partition.is_none(),
+                "provenance gate must not resolve a cache partition"
+            );
+            assert!(matches!(
+                load_test_entry(&store, &cache_key),
+                crate::discovery_cache::EntryLookup::Found(_)
+            ));
+        }
+        drop(env);
     }
 
     /// A real parsed/runtime `discoveryCache:false` value must purge the
@@ -8203,6 +8442,7 @@ mod tests {
                 &logical_key,
                 &crate::discovery_cache::fingerprint("grant:old"),
             ),
+            expected_era: "legacy",
         };
         let new_partition = DiscoveryCachePartition {
             logical_key: logical_key.clone(),
@@ -8210,6 +8450,7 @@ mod tests {
                 &logical_key,
                 &crate::discovery_cache::fingerprint("grant:new"),
             ),
+            expected_era: "legacy",
         };
         let entry = crate::discovery_cache::DiscoveryCacheEntry::new(
             logical_key.clone(),
@@ -8249,6 +8490,101 @@ mod tests {
             new.consecutive_refresh_failures, 0,
             "a refresh-token rotation must not move the strike to the new partition"
         );
+    }
+
+    #[tokio::test]
+    async fn stale_refresh_era_change_purges_hit_partition_without_replacement_or_strike() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = crate::discovery_cache::DiscoveryCacheStore::new(dir.path());
+        let cfg = http_cfg("srv", "https://mcp.example.com/v1");
+        let logical_key = crate::discovery_cache::logical_cache_key(&cfg);
+        let partition = DiscoveryCachePartition {
+            logical_key: logical_key.clone(),
+            partition_key: crate::discovery_cache::partition_key(
+                &logical_key,
+                &crate::discovery_cache::fingerprint("grant:none"),
+            ),
+            expected_era: "legacy",
+        };
+        let entry = crate::discovery_cache::DiscoveryCacheEntry::new(
+            logical_key.clone(),
+            1,
+            ServerCapabilitiesDto::default(),
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+        );
+        store
+            .store_partitioned(&entry, &partition.partition_key)
+            .expect("seed stale partition");
+        let other_partition_key = crate::discovery_cache::partition_key(
+            &logical_key,
+            &crate::discovery_cache::fingerprint("grant:other"),
+        );
+        store
+            .store_partitioned(&entry, &other_partition_key)
+            .expect("seed other partition");
+
+        let mock = Arc::new(BridgeMock::new(&[]));
+        let registry = McpRegistry::with_raw_conn(
+            mock.clone() as Arc<dyn McpTransport>,
+            mock as Arc<dyn RawConnectionProvider>,
+        )
+        .with_discovery_cache_store(crate::discovery_cache::DiscoveryCacheStore::new(dir.path()));
+        let cached_connection_id = registry
+            .serve_discovery_cache_hit(&cfg, "srv", entry, 1_000_000, false)
+            .await;
+        let slot = Arc::new(LazyUpgradeSlot::new(
+            "srv".into(),
+            cached_connection_id,
+            cfg.clone(),
+            Some(partition.clone()),
+            Some("legacy".into()),
+            LazyUpgradeMode::Background,
+        ));
+        registry
+            .lazy_upgrade_slots
+            .write()
+            .await
+            .insert("srv".into(), slot.clone());
+
+        let discovery = LiveDiscovery {
+            connection_id: McpConnectionId::new(),
+            negotiated: traits::McpNegotiatedProtocol {
+                era: traits::McpProtocolEra::Modern,
+                version: "2026-07-28".into(),
+            },
+            capabilities: ServerCapabilitiesDto::default(),
+            tools: vec![],
+            resources: vec![],
+            resource_templates: vec![],
+            prompts: vec![],
+            discovery_cache_partition: Some(partition.clone()),
+            client: None,
+            listener_connection: None,
+        };
+        assert!(matches!(
+            registry
+                .install_lazy_upgrade_live_discovery_if_current("srv", &slot, discovery)
+                .await,
+            BackgroundInstallOutcome::Rejected(_)
+        ));
+        assert!(matches!(
+            registry.connections.read().await.get("srv"),
+            Some(McpConnectionState::Cached { connection_id, .. })
+                if *connection_id == cached_connection_id
+        ));
+        assert_eq!(
+            store.load_partitioned(&logical_key, &partition.partition_key),
+            crate::discovery_cache::EntryLookup::Absent,
+            "an era change retires only the partition that served the stale hit"
+        );
+        assert!(matches!(
+            store.load_partitioned(&logical_key, &other_partition_key),
+            crate::discovery_cache::EntryLookup::Found(entry)
+                if entry.consecutive_refresh_failures == 0
+        ));
     }
 
     /// A connect failure for a server with NO existing entry records
@@ -8352,6 +8688,7 @@ mod tests {
                 directory_read: false,
                 logging: false,
                 experimental: HashMap::new(),
+                extensions: HashMap::new(),
             },
             vec![McpToolDto {
                 server_name: "srv".into(),
@@ -8745,7 +9082,7 @@ mod tests {
         let lifecycle = registry.lifecycle_lock("srv");
         let _guard = lifecycle.lock().await;
         let prepare = registry
-            .prepare_lazy_upgrade_slot_locked("srv", LazyUpgradeMode::Background, None)
+            .prepare_lazy_upgrade_slot_locked("srv", LazyUpgradeMode::Background, None, None)
             .await
             .expect("background probe");
         drop(_guard);
@@ -9038,6 +9375,11 @@ mod tests {
                     directory_read: false,
                     logging: false,
                     experimental: HashMap::new(),
+                    extensions: HashMap::new(),
+                },
+                negotiated: traits::McpNegotiatedProtocol {
+                    era: traits::McpProtocolEra::Legacy,
+                    version: "2025-11-25".into(),
                 },
                 tools: vec![McpToolDto {
                     server_name: "srv".into(),
@@ -9067,6 +9409,7 @@ mod tests {
                 directory_read: false,
                 logging: false,
                 experimental: HashMap::new(),
+                extensions: HashMap::new(),
             },
             vec![McpToolDto {
                 server_name: "srv".into(),
@@ -9156,6 +9499,11 @@ mod tests {
                     directory_read: false,
                     logging: false,
                     experimental: HashMap::new(),
+                    extensions: HashMap::new(),
+                },
+                negotiated: traits::McpNegotiatedProtocol {
+                    era: traits::McpProtocolEra::Legacy,
+                    version: "2025-11-25".into(),
                 },
                 tools: vec![],
                 resources: vec![],
@@ -9328,6 +9676,11 @@ mod tests {
                     directory_read: false,
                     logging: false,
                     experimental: HashMap::new(),
+                    extensions: HashMap::new(),
+                },
+                negotiated: traits::McpNegotiatedProtocol {
+                    era: traits::McpProtocolEra::Legacy,
+                    version: "2025-11-25".into(),
                 },
                 tools: vec![McpToolDto {
                     server_name: "srv".into(),
@@ -9554,6 +9907,11 @@ mod tests {
                     directory_read: false,
                     logging: false,
                     experimental: HashMap::new(),
+                    extensions: HashMap::new(),
+                },
+                negotiated: traits::McpNegotiatedProtocol {
+                    era: traits::McpProtocolEra::Legacy,
+                    version: "2025-11-25".into(),
                 },
                 tools: vec![McpToolDto {
                     server_name: "srv".into(),
@@ -9666,6 +10024,11 @@ mod tests {
                     directory_read: false,
                     logging: false,
                     experimental: HashMap::new(),
+                    extensions: HashMap::new(),
+                },
+                negotiated: traits::McpNegotiatedProtocol {
+                    era: traits::McpProtocolEra::Legacy,
+                    version: "2025-11-25".into(),
                 },
                 tools: vec![],
                 resources: vec![],
@@ -9785,6 +10148,11 @@ mod tests {
                     directory_read: false,
                     logging: false,
                     experimental: HashMap::new(),
+                    extensions: HashMap::new(),
+                },
+                negotiated: traits::McpNegotiatedProtocol {
+                    era: traits::McpProtocolEra::Legacy,
+                    version: "2025-11-25".into(),
                 },
                 tools: vec![],
                 resources: vec![],
@@ -9966,6 +10334,11 @@ mod tests {
                     directory_read: false,
                     logging: false,
                     experimental: HashMap::new(),
+                    extensions: HashMap::new(),
+                },
+                negotiated: traits::McpNegotiatedProtocol {
+                    era: traits::McpProtocolEra::Legacy,
+                    version: "2025-11-25".into(),
                 },
                 tools: vec![],
                 resources: vec![],
@@ -10044,6 +10417,11 @@ mod tests {
                     directory_read: false,
                     logging: false,
                     experimental: HashMap::new(),
+                    extensions: HashMap::new(),
+                },
+                negotiated: traits::McpNegotiatedProtocol {
+                    era: traits::McpProtocolEra::Legacy,
+                    version: "2025-11-25".into(),
                 },
                 tools: vec![],
                 resources: vec![],
@@ -11529,6 +11907,7 @@ mod tests {
                 directory_read: false,
                 logging: false,
                 experimental: HashMap::new(),
+                extensions: HashMap::new(),
             })
         }
 
@@ -11861,6 +12240,7 @@ mod tests {
             always_load: false,
             discovery_cache: None,
             config_error: None,
+            metadata: Default::default(),
         }
     }
 
@@ -12012,6 +12392,7 @@ mod snapshot_tests {
             always_load: false,
             discovery_cache: None,
             config_error: None,
+            metadata: Default::default(),
         }
     }
 

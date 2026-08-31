@@ -15,6 +15,7 @@ pub mod guest_fs;
 pub mod http;
 pub mod llm_config;
 pub mod mcp_http;
+pub mod mcp_remote;
 pub mod mcp_sse;
 pub mod mcp_stdio;
 pub mod mcp_ws;
@@ -29,6 +30,7 @@ pub use llm_config::{
     apply_settings_providers, builtin_anthropic_config, parse_routing_overrides, RoutingOverrides,
 };
 pub use mcp_http::{connect_http, HttpConnectError};
+pub use mcp_remote::RemoteMcpTransport;
 pub use mcp_sse::{connect_sse, SseConnectError, IDE_AUTH_HEADER};
 pub use mobile_linux::{
     MobileLinuxProcessRunner, MobileLinuxSandbox, RootfsArchive, RootfsEntryKind,

@@ -15,7 +15,7 @@ use platform_posix::mcp::PosixMcpTransport;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Duration;
-use traits::{McpTransport, McpTransportSpec};
+use traits::{McpConnectOptions, McpProtocolEra, McpTransport, McpTransportSpec};
 
 mod support;
 
@@ -255,4 +255,29 @@ async fn ping_unknown_connection_errors() {
         matches!(res, Err(traits::McpError::Connection(_))),
         "ping on an unknown id should be a connection error, got {res:?}"
     );
+}
+
+/// The legacy fixture has no `server/discover` implementation, so an explicit
+/// modern expectation must probe a disposable child, close it, and then spawn
+/// a fresh child for the legacy initialize. This exercises the production
+/// fallback path over real NDJSON JSON-RPC rather than a trait stub.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn modern_probe_falls_back_and_redials_stdio_legacy() {
+    let transport = PosixMcpTransport::new();
+    let result = transport
+        .connect_and_initialize(
+            &stdio_spec(),
+            McpConnectOptions {
+                expected_era: Some(McpProtocolEra::Modern),
+                deadline_ms: 5_000,
+            },
+        )
+        .await
+        .expect("legacy fallback handshake");
+    assert_eq!(result.negotiated.era, McpProtocolEra::Legacy);
+    assert_eq!(result.negotiated.version, "2025-11-25");
+    transport
+        .disconnect(result.connection.connection_id)
+        .await
+        .expect("disconnect live legacy child");
 }

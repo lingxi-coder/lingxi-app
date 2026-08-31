@@ -126,17 +126,19 @@ impl AgentToolResolver {
     ///   the per-definition `disallowed_tools` denylist).
     /// * `parent_tools` — tools the parent agent had access to.
     /// * `agent_mcp_tools` — tools surfaced by the agent's MCP servers; these
-    ///   ALWAYS pass (claude returns `true` for `mcp__` names before any
+    ///   normally pass (claude returns `true` for `mcp__` names before any
     ///   disallowed check, `agentToolUtils.ts:82-85`), so they are appended
-    ///   AFTER the always-disallowed/per-definition drops.
-    /// * `_coordinator_mode` — reserved; future coordinator-only filters
-    ///   will land in Plan 07.
+    ///   AFTER the always-disallowed/per-definition drops. Coordinator workers
+    ///   additionally omit entries carrying `role:"comms"`.
+    /// * `coordinator_mode` — when true, coordinator workers do not receive
+    ///   coordinator-only (`role:"comms"`) MCP tools from either the shared
+    ///   registry pool or the per-agent inline MCP pool.
     ///
     /// Pipeline (claude `resolveAgentTools` order-equivalent):
     /// 1. policy projection ([`AgentToolPolicy`]) — only removes tools;
     /// 2. always-disallowed drop (`Agent`/`TaskOutput`/… gated by `USER_TYPE`);
     /// 3. per-definition `disallowed_tools` subtraction (base-name match);
-    /// 4. append per-agent MCP tools (never filtered);
+    /// 4. append per-agent MCP tools (coordinator workers omit `comms`);
     /// 5. Plan-mode safe-tool narrowing (LingXi-local last step).
     ///
     /// ## `use_exact_tools` full bypass (claude `runAgent.ts:500-502`)
@@ -149,7 +151,9 @@ impl AgentToolResolver {
     /// keeps the `Agent` tool the recursion guard (`isInForkChild`) assumes is
     /// present. We therefore return `parent_tools` verbatim with NO
     /// always-disallowed strip, NO per-definition subtraction, and NO Plan-mode
-    /// narrowing. (Per-agent MCP tools are not appended on this path either:
+    /// narrowing, except that coordinator workers still omit shared `comms`
+    /// MCP tools so the lead-only routing invariant holds. (Per-agent MCP tools
+    /// are not appended on this path either:
     /// claude's fork passes `availableTools = toolUseContext.options.tools`
     /// untouched.)
     #[must_use]
@@ -161,7 +165,7 @@ impl AgentToolResolver {
         // / `spawnDepth`): the main thread spawns depth-1 children. Gates the
         // `Agent` tool against the configured maximum spawn depth below.
         depth: u32,
-        _coordinator_mode: bool,
+        coordinator_mode: bool,
     ) -> Vec<Arc<dyn Tool>> {
         // claude `runAgent.ts:500-502`: `useExactTools ? availableTools : …`.
         // The fork child bypasses ALL filtering, keeping the parent's exact pool.
@@ -169,7 +173,15 @@ impl AgentToolResolver {
             use_exact_tools: true,
         } = &agent_def.tools
         {
-            return parent_tools.to_vec();
+            return if coordinator_mode {
+                parent_tools
+                    .iter()
+                    .filter(|tool| tool.mcp_role() != Some("comms"))
+                    .cloned()
+                    .collect()
+            } else {
+                parent_tools.to_vec()
+            };
         }
 
         let mut tools = match &agent_def.tools {
@@ -185,6 +197,13 @@ impl AgentToolResolver {
                 .cloned()
                 .collect(),
         };
+
+        // Shared MCP tools are already in `parent_tools`, unlike inline MCP
+        // tools which are appended below. Apply the coordinator worker gate to
+        // the projected parent pool before the common deny/depth passes.
+        if coordinator_mode {
+            tools.retain(|tool| tool.mcp_role() != Some("comms"));
+        }
 
         // (1b) Auto-memory tool injection (claude `isAutoMemoryEnabled` →
         // Write/Edit/Read). When a subagent declares a `memory:` scope
@@ -258,7 +277,16 @@ impl AgentToolResolver {
 
         // (4) Per-agent MCP tools always pass (claude returns true for
         // `mcp__*` before any disallowed check) — append after the drops.
-        tools.extend(agent_mcp_tools.iter().cloned());
+        if coordinator_mode {
+            tools.extend(
+                agent_mcp_tools
+                    .iter()
+                    .filter(|tool| tool.mcp_role() != Some("comms"))
+                    .cloned(),
+            );
+        } else {
+            tools.extend(agent_mcp_tools.iter().cloned());
+        }
 
         // (5) Plan-mode narrowing (LingXi-local last step; only further
         // narrows, so leaving it last is byte-safe). Reuse permission's
@@ -334,6 +362,9 @@ pub async fn resolve_subagent_tools(
     // The resolved subagent's own recursion depth — gates its `Agent` tool
     // against Claude's configured maximum. Threaded from the spawn request.
     depth: u32,
+    // Whether this spawn is a coordinator worker. Coordinator workers hide
+    // `role:"comms"` MCP tools while ordinary sessions retain them.
+    coordinator_mode: bool,
     // §24b — this spawn's already-connected per-agent MCP tools (claude
     // `Agr`'s `Fe`), passed straight through to
     // [`AgentToolResolver::resolve`]'s `agent_mcp_tools` parameter. Empty for
@@ -362,8 +393,13 @@ pub async fn resolve_subagent_tools(
             ));
         }
     }
-    let mut resolved =
-        AgentToolResolver::resolve(agent_def, &parent_tools, agent_mcp_tools, depth, false);
+    let mut resolved = AgentToolResolver::resolve(
+        agent_def,
+        &parent_tools,
+        agent_mcp_tools,
+        depth,
+        coordinator_mode,
+    );
     if !tool_wide_deny.is_empty() {
         resolved.retain(|t| {
             !tool_wide_deny
@@ -457,6 +493,7 @@ mod tests {
     /// resolver inspects).
     struct StubTool {
         name: &'static str,
+        role: Option<&'static str>,
     }
 
     #[async_trait]
@@ -470,6 +507,9 @@ mod tests {
         }
         fn is_enabled(&self, _ctx: &ToolStaticContext) -> bool {
             true
+        }
+        fn mcp_role(&self) -> Option<&str> {
+            self.role
         }
         fn max_result_size_chars(&self) -> usize {
             1024
@@ -511,7 +551,14 @@ mod tests {
     }
 
     fn tool(name: &'static str) -> Arc<dyn Tool> {
-        Arc::new(StubTool { name })
+        Arc::new(StubTool { name, role: None })
+    }
+
+    fn comms_tool(name: &'static str) -> Arc<dyn Tool> {
+        Arc::new(StubTool {
+            name,
+            role: Some("comms"),
+        })
     }
 
     fn pool(names: &[&'static str]) -> Vec<Arc<dyn Tool>> {
@@ -754,6 +801,18 @@ mod tests {
         assert!(got.contains(&"mcp__x__y".to_string()));
         assert!(got.contains(&"Agent".to_string()), "Agent kept at depth 0");
         assert!(got.contains(&"Read".to_string()));
+    }
+
+    #[test]
+    fn coordinator_worker_filters_only_comms_mcp_tools() {
+        let parent = pool(&["Read"]);
+        let mcp = vec![tool("mcp__ordinary__run"), comms_tool("mcp__comms__send")];
+        let def = agent_def(all_policy());
+        let worker = AgentToolResolver::resolve(&def, &parent, &mcp, 0, true);
+        assert!(names(&worker).contains(&"mcp__ordinary__run".to_string()));
+        assert!(!names(&worker).contains(&"mcp__comms__send".to_string()));
+        let ordinary = AgentToolResolver::resolve(&def, &parent, &mcp, 0, false);
+        assert!(names(&ordinary).contains(&"mcp__comms__send".to_string()));
     }
 
     #[test]

@@ -57,30 +57,14 @@
 //! cache. `MCP_DISCOVERY_CACHE` itself defaults OFF (`Sln`'s `"not-enabled"`
 //! arm) — the feature is opt-IN.
 //!
-//! ## What is DEFERRED (named, not built — see the batch report)
+//! Provenance and post-hit capability guards are wired in this module. The
+//! provenance guards (`cli-owned`, unresolved environment placeholders, and
+//! explicit MCP-only ambient credentials) run before the two user-controlled
+//! purging guards (`opt-out` and `headers-helper`). Skills takes precedence
+//! over channel, and skills uses the independent `tengu_mcp_skills` feature
+//! flag rather than the discovery-cache flag. A live-connection short circuit
+//! remains in the registry before this cache is consulted.
 //!
-//! * **`cli-owned` / `env-placeholder` / `ambient-credential`.** Oracle guards
-//!   between the transport gate and the opt-out/headers-helper table (see
-//!   `me`'s source above). This port still has no surface for those three, so
-//!   they remain deferred.
-//! * **`skills-capable` / `channel-capable` / `live-connection`.** Round-3
-//!   of the batch audit misfiled these as a separate "MCP skills" feature;
-//!   round-4 (§24e) corrected that — they are discovery-cache MISS REASONS
-//!   `rs`/`Vo` (@182313623/@182512831) apply AFTER a fresh/stale hit, when
-//!   the entry's capabilities match a coordinator-mode "skills" or "channel"
-//!   predicate this port has no concept of at all (no coordinator/multi-agent
-//!   surface exists here — see `mcp::protocol_negotiation`'s module docs,
-//!   which deferred the SAME two reasons for the identical reason). Building
-//!   a guess at `Gmt`/`o_e`'s predicate would BE the separate feature the
-//!   correction warns against — not built. `live-connection` similarly ties
-//!   to an in-flight-connection check at the plugin-discovery call site this
-//!   port doesn't have; also not built.
-//! * **`role` config threading.** `role` still is not carried onto
-//!   [`crate::connection::McpServerConfig`] or [`traits::McpTransportSpec`];
-//!   this port has no runtime consumer for it yet. `discoveryCache` is now
-//!   threaded as `McpServerConfig::discovery_cache`, and production
-//!   [`mcp::registry`] call sites pass that value into [`cache_gate`] /
-//!   [`decide`], making [`CacheGateReason::OptOut`] reachable in practice.
 //!
 //! ## What §11 Stage 1 wires in (this revision)
 //!
@@ -192,12 +176,22 @@ pub(crate) fn fingerprint(grant_token: &str) -> String {
 }
 
 #[must_use]
-pub(crate) fn partition_key(logical_cache_key: &str, fingerprint: &str) -> String {
+pub(crate) fn partition_key_for_era(
+    logical_cache_key: &str,
+    fingerprint: &str,
+    era: &str,
+) -> String {
     let material = format!(
-        "{logical_cache_key}\0{fingerprint}\0era:legacy\0{}",
+        "{logical_cache_key}\0{fingerprint}\0era:{era}\0{}",
         traits::CLAUDE_CODE_VERSION
     );
     sha256_hex(material.as_bytes())[..32].to_string()
+}
+
+/// Backward-compatible legacy partition vector.  Callers that have not
+/// negotiated a protocol continue to produce the original bytes.
+pub(crate) fn partition_key(logical_cache_key: &str, fingerprint: &str) -> String {
+    partition_key_for_era(logical_cache_key, fingerprint, "legacy")
 }
 
 fn canonicalize_logical_key_value(value: serde_json::Value) -> serde_json::Value {
@@ -379,6 +373,27 @@ pub(crate) fn logical_cache_key(config: &crate::connection::McpServerConfig) -> 
     if let Some(timeout) = config.timeout_ms {
         map.insert("timeout".into(), timeout.into());
     }
+    // Metadata is absent for ordinary servers, preserving their established
+    // fixed vectors.  These fields are only identity-bearing when explicitly
+    // supplied by the MCP config/agent host.
+    if let Some(transport) = &config.metadata.transport {
+        map.insert("transport".into(), transport.clone().into());
+    }
+    if config.metadata.role.is_some() {
+        map.insert("role".into(), "comms".into());
+    }
+    if let Some(source) = config.metadata.agent_source {
+        let value = match source {
+            crate::connection::McpAgentSource::BuiltIn => "built-in",
+            crate::connection::McpAgentSource::Plugin => "plugin",
+            crate::connection::McpAgentSource::UserSettings => "userSettings",
+            crate::connection::McpAgentSource::ProjectSettings => "projectSettings",
+            crate::connection::McpAgentSource::PolicySettings => "policySettings",
+            crate::connection::McpAgentSource::FlagSettings => "flagSettings",
+            crate::connection::McpAgentSource::AdditionalDirectory => "additionalDirectory",
+        };
+        map.insert("agentSource".into(), value.into());
+    }
     let canonical = canonicalize_logical_key_value(raw);
     let canonical_json = serde_json::to_string(&canonical)
         .expect("canonical discovery-cache key config is serializable");
@@ -406,6 +421,11 @@ pub const CACHE_SCHEMA_VERSION: u32 = 2;
 /// Reused here via [`traits::env::is_env_truthy`]/[`traits::env::is_env_defined_falsy`],
 /// this port's established idiom for a coerced-boolean env var.
 pub const ENV_ENABLED: &str = "MCP_DISCOVERY_CACHE";
+
+/// Independent GrowthBook feature flag for the MCP skills capability gate.
+/// This is deliberately not derived from [`ENV_ENABLED`]: the discovery cache
+/// may be enabled while skills handling remains disabled (and vice versa).
+const FLAG_SKILLS: &str = "tengu_mcp_skills";
 
 /// Shared serial guard for tests that mutate `ENV_ENABLED`. Env vars are
 /// process-global, so the registry's eligibility tests must take the same
@@ -555,6 +575,14 @@ pub fn feature_enabled() -> bool {
     traits::env::is_env_truthy(std::env::var(ENV_ENABLED).ok().as_deref())
 }
 
+/// Whether the MCP skills capability gate is enabled. This reads the
+/// independent `tengu_mcp_skills` feature flag rather than the discovery-cache
+/// opt-in, matching the two separate gates in the reference implementation.
+#[must_use]
+fn skills_feature_enabled() -> bool {
+    telemetry::flag_bool(FLAG_SKILLS, false)
+}
+
 /// Plain, non-negative-integer env parse shared by the three numeric knobs
 /// below — mirrors this crate's existing `MCP_TIMEOUT` convention
 /// (`registry::mcp_connection_timeout`): trim, parse as `u64`, `0` or
@@ -619,6 +647,12 @@ pub enum CacheGateReason {
     /// entry) — an executable-derived header can't be safely assumed stable
     /// across a cached round.
     HeadersHelper,
+    /// Explicit `--mcp-config` ownership; this is a non-purging miss.
+    CliOwned,
+    /// Unresolved `${VAR}` remains in a remote URL/header; non-purging.
+    EnvPlaceholder,
+    /// Host-injected MCP-only temporary credential; non-purging.
+    AmbientCredential,
 }
 
 impl CacheGateReason {
@@ -629,6 +663,9 @@ impl CacheGateReason {
         match self {
             Self::Transport => MissReason::Transport,
             Self::FeatureDisabled | Self::OptOut | Self::HeadersHelper => MissReason::Disabled,
+            Self::CliOwned => MissReason::CliOwned,
+            Self::EnvPlaceholder => MissReason::EnvPlaceholder,
+            Self::AmbientCredential => MissReason::AmbientCredential,
         }
     }
 
@@ -671,11 +708,57 @@ pub fn cache_gate(
     None
 }
 
+/// Provenance-aware cache gate with the oracle's fixed ordering.  The legacy
+/// [`cache_gate`] remains available for callers that have no metadata.
+#[must_use]
+pub fn cache_gate_with_metadata(
+    spec: &McpTransportSpec,
+    discovery_cache_opt_out: Option<bool>,
+    feature_enabled: bool,
+    metadata: &crate::connection::McpServerMetadata,
+) -> Option<CacheGateReason> {
+    if !feature_enabled {
+        return Some(CacheGateReason::FeatureDisabled);
+    }
+    let headers_helper = match spec {
+        McpTransportSpec::Sse { headers_helper, .. }
+        | McpTransportSpec::Http { headers_helper, .. } => headers_helper,
+        _ => return Some(CacheGateReason::Transport),
+    };
+    if metadata.cli_owned {
+        return Some(CacheGateReason::CliOwned);
+    }
+    if spec_contains_env_placeholder(spec) {
+        return Some(CacheGateReason::EnvPlaceholder);
+    }
+    if metadata.ambient_credential {
+        return Some(CacheGateReason::AmbientCredential);
+    }
+    if discovery_cache_opt_out == Some(false) {
+        return Some(CacheGateReason::OptOut);
+    }
+    if headers_helper.is_some() {
+        return Some(CacheGateReason::HeadersHelper);
+    }
+    None
+}
+
+fn spec_contains_env_placeholder(spec: &McpTransportSpec) -> bool {
+    let has_placeholder = |value: &str| value.contains("${") && value.contains('}');
+    match spec {
+        McpTransportSpec::Sse { url, headers, .. }
+        | McpTransportSpec::Http { url, headers, .. } => {
+            has_placeholder(url) || headers.values().any(|value| has_placeholder(value))
+        }
+        _ => false,
+    }
+}
+
 // ── miss-reason vocabulary (oracle `rs`/`Vo`/`as`) ──────────────────────────
 
-/// The full oracle miss-reason vocabulary. Variants marked DEFERRED are
-/// never constructed by [`decide`] today — kept so the type is complete and
-/// a future wave can wire them in without a breaking rename.
+/// The full oracle miss-reason vocabulary. Some variants are retained for
+/// compatibility with the recovered telemetry vocabulary even when a caller
+/// has no corresponding runtime surface.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MissReason {
     /// Non-cache-eligible transport.
@@ -694,19 +777,20 @@ pub enum MissReason {
     Expired,
     /// `consecutiveRefreshFailures` reached [`strike_threshold`].
     Strike,
-    /// DEFERRED — ties to OAuth-grant-token fingerprinting; never
-    /// constructed today (see module docs).
+    /// Grant-token fingerprint was unavailable.
     NoFingerprint,
-    /// DEFERRED — an in-flight live connection already exists for this
-    /// server; never constructed today.
+    /// An in-flight live connection already exists for this server.
     LiveConnection,
-    /// DEFERRED — the cached entry declares a "skills" capability the
-    /// coordinator-mode predicate this port lacks would reject; never
-    /// constructed today (§24e).
+    /// The cached entry declares MCP skills while the skills feature is on.
     SkillsCapable,
-    /// DEFERRED — the cached entry declares a "channel" capability; never
-    /// constructed today (§24e).
+    /// The cached entry declares the experimental channel capability.
     ChannelCapable,
+    /// Explicit CLI-owned config (non-purging).
+    CliOwned,
+    /// Unresolved environment placeholder (non-purging).
+    EnvPlaceholder,
+    /// Explicit MCP-only ambient credential (non-purging).
+    AmbientCredential,
 }
 
 /// Oracle `as(e)` — the telemetry bucket name for a decision. Curiously,
@@ -723,6 +807,7 @@ pub fn miss_telemetry_value(reason: MissReason) -> &'static str {
         MissReason::Corrupt => "miss_corrupt",
         MissReason::Strike => "miss_strike",
         MissReason::NoFingerprint => "miss_no_fingerprint",
+        MissReason::CliOwned | MissReason::EnvPlaceholder | MissReason::AmbientCredential => "live",
         MissReason::Transport
         | MissReason::Absent
         | MissReason::LiveConnection
@@ -804,14 +889,18 @@ pub struct DiscoveryCacheServerInfo {
 /// Schema v2: carries the FULL catalog a cache hit would need to serve a
 /// server without dialing (tools/resources/resource_templates/prompts +
 /// capabilities), not just the metadata v1 needed to make the fresh/stale/
-/// miss decision. Still narrower than the oracle's `B` schema
-/// (`negotiatedEra` is not modelled — no protocol-era negotiation reaches
-/// this deep in the port; see `mcp::protocol_negotiation`'s module docs).
+/// miss decision. Still narrower than the oracle's `B` schema; its
+/// `negotiatedEra` field is retained here only to compare a stale hit with the
+/// subsequent live revalidation result.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct DiscoveryCacheEntry {
     /// Schema version — see [`CACHE_SCHEMA_VERSION`].
     #[serde(rename = "v")]
     pub version: u32,
+    /// Negotiated protocol era used to populate this catalog.  Old entries
+    /// omit it and are interpreted as legacy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub negotiated_era: Option<String>,
     /// Logical server/config key from [`logical_cache_key`]. A mismatch
     /// (entry read from the right partition path but keyed for a different
     /// server/config) is treated as [`MissReason::Corrupt`].
@@ -866,6 +955,7 @@ impl DiscoveryCacheEntry {
     ) -> Self {
         Self {
             version: CACHE_SCHEMA_VERSION,
+            negotiated_era: None,
             cache_key,
             saved_at_ms,
             tools_saved_at_ms: None,
@@ -885,6 +975,13 @@ impl DiscoveryCacheEntry {
     #[must_use]
     pub fn with_server_info(mut self, server_info: DiscoveryCacheServerInfo) -> Self {
         self.server_info = Some(server_info);
+        self
+    }
+
+    /// Attach the actual negotiated protocol era used for this catalog.
+    #[must_use]
+    pub fn with_negotiated_era(mut self, era: impl Into<String>) -> Self {
+        self.negotiated_era = Some(era.into());
         self
     }
 }
@@ -972,7 +1069,32 @@ pub fn decide(
     lookup: EntryLookup,
     policy: DiscoveryCachePolicy,
 ) -> Decision {
-    if let Some(reason) = cache_gate(spec, discovery_cache_opt_out, feature_enabled) {
+    decide_with_metadata(
+        spec,
+        discovery_cache_opt_out,
+        feature_enabled,
+        lookup,
+        policy,
+        &crate::connection::McpServerMetadata::default(),
+    )
+}
+
+/// Metadata-aware discovery decision.  The post-hit capability checks are
+/// intentionally performed before Fresh/Stale so a catalog that exposes a
+/// coordinator-only capability is revalidated live rather than served from
+/// disk.
+#[must_use]
+pub fn decide_with_metadata(
+    spec: &McpTransportSpec,
+    discovery_cache_opt_out: Option<bool>,
+    feature_enabled: bool,
+    lookup: EntryLookup,
+    policy: DiscoveryCachePolicy,
+    metadata: &crate::connection::McpServerMetadata,
+) -> Decision {
+    if let Some(reason) =
+        cache_gate_with_metadata(spec, discovery_cache_opt_out, feature_enabled, metadata)
+    {
         return Decision::Miss {
             reason: reason.miss_reason(),
         };
@@ -1016,6 +1138,29 @@ pub fn decide(
     // the real fields, so this reads them directly — byte-exact with the
     // oracle expression, not a flattened approximation.
     let degenerate = entry.capabilities.tools && entry.tools.is_empty();
+    let skills_capable = skills_feature_enabled()
+        && entry.capabilities.resources
+        && entry
+            .capabilities
+            .extensions
+            .get("io.modelcontextprotocol/skills")
+            .is_some();
+    if skills_capable {
+        return Decision::Miss {
+            reason: MissReason::SkillsCapable,
+        };
+    }
+    let channel_capable = entry
+        .capabilities
+        .experimental
+        .get("claude/channel")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    if channel_capable {
+        return Decision::Miss {
+            reason: MissReason::ChannelCapable,
+        };
+    }
     if age_ms < policy.ttl_ms && !degenerate {
         Decision::Fresh { entry, age_ms }
     } else {
@@ -1231,6 +1376,21 @@ impl DiscoveryCacheStore {
         self.load_path(&self.partitioned_entry_path(partition_key), logical_key)
     }
 
+    /// Load a partition selected by the caller's expected protocol era.
+    ///
+    /// The era is part of the partition key, but the entry's actual negotiated
+    /// era is intentionally not compared here. An auto-negotiated connection
+    /// may fall back to legacy while retaining the modern expected partition,
+    /// and old entries that omit the field are legacy by compatibility rule.
+    pub(crate) fn load_partitioned_for_era(
+        &self,
+        logical_key: &str,
+        partition_key: &str,
+        _expected_era: &str,
+    ) -> EntryLookup {
+        self.load_partitioned(logical_key, partition_key)
+    }
+
     /// Atomic write: serialize to a sibling temp file with an exclusive
     /// per-attempt nonce, then rename into place. A crash mid-write leaves
     /// only an orphaned `.tmp-*` file behind — the real path is untouched
@@ -1259,6 +1419,23 @@ impl DiscoveryCacheStore {
             self.partitioned_entry_path(partition_key),
             partition_key,
         )
+    }
+
+    /// Delete exactly one identity partition. A stale revalidation may need
+    /// to retire the partition that served its cached entry without touching
+    /// another grant/era partition for the same server.
+    pub(crate) fn purge_partitioned(&self, partition_key: &str) -> std::io::Result<()> {
+        if !Self::valid_partition_key(partition_key) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "invalid discovery cache partition key",
+            ));
+        }
+        match std::fs::remove_file(self.partitioned_entry_path(partition_key)) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error),
+        }
     }
 
     /// Delete the entry for `key`. A missing file is not an error (mirrors
@@ -1429,6 +1606,35 @@ mod tests {
     }
 
     #[test]
+    fn provenance_gates_are_ordered_and_non_purging() {
+        let spec = http_spec("https://${MCP_HOST}", None);
+        let mut metadata = crate::connection::McpServerMetadata {
+            cli_owned: true,
+            ambient_credential: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            cache_gate_with_metadata(&spec, Some(false), true, &metadata),
+            Some(CacheGateReason::CliOwned)
+        );
+        metadata.cli_owned = false;
+        assert_eq!(
+            cache_gate_with_metadata(&spec, Some(false), true, &metadata),
+            Some(CacheGateReason::EnvPlaceholder)
+        );
+        let placeholder_free = http_spec("https://x.example", None);
+        assert_eq!(
+            cache_gate_with_metadata(&placeholder_free, Some(false), true, &metadata),
+            Some(CacheGateReason::AmbientCredential)
+        );
+        assert!(!CacheGateReason::CliOwned.purges_existing_entry());
+        assert!(!CacheGateReason::EnvPlaceholder.purges_existing_entry());
+        assert!(!CacheGateReason::AmbientCredential.purges_existing_entry());
+        assert!(CacheGateReason::OptOut.purges_existing_entry());
+        assert!(CacheGateReason::HeadersHelper.purges_existing_entry());
+    }
+
+    #[test]
     fn opt_out_and_headers_helper_purge_but_transport_and_feature_disabled_do_not() {
         assert!(CacheGateReason::OptOut.purges_existing_entry());
         assert!(CacheGateReason::HeadersHelper.purges_existing_entry());
@@ -1471,6 +1677,9 @@ mod tests {
             MissReason::LiveConnection,
             MissReason::SkillsCapable,
             MissReason::ChannelCapable,
+            MissReason::CliOwned,
+            MissReason::EnvPlaceholder,
+            MissReason::AmbientCredential,
         ] {
             assert_eq!(miss_telemetry_value(live), "live");
         }
@@ -1503,6 +1712,9 @@ mod tests {
             MissReason::LiveConnection,
             MissReason::SkillsCapable,
             MissReason::ChannelCapable,
+            MissReason::CliOwned,
+            MissReason::EnvPlaceholder,
+            MissReason::AmbientCredential,
         ] {
             assert!(
                 !miss_emits_discovery_source_telemetry(should_not_emit),
@@ -1523,7 +1735,121 @@ mod tests {
             logging: false,
             directory_read: false,
             experimental: std::collections::HashMap::new(),
+            extensions: std::collections::HashMap::new(),
         }
+    }
+
+    #[test]
+    fn skills_flag_is_independent_and_skills_miss_precedes_channel_miss() {
+        let mut capabilities = caps_tools(false);
+        capabilities.resources = true;
+        capabilities.extensions.insert(
+            "io.modelcontextprotocol/skills".into(),
+            serde_json::json!({}),
+        );
+        capabilities
+            .experimental
+            .insert("claude/channel".into(), serde_json::json!(true));
+        let entry = DiscoveryCacheEntry::new(
+            "srv-key".into(),
+            100,
+            capabilities,
+            sample_tools(1),
+            vec![],
+            vec![],
+            vec![],
+        );
+        let policy = DiscoveryCachePolicy {
+            now_ms: 101,
+            ttl_ms: 1000,
+            max_stale_ms: 10000,
+            strike_threshold: 3,
+        };
+        let spec = http_spec("https://x.example", None);
+        telemetry::test_set_flag("tengu_mcp_skills", true);
+        assert!(matches!(
+            decide_with_metadata(
+                &spec,
+                None,
+                true,
+                EntryLookup::Found(entry.clone()),
+                policy,
+                &Default::default()
+            ),
+            Decision::Miss {
+                reason: MissReason::SkillsCapable
+            }
+        ));
+        telemetry::test_set_flag("tengu_mcp_skills", false);
+        assert!(matches!(
+            decide_with_metadata(
+                &spec,
+                None,
+                true,
+                EntryLookup::Found(entry.clone()),
+                policy,
+                &Default::default()
+            ),
+            Decision::Miss {
+                reason: MissReason::ChannelCapable
+            }
+        ));
+        let mut no_channel = entry.clone();
+        no_channel.capabilities.experimental.clear();
+        assert!(matches!(
+            decide_with_metadata(
+                &spec,
+                None,
+                true,
+                EntryLookup::Found(no_channel),
+                policy,
+                &Default::default()
+            ),
+            Decision::Fresh { .. }
+        ));
+        let stale_policy = DiscoveryCachePolicy {
+            now_ms: 1_101,
+            ..policy
+        };
+        let mut no_channel = entry;
+        no_channel.capabilities.experimental.clear();
+        assert!(matches!(
+            decide_with_metadata(
+                &spec,
+                None,
+                true,
+                EntryLookup::Found(no_channel),
+                stale_policy,
+                &Default::default()
+            ),
+            Decision::Stale { .. }
+        ));
+        telemetry::test_clear_flag("tengu_mcp_skills");
+    }
+
+    #[test]
+    fn protocol_era_only_selects_partition_and_old_entries_default_to_legacy() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = DiscoveryCacheStore::new(dir.path());
+        let entry = DiscoveryCacheEntry::new(
+            "logical".into(),
+            1,
+            caps_tools(false),
+            sample_tools(1),
+            vec![],
+            vec![],
+            vec![],
+        );
+        store
+            .store_partitioned(&entry, "0123456789abcdef0123456789abcdef")
+            .expect("store");
+        assert!(matches!(
+            store.load_partitioned_for_era("logical", "0123456789abcdef0123456789abcdef", "modern"),
+            EntryLookup::Found(DiscoveryCacheEntry {
+                negotiated_era: None,
+                ..
+            })
+        ));
     }
 
     fn sample_tools(n: usize) -> Vec<McpToolDto> {
@@ -2325,6 +2651,7 @@ mod tests {
             discovery_cache: None,
             always_load: false,
             config_error: None,
+            metadata: crate::connection::McpServerMetadata::default(),
         };
         let same = crate::connection::McpServerConfig {
             scope: crate::connection::ConfigScope::Managed,
@@ -2369,6 +2696,7 @@ mod tests {
             discovery_cache: None,
             always_load: false,
             config_error: None,
+            metadata: crate::connection::McpServerMetadata::default(),
         };
         let McpTransportSpec::Http { oauth, .. } = &mut empty_oauth.spec else {
             unreachable!()

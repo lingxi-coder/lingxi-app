@@ -417,6 +417,8 @@ pub struct MCPTool {
     /// [`Self::with_bound_server_key`] so every OTHER construction site's
     /// argument list is unaffected by this addition.
     bound_server_key: Option<String>,
+    /// Optional server role propagated from MCP configuration metadata.
+    mcp_role: Option<String>,
 }
 
 /// Inspect a configured MCP server's auth/transport surface.
@@ -450,6 +452,7 @@ impl MCPTool {
             always_load: true,
             requires_user_interaction: false,
             bound_server_key: None,
+            mcp_role: None,
         }
     }
 
@@ -485,6 +488,7 @@ impl MCPTool {
             always_load,
             requires_user_interaction,
             bound_server_key: None,
+            mcp_role: None,
         }
     }
 
@@ -498,6 +502,13 @@ impl MCPTool {
     #[must_use]
     pub fn with_bound_server_key(mut self, key: String) -> Self {
         self.bound_server_key = Some(key);
+        self
+    }
+
+    /// Preserve the configured MCP routing role on a freshly built tool.
+    #[must_use]
+    pub fn with_mcp_role(mut self, role: Option<String>) -> Self {
+        self.mcp_role = role;
         self
     }
 
@@ -836,6 +847,9 @@ impl Tool for MCPTool {
     }
     fn is_mcp(&self) -> bool {
         true
+    }
+    fn mcp_role(&self) -> Option<&str> {
+        self.mcp_role.as_deref()
     }
     fn should_defer(&self) -> bool {
         self.full_name.is_some() && !self.always_load
@@ -2503,15 +2517,21 @@ pub async fn build_registered_mcp_tools(
             let mut handles: Vec<Arc<dyn Tool>> = tools
                 .iter()
                 .map(|dto| {
-                    Arc::new(MCPTool::new_for_tool(
-                        ctx.clone(),
-                        dto.full_name.clone(),
-                        dto.description.clone(),
-                        dto.input_schema.clone(),
-                        dto.search_hint.clone(),
-                        dto.always_load.unwrap_or(false),
-                        dto.requires_user_interaction,
-                    )) as Arc<dyn Tool>
+                    Arc::new(
+                        MCPTool::new_for_tool(
+                            ctx.clone(),
+                            dto.full_name.clone(),
+                            dto.description.clone(),
+                            dto.input_schema.clone(),
+                            dto.search_hint.clone(),
+                            dto.always_load.unwrap_or(false),
+                            dto.requires_user_interaction,
+                        )
+                        .with_mcp_role(
+                            (config.metadata.role == Some(mcp::McpServerRole::Comms))
+                                .then(|| "comms".to_string()),
+                        ),
+                    ) as Arc<dyn Tool>
                 })
                 .collect();
             if capabilities.resources && !resource_tools_pushed {
@@ -3488,6 +3508,7 @@ pub(crate) mod cached_resource_test_support {
             always_load: false,
             discovery_cache: None,
             config_error: None,
+            metadata: Default::default(),
         }
     }
 
@@ -3500,6 +3521,7 @@ pub(crate) mod cached_resource_test_support {
             logging: false,
             directory_read,
             experimental: HashMap::new(),
+            extensions: HashMap::new(),
         }
     }
 
@@ -3535,6 +3557,10 @@ pub(crate) mod cached_resource_test_support {
                 config: cached_server_config(name),
                 connection_id: McpConnectionId::new(),
                 capabilities: behavior.cached_capabilities,
+                negotiated: traits::McpNegotiatedProtocol {
+                    era: traits::McpProtocolEra::Legacy,
+                    version: "2025-11-25".into(),
+                },
                 tools: vec![],
                 resources: behavior.resources,
                 resource_templates: Vec::<McpResourceTemplateDto>::new(),
@@ -4413,6 +4439,7 @@ mod resource_tool_gating_tests {
             always_load: false,
             discovery_cache: None,
             config_error: None,
+            metadata: Default::default(),
         }
     }
 
@@ -4424,6 +4451,7 @@ mod resource_tool_gating_tests {
             logging: false,
             directory_read: false,
             experimental: std::collections::HashMap::new(),
+            extensions: std::collections::HashMap::new(),
         }
     }
 
@@ -4478,6 +4506,10 @@ mod resource_tool_gating_tests {
                 config: config("srv"),
                 connection_id: protocol::McpConnectionId::new(),
                 capabilities: caps(resources),
+                negotiated: traits::McpNegotiatedProtocol {
+                    era: traits::McpProtocolEra::Legacy,
+                    version: "2025-11-25".into(),
+                },
                 tools: vec![],
                 resources: vec![],
                 resource_templates: vec![],
@@ -4496,6 +4528,71 @@ mod resource_tool_gating_tests {
             .into_iter()
             .flat_map(|(_, ts)| ts.into_iter().map(|t| t.name().to_string()))
             .collect()
+    }
+
+    #[tokio::test]
+    async fn per_tool_mcp_role_survives_connected_and_cached_rebuilds() {
+        let registry = Arc::new(McpRegistry::new(Arc::new(NeverDialled)));
+        let mut connected_config = config("connected");
+        connected_config.metadata.role = Some(mcp::McpServerRole::Comms);
+        let mut cached_config = config("cached");
+        cached_config.metadata.role = Some(mcp::McpServerRole::Comms);
+        registry.connections.write().await.insert(
+            "connected".into(),
+            McpConnectionState::Connected {
+                config: connected_config,
+                connection_id: protocol::McpConnectionId::new(),
+                capabilities: caps(false),
+                negotiated: traits::McpNegotiatedProtocol {
+                    era: traits::McpProtocolEra::Legacy,
+                    version: "2025-11-25".into(),
+                },
+                tools: vec![dto("connected", "send")],
+                resources: vec![],
+                resource_templates: vec![],
+                prompts: vec![],
+                connected_at: std::time::SystemTime::now(),
+            },
+        );
+        registry.connections.write().await.insert(
+            "cached".into(),
+            McpConnectionState::Cached {
+                config: cached_config,
+                connection_id: protocol::McpConnectionId::new(),
+                capabilities: caps(false),
+                negotiated: traits::McpNegotiatedProtocol {
+                    era: traits::McpProtocolEra::Legacy,
+                    version: "2025-11-25".into(),
+                },
+                tools: vec![dto("cached", "send")],
+                resources: vec![],
+                resource_templates: vec![],
+                prompts: vec![],
+                cache_saved_at_ms: 1,
+                age_ms: 0,
+            },
+        );
+
+        let mut ctx = tool_api::test_support::ctx_for_file_tools(
+            tool_api::test_support::make_dummy_fs(),
+            Arc::new(telemetry::AnalyticsBus::new()),
+            vec![std::path::PathBuf::from("/tmp")],
+        );
+        ctx.mcp_registry = Some(registry.clone());
+        let built = build_registered_mcp_tools(&registry, ctx).await;
+        for server in ["connected", "cached"] {
+            let full_name = format!("mcp__{server}__send");
+            let tool = built
+                .iter()
+                .flat_map(|(_, tools)| tools.iter())
+                .find(|tool| tool.name() == full_name)
+                .unwrap_or_else(|| panic!("missing rebuilt tool {full_name}"));
+            assert_eq!(
+                tool.mcp_role(),
+                Some("comms"),
+                "config role must reach every per-tool entry for {server}"
+            );
+        }
     }
 
     /// `if(n.some((l)=>l.type==="connected"&&!!l.capabilities?.resources))` —
@@ -4536,6 +4633,10 @@ mod resource_tool_gating_tests {
                     config: config(name),
                     connection_id: protocol::McpConnectionId::new(),
                     capabilities: caps(true),
+                    negotiated: traits::McpNegotiatedProtocol {
+                        era: traits::McpProtocolEra::Legacy,
+                        version: "2025-11-25".into(),
+                    },
                     tools: vec![],
                     resources: vec![],
                     resource_templates: vec![],
@@ -4581,6 +4682,10 @@ mod resource_tool_gating_tests {
                 config: config("shared"),
                 connection_id: scoped_connection_id,
                 capabilities: caps(true),
+                negotiated: traits::McpNegotiatedProtocol {
+                    era: traits::McpProtocolEra::Legacy,
+                    version: "2025-11-25".into(),
+                },
                 tools: vec![dto("shared", "scoped_only")],
                 resources: vec![],
                 resource_templates: vec![],
@@ -4594,6 +4699,10 @@ mod resource_tool_gating_tests {
                 config: config("shared"),
                 connection_id: shared_connection_id,
                 capabilities: caps(true),
+                negotiated: traits::McpNegotiatedProtocol {
+                    era: traits::McpProtocolEra::Legacy,
+                    version: "2025-11-25".into(),
+                },
                 tools: vec![dto("shared", "shared_only")],
                 resources: vec![],
                 resource_templates: vec![],
@@ -4635,6 +4744,10 @@ mod resource_tool_gating_tests {
                 config: config("a"),
                 connection_id: a_id,
                 capabilities: caps(true),
+                negotiated: traits::McpNegotiatedProtocol {
+                    era: traits::McpProtocolEra::Legacy,
+                    version: "2025-11-25".into(),
+                },
                 tools: vec![dto("a", "a_only")],
                 resources: vec![],
                 resource_templates: vec![],
@@ -4648,6 +4761,10 @@ mod resource_tool_gating_tests {
                 config: config("b"),
                 connection_id: b_id,
                 capabilities: caps(true),
+                negotiated: traits::McpNegotiatedProtocol {
+                    era: traits::McpProtocolEra::Legacy,
+                    version: "2025-11-25".into(),
+                },
                 tools: vec![dto("b", "b_only")],
                 resources: vec![],
                 resource_templates: vec![],
@@ -5018,6 +5135,10 @@ mod cached_resource_tool_tests {
                 config: cached_resource_test_support::cached_server_config("shared"),
                 connection_id: protocol::McpConnectionId::new(),
                 capabilities: resource_caps(true),
+                negotiated: traits::McpNegotiatedProtocol {
+                    era: traits::McpProtocolEra::Legacy,
+                    version: "2025-11-25".into(),
+                },
                 tools: vec![],
                 resources: vec![],
                 resource_templates: vec![],
@@ -5147,6 +5268,10 @@ mod cached_resource_tool_tests {
                 config: cached_resource_test_support::cached_server_config("shared"),
                 connection_id: protocol::McpConnectionId::new(),
                 capabilities: resource_caps(true),
+                negotiated: traits::McpNegotiatedProtocol {
+                    era: traits::McpProtocolEra::Legacy,
+                    version: "2025-11-25".into(),
+                },
                 tools: vec![],
                 resources: vec![traits::McpResourceDto {
                     uri: "cached://scoped".into(),

@@ -13,8 +13,8 @@ use tokio::sync::RwLock;
 
 use serde::{Deserialize, Serialize};
 use traits::{
-    McpPromptDto, McpResourceContentDto, McpResourceDto, McpToolDto, McpToolResultDto,
-    McpTransportKind, ServerCapabilitiesDto,
+    McpNegotiatedProtocol, McpPromptDto, McpProtocolEra, McpResourceContentDto, McpResourceDto,
+    McpToolDto, McpToolResultDto, McpTransportKind, ServerCapabilitiesDto,
 };
 
 use crate::hook_dispatch::HookDispatcher;
@@ -223,7 +223,47 @@ fn decode_server_capabilities(raw: &serde_json::Value) -> ServerCapabilitiesDto 
         logging: has("logging"),
         directory_read,
         experimental,
+        extensions: obj
+            .and_then(|o| o.get("extensions"))
+            .and_then(|v| v.as_object())
+            .map(|o| o.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+            .unwrap_or_default(),
     }
+}
+
+fn modern_meta(version: &str) -> serde_json::Value {
+    serde_json::json!({
+        "io.modelcontextprotocol/protocolVersion": version,
+        "io.modelcontextprotocol/clientInfo": {
+            "name": crate::CLIENT_NAME,
+            "title": crate::CLIENT_TITLE,
+            "version": env!("CARGO_PKG_VERSION"),
+            "description": "An agentic coding tool",
+            "websiteUrl": crate::MCP_WEBSITE_URL,
+        },
+        "io.modelcontextprotocol/clientCapabilities": {
+            "roots": {},
+            "elicitation": {},
+        },
+    })
+}
+
+fn modern_request_requires_meta(method: &str) -> bool {
+    matches!(
+        method,
+        "tools/list"
+            | "tools/call"
+            | "prompts/list"
+            | "prompts/get"
+            | "resources/list"
+            | "resources/read"
+            | "resources/templates/list"
+            | "resources/directory/read"
+    )
+}
+
+fn modern_request_requires_result_type(method: &str) -> bool {
+    modern_request_requires_meta(method)
 }
 
 /// Async MCP client built on top of a [`jsonrpc::Connection`].
@@ -277,6 +317,8 @@ pub struct McpClient {
     /// [`crate::McpTransportSpec`]'s URL through — no production call site
     /// does yet; see the §20a batch report.
     server_url: Option<String>,
+    /// Protocol result envelope selected by the transport handshake.
+    negotiated: McpNegotiatedProtocol,
 }
 
 impl McpClient {
@@ -382,6 +424,10 @@ impl McpClient {
             config_always_load: false,
             transport_kind: McpTransportKind::Stdio,
             server_url: None,
+            negotiated: McpNegotiatedProtocol {
+                era: McpProtocolEra::Legacy,
+                version: "2025-11-25".to_string(),
+            },
         }
     }
 
@@ -422,6 +468,64 @@ impl McpClient {
     pub fn with_server_url(mut self, url: Option<String>) -> Self {
         self.server_url = url;
         self
+    }
+
+    /// Record the exact protocol result selected by the transport. The
+    /// registry passes this from the same handshake result it stores in the
+    /// live connection state, so direct client calls cannot drift eras.
+    #[must_use]
+    pub fn with_negotiated_protocol(mut self, negotiated: McpNegotiatedProtocol) -> Self {
+        self.negotiated = negotiated;
+        self
+    }
+
+    fn modern(&self) -> bool {
+        self.negotiated.era == McpProtocolEra::Modern
+    }
+
+    fn request_params(&self, method: &str, params: serde_json::Value) -> serde_json::Value {
+        if !self.modern() || !modern_request_requires_meta(method) {
+            return params;
+        }
+        let mut object = params.as_object().cloned().unwrap_or_default();
+        let mut required = modern_meta(&self.negotiated.version)
+            .as_object()
+            .cloned()
+            .unwrap_or_default();
+        if let Some(existing) = object
+            .remove("_meta")
+            .and_then(|value| value.as_object().cloned())
+        {
+            for (key, value) in existing {
+                required.entry(key).or_insert(value);
+            }
+        }
+        object.insert("_meta".to_string(), serde_json::Value::Object(required));
+        serde_json::Value::Object(object)
+    }
+
+    fn validate_response(
+        &self,
+        method: &str,
+        value: &mut serde_json::Value,
+    ) -> Result<(), McpClientError> {
+        if !self.modern() || !modern_request_requires_result_type(method) {
+            return Ok(());
+        }
+        let Some(object) = value.as_object_mut() else {
+            return Err(McpClientError::Deserialize(
+                "modern MCP reply must be an object envelope".into(),
+            ));
+        };
+        match object.remove("resultType") {
+            Some(serde_json::Value::String(result_type)) if result_type == "complete" => Ok(()),
+            Some(serde_json::Value::String(result_type)) => Err(McpClientError::Deserialize(
+                format!("unsupported modern MCP resultType: {result_type}"),
+            )),
+            Some(_) | None => Err(McpClientError::Deserialize(
+                "modern MCP reply missing resultType".into(),
+            )),
+        }
     }
 
     /// Send `notifications/roots/list_changed` to the server, telling it the
@@ -532,9 +636,15 @@ impl McpClient {
         // Receive the raw JSON value so we can sanitize before typed decode.
         let raw_value: serde_json::Value = self
             .connection
-            .call("tools/list", serde_json::Value::Null)
+            .call(
+                "tools/list",
+                self.request_params("tools/list", serde_json::json!({})),
+            )
             .await
             .map_err(|e| McpClientError::Rpc(e.to_string()))?;
+
+        let mut raw_value = raw_value;
+        self.validate_response("tools/list", &mut raw_value)?;
 
         // Mirror `client.ts:1758`: `recursivelySanitizeUnicode(result.tools)`
         // — sanitize the entire tools array in-place before processing.
@@ -828,9 +938,10 @@ impl McpClient {
         // the millis fraction so non-zero sub-second timeouts don't collapse
         // to "after 0s".
         let secs = timeout.as_secs().max(1);
+        let params = self.request_params("tools/call", params);
         let fut = self
             .connection
-            .call::<_, ToolCallResponse>("tools/call", params);
+            .call::<_, serde_json::Value>("tools/call", params);
 
         // Race the call against the overall `BHs` timeout and — when enabled —
         // the `GLd` idle watchdog. When the idle watchdog is disabled (`ZERO`)
@@ -847,12 +958,19 @@ impl McpClient {
                         secs,
                     }),
                     Ok(Err(e)) => Err(mcp_client_error_from_rpc(&e.to_string())),
-                    Ok(Ok(resp)) => Ok(McpToolResultDto {
-                        content: resp.content,
-                        is_error: resp.is_error,
-                        meta: resp.meta,
-                        structured_content: resp.structured_content,
-                    }),
+                    Ok(Ok(mut value)) => {
+                        match self.validate_response("tools/call", &mut value) {
+                            Err(error) => Err(error),
+                            Ok(()) => serde_json::from_value::<ToolCallResponse>(value)
+                                .map(|resp| McpToolResultDto {
+                                    content: resp.content,
+                                    is_error: resp.is_error,
+                                    meta: resp.meta,
+                                    structured_content: resp.structured_content,
+                                })
+                                .map_err(|e| McpClientError::Deserialize(e.to_string())),
+                        }
+                    },
                 },
                 idle = idle_watchdog(idle_timeout, last_activity.clone(), server, idle_tool) => idle,
             }
@@ -864,12 +982,17 @@ impl McpClient {
                     secs,
                 }),
                 Ok(Err(e)) => Err(mcp_client_error_from_rpc(&e.to_string())),
-                Ok(Ok(resp)) => Ok(McpToolResultDto {
-                    content: resp.content,
-                    is_error: resp.is_error,
-                    meta: resp.meta,
-                    structured_content: resp.structured_content,
-                }),
+                Ok(Ok(mut value)) => match self.validate_response("tools/call", &mut value) {
+                    Err(error) => Err(error),
+                    Ok(()) => serde_json::from_value::<ToolCallResponse>(value)
+                        .map(|resp| McpToolResultDto {
+                            content: resp.content,
+                            is_error: resp.is_error,
+                            meta: resp.meta,
+                            structured_content: resp.structured_content,
+                        })
+                        .map_err(|e| McpClientError::Deserialize(e.to_string())),
+                },
             }
         };
 
@@ -890,9 +1013,15 @@ impl McpClient {
         // Receive raw JSON so we can sanitize before typed decode.
         let raw_value: serde_json::Value = self
             .connection
-            .call("prompts/list", serde_json::Value::Null)
+            .call(
+                "prompts/list",
+                self.request_params("prompts/list", serde_json::json!({})),
+            )
             .await
             .map_err(|e| McpClientError::Rpc(e.to_string()))?;
+
+        let mut raw_value = raw_value;
+        self.validate_response("prompts/list", &mut raw_value)?;
 
         // Mirror `client.ts:2051`: `recursivelySanitizeUnicode(result.prompts)`.
         let sanitized_value = recursively_sanitize_unicode(raw_value);
@@ -927,10 +1056,13 @@ impl McpClient {
         arguments: serde_json::Value,
     ) -> Result<serde_json::Value, McpClientError> {
         let params = serde_json::json!({ "name": name, "arguments": arguments });
-        self.connection
-            .call("prompts/get", params)
+        let mut value: serde_json::Value = self
+            .connection
+            .call("prompts/get", self.request_params("prompts/get", params))
             .await
-            .map_err(|e| McpClientError::Rpc(e.to_string()))
+            .map_err(|e| McpClientError::Rpc(e.to_string()))?;
+        self.validate_response("prompts/get", &mut value)?;
+        Ok(value)
     }
 
     /// Enumerate every resource advertised by the server.
@@ -939,11 +1071,17 @@ impl McpClient {
     /// MCP spec lets `mimeType` be absent for opaque/unknown content; we
     /// surface that as `None`.
     pub async fn list_resources(&self) -> Result<Vec<McpResourceDto>, McpClientError> {
-        let resp: ResourcesListResponse = self
+        let mut raw_value: serde_json::Value = self
             .connection
-            .call("resources/list", serde_json::Value::Null)
+            .call(
+                "resources/list",
+                self.request_params("resources/list", serde_json::json!({})),
+            )
             .await
             .map_err(|e| McpClientError::Rpc(e.to_string()))?;
+        self.validate_response("resources/list", &mut raw_value)?;
+        let resp: ResourcesListResponse = serde_json::from_value(raw_value)
+            .map_err(|e| McpClientError::Deserialize(e.to_string()))?;
         Ok(resp
             .resources
             .into_iter()
@@ -959,11 +1097,17 @@ impl McpClient {
     /// of the server's `contents` array (the protocol allows multiple but
     /// claude-code always reads the first).
     pub async fn read_resource(&self, uri: &str) -> Result<McpResourceContentDto, McpClientError> {
-        let resp: ResourceReadResponse = self
+        let mut raw_value: serde_json::Value = self
             .connection
-            .call("resources/read", serde_json::json!({ "uri": uri }))
+            .call(
+                "resources/read",
+                self.request_params("resources/read", serde_json::json!({ "uri": uri })),
+            )
             .await
             .map_err(|e| McpClientError::Rpc(e.to_string()))?;
+        self.validate_response("resources/read", &mut raw_value)?;
+        let resp: ResourceReadResponse = serde_json::from_value(raw_value)
+            .map_err(|e| McpClientError::Deserialize(e.to_string()))?;
         resp.contents
             .into_iter()
             .next()
@@ -992,11 +1136,17 @@ impl McpClient {
         uri: &str,
         output_dir: &std::path::Path,
     ) -> Result<Vec<traits::McpResourceContentsRich>, McpClientError> {
-        let resp: ResourceReadRichResponse = self
+        let mut raw_value: serde_json::Value = self
             .connection
-            .call("resources/read", serde_json::json!({ "uri": uri }))
+            .call(
+                "resources/read",
+                self.request_params("resources/read", serde_json::json!({ "uri": uri })),
+            )
             .await
             .map_err(|e| McpClientError::Rpc(e.to_string()))?;
+        self.validate_response("resources/read", &mut raw_value)?;
+        let resp: ResourceReadRichResponse = serde_json::from_value(raw_value)
+            .map_err(|e| McpClientError::Deserialize(e.to_string()))?;
         let raw: Vec<crate::mcp_output_storage::RawResourceContent> = resp
             .contents
             .into_iter()
@@ -1071,9 +1221,12 @@ impl McpClient {
             if let Some(c) = cursor.as_deref() {
                 params["cursor"] = serde_json::Value::String(c.to_string());
             }
-            let resp: DirectoryReadResponse = match self
+            let mut raw_value: serde_json::Value = match self
                 .connection
-                .call("resources/directory/read", params)
+                .call(
+                    "resources/directory/read",
+                    self.request_params("resources/directory/read", params),
+                )
                 .await
             {
                 Ok(r) => r,
@@ -1091,6 +1244,9 @@ impl McpClient {
                     return Err(McpClientError::Rpc(e.to_string()));
                 }
             };
+            self.validate_response("resources/directory/read", &mut raw_value)?;
+            let resp: DirectoryReadResponse = serde_json::from_value(raw_value)
+                .map_err(|e| McpClientError::Deserialize(e.to_string()))?;
             out.extend(resp.resources);
             cursor = resp.next_cursor;
             page += 1;
@@ -1851,6 +2007,44 @@ mod constructor_tests {
             text2.contains(r#""action":"cancel""#),
             "elicitation/create handler not registered: {text2}",
         );
+    }
+
+    #[tokio::test]
+    async fn modern_catalog_requests_use_required_meta_and_result_type() {
+        let (conn, peer_tx, mut peer_rx) = paired_connection();
+        let client = McpClient::new("srv", std::path::PathBuf::from("/tmp/work"), conn)
+            .await
+            .with_negotiated_protocol(McpNegotiatedProtocol {
+                era: McpProtocolEra::Modern,
+                version: "2026-07-28".into(),
+            });
+        let handle = tokio::spawn(async move { client.list_tools().await });
+        let frame = tokio::time::timeout(std::time::Duration::from_secs(2), peer_rx.recv())
+            .await
+            .expect("tools/list request")
+            .expect("request frame");
+        let request: serde_json::Value = serde_json::from_slice(&frame).expect("request json");
+        assert_eq!(request["method"], "tools/list");
+        assert_eq!(request["params"]["_meta"].as_object().unwrap().len(), 3);
+        let response = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": request["id"].clone(),
+            "result": {
+                "resultType": "complete",
+                "tools": []
+            }
+        });
+        let mut bytes = serde_json::to_vec(&response).expect("response json");
+        bytes.push(b'\n');
+        peer_tx
+            .send(Bytes::from(bytes))
+            .await
+            .expect("send response");
+        assert!(handle
+            .await
+            .expect("list_tools join")
+            .expect("modern list_tools")
+            .is_empty());
     }
 
     #[tokio::test]

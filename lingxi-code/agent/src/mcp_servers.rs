@@ -166,6 +166,16 @@ pub fn agent_mcp_specs_to_scoped_configs(
         // LAST-wins and keeps its original key position; the `Vec` stands in
         // for `t`'s insertion order.
         if let Some(cfg) = mcp::build_server_from_json_entry(name, raw, mcp::ConfigScope::Agent) {
+            let mut cfg = cfg;
+            cfg.metadata.agent_source = Some(match def.source {
+                AgentSource::BuiltIn => mcp::McpAgentSource::BuiltIn,
+                AgentSource::UserDefined => mcp::McpAgentSource::UserSettings,
+                AgentSource::Project => mcp::McpAgentSource::ProjectSettings,
+                AgentSource::Plugin => mcp::McpAgentSource::Plugin,
+                AgentSource::PolicySettings => mcp::McpAgentSource::PolicySettings,
+                AgentSource::Flag => mcp::McpAgentSource::FlagSettings,
+                AgentSource::AdditionalDirectory => mcp::McpAgentSource::AdditionalDirectory,
+            });
             upsert(cfg, true);
         }
     }
@@ -191,6 +201,7 @@ fn source_label(source: AgentSource) -> &'static str {
         AgentSource::Plugin => "plugin",
         AgentSource::PolicySettings => "policySettings",
         AgentSource::Flag => "flagSettings",
+        AgentSource::AdditionalDirectory => "additionalDirectory",
     }
 }
 
@@ -271,6 +282,29 @@ mod tests {
             mcp::ConfigScope::User,
             "the EXISTING config's scope is preserved verbatim, not overwritten to Agent"
         );
+    }
+
+    #[test]
+    fn inline_agent_source_is_persisted_while_by_name_keeps_config_identity() {
+        let inline = def_with_specs(
+            vec![record("inline", serde_json::json!({"command": "mcp"}))],
+            AgentSource::Plugin,
+        );
+        let converted = convert(&inline, false);
+        assert_eq!(converted.len(), 1);
+        assert_eq!(
+            converted[0].config.metadata.agent_source,
+            Some(mcp::McpAgentSource::Plugin)
+        );
+
+        let existing = existing_stdio("shared", "shared-mcp");
+        let by_name = def_with_specs(
+            vec![AgentMcpServerSpec::ByName("shared".into())],
+            AgentSource::Project,
+        );
+        let converted = agent_mcp_specs_to_scoped_configs(&by_name, false, false, &[existing]);
+        assert_eq!(converted.len(), 1);
+        assert_eq!(converted[0].config.metadata.agent_source, None);
     }
 
     #[test]

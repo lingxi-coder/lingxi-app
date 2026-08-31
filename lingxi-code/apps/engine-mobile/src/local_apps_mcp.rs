@@ -1846,6 +1846,7 @@ impl McpTransport for LocalAppsMcpTransport {
             logging: false,
             directory_read: false,
             experimental: std::collections::HashMap::new(),
+            extensions: std::collections::HashMap::new(),
         })
     }
 
@@ -1956,6 +1957,16 @@ impl McpTransport for LocalAppsMcpTransport {
         Ok(())
     }
 
+    fn disconnect_sync(&self, connection_id: McpConnectionId) {
+        // The composite transport uses this best-effort hook when its route
+        // map cannot remember a just-opened connection. Local Apps has no
+        // process or socket to close, but it still owns an id registry that
+        // must be retired synchronously on cancellation/failure.
+        if let Ok(mut connections) = self.connections.lock() {
+            connections.remove(&connection_id);
+        }
+    }
+
     fn supported_transports(&self) -> Vec<McpTransportKind> {
         vec![McpTransportKind::InProcess]
     }
@@ -2004,6 +2015,19 @@ mod tests {
             .reserve()
             .expect_err("persisted usage must count against the next call");
         assert!(error.to_string().contains("MCP call budget"));
+    }
+
+    #[tokio::test]
+    async fn disconnect_sync_retires_local_apps_connection() {
+        let transport = LocalAppsMcpTransport::new(PathBuf::from("/tmp/local-apps-test"));
+        let connection = transport
+            .connect(&McpTransportSpec::InProcess {
+                registry_key: LOCAL_APPS_REGISTRY_KEY.into(),
+            })
+            .await
+            .expect("local apps connection");
+        transport.disconnect_sync(connection.connection_id);
+        assert!(transport.ping(connection.connection_id).await.is_err());
     }
 
     /// A transport over a real store with one app whose mailbox holds

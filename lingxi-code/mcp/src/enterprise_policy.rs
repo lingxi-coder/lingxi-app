@@ -2336,6 +2336,7 @@ mod tests {
             always_load: false,
             discovery_cache: None,
             config_error: None,
+            metadata: Default::default(),
         }
     }
     fn stdio_spec(command: &str, args: &[&str]) -> McpTransportSpec {

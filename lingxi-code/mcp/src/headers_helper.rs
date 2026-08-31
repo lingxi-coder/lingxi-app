@@ -438,6 +438,7 @@ mod tests {
             always_load: false,
             discovery_cache: None,
             config_error: None,
+            metadata: Default::default(),
         };
         let (resolved, minted_authorization) =
             resolve_headers_helper_in(&config, session.path(), Some(plugin.path()))
@@ -475,6 +476,7 @@ mod tests {
             always_load: false,
             discovery_cache: None,
             config_error: None,
+            metadata: Default::default(),
         };
         let error = resolve_headers_helper_in(&config, session.path(), None)
             .await

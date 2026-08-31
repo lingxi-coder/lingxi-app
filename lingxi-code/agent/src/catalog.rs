@@ -1670,6 +1670,13 @@ pub async fn load_agents_from_dirs(paths: &[(PathBuf, AgentSource)]) -> Vec<Agen
     out
 }
 
+/// Load agents from a caller-supplied additional directory.  This preserves
+/// the oracle's distinct `additionalDirectory` provenance instead of
+/// collapsing it into user/project settings.
+pub async fn load_agents_from_additional_directory(path: PathBuf) -> Vec<AgentDefinition> {
+    load_agents_from_dirs(&[(path, AgentSource::AdditionalDirectory)]).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

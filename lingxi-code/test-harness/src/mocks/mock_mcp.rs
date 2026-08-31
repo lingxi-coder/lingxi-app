@@ -298,6 +298,7 @@ impl McpTransport for MockMcpTransport {
             logging: false,
             directory_read: false,
             experimental: std::collections::HashMap::new(),
+            extensions: std::collections::HashMap::new(),
         })
     }
 

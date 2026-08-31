@@ -27,6 +27,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tool_api::ToolRegistry;
+use traits::coordinator_mode::CoordinatorModeHandle;
 use traits::subagent_spawn::{
     SubagentInheritance, SubagentListingEntry, SubagentObservation, SubagentResult,
     SubagentSpawnError, SubagentSpawnObserver, SubagentSpawnRequest, SubagentSpawner,
@@ -287,6 +288,10 @@ pub struct PoolSubagentSpawner {
     /// to legacy (this feature's whole prior history: named, computed, never
     /// wired).
     mcp_tool_builder: Arc<std::sync::OnceLock<crate::agent_mcp_tools::AgentMcpToolBuilder>>,
+    /// Live coordinator-mode seam used by the spawn-time tool resolver. The
+    /// composition root fills this after constructing the session's mode;
+    /// unset means an ordinary session (`false`).
+    coordinator_mode: Arc<std::sync::OnceLock<Arc<dyn CoordinatorModeHandle>>>,
     /// Stable mobile host/tool-runtime snapshot. Kept separate from the
     /// provider/model environment renderer because inference routing is not a
     /// device capability and may change independently.
@@ -424,6 +429,7 @@ impl PoolSubagentSpawner {
             tool_wide_deny_names: Arc::new(std::sync::OnceLock::new()),
             subagent_env_renderer: Arc::new(std::sync::OnceLock::new()),
             mcp_tool_builder: Arc::new(std::sync::OnceLock::new()),
+            coordinator_mode: Arc::new(std::sync::OnceLock::new()),
             mobile_runtime_environment: None,
             mobile_workspace_cwd_provider: None,
             session_interactive: None,
@@ -504,6 +510,25 @@ impl PoolSubagentSpawner {
         builder: crate::agent_mcp_tools::AgentMcpToolBuilder,
     ) -> Self {
         let _ = self.mcp_tool_builder.set(builder);
+        self
+    }
+
+    /// Return the set-once live coordinator-mode cell. The desktop
+    /// composition root fills it after the existing `CoordinatorMode` is
+    /// created, before any spawn can run. Unfilled means an ordinary session.
+    #[must_use]
+    pub fn coordinator_mode_handle(
+        &self,
+    ) -> Arc<std::sync::OnceLock<Arc<dyn CoordinatorModeHandle>>> {
+        self.coordinator_mode.clone()
+    }
+
+    /// Builder: set the coordinator-mode seam immediately (tests/minimal
+    /// hosts). Production uses [`Self::coordinator_mode_handle`] to break the
+    /// construction cycle.
+    #[must_use]
+    pub fn with_coordinator_mode(self, mode: Arc<dyn CoordinatorModeHandle>) -> Self {
+        let _ = self.coordinator_mode.set(mode);
         self
     }
 
@@ -1125,12 +1150,17 @@ impl PoolSubagentSpawner {
         let empty: Vec<String> = Vec::new();
         let denied = self.tool_wide_deny_names.get().unwrap_or(&empty);
         let default_model = self.resolved_default_model();
+        let coordinator_mode = self
+            .coordinator_mode
+            .get()
+            .is_some_and(|mode| mode.is_enabled());
         crate::tool_resolver::resolve_subagent_tools(
             registry,
             agent_def,
             denied,
             default_model.as_deref(),
             depth,
+            coordinator_mode,
             agent_mcp_tools,
         )
         .await
@@ -2570,6 +2600,7 @@ pub(crate) fn agent_source_to_claude_str(source: AgentSource) -> &'static str {
         AgentSource::Project => "projectSettings",
         AgentSource::PolicySettings => "policySettings",
         AgentSource::Flag => "flagSettings",
+        AgentSource::AdditionalDirectory => "additionalDirectory",
     }
 }
 
@@ -2803,6 +2834,7 @@ mod tests {
                         tools: vec![Arc::new(StubTool {
                             name: "mcp__fake__tool",
                             aliases: &[],
+                            role: None,
                         }) as Arc<dyn Tool>],
                         cleanups: vec![cleanup],
                     }
@@ -2902,6 +2934,7 @@ mod tests {
                         tools: vec![Arc::new(StubTool {
                             name: "mcp__fake__tool",
                             aliases: &[],
+                            role: None,
                         }) as Arc<dyn Tool>],
                         cleanups: vec![cleanup],
                     }
@@ -3103,6 +3136,7 @@ mod tests {
     struct StubTool {
         name: &'static str,
         aliases: &'static [&'static str],
+        role: Option<&'static str>,
     }
 
     #[async_trait]
@@ -3119,6 +3153,9 @@ mod tests {
         }
         fn is_enabled(&self, _ctx: &tool_api::tool_trait::ToolStaticContext) -> bool {
             true
+        }
+        fn mcp_role(&self) -> Option<&str> {
+            self.role
         }
         fn max_result_size_chars(&self) -> usize {
             1024
@@ -3163,6 +3200,16 @@ mod tests {
         }
     }
 
+    struct StubCoordinatorMode {
+        enabled: bool,
+    }
+
+    impl CoordinatorModeHandle for StubCoordinatorMode {
+        fn is_enabled(&self) -> bool {
+            self.enabled
+        }
+    }
+
     /// Build an `AgentDefinition` with the given tool policy (other fields are
     /// the spawn-path defaults).
     fn agent_def(tools: AgentToolPolicy) -> AgentDefinition {
@@ -3197,8 +3244,27 @@ mod tests {
     fn registry_with(names: &[&'static str]) -> Arc<ToolRegistry> {
         let mut reg = ToolRegistry::new();
         for name in names {
-            reg.register_builtin(Arc::new(StubTool { name, aliases: &[] }));
+            reg.register_builtin(Arc::new(StubTool {
+                name,
+                aliases: &[],
+                role: None,
+            }));
         }
+        Arc::new(reg)
+    }
+
+    fn registry_with_shared_comms() -> Arc<ToolRegistry> {
+        let mut reg = ToolRegistry::new();
+        reg.register_builtin(Arc::new(StubTool {
+            name: "Read",
+            aliases: &[],
+            role: None,
+        }));
+        reg.register_builtin(Arc::new(StubTool {
+            name: "mcp__comms__send",
+            aliases: &[],
+            role: Some("comms"),
+        }));
         Arc::new(reg)
     }
 
@@ -3226,6 +3292,82 @@ mod tests {
         assert!(spawner.tool_registry_handle().get().is_some());
         // Set-once: a second fill is rejected.
         assert!(cell.set(registry_with(&[])).is_err());
+    }
+
+    #[tokio::test]
+    async fn production_spawner_filters_shared_comms_tools_for_coordinator_workers() {
+        let runtime = Arc::new(MockRuntimeSpawner::default());
+        let pool = Arc::new(StateMachinePool::new(runtime, 4));
+        let spawner = PoolSubagentSpawner::new(pool)
+            .with_tool_registry(registry_with_shared_comms())
+            .with_coordinator_mode(Arc::new(StubCoordinatorMode { enabled: true }));
+        let inline_comms: Arc<dyn Tool> = Arc::new(StubTool {
+            name: "mcp__inline__send",
+            aliases: &[],
+            role: Some("comms"),
+        });
+        let inline_ordinary: Arc<dyn Tool> = Arc::new(StubTool {
+            name: "mcp__inline__read",
+            aliases: &[],
+            role: None,
+        });
+
+        let (schemas, allowed) = spawner
+            .resolve_tools(
+                &agent_def(AgentToolPolicy::All {
+                    use_exact_tools: false,
+                }),
+                0,
+                &[inline_comms, inline_ordinary],
+            )
+            .await
+            .expect("coordinator worker tool resolution should succeed");
+        let names: Vec<&str> = schemas
+            .iter()
+            .map(|tool| tool["name"].as_str().expect("tool name"))
+            .collect();
+        assert_eq!(names, vec!["Read", "mcp__inline__read"]);
+        assert_eq!(
+            allowed,
+            vec!["Read".to_string(), "mcp__inline__read".to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn production_spawner_retains_shared_comms_tools_outside_coordinator_mode() {
+        let runtime = Arc::new(MockRuntimeSpawner::default());
+        let pool = Arc::new(StateMachinePool::new(runtime, 4));
+        let spawner =
+            PoolSubagentSpawner::new(pool).with_tool_registry(registry_with_shared_comms());
+        let inline_comms: Arc<dyn Tool> = Arc::new(StubTool {
+            name: "mcp__inline__send",
+            aliases: &[],
+            role: Some("comms"),
+        });
+
+        let (schemas, allowed) = spawner
+            .resolve_tools(
+                &agent_def(AgentToolPolicy::All {
+                    use_exact_tools: false,
+                }),
+                0,
+                &[inline_comms],
+            )
+            .await
+            .expect("ordinary subagent tool resolution should succeed");
+        let names: Vec<&str> = schemas
+            .iter()
+            .map(|tool| tool["name"].as_str().expect("tool name"))
+            .collect();
+        assert_eq!(names, vec!["mcp__comms__send", "Read", "mcp__inline__send"]);
+        assert_eq!(
+            allowed,
+            vec![
+                "mcp__comms__send".to_string(),
+                "Read".to_string(),
+                "mcp__inline__send".to_string()
+            ]
+        );
     }
 
     #[tokio::test]
@@ -3443,6 +3585,7 @@ mod tests {
         reg.register_builtin(Arc::new(StubTool {
             name: "Bash",
             aliases: &["Shell"],
+            role: None,
         }));
         let runtime = Arc::new(MockRuntimeSpawner::default());
         let pool = Arc::new(StateMachinePool::new(runtime, 4));
@@ -3477,6 +3620,7 @@ mod tests {
         reg.register_builtin(Arc::new(StubTool {
             name: "Agent",
             aliases: &["Task"],
+            role: None,
         }));
         let runtime = Arc::new(MockRuntimeSpawner::default());
         let pool = Arc::new(StateMachinePool::new(runtime, 4));

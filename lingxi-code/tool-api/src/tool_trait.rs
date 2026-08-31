@@ -61,6 +61,12 @@ pub trait Tool: Send + Sync {
         false
     }
 
+    /// Optional MCP server routing role.  Native and generic tools return
+    /// `None`; MCP per-tool entries may expose `comms` to coordinator routing.
+    fn mcp_role(&self) -> Option<&str> {
+        None
+    }
+
     /// Whether this tool is sourced from an LSP server.
     fn is_lsp(&self) -> bool {
         false

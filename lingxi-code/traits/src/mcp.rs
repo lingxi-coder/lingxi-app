@@ -9,6 +9,7 @@
 
 use async_trait::async_trait;
 use futures_core::stream::Stream;
+use futures_util::FutureExt;
 use protocol::McpConnectionId;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -214,6 +215,76 @@ pub struct McpRawConnection {
     pub connection_id: McpConnectionId,
 }
 
+/// Protocol revision family used by the MCP handshake.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum McpProtocolEra {
+    /// The established single-shot initialize flow.
+    Legacy,
+    /// The opt-in `server/discover` negotiation flow.
+    Modern,
+}
+
+/// Result of protocol negotiation for a live MCP connection.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct McpNegotiatedProtocol {
+    /// Family selected for this connection.
+    pub era: McpProtocolEra,
+    /// Exact MCP revision sent/accepted by the server.
+    pub version: String,
+}
+
+/// Options passed to a transport's combined handshake operation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct McpConnectOptions {
+    /// Expected family. `None` lets the transport use its platform policy.
+    pub expected_era: Option<McpProtocolEra>,
+    /// Total connection/handshake deadline in milliseconds.
+    pub deadline_ms: u64,
+}
+
+impl Default for McpConnectOptions {
+    fn default() -> Self {
+        Self {
+            expected_era: None,
+            deadline_ms: 100_000,
+        }
+    }
+}
+
+/// Combined connect + initialize outcome.  The default trait implementation
+/// preserves the existing two-call behavior for every existing transport.
+#[derive(Debug, Clone)]
+pub struct McpConnectResult {
+    /// Raw connection handle.
+    pub connection: McpRawConnection,
+    /// Capabilities returned by initialize.
+    pub capabilities: ServerCapabilitiesDto,
+    /// The protocol family and exact version used by the handshake.
+    pub negotiated: McpNegotiatedProtocol,
+}
+
+struct ConnectCleanupGuard<'a, T: McpTransport + ?Sized> {
+    transport: &'a T,
+    connection_id: McpConnectionId,
+    armed: bool,
+}
+
+impl<T: McpTransport + ?Sized> ConnectCleanupGuard<'_, T> {
+    fn disarm(mut self) {
+        self.armed = false;
+    }
+}
+
+impl<T: McpTransport + ?Sized> Drop for ConnectCleanupGuard<'_, T> {
+    fn drop(&mut self) {
+        if self.armed {
+            // This is deliberately synchronous: a cancelled handshake has no
+            // executor future left in which to await `disconnect`.
+            self.transport.disconnect_sync(self.connection_id);
+        }
+    }
+}
+
 /// Server capability flags returned by `initialize`.
 ///
 /// Mirrors the JSON-RPC capability object — booleans indicate whether the
@@ -237,6 +308,12 @@ pub struct ServerCapabilitiesDto {
     pub directory_read: bool,
     /// Vendor-specific or experimental capability flags.
     pub experimental: std::collections::HashMap<String, Value>,
+    /// Complete MCP extension map returned by `initialize`.
+    ///
+    /// `directory_read` remains as a derived compatibility convenience; this
+    /// field preserves extension evidence needed by discovery-cache gates.
+    #[serde(default)]
+    pub extensions: std::collections::HashMap<String, Value>,
 }
 
 /// One tool advertised by an MCP server.
@@ -456,6 +533,71 @@ pub trait McpTransport: Send + Sync {
     /// Open a logical connection to the server described by `spec`.
     async fn connect(&self, spec: &McpTransportSpec) -> Result<McpRawConnection, McpError>;
 
+    /// Open and initialize a connection in one operation.  Existing
+    /// transports retain the legacy behavior through this default; remote
+    /// transports may override it to perform an opt-in modern probe.
+    async fn connect_and_initialize(
+        &self,
+        spec: &McpTransportSpec,
+        options: McpConnectOptions,
+    ) -> Result<McpConnectResult, McpError> {
+        let deadline = tokio::time::Instant::now()
+            .checked_add(std::time::Duration::from_millis(options.deadline_ms))
+            .ok_or_else(|| McpError::Connection("MCP connection deadline overflow".into()))?;
+        let connection = tokio::time::timeout_at(deadline, self.connect(spec))
+            .await
+            .map_err(|_| McpError::Connection("MCP connection deadline exceeded".into()))??;
+        let cleanup = ConnectCleanupGuard {
+            transport: self,
+            connection_id: connection.connection_id,
+            armed: true,
+        };
+        let remaining = deadline
+            .checked_duration_since(tokio::time::Instant::now())
+            .unwrap_or_default();
+        let capabilities = match std::panic::AssertUnwindSafe(tokio::time::timeout(
+            remaining,
+            self.initialize(&connection),
+        ))
+        .catch_unwind()
+        .await
+        {
+            Ok(Ok(Ok(capabilities))) => capabilities,
+            Ok(Ok(Err(error))) => {
+                if self.disconnect(connection.connection_id).await.is_ok() {
+                    cleanup.disarm();
+                }
+                return Err(error);
+            }
+            Ok(Err(_)) => {
+                if self.disconnect(connection.connection_id).await.is_ok() {
+                    cleanup.disarm();
+                }
+                return Err(McpError::Connection(
+                    "MCP connection deadline exceeded".into(),
+                ));
+            }
+            Err(payload) => {
+                if self.disconnect(connection.connection_id).await.is_ok() {
+                    cleanup.disarm();
+                }
+                std::panic::resume_unwind(payload);
+            }
+        };
+        cleanup.disarm();
+        Ok(McpConnectResult {
+            connection,
+            capabilities,
+            negotiated: McpNegotiatedProtocol {
+                // The default implementation is the legacy two-call flow;
+                // an implementation must explicitly override this method
+                // before it may claim a modern negotiation.
+                era: McpProtocolEra::Legacy,
+                version: "2025-11-25".to_string(),
+            },
+        })
+    }
+
     /// Perform the MCP `initialize` handshake and return the server's
     /// declared capabilities.
     async fn initialize(&self, conn: &McpRawConnection) -> Result<ServerCapabilitiesDto, McpError>;
@@ -549,6 +691,11 @@ pub trait McpTransport: Send + Sync {
 
     /// Tear down the connection and release any resources.
     async fn disconnect(&self, conn_id: McpConnectionId) -> Result<(), McpError>;
+
+    /// Synchronous best-effort teardown hook used when a combined handshake
+    /// future is cancelled. Implementations owning resources that cannot be
+    /// dropped safely should override this alongside [`Self::disconnect`].
+    fn disconnect_sync(&self, _conn_id: McpConnectionId) {}
 
     /// Transports this implementation can carry on the current platform.
     fn supported_transports(&self) -> Vec<McpTransportKind>;

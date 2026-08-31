@@ -50,6 +50,7 @@ impl McpTransport for PosixMcp {
             logging: false,
             directory_read: false,
             experimental: HashMap::new(),
+            extensions: HashMap::new(),
         })
     }
 

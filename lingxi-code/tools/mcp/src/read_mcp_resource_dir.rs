@@ -767,6 +767,10 @@ mod tests {
                 ),
                 connection_id: protocol::McpConnectionId::new(),
                 capabilities: resource_caps(true),
+                negotiated: traits::McpNegotiatedProtocol {
+                    era: traits::McpProtocolEra::Legacy,
+                    version: "2025-11-25".into(),
+                },
                 tools: vec![],
                 resources: vec![],
                 resource_templates: vec![],

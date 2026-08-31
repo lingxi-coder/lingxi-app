@@ -169,6 +169,8 @@ pub enum AgentSource {
     /// is the default `source` for the JSON-agent parsers
     /// ([`crate::catalog::parse_agent_from_json`]).
     Flag,
+    /// Loaded from an explicitly supplied additional agent directory.
+    AdditionalDirectory,
 }
 
 /// Isolation mode for an agent (claude `isolation`).

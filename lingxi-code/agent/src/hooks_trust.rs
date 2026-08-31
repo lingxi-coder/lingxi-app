@@ -80,7 +80,7 @@ pub fn source_is_self_trusting(source: AgentSource) -> bool {
         // `J0e` = {plugin, policySettings, built-in, builtin, bundled}
         AgentSource::BuiltIn | AgentSource::Plugin | AgentSource::PolicySettings => true,
         // `e.source==="userSettings" || e.source==="flagSettings"`
-        AgentSource::UserDefined | AgentSource::Flag => true,
+        AgentSource::UserDefined | AgentSource::Flag | AgentSource::AdditionalDirectory => true,
         AgentSource::Project => false,
     }
 }

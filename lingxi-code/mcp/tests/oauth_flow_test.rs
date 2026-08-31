@@ -326,6 +326,7 @@ impl McpTransport for RecordingTransport {
             logging: false,
             directory_read: false,
             experimental: HashMap::new(),
+            extensions: HashMap::new(),
         })
     }
     async fn list_tools(&self, _c: &McpRawConnection) -> Result<Vec<McpToolDto>, McpError> {
@@ -395,6 +396,7 @@ fn http_cfg(name: &str, oauth: Option<McpOAuthConfigDto>) -> McpServerConfig {
         always_load: false,
         discovery_cache: None,
         config_error: None,
+        metadata: Default::default(),
     }
 }
 
@@ -573,6 +575,7 @@ async fn static_token_server_spec_is_unchanged() {
         always_load: false,
         discovery_cache: None,
         config_error: None,
+        metadata: Default::default(),
     };
 
     registry.connect(config.clone()).await.expect("connect ok");
@@ -942,6 +945,7 @@ async fn static_authorization_header_survives_oauth_bearer() {
         always_load: false,
         discovery_cache: None,
         config_error: None,
+        metadata: Default::default(),
     };
     let key = oauth::server_key("static-with-oauth", &config.spec);
     seed_unexpired_oauth_token(&storage, &key).await;
@@ -994,6 +998,7 @@ async fn static_authorization_header_rejection_is_classified() {
         always_load: false,
         discovery_cache: None,
         config_error: None,
+        metadata: Default::default(),
     };
 
     let registry = McpRegistry::new(transport.clone() as Arc<dyn McpTransport>);
@@ -1037,6 +1042,7 @@ async fn headers_helper_minted_authorization_survives_oauth_bearer() {
         always_load: false,
         discovery_cache: None,
         config_error: None,
+        metadata: Default::default(),
     };
     // `oauth::server_key` hashes `{type, url, headers}`, so a stored-token
     // lookup keys on the spec's headers too. Seed under the key the
@@ -1102,6 +1108,7 @@ async fn headers_helper_minted_authorization_rejection_is_classified() {
         always_load: false,
         discovery_cache: None,
         config_error: None,
+        metadata: Default::default(),
     };
 
     let registry = McpRegistry::new(transport.clone() as Arc<dyn McpTransport>);
@@ -1150,6 +1157,7 @@ async fn headers_helper_minting_other_header_does_not_suppress_oauth() {
         always_load: false,
         discovery_cache: None,
         config_error: None,
+        metadata: Default::default(),
     };
     // The helper mints only `X-Api-Key`, so the post-helper spec's headers
     // are `{X-Api-Key: "helper-key"}` when `resolve_oauth_spec` hashes it.

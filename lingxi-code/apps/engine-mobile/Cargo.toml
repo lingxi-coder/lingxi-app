@@ -104,6 +104,7 @@ uniffi = [
     # stdio/remote entries remain disconnected until a platform transport is
     # injected; they are never reported as connected by the mobile engine.
     "dep:mcp",
+    "dep:jsonrpc",
     "dep:tool-mcp",
     "dep:futures-util",
     "dep:reqwest",
@@ -188,6 +189,7 @@ sidequery = { path = "../../sidequery", optional = true }
 # above.
 local-apps = { path = "../../local-apps", optional = true }
 mcp = { path = "../../mcp", optional = true }
+jsonrpc = { path = "../../jsonrpc", optional = true }
 tool-mcp = { path = "../../tools/mcp", optional = true }
 futures-util = { workspace = true, optional = true }
 reqwest = { version = "=0.12.28", default-features = false, features = ["rustls-tls"], optional = true }

@@ -1468,8 +1468,8 @@ fn hook_source_description(source: hooks::HookSource) -> String {
 /// `getSettingSourceName`). `UserDefined`→User, `Project`→Project,
 /// `Local`→Local (LingXi has no `Local` variant yet — `localSettings` maps
 /// from `Project` in claude-code's gitignored tier, so it's absent here),
-/// `PolicySettings`→Managed, `Plugin`→Plugin, `Flag`→CLI arg, `BuiltIn`→
-/// Built-in.
+/// `PolicySettings`→Managed, `Plugin`→Plugin, `Flag`→CLI arg,
+/// `AdditionalDirectory`→User, `BuiltIn`→Built-in.
 fn agent_source_group_label(source: agent::AgentSource) -> &'static str {
     use agent::AgentSource as S;
     match source {
@@ -1478,6 +1478,7 @@ fn agent_source_group_label(source: agent::AgentSource) -> &'static str {
         S::PolicySettings => "Managed agents",
         S::Plugin => "Plugin agents",
         S::Flag => "CLI arg agents",
+        S::AdditionalDirectory => "User agents",
         S::BuiltIn => "Built-in agents",
     }
 }

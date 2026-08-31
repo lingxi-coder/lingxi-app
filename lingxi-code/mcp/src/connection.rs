@@ -12,6 +12,59 @@ use traits::{
     ServerCapabilitiesDto,
 };
 
+/// Stable source identity and cache provenance attached to a configured MCP
+/// server.  This is deliberately MCP-local metadata: it never consults or
+/// persists an LLM provider credential, profile, or account identifier.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct McpServerMetadata {
+    /// Original transport label when the enum projection would lose it (for
+    /// example `claudeai-proxy` is carried as an HTTP transport today).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transport: Option<String>,
+    /// Optional Claude-compatible routing role.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<McpServerRole>,
+    /// Stable source of an agent inline MCP record.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_source: Option<McpAgentSource>,
+    /// True only when the host explicitly supplied this MCP config through a
+    /// command-line option.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub cli_owned: bool,
+    /// True only for an explicitly injected MCP temporary credential.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub ambient_credential: bool,
+}
+
+/// MCP server routing role.  `Comms` affects coordinator worker tool routing;
+/// it is not an LLM provider or account concept.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum McpServerRole {
+    /// Keep this server's tools in the coordinator and hide them from workers.
+    #[serde(rename = "comms")]
+    Comms,
+}
+
+/// Stable source values used by Claude-compatible agent MCP records.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum McpAgentSource {
+    #[serde(rename = "built-in")]
+    BuiltIn,
+    #[serde(rename = "plugin")]
+    Plugin,
+    #[serde(rename = "userSettings")]
+    UserSettings,
+    #[serde(rename = "projectSettings")]
+    ProjectSettings,
+    #[serde(rename = "policySettings")]
+    PolicySettings,
+    #[serde(rename = "flagSettings")]
+    FlagSettings,
+    #[serde(rename = "additionalDirectory")]
+    AdditionalDirectory,
+}
+
 /// Static configuration for one MCP server.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct McpServerConfig {
@@ -64,6 +117,19 @@ pub struct McpServerConfig {
     /// `- Not configured` is reserved for [`McpServerConfig::is_unconfigured`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub config_error: Option<String>,
+    /// Optional metadata used for cache identity and coordinator routing.
+    /// Defaults to an empty value so old serialized configurations retain
+    /// their exact logical-cache behavior.
+    #[serde(default, skip_serializing_if = "McpServerMetadata::is_empty")]
+    pub metadata: McpServerMetadata,
+}
+
+impl McpServerMetadata {
+    /// Whether this is the compatibility/default metadata value.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self == &Self::default()
+    }
 }
 
 /// claude's error text for a server with nothing to dial (`Nxe`'s
@@ -218,6 +284,8 @@ pub enum McpConnectionState {
         connection_id: McpConnectionId,
         /// Server capabilities returned by `initialize`.
         capabilities: ServerCapabilitiesDto,
+        /// Protocol family/version negotiated for this live connection.
+        negotiated: traits::McpNegotiatedProtocol,
         /// Tools advertised by the server.
         tools: Vec<McpToolDto>,
         /// Resources advertised by the server.
@@ -256,6 +324,9 @@ pub enum McpConnectionState {
         connection_id: McpConnectionId,
         /// Server capabilities from the cached `initialize` round.
         capabilities: ServerCapabilitiesDto,
+        /// Protocol family/version recorded when the cached catalog was
+        /// populated. No transport is live in this state.
+        negotiated: traits::McpNegotiatedProtocol,
         /// Tools from the cached `tools/list` round.
         tools: Vec<McpToolDto>,
         /// Resources from the cached `resources/list` round.
@@ -372,6 +443,7 @@ mod tests {
             discovery_cache: None,
             always_load: false,
             config_error: config_error.map(str::to_string),
+            metadata: McpServerMetadata::default(),
         }
     }
 

@@ -83,12 +83,15 @@ pub use client::{
     truncate_description, McpClient, McpClientError, McpDirectoryEntry, MAX_MCP_DESCRIPTION_LENGTH,
     MAX_MCP_DIRECTORY_PAGES,
 };
-pub use connection::{ConfigScope, McpConnectionState, McpServerConfig};
+pub use connection::{
+    ConfigScope, McpAgentSource, McpConnectionState, McpServerConfig, McpServerMetadata,
+    McpServerRole,
+};
 pub use discovery_cache::{
-    cache_gate, decide, feature_enabled as discovery_cache_feature_enabled, max_stale_ms,
-    miss_telemetry_value, strike_threshold, ttl_ms, CacheGateReason,
-    Decision as DiscoveryCacheDecision, DiscoveryCacheEntry, DiscoveryCacheStore,
-    EntryLookup as DiscoveryCacheEntryLookup, MissReason,
+    cache_gate, cache_gate_with_metadata, decide, decide_with_metadata,
+    feature_enabled as discovery_cache_feature_enabled, max_stale_ms, miss_telemetry_value,
+    strike_threshold, ttl_ms, CacheGateReason, Decision as DiscoveryCacheDecision,
+    DiscoveryCacheEntry, DiscoveryCacheStore, EntryLookup as DiscoveryCacheEntryLookup, MissReason,
 };
 pub use env_expansion::{
     expand_env_vars_in_string, expand_with_env, startup_env_snapshot, EnvExpansion,
@@ -117,4 +120,5 @@ pub use server_gate::{
     apply_project_server_gate, is_builtin_computer_use, mcp_server_is_disabled, McpPolicyContext,
     McpServerBlockReason, McpServerDecision, BUILTIN_COMPUTER_USE_SERVER,
 };
+pub use traits::{McpConnectOptions, McpConnectResult, McpNegotiatedProtocol, McpProtocolEra};
 pub use xaa_idp::{MapServerOAuthLookup, ServerOAuthLookup, XaaIdpConfigProvider, XaaIdpSettings};

@@ -63,7 +63,8 @@ use command_api::parse_slash_command;
 use command_api::RegistrySlashDispatcher;
 use cron::CronJobFirer;
 use local_apps::{AppError, AppService};
-use mcp::{ConfigScope as McpConfigScope, McpRegistry, McpServerConfig};
+use mcp::registry::OAuthDeps;
+use mcp::{ConfigScope as McpConfigScope, McpRegistry, McpServerConfig, RawConnectionProvider};
 
 use llm_client::oauth::anthropic::client::ClaudeAiOAuthClient;
 use llm_client::oauth::anthropic::config::ClaudeAiOAuthConfig;
@@ -110,6 +111,7 @@ use crate::{
     local_apps_llm::{ApiServiceModel, LocalAppsLlm},
     local_apps_mcp::{LocalAppsMcpTransport, LOCAL_APPS_REGISTRY_KEY},
     local_apps_profile::{profile_apps, ProfileApps},
+    mcp_transport::MobileMcpTransport,
     mobile_command_registry, mobile_tool_registry_with_skill_loader,
     mobile_tool_registry_with_skill_loader_and_ask_resolver, register_android_ui_automation,
 };
@@ -484,6 +486,9 @@ pub struct MobileRuntime {
     /// provider and also loads the app-private `settings.json` plus project
     /// `.mcp.json` entries using the shared MCP parser.
     pub mcp_registry: Arc<McpRegistry>,
+    /// Most recent MCP OAuth authorization URL. Retained for hosts without a
+    /// native deep-link opener so the user can copy it.
+    pub mcp_oauth_authorization_url: Arc<StdMutex<Option<String>>>,
     /// Every `(provider, model)` this connection can actually route to — the
     /// LIVE client config after `apply_mobile_profile_allowlist`.
     ///
@@ -622,6 +627,7 @@ impl MobileAppAgentExecutor {
                 always_load: true,
                 discovery_cache: None,
                 config_error: None,
+                metadata: Default::default(),
             })
             .await
             .map_err(|error| format!("app Agent MCP bootstrap failed: {error}"))?;
@@ -2388,6 +2394,32 @@ fn mobile_reload_skills_handler(
     )
 }
 
+/// Apply the mobile MCP dial preflight consistently on boot and reload.
+/// OAuth-configured remote entries are only dialable when the platform supplied
+/// an encrypted credential store; this check runs before `connect_all`, so it
+/// cannot issue OAuth discovery, remote HTTP, or plaintext-storage writes.
+fn mobile_mcp_preflight(
+    mut configs: Vec<McpServerConfig>,
+    oauth_supported: bool,
+) -> Vec<McpServerConfig> {
+    if oauth_supported {
+        return configs;
+    }
+    for config in &mut configs {
+        if config.config_error.is_none()
+            && matches!(
+                config.spec,
+                traits::McpTransportSpec::Sse { oauth: Some(_), .. }
+                    | traits::McpTransportSpec::Http { oauth: Some(_), .. }
+            )
+        {
+            config.config_error =
+                Some("MCP OAuth requires an encrypted secure credential store".to_string());
+        }
+    }
+    configs
+}
+
 /// Build a fully-wired mobile [`MobileRuntime`] from a deterministic
 /// [`MobileConfig`] + an `Arc<dyn Platform>` (plan F3-03 — the mobile sibling of
 /// `engine_desktop::build`).
@@ -2460,11 +2492,59 @@ async fn build_mobile_inner_with_ask(
     ask_user_question_tx: Option<tokio::sync::mpsc::Sender<tool_ui::AskUserQuestionExchange>>,
 ) -> Result<MobileRuntime, MobileBuildError> {
     let cwd = cfg.cwd.clone();
+    // Resolve all platform handles before constructing or connecting the MCP
+    // registry. This is intentionally a preflight boundary: an OAuth config
+    // must be rejected before any remote dial (or plaintext credential access)
+    // when the host did not provide encrypted storage.
+    let http = platform.http();
+    let clock = platform.clock();
+    let fs = platform.filesystem();
+    let storage: Arc<dyn traits::SecureStorage> = platform
+        .secure_storage()
+        .unwrap_or_else(|| Arc::new(platform_posix_minimal::PlainTextSecureStorage::new()));
+    let oauth_supported = traits::SecureStorage::is_encrypted(storage.as_ref());
+
     let local_apps_mcp = Arc::new(LocalAppsMcpTransport::new(mobile_apps_data_root(&cfg)));
     let _ = local_apps_mcp.attach_lingxi_home(cfg.lingxi_home.clone());
-    let mcp_registry = Arc::new(McpRegistry::new(
-        local_apps_mcp.clone() as Arc<dyn traits::McpTransport>
+    let remote_mcp = Arc::new(platform_common::RemoteMcpTransport::new());
+    let mobile_mcp = Arc::new(MobileMcpTransport::new(local_apps_mcp.clone(), remote_mcp));
+    let mcp_auth_url = Arc::new(StdMutex::new(None::<String>));
+    let mcp_auth_url_for_callback = mcp_auth_url.clone();
+    let mcp_deep_link = platform.deep_link();
+    let mcp_auth_callback: mcp::oauth::OnAuthorizationUrl = Arc::new(move |url| {
+        if let Ok(mut slot) = mcp_auth_url_for_callback.lock() {
+            *slot = Some(url.to_string());
+        }
+        if let Some(opener) = mcp_deep_link.as_ref() {
+            let opener = opener.clone();
+            let url = url.to_string();
+            tokio::spawn(async move {
+                if let Err(error) = opener.open(url).await {
+                    tracing::warn!(%error, "MCP OAuth authorization URL opener failed; copy the recorded URL");
+                }
+            });
+        } else {
+            tracing::info!(url = %url, "MCP OAuth authorization URL is ready to copy");
+        }
+    });
+    let mut mcp_registry = McpRegistry::with_raw_conn(
+        mobile_mcp.clone() as Arc<dyn traits::McpTransport>,
+        mobile_mcp.clone() as Arc<dyn RawConnectionProvider>,
+    )
+    .with_headers_helper_cwd(cwd.clone())
+    .with_discovery_cache_store(mcp::DiscoveryCacheStore::new(
+        cfg.lingxi_home.join("mcp-discovery-cache"),
     ));
+    if oauth_supported {
+        mcp_registry = mcp_registry.with_oauth(OAuthDeps {
+            http: http.clone(),
+            clock: clock.clone(),
+            storage: storage.clone(),
+            on_authorization_url: mcp_auth_callback,
+            xaa_config: None,
+        });
+    }
+    let mcp_registry = Arc::new(mcp_registry);
     // Subscribe before connecting so initialization-time catalog notifications
     // are retained until the shared ToolRegistry is ready below.
     let mut mcp_catalog_changes = mcp_registry.subscribe_catalog_changes();
@@ -2480,6 +2560,7 @@ async fn build_mobile_inner_with_ask(
             always_load: true,
             discovery_cache: None,
             config_error: None,
+            metadata: Default::default(),
         })
         .await
         .map_err(|error| {
@@ -2488,10 +2569,13 @@ async fn build_mobile_inner_with_ask(
     // Keep iOS/Android MCP discovery on the same parser and precedence rules
     // as desktop. The app-private settings file is the mobile equivalent of
     // the user global config; `.mcp.json` remains project-scoped.
-    let configured_mcp = mcp::load_mcp_servers(
-        &cwd.join(".mcp.json"),
-        &cfg.lingxi_home.join("settings.json"),
-        &cwd,
+    let configured_mcp = mobile_mcp_preflight(
+        mcp::load_mcp_servers(
+            &cwd.join(".mcp.json"),
+            &cfg.lingxi_home.join("settings.json"),
+            &cwd,
+        ),
+        oauth_supported,
     );
     for (name, result) in mcp_registry.connect_all(configured_mcp).await {
         if let Err(error) = result {
@@ -2501,9 +2585,6 @@ async fn build_mobile_inner_with_ask(
 
     // (1) OS handles from the aggregate `Platform` (NOT a concrete posix type —
     //     the device supplies these; the host test supplies a portable shim).
-    let http = platform.http();
-    let clock = platform.clock();
-    let fs = platform.filesystem();
     let main_session_id = protocol::SessionId::new();
     let main_session_uuid = main_session_id.as_uuid().to_string();
     // v3 Phase 3 (MCP create 收权): the LIVE current-session uuid, updated on
@@ -2551,17 +2632,6 @@ async fn build_mobile_inner_with_ask(
     let process = platform.process();
     let sandbox = platform.sandbox();
     let worktree = platform.worktree();
-    // Secure storage: prefer the platform's NATIVE store (iOS Keychain / Android
-    // Keystore) when the device layer injects one; otherwise fall back to the
-    // non-persisting development stub. The stub cannot persist secrets, so OAuth
-    // `/login` is short-circuited with a clear message below (it cannot store
-    // tokens); a real injected store flips `oauth_supported` true and enables
-    // subscription login. Computed before `storage` moves into CredentialManager.
-    let storage: Arc<dyn traits::SecureStorage> = platform
-        .secure_storage()
-        .unwrap_or_else(|| Arc::new(platform_posix_minimal::PlainTextSecureStorage::new()));
-    let oauth_supported = traits::SecureStorage::is_encrypted(storage.as_ref());
-
     // Build the shared credential manager and provider-specific OAuth handles
     // before assembling the client. This lets a native Keychain session restore
     // into the live provider graph on every engine boot.
@@ -4413,6 +4483,7 @@ async fn build_mobile_inner_with_ask(
         credentials,
         mobile_linux,
         mcp_registry,
+        mcp_oauth_authorization_url: mcp_auth_url,
         routable_listings: default_listings.clone(),
         local_apps_mcp,
         local_apps_llm,
@@ -5233,6 +5304,18 @@ impl MobileEngineHandle {
     #[must_use]
     pub fn inner(&self) -> &MobileRuntime {
         &self.inner
+    }
+
+    /// Return the most recent MCP OAuth authorization URL when a native
+    /// deep-link opener was unavailable or failed. Hosts can present this as a
+    /// copyable fallback without exposing any token or PKCE verifier.
+    #[must_use]
+    pub fn mcp_oauth_authorization_url(&self) -> Option<String> {
+        self.inner
+            .mcp_oauth_authorization_url
+            .lock()
+            .ok()
+            .and_then(|url| url.clone())
     }
 
     /// The connection-scoped [`AdapterPermissionGate`] — F3-05's
@@ -8197,10 +8280,13 @@ impl MobileEngineHandle {
     /// The listing and the next turn therefore use the same live registry.
     async fn reload_configured_mcp(&self) {
         let cwd = std::path::PathBuf::from(&self.session_cwd);
-        let configured = mcp::load_mcp_servers(
-            &cwd.join(".mcp.json"),
-            &self.lingxi_home.join("settings.json"),
-            &cwd,
+        let configured = mobile_mcp_preflight(
+            mcp::load_mcp_servers(
+                &cwd.join(".mcp.json"),
+                &self.lingxi_home.join("settings.json"),
+                &cwd,
+            ),
+            self.inner.oauth_supported,
         );
         let desired: std::collections::HashSet<&str> = configured
             .iter()
@@ -9926,9 +10012,10 @@ mod tests {
     use super::{
         build_mobile, builtin_provider_catalog, classify_provider_connection_response,
         collect_session_agent_transcript_paths, find_session_agent_transcript_path,
-        lower_session_agent_snapshot, mobile_cron_schedule_error, mobile_skill_listing_provider,
-        provider_models_endpoint, session_agent_conversation_is_visible,
-        session_agent_transcript_event, session_agent_transcript_revision, MobileConfig,
+        lower_session_agent_snapshot, mobile_cron_schedule_error, mobile_mcp_preflight,
+        mobile_skill_listing_provider, provider_models_endpoint,
+        session_agent_conversation_is_visible, session_agent_transcript_event,
+        session_agent_transcript_revision, McpConfigScope, McpServerConfig, MobileConfig,
         MobileCronStoreHandle, MobileSessionAgentObserver,
     };
 
@@ -10953,6 +11040,38 @@ mod tests {
             rt_real.oauth_supported,
             "an injected encrypted secure store must enable OAuth /login"
         );
+    }
+
+    #[test]
+    fn mobile_mcp_boot_and_reload_preflight_reject_plaintext_oauth_before_dial() {
+        let oauth = traits::McpOAuthConfigDto {
+            client_id: Some("mobile-test".into()),
+            callback_port: None,
+            auth_server_metadata_url: None,
+            scopes: None,
+            xaa: None,
+        };
+        let config = McpServerConfig {
+            name: "remote".into(),
+            spec: traits::McpTransportSpec::Http {
+                url: "https://127.0.0.1:1/mcp".into(),
+                headers: traits::McpHeaders::new(),
+                headers_helper: None,
+                oauth: Some(oauth),
+            },
+            scope: McpConfigScope::User,
+            disabled: false,
+            timeout_ms: None,
+            always_load: false,
+            discovery_cache: None,
+            config_error: None,
+            metadata: Default::default(),
+        };
+        let boot = mobile_mcp_preflight(vec![config.clone()], false);
+        let reload = mobile_mcp_preflight(vec![config], false);
+        let expected = Some("MCP OAuth requires an encrypted secure credential store".to_string());
+        assert_eq!(boot[0].config_error, expected);
+        assert_eq!(reload[0].config_error, expected);
     }
 
     /// F3-03: the built runtime binds the adapter sinks — the

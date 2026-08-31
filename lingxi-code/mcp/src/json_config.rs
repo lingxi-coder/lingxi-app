@@ -13,7 +13,7 @@
 //! [`crate::ConfigScope`] supplied by the caller. URL-based ("http"/"sse")
 //! entries are accepted via the `url` field.
 
-use crate::connection::{ConfigScope, McpServerConfig};
+use crate::connection::{ConfigScope, McpServerConfig, McpServerMetadata, McpServerRole};
 use crate::env_expansion::expand_env_vars_in_string;
 use serde::Deserialize;
 use std::collections::HashMap;
@@ -1089,6 +1089,7 @@ fn build_entry(
             _ => entry.timeout,
         };
         let always_load = entry.always_load.unwrap_or(false);
+        let spec_kind = spec.kind();
         Some(McpServerConfig {
             name,
             spec,
@@ -1098,6 +1099,14 @@ fn build_entry(
             discovery_cache,
             always_load,
             config_error,
+            metadata: McpServerMetadata {
+                // Keep the existing logical key bytes for ordinary config
+                // transports.  Only labels that the enum projection loses
+                // need an explicit transport discriminator.
+                transport: ty.filter(|raw| *raw != spec_kind).map(str::to_string),
+                role: role_flag(ty, raw_entry.as_ref()).map(|_| McpServerRole::Comms),
+                ..McpServerMetadata::default()
+            },
         })
     }
 }

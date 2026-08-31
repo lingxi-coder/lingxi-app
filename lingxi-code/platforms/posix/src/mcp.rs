@@ -110,8 +110,8 @@ pub(crate) enum PosixMcpConnection {
 ///
 /// Supports the `Stdio`, `Sse`, and `Http` variants in M2. Other transports
 /// (`WebSocket`, `InProcess`, `SseIde`, `SdkControl`) return
-/// `McpError::UnsupportedTransport`. Most request methods are intentionally
-/// stubbed pending full `JSON-RPC` framing in M2 phase 3.
+/// `McpError::UnsupportedTransport`. Stdio owns process/reaper state while
+/// HTTP and SSE request handling is delegated to the shared remote transport.
 #[derive(Default)]
 pub struct PosixMcpTransport {
     connections: Arc<Mutex<HashMap<McpConnectionId, PosixMcpConnection>>>,
@@ -338,7 +338,7 @@ impl PosixMcpTransport {
                 ));
             };
             let result = rpc
-                .call_with_timeout::<Value, Value>("server/discover", probe.clone(), timeout)
+                .call_with_timeout_probe::<Value, Value>("server/discover", probe.clone(), timeout)
                 .await;
             match result {
                 Ok(reply) => {
@@ -390,6 +390,9 @@ impl PosixMcpTransport {
                 Err(ConnectionError::Router(RouterError::Deserialize(_))) => {
                     // A syntactically valid JSON-RPC result with the wrong
                     // shape is compatibility evidence, not a transport fault.
+                    return Ok(None);
+                }
+                Err(ConnectionError::Router(RouterError::WrongResponseId { .. })) => {
                     return Ok(None);
                 }
                 Err(ConnectionError::Router(RouterError::WriterClosed))
@@ -697,7 +700,7 @@ impl McpTransport for PosixMcpTransport {
             McpTransportSpec::Stdio { command, args, env } => {
                 // Build a fully-wired JSON-RPC `Connection` over the child's
                 // NDJSON stdio instead of spawning a raw `Command` (the old
-                // code dropped the link, leaving every request method a stub).
+                // code dropped the link instead of retaining the live broker).
                 // `spawn_stdio_with_handles` sets `kill_on_drop(true)`, frames
                 // stdio, drains stderr into a 64 MB ring, and reaps the child.
                 let cfg = StdioConfig {
@@ -780,11 +783,17 @@ impl McpTransport for PosixMcpTransport {
                     return Err(error);
                 }
             };
-            let probe_cap = if matches!(spec, McpTransportSpec::Stdio { .. }) {
-                Duration::from_millis(3_000)
+            let default_probe_cap = if matches!(spec, McpTransportSpec::Stdio { .. }) {
+                3_000
             } else {
-                Duration::from_millis(5_000)
+                5_000
             };
+            let probe_cap = Duration::from_millis(
+                options
+                    .probe_timeout_ms
+                    .unwrap_or(default_probe_cap)
+                    .min(default_probe_cap),
+            );
             let probe_deadline = std::cmp::min(
                 deadline,
                 tokio::time::Instant::now()

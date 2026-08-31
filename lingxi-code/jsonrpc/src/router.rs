@@ -32,6 +32,15 @@ pub enum RouterError {
     /// The writer half (broker) was dropped before the response arrived.
     #[error("router writer closed before response")]
     WriterClosed,
+    /// A disposable diagnostic call received a response with an id that did
+    /// not match its one pending request.
+    #[error("response id mismatch: expected {expected:?}, got {actual:?}")]
+    WrongResponseId {
+        /// Id assigned to the disposable request.
+        expected: Id,
+        /// Id observed on the unmatched response, or `None` for JSON null.
+        actual: Option<Id>,
+    },
     /// Serializing the params into JSON failed.
     #[error("serialize params: {0}")]
     Serialize(serde_json::Error),
@@ -41,6 +50,7 @@ pub enum RouterError {
 }
 
 type PendingMap = Arc<DashMap<Id, oneshot::Sender<Result<Value, ResponseError>>>>;
+type UnknownResponseMap = Arc<DashMap<Id, oneshot::Sender<Option<Id>>>>;
 
 /// Outbound JSON-RPC router. Holds an atomic counter for outbound IDs and a
 /// `DashMap` of pending oneshots keyed by Id.
@@ -51,6 +61,7 @@ pub struct Router {
     outbound: mpsc::UnboundedSender<OutboundMessage>,
     default_timeout: Duration,
     closed: Arc<AtomicBool>,
+    unknown_response_ids: UnknownResponseMap,
 }
 
 /// Lightweight terminal handle that does not keep the outbound queue open.
@@ -58,12 +69,14 @@ pub struct Router {
 pub(crate) struct RouterCloseHandle {
     pending: PendingMap,
     closed: Arc<AtomicBool>,
+    unknown_response_ids: UnknownResponseMap,
 }
 
 impl RouterCloseHandle {
     pub(crate) fn close(&self) {
         self.closed.store(true, Ordering::Release);
         self.pending.clear();
+        self.unknown_response_ids.clear();
     }
 }
 
@@ -88,6 +101,7 @@ impl Router {
             outbound,
             default_timeout: DEFAULT_TIMEOUT,
             closed: Arc::new(AtomicBool::new(false)),
+            unknown_response_ids: Arc::new(DashMap::new()),
         }
     }
 
@@ -117,6 +131,20 @@ impl Router {
         RouterCloseHandle {
             pending: Arc::clone(&self.pending),
             closed: Arc::clone(&self.closed),
+            unknown_response_ids: Arc::clone(&self.unknown_response_ids),
+        }
+    }
+
+    fn signal_unknown_response_id(&self, actual: Option<Id>) {
+        let expected = self
+            .unknown_response_ids
+            .iter()
+            .next()
+            .map(|entry| entry.key().clone());
+        if let Some(expected) = expected {
+            if let Some((_, sender)) = self.unknown_response_ids.remove(&expected) {
+                let _ = sender.send(actual);
+            }
         }
     }
 
@@ -124,12 +152,14 @@ impl Router {
     /// received `Response` to the pending oneshot. Unknown IDs are dropped
     /// with a `tracing::warn!`.
     pub fn dispatch_response(&self, resp: Response) {
-        let Some(id) = resp.id else {
+        let Some(id) = resp.id.clone() else {
             tracing::warn!("dropping response with null id");
+            self.signal_unknown_response_id(None);
             return;
         };
         let Some((_, sender)) = self.pending.remove(&id) else {
             tracing::warn!(?id, "dropping response for unknown id");
+            self.signal_unknown_response_id(Some(id));
             return;
         };
         let outcome = match (resp.result, resp.error) {
@@ -164,7 +194,7 @@ impl Router {
         method: &str,
         params: P,
     ) -> Result<R, RouterError> {
-        self.call_with_timeout(method, params, self.default_timeout)
+        self.call_inner(method, params, Some(self.default_timeout), false)
             .await
     }
 
@@ -174,7 +204,7 @@ impl Router {
         method: &str,
         params: P,
     ) -> Result<R, RouterError> {
-        self.call_inner(method, params, None).await
+        self.call_inner(method, params, None, false).await
     }
 
     /// Send an outbound request and await the typed response with an explicit timeout.
@@ -184,7 +214,20 @@ impl Router {
         params: P,
         timeout: Duration,
     ) -> Result<R, RouterError> {
-        self.call_inner(method, params, Some(timeout)).await
+        self.call_inner(method, params, Some(timeout), false).await
+    }
+
+    /// Send a disposable request while classifying an otherwise-unmatched
+    /// response id. Protocol negotiation uses this only on a short-lived
+    /// connection with one pending probe, so ordinary late responses keep the
+    /// existing harmless-drop behavior.
+    pub async fn call_with_timeout_probe<P: Serialize, R: DeserializeOwned>(
+        &self,
+        method: &str,
+        params: P,
+        timeout: Duration,
+    ) -> Result<R, RouterError> {
+        self.call_inner(method, params, Some(timeout), true).await
     }
 
     async fn call_inner<P: Serialize, R: DeserializeOwned>(
@@ -192,6 +235,7 @@ impl Router {
         method: &str,
         params: P,
         timeout: Option<Duration>,
+        classify_unknown_id: bool,
     ) -> Result<R, RouterError> {
         if self.closed.load(Ordering::Acquire) {
             return Err(RouterError::WriterClosed);
@@ -207,6 +251,19 @@ impl Router {
         let drop_guard = DropGuard {
             pending: self.pending.clone(),
             id: id.clone(),
+            unknown_response_ids: if classify_unknown_id {
+                Some(self.unknown_response_ids.clone())
+            } else {
+                None
+            },
+        };
+
+        let unknown_id_rx = if classify_unknown_id {
+            let (tx, rx) = oneshot::channel();
+            self.unknown_response_ids.insert(id.clone(), tx);
+            Some(rx)
+        } else {
+            None
         };
 
         // Close may race the first check. Re-check after insertion so a
@@ -226,11 +283,40 @@ impl Router {
             })?;
 
         let outcome = if let Some(timeout) = timeout {
-            match tokio::time::timeout(timeout, rx).await {
-                Ok(outcome) => outcome,
-                Err(_elapsed) => {
-                    self.pending.remove(&id);
-                    return Err(RouterError::Timeout(timeout));
+            if let Some(unknown_id_rx) = unknown_id_rx {
+                enum ProbeOutcome {
+                    Response(Result<Result<Value, ResponseError>, oneshot::error::RecvError>),
+                    Wrong(Result<Option<Id>, oneshot::error::RecvError>),
+                }
+                match tokio::time::timeout(timeout, async move {
+                    tokio::select! {
+                        response = rx => ProbeOutcome::Response(response),
+                        actual = unknown_id_rx => ProbeOutcome::Wrong(actual),
+                    }
+                })
+                .await
+                {
+                    Ok(ProbeOutcome::Response(outcome)) => outcome,
+                    Ok(ProbeOutcome::Wrong(Ok(actual))) => {
+                        return Err(RouterError::WrongResponseId {
+                            expected: id,
+                            actual,
+                        });
+                    }
+                    Ok(ProbeOutcome::Wrong(Err(_))) => {
+                        return Err(RouterError::WriterClosed);
+                    }
+                    Err(_elapsed) => {
+                        return Err(RouterError::Timeout(timeout));
+                    }
+                }
+            } else {
+                match tokio::time::timeout(timeout, rx).await {
+                    Ok(outcome) => outcome,
+                    Err(_elapsed) => {
+                        self.pending.remove(&id);
+                        return Err(RouterError::Timeout(timeout));
+                    }
                 }
             }
         } else {
@@ -253,11 +339,15 @@ impl Router {
 struct DropGuard {
     pending: PendingMap,
     id: Id,
+    unknown_response_ids: Option<UnknownResponseMap>,
 }
 
 impl Drop for DropGuard {
     fn drop(&mut self) {
         self.pending.remove(&self.id);
+        if let Some(unknown_response_ids) = &self.unknown_response_ids {
+            unknown_response_ids.remove(&self.id);
+        }
     }
 }
 
@@ -325,6 +415,37 @@ mod tests {
             }
             other => panic!("unexpected: {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn disposable_probe_classifies_wrong_response_id() {
+        let (router, mut rx) = router_with_writer();
+        let router_clone = router.clone();
+        tokio::spawn(async move {
+            let OutboundMessage::Request(_request) = rx.recv().await.unwrap() else {
+                panic!("expected request");
+            };
+            router_clone.dispatch_response(Response::success(
+                crate::messages::Id::Number(999),
+                json!({"protocolVersion": "2026-07-28"}),
+            ));
+        });
+        let error = router
+            .call_with_timeout_probe::<_, serde_json::Value>(
+                "server/discover",
+                json!({}),
+                Duration::from_secs(1),
+            )
+            .await
+            .expect_err("wrong response id must be observable");
+        assert!(matches!(
+            error,
+            RouterError::WrongResponseId {
+                expected: crate::messages::Id::Number(1),
+                actual: Some(crate::messages::Id::Number(999)),
+            }
+        ));
+        assert!(router.pending.is_empty());
     }
 
     #[tokio::test]

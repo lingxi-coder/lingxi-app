@@ -240,6 +240,10 @@ pub struct McpConnectOptions {
     pub expected_era: Option<McpProtocolEra>,
     /// Total connection/handshake deadline in milliseconds.
     pub deadline_ms: u64,
+    /// Probe budget selected by the immutable negotiation decision. `None`
+    /// means no modern probe is requested; transports must still clamp this
+    /// value against the remaining total deadline when it is present.
+    pub probe_timeout_ms: Option<u64>,
 }
 
 impl Default for McpConnectOptions {
@@ -247,6 +251,7 @@ impl Default for McpConnectOptions {
         Self {
             expected_era: None,
             deadline_ms: 100_000,
+            probe_timeout_ms: None,
         }
     }
 }

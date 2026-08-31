@@ -1,64 +1,79 @@
 # MCP discovery cache production alignment（Claude Code 2.1.251）
 
-日期：2026-08-31  
-范围：MCP discovery cache Stage 3、resources/prompts 惰性拨号、MCP grant 分区、desktop production wiring  
-基线提交：`48d6ceba0`（Stage 3 与惰性拨号 checkpoint）
+日期：2026-08-31
+范围：MCP discovery cache Stage 3、resources/prompts 惰性拨号、MCP grant 分区、protocol-era negotiation、agent/comms routing、desktop/mobile production wiring
+实现基线：`8469d341c`（主实现）+ `f11dbce16`（全 workspace 兼容收口）
+详细交付报告：[mcp-plugin-deferred-completion-2.1.251-2026-08-31.md](./mcp-plugin-deferred-completion-2.1.251-2026-08-31.md)
 
 ## 1. 结论
 
-本轮关闭了此前报告中明确 defer 的 production identity 与 composition-root wiring：
+本轮将此前列出的六项实现缺口收敛为可运行、可测试、可审计的完成矩阵：
 
-- desktop 现在把持久化 `DiscoveryCacheStore` 注入 production `McpRegistry`；
-- 缓存分区只依赖固定兼容域和远程 MCP server 自己的 OAuth refresh grant；
-- 不读取、保存或推导 Anthropic account UUID，也不读取任何 LLM provider credential；
-- stale cache 命中会立即提供 catalog，并单飞执行后台重验证；
-- 重验证失败只 strike 当初提供 stale catalog 的确切 partition；
-- MCP refresh grant 在请求期间轮换时，不会把旧 catalog 或旧 strike 写入新 partition；
-- tools、resources、resource directory 与 prompts 都能从 `Cached` 状态按需拨号；
-- plugin unload/remove/disconnect 会 best-effort 清除对应 server cache family。
+- desktop 与 mobile composition root 都能把 `DiscoveryCacheStore` 接到 `McpRegistry`；mobile 现在同时支持内置 Local Apps 与共享 HTTP/SSE remote MCP。
+- cache identity 只由 MCP 配置、稳定 MCP metadata、协议期望值和 MCP server 自己的 OAuth refresh grant 构成；不读取、保存或推导任何 LLM provider credential 或 account UUID。
+- provenance gate、post-hit capability gate、fresh/stale/miss、single-flight lazy upgrade、精确 strike 与 lifecycle purge 已贯通。
+- protocol era 不再固定为单一路径：默认仍保持安全的 legacy 行为，但 opt-in auto 会做 modern probe、兼容回退和 envelope 校验；expected era 与实际 negotiated era 分开保存。
+- `role:"comms"` 与 `agentSource` 已从配置解析传到 cache identity、工具元数据和 coordinator worker 路由。
 
-这表示本报告范围内的 discovery-cache 功能已经 production-reachable。它不等于声称所有 Claude Code MCP 内部概念均已移植；明确残余项见第 12 节。
+这份 alignment 只声明当前实现和测试覆盖的 MCP/cache surface，不声称所有 Claude Code MCP 产品能力均已移植。明确非目标是：不实现完整 notifications 产品、不实现完整 Claude channel 产品、不实现完整 Claude/marketplace 产品；也不涉及任何 LLM provider auth、profile、credential 或 account UUID。
 
-## 2. 审查 oracle
+## 2. 审查 oracle 与基线
 
-本轮继续使用固定的 Claude Code 2.1.251 本地二进制作为 oracle：
+本轮继续以固定的 Claude Code 2.1.251 本地二进制作为 alignment oracle：
 
 ```text
 /Users/luolingfeng/.local/share/claude/versions/2.1.251
 SHA256 625869b01e0050f260b2980fac248fd9cef9e462612bded4ec9d3d49ff8969a5
 ```
 
-关键恢复点：
+本轮代码基线链为：
 
-- eligibility/miss decision：Mach-O `cot` 附近 `@176266197`；
-- gate `me`：`@176260900`；
-- fingerprint/write refusal：`@176269458`、`@176271314`；
-- logical-key canonicalization：`fM`/`ur`，二进制 `@157121288`；
-- TTL、max-stale、strike defaults：`@176259300`；
-- fresh/stale hit telemetry 与调用点：`@182536408`。
+```text
+c5c46f9707fe28840205e6d7144b735404e9d2ce  parent baseline
+8469d341cddf3c72e68c5add6c0869a7025d6052  primary implementation
+f11dbce16                                      all-target literal/clippy integration
+```
 
-所有 `[GREP]`/literal 结论均以同批阳性对照为原则；没有把模块注释自述当作 oracle。
+oracle 取证仍限于固定 binary literals、schema、telemetry 与行为；没有把源码注释自述当作 oracle。实现提交的约束也保留：`MCP_DISCOVERY_CACHE` 与 automatic protocol negotiation 默认关闭，MCP/plugin 代码不得读取 LLM provider credential 或 account UUID。
 
 ## 3. 认证边界：MCP OAuth，不是 LLM provider auth
 
-LingXi 是多 provider 项目。MCP/plugin 不能依赖 Anthropic 登录态。
-
 | 输入 | 是否进入 MCP cache partition | 说明 |
 |---|---:|---|
-| Anthropic API key | 否 | 只属于模型 provider 请求 |
-| Anthropic OAuth/profile/account UUID | 否 | MCP 路径完全不读取 |
-| OpenAI/Gemini/其他 provider credential | 否 | 同样不读取 |
-| MCP server access token | 否 | 短期轮换，不作为稳定 grant identity |
-| MCP server refresh token | 是，先哈希 | 代表远程 MCP grant；原文不落入文件名或日志 |
-| 无 MCP token row | 是 | 映射为 `grant:none` |
+| Anthropic/OpenAI/Gemini/其他 LLM provider credential | 否 | 属于模型 provider 请求，MCP cache 不读取 |
+| Anthropic OAuth/profile/account UUID | 否 | MCP 路径不读取、不持久化、不推导 |
+| MCP server access token | 否 | 短期 bearer，不是稳定 grant identity |
+| MCP server refresh token | 是，先哈希 | 仅表示远程 MCP grant，原文不进入文件名或日志 |
+| 没有 MCP token row | 是 | 映射为 `grant:none` |
 | token row 存在但没有 refresh token | 禁止缓存 | 返回 `no-fingerprint`，避免错误共享 |
 | MCP secure storage 无法读取/损坏 | 禁止缓存 | fail closed，不读、不写 |
 
-代码中的固定字节 `acct:logged-out` 被命名为 `PROVIDER_NEUTRAL_IDENTITY_DOMAIN`。它只是复现 oracle hash material 的固定兼容域，不表示 LingXi 登录/登出状态，禁止替换为 provider profile、credential 或 account UUID。
+固定兼容域 `acct:logged-out` 只是复现 oracle hash material 的 provider-neutral domain；它不是 LingXi 登录/登出状态，禁止替换成 provider profile、credential 或 account UUID。
 
-## 4. 分区算法
+## 4. Identity、metadata 与分区
 
-### 4.1 MCP grant token
+### 4.1 `McpServerMetadata`
+
+`mcp/src/connection.rs` 的 `McpServerMetadata` 是 MCP-local metadata，字段为：
+
+| 字段 | 作用 | 是否改变 logical key |
+|---|---|---:|
+| `transport` | 保留 enum 投影会丢失的原始 transport label（例如 `claudeai-proxy`） | 是（仅显式存在时） |
+| `role` | 当前唯一运行时值为 `comms`，用于 coordinator routing | 是 |
+| `agent_source` | Agent inline MCP 的稳定来源：`built-in`、`plugin`、`userSettings`、`projectSettings`、`policySettings`、`flagSettings`、`additionalDirectory` | 是 |
+| `cli_owned` | `--mcp-config` 显式注入标记 | 否；cache gate 拒绝 |
+| `ambient_credential` | MCP-only 临时 credential 注入标记 | 否；cache gate 拒绝 |
+
+普通空 metadata 被 serde 忽略，以保持旧配置的形状和 key bytes。Rust state 的字段名是 `agent_source`；logical-key canonical JSON 使用兼容名称 `agentSource`，两者不是两个独立身份。
+
+来源已闭环：
+
+- `mcp/src/json_config.rs` 解析 transport、`role:"comms"`、`discoveryCache` 并保留被 enum 投影丢掉的 raw transport label。
+- `apps/cli/src/init.rs::parse_cli_mcp_servers` 将 `--mcp-config` 结果标成 `cli_owned`。
+- `agent/src/mcp_servers.rs` 将 inline Agent `AgentSource` 映射为 `McpAgentSource`；按名称复用既有 config 时不伪造新的 source。
+- host 可显式设置 `ambient_credential`；这类配置只允许 live，不会污染已有 partition。
+
+### 4.2 Grant、fingerprint、logical key、partition
 
 ```text
 no stored MCP token row:
@@ -66,280 +81,212 @@ no stored MCP token row:
 
 stored refresh token:
     grant_token = "grant:" + SHA256(refresh_token)[0..16]
+
+fingerprint = SHA256("acct:logged-out" + NUL + grant_token)
+
+logical_key = server_name + "-" + SHA256(canonical_config_json)[0..16]
+
+partition_key = SHA256(
+    logical_key + NUL + fingerprint + NUL +
+    "era:" + expected_era + NUL + "2.1.251"
+)[0..32]
 ```
 
-固定向量：
+canonical config 会递归排序 object key，并排除 discovery 结果、state、scope、plugin path/source、config error、`discoveryCache` 等非身份字段；显式 timeout/alwaysLoad 与 metadata identity 字段按当前实现规则进入。固定向量继续保持：
 
 ```text
 refresh-token -> grant:0eb17643d4e92611
+grant:none -> 856f0d2375be22a510e79662f22d30c51c14dc3394b9d610af33a7116d81cda6
+legacy logical-cache-key -> a6fad12e13235da65ecc9b068d2c62b6.json
 ```
 
-access token 改变不会改变 grant token；refresh token 改变一定会改变 grant token。
+Agent scope 没有稳定 `agentSource` 时返回 `no-fingerprint`，不会降级共享普通 server partition。access token 轮换不改变 grant；refresh token 轮换一定改变 grant。
 
-### 4.2 Fingerprint
+## 5. Protocol era：expected 与 actual 分离
 
-```text
-fingerprint = SHA256(
-    "acct:logged-out" + NUL + grant_token
-)
-```
+`traits/src/mcp.rs` 定义 `McpProtocolEra::{Legacy, Modern}`、`McpNegotiatedProtocol { era, version }`、`McpConnectOptions { expected_era, deadline_ms }` 与 `McpConnectResult::negotiated`。`mcp/src/protocol_negotiation.rs` 负责从 `MCP_PROTOCOL_NEGOTIATION`、transport gate、feature flag 和 server denylist 得到期望值：
 
-固定向量：
+- `legacy` 明确选择单次 legacy initialize；
+- `auto` 对 eligible HTTP/stdio 路径先做 modern `server/discover` probe；
+- 未设置或 feature flag 关闭时仍选择 legacy，保证默认行为不变；
+- probe 不支持 modern 时关闭 probe connection、重新拨 live connection，再以 legacy initialize；
+- modern 成功时保存准确版本 `2026-07-28`，legacy 为 `2025-11-25`。
 
-```text
-grant:none
--> 856f0d2375be22a510e79662f22d30c51c14dc3394b9d610af33a7116d81cda6
-```
+cache partition 编入 `expected_era`，entry 另外保存 `negotiatedEra`（旧 entry 缺失时按 legacy 兼容）。因此“期望使用 modern partition”与“这条真实连接最后协商到 legacy”不再混为一谈。
 
-### 4.3 Logical cache key
+stale revalidation 的 `LazyUpgradeSlot` 同时保存：命中 partition 的 expected era、entry 的 actual era、cached connection id 和 config snapshot。revalidation 只有在 generation/config 仍匹配且 actual era 与 entry actual era 相同才安装 live generation；era 改变时只 purge 提供 stale hit 的 partition、保留当前 `Cached`、不记录 strike、不写 replacement partition。该状态机由 `stale_refresh_era_change_purges_hit_partition_without_replacement_or_strike` 锁定。
 
-logical key 使用恢复的 canonical-config 规则：
+## 6. Cache gate、post-hit 顺序与 fresh/stale/miss
 
-```text
-logical_key = server_name + "-" + SHA256(canonical_config_json)[0..16]
-```
+registry 在已有 `Connected` 或 `Cached` state 上先短路复用；这对应 oracle 的 live-connection 语义，`decide_with_metadata` 不会把它重新伪造成一次磁盘 miss。对需要新一次 discovery 的 config，门控与判定顺序为：
 
-会剔除 discovery 结果、cache state、scope、plugin path/source、config error 等非配置身份字段；对象 key 递归排序。`discoveryCache` 本身是 gate，不进入 logical key。
+1. feature gate：`MCP_DISCOVERY_CACHE` 未开启即 `FeatureDisabled`。
+2. transport gate：只有 HTTP/SSE 具备 cache eligibility；其他 transport 为 `Transport`。
+3. provenance gate：按 `cli-owned` → unresolved `${VAR}`（remote URL/header）→ `ambient-credential` 检查。
+4. 用户可改变的 purge gate：`discoveryCache:false` 为 `OptOut`，再检查 `headersHelper` 为 `HeadersHelper`。
+5. `OptOut` 与 `HeadersHelper` 会 best-effort purge server family；其余 gate（feature、transport、provenance）只 live miss，不 purge。
+6. gate 通过后计算 Agent source、MCP grant fingerprint 与 expected-era partition；secure storage/refresh grant 不可用时为 `NoFingerprint`。
+7. 读取 entry 后依次检查：absent/corrupt、strike threshold、future-clock/max-stale、degenerate zero-tools、skills capability、channel capability。
+8. 通过 post-hit 检查后才按 age 分为 `Fresh` 或 `Stale`；fresh/stale 都先安装 cached catalog，再决定是否 live dial。
 
-固定向量：
+具体结果：
 
-```text
-server = srv
-config = {"headers":{},"timeout":10,"type":"http","url":"https://a.example"}
-logical_key = srv-3a9ea8118cd8b809
+- `Fresh`：立即安装 `McpConnectionState::Cached`，发出 `cache_fresh`，不拨 transport；第一次真实 tool/resource/prompt 调用再单飞 lazy dial。
+- `Stale`：立即安装 cached catalog，发出 `cache_stale`，后台 single-flight live revalidation；foreground waiter 可以加入同一个 owner。
+- `Miss`：按原因发 telemetry（磁盘不可用的 absent/expired/corrupt/strike/no-fingerprint）后 live discovery；provenance/transport/feature 等门控 miss 不假装磁盘读过。
+- background failure/panic 仅在 cached generation 仍匹配时对命中 partition 记录 strike；普通 initial connect failure 不 strike。
+- generation/config 替换、disconnect/remove 或 CAS reject 会拒绝旧 owner，并对未发布 transport 做有界 cleanup。
 
-config.oauth = {}
-logical_key = srv-3e065924e4160070
+post-hit capability 具体为：`tengu_mcp_skills` 开启且 entry 同时有 resources 与 `extensions["io.modelcontextprotocol/skills"]` 时 `SkillsCapable`；`experimental["claude/channel"] == true` 时 `ChannelCapable`。skills 优先于 channel。这里实现的是 cache safety gate，不是完整 skills/channel 产品。
 
-config.oauth = {"clientId":"client"}
-logical_key = srv-95bfe547b37316e7
-```
+## 7. Write-through、grant rotation 与持久化安全
 
-OAuth optional fields只有在 source config 中实际存在时才进入 canonical JSON；不存在的字段不会被 Rust `null` 扩大。
+live discovery 在认证 transport 建立后捕获 partition，在 catalog RPC 完成后重新读取 MCP grant 并重算 partition；两者不一致就跳过写入，避免旧 grant 的 catalog 落入新 grant。写入 entry 同时记录实际 `negotiatedEra`。
 
-Agent scope 需要 oracle 的稳定 `agentSource`，当前 Rust config 没有这个字段，因此 Agent scope 明确 fail closed，而不是错误共享普通 server partition。
+持久化边界：
 
-### 4.4 Partition filename
+- desktop root：`<lingxi_home>/mcp-discovery-cache/`；mobile root：`<cfg.lingxi_home>/mcp-discovery-cache/`；store 已注入但 feature 默认关闭。
+- root mode `0700`、entry mode `0600`、单 entry 上限 8 MiB。
+- no-follow + regular-file 校验；symlink、非普通文件、超大、schema/key mismatch 都是 corrupt miss。
+- exclusive staging file + atomic rename；staging 名只含 partition digest 与内部 nonce。
+- serialize catalog 前反射检查 config header/env/URL credential 与 stored MCP token/client secret，包括复合 Cookie/header 和 URI percent-encoded token（hex 大小写）。secure storage 读取失败则拒绝写入。
+- purge 不跟随 symlink；lifecycle purge 只删除 cache family，不隐式撤销 plugin 的 OAuth grant。
 
-```text
-partition_key = SHA256(
-    logical_key + NUL +
-    fingerprint + NUL +
-    "era:legacy" + NUL +
-    "2.1.251"
-)[0..32]
+## 8. Resources、prompts、plugin 生命周期
 
-filename = partition_key + ".json"
-```
-
-固定向量：
-
-```text
-logical-cache-key + grant:none fingerprint
--> a6fad12e13235da65ecc9b068d2c62b6.json
-```
-
-只接受 32 位小写十六进制 partition key；server name、URL、token 等均不会进入文件名。
-
-## 5. Fresh / stale / miss 状态机
-
-默认值：
-
-| 参数 | 默认值 |
-|---|---:|
-| feature flag | off |
-| TTL | 900 秒 |
-| max stale | 14,400 秒 |
-| max-stale hard cap | 604,800 秒 |
-| strike threshold | 1 |
-
-### Fresh
-
-1. 校验 gate、fingerprint、partition、schema 和 logical key。
-2. 将 catalog 安装为 `McpConnectionState::Cached`。
-3. 不打开 transport。
-4. tools/resources/prompts 可以立即参与 catalog 展示。
-5. 第一次真实调用通过单飞 lazy upgrade 拨号。
-
-### Stale
-
-1. 与 Fresh 一样立即返回 cached catalog。
-2. 创建 `LazyUpgradeSlot`，保存 cached generation、config snapshot 和命中 partition。
-3. detached owner 在后台执行 live initialize/catalog discovery。
-4. 只有 generation/config 仍匹配时才以 live catalog 原子替换 Cached。
-5. CAS reject 的 live transport 会被断开，并进入有界清理重试。
-
-### Miss
-
-按 oracle vocabulary 发射 miss telemetry，然后 live dial。`discoveryCache:false` 与 `headersHelper` 会额外 purge 整个 server family；feature disabled、transport ineligible 等非动态 gate 不 purge。
-
-## 6. Strike 精确语义
-
-旧实现曾把“普通 connect 失败”作为保守 strike 信号，这会扩大 oracle `_6e` 的语义，并且在 grant 轮换时可能重新计算到另一个 partition。
-
-最终实现：
-
-- 只有 stale background revalidation failure 记录 strike；
-- partition 在 stale hit consult 时计算并进入 `LazyUpgradeSlot`；
-- failure path 不重新读取当前 grant，不重新计算 partition；
-- strike 前再次验证 cached connection id 与 config snapshot 仍是当前 generation；
-- replacement generation、disconnect/remove 或配置改变后不 strike；
-- ordinary initial connect failure 保持原 entry 的 strike 为 0；
-- grant A 命中、期间轮换到 grant B 时，只更新 A，B 保持不变。
-
-## 7. Write-through 与 grant rotation
-
-live discovery 的 write-through 使用两阶段 partition 检查：
-
-1. authenticated transport 建立成功后、catalog RPC 前捕获 partition；
-2. catalog RPC 完成后重新读取 MCP grant 并计算 partition；
-3. 两者完全相等才写入；
-4. 不相等说明 refresh grant 在请求期间轮换，跳过本次写入。
-
-因此旧 grant 下获取的 tools/resources/prompts 不会被标记成新 grant 的 catalog。
-
-## 8. Resources 与 prompts 惰性拨号
-
-以下路径均接受 `Connected` 或 `Cached` server：
+Cached catalog 对 tools、resources、resource templates、prompts 一视同仁：
 
 | 表面 | Cached 行为 |
 |---|---|
 | `ListMcpResourcesTool` 指定 server | `ensure_connected_client` 后执行 `resources/list` |
-| `ListMcpResourcesTool` 全 server | 逐 server best-effort lazy dial，单个失败不阻塞其余 server |
+| `ListMcpResourcesTool` 全 server | 逐 server best-effort lazy dial，单个失败不阻塞其他 server |
 | `ReadMcpResourceTool` | lazy dial 后执行 `resources/read` |
-| `ReadMcpResourceDirTool` | lazy dial 后重新读取 live capabilities，再执行 directory read |
-| `connected_prompts` | 从 cached catalog 暴露 prompt command |
-| `get_prompt` | 以 cached connection generation 为 predecessor，lazy dial 后验证 live generation/config 再调用 |
+| `ReadMcpResourceDirTool` | lazy dial 后重新读取 live capability，再执行 directory read |
+| `connected_prompts` | 从 cached catalog 构建 prompt command |
+| `get_prompt` | 以 cached generation 为 predecessor，lazy dial 后核对 live generation/config |
 
-这一设计避免了“普通 cached tools 可用，但 resources/prompts 被当作未连接跳过”的旧缺口。
+disconnect/remove/plugin unload 都会 best-effort purge 对应 server cache family；I/O 失败记录日志，不把本地 registry 状态卡在 live。plugin unload/remove 使用不撤销 OAuth 的路径，避免卸载插件造成远程 server 被登出；显式 remove 仍遵循现有 revoke 语义。
 
-## 9. Plugin 与生命周期失效
+## 9. Production composition：desktop 与 mobile
 
-| 事件 | Cache 行为 | MCP OAuth token 行为 |
-|---|---|---|
-| disconnect | best-effort purge server family；I/O 失败只记录日志 | 按现有 disconnect 语义处理 |
-| remove | best-effort purge server family；I/O 失败只记录日志 | 按 remove 语义撤销/删除 |
-| plugin unload/remove | best-effort purge plugin server family；I/O 失败只记录日志 | 保留 OAuth grant，避免卸载插件导致用户被远程 server 登出 |
-| `discoveryCache:false` | best-effort purge family | 不触碰 token |
-| `headersHelper` 启用 | best-effort purge family | 不触碰 token |
-| refresh grant replacement | 新 partition | 旧 partition 不再命中；生命周期 purge 可清整个 family |
+### Desktop
 
-plugin 中的 `anthropic/*` metadata 或官方 marketplace 标识只属于上游 wire/marketplace compatibility，不构成 Anthropic auth 依赖。
-
-## 10. 持久化安全边界
-
-production desktop root：
-
-```text
-<lingxi_home>/mcp-discovery-cache/
-```
-
-安全属性：
-
-- 根目录 Unix mode `0700`；
-- entry 文件 Unix mode `0600`；
-- 单 entry 最大 8 MiB；
-- read 使用 no-follow 打开并验证 regular file；
-- symlink、非普通文件、超大文件、schema 错误、logical-key mismatch 均视为 corrupt miss；
-- write 使用同目录 exclusive staging file + atomic rename；
-- staging filename 只使用 partition digest 和内部 nonce；
-- purge 不跟随 symlink；
-- serialized catalog 写入前对 config header/env/URL credential 与 MCP stored token/client secret 做反射检查；
-- 反射检查覆盖复合 Cookie/header 中以空白、`,`、`;`、`=` 分隔的 secret，以及 URI percent-encoded token（大小写 hex）；
-- secure storage 无法读取时拒绝写入，而不是在不知道 secret 的情况下冒险持久化。
-
-## 11. Production composition
-
-Desktop：
+`apps/engine-desktop/src/lib.rs` 生产 composition root 同时注入：
 
 ```rust
-.with_discovery_cache_store(DiscoveryCacheStore::new(
-    cfg.lingxi_home.join("mcp-discovery-cache"),
-))
+McpRegistry::with_raw_conn(...)
+    .with_discovery_cache_store(DiscoveryCacheStore::new(
+        cfg.lingxi_home.join("mcp-discovery-cache")
+    ))
+    .with_oauth(...)
 ```
 
-store 总是可达，但 `MCP_DISCOVERY_CACHE` 默认关闭；未启用时不会读写缓存。
+同一 `McpRegistry` 供 orchestrator、plugin runtime、MCP tools、prompts 和 catalog refresh 使用；已有 `build_wires_mcp_discovery_cache_store` regression test 验证 store 可达。
 
-Mobile 当前 registry 只注册 `InProcess` transport，而 discovery cache gate 只允许 HTTP/SSE。为避免创建永远不会使用的持久目录，本轮明确不在 mobile composition root 接 store。这是经代码路径确认后的平台边界，不是遗漏。
+### Mobile
 
-## 12. 明确残余项
+mobile composition 现已接入 discovery-cache store，并同时承载 Local Apps 与共享 HTTP/SSE remote MCP。`apps/engine-mobile/src/host.rs` 现在：
 
-这些项目不阻塞本报告范围，但不能被描述为“Claude Code MCP 内部实现 100% 完全移植”：
+1. 从 `Platform` 取得 HTTP、clock、secure storage、deep-link opener；
+2. 构造 `RemoteMcpTransport` 与 `MobileMcpTransport` composite；
+3. 构造带 raw connection bridge 的 `McpRegistry`，注入 mobile cache root；
+4. 先连接内置 `LocalAppsMcpTransport`（`InProcess`），再用共享 parser 读取 app-private `settings.json` 与 project `.mcp.json` 并连接 HTTP/SSE；
+5. 让 mobile ToolRegistry 订阅 catalog changes，cached/live replacement 后重建 MCP tools。
 
-1. **Agent `agentSource`**：缺少稳定 source identity，当前 Agent scope cache fail closed。
-2. **Protocol era**：当前 transport 实际只执行 legacy，partition 固定 `era:legacy`；未来真正启用 modern transport 后必须纳入 era。
-3. **`role` runtime**：JSON validation 已存在，但没有 LingXi runtime consumer。
-4. **`cli-owned` / `env-placeholder` / `ambient-credential` gate**：LingXi config model 没有等价状态。
-5. **`skills-capable` / `channel-capable` / `live-connection` post-hit miss**：依赖 Claude coordinator/plugin discovery 上下文，当前没有可靠映射。
-6. **Mobile remote MCP**：若未来 mobile 支持 HTTP/SSE，需要再决定平台安全存储与 cache root。
+`MobileMcpTransport` 只路由 connection id，不按 server name 猜路由：`InProcess` 委托 Local Apps，`Sse`/`Http` 委托共享 remote；`WebSocket`、stdio、IDE 与 SDK control 不在 mobile composite 的支持集内。Local Apps 仍 cache-ineligible，带 store 的 mobile registry 连接它不会创建 discovery-cache 目录。
 
-Anthropic credential account UUID 持久化不是残余任务，也不应成为任务。
+## 10. OAuth encrypted storage 与 deep-link 安全边界
 
-## 13. 修改文件职责
+mobile 只在 `Platform::secure_storage()` 返回 `is_encrypted() == true` 时把 OAuth deps 接入 registry。没有原生 Keychain/Keystore 时使用 non-persisting development stub，但 `mobile_mcp_preflight` 会在任何 remote OAuth dial 前把 config 标成 `MCP OAuth requires an encrypted secure credential store`；因此不会先做 OAuth discovery、remote HTTP 或 plaintext token write。注入真实 encrypted store 后，OAuth load/refresh/PKCE persist 路径才可用。
+
+授权 URL 回调先写入 host-owned 的 copyable slot，再尝试 `DeepLinkOpener::open`；opener 不可用或失败只留下可复制 URL并记录 warning，不暴露 access token 或 PKCE verifier。该 slot 通过 UniFFI getter 暴露，configured remote connect 在后台运行，因此 loopback callback 等待不会阻塞 engine build。MCP OAuth token 仍只进入 `mcp-oauth` secure-storage service；cache 只保存 refresh-grant 的短哈希 fingerprint，并在 write-through 做 secret reflection refusal。
+
+mobile listing reload 先比较完整 config snapshot：未变 server 不 dial、不 purge、不 revoke；新增/修改项统一后台连接，修改/删除使用不撤销 OAuth 的 replacement 路径。
+
+## 11. 验证结果与已知风险
+
+本轮直接复核的结果：
+
+```text
+cargo test -p jsonrpc -p mcp -p tool-mcp -p agent -p plugin --quiet
+jsonrpc 63、mcp 574、agent 358、tool-mcp 140 及 plugin 全部通过；0 failed；3 ignored
+
+cargo test -p tasks --lib --quiet -- --test-threads=1
+271 passed; 0 failed
+
+cargo test -p platform-common -p platform-posix --quiet
+全部 unit/integration suites 通过；modern negotiation E2E 7/7
+
+cargo test -p engine-desktop --quiet
+228 lib + 其余 integration suites 全部通过
+
+cargo check --workspace --all-targets
+passed
+```
+
+`engine-mobile --features uniffi` 的已知 fixture 风险可稳定复现：
+
+```text
+local_app_runtime_profiles::tests::published_r1_contract_digests_are_immutable
+phaser_2d: FAILED
+actual   7fd39e60eff9b7491062506f97a7b39f796f4d735e8716a7ed6d9fd7604695b1
+expected 38b5fed98a06e5784632e544e41ec663ff7bc55215d199e436bb53dfde7b1476
+```
+
+该失败在实现基线 `8469d341c` 及其基线父提交 `c5c46f970` 上均为同一既有 mobile `phaser_2d` fixture digest 不一致，不是 MCP/cache 行为失败；本轮不改 fixture、不改代码。基线 commit 还记录了 engine-desktop coordinator、iOS framework、Android AAR 与相关 package checks；本报告不把上述 mobile fixture 风险或既有 warnings 伪装成 workspace-wide 全绿。
+
+补充回归加入后，集成复核确认：`workspace/all-targets`、`core/platform/desktop` 与 iOS framework/Android AAR framework checks 均通过；`engine-mobile --features uniffi` 完整测试面为 **465/466（465 passed、1 failed）**，唯一失败就是上面的 `phaser_2d` digest fixture。该数字不应被概括为 mobile 全绿。
+
+`git diff --check` 与文档结构检查在本次文档修改后执行；最终状态见详细交付报告第 14 节。
+
+## 12. 六项完成矩阵（替代历史残余列表）
+
+| # | 历史残余项 | 当前状态 | 实现落点 | 回归/证据 |
+|---:|---|---|---|---|
+| 1 | Agent `agentSource` 稳定 source identity | ✅ 已完成 | `McpServerMetadata.agent_source`；inline source 全量映射；Agent 无 source 直接 `NoFingerprint`；logical key 纳入 `agentSource` | 7 个 source 映射/identity、7-way logical-key separation、registry missing-source fail-closed |
+| 2 | Protocol era 与 partition | ✅ 已完成 | `McpProtocolEra`/`McpNegotiatedProtocol`；immutable negotiation decision、budgeted modern probe、fallback、corrective retry、modern envelope；partition 纳入 expected era，entry 保存 actual era | protocol E2E 7/7；wrong-id、probe clamp、era/mode-change stale tests |
+| 3 | `role` runtime consumer | ✅ 已完成 | parser 识别 `role:"comms"`；MCPTool 保留 `mcp_role`；coordinator worker 过滤 shared/inline comms 以及 generic `MCP`/`McpAuth`，普通 worker 保留；Cached/Connected rebuild 一致 | tool-mcp role rebuild；agent dispatcher/routing；plugin load→cache→refresh integration |
+| 4 | `cli-owned` / `env-placeholder` / `ambient-credential` gate | ✅ 已完成 | provenance gate 按固定顺序执行；三者均 non-purging live miss；opt-out/helper 仍是唯一 gate purge | `discovery_cache::provenance_gates_are_ordered_and_non_purging`；registry provenance read/purge test |
+| 5 | skills/channel/live post-hit | ✅ 已完成（cache gate 范围） | live state 在 cache 前短路；entry post-hit 依次检查 skills→channel→Fresh/Stale；独立 skills flag；channel marker safety gate | `skills_flag_is_independent_and_skills_miss_precedes_channel_miss`；live/cached registry tests |
+| 6 | Mobile remote MCP 与 production wiring | ✅ 已完成（支持集有边界） | shared `platform-common::RemoteMcpTransport`；mobile Local Apps + remote composite；cache root/store；后台 OAuth、exported copy URL、无副作用 reload | shared remote E2E 3/3；mobile composite 7/7；cache rebuild/reload/deep-link/encrypted-store tests；fixture 风险见第 11 节 |
+
+## 13. 文件职责摘要
 
 | 文件 | 职责 |
 |---|---|
-| `mcp/src/discovery_cache.rs` | policy、logical key、fingerprint、partition、store hardening、fixed vectors |
-| `mcp/src/oauth.rs` | MCP refresh grant token 派生与 secure-storage fail-closed |
-| `mcp/src/registry.rs` | consult/read/write、Stage 3 owner、exact strike、lazy dial、lifecycle purge |
-| `mcp/src/connection.rs` | `discovery_cache: Option<bool>` runtime config |
-| `mcp/src/json_config.rs` | `discoveryCache` parse/validation/threading |
-| `tools/mcp/src/mcp_tool.rs` | resources list/read lazy dial |
-| `tools/mcp/src/read_mcp_resource_dir.rs` | resource directory lazy dial 与 capability recheck |
-| `plugin/src/manager.rs` | plugin-owned server unload/remove lifecycle |
-| `apps/engine-desktop/src/lib.rs` | production store composition 与 wiring regression test |
+| `mcp/src/connection.rs` | `McpServerMetadata`、Agent source、role、Cached/Connected state schema |
+| `mcp/src/discovery_cache.rs` | gate、logical/partition key、fingerprint、fresh/stale/miss、post-hit、store hardening |
+| `mcp/src/protocol_negotiation.rs` | env/flag/denylist 到 expected era 的纯决策 |
+| `mcp/src/registry.rs` | consult/read/write、grant rotation、single-flight、exact strike、lazy dial、lifecycle purge、error cleanup |
+| `mcp/src/json_config.rs` | transport/schema、`discoveryCache`、`role` 与 metadata 来源 |
+| `mcp/src/oauth.rs` | MCP OAuth secure storage、refresh-grant token 派生、PKCE/token lifecycle |
+| `mcp/src/client.rs` | live client、tool/prompt/resource dispatch 与 negotiated protocol metadata |
+| `traits/src/mcp.rs` | transport spec、protocol era/options/result、capabilities extensions |
+| `platforms/common/src/mcp_remote.rs` | 共享 HTTP/SSE wire、probe、deadline、modern envelope、connection cleanup |
+| `platforms/posix/src/mcp.rs` | stdio process/reaper 与 shared remote bridge |
+| `agent/src/mcp_servers.rs` | inline Agent source metadata 注入与 scoped config |
+| `agent/src/tool_resolver.rs` | coordinator worker 的 `role:"comms"` 过滤 |
+| `tools/mcp/src/mcp_tool.rs` | Cached/Connected MCP tool construction、role propagation、resource/prompt tools |
+| `apps/engine-desktop/src/lib.rs` | desktop OAuth/cache composition、coordinator mode、catalog refresh |
+| `apps/engine-mobile/src/host.rs` | mobile composition、OAuth preflight、secure store/deep link、catalog refresh |
+| `apps/engine-mobile/src/mcp_transport.rs` | Local Apps/remote connection-id composite |
+| `platforms/common/tests/mcp_remote_e2e_test.rs` | shared HTTP/SSE round trips |
+| `platforms/posix/tests/mcp_protocol_negotiation_e2e_test.rs` | modern success、fallback、corrective retry、deadline/auth/error envelope |
 
-## 14. 验证结果
+## 14. 明确非目标、剩余风险与交叉引用
 
-已执行：
+明确非目标：
 
-```text
-cargo test -p mcp --quiet
-612 passed; 0 failed; 3 ignored
+- 不实现完整 notifications 产品；当前只提供 transport-level notification stream 与 legacy list-changed 路径的既有接线。
+- 不实现完整 Claude channel 产品；`claude/channel` 只作为 cache post-hit safety marker。
+- 不实现完整 Claude/marketplace/plugin 产品面；本文只覆盖 plugin-owned MCP cache lifecycle 与已验证 routing seam。
+- 不读取、保存、派生或依赖任何 LLM provider auth、credential、profile 或 account UUID；MCP OAuth 是独立的 server grant。
 
-cargo test -p tool-mcp --quiet
-139 passed; 0 failed
+剩余风险：
 
-cargo test -p plugin
-137 unit + 9 discovery_bootstrap + 3 enabled_discovery + 11 materialize
-160 passed; 0 failed
+- mobile 原生 encrypted Keychain/Keystore 的具体平台实现仍由宿主注入；没有它时 OAuth remote 会明确拒绝，而不会降级到明文。
+- mobile 不支持 stdio/WebSocket/IDE/SDK control；这是 composite 的明确 supported-transports 边界，不是“所有 mobile MCP”声明。
+- modern feature 与 discovery cache 默认关闭；启用前仍应运行固定 vectors、protocol E2E、grant rotation、stale strike、lifecycle purge。
+- `phaser_2d` fixture digest 失败需要独立 fixture owner 处理。
 
-cargo test -p engine-desktop build_wires_mcp_discovery_cache_store
-1 passed; 0 failed
-
-cargo check --tests \
-  -p cli -p engine-desktop -p engine-mobile \
-  -p orchestrator -p test-harness -p tool-meta
-passed
-
-git diff --check
-passed
-```
-
-重点回归包括：
-
-- fixed fingerprint/partition/logical-key vectors；
-- access-token 轮换不改变 grant identity；
-- refresh-token 轮换改变 grant identity；
-- stale background success/failure/panic/CAS reject；
-- strike retained partition，不 strike replacement partition；
-- ordinary failed connect 不 strike；
-- `discoveryCache:false` purge + live dial + no rewrite；
-- resources 三工具与 prompts cached-generation lazy dial；
-- disconnect/remove/plugin unload retirement；
-- desktop production store 可达；
-- mobile 与下游 config literal 类型检查。
-
-仓库仍有既有的 missing-docs、deprecated rand、unused test import 等 warnings；本轮没有扩大到无关清理。
-
-## 15. 交付判定
-
-最终 Sol xhigh 修复验证结论：`No findings`，`Verdict: SHIP`。
-
-- [x] focused/full package tests 保持通过
-- [x] scoped rustfmt 与 `git diff --check` 通过
-- [x] 最终 Sol review 无 P0–P3 未解决 finding
-- [x] 第一轮 review 的 composite/encoded secret、OAuth null canonicalization、文档 best-effort 三项已修复并复审
-- [x] follow-up 使用 Lore commit protocol 提交
-
-若后续修改 identity、grant、logical-key、protocol era 或 plugin unload 语义，必须重新运行 fixed vectors、grant rotation、stale strike 和 lifecycle purge 测试。
+历史 Stage 3 报告保留当日交付记录；其中关于 production store 与 mobile remote 的旧描述只代表 2026-08-30 截面，应以本文件和[详细交付报告](./mcp-plugin-deferred-completion-2.1.251-2026-08-31.md)为准。

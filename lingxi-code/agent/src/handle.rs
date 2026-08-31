@@ -3268,6 +3268,26 @@ mod tests {
         Arc::new(reg)
     }
 
+    fn registry_with_coordinator_routing_tools() -> Arc<ToolRegistry> {
+        let mut reg = ToolRegistry::new();
+        for (name, role) in [
+            ("Read", None),
+            ("MCP", None),
+            ("McpAuth", None),
+            ("ListMcpResourcesTool", None),
+            ("ReadMcpResourceTool", None),
+            ("ReadMcpResourceDirTool", None),
+            ("mcp__comms__send", Some("comms")),
+        ] {
+            reg.register_builtin(Arc::new(StubTool {
+                name,
+                aliases: &[],
+                role,
+            }));
+        }
+        Arc::new(reg)
+    }
+
     /// Like `agent_def` but in Plan permission mode, which makes
     /// [`AgentToolResolver`] retain only the read-only tool set.
     fn agent_def_plan(tools: AgentToolPolicy) -> AgentDefinition {
@@ -3331,6 +3351,144 @@ mod tests {
             allowed,
             vec!["Read".to_string(), "mcp__inline__read".to_string()]
         );
+    }
+
+    #[tokio::test]
+    async fn production_spawner_filters_generic_mcp_routing_for_coordinator_workers() {
+        let runtime = Arc::new(MockRuntimeSpawner::default());
+        let pool = Arc::new(StateMachinePool::new(runtime, 4));
+        let spawner = PoolSubagentSpawner::new(pool)
+            .with_tool_registry(registry_with_coordinator_routing_tools())
+            .with_coordinator_mode(Arc::new(StubCoordinatorMode { enabled: true }));
+        let inline_generic: Arc<dyn Tool> = Arc::new(StubTool {
+            name: "MCP",
+            aliases: &[],
+            role: None,
+        });
+        let inline_auth: Arc<dyn Tool> = Arc::new(StubTool {
+            name: "McpAuth",
+            aliases: &[],
+            role: None,
+        });
+        let inline_ordinary: Arc<dyn Tool> = Arc::new(StubTool {
+            name: "mcp__inline__read",
+            aliases: &[],
+            role: None,
+        });
+
+        let (schemas, allowed) = spawner
+            .resolve_tools(
+                &agent_def(AgentToolPolicy::All {
+                    use_exact_tools: false,
+                }),
+                0,
+                &[
+                    inline_generic.clone(),
+                    inline_auth.clone(),
+                    inline_ordinary.clone(),
+                ],
+            )
+            .await
+            .expect("coordinator worker tool resolution should succeed");
+        let names: Vec<&str> = schemas
+            .iter()
+            .map(|tool| tool["name"].as_str().expect("tool name"))
+            .collect();
+        for denied in ["MCP", "McpAuth", "mcp__comms__send"] {
+            assert!(!names.contains(&denied), "coordinator must hide {denied}");
+            assert!(!allowed.iter().any(|name| name == denied));
+        }
+        for retained in [
+            "Read",
+            "ListMcpResourcesTool",
+            "ReadMcpResourceTool",
+            "ReadMcpResourceDirTool",
+            "mcp__inline__read",
+        ] {
+            assert!(names.contains(&retained), "resource/read helper {retained}");
+            assert!(allowed.iter().any(|name| name == retained));
+        }
+
+        // The same production path without the coordinator seam remains
+        // unchanged: generic routing/auth and per-tool comms entries are all
+        // visible to an ordinary subagent.
+        let ordinary = PoolSubagentSpawner::new(Arc::new(StateMachinePool::new(
+            Arc::new(MockRuntimeSpawner::default()),
+            4,
+        )))
+        .with_tool_registry(registry_with_coordinator_routing_tools());
+        let (schemas, allowed) = ordinary
+            .resolve_tools(
+                &agent_def(AgentToolPolicy::All {
+                    use_exact_tools: false,
+                }),
+                0,
+                &[inline_generic, inline_auth, inline_ordinary],
+            )
+            .await
+            .expect("ordinary worker tool resolution should succeed");
+        let names: Vec<&str> = schemas
+            .iter()
+            .map(|tool| tool["name"].as_str().expect("tool name"))
+            .collect();
+        for retained in ["MCP", "McpAuth", "mcp__comms__send"] {
+            assert!(
+                names.contains(&retained),
+                "ordinary worker keeps {retained}"
+            );
+            assert!(allowed.iter().any(|name| name == retained));
+        }
+    }
+
+    #[tokio::test]
+    async fn production_spawner_exact_policy_filters_generic_mcp_routing_only_for_coordinator() {
+        let runtime = Arc::new(MockRuntimeSpawner::default());
+        let pool = Arc::new(StateMachinePool::new(runtime, 4));
+        let coordinator = PoolSubagentSpawner::new(pool.clone())
+            .with_tool_registry(registry_with_coordinator_routing_tools())
+            .with_coordinator_mode(Arc::new(StubCoordinatorMode { enabled: true }));
+        let ordinary = PoolSubagentSpawner::new(pool)
+            .with_tool_registry(registry_with_coordinator_routing_tools());
+
+        let exact = agent_def(AgentToolPolicy::All {
+            use_exact_tools: true,
+        });
+        let (schemas, allowed) = coordinator
+            .resolve_tools(&exact, 0, &[])
+            .await
+            .expect("coordinator exact resolution should succeed");
+        let names: Vec<&str> = schemas
+            .iter()
+            .map(|tool| tool["name"].as_str().expect("tool name"))
+            .collect();
+        for denied in ["MCP", "McpAuth", "mcp__comms__send"] {
+            assert!(
+                !names.contains(&denied),
+                "coordinator exact must hide {denied}"
+            );
+            assert!(!allowed.iter().any(|name| name == denied));
+        }
+        for retained in [
+            "Read",
+            "ListMcpResourcesTool",
+            "ReadMcpResourceTool",
+            "ReadMcpResourceDirTool",
+        ] {
+            assert!(names.contains(&retained));
+        }
+
+        let (schemas, allowed) = ordinary
+            .resolve_tools(&exact, 0, &[])
+            .await
+            .expect("ordinary exact resolution should succeed");
+        let names: Vec<&str> = schemas
+            .iter()
+            .map(|tool| tool["name"].as_str().expect("tool name"))
+            .collect();
+        for retained in ["MCP", "McpAuth", "mcp__comms__send"] {
+            assert!(names.contains(&retained), "ordinary exact keeps {retained}");
+            assert!(allowed.iter().any(|name| name == retained));
+        }
     }
 
     #[tokio::test]
@@ -5637,6 +5795,124 @@ mod tests {
             agent_source_to_claude_str(AgentSource::Flag),
             "flagSettings"
         );
+        assert_eq!(
+            agent_source_to_claude_str(AgentSource::AdditionalDirectory),
+            "additionalDirectory"
+        );
+    }
+
+    #[test]
+    fn agent_mcp_specs_to_scoped_configs_preserves_every_source_and_identity() {
+        let expected = [
+            (
+                AgentSource::BuiltIn,
+                mcp::McpAgentSource::BuiltIn,
+                "built-in",
+            ),
+            (AgentSource::Plugin, mcp::McpAgentSource::Plugin, "plugin"),
+            (
+                AgentSource::UserDefined,
+                mcp::McpAgentSource::UserSettings,
+                "userSettings",
+            ),
+            (
+                AgentSource::Project,
+                mcp::McpAgentSource::ProjectSettings,
+                "projectSettings",
+            ),
+            (
+                AgentSource::PolicySettings,
+                mcp::McpAgentSource::PolicySettings,
+                "policySettings",
+            ),
+            (
+                AgentSource::Flag,
+                mcp::McpAgentSource::FlagSettings,
+                "flagSettings",
+            ),
+            (
+                AgentSource::AdditionalDirectory,
+                mcp::McpAgentSource::AdditionalDirectory,
+                "additionalDirectory",
+            ),
+        ];
+        let expected_count = expected.len();
+
+        let inline = |source| {
+            let mut def = agent_def(AgentToolPolicy::All {
+                use_exact_tools: false,
+            });
+            def.source = source;
+            let mut record = serde_json::Map::new();
+            record.insert(
+                "shared".into(),
+                serde_json::json!({"command": "same-mcp", "args": ["--stable"]}),
+            );
+            def.mcp_servers = vec![crate::definition::AgentMcpServerSpec::Record(record)];
+            def
+        };
+
+        let mut converted = Vec::new();
+        for (source, expected_source, expected_wire) in expected {
+            assert_eq!(agent_source_to_claude_str(source), expected_wire);
+            let mut cfg = crate::mcp_servers::agent_mcp_specs_to_scoped_configs(
+                &inline(source),
+                false,
+                false,
+                &[],
+            );
+            assert_eq!(cfg.len(), 1, "source {source:?} should build one config");
+            assert_eq!(cfg[0].config.name, "shared");
+            assert_eq!(cfg[0].config.metadata.agent_source, Some(expected_source));
+            assert!(cfg[0].is_newly_created);
+            converted.push(cfg.remove(0));
+        }
+
+        // Same server name and transport payload are intentionally distinct
+        // cache identities once the source provenance is included. This is
+        // the production builder's input to the MCP logical-cache key; source
+        // must not be dropped while converting an agent definition.
+        let first_spec = serde_json::to_value(&converted[0].config.spec).unwrap();
+        assert!(converted.iter().all(|entry| {
+            entry.config.name == "shared"
+                && serde_json::to_value(&entry.config.spec).unwrap() == first_spec
+        }));
+        let source_values: std::collections::HashSet<_> = converted
+            .iter()
+            .map(|entry| entry.config.metadata.agent_source)
+            .collect();
+        assert_eq!(source_values.len(), expected_count);
+
+        // A by-name frontmatter entry reuses the existing config verbatim: it
+        // keeps the name/spec identity and does not invent agent provenance.
+        let existing = mcp::build_server_from_json_entry(
+            "shared",
+            &serde_json::json!({"command": "same-mcp", "args": ["--stable"]}),
+            mcp::ConfigScope::User,
+        )
+        .unwrap();
+        let mut by_name = agent_def(AgentToolPolicy::All {
+            use_exact_tools: false,
+        });
+        by_name.source = AgentSource::Plugin;
+        by_name.mcp_servers = vec![crate::definition::AgentMcpServerSpec::ByName(
+            "shared".into(),
+        )];
+        let reused = crate::mcp_servers::agent_mcp_specs_to_scoped_configs(
+            &by_name,
+            false,
+            false,
+            std::slice::from_ref(&existing),
+        );
+        assert_eq!(reused.len(), 1);
+        assert_eq!(reused[0].config.name, existing.name);
+        assert_eq!(reused[0].config.scope, existing.scope);
+        assert_eq!(reused[0].config.metadata.agent_source, None);
+        assert_eq!(
+            serde_json::to_value(&reused[0].config.spec).unwrap(),
+            serde_json::to_value(&existing.spec).unwrap()
+        );
+        assert!(!reused[0].is_newly_created);
     }
 
     // ── Gap C: nested subagent tool-call surfacing ──

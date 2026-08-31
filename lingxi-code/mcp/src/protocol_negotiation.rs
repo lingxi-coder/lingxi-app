@@ -30,56 +30,30 @@
 //!    `MCP_PROTOCOL_NEGOTIATION=auto` is NOT denylistable — the guard reads
 //!    `h.mode`, and `h` is the gated switch's result alone.
 //!
-//! `ccr-proxy` is one of the oracle's negotiable labels this port has no
-//! transport for at all (Claude-Code-Router proxying is an explicit non-goal
-//! — see the batch brief's out-of-scope list); its branch is kept, unreached,
-//! for byte-exact parity with `Kr`/the gated switch, exactly like the sibling
-//! `negotiation.rs`'s `_ => 401` fallback arm.
+//! `ccr-proxy` is represented by the compatible HTTP spec in this port. The
+//! original config discriminator is supplied separately by
+//! `McpServerMetadata::transport`; arbitrary metadata labels are ignored.
 //!
-//! ⚠️ KNOWN DIVERGENCE — `claudeai-proxy` is NOT in that category. Oracle
-//! `Wr` (@182281901) labels the CONFIG type
-//! (`case"claudeai-proxy":return"claudeai-proxy"`), but
-//! `json_config::build_entry` dials such a server as
-//! [`McpTransportSpec::Http`], which erases the discriminator, so
-//! [`transport_label`] returns `"http"` and [`gated_mode`] consults
-//! [`FLAG_HTTP`] instead of [`FLAG_CLAUDEAI`] — the `claudeai-proxy` arm of
-//! that switch is therefore dead. Latent today on two counts: `telemetry::
-//! flag_bool` defaults `false` with no flag fetcher wired (so both arms
-//! resolve `Legacy`), and the resolved mode is not yet consumed by the
-//! connect flow at all. `Kr` (`env_auto_eligible`) lists BOTH labels, so an
-//! explicit `MCP_PROTOCOL_NEGOTIATION=auto` is unaffected either way. Fixing
-//! it needs the `claudeai-proxy` discriminator carried on
-//! [`McpTransportSpec`] (or on `McpServerConfig`) — a cross-crate change out
-//! of scope for this batch; reported, not fixed.
+//! `claudeai-proxy` and `ccr-proxy` may therefore select their own feature
+//! gates when metadata identifies one of those labels on an HTTP spec. Other
+//! metadata values cannot spoof a transport label.
 //!
 //! Downstream of the resolved mode, the oracle also gates `skills-capable` /
 //! `channel-capable` / `live-connection` off the NEGOTIATED protocol
-//! revision returned by an `auto`-mode server (via a `server/discover`
-//! JSON-RPC probe sub-protocol and a "pin the 2026-07-28 revision" retry
-//! ladder this port does not have) and refuses unsolicited custom
-//! notifications on a "modern-era" revision. **That capability gating, the
-//! `server/discover` probe itself, and the pinned-legacy reconnect-on-
-//! failure retry are DEFERRED** — see the batch report. What this module
-//! gives the caller is the pure, fully-tested MODE decision (`Legacy` vs
-//! `Auto{probe_timeout_ms}`) plus the two oracle warning strings; wiring it
-//! into `connect_locked_inner` changes no observable connect behavior today,
-//! because every reachable label in this port resolves to `Legacy` without
-//! an explicit `MCP_PROTOCOL_NEGOTIATION=auto` AND a wired feature-flag
-//! fetcher (neither exists by default) — i.e. today's unconditional connect
-//! flow already ­*is* the legacy path, byte-for-byte.
+//! revision returned by an `auto`-mode server. The transport performs the
+//! `server/discover` probe and one pinned-revision corrective retry, while the
+//! registry carries this immutable mode and probe budget through cache and
+//! handshake decisions. Legacy remains the fixed default when no negotiation
+//! flag is enabled.
 
 use traits::{McpTransportKind, McpTransportSpec};
 
 /// `tengu_mcp_protocol_negotiation_http` — default off.
 const FLAG_HTTP: &str = "tengu_mcp_protocol_negotiation_http";
-/// `tengu_mcp_protocol_negotiation_claudeai` — default off. Currently
-/// UNREACHED, but not because the transport is absent: a `claudeai-proxy`
-/// server loads and dials as [`McpTransportSpec::Http`], so
-/// [`transport_label`] labels it `"http"` and [`FLAG_HTTP`] gates it. See the
-/// module-level KNOWN DIVERGENCE note.
+/// `tengu_mcp_protocol_negotiation_claudeai` — default off.
 const FLAG_CLAUDEAI: &str = "tengu_mcp_protocol_negotiation_claudeai";
-/// `tengu_mcp_protocol_negotiation_ccr` — default off. Unreached: no
-/// `ccr-proxy` transport exists in this port.
+/// `tengu_mcp_protocol_negotiation_ccr` — default off. The compatible HTTP
+/// spec carries this original config label in metadata.
 const FLAG_CCR: &str = "tengu_mcp_protocol_negotiation_ccr";
 /// `tengu_mcp_negotiation_server_denylist` — an ARRAY flag (list of
 /// hostnames, or `["*"]` to denylist every server), default `[]`.
@@ -96,12 +70,10 @@ const ENV_VAR: &str = "MCP_PROTOCOL_NEGOTIATION";
 /// Resolved negotiation mode for one connect attempt (oracle `{mode:...}`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NegotiationMode {
-    /// Single-shot handshake — the only mode this port's connect flow acts
-    /// on today.
+    /// Single-shot handshake using the fixed legacy revision.
     Legacy,
     /// Era-probing handshake, bounded by `probe_timeout_ms` (oracle
-    /// `{mode:"auto",probe:{timeoutMs}}`). The probe sub-protocol itself is
-    /// DEFERRED — see module docs.
+    /// `{mode:"auto",probe:{timeoutMs}}`).
     Auto {
         /// `min(cap, floor(base_timeout_ms/3))` — see [`probe_timeout_ms`].
         probe_timeout_ms: u64,
@@ -147,10 +119,8 @@ fn parse_env_mode(raw: Option<&str>) -> (Option<EnvMode>, Option<String>) {
 }
 
 /// `Kr` — labels an explicit `MCP_PROTOCOL_NEGOTIATION=auto` can actually
-/// engage for. `claudeai-proxy`/`ccr-proxy` are kept for parity; unreached in
-/// this port (see module docs). Harmless for `claudeai-proxy`: it and the
-/// `"http"` label this port hands it instead are BOTH in `Kr`, so the
-/// env-var path lands on the same mode either way.
+/// engage for. `claudeai-proxy`/`ccr-proxy` are accepted only when the
+/// compatible HTTP spec carries those original config labels in metadata.
 fn env_auto_eligible(label: &str) -> bool {
     matches!(label, "http" | "claudeai-proxy" | "ccr-proxy" | "stdio")
 }
@@ -186,14 +156,9 @@ fn gated_mode(label: &str, base_timeout_ms: u64) -> NegotiationMode {
     }
 }
 
-/// `Wr(transportType, {inProcess, ccrProxy})` restricted to the kinds this
-/// port actually has ([`McpTransportKind`]). `ccrProxy` is always `false`
-/// here — no `ccr-proxy` config concept exists in [`McpTransportSpec`] — so
-/// `Http` always maps to `"http"`, never `"ccr-proxy"`; kept as a documented
-/// simplification, not a silent gap (see module docs).
-///
-/// ⚠️ `Http` ALSO swallows `claudeai-proxy`, which the oracle labels
-/// separately — see the module-level KNOWN DIVERGENCE note.
+/// `Wr(transportType, {inProcess, ccrProxy})` restricted to the concrete
+/// [`McpTransportSpec`] kinds in this port. Original proxy labels are applied
+/// by [`transport_label_for_spec`] only for compatible HTTP specs.
 fn transport_label(kind: McpTransportKind) -> &'static str {
     match kind {
         McpTransportKind::InProcess => "in-process",
@@ -206,6 +171,20 @@ fn transport_label(kind: McpTransportKind) -> &'static str {
         McpTransportKind::SdkControl => "sdk-control",
         McpTransportKind::Stdio => "stdio",
     }
+}
+
+fn transport_label_for_spec(
+    spec: &McpTransportSpec,
+    metadata_transport: Option<&str>,
+) -> &'static str {
+    if matches!(spec, McpTransportSpec::Http { .. }) {
+        match metadata_transport {
+            Some("claudeai-proxy") => return "claudeai-proxy",
+            Some("ccr-proxy") => return "ccr-proxy",
+            _ => {}
+        }
+    }
+    transport_label(spec.transport_kind())
 }
 
 /// The static `url` a spec carries, if any (only the remote transports have
@@ -342,7 +321,20 @@ fn resolve(
 /// in rather than re-read here so this stays a single source of truth.
 #[must_use]
 pub fn resolve_for_spec(spec: &McpTransportSpec, base_timeout_ms: u64) -> NegotiationMode {
-    let label = transport_label(spec.transport_kind());
+    resolve_for_spec_with_transport(spec, None, base_timeout_ms)
+}
+
+/// Resolve one immutable negotiation decision while retaining an original
+/// proxy discriminator carried in MCP config metadata. Only the compatible
+/// HTTP spec may override its enum-derived label; arbitrary metadata cannot
+/// turn stdio, SSE, or an unrelated transport into a proxy.
+#[must_use]
+pub fn resolve_for_spec_with_transport(
+    spec: &McpTransportSpec,
+    metadata_transport: Option<&str>,
+    base_timeout_ms: u64,
+) -> NegotiationMode {
+    let label = transport_label_for_spec(spec, metadata_transport);
     let url = spec_url(spec);
     let env_raw = std::env::var(ENV_VAR).ok();
     let resolution = resolve(label, url, base_timeout_ms, env_raw.as_deref(), None);
@@ -760,5 +752,48 @@ mod tests {
             }
         );
         telemetry::test_clear_flag(FLAG_HTTP);
+    }
+
+    #[test]
+    fn metadata_transport_selects_only_compatible_proxy_gates() {
+        let _guard = flag_test_lock().lock().unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var(ENV_VAR);
+        telemetry::test_clear_flag(FLAG_HTTP);
+        telemetry::test_set_flag(FLAG_CLAUDEAI, true);
+        telemetry::test_set_flag(FLAG_CCR, true);
+        let spec = http_spec("https://mcp.example.com");
+
+        assert_eq!(
+            resolve_for_spec_with_transport(&spec, Some("claudeai-proxy"), 30_000),
+            NegotiationMode::Auto {
+                probe_timeout_ms: 5_000
+            }
+        );
+        assert_eq!(
+            resolve_for_spec_with_transport(&spec, Some("ccr-proxy"), 30_000),
+            NegotiationMode::Auto {
+                probe_timeout_ms: 5_000
+            }
+        );
+
+        // A metadata label cannot spoof an incompatible concrete transport or
+        // invent an unsupported label.
+        let sse = McpTransportSpec::Sse {
+            url: "https://mcp.example.com".into(),
+            headers: traits::McpHeaders::new(),
+            headers_helper: None,
+            oauth: None,
+        };
+        assert_eq!(
+            resolve_for_spec_with_transport(&sse, Some("claudeai-proxy"), 30_000),
+            NegotiationMode::Legacy
+        );
+        assert_eq!(
+            resolve_for_spec_with_transport(&spec, Some("not-a-transport"), 30_000),
+            NegotiationMode::Legacy
+        );
+
+        telemetry::test_clear_flag(FLAG_CLAUDEAI);
+        telemetry::test_clear_flag(FLAG_CCR);
     }
 }

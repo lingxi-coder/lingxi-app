@@ -11,9 +11,10 @@
 //!
 //! * the two new config keys, `discoveryCache` (sse/http only) and `role`
 //!   (see [`crate::json_config::discovery_cache_flag`] /
-//!   [`crate::json_config::role_flag`]); `discoveryCache` is threaded onto
-//!   [`crate::connection::McpServerConfig`] for runtime gating, while `role`
-//!   remains validation-only and is still deferred;
+//!   [`crate::json_config::role_flag`]); both are threaded through
+//!   [`crate::connection::McpServerConfig`]. `discoveryCache` drives runtime
+//!   eligibility, while `role` participates in logical identity and MCP tool
+//!   routing;
 //! * the miss-reason vocabulary and the fresh/stale/miss decision oracle
 //!   `cot` implements (2.1.251 Mach-O @176266197), recovered byte-exact from
 //!   the binary:
@@ -631,8 +632,9 @@ pub fn strike_threshold() -> u32 {
 // ── eligibility gate (oracle `me`/`Ie`) ─────────────────────────────────────
 
 /// Why [`cache_gate`] refused to consult the cache at all — oracle `me`'s
-/// disable reasons, restricted to the subset this port can evaluate today
-/// (see the module-level DEFERRED note for the rest).
+/// disable reasons evaluated by the production cache gate. Provenance-only
+/// reasons are non-purging; only the user-controlled opt-out/helper reasons
+/// purge an existing server family.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CacheGateReason {
     /// `type!=="http"&&type!=="sse"` — only these two transports are ever
@@ -1059,8 +1061,9 @@ impl DiscoveryCachePolicy {
 }
 
 /// Oracle `cot` (2.1.251 Mach-O @176266197) — the pure decision, given
-/// everything a store read + the config already resolved. See module docs
-/// for the full recovered source and the DEFERRED reasons this omits.
+/// everything a store read + the config already resolved. This compatibility
+/// wrapper has no server metadata argument; production callers use
+/// [`decide_with_metadata`] so provenance and capability evidence are applied.
 #[must_use]
 pub fn decide(
     spec: &McpTransportSpec,
@@ -1175,9 +1178,8 @@ pub fn decide_with_metadata(
 const MAX_ENTRY_BYTES: u64 = 8 * 1024 * 1024;
 
 /// A directory of one-file-per-server discovery-cache entries. The root is
-/// caller-supplied (see the module-level DEFERRED note on wiring the real
-/// production directory) so this type stays trivially testable against a
-/// tempdir.
+/// caller-supplied so the same implementation can use the desktop/mobile
+/// app-private production root and remain testable against a tempdir.
 #[derive(Debug, Clone)]
 pub struct DiscoveryCacheStore {
     root: std::path::PathBuf,
@@ -2716,5 +2718,40 @@ mod tests {
         };
         oauth.as_mut().expect("oauth config").client_id = Some("client".into());
         assert_eq!(logical_cache_key(&partial_oauth), "srv-95bfe547b37316e7");
+    }
+
+    #[test]
+    fn logical_cache_key_separates_all_agent_sources_for_same_server_and_spec() {
+        use std::collections::HashSet;
+
+        let base = crate::connection::McpServerConfig {
+            name: "same-agent-server".into(),
+            spec: http_spec("https://a.example", None),
+            scope: crate::connection::ConfigScope::Agent,
+            disabled: false,
+            timeout_ms: None,
+            discovery_cache: None,
+            always_load: false,
+            config_error: None,
+            metadata: crate::connection::McpServerMetadata::default(),
+        };
+        let sources = [
+            crate::connection::McpAgentSource::BuiltIn,
+            crate::connection::McpAgentSource::Plugin,
+            crate::connection::McpAgentSource::UserSettings,
+            crate::connection::McpAgentSource::ProjectSettings,
+            crate::connection::McpAgentSource::PolicySettings,
+            crate::connection::McpAgentSource::FlagSettings,
+            crate::connection::McpAgentSource::AdditionalDirectory,
+        ];
+        let keys: HashSet<_> = sources
+            .into_iter()
+            .map(|source| {
+                let mut config = base.clone();
+                config.metadata.agent_source = Some(source);
+                logical_cache_key(&config)
+            })
+            .collect();
+        assert_eq!(keys.len(), sources.len());
     }
 }

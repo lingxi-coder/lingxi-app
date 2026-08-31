@@ -143,6 +143,7 @@ fn options_with_deadline(deadline_ms: u64) -> McpConnectOptions {
     McpConnectOptions {
         expected_era: Some(McpProtocolEra::Modern),
         deadline_ms,
+        probe_timeout_ms: Some(3_000),
     }
 }
 

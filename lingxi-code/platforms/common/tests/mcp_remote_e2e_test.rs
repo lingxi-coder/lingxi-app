@@ -10,9 +10,10 @@ use futures::{stream, Stream, StreamExt};
 use platform_common::RemoteMcpTransport;
 use serde_json::{json, Value};
 use std::convert::Infallible;
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::broadcast;
-use traits::{McpTransport, McpTransportSpec};
+use traits::{McpConnectOptions, McpProtocolEra, McpTransport, McpTransportSpec};
 
 fn spec(kind: &str, url: String) -> McpTransportSpec {
     let headers = traits::McpHeaders::new();
@@ -117,6 +118,51 @@ async fn spawn_sse() -> String {
     format!("http://{addr}/mcp")
 }
 
+#[derive(Clone)]
+struct NegotiationState {
+    requests: Arc<std::sync::Mutex<Vec<Value>>>,
+}
+
+async fn negotiation_http_handler(
+    State(state): State<NegotiationState>,
+    Json(body): Json<Value>,
+) -> Json<Value> {
+    state.requests.lock().unwrap().push(body.clone());
+    let id = body.get("id").cloned().unwrap_or(Value::Null);
+    let method = body.get("method").and_then(Value::as_str).unwrap_or("");
+    if method == "server/discover" {
+        // Deliberately use a wrong id. The disposable probe must classify this
+        // as compatibility and close before the legacy redial.
+        return Json(json!({
+            "jsonrpc": "2.0",
+            "id": 999,
+            "result": {"protocolVersion": "2026-07-28"}
+        }));
+    }
+    Json(json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "result": {
+            "protocolVersion": "2025-11-25",
+            "capabilities": {"tools": {}},
+            "serverInfo": {"name": "wrong-id", "version": "1"}
+        }
+    }))
+}
+
+async fn spawn_negotiation_http() -> (String, NegotiationState) {
+    let state = NegotiationState {
+        requests: Arc::new(std::sync::Mutex::new(Vec::new())),
+    };
+    let app = Router::new()
+        .route("/mcp", post(negotiation_http_handler))
+        .with_state(state.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    (format!("http://{addr}/mcp"), state)
+}
+
 async fn exercise(kind: &str, url: String) {
     let transport = RemoteMcpTransport::new();
     let conn = tokio::time::timeout(Duration::from_secs(5), transport.connect(&spec(kind, url)))
@@ -162,4 +208,41 @@ async fn shared_remote_http_roundtrip() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn shared_remote_sse_roundtrip() {
     exercise("sse", spawn_sse().await).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn remote_disposable_probe_classifies_wrong_id_and_redials_legacy() {
+    let transport = RemoteMcpTransport::new();
+    let (url, state) = spawn_negotiation_http().await;
+    let result = transport
+        .connect_and_initialize(
+            &spec("http", url),
+            McpConnectOptions {
+                expected_era: Some(McpProtocolEra::Modern),
+                deadline_ms: 5_000,
+                probe_timeout_ms: Some(50_000),
+            },
+        )
+        .await
+        .expect("wrong-id probe should fall back to legacy");
+    assert_eq!(result.negotiated.era, McpProtocolEra::Legacy);
+    let requests = state.requests.lock().unwrap().clone();
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|request| request["method"] == "server/discover")
+            .count(),
+        1
+    );
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|request| request["method"] == "initialize")
+            .count(),
+        1
+    );
+    transport
+        .disconnect(result.connection.connection_id)
+        .await
+        .unwrap();
 }

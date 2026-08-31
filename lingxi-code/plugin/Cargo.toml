@@ -50,10 +50,17 @@ regex = "1"
 tokio = { version = "1", features = ["sync", "fs", "macros", "rt", "rt-multi-thread"] }
 tempfile = "3"
 platform-posix = { path = "../platforms/posix" }
+tool-api = { path = "../tool-api", features = ["test-support"] }
+telemetry = { path = "../telemetry" }
+# Exercise the production MCP tool rebuild path from plugin materialization
+# tests (load → scope → connect/cache → registered-tool refresh).
+tool-mcp = { path = "../tools/mcp" }
 # Build local git fixtures for the Stage-1 git-install-arm test (file:// clone).
 git2 = { path = "../../third_party/git2-rs/git2", default-features = false, features = ["vendored-libgit2"] }
 # Build .mcpb zip fixtures for the Stage-3 tests.
 zip = { version = "2", default-features = false, features = ["deflate"] }
+
+futures-util.workspace = true
 
 [lints]
 workspace = true

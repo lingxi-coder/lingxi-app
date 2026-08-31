@@ -29,6 +29,13 @@ const MCP_CLIENT_NAME: &str = "lingxi";
 const MCP_CLIENT_TITLE: &str = "LingXi";
 const MCP_WEBSITE_URL: &str = "https://claude.com/claude-code";
 const MCP_SKILLS_EXTENSION_KEY: &str = "io.modelcontextprotocol/skills";
+const MAX_PROBE_TIMEOUT_MS: u64 = 5_000;
+
+fn bounded_probe_timeout_ms(requested: Option<u64>) -> u64 {
+    requested
+        .unwrap_or(MAX_PROBE_TIMEOUT_MS)
+        .min(MAX_PROBE_TIMEOUT_MS)
+}
 
 /// Shared remote HTTP/SSE MCP transport.
 #[derive(Default)]
@@ -183,7 +190,7 @@ impl RemoteMcpTransport {
                 ));
             };
             match connection
-                .call_with_timeout::<Value, Value>("server/discover", probe.clone(), timeout)
+                .call_with_timeout_probe::<Value, Value>("server/discover", probe.clone(), timeout)
                 .await
             {
                 Ok(reply) => {
@@ -231,6 +238,9 @@ impl RemoteMcpTransport {
                     )));
                 }
                 Err(ConnectionError::Router(RouterError::Deserialize(_))) => return Ok(None),
+                Err(ConnectionError::Router(RouterError::WrongResponseId { .. })) => {
+                    return Ok(None)
+                }
                 Err(error) => return Err(map_call_err(&error)),
             }
         }
@@ -305,7 +315,7 @@ impl McpTransport for RemoteMcpTransport {
         let deadline = tokio::time::Instant::now()
             .checked_add(Duration::from_millis(options.deadline_ms))
             .ok_or_else(|| McpError::Connection("MCP connection deadline overflow".into()))?;
-        let requested = options.expected_era.unwrap_or(McpProtocolEra::Modern);
+        let requested = options.expected_era.unwrap_or(McpProtocolEra::Legacy);
         let mut negotiated = McpNegotiatedProtocol {
             era: McpProtocolEra::Legacy,
             version: MCP_PROTOCOL_VERSION.to_string(),
@@ -317,14 +327,13 @@ impl McpTransport for RemoteMcpTransport {
                 id: probe.connection_id,
                 armed: true,
             };
+            let probe_cap =
+                Duration::from_millis(bounded_probe_timeout_ms(options.probe_timeout_ms));
+            let probe_deadline = tokio::time::Instant::now()
+                .checked_add(probe_cap)
+                .unwrap_or(deadline);
             match self
-                .probe_modern(
-                    &probe,
-                    std::cmp::min(
-                        deadline,
-                        tokio::time::Instant::now() + Duration::from_secs(5),
-                    ),
-                )
+                .probe_modern(&probe, std::cmp::min(deadline, probe_deadline))
                 .await
             {
                 Ok(Some(version)) => {
@@ -668,6 +677,18 @@ pub fn directory_read_capability(capabilities: Option<&Value>) -> bool {
         .and_then(|value| value.get("directoryRead"))
         .and_then(Value::as_bool)
         == Some(true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::bounded_probe_timeout_ms;
+
+    #[test]
+    fn caller_probe_timeout_is_clamped_to_shared_remote_cap() {
+        assert_eq!(bounded_probe_timeout_ms(None), 5_000);
+        assert_eq!(bounded_probe_timeout_ms(Some(1_000)), 1_000);
+        assert_eq!(bounded_probe_timeout_ms(Some(50_000)), 5_000);
+    }
 }
 
 /// Decode the wire capability presence map into the shared DTO.

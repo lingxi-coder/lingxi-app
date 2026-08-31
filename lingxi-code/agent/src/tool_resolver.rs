@@ -51,6 +51,15 @@ use tool_api::Tool;
 /// spawn from the agent definition plus the surrounding tool sets.
 pub struct AgentToolResolver;
 
+/// Coordinator workers must not be able to route through the generic MCP
+/// dispatcher or inspect MCP auth state, even when those base-list tools do
+/// not carry the per-server `role:"comms"` marker themselves. Keep this
+/// name-based gate local to `agent`: the crate deliberately has no dependency
+/// on `tools/mcp`, and resource helper tools are intentionally not part of it.
+fn coordinator_worker_tool_allowed(tool: &dyn Tool) -> bool {
+    tool.mcp_role() != Some("comms") && !matches!(tool.name(), "MCP" | "McpAuth")
+}
+
 /// Errors while converting an agent definition's explicit tool policy into the
 /// child-visible schema/allow-list.
 #[derive(Debug, Clone, Error, PartialEq, Eq)]
@@ -129,7 +138,8 @@ impl AgentToolResolver {
     ///   normally pass (claude returns `true` for `mcp__` names before any
     ///   disallowed check, `agentToolUtils.ts:82-85`), so they are appended
     ///   AFTER the always-disallowed/per-definition drops. Coordinator workers
-    ///   additionally omit entries carrying `role:"comms"`.
+    ///   additionally omit entries carrying `role:"comms"` and the generic
+    ///   `MCP`/`McpAuth` routing tools.
     /// * `coordinator_mode` — when true, coordinator workers do not receive
     ///   coordinator-only (`role:"comms"`) MCP tools from either the shared
     ///   registry pool or the per-agent inline MCP pool.
@@ -152,8 +162,8 @@ impl AgentToolResolver {
     /// present. We therefore return `parent_tools` verbatim with NO
     /// always-disallowed strip, NO per-definition subtraction, and NO Plan-mode
     /// narrowing, except that coordinator workers still omit shared `comms`
-    /// MCP tools so the lead-only routing invariant holds. (Per-agent MCP tools
-    /// are not appended on this path either:
+    /// MCP tools and generic MCP routing/auth tools so the lead-only routing
+    /// invariant holds. (Per-agent MCP tools are not appended on this path either:
     /// claude's fork passes `availableTools = toolUseContext.options.tools`
     /// untouched.)
     #[must_use]
@@ -176,7 +186,7 @@ impl AgentToolResolver {
             return if coordinator_mode {
                 parent_tools
                     .iter()
-                    .filter(|tool| tool.mcp_role() != Some("comms"))
+                    .filter(|tool| coordinator_worker_tool_allowed(tool.as_ref()))
                     .cloned()
                     .collect()
             } else {
@@ -202,7 +212,7 @@ impl AgentToolResolver {
         // tools which are appended below. Apply the coordinator worker gate to
         // the projected parent pool before the common deny/depth passes.
         if coordinator_mode {
-            tools.retain(|tool| tool.mcp_role() != Some("comms"));
+            tools.retain(|tool| coordinator_worker_tool_allowed(tool.as_ref()));
         }
 
         // (1b) Auto-memory tool injection (claude `isAutoMemoryEnabled` →
@@ -277,11 +287,14 @@ impl AgentToolResolver {
 
         // (4) Per-agent MCP tools always pass (claude returns true for
         // `mcp__*` before any disallowed check) — append after the drops.
+        // Coordinator workers still apply the same comms/generic dispatcher
+        // gate to this pool, preventing an inline MCP definition from
+        // reintroducing a bypass after the shared pool was filtered.
         if coordinator_mode {
             tools.extend(
                 agent_mcp_tools
                     .iter()
-                    .filter(|tool| tool.mcp_role() != Some("comms"))
+                    .filter(|tool| coordinator_worker_tool_allowed(tool.as_ref()))
                     .cloned(),
             );
         } else {
@@ -805,14 +818,35 @@ mod tests {
 
     #[test]
     fn coordinator_worker_filters_only_comms_mcp_tools() {
-        let parent = pool(&["Read"]);
+        let parent = vec![
+            tool("Read"),
+            tool("MCP"),
+            tool("McpAuth"),
+            tool("ListMcpResourcesTool"),
+            tool("ReadMcpResourceTool"),
+            tool("ReadMcpResourceDirTool"),
+            comms_tool("mcp__comms__send"),
+        ];
         let mcp = vec![tool("mcp__ordinary__run"), comms_tool("mcp__comms__send")];
         let def = agent_def(all_policy());
         let worker = AgentToolResolver::resolve(&def, &parent, &mcp, 0, true);
         assert!(names(&worker).contains(&"mcp__ordinary__run".to_string()));
         assert!(!names(&worker).contains(&"mcp__comms__send".to_string()));
+        for denied in ["MCP", "McpAuth"] {
+            assert!(!names(&worker).contains(&denied.to_string()));
+        }
+        for retained in [
+            "Read",
+            "ListMcpResourcesTool",
+            "ReadMcpResourceTool",
+            "ReadMcpResourceDirTool",
+        ] {
+            assert!(names(&worker).contains(&retained.to_string()));
+        }
         let ordinary = AgentToolResolver::resolve(&def, &parent, &mcp, 0, false);
         assert!(names(&ordinary).contains(&"mcp__comms__send".to_string()));
+        assert!(names(&ordinary).contains(&"MCP".to_string()));
+        assert!(names(&ordinary).contains(&"McpAuth".to_string()));
     }
 
     #[test]
@@ -970,6 +1004,36 @@ mod tests {
         let resolved = AgentToolResolver::resolve(&def, &parent, &mcp, 0, false);
         assert_eq!(names(&resolved), names(&parent));
         assert!(!names(&resolved).contains(&"mcp__x__y".to_string()));
+    }
+
+    #[test]
+    fn use_exact_tools_coordinator_gate_blocks_generic_dispatcher_and_auth() {
+        let parent = vec![
+            tool("Read"),
+            tool("MCP"),
+            tool("McpAuth"),
+            tool("ListMcpResourcesTool"),
+            tool("ReadMcpResourceTool"),
+            tool("ReadMcpResourceDirTool"),
+            comms_tool("mcp__comms__send"),
+        ];
+        let def = agent_def(exact_policy());
+        let worker = AgentToolResolver::resolve(&def, &parent, &[], 0, true);
+        let worker_names = names(&worker);
+        for denied in ["MCP", "McpAuth", "mcp__comms__send"] {
+            assert!(!worker_names.contains(&denied.to_string()));
+        }
+        for retained in [
+            "Read",
+            "ListMcpResourcesTool",
+            "ReadMcpResourceTool",
+            "ReadMcpResourceDirTool",
+        ] {
+            assert!(worker_names.contains(&retained.to_string()));
+        }
+
+        let ordinary = AgentToolResolver::resolve(&def, &parent, &[], 0, false);
+        assert_eq!(names(&ordinary), names(&parent));
     }
 
     #[test]

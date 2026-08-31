@@ -160,6 +160,8 @@ struct LazyUpgradeSlot {
     /// from the partition's expected era: auto negotiation can select the
     /// modern partition and still fall back to a legacy live handshake.
     refresh_entry_era: Option<String>,
+    /// The immutable resolver result captured when this lazy dial started.
+    negotiation_mode: crate::protocol_negotiation::NegotiationMode,
     mode: LazyUpgradeMode,
     terminal: StdMutex<Option<LazyUpgradeTerminal>>,
     notify: Notify,
@@ -172,6 +174,7 @@ impl LazyUpgradeSlot {
         expected_config: McpServerConfig,
         refresh_partition: Option<DiscoveryCachePartition>,
         refresh_entry_era: Option<String>,
+        negotiation_mode: crate::protocol_negotiation::NegotiationMode,
         mode: LazyUpgradeMode,
     ) -> Self {
         Self {
@@ -180,6 +183,7 @@ impl LazyUpgradeSlot {
             expected_config,
             refresh_partition,
             refresh_entry_era,
+            negotiation_mode,
             mode,
             terminal: StdMutex::new(None),
             notify: Notify::new(),
@@ -239,6 +243,8 @@ impl LazyUpgradeSlot {
 #[derive(Clone)]
 struct LiveDiscovery {
     connection_id: McpConnectionId,
+    /// Immutable resolver result used for this entire connect attempt.
+    negotiation_mode: crate::protocol_negotiation::NegotiationMode,
     negotiated: traits::McpNegotiatedProtocol,
     capabilities: ServerCapabilitiesDto,
     tools: Vec<traits::McpToolDto>,
@@ -272,6 +278,10 @@ struct DiscoveryCachePartition {
     logical_key: String,
     partition_key: String,
     expected_era: &'static str,
+    /// The resolver decision that produced this partition. Keeping the
+    /// budget here prevents a later re-resolution from changing the probe
+    /// deadline or expected era during write-through/revalidation.
+    negotiation_mode: crate::protocol_negotiation::NegotiationMode,
 }
 
 struct DiscoveryCacheConsult {
@@ -1173,8 +1183,30 @@ impl McpRegistry {
         let lifecycle = self.lifecycle_lock(key);
         let outcome = {
             let _guard = lifecycle.lock().await;
-            self.prepare_lazy_upgrade_slot_locked(key, LazyUpgradeMode::Foreground, None, None)
-                .await?
+            let negotiation_mode = if let Some(slot) = self.lazy_upgrade_slot(key).await {
+                slot.negotiation_mode
+            } else {
+                let conns = self.connections.read().await;
+                match conns.get(key) {
+                    Some(McpConnectionState::Cached { config, .. })
+                    | Some(McpConnectionState::Connecting { config, .. }) => {
+                        crate::protocol_negotiation::resolve_for_spec_with_transport(
+                            &config.spec,
+                            config.metadata.transport.as_deref(),
+                            mcp_connection_timeout().as_millis() as u64,
+                        )
+                    }
+                    _ => crate::protocol_negotiation::NegotiationMode::Legacy,
+                }
+            };
+            self.prepare_lazy_upgrade_slot_locked(
+                key,
+                LazyUpgradeMode::Foreground,
+                None,
+                None,
+                negotiation_mode,
+            )
+            .await?
         };
         match outcome {
             LazyUpgradePreparation::Connected(connection_id) => Ok(connection_id),
@@ -1493,7 +1525,16 @@ impl McpRegistry {
         let invalidated_slot = self.invalidate_lazy_upgrade_slot(&key).await;
         Self::finish_invalidated_lazy_upgrade_slot(invalidated_slot.as_ref());
 
-        if let Some(consult) = self.discovery_cache_decision_for(&config).await {
+        let connect_timeout = mcp_connection_timeout();
+        let negotiation_mode = crate::protocol_negotiation::resolve_for_spec_with_transport(
+            &config.spec,
+            config.metadata.transport.as_deref(),
+            connect_timeout.as_millis() as u64,
+        );
+        if let Some(consult) = self
+            .discovery_cache_decision_for(&config, negotiation_mode)
+            .await
+        {
             let DiscoveryCacheConsult {
                 decision,
                 partition,
@@ -1518,6 +1559,7 @@ impl McpRegistry {
                             LazyUpgradeMode::Background,
                             partition,
                             Some(entry_era),
+                            negotiation_mode,
                         )
                         .await?
                     {
@@ -1552,7 +1594,9 @@ impl McpRegistry {
                 started_at: SystemTime::now(),
             },
         );
-        let discovery = self.discover_live_connection(&config).await?;
+        let discovery = self
+            .discover_live_connection(&config, negotiation_mode)
+            .await?;
         Ok(self
             .install_live_discovery(key, config, discovery, None)
             .await)
@@ -1617,6 +1661,7 @@ impl McpRegistry {
         mode: LazyUpgradeMode,
         refresh_partition: Option<DiscoveryCachePartition>,
         refresh_entry_era: Option<String>,
+        negotiation_mode: crate::protocol_negotiation::NegotiationMode,
     ) -> Result<LazyUpgradePreparation, McpError> {
         enum CachedDialState {
             Connected(McpConnectionId),
@@ -1677,6 +1722,7 @@ impl McpRegistry {
                     config.clone(),
                     refresh_partition,
                     refresh_entry_era,
+                    negotiation_mode,
                     mode,
                 ));
                 if mode == LazyUpgradeMode::Foreground {
@@ -1788,6 +1834,7 @@ impl McpRegistry {
     async fn discover_live_connection(
         &self,
         config: &McpServerConfig,
+        negotiation_mode: crate::protocol_negotiation::NegotiationMode,
     ) -> Result<LiveDiscovery, McpError> {
         let connect_timeout = mcp_connection_timeout();
         let has_user_auth_header = crate::negotiation::spec_has_authorization(&config.spec);
@@ -1813,24 +1860,14 @@ impl McpRegistry {
             self.resolve_oauth_spec(&resolved_config).await?
         };
 
-        let negotiation_mode = crate::protocol_negotiation::resolve_for_spec(
-            &connect_spec,
-            connect_timeout.as_millis() as u64,
-        );
         tracing::debug!(
             server = %config.name,
             mode = ?negotiation_mode,
             "MCP protocol-era negotiation resolved"
         );
 
-        let expected_era = match negotiation_mode {
-            crate::protocol_negotiation::NegotiationMode::Auto { .. } => {
-                traits::McpProtocolEra::Modern
-            }
-            crate::protocol_negotiation::NegotiationMode::Legacy => traits::McpProtocolEra::Legacy,
-        };
         let attempt = |spec: McpTransportSpec| {
-            self.connect_attempt(spec, connect_timeout, &config.name, expected_era)
+            self.connect_attempt(spec, connect_timeout, &config.name, negotiation_mode)
         };
 
         let (conn, caps, negotiated) = match attempt(connect_spec.clone()).await {
@@ -1909,7 +1946,9 @@ impl McpRegistry {
             )
             .is_none()
         {
-            self.discovery_cache_partition_for(config).await.ok()
+            self.discovery_cache_partition_for(config, negotiation_mode)
+                .await
+                .ok()
         } else {
             None
         };
@@ -2078,6 +2117,7 @@ impl McpRegistry {
             Ok(LiveDiscovery {
                 connection_id,
                 negotiated,
+                negotiation_mode,
                 capabilities: caps,
                 tools,
                 resources,
@@ -2116,7 +2156,10 @@ impl McpRegistry {
             return;
         }
 
-        let discovery = match self.discover_live_connection(&slot.expected_config).await {
+        let discovery = match self
+            .discover_live_connection(&slot.expected_config, slot.negotiation_mode)
+            .await
+        {
             Ok(discovery) => discovery,
             Err(error) => {
                 let terminal = {
@@ -2195,6 +2238,7 @@ impl McpRegistry {
             &resources,
             &resource_templates,
             &prompts,
+            discovery.negotiation_mode,
             Some(&discovery.negotiated),
         )
         .await;
@@ -2252,11 +2296,20 @@ impl McpRegistry {
                     ),
                 };
                 if expected_current {
+                    let expected_era = match slot.negotiation_mode {
+                        crate::protocol_negotiation::NegotiationMode::Auto { .. } => "modern",
+                        crate::protocol_negotiation::NegotiationMode::Legacy => "legacy",
+                    };
+                    let expected_changed =
+                        slot.refresh_partition.as_ref().is_some_and(|partition| {
+                            partition.negotiation_mode != slot.negotiation_mode
+                                || partition.expected_era != expected_era
+                        }) || discovery.negotiation_mode != slot.negotiation_mode;
                     let era_changed = slot.mode == LazyUpgradeMode::Background
                         && slot.refresh_partition.is_some()
                         && slot.refresh_entry_era.as_deref().unwrap_or("legacy")
                             != negotiated_era_label(discovery.negotiated.era);
-                    if era_changed {
+                    if expected_changed || era_changed {
                         if let (Some(store), Some(partition)) =
                             (&self.discovery_cache_store, slot.refresh_partition.as_ref())
                         {
@@ -2296,6 +2349,7 @@ impl McpRegistry {
             &resources,
             &resource_templates,
             &prompts,
+            slot.negotiation_mode,
             Some(&discovery.negotiated),
         )
         .await;
@@ -2525,6 +2579,7 @@ impl McpRegistry {
     async fn discovery_cache_partition_for(
         &self,
         config: &McpServerConfig,
+        negotiation_mode: crate::protocol_negotiation::NegotiationMode,
     ) -> Result<DiscoveryCachePartition, crate::discovery_cache::MissReason> {
         // Agent catalogs are safe to cache only when their stable source is
         // present.  A missing source fails closed rather than sharing an
@@ -2554,10 +2609,7 @@ impl McpRegistry {
             _ => "grant:none".to_string(),
         };
         let fingerprint = crate::discovery_cache::fingerprint(&grant_token);
-        let expected_era = match crate::protocol_negotiation::resolve_for_spec(
-            &config.spec,
-            mcp_connection_timeout().as_millis() as u64,
-        ) {
+        let expected_era = match negotiation_mode {
             crate::protocol_negotiation::NegotiationMode::Auto { .. } => "modern",
             crate::protocol_negotiation::NegotiationMode::Legacy => "legacy",
         };
@@ -2567,6 +2619,7 @@ impl McpRegistry {
             logical_key,
             partition_key,
             expected_era,
+            negotiation_mode,
         })
     }
 
@@ -2768,6 +2821,7 @@ impl McpRegistry {
     async fn discovery_cache_decision_for(
         &self,
         config: &McpServerConfig,
+        negotiation_mode: crate::protocol_negotiation::NegotiationMode,
     ) -> Option<DiscoveryCacheConsult> {
         let store = self.discovery_cache_store.as_ref()?;
         let feature_enabled = crate::discovery_cache::feature_enabled();
@@ -2789,7 +2843,10 @@ impl McpRegistry {
                 }
             }
             None => {
-                let partition = match self.discovery_cache_partition_for(config).await {
+                let partition = match self
+                    .discovery_cache_partition_for(config, negotiation_mode)
+                    .await
+                {
                     Ok(partition) => partition,
                     Err(reason) => {
                         return Some(DiscoveryCacheConsult {
@@ -2916,6 +2973,7 @@ impl McpRegistry {
         resources: &[traits::McpResourceDto],
         resource_templates: &[traits::McpResourceTemplateDto],
         prompts: &[traits::McpPromptDto],
+        negotiation_mode: crate::protocol_negotiation::NegotiationMode,
         negotiated: Option<&traits::McpNegotiatedProtocol>,
     ) {
         let Some(store) = &self.discovery_cache_store else {
@@ -2934,7 +2992,10 @@ impl McpRegistry {
                 let Some(captured_partition) = captured_partition else {
                     return;
                 };
-                let Ok(partition) = self.discovery_cache_partition_for(config).await else {
+                let Ok(partition) = self
+                    .discovery_cache_partition_for(config, negotiation_mode)
+                    .await
+                else {
                     return;
                 };
                 if &partition != captured_partition {
@@ -3025,7 +3086,7 @@ impl McpRegistry {
         spec: McpTransportSpec,
         timeout: Duration,
         server_name: &str,
-        expected_era: traits::McpProtocolEra,
+        negotiation_mode: crate::protocol_negotiation::NegotiationMode,
     ) -> Result<
         (
             McpRawConnection,
@@ -3041,6 +3102,18 @@ impl McpRegistry {
                 timeout.as_millis()
             ))
         };
+        let expected_era = match negotiation_mode {
+            crate::protocol_negotiation::NegotiationMode::Auto { .. } => {
+                traits::McpProtocolEra::Modern
+            }
+            crate::protocol_negotiation::NegotiationMode::Legacy => traits::McpProtocolEra::Legacy,
+        };
+        let probe_timeout_ms = match negotiation_mode {
+            crate::protocol_negotiation::NegotiationMode::Auto { probe_timeout_ms } => {
+                Some(probe_timeout_ms)
+            }
+            crate::protocol_negotiation::NegotiationMode::Legacy => None,
+        };
         match std::panic::AssertUnwindSafe(async {
             tokio::time::timeout_at(
                 deadline,
@@ -3049,6 +3122,7 @@ impl McpRegistry {
                     traits::McpConnectOptions {
                         expected_era: Some(expected_era),
                         deadline_ms: timeout.as_millis() as u64,
+                        probe_timeout_ms,
                     },
                 ),
             )
@@ -8055,7 +8129,7 @@ mod tests {
         let mock = Arc::new(BridgeMock::new(&[]));
         let registry = McpRegistry::with_raw_conn(
             mock.clone() as Arc<dyn McpTransport>,
-            mock as Arc<dyn RawConnectionProvider>,
+            mock.clone() as Arc<dyn RawConnectionProvider>,
         )
         .with_oauth(OAuthDeps {
             http: GatedXaaHttp::new() as Arc<dyn traits::HttpTransport>,
@@ -8246,6 +8320,7 @@ mod tests {
                 &[],
                 &[],
                 &[],
+                crate::protocol_negotiation::NegotiationMode::Legacy,
                 None,
             )
             .await;
@@ -8271,6 +8346,9 @@ mod tests {
         let env_placeholder = http_cfg("env-placeholder", "https://${MCP_HOST}/v1");
         let mut ambient_credential = http_cfg("ambient-credential", "https://mcp.example.com/v1");
         ambient_credential.metadata.ambient_credential = true;
+        let mut agent_without_source =
+            http_cfg("agent-without-source", "https://mcp.example.com/v1");
+        agent_without_source.scope = ConfigScope::Agent;
         let scenarios = [
             (cli_owned, crate::discovery_cache::MissReason::CliOwned),
             (
@@ -8280,6 +8358,10 @@ mod tests {
             (
                 ambient_credential,
                 crate::discovery_cache::MissReason::AmbientCredential,
+            ),
+            (
+                agent_without_source,
+                crate::discovery_cache::MissReason::NoFingerprint,
             ),
         ];
 
@@ -8309,7 +8391,10 @@ mod tests {
             );
 
             let consult = registry
-                .discovery_cache_decision_for(&config)
+                .discovery_cache_decision_for(
+                    &config,
+                    crate::protocol_negotiation::NegotiationMode::Legacy,
+                )
                 .await
                 .expect("store is configured");
             assert_eq!(
@@ -8442,6 +8527,7 @@ mod tests {
                 &crate::discovery_cache::fingerprint("grant:old"),
             ),
             expected_era: "legacy",
+            negotiation_mode: crate::protocol_negotiation::NegotiationMode::Legacy,
         };
         let new_partition = DiscoveryCachePartition {
             logical_key: logical_key.clone(),
@@ -8450,6 +8536,7 @@ mod tests {
                 &crate::discovery_cache::fingerprint("grant:new"),
             ),
             expected_era: "legacy",
+            negotiation_mode: crate::protocol_negotiation::NegotiationMode::Legacy,
         };
         let entry = crate::discovery_cache::DiscoveryCacheEntry::new(
             logical_key.clone(),
@@ -8504,6 +8591,7 @@ mod tests {
                 &crate::discovery_cache::fingerprint("grant:none"),
             ),
             expected_era: "legacy",
+            negotiation_mode: crate::protocol_negotiation::NegotiationMode::Legacy,
         };
         let entry = crate::discovery_cache::DiscoveryCacheEntry::new(
             logical_key.clone(),
@@ -8540,6 +8628,7 @@ mod tests {
             cfg.clone(),
             Some(partition.clone()),
             Some("legacy".into()),
+            crate::protocol_negotiation::NegotiationMode::Legacy,
             LazyUpgradeMode::Background,
         ));
         registry
@@ -8550,6 +8639,7 @@ mod tests {
 
         let discovery = LiveDiscovery {
             connection_id: McpConnectionId::new(),
+            negotiation_mode: crate::protocol_negotiation::NegotiationMode::Legacy,
             negotiated: traits::McpNegotiatedProtocol {
                 era: traits::McpProtocolEra::Modern,
                 version: "2026-07-28".into(),
@@ -8584,6 +8674,97 @@ mod tests {
             crate::discovery_cache::EntryLookup::Found(entry)
                 if entry.consecutive_refresh_failures == 0
         ));
+    }
+
+    #[tokio::test]
+    async fn stale_refresh_expected_mode_change_purges_without_publish_strike_or_write() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = crate::discovery_cache::DiscoveryCacheStore::new(dir.path());
+        let cfg = http_cfg("srv", "https://mcp.example.com/v1");
+        let logical_key = crate::discovery_cache::logical_cache_key(&cfg);
+        let partition = DiscoveryCachePartition {
+            logical_key: logical_key.clone(),
+            partition_key: crate::discovery_cache::partition_key(
+                &logical_key,
+                &crate::discovery_cache::fingerprint("grant:none"),
+            ),
+            expected_era: "legacy",
+            negotiation_mode: crate::protocol_negotiation::NegotiationMode::Legacy,
+        };
+        let entry = crate::discovery_cache::DiscoveryCacheEntry::new(
+            logical_key.clone(),
+            1,
+            ServerCapabilitiesDto::default(),
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+        );
+        store
+            .store_partitioned(&entry, &partition.partition_key)
+            .expect("seed stale partition");
+
+        let mock = Arc::new(BridgeMock::new(&[]));
+        let registry = McpRegistry::with_raw_conn(
+            mock.clone() as Arc<dyn McpTransport>,
+            mock.clone() as Arc<dyn RawConnectionProvider>,
+        )
+        .with_discovery_cache_store(crate::discovery_cache::DiscoveryCacheStore::new(dir.path()));
+        let cached_connection_id = registry
+            .serve_discovery_cache_hit(&cfg, "srv", entry, 1_000_000, false)
+            .await;
+        let slot = Arc::new(LazyUpgradeSlot::new(
+            "srv".into(),
+            cached_connection_id,
+            cfg.clone(),
+            Some(partition.clone()),
+            Some("legacy".into()),
+            crate::protocol_negotiation::NegotiationMode::Legacy,
+            LazyUpgradeMode::Background,
+        ));
+        registry
+            .lazy_upgrade_slots
+            .write()
+            .await
+            .insert("srv".into(), slot.clone());
+
+        let discovery = LiveDiscovery {
+            connection_id: McpConnectionId::new(),
+            // The live handshake actually stayed legacy, but its immutable
+            // resolver mode changed. That is enough to reject the stale hit.
+            negotiation_mode: crate::protocol_negotiation::NegotiationMode::Auto {
+                probe_timeout_ms: 1_000,
+            },
+            negotiated: traits::McpNegotiatedProtocol {
+                era: traits::McpProtocolEra::Legacy,
+                version: "2025-11-25".into(),
+            },
+            capabilities: ServerCapabilitiesDto::default(),
+            tools: vec![],
+            resources: vec![],
+            resource_templates: vec![],
+            prompts: vec![],
+            discovery_cache_partition: Some(partition.clone()),
+            client: None,
+            listener_connection: None,
+        };
+        assert!(matches!(
+            registry
+                .install_lazy_upgrade_live_discovery_if_current("srv", &slot, discovery)
+                .await,
+            BackgroundInstallOutcome::Rejected(_)
+        ));
+        assert!(matches!(
+            registry.connections.read().await.get("srv"),
+            Some(McpConnectionState::Cached { connection_id, .. })
+                if *connection_id == cached_connection_id
+        ));
+        assert_eq!(
+            store.load_partitioned(&logical_key, &partition.partition_key),
+            crate::discovery_cache::EntryLookup::Absent,
+            "expected mode drift purges the partition that served the stale hit"
+        );
+        assert_eq!(mock.connect_calls.load(Ordering::SeqCst), 0);
     }
 
     /// A connect failure for a server with NO existing entry records
@@ -9081,7 +9262,13 @@ mod tests {
         let lifecycle = registry.lifecycle_lock("srv");
         let _guard = lifecycle.lock().await;
         let prepare = registry
-            .prepare_lazy_upgrade_slot_locked("srv", LazyUpgradeMode::Background, None, None)
+            .prepare_lazy_upgrade_slot_locked(
+                "srv",
+                LazyUpgradeMode::Background,
+                None,
+                None,
+                crate::protocol_negotiation::NegotiationMode::Legacy,
+            )
             .await
             .expect("background probe");
         drop(_guard);

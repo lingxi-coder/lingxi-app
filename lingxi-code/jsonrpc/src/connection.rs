@@ -263,6 +263,21 @@ impl Connection {
             .await?)
     }
 
+    /// Send a disposable request while surfacing a response with a mismatched
+    /// id. Protocol negotiation uses this on a sibling connection with one
+    /// pending probe; ordinary calls continue to ignore unknown ids.
+    pub async fn call_with_timeout_probe<P: Serialize, R: DeserializeOwned>(
+        &self,
+        method: &str,
+        params: P,
+        timeout: Duration,
+    ) -> Result<R, ConnectionError> {
+        Ok(self
+            .router
+            .call_with_timeout_probe(method, params, timeout)
+            .await?)
+    }
+
     /// Send an outbound notification (fire-and-forget). Returns once the
     /// writer task has accepted the message into its outbound queue.
     pub fn notify<P: Serialize>(&self, method: &str, params: P) -> Result<(), ConnectionError> {

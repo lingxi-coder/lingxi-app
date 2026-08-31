@@ -2420,6 +2420,50 @@ fn mobile_mcp_preflight(
     configs
 }
 
+/// Serialize the complete MCP config for reload identity checks. `McpHeaders`
+/// intentionally preserves insertion order because it is part of the server
+/// key, so the serialized form also distinguishes a meaningful header-order
+/// change. Returning `None` is fail-closed for equality: an unrepresentable
+/// config is treated as changed and is never silently retained.
+fn mobile_mcp_config_snapshot(config: &McpServerConfig) -> Option<String> {
+    serde_json::to_string(config).ok()
+}
+
+fn mobile_mcp_config_unchanged(current: &McpServerConfig, desired: &McpServerConfig) -> bool {
+    match (
+        mobile_mcp_config_snapshot(current),
+        mobile_mcp_config_snapshot(desired),
+    ) {
+        (Some(current), Some(desired)) => current == desired,
+        _ => false,
+    }
+}
+
+fn mobile_mcp_oauth_authorization_callback(
+    slot: Arc<StdMutex<Option<String>>>,
+    opener: Option<Arc<dyn traits::DeepLinkOpener>>,
+) -> mcp::oauth::OnAuthorizationUrl {
+    Arc::new(move |url| {
+        // Record before attempting the native opener. A successful open is
+        // still observable as a copyable fallback, and an opener rejection or
+        // missing opener cannot lose the authorization URL.
+        if let Ok(mut current) = slot.lock() {
+            *current = Some(url.to_string());
+        }
+        if let Some(opener) = opener.as_ref() {
+            let opener = opener.clone();
+            let url = url.to_string();
+            tokio::spawn(async move {
+                if let Err(error) = opener.open(url).await {
+                    tracing::warn!(%error, "MCP OAuth authorization URL opener failed; copy the recorded URL");
+                }
+            });
+        } else {
+            tracing::info!(url = %url, "MCP OAuth authorization URL is ready to copy");
+        }
+    })
+}
+
 /// Build a fully-wired mobile [`MobileRuntime`] from a deterministic
 /// [`MobileConfig`] + an `Arc<dyn Platform>` (plan F3-03 — the mobile sibling of
 /// `engine_desktop::build`).
@@ -2509,24 +2553,8 @@ async fn build_mobile_inner_with_ask(
     let remote_mcp = Arc::new(platform_common::RemoteMcpTransport::new());
     let mobile_mcp = Arc::new(MobileMcpTransport::new(local_apps_mcp.clone(), remote_mcp));
     let mcp_auth_url = Arc::new(StdMutex::new(None::<String>));
-    let mcp_auth_url_for_callback = mcp_auth_url.clone();
-    let mcp_deep_link = platform.deep_link();
-    let mcp_auth_callback: mcp::oauth::OnAuthorizationUrl = Arc::new(move |url| {
-        if let Ok(mut slot) = mcp_auth_url_for_callback.lock() {
-            *slot = Some(url.to_string());
-        }
-        if let Some(opener) = mcp_deep_link.as_ref() {
-            let opener = opener.clone();
-            let url = url.to_string();
-            tokio::spawn(async move {
-                if let Err(error) = opener.open(url).await {
-                    tracing::warn!(%error, "MCP OAuth authorization URL opener failed; copy the recorded URL");
-                }
-            });
-        } else {
-            tracing::info!(url = %url, "MCP OAuth authorization URL is ready to copy");
-        }
-    });
+    let mcp_auth_callback =
+        mobile_mcp_oauth_authorization_callback(mcp_auth_url.clone(), platform.deep_link());
     let mut mcp_registry = McpRegistry::with_raw_conn(
         mobile_mcp.clone() as Arc<dyn traits::McpTransport>,
         mobile_mcp.clone() as Arc<dyn RawConnectionProvider>,
@@ -2577,11 +2605,19 @@ async fn build_mobile_inner_with_ask(
         ),
         oauth_supported,
     );
-    for (name, result) in mcp_registry.connect_all(configured_mcp).await {
-        if let Err(error) = result {
-            tracing::debug!(server = %name, error = %error, "mobile MCP server is unavailable");
+    // Remote startup, especially an interactive OAuth flow, may legitimately
+    // wait for the user for several minutes. Never hold the mobile engine
+    // constructor open for that interaction: Local Apps is ready synchronously
+    // above, while configured MCP connections continue on the owned runtime and
+    // publish their catalog through the subscription below.
+    let configured_mcp_registry = mcp_registry.clone();
+    tokio::spawn(async move {
+        for (name, result) in configured_mcp_registry.connect_all(configured_mcp).await {
+            if let Err(error) = result {
+                tracing::debug!(server = %name, error = %error, "mobile MCP server is unavailable");
+            }
         }
-    }
+    });
 
     // (1) OS handles from the aggregate `Platform` (NOT a concrete posix type —
     //     the device supplies these; the host test supplies a portable shim).
@@ -5306,18 +5342,6 @@ impl MobileEngineHandle {
         &self.inner
     }
 
-    /// Return the most recent MCP OAuth authorization URL when a native
-    /// deep-link opener was unavailable or failed. Hosts can present this as a
-    /// copyable fallback without exposing any token or PKCE verifier.
-    #[must_use]
-    pub fn mcp_oauth_authorization_url(&self) -> Option<String> {
-        self.inner
-            .mcp_oauth_authorization_url
-            .lock()
-            .ok()
-            .and_then(|url| url.clone())
-    }
-
     /// The connection-scoped [`AdapterPermissionGate`] — F3-05's
     /// `submit(ApprovePermission/DenyPermission)` calls `resolve` on it to
     /// satisfy a parked `check()`.
@@ -6308,6 +6332,26 @@ impl MobileEngineHandle {
 // SAME method body.
 #[cfg_attr(feature = "uniffi", uniffi::export(async_runtime = "tokio"))]
 impl MobileEngineHandle {
+    /// Return the most recent MCP OAuth authorization URL. This is a
+    /// copyable fallback for mobile hosts when no deep-link opener exists or
+    /// the native opener rejects the URL; the slot never contains credentials
+    /// or a PKCE verifier.
+    #[must_use]
+    pub fn mcp_oauth_authorization_url(&self) -> Option<String> {
+        self.inner
+            .mcp_oauth_authorization_url
+            .lock()
+            .ok()
+            .and_then(|url| url.clone())
+    }
+
+    /// Compatibility spelling for mobile clients that prefix host-owned
+    /// MCP surfaces with `mobile_`. Both accessors read the same slot.
+    #[must_use]
+    pub fn mobile_mcp_oauth_authorization_url(&self) -> Option<String> {
+        self.mcp_oauth_authorization_url()
+    }
+
     /// Return the built-in provider catalog without credentials or runtime
     /// secrets. The catalog is assembled from the same vendored models.dev
     /// snapshots used to build the live LLM registry.
@@ -8288,9 +8332,10 @@ impl MobileEngineHandle {
             ),
             self.inner.oauth_supported,
         );
-        let desired: std::collections::HashSet<&str> = configured
+        let desired: std::collections::HashMap<String, McpServerConfig> = configured
             .iter()
-            .map(|config| config.name.as_str())
+            .cloned()
+            .map(|config| (config.name.clone(), config))
             .collect();
         for name in self
             .inner
@@ -8298,18 +8343,60 @@ impl MobileEngineHandle {
             .server_names()
             .await
             .into_iter()
-            .filter(|name| name != LOCAL_APPS_REGISTRY_KEY && !desired.contains(name.as_str()))
+            .filter(|name| name != LOCAL_APPS_REGISTRY_KEY && !desired.contains_key(name))
         {
-            let _ = self.inner.mcp_registry.remove(&name).await;
+            // A reload is configuration reconciliation, not an explicit
+            // logout. Retire deleted servers without revoking their OAuth
+            // grant; the registry's lifecycle helper also removes their live
+            // catalog/client and purges the obsolete discovery family.
+            let _ = self
+                .inner
+                .mcp_registry
+                .remove_without_revoking_auth(&name)
+                .await;
         }
-        for config in configured {
+        let mut pending_connections = Vec::new();
+        for config in desired.into_values() {
             let name = config.name.clone();
-            let _ = self.inner.mcp_registry.remove(&name).await;
-            for (_, result) in self.inner.mcp_registry.connect_all(vec![config]).await {
-                if let Err(error) = result {
-                    tracing::debug!(server = %name, error = %error, "mobile MCP refresh failed");
-                }
+            let current = self
+                .inner
+                .mcp_registry
+                .connections
+                .read()
+                .await
+                .get(&name)
+                .map(|state| state.config().clone());
+            if current
+                .as_ref()
+                .is_some_and(|current| mobile_mcp_config_unchanged(current, &config))
+            {
+                // Preserve live/cached/failed state exactly as-is. In
+                // particular, do not redial, purge discovery, or touch OAuth
+                // storage merely because the listing was refreshed.
+                continue;
             }
+            if current.is_some() {
+                let _ = self
+                    .inner
+                    .mcp_registry
+                    .remove_without_revoking_auth(&name)
+                    .await;
+            }
+            pending_connections.push(config);
+        }
+        if !pending_connections.is_empty() {
+            // A settings listing must never wait for a new server's network
+            // handshake or interactive OAuth. Reconciliation above is complete
+            // before this single background batch starts, so unchanged entries
+            // remain untouched and removals cannot race a reconnect.
+            let registry = self.inner.mcp_registry.clone();
+            tokio::spawn(async move {
+                for (name, result) in registry.connect_all(pending_connections).await {
+                    if let Err(error) = result {
+                        tracing::debug!(server = %name, error = %error, "mobile MCP refresh failed");
+                    }
+                }
+            });
         }
     }
 }
@@ -10012,7 +10099,8 @@ mod tests {
     use super::{
         build_mobile, builtin_provider_catalog, classify_provider_connection_response,
         collect_session_agent_transcript_paths, find_session_agent_transcript_path,
-        lower_session_agent_snapshot, mobile_cron_schedule_error, mobile_mcp_preflight,
+        lower_session_agent_snapshot, mobile_cron_schedule_error, mobile_mcp_config_unchanged,
+        mobile_mcp_oauth_authorization_callback, mobile_mcp_preflight,
         mobile_skill_listing_provider, provider_models_endpoint,
         session_agent_conversation_is_visible, session_agent_transcript_event,
         session_agent_transcript_revision, McpConfigScope, McpServerConfig, MobileConfig,
@@ -11022,6 +11110,10 @@ mod tests {
             !rt_stub.oauth_supported,
             "the non-persisting stub store must gate OAuth /login off"
         );
+        assert!(
+            !rt_stub.mcp_registry.has_oauth(),
+            "plaintext fallback must not wire MCP OAuth dependencies"
+        );
 
         // Inject an encrypted store → OAuth /login enabled.
         let platform: Arc<dyn traits::Platform> = Arc::new(
@@ -11040,6 +11132,63 @@ mod tests {
             rt_real.oauth_supported,
             "an injected encrypted secure store must enable OAuth /login"
         );
+        assert!(
+            rt_real.mcp_registry.has_oauth(),
+            "encrypted secure storage must wire MCP OAuth dependencies"
+        );
+    }
+
+    #[tokio::test]
+    async fn mobile_build_returns_before_interactive_mcp_oauth() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let cfg = test_config(tmp.path());
+        std::fs::create_dir_all(&cfg.lingxi_home).expect("create mobile home");
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind hanging MCP server");
+        let address = listener.local_addr().expect("MCP server address");
+        let server_task = tokio::spawn(async move {
+            let mut streams = Vec::new();
+            loop {
+                let Ok((stream, _peer)) = listener.accept().await else {
+                    break;
+                };
+                // Keep each request open so an OAuth/negotiation path that is
+                // accidentally awaited by build would visibly hang this test.
+                streams.push(stream);
+            }
+        });
+        std::fs::write(
+            cfg.lingxi_home.join("settings.json"),
+            format!(
+                r#"{{"mcpServers":{{"oauth-remote":{{"type":"http","url":"http://{address}/mcp","oauth":{{"clientId":"mobile-test"}}}}}}}}"#
+            ),
+        )
+        .expect("write MCP config");
+        let platform: Arc<dyn traits::Platform> = Arc::new(
+            HostFakePlatform::new(tmp.path().to_path_buf())
+                .with_secure_storage(Arc::new(FakeEncryptedStore::default())),
+        );
+        let started = std::time::Instant::now();
+        let runtime = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            build_mobile(
+                cfg,
+                platform,
+                Arc::new(FakeListener::default()),
+                Arc::new(RecordingPermissionSink::default()),
+            ),
+        )
+        .await
+        .expect("mobile build must not wait for OAuth interaction")
+        .expect("mobile build failed");
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "configured remote connect must be backgrounded"
+        );
+        assert!(runtime.oauth_supported);
+        assert!(runtime.mcp_registry.has_oauth());
+        server_task.abort();
     }
 
     #[test]
@@ -11072,6 +11221,121 @@ mod tests {
         let expected = Some("MCP OAuth requires an encrypted secure credential store".to_string());
         assert_eq!(boot[0].config_error, expected);
         assert_eq!(reload[0].config_error, expected);
+    }
+
+    #[test]
+    fn mobile_mcp_reload_snapshot_is_complete_and_stable() {
+        let mut headers = traits::McpHeaders::new();
+        headers.insert("X-First".into(), "one".into());
+        headers.insert("X-Second".into(), "two".into());
+        let config = McpServerConfig {
+            name: "remote".into(),
+            spec: traits::McpTransportSpec::Http {
+                url: "https://example.test/mcp".into(),
+                headers,
+                headers_helper: Some("helper".into()),
+                oauth: None,
+            },
+            scope: McpConfigScope::User,
+            disabled: false,
+            timeout_ms: Some(5000),
+            always_load: true,
+            discovery_cache: Some(true),
+            config_error: None,
+            metadata: Default::default(),
+        };
+        let same = config.clone();
+        assert!(mobile_mcp_config_unchanged(&config, &same));
+
+        let mut changed = config.clone();
+        if let traits::McpTransportSpec::Http { headers, .. } = &mut changed.spec {
+            headers.insert("X-Third".into(), "three".into());
+        }
+        assert!(!mobile_mcp_config_unchanged(&config, &changed));
+
+        let mut reordered = config.clone();
+        if let traits::McpTransportSpec::Http { headers, .. } = &mut reordered.spec {
+            let first = headers.shift_remove("X-First").unwrap();
+            headers.insert("X-First".into(), first);
+        }
+        assert!(
+            !mobile_mcp_config_unchanged(&config, &reordered),
+            "header order is part of MCP server identity"
+        );
+    }
+
+    struct RecordingDeepLinkOpener {
+        opened: Arc<StdMutex<Vec<String>>>,
+        succeed: bool,
+    }
+
+    #[async_trait]
+    impl traits::DeepLinkOpener for RecordingDeepLinkOpener {
+        async fn open(&self, url: String) -> Result<(), traits::DeepLinkError> {
+            self.opened.lock().unwrap().push(url);
+            if self.succeed {
+                Ok(())
+            } else {
+                Err(traits::DeepLinkError::Unavailable)
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn mobile_mcp_authorization_url_slot_survives_open_success_failure_and_absence() {
+        let success_slot = Arc::new(StdMutex::new(None));
+        let success_opened = Arc::new(StdMutex::new(Vec::new()));
+        let success_opener = Arc::new(RecordingDeepLinkOpener {
+            opened: success_opened.clone(),
+            succeed: true,
+        });
+        let success_callback =
+            mobile_mcp_oauth_authorization_callback(success_slot.clone(), Some(success_opener));
+        success_callback("https://auth.example/success");
+        for _ in 0..100 {
+            if success_opened.lock().unwrap().len() == 1 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(
+            success_slot.lock().unwrap().as_deref(),
+            Some("https://auth.example/success")
+        );
+        assert_eq!(
+            success_opened.lock().unwrap().first().map(String::as_str),
+            Some("https://auth.example/success")
+        );
+
+        let failure_slot = Arc::new(StdMutex::new(None));
+        let failure_opened = Arc::new(StdMutex::new(Vec::new()));
+        let failure_callback = mobile_mcp_oauth_authorization_callback(
+            failure_slot.clone(),
+            Some(Arc::new(RecordingDeepLinkOpener {
+                opened: failure_opened.clone(),
+                succeed: false,
+            })),
+        );
+        failure_callback("https://auth.example/failure");
+        for _ in 0..100 {
+            if failure_opened.lock().unwrap().len() == 1 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(
+            failure_slot.lock().unwrap().as_deref(),
+            Some("https://auth.example/failure")
+        );
+        assert_eq!(failure_opened.lock().unwrap().len(), 1);
+
+        let absent_slot = Arc::new(StdMutex::new(None));
+        let absent_callback = mobile_mcp_oauth_authorization_callback(absent_slot.clone(), None);
+        absent_callback("https://auth.example/copy");
+        assert_eq!(
+            absent_slot.lock().unwrap().as_deref(),
+            Some("https://auth.example/copy")
+        );
     }
 
     /// F3-03: the built runtime binds the adapter sinks — the
@@ -11578,6 +11842,80 @@ mod tests {
             .expect("build_mobile_engine failed");
         handle.set_local_apps_model(ScriptedModel::new());
         (handle, listener)
+    }
+
+    #[test]
+    fn mobile_engine_exports_copyable_mcp_oauth_url_getters() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let (handle, _listener) = build_submit_handle(tmp.path());
+        assert_eq!(handle.mcp_oauth_authorization_url(), None);
+        assert_eq!(handle.mobile_mcp_oauth_authorization_url(), None);
+    }
+
+    #[test]
+    fn mobile_mcp_reload_identical_config_is_read_only() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let cfg = test_config(tmp.path());
+        let settings_path = cfg.lingxi_home.join("settings.json");
+        std::fs::create_dir_all(&cfg.lingxi_home).expect("create mobile home");
+        std::fs::write(
+            &settings_path,
+            r#"{"mcpServers":{"remote":{"type":"http","url":"http://127.0.0.1:1/mcp"}}}"#,
+        )
+        .expect("write MCP settings");
+        let cwd = cfg.cwd.clone();
+        let (handle, _listener) = build_submit_handle_with_config(cfg, tmp.path());
+        let desired = mobile_mcp_preflight(
+            mcp::load_mcp_servers(&cwd.join(".mcp.json"), &settings_path, &cwd),
+            handle.inner.oauth_supported,
+        )
+        .into_iter()
+        .find(|config| config.name == "remote")
+        .expect("settings MCP entry");
+        let connection_id = protocol::McpConnectionId::new();
+        handle.runtime().block_on(async {
+            handle.inner.mcp_registry.connections.write().await.insert(
+                "remote".into(),
+                mcp::connection::McpConnectionState::Connected {
+                    config: desired.clone(),
+                    connection_id,
+                    capabilities: traits::ServerCapabilitiesDto::default(),
+                    negotiated: traits::McpNegotiatedProtocol {
+                        era: traits::McpProtocolEra::Legacy,
+                        version: "2025-11-25".into(),
+                    },
+                    tools: Vec::new(),
+                    resources: Vec::new(),
+                    resource_templates: Vec::new(),
+                    prompts: Vec::new(),
+                    connected_at: std::time::SystemTime::now(),
+                },
+            );
+            handle.reload_configured_mcp().await;
+            let state = handle
+                .inner
+                .mcp_registry
+                .connections
+                .read()
+                .await
+                .get("remote")
+                .cloned()
+                .expect("unchanged MCP entry remains installed");
+            match state {
+                mcp::connection::McpConnectionState::Connected {
+                    connection_id: actual_id,
+                    config,
+                    ..
+                } => {
+                    assert_eq!(actual_id, connection_id);
+                    assert_eq!(
+                        super::mobile_mcp_config_snapshot(&config),
+                        super::mobile_mcp_config_snapshot(&desired)
+                    );
+                }
+                other => panic!("unchanged MCP entry was reconciled: {other:?}"),
+            }
+        });
     }
 
     #[test]

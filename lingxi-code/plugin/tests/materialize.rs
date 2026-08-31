@@ -9,16 +9,24 @@ use std::fs;
 use std::path::Path;
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use command_api::CommandRegistry;
+use futures_util::stream;
 use hooks::HookRegistry;
 use lsp::LspRegistry;
-use mcp::McpRegistry;
+use mcp::{McpConnectionState, McpRegistry, McpServerRole};
 use outputstyles::OutputStyleRegistry;
 use plugin::{PluginManager, StrictPluginOnlyPolicy};
+use protocol::McpConnectionId;
 use secret::CredentialManager;
 use skill_api::SkillRegistry;
 use tokio::sync::RwLock;
 use tool_api::ToolRegistry;
+use traits::{
+    ElicitRequestDto, ElicitResultDto, McpError, McpNotificationStream, McpPromptDto,
+    McpRawConnection, McpResourceContentDto, McpResourceDto, McpToolDto, McpToolResultDto,
+    McpTransport, McpTransportKind, McpTransportSpec, ServerCapabilitiesDto,
+};
 
 use platform_posix::{
     PlainTextSecureStorage, PosixClock, PosixFileSystem, PosixHttp, PosixLspTransport,
@@ -406,7 +414,7 @@ fn write_full_component_plugin(root: &Path, dir_name: &str, plugin_name: &str) {
     // MCP server config (.mcp.json).
     fs::write(
         plugin_dir.join(".mcp.json"),
-        r#"{"mcpServers":{"echo":{"command":"echo","args":["hi"]}}}"#,
+        r#"{"mcpServers":{"echo":{"command":"echo","args":["hi"],"role":"comms"}}}"#,
     )
     .unwrap();
     // LSP server config (.lsp.json) — a record keyed by server name.
@@ -415,6 +423,105 @@ fn write_full_component_plugin(root: &Path, dir_name: &str, plugin_name: &str) {
         r#"{"pyls":{"command":"${CLAUDE_PLUGIN_ROOT}/bin/pylsp","args":["--plugin-data","${CLAUDE_PLUGIN_DATA}/cache","--project","${CLAUDE_PROJECT_DIR}"],"env":{"PLUGIN_DATA":"${LINGXI_PLUGIN_DATA}/env","PLUGIN_ROOT":"${LINGXI_PLUGIN_ROOT}","PROJECT_DIR":"${CLAUDE_PROJECT_DIR}"},"workspaceFolder":"${CLAUDE_PLUGIN_DATA}/workspace","extensionToLanguage":{".py":"python"},"settings":{"pylsp":{"plugins":{"pyflakes":{"enabled":true}}}}}}"#,
     )
     .unwrap();
+}
+
+/// Successful in-process transport used by the role integration test. The
+/// plugin manager still performs the real parser → scoping → `connect_all`
+/// path; only the external MCP wire is replaced so the test can deterministically
+/// expose one tool and exercise the registered-tool rebuild.
+struct RoleMcpTransport;
+
+#[async_trait]
+impl McpTransport for RoleMcpTransport {
+    async fn connect(&self, _spec: &McpTransportSpec) -> Result<McpRawConnection, McpError> {
+        Ok(McpRawConnection {
+            connection_id: McpConnectionId::new(),
+        })
+    }
+
+    async fn initialize(
+        &self,
+        _connection: &McpRawConnection,
+    ) -> Result<ServerCapabilitiesDto, McpError> {
+        Ok(ServerCapabilitiesDto {
+            tools: true,
+            ..ServerCapabilitiesDto::default()
+        })
+    }
+
+    async fn list_tools(
+        &self,
+        _connection: &McpRawConnection,
+    ) -> Result<Vec<McpToolDto>, McpError> {
+        Ok(vec![McpToolDto {
+            server_name: "echo".into(),
+            tool_name: "send".into(),
+            description: "send through the role fixture".into(),
+            input_schema: serde_json::json!({"type": "object"}),
+            full_name: String::new(),
+            search_hint: None,
+            always_load: None,
+            requires_user_interaction: false,
+        }])
+    }
+
+    async fn list_resources(
+        &self,
+        _connection: &McpRawConnection,
+    ) -> Result<Vec<McpResourceDto>, McpError> {
+        Ok(Vec::new())
+    }
+
+    async fn list_prompts(
+        &self,
+        _connection: &McpRawConnection,
+    ) -> Result<Vec<McpPromptDto>, McpError> {
+        Ok(Vec::new())
+    }
+
+    async fn call_tool(
+        &self,
+        _connection: &McpRawConnection,
+        _tool: &str,
+        _input: serde_json::Value,
+    ) -> Result<McpToolResultDto, McpError> {
+        Err(McpError::Internal("unused in role fixture".into()))
+    }
+
+    async fn read_resource(
+        &self,
+        _connection: &McpRawConnection,
+        _uri: &str,
+    ) -> Result<McpResourceContentDto, McpError> {
+        Err(McpError::Internal("unused in role fixture".into()))
+    }
+
+    async fn ping(&self, _connection_id: McpConnectionId) -> Result<(), McpError> {
+        Ok(())
+    }
+
+    async fn notifications(
+        &self,
+        _connection: &McpRawConnection,
+    ) -> Result<McpNotificationStream, McpError> {
+        Ok(Box::pin(stream::empty()))
+    }
+
+    async fn handle_elicitation(
+        &self,
+        _connection: &McpRawConnection,
+        _request: ElicitRequestDto,
+    ) -> Result<ElicitResultDto, McpError> {
+        Err(McpError::Internal("unused in role fixture".into()))
+    }
+
+    async fn disconnect(&self, _connection_id: McpConnectionId) -> Result<(), McpError> {
+        Ok(())
+    }
+
+    fn supported_transports(&self) -> Vec<McpTransportKind> {
+        vec![McpTransportKind::Stdio]
+    }
 }
 
 #[tokio::test]
@@ -609,6 +716,154 @@ async fn enable_materializes_skill_outputstyle_mcp_lsp_into_live_registries() {
         lsp_registry.get_config(lsp_name).await.is_none(),
         "LSP config removed on unload"
     );
+}
+
+#[tokio::test]
+async fn plugin_mcp_role_survives_parse_scope_connect_cache_and_tool_refresh() {
+    let tmp = tempfile::tempdir().unwrap();
+    write_full_component_plugin(tmp.path(), "role-plugin", "roleplugin");
+
+    let discovered = plugin::discover_installed_plugins(tmp.path()).await;
+    assert_eq!(discovered.len(), 1);
+    let (id, manifest, dir) = discovered.into_iter().next().unwrap();
+    let parsed = manifest
+        .components
+        .mcp_servers
+        .get("echo")
+        .expect(".mcp.json server should be loaded");
+    assert_eq!(parsed.metadata.role, Some(McpServerRole::Comms));
+
+    let command_registry = Arc::new(RwLock::new(CommandRegistry::new()));
+    let hook_registry = Arc::new(RwLock::new(HookRegistry::new()));
+    let skill_registry = Arc::new(RwLock::new(SkillRegistry::new()));
+    let output_style_registry = Arc::new(RwLock::new(OutputStyleRegistry::new()));
+    let tool_registry = Arc::new(RwLock::new(ToolRegistry::new()));
+    let lsp_registry = Arc::new(LspRegistry::new(Arc::new(PosixLspTransport::new())));
+    let mcp_registry = Arc::new(McpRegistry::new(Arc::new(RoleMcpTransport)));
+    let storage = PlainTextSecureStorage::new(tmp.path().join("secrets"))
+        .await
+        .unwrap();
+    let credentials = Arc::new(CredentialManager::new(
+        Arc::new(storage),
+        Arc::new(PosixClock::new()),
+        Arc::new(PosixHttp::new()),
+    ));
+    let manager = PluginManager::new(
+        tmp.path().to_path_buf(),
+        Arc::new(PosixFileSystem::new(tmp.path().to_path_buf())),
+        Arc::new(PosixHttp::new()),
+        Arc::new(PosixRuntime::new()),
+        credentials,
+        Arc::new(StrictPluginOnlyPolicy::empty()),
+        command_registry,
+        skill_registry,
+        hook_registry,
+        output_style_registry,
+        mcp_registry.clone(),
+        lsp_registry,
+        tool_registry,
+    );
+
+    // Production plugin materialization scopes the name and connects through
+    // the same registry path used by normal configured MCP servers.
+    manager
+        .enable(&id, manifest, dir)
+        .await
+        .expect("role plugin should materialize and connect");
+    let scoped_name = "plugin:roleplugin:echo";
+    let connected = {
+        let conns = mcp_registry.connections.read().await;
+        let state = conns
+            .get(scoped_name)
+            .expect("scoped MCP connection should be registered");
+        let McpConnectionState::Connected {
+            config,
+            connection_id,
+            capabilities,
+            negotiated,
+            tools,
+            resources,
+            resource_templates,
+            prompts,
+            ..
+        } = state
+        else {
+            panic!("plugin MCP should be Connected after successful fixture dial");
+        };
+        assert_eq!(config.metadata.role, Some(McpServerRole::Comms));
+        assert_eq!(tools.len(), 1);
+        McpConnectionState::Connected {
+            config: config.clone(),
+            connection_id: *connection_id,
+            capabilities: capabilities.clone(),
+            negotiated: negotiated.clone(),
+            tools: tools.clone(),
+            resources: resources.clone(),
+            resource_templates: resource_templates.clone(),
+            prompts: prompts.clone(),
+            connected_at: std::time::SystemTime::now(),
+        }
+    };
+
+    let mut ctx = tool_api::test_support::ctx_for_file_tools(
+        tool_api::test_support::make_dummy_fs(),
+        Arc::new(telemetry::AnalyticsBus::new()),
+        vec![std::path::PathBuf::from("/tmp")],
+    );
+    ctx.mcp_registry = Some(mcp_registry.clone());
+    let built = tool_mcp::build_registered_mcp_tools(&mcp_registry, ctx).await;
+    let connected_tool = built
+        .iter()
+        .flat_map(|(_, tools)| tools.iter())
+        .find(|tool| tool.name().ends_with("__send"))
+        .expect("connected plugin MCP tool should be rebuilt");
+    assert_eq!(connected_tool.mcp_role(), Some("comms"));
+
+    // Convert the live state to the production cache-served shape, then run
+    // the same registered-tool refresh. This keeps the plugin chain coupled to
+    // both Connected and Cached role propagation instead of checking metadata
+    // on a parser-only fixture.
+    mcp_registry.connections.write().await.insert(
+        scoped_name.into(),
+        match connected {
+            McpConnectionState::Connected {
+                config,
+                connection_id,
+                capabilities,
+                negotiated,
+                tools,
+                resources,
+                resource_templates,
+                prompts,
+                ..
+            } => McpConnectionState::Cached {
+                config,
+                connection_id,
+                capabilities,
+                negotiated,
+                tools,
+                resources,
+                resource_templates,
+                prompts,
+                cache_saved_at_ms: 1,
+                age_ms: 0,
+            },
+            _ => unreachable!(),
+        },
+    );
+    let mut ctx = tool_api::test_support::ctx_for_file_tools(
+        tool_api::test_support::make_dummy_fs(),
+        Arc::new(telemetry::AnalyticsBus::new()),
+        vec![std::path::PathBuf::from("/tmp")],
+    );
+    ctx.mcp_registry = Some(mcp_registry.clone());
+    let cached = tool_mcp::build_registered_mcp_tools(&mcp_registry, ctx).await;
+    let cached_tool = cached
+        .iter()
+        .flat_map(|(_, tools)| tools.iter())
+        .find(|tool| tool.name().ends_with("__send"))
+        .expect("cached plugin MCP tool should be rebuilt");
+    assert_eq!(cached_tool.mcp_role(), Some("comms"));
 }
 
 /// A manifest declaring `workflows` as a single `.js` file with its own

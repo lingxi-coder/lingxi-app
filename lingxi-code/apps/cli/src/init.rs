@@ -392,10 +392,11 @@ pub(crate) fn parse_cli_mcp_servers(entries: Option<&Vec<String>>) -> Vec<mcp::M
         if content.trim().is_empty() {
             continue;
         }
-        // CLI-provided servers carry Project scope (the approval policy's
-        // middle tier); precedence over discovered servers is enforced by the
-        // name-merge in `engine_desktop::build`, not the scope.
-        match mcp::json_config::parse_mcp_json_string(&content, mcp::ConfigScope::Project) {
+        // CLI-provided servers are dynamic/session-scoped.  They are not
+        // project `.mcp.json` entries and therefore must not be held behind
+        // the project approval gate; name precedence is still enforced by the
+        // merge in `engine_desktop::build`.
+        match mcp::json_config::parse_mcp_json_string(&content, mcp::ConfigScope::Dynamic) {
             Ok(cfgs) => out.extend(cfgs),
             Err(e) => eprintln!("lingxi-cli: invalid --mcp-config entry: {e}"),
         }
@@ -511,6 +512,10 @@ fn load_provider_profiles(
 /// flag). `None` when unset / on any load failure, so the gate falls back to
 /// its "off" default.
 pub(crate) fn load_settings_ax_screen_reader(argv: &Argv) -> Option<bool> {
+    if argv.restricted_enabled() {
+        return parse_flag_settings(argv.settings.as_deref())
+            .and_then(|settings| settings.ax_screen_reader);
+    }
     let (include_user, include_project) = setting_source_flags(argv.setting_sources.as_deref());
     load_scoped_settings(include_user, include_project)
         .and_then(|eff| eff.settings.ax_screen_reader)
@@ -631,6 +636,7 @@ pub(crate) fn resolve_desktop_config(
 ) -> DesktopConfig {
     let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     let lingxi_home = crate::run::lingxi_home_dir();
+    let restricted = argv.restricted_enabled();
     if let Some(settings) = argv.settings.as_deref() {
         let _ = mcp::enterprise_policy::install_flag_settings_env(flag_settings_env(settings));
     }
@@ -682,7 +688,16 @@ pub(crate) fn resolve_desktop_config(
     // `--setting-sources <user,project,local>`: gate which file setting layers
     // the provider/routing/claudeMdExcludes loaders read (env + defaults always
     // apply). `None` ⟶ all sources (default behavior).
-    let (incl_user, incl_project) = setting_source_flags(argv.setting_sources.as_deref());
+    // Restricted mode ignores user/project/local settings at boot. Managed
+    // settings and the explicit `--settings` layer remain available through
+    // the engine's supplemental-layer path; `--setting-sources` cannot widen
+    // the restricted scope back to untrusted files.
+    let (incl_user, incl_project) = if restricted {
+        (false, false)
+    } else {
+        setting_source_flags(argv.setting_sources.as_deref())
+    };
+    let flag_settings = parse_flag_settings(argv.settings.as_deref());
 
     let mut default_model = DesktopConfig::default().default_model;
     // Persisted `model` from settings.json (written by the `/model` picker) so the
@@ -697,6 +712,13 @@ pub(crate) fn resolve_desktop_config(
     // (ANTHROPIC_API_KEY, ANTHROPIC_DEFAULT_*_MODEL) and CC honors it directly.
     if let Some(persisted) = load_settings_model(incl_user, incl_project) {
         default_model = persisted;
+    }
+    if let Some(flag_model) = flag_settings
+        .as_ref()
+        .and_then(|settings| settings.model.clone())
+        .filter(|model| !model.trim().is_empty())
+    {
+        default_model = flag_model;
     }
     let mut default_model_env_pinned = false;
     if let Some(env_model) = std::env::var("ANTHROPIC_MODEL")
@@ -750,7 +772,14 @@ pub(crate) fn resolve_desktop_config(
         isolated_credential_storage: false,
         api_base: resolve_api_base(),
         api_key: std::env::var("ANTHROPIC_API_KEY").unwrap_or_default(),
-        api_key_helper: load_settings_api_key_helper(incl_user, incl_project),
+        api_key_helper: if restricted {
+            flag_settings
+                .as_ref()
+                .and_then(|settings| settings.api_key_helper.clone())
+                .filter(|helper| !helper.trim().is_empty())
+        } else {
+            load_settings_api_key_helper(incl_user, incl_project)
+        },
         // (M13) Host-launcher OAuth forcing is claude-code's `KWr()`
         // (@228931361) — a pure env predicate that `zb()` (@228933355)
         // evaluates at credential-resolution time, so the ENGINE reads it
@@ -791,9 +820,21 @@ pub(crate) fn resolve_desktop_config(
         },
         fallback_model,
         custom_betas: argv.betas.clone().unwrap_or_default(),
-        flag_settings: parse_flag_settings(argv.settings.as_deref()),
-        provider_profiles: load_provider_profiles(incl_user, incl_project),
-        routing: load_routing(incl_user, incl_project),
+        flag_settings: flag_settings.clone(),
+        provider_profiles: if restricted {
+            flag_settings
+                .as_ref()
+                .and_then(|settings| settings.providers.clone())
+        } else {
+            load_provider_profiles(incl_user, incl_project)
+        },
+        routing: if restricted {
+            flag_settings
+                .as_ref()
+                .and_then(|settings| settings.routing.clone())
+        } else {
+            load_routing(incl_user, incl_project)
+        },
         mcp_paths: vec![project_mcp_path, global_mcp_path],
         use_noop_permission_gate: true,
         // HEADLESS deny-on-ask (claude-code `--print` parity): in `-p`/`--print`
@@ -805,7 +846,12 @@ pub(crate) fn resolve_desktop_config(
         // (no injected gate), so an unresolved ask there resolves via the
         // `NoOpPermissionGate` (allow) — a known limitation of the v0.6.0
         // fallback REPL, not the primary interactive surface.
-        deny_unresolved_ask: argv.print,
+        // Restricted headless/stdio sessions have no human prompt transport;
+        // force unresolved protected asks to deny instead of allowing them via
+        // the historical NoOp gate. The TUI injects its configured human gate
+        // after this config is created and therefore remains interactive.
+        deny_unresolved_ask: argv.print
+            || (restricted && !matches!(crate::mode::decide_mode(argv), crate::mode::Mode::Tui)),
         // Claude Code 2.1.245 `process.stdout.isTTY??!1`. Independent of
         // `--print`: `-p` in a terminal is both print and TTY.
         is_tty: {
@@ -826,7 +872,14 @@ pub(crate) fn resolve_desktop_config(
         // `settings.json` `plansDirectory` (206 `iT`): custom plan-file directory
         // threaded to `OrchestratorConfig::plans_directory`, resolved against the
         // project root with a within-root containment check by the orchestrator.
-        plans_directory: load_settings_plans_directory(incl_user, incl_project),
+        plans_directory: if restricted {
+            flag_settings
+                .as_ref()
+                .and_then(|settings| settings.plans_directory.clone())
+                .filter(|dir| !dir.trim().is_empty())
+        } else {
+            load_settings_plans_directory(incl_user, incl_project)
+        },
         max_budget_usd,
         // `--json-schema` structured output (print-gated above): `build()` forces
         // the StructuredOutput tool + surfaces a capture slot when this is `Some`.
@@ -856,7 +909,14 @@ pub(crate) fn resolve_desktop_config(
             None
         } else {
             Some(orchestrator::prompt::real_provider_with_excludes(
-                load_lingxi_md_excludes(incl_user, incl_project),
+                if restricted {
+                    flag_settings
+                        .as_ref()
+                        .and_then(|settings| settings.lingxi_md_excludes.clone())
+                        .unwrap_or_default()
+                } else {
+                    load_lingxi_md_excludes(incl_user, incl_project)
+                },
             ))
         },
         // CLI-resolved session permission mode (`initialPermissionModeFromCLI`),
@@ -911,6 +971,8 @@ pub(crate) fn resolve_desktop_config(
         // (claude `FWt`: frontmatter servers skipped under strict mode unless the
         // agent came from `--agents`).
         strict_mcp_config: argv.strict_mcp_config,
+        restricted,
+        restricted_tools: argv.tools.clone(),
         // CLI `--exclude-dynamic-system-prompt-sections`: move per-machine env
         // sections out of the cacheable system prompt into the first user message.
         exclude_dynamic_system_prompt_sections: argv.exclude_dynamic_system_prompt_sections,
@@ -954,7 +1016,13 @@ pub(crate) fn resolve_desktop_config(
         session_thinking: llm_client::model::thinking::session_thinking_from_cli(
             argv.thinking.as_deref(),
             argv.max_thinking_tokens,
-            load_always_thinking_enabled(incl_user, incl_project),
+            if restricted {
+                flag_settings
+                    .as_ref()
+                    .and_then(|settings| settings.always_thinking_enabled)
+            } else {
+                load_always_thinking_enabled(incl_user, incl_project)
+            },
         ),
         // (worktree-tmux-launch plan, Task 3) `-w`/`--worktree [name]`:
         // `argv.worktree` is `None` when the flag is absent (inert boot),
@@ -1216,15 +1284,20 @@ pub async fn build_runtime_for_tui_inner_with_parent(
     crate::startup_trace::mark("tui_runtime_build_end");
     // (companyAnnouncements) Read the merged array honoring `--setting-sources`;
     // the composition root (`run_ratatui`) selects + renders it at startup.
-    let (incl_user, incl_project) = setting_source_flags(argv.setting_sources.as_deref());
+    let (incl_user, incl_project) = if argv.restricted_enabled() {
+        (false, false)
+    } else {
+        setting_source_flags(argv.setting_sources.as_deref())
+    };
     let company_announcements = load_settings_company_announcements(incl_user, incl_project);
     let emoji_completion_enabled =
         load_settings_emoji_completion_enabled(incl_user, incl_project).unwrap_or(true);
     Ok(TuiBuild {
         runtime,
         initial_permission_mode: permission_mode,
-        bypass_available: argv.allow_dangerously_skip_permissions
-            || permission_mode == permission::PermissionMode::BypassPermissions,
+        bypass_available: !argv.restricted_enabled()
+            && (argv.allow_dangerously_skip_permissions
+                || permission_mode == permission::PermissionMode::BypassPermissions),
         bridge_rx,
         turn_tx,
         workflow_events,
@@ -1259,6 +1332,14 @@ mod tests {
         // Unknown / empty ⟶ neither file layer (env + defaults still apply).
         assert_eq!(setting_source_flags(Some("bogus")), (false, false));
         assert_eq!(setting_source_flags(Some("")), (false, false));
+    }
+
+    #[test]
+    fn cli_mcp_config_is_dynamic_scoped() {
+        let entries = vec![r#"{"mcpServers":{"from-cli":{"command":"mcp-tool"}}}"#.to_string()];
+        let configs = parse_cli_mcp_servers(Some(&entries));
+        assert_eq!(configs.len(), 1);
+        assert_eq!(configs[0].scope, mcp::ConfigScope::Dynamic);
     }
 
     #[tokio::test]

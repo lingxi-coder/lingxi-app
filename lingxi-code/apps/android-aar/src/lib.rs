@@ -5165,24 +5165,28 @@ mod tests {
         let _gate = handle.permission_gate();
         let _listener: Arc<dyn ClientEventListener> = handle.listener();
 
-        // The M8 smoke signal reflects the Rust-bundled mobile skill catalog.
-        // Anchored to the live roster, never to a literal: this assert sat at a
+        // The M8 smoke signal reflects the verified file-backed mobile Plugin
+        // catalog. Anchored to the live roster, never to a literal: this assert sat at a
         // stale `1` while `BUILTIN_MOBILE` grew to five, and because the module
         // is `#[cfg(feature = "uniffi")]` a plain `cargo test --workspace`
         // compiled none of it, so the rot only surfaced under `--all-features`.
-        let bundled = engine_mobile::mobile_skill_registry();
-        assert!(!bundled.is_empty(), "mobile ships builtin skills");
+        let plugin_skills = engine_mobile::mobile_plugin_skill_names();
+        assert_eq!(
+            plugin_skills.len(),
+            27,
+            "mobile ships exactly 27 Plugin skills"
+        );
         assert_eq!(
             handle.skill_count() as usize,
-            bundled.len(),
-            "the handle must expose the live bundled mobile skill catalog"
+            plugin_skills.len(),
+            "the handle must expose the live verified mobile Plugin skill catalog"
         );
         // `create-local-app` is always present so the agent can enter the
         // template-guided, approval-gated local-app workflow offline.
         assert!(
-            bundled.get("create-local-app").is_some(),
-            "bundled mobile skills must include create-local-app; got {:?}",
-            bundled.names()
+            plugin_skills.iter().any(|name| name == "create-local-app"),
+            "mobile Plugin skills must include create-local-app; got {:?}",
+            plugin_skills
         );
     }
 

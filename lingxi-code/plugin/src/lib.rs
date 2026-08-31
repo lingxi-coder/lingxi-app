@@ -1,10 +1,9 @@
 //! Plugin subsystem — manifest model, 7-state lifecycle, blocklist, strict
-//! policy, agent-frontmatter privilege validation, and the 8-registry
-//! materialiser.
+//! policy, agent-frontmatter privilege validation, and component materializers.
 //!
 //! Plugins are the most cross-cutting subsystem in the engine: every
 //! component slot they declare (commands / agents / skills / hooks /
-//! output styles / MCP servers / LSP servers) eventually lands in a
+//! output styles / MCP servers / LSP servers / workflows) eventually lands in a
 //! dedicated registry built by Plans 03 / 04 / 09 / 12. This crate owns
 //! the lifecycle and the materialiser; Plan 16 wires the actual fetches.
 //!
@@ -71,12 +70,6 @@ pub use mcpb::unpack_mcpb as unpack_plugin_archive;
 pub use source::PluginSource;
 pub use strict_policy::{PluginComponent, StrictPluginOnlyPolicy};
 pub use trust::{default_trust_for_source, PluginTrustLevel};
-/// Plugin workflow inventory (parsed `meta.name` + namespaced FQN) and the
-/// named-workflow resolver (saved > plugin > builtin) — see [`workflow`]'s
-/// module doc for the full design-doc grounding (§5.5 / §19.1).
-pub use workflow::{
-    build_plugin_workflow_inventory, extract_meta_name, namespaced_workflow_name,
-    resolve_explicit_script_path, resolve_named_workflow, resolve_verified_handle,
-    scan_plugin_workflow_dir, ResolvedWorkflow, ResolvedWorkflowSource, SavedWorkflowCandidate,
-    VerifiedWorkflowHandle, WorkflowInventoryEntry,
-};
+/// Legacy discovery assertion helper. Production workflow registration uses
+/// the shared `workflow::PluginWorkflowRegistry` instead.
+pub use workflow::{build_plugin_workflow_inventory, extract_meta_name, WorkflowInventoryEntry};

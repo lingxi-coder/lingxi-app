@@ -33,6 +33,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use thiserror::Error;
+use tokio::io::AsyncReadExt;
 use tokio::sync::RwLock;
 use tool_api::ToolRegistry;
 use traits::{FileSystem, HttpTransport, RuntimeSpawner};
@@ -115,6 +116,11 @@ pub struct PluginManager {
     /// into `mcp_registry.connections`, so [`Self::unload_plugin`] can remove
     /// exactly those entries (the registry has no plugin-ownership index).
     plugin_mcp_names: RwLock<HashMap<PluginId, Vec<String>>>,
+    /// Optional live plugin-workflow registry shared with the Workflow tool
+    /// and nested workflow resolver. The composition root supplies the same
+    /// Arc to every consumer; keeping the table out of this crate avoids the
+    /// branch-only duplicate resolver that previously had no production path.
+    plugin_workflows: Option<Arc<workflow::PluginWorkflowRegistry>>,
 }
 
 impl PluginManager {
@@ -157,6 +163,7 @@ impl PluginManager {
             agent_catalog: None,
             plugin_agent_names: RwLock::new(HashMap::new()),
             plugin_mcp_names: RwLock::new(HashMap::new()),
+            plugin_workflows: None,
         }
     }
 
@@ -165,6 +172,30 @@ impl PluginManager {
     pub fn with_agent_catalog(mut self, catalog: Arc<RwLock<Vec<agent::AgentDefinition>>>) -> Self {
         self.agent_catalog = Some(catalog);
         self
+    }
+
+    /// Share the live plugin-workflow table with the Workflow tool and task
+    /// resolver. All three surfaces must observe the same Arc.
+    #[must_use]
+    pub fn with_plugin_workflows(
+        mut self,
+        registry: Arc<workflow::PluginWorkflowRegistry>,
+    ) -> Self {
+        self.plugin_workflows = Some(registry);
+        self
+    }
+
+    /// Composition-test seam: confirms consumers were handed the same live
+    /// registry allocation rather than equal but disconnected tables.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn shares_plugin_workflows(
+        &self,
+        registry: &Arc<workflow::PluginWorkflowRegistry>,
+    ) -> bool {
+        self.plugin_workflows
+            .as_ref()
+            .is_some_and(|wired| Arc::ptr_eq(wired, registry))
     }
 
     /// Seed the persisted `userConfig` state (settings `pluginConfigs`) the
@@ -640,6 +671,13 @@ impl PluginManager {
             .collect()
     }
 
+    /// Snapshot one plugin's lifecycle state. Builtin hosts use this to
+    /// distinguish an explicitly present `Disabled` plugin from a bundle that
+    /// failed before registration and is therefore absent.
+    pub async fn plugin_state(&self, id: &PluginId) -> Option<PluginState> {
+        self.plugins.read().await.get(id).cloned()
+    }
+
     /// Materialise `manifest`'s components into the 8 registries.
     #[allow(clippy::too_many_lines)] // Wiring layer — validate-then-mutate over 7 component slots.
     async fn load_plugin(
@@ -878,6 +916,7 @@ impl PluginManager {
         let plugin_name = &manifest.name;
         let mut skills: Vec<skill_api::Skill> = Vec::new();
         {
+            let mut sources = Vec::new();
             for sp in &manifest.components.skills {
                 let abs = if sp.path.is_absolute() {
                     sp.path.clone()
@@ -887,8 +926,27 @@ impl PluginManager {
                 let Ok(raw) = tokio::fs::read_to_string(&abs).await else {
                     continue;
                 };
-                let Ok(mut skill) = parse_skill_markdown(
+                let Ok(skill) = parse_skill_markdown(
                     &raw,
+                    abs.clone(),
+                    SkillSource::Plugin,
+                    LoadedFrom::Plugin,
+                ) else {
+                    continue;
+                };
+                sources.push((abs, raw, skill.name));
+            }
+            let bare_names: HashSet<String> =
+                sources.iter().map(|(_, _, name)| name.clone()).collect();
+            for (abs, raw, _) in sources {
+                // Plugin-authored handoffs commonly use `$other-skill` in the
+                // checked-in Markdown. Keep the package bytes source-faithful,
+                // but qualify references to sibling skills in the live prompt
+                // so the Skill tool cannot miss or resolve a same-name project
+                // skill outside this plugin.
+                let scoped_raw = scope_plugin_skill_references(&raw, plugin_name, &bare_names);
+                let Ok(mut skill) = parse_skill_markdown(
+                    &scoped_raw,
                     abs.clone(),
                     SkillSource::Plugin,
                     LoadedFrom::Plugin,
@@ -904,7 +962,7 @@ impl PluginManager {
                 // direct `/plugin:skill` invocation all observe it.
                 let skill_root = abs.parent().unwrap_or(install_dir).to_path_buf();
                 let file = command_api::parse_skill_command_markdown(
-                    &raw,
+                    &scoped_raw,
                     abs.clone(),
                     skill_root,
                     command_api::CommandSource::Plugin,
@@ -969,6 +1027,86 @@ impl PluginManager {
                     },
                     system_prompt_addendum: disk.prompt,
                     source_path: Some(abs),
+                });
+            }
+        }
+
+        // (d2) Workflows — validate each declared/auto-scanned `.js` file
+        //      before adding it to the shared workflow registry. The script's
+        //      own literal `meta.name` is authoritative; a missing/invalid
+        //      meta block is dropped rather than exposed under a filename
+        //      that the runtime would later reject. This mirrors main's
+        //      production loader and keeps the plugin module from owning a
+        //      second, incompatible resolver.
+        let mut workflow_entries: Vec<workflow::PluginWorkflowEntry> = Vec::new();
+        if self.plugin_workflows.is_some() {
+            let canonical_install_dir = tokio::fs::canonicalize(install_dir).await.ok();
+            for wp in &manifest.components.workflows {
+                let abs = if wp.path.is_absolute() {
+                    wp.path.clone()
+                } else {
+                    install_dir.join(&wp.path)
+                };
+                let Ok(canonical_abs) = tokio::fs::canonicalize(&abs).await else {
+                    continue;
+                };
+                if canonical_install_dir
+                    .as_ref()
+                    .is_none_or(|root| !canonical_abs.starts_with(root))
+                {
+                    tracing::warn!(
+                        path = %abs.display(),
+                        root = %install_dir.display(),
+                        "plugin workflow resolves outside its install root; skipping"
+                    );
+                    continue;
+                }
+                let Ok(file) = tokio::fs::File::open(&canonical_abs).await else {
+                    continue;
+                };
+                let Ok(metadata) = file.metadata().await else {
+                    continue;
+                };
+                if !metadata.is_file() || metadata.len() > workflow::MAX_WORKFLOW_SCRIPT_BYTES {
+                    tracing::warn!(
+                        path = %abs.display(),
+                        "plugin workflow is not a regular file or exceeds {} bytes; skipping",
+                        workflow::MAX_WORKFLOW_SCRIPT_BYTES
+                    );
+                    continue;
+                }
+                let mut bytes = Vec::new();
+                let mut limited = file.take(workflow::MAX_WORKFLOW_SCRIPT_BYTES + 1);
+                if limited.read_to_end(&mut bytes).await.is_err()
+                    || bytes.len() as u64 > workflow::MAX_WORKFLOW_SCRIPT_BYTES
+                {
+                    tracing::warn!(
+                        path = %abs.display(),
+                        "plugin workflow exceeds {} bytes while reading; skipping",
+                        workflow::MAX_WORKFLOW_SCRIPT_BYTES
+                    );
+                    continue;
+                }
+                let Ok(raw) = String::from_utf8(bytes) else {
+                    continue;
+                };
+                if let Err(error) = workflow::validate_meta(&raw) {
+                    tracing::warn!(
+                        path = %abs.display(),
+                        %error,
+                        "plugin workflow has invalid meta; skipping"
+                    );
+                    continue;
+                }
+                let Some(base_name) =
+                    workflow::meta_string_value(&raw, "name").filter(|name| !name.is_empty())
+                else {
+                    continue;
+                };
+                workflow_entries.push(workflow::PluginWorkflowEntry {
+                    name: format!("{plugin_name}:{base_name}"),
+                    script_path: canonical_abs,
+                    script: raw,
                 });
             }
         }
@@ -1134,6 +1272,13 @@ impl PluginManager {
             .register_plugin_servers(manifest.id, configs)
             .await;
 
+        // 9. Workflows — join the same owner-aware table consumed by the
+        // Workflow tool and nested resolver. Register even an empty set so a
+        // reload whose valid inventory shrank cannot leave stale names behind.
+        if let Some(registry) = &self.plugin_workflows {
+            registry.register(&manifest.id.to_string(), workflow_entries);
+        }
+
         Ok(())
     }
 
@@ -1169,7 +1314,59 @@ impl PluginManager {
                 conns.remove(n);
             }
         }
+        if let Some(registry) = &self.plugin_workflows {
+            registry.unregister(&id.to_string());
+        }
         Ok(())
+    }
+}
+
+fn scope_plugin_skill_references(
+    source: &str,
+    plugin_name: &str,
+    bare_names: &HashSet<String>,
+) -> String {
+    let mut output = String::with_capacity(source.len());
+    let mut cursor = 0;
+    for (dollar, _) in source.match_indices('$') {
+        if dollar < cursor {
+            continue;
+        }
+        let token_start = dollar + 1;
+        let token_len = source[token_start..]
+            .chars()
+            .take_while(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_'))
+            .map(char::len_utf8)
+            .sum::<usize>();
+        let token_end = token_start + token_len;
+        let token = &source[token_start..token_end];
+        if !token.is_empty() && bare_names.contains(token) {
+            output.push_str(&source[cursor..dollar]);
+            output.push('$');
+            output.push_str(plugin_name);
+            output.push(':');
+            output.push_str(token);
+            cursor = token_end;
+        }
+    }
+    output.push_str(&source[cursor..]);
+    output
+}
+
+#[cfg(test)]
+mod plugin_skill_reference_tests {
+    use super::*;
+
+    #[test]
+    fn sibling_skill_references_are_qualified_without_rewriting_other_tokens() {
+        let names = HashSet::from(["frontend-design".to_string(), "device".to_string()]);
+        let source =
+            "Use $frontend-design, $device and $ARGUMENTS. Keep $other and $plugin:device.";
+        assert_eq!(
+            scope_plugin_skill_references(source, "lingxi-local-app", &names),
+            "Use $lingxi-local-app:frontend-design, $lingxi-local-app:device and \
+             $ARGUMENTS. Keep $other and $plugin:device."
+        );
     }
 }
 

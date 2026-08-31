@@ -61,6 +61,41 @@ mod tests {
         assert_eq!(TOOL_NAME, "Edit");
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn leaf_symlink_is_refused_without_touching_target() {
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("target.txt");
+        let link = tmp.path().join("link.txt");
+        std::fs::write(&target, "original").unwrap();
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let (ctx, _sink) = make_ctx(&tmp);
+        seed_full_read(&ctx, &target);
+        let tool = FileEditTool::new(ctx);
+
+        let error = tool
+            .call(
+                json!({
+                    "file_path": link.to_string_lossy(),
+                    "old_string": "original",
+                    "new_string": "changed"
+                }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .expect_err("Edit must refuse a final symlink");
+        let message = match error {
+            tool_api::tool_trait::ToolError::InvalidInput(message) => message,
+            other => panic!("unexpected error: {other:?}"),
+        };
+        assert!(message.starts_with("Refusing to write "));
+        assert!(
+            message.ends_with("it is a symbolic link. Write to the link's target path instead.")
+        );
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "original");
+    }
+
     #[test]
     fn patch_truncation_template_byte_locked() {
         assert_eq!(

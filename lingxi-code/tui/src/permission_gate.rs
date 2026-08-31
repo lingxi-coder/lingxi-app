@@ -91,24 +91,96 @@ impl PermissionGate for TuiPermissionGate {
         input: &serde_json::Value,
         worker: Option<PromptWorker>,
     ) -> PermissionDecision {
+        match self
+            .check_with_context_impl(name, input, worker, false, None)
+            .await
+        {
+            permission::gate::PermissionOutcome::Allow { .. }
+            | permission::gate::PermissionOutcome::AllowAuto { .. } => PermissionDecision::Allow,
+            permission::gate::PermissionOutcome::Deny { reason } => {
+                PermissionDecision::Deny { reason }
+            }
+        }
+    }
+
+    async fn check_with_context(
+        &self,
+        name: &str,
+        input: &serde_json::Value,
+        ctx: &permission::gate::PermissionCheckContext,
+    ) -> permission::gate::PermissionOutcome {
+        match self
+            .check_with_context_impl(
+                name,
+                input,
+                ctx.worker.clone(),
+                ctx.suppress_always_allow_rule,
+                ctx.auto_mode_prompt,
+            )
+            .await
+        {
+            outcome => outcome,
+        }
+    }
+}
+
+impl TuiPermissionGate {
+    async fn check_with_context_impl(
+        &self,
+        name: &str,
+        input: &serde_json::Value,
+        worker: Option<PromptWorker>,
+        suppress_always_allow_rule: bool,
+        auto_mode_prompt: Option<permission::gate::AutoModePrompt>,
+    ) -> permission::gate::PermissionOutcome {
+        // The engine is the only authority that can select an Auto row.  Keep
+        // the prompt kind aligned with the request so a stale caller cannot
+        // label an ExitPlanMode dialog as a Workflow Bash action (or vice
+        // versa).
+        let auto_mode_prompt = match auto_mode_prompt {
+            Some(permission::gate::AutoModePrompt::ExitPlanMode) if name == "ExitPlanMode" => {
+                Some(permission::gate::AutoModePrompt::ExitPlanMode)
+            }
+            Some(permission::gate::AutoModePrompt::WorkflowBash) if name != "ExitPlanMode" => {
+                Some(permission::gate::AutoModePrompt::WorkflowBash)
+            }
+            _ => None,
+        };
         // Step 1: consult session rules (content-aware: a narrowed AllowAlways
-        // rule only short-circuits a matching command/path/domain).
+        // rule only short-circuits a matching command/path/domain). A tool that
+        // requires a human decision on every invocation must not be bypassed by
+        // an older session rule.
         {
             let rules = self.session_allow_rules.lock().await;
-            if rules
-                .iter()
-                .any(|r| permission::call_matches_rule(r, name, input))
+            if !suppress_always_allow_rule
+                && rules
+                    .iter()
+                    .any(|r| permission::call_matches_rule(r, name, input))
             {
-                return PermissionDecision::Allow;
+                return permission::gate::PermissionOutcome::Allow {
+                    updated_input: None,
+                    permission_updates: Vec::new(),
+                    decision_classification: None,
+                };
             }
         }
 
         // Step 2: build request.
         let default_decision = permission::tool_default(name);
-        let request = PermissionRequest::ToolUseConfirm {
-            tool_name: name.to_string(),
-            tool_input: input.clone(),
-            default_decision,
+        let request = if name == "ExitPlanMode" {
+            PermissionRequest::ExitPlanMode {
+                plan: input
+                    .get("plan")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_string(),
+            }
+        } else {
+            PermissionRequest::ToolUseConfirm {
+                tool_name: name.to_string(),
+                tool_input: input.clone(),
+                default_decision,
+            }
         };
 
         // Step 3: send + await. A worker-originated request carries the worker
@@ -125,15 +197,17 @@ impl PermissionGate for TuiPermissionGate {
             request,
             resp_tx: tx,
             worker: worker_info,
+            suppress_always_allow_rule,
+            auto_mode_prompt,
         };
         if self.event_tx.send(exchange).await.is_err() {
             // TUI is gone — fail closed.
-            return PermissionDecision::Deny {
+            return permission::gate::PermissionOutcome::Deny {
                 reason: "TUI permission bridge closed".to_string(),
             };
         }
         let Ok(response) = rx.await else {
-            return PermissionDecision::Deny {
+            return permission::gate::PermissionOutcome::Deny {
                 reason: "TUI permission response dropped".to_string(),
             };
         };
@@ -141,7 +215,9 @@ impl PermissionGate for TuiPermissionGate {
         // Step 4: persist if AllowAlways. The rule is NARROWED to the specific
         // command / path / domain the call used (claude-code `ruleSuggestions`),
         // not a bare tool-wide allow — so "always allow" scopes the grant.
-        if matches!(response, PermissionResponse::AllowAlways) {
+        let allow_always =
+            matches!(response, PermissionResponse::AllowAlways) && !suppress_always_allow_rule;
+        if allow_always {
             let rule = permission::allow_suggestion(name, input);
             self.session_allow_rules.lock().await.push(rule.clone());
             // (3c) Durably record the choice when a persist target is wired.
@@ -166,9 +242,28 @@ impl PermissionGate for TuiPermissionGate {
         // Step 5: map to decision.
         match response {
             PermissionResponse::AllowOnce | PermissionResponse::AllowAlways => {
-                PermissionDecision::Allow
+                permission::gate::PermissionOutcome::Allow {
+                    updated_input: None,
+                    permission_updates: Vec::new(),
+                    decision_classification: None,
+                }
             }
-            PermissionResponse::Deny => PermissionDecision::Deny {
+            PermissionResponse::AllowAuto
+                if auto_mode_prompt.is_some() && !suppress_always_allow_rule =>
+            {
+                permission::gate::PermissionOutcome::AllowAuto {
+                    updated_input: None,
+                }
+            }
+            // A stale or malicious responder cannot select Auto when the
+            // engine did not mark this request eligible. Preserve the explicit
+            // approval as a one-shot grant, but do not switch mode.
+            PermissionResponse::AllowAuto => permission::gate::PermissionOutcome::Allow {
+                updated_input: None,
+                permission_updates: Vec::new(),
+                decision_classification: None,
+            },
+            PermissionResponse::Deny => permission::gate::PermissionOutcome::Deny {
                 reason: "user denied via dialog".to_string(),
             },
         }
@@ -265,6 +360,64 @@ mod tests {
         let stored = rules.lock().await;
         assert_eq!(stored.len(), 1);
         assert!(stored[0].matches_tool("Bash"));
+    }
+
+    #[tokio::test]
+    async fn tui_gate_maps_eligible_auto_to_rich_outcome_without_persistence() {
+        let (event_tx, mut event_rx) = mpsc::channel::<PermissionExchange>(4);
+        let rules = Arc::new(Mutex::new(Vec::new()));
+        let gate = TuiPermissionGate::new(event_tx, rules.clone());
+        let ctx = permission::gate::PermissionCheckContext {
+            auto_mode_prompt: Some(permission::gate::AutoModePrompt::WorkflowBash),
+            ..Default::default()
+        };
+        let task = tokio::spawn(async move {
+            gate.check_with_context("Bash", &json!({"command": "echo hi"}), &ctx)
+                .await
+        });
+        let exchange = event_rx.recv().await.unwrap();
+        assert_eq!(
+            exchange.auto_mode_prompt,
+            Some(permission::gate::AutoModePrompt::WorkflowBash)
+        );
+        exchange
+            .resp_tx
+            .send(PermissionResponse::AllowAuto)
+            .unwrap();
+        assert!(matches!(
+            task.await.unwrap(),
+            permission::gate::PermissionOutcome::AllowAuto { .. }
+        ));
+        assert!(rules.lock().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn tui_gate_maps_exit_plan_to_plan_request_with_payload() {
+        let (event_tx, mut event_rx) = mpsc::channel::<PermissionExchange>(4);
+        let rules = Arc::new(Mutex::new(Vec::new()));
+        let gate = TuiPermissionGate::new(event_tx, rules);
+        let ctx = permission::gate::PermissionCheckContext {
+            auto_mode_prompt: Some(permission::gate::AutoModePrompt::ExitPlanMode),
+            ..Default::default()
+        };
+        let task = tokio::spawn(async move { gate.check_exit_plan_mode("1. Ship it", &ctx).await });
+        let exchange = event_rx.recv().await.unwrap();
+        match exchange.request {
+            PermissionRequest::ExitPlanMode { plan } => assert_eq!(plan, "1. Ship it"),
+            other => panic!("unexpected request: {other:?}"),
+        }
+        assert_eq!(
+            exchange.auto_mode_prompt,
+            Some(permission::gate::AutoModePrompt::ExitPlanMode)
+        );
+        exchange
+            .resp_tx
+            .send(PermissionResponse::AllowAuto)
+            .unwrap();
+        assert!(matches!(
+            task.await.unwrap(),
+            permission::gate::PermissionOutcome::AllowAuto { .. }
+        ));
     }
 
     #[tokio::test]

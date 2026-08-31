@@ -31,18 +31,21 @@ fn default_git_version_control() -> bool {
     true
 }
 
-/// Workflow state of an app — mirrors the core `AppWorkflowState`. A bare
-/// wire STRING (`"draft"` / `"ready"`). `#[non_exhaustive]` so a future state
-/// is additive.
+/// Derived publication state of an app. A bare wire STRING
+/// (`"draft"` / `"published_unverified"` / `"published_verified"`).
+/// `#[non_exhaustive]` so a future state is additive.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum AppWorkflowStateDto {
-    /// The app exists but has not been built/approved yet.
+    /// No active build/catalog pair is published.
     Draft,
-    /// The app is built and usable.
-    Ready,
+    /// The app has an active build/catalog pair but no UI verification
+    /// evidence.
+    PublishedUnverified,
+    /// The app has an active build/catalog pair and UI verification evidence.
+    PublishedVerified,
 }
 
 /// Runtime (dev-server) state of an app — mirrors the core `AppRuntimeState`
@@ -259,7 +262,7 @@ pub struct AppRecordDto {
     pub created_at_ms: u64,
     /// Last mutation time, epoch milliseconds.
     pub updated_at_ms: u64,
-    /// Current workflow state (`draft` / `ready`).
+    /// Current derived publication state.
     pub workflow_state: AppWorkflowStateDto,
     /// Conversation the app was created from (`origin: chat`), if any. Skipped
     /// from the wire when `None`.

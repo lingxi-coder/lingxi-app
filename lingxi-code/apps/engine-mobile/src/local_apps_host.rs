@@ -158,6 +158,18 @@ struct PendingDependencyChangeReceipt {
     claimed: bool,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PersistedMcpCandidate {
+    validated: local_apps::ValidatedAppMcpProposal,
+    approval_contract_sha256: String,
+    review_surface: Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    verification_sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    catalog_sha256: Option<String>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct DependencyBaselineIdentity {
     dependency_snapshot_sha256: String,
@@ -926,6 +938,7 @@ pub(crate) struct LocalAppsHostBroker {
     pending_ui: Mutex<HashMap<String, oneshot::Sender<UiResolution>>>,
     pending_runtime_profile_receipts: Mutex<HashMap<String, PendingRuntimeProfileReceipt>>,
     pending_dependency_change_receipts: Mutex<HashMap<String, PendingDependencyChangeReceipt>>,
+    pending_mcp_receipts: Mutex<local_apps::McpReceiptBook>,
     session_permissions: Mutex<SessionPermissions>,
     runtimes: Arc<Mutex<HashMap<String, RuntimeEntry>>>,
     /// See [`PortLeases`].  Broker-scoped because a profile's apps are what
@@ -1057,6 +1070,7 @@ impl LocalAppsHostBroker {
             pending_ui: Mutex::new(HashMap::new()),
             pending_runtime_profile_receipts: Mutex::new(HashMap::new()),
             pending_dependency_change_receipts: Mutex::new(HashMap::new()),
+            pending_mcp_receipts: Mutex::new(local_apps::McpReceiptBook::default()),
             session_permissions: Mutex::new(SessionPermissions::default()),
             runtimes: Arc::new(Mutex::new(HashMap::new())),
             port_leases: Arc::new(std::sync::Mutex::new(HashMap::new())),
@@ -1201,6 +1215,109 @@ impl LocalAppsHostBroker {
     fn request_id(&self, prefix: &str) -> String {
         let id = self.next_request_id.fetch_add(1, Ordering::Relaxed);
         format!("{prefix}-{id}")
+    }
+
+    fn validate_workflow_run_id(workflow_run_id: &str) -> Result<(), String> {
+        if workflow_run_id.is_empty()
+            || workflow_run_id.len() > 128
+            || !workflow_run_id
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-')
+        {
+            return Err("workflow_run_id is invalid".into());
+        }
+        Ok(())
+    }
+
+    fn mcp_candidate_rel(
+        app_id: &str,
+        workflow_run_id: &str,
+    ) -> Result<PathBuf, local_apps::AppError> {
+        local_apps::ids::validate_app_id(app_id)?;
+        Self::validate_workflow_run_id(workflow_run_id)
+            .map_err(local_apps::AppError::InvalidRequest)?;
+        Ok(PathBuf::from("apps")
+            .join(app_id)
+            .join(local_apps::manifest::MCP_CATALOGS_DIR)
+            .join("candidates")
+            .join(format!("{workflow_run_id}.json")))
+    }
+
+    fn save_mcp_candidate(
+        &self,
+        app_id: &str,
+        workflow_run_id: &str,
+        candidate: &PersistedMcpCandidate,
+    ) -> Result<(), String> {
+        let path =
+            Self::mcp_candidate_rel(app_id, workflow_run_id).map_err(|error| error.to_string())?;
+        let mut body = serde_json::to_vec_pretty(candidate)
+            .map_err(|error| format!("serialize MCP candidate: {error}"))?;
+        body.push(b'\n');
+        traits::rooted_fs::atomic_write(
+            &self.root,
+            &path,
+            &body,
+            traits::rooted_fs::AtomicWriteOptions::default(),
+        )
+        .map_err(|error| local_apps::AppError::from_fs("write MCP candidate", &error).to_string())
+    }
+
+    fn load_mcp_candidate(
+        &self,
+        app_id: &str,
+        workflow_run_id: &str,
+    ) -> Result<PersistedMcpCandidate, String> {
+        let path =
+            Self::mcp_candidate_rel(app_id, workflow_run_id).map_err(|error| error.to_string())?;
+        let body = traits::rooted_fs::read_to_string_limited(&self.root, &path, 512 * 1024)
+            .map_err(|error| {
+                local_apps::AppError::from_fs("read MCP candidate", &error).to_string()
+            })?;
+        serde_json::from_str(&body).map_err(|error| format!("parse MCP candidate: {error}"))
+    }
+
+    fn load_active_mcp_flow_contexts(
+        &self,
+        layout: &AppLayout,
+    ) -> Result<BTreeMap<String, local_apps::AppMcpFlowContext>, String> {
+        let rel = layout
+            .workspace_rel()
+            .join(".lingxi/mcp-flow-contexts.json");
+        let body = traits::rooted_fs::read_to_string_limited(&self.root, &rel, 512 * 1024)
+            .map_err(|error| match error {
+                traits::FsError::NotFound(_) => {
+                    "mcp_flow_contexts_missing: Host could not resolve any trusted MCP flow contexts for this app".to_string()
+                }
+                other => local_apps::AppError::from_fs("read MCP flow contexts", &other).to_string(),
+            })?;
+        serde_json::from_str(&body).map_err(|error| format!("parse MCP flow contexts: {error}"))
+    }
+
+    fn build_mcp_review_surface(
+        manifest: &local_apps::AppManifest,
+        validated: &local_apps::ValidatedAppMcpProposal,
+        active_catalog: Option<&local_apps::AppMcpCatalogRef>,
+    ) -> Value {
+        json!({
+            "appId": validated.proposal.app_id,
+            "manifestRevision": manifest.revision,
+            "summary": validated.proposal.summary,
+            "proposalSha256": validated.proposal_sha256,
+            "toolSurfaceSha256": validated.tool_surface_sha256,
+            "tools": validated.tools.iter().map(|tool| json!({
+                "name": tool.definition.name,
+                "title": tool.definition.title,
+                "description": tool.definition.description,
+                "inputSchema": tool.definition.input_schema,
+                "outputSchema": tool.definition.output_schema,
+                "flow": tool.flow,
+                "ceiling": tool.ceiling,
+            })).collect::<Vec<_>>(),
+            "requiredFlowChanges": validated.proposal.required_flow_changes,
+            "excludedCapabilities": validated.proposal.excluded_capabilities,
+            "previousActiveCatalog": active_catalog,
+        })
     }
 
     async fn issue_runtime_profile_receipt(
@@ -5573,6 +5690,16 @@ fn stamp_scaffold_identity(
     manifest.surface = Some(artifacts.binding.family.surface());
     manifest.runtime_profile = Some(artifacts.binding.clone());
     manifest.dependency_snapshot = None;
+    manifest.template_origin = Some(local_apps::AppTemplateOrigin {
+        plugin_id: local_apps::AppTemplateOrigin::BUILTIN_PLUGIN_ID.into(),
+        plugin_version: "builtin".into(),
+        template_id: format!(
+            "{}-r{}",
+            artifacts.binding.family.as_str().replace('_', "-"),
+            artifacts.binding.revision
+        ),
+        template_sha256: artifacts.binding.contract_sha256.clone(),
+    });
     manifest.name = name.to_string();
     local_apps::save_manifest(layout, &manifest).map_err(|error| error.to_string())
 }
@@ -6383,6 +6510,23 @@ fn capture_ui_value(input: &Value) -> Result<Option<String>, String> {
     ))
 }
 
+fn validate_create_stage_quality(
+    quality_level: &str,
+    family: local_apps::AppRuntimeProfile,
+) -> Result<(), String> {
+    if !matches!(quality_level, "fast" | "balanced" | "thorough") {
+        return Err(
+            "create_staging_invalid: quality_level must be fast, balanced, or thorough".into(),
+        );
+    }
+    if quality_level == "fast" && family != local_apps::AppRuntimeProfile::ReactDom {
+        return Err(
+            "create_staging_invalid: canvas profiles require balanced or thorough quality".into(),
+        );
+    }
+    Ok(())
+}
+
 #[async_trait]
 impl LocalAppsMcpHost for LocalAppsHostBroker {
     fn create_next_step(&self) -> String {
@@ -6391,6 +6535,528 @@ impl LocalAppsMcpHost for LocalAppsHostBroker {
 
     async fn runtime_profiles(&self, input: Value) -> Result<Value, String> {
         self.runtime_profiles_value(input).await
+    }
+
+    async fn template_catalog(&self, _input: Value) -> Result<Value, String> {
+        let view = crate::local_app_template_catalog::catalog_view()?;
+        serde_json::to_value(view).map_err(|error| format!("serialize template catalog: {error}"))
+    }
+
+    async fn validate_template_selection(&self, input: Value) -> Result<Value, String> {
+        let app_id = required_string(&input, "app_id")?;
+        let workflow_run_id = required_string(&input, "workflow_run_id")?;
+        if input.get("caller_role").is_some() {
+            return Err(
+                "template_selector_only: caller_role is not an authority proof; use the Host-issued selector_capability"
+                    .into(),
+            );
+        }
+        let record = self
+            .service()?
+            .record(app_id)
+            .await
+            .map_err(|error| error.to_string())?;
+        if record.scaffolded {
+            return Err("template_selection_rejected: app is already scaffolded; update/verify must use its persisted profile".into());
+        }
+        crate::local_app_template_catalog::validate_and_journal(
+            &self.root,
+            app_id,
+            workflow_run_id,
+            &input,
+        )
+    }
+
+    async fn resolve_template_selection(&self, input: Value) -> Result<Value, String> {
+        let app_id = required_string(&input, "app_id")?;
+        let workflow_run_id = required_string(&input, "workflow_run_id")?;
+        let handle = required_string(&input, "validated_selection_handle")?;
+        self.service()?
+            .record(app_id)
+            .await
+            .map_err(|error| error.to_string())?;
+        crate::local_app_template_catalog::resolve(&self.root, app_id, workflow_run_id, handle)
+    }
+
+    async fn stage_create(&self, input: Value) -> Result<Value, String> {
+        let app_id = required_string(&input, "app_id")?;
+        let workflow_run_id = required_string(&input, "workflow_run_id")?;
+        let handle = required_string(&input, "validated_selection_handle")?;
+        let quality_level = required_string(&input, "quality_level")?;
+        let record = self
+            .service()?
+            .record(app_id)
+            .await
+            .map_err(|error| error.to_string())?;
+        if record.scaffolded {
+            return Err("create_staging_rejected: app is already scaffolded".into());
+        }
+        let selection = crate::local_app_template_catalog::resolve_typed(
+            &self.root,
+            app_id,
+            workflow_run_id,
+            handle,
+        )?;
+        validate_create_stage_quality(quality_level, selection.runtime_profile.family)?;
+        let artifacts = crate::local_app_runtime_profiles::scaffold_artifacts_for_binding(
+            &selection.runtime_profile,
+        )
+        .map_err(|error| format!("stage template dependencies: {error}"))?;
+        let requested = artifacts
+            .files
+            .iter()
+            .find(|(path, _)| *path == crate::local_app_runtime_profiles::REQUESTED_FILE_REL)
+            .map(|(_, bytes)| bytes.as_slice())
+            .ok_or_else(|| {
+                "create_staging_invalid: requested dependency input missing".to_string()
+            })?;
+        let effective = artifacts
+            .files
+            .iter()
+            .find(|(path, _)| {
+                *path == crate::local_app_runtime_profiles::EFFECTIVE_PACKAGE_FILE_REL
+            })
+            .map(|(_, bytes)| bytes.as_slice())
+            .ok_or_else(|| "create_staging_invalid: effective package input missing".to_string())?;
+        let lock = artifacts
+            .files
+            .iter()
+            .find(|(path, _)| *path == crate::local_app_runtime_profiles::LOCKFILE_FILE_REL)
+            .map(|(_, bytes)| bytes.as_slice())
+            .ok_or_else(|| "create_staging_invalid: base lock input missing".to_string())?;
+        let dependency_input_sha256 = crate::local_app_template_catalog::dependency_input_sha256(
+            requested,
+            effective,
+            lock,
+            crate::local_app_runtime_profiles::RUNTIME_PROFILE_TOOLCHAIN_KEY,
+        );
+        let verified_dependency_input_sha256 =
+            crate::local_app_template_catalog::dependency_input_sha256(
+                requested,
+                effective,
+                lock,
+                crate::local_app_runtime_profiles::RUNTIME_PROFILE_TOOLCHAIN_KEY,
+            );
+        if dependency_input_sha256 != verified_dependency_input_sha256 {
+            return Err(
+                "create_staging_invalid: dependency_input_sha256 verification mismatch".into(),
+            );
+        }
+        let staging = self
+            .root
+            .join(".lingxi-build-state/template-candidates")
+            .join(app_id)
+            .join(workflow_run_id)
+            .join("staging")
+            .join(handle);
+        std::fs::create_dir_all(&staging)
+            .map_err(|error| format!("create isolated staging: {error}"))?;
+        // Materialize only the install-before-build inputs in the run-scoped
+        // candidate staging area.  The app workspace and Manifest remain
+        // untouched until the later receipt/publish phase.  Each file is
+        // written atomically and read back before evidence is emitted so the
+        // dependency digest covers bytes that actually reached staging.
+        let template_root = staging.join("template");
+        let mut staged_files = Vec::with_capacity(artifacts.files.len());
+        for (relative, bytes) in artifacts.files {
+            let relative_path = std::path::Path::new(relative);
+            if relative_path.is_absolute()
+                || relative_path
+                    .components()
+                    .any(|component| matches!(component, std::path::Component::ParentDir))
+            {
+                return Err(format!(
+                    "create_staging_invalid: unsafe template artifact path {relative:?}"
+                ));
+            }
+            let target = template_root.join(relative_path);
+            let parent = target.parent().ok_or_else(|| {
+                "create_staging_invalid: template artifact has no parent".to_string()
+            })?;
+            std::fs::create_dir_all(parent)
+                .map_err(|error| format!("create template staging directory: {error}"))?;
+            let temporary = target.with_file_name(format!(
+                ".{}.tmp",
+                target
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .ok_or_else(|| {
+                        "create_staging_invalid: template artifact has invalid filename".to_string()
+                    })?
+            ));
+            std::fs::write(&temporary, &bytes).map_err(|error| {
+                format!("write template staging artifact {relative:?}: {error}")
+            })?;
+            std::fs::rename(&temporary, &target).map_err(|error| {
+                format!("commit template staging artifact {relative:?}: {error}")
+            })?;
+            let materialized = std::fs::read(&target)
+                .map_err(|error| format!("read template staging artifact {relative:?}: {error}"))?;
+            if materialized != bytes {
+                return Err(format!(
+                    "create_staging_invalid: template artifact changed while staging {relative:?}"
+                ));
+            }
+            staged_files.push(serde_json::json!({
+                "path": relative,
+                "sha256": format!("{:x}", sha2::Sha256::digest(&materialized)),
+            }));
+        }
+        let evidence = serde_json::json!({
+            "schemaVersion": 1,
+            "staging": "isolated",
+            "appId": app_id,
+            "workflowRunId": workflow_run_id,
+            "validatedSelectionHandle": handle,
+            "templateId": selection.template_id,
+            "dependencyInputSha256": dependency_input_sha256,
+            "stagedFiles": staged_files,
+            "published": false,
+            "manifestCommitted": false,
+        });
+        let evidence_path = staging.join("evidence.json");
+        let bytes = serde_json::to_vec_pretty(&evidence)
+            .map_err(|error| format!("serialize staging evidence: {error}"))?;
+        let temp_path = staging.join("evidence.json.tmp");
+        std::fs::write(&temp_path, bytes)
+            .map_err(|error| format!("write staging evidence: {error}"))?;
+        std::fs::rename(&temp_path, &evidence_path)
+            .map_err(|error| format!("commit staging evidence: {error}"))?;
+        Ok(evidence)
+    }
+
+    async fn validate_mcp_proposal(&self, input: Value) -> Result<Value, String> {
+        let app_id = required_string(&input, "app_id")?.to_string();
+        let workflow_run_id = required_string(&input, "workflow_run_id")?.to_string();
+        Self::validate_workflow_run_id(&workflow_run_id)?;
+        let proposal_value = input
+            .get("proposal")
+            .cloned()
+            .ok_or_else(|| "proposal is required".to_string())?;
+        let service = self.service()?;
+        let record = service
+            .record(&app_id)
+            .await
+            .map_err(|error| error.to_string())?;
+        if !record.scaffolded {
+            return Err("mcp_proposal_rejected: app is not scaffolded".into());
+        }
+        let layout = self.layout(&app_id)?;
+        let manifest = load_manifest(&layout).map_err(|error| error.to_string())?;
+        let proposal: local_apps::AppMcpProposal = serde_json::from_value(proposal_value)
+            .map_err(|error| format!("proposal_invalid: {error}"))?;
+        let contexts = self.load_active_mcp_flow_contexts(&layout)?;
+        let validated = local_apps::validate_app_mcp_proposal(
+            proposal,
+            &app_id,
+            manifest.revision,
+            &contexts,
+            &local_apps::CapabilityRegistry::default(),
+        )
+        .map_err(|issues| {
+            format!(
+                "proposal_invalid: {}",
+                issues
+                    .into_iter()
+                    .map(|issue| format!("{}: {}", issue.code, issue.message))
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            )
+        })?;
+        let review_surface = Self::build_mcp_review_surface(
+            &manifest,
+            &validated,
+            manifest.active_mcp_catalog.as_ref(),
+        );
+        let approval_contract_sha256 = local_apps::approval_contract_sha256(review_surface.clone())
+            .map_err(|issue| format!("proposal_invalid: {}", issue.message))?;
+        let active_build_id =
+            crate::local_apps_build::active_build_id(&layout).map_err(|error| error.to_string())?;
+        let mut journal = local_apps::McpCandidateJournal {
+            schema_version: local_apps::APPS_SCHEMA_VERSION,
+            app_id: app_id.clone(),
+            workflow_run_id: workflow_run_id.clone(),
+            stage: local_apps::McpAuthoringStage::Prepared,
+            previous_build_id: active_build_id,
+            previous_catalog_sha256: manifest
+                .active_mcp_catalog
+                .as_ref()
+                .map(|catalog| catalog.catalog_sha256.clone()),
+            proposal_sha256: validated.proposal_sha256.clone(),
+            approval_contract_sha256: approval_contract_sha256.clone(),
+            tool_surface_sha256: validated.tool_surface_sha256.clone(),
+            catalog_sha256: None,
+            consumed_receipt_sha256: None,
+            integrity_sha256: String::new(),
+        }
+        .seal()
+        .map_err(|issue| issue.message)?;
+        let unchanged_approval = manifest.active_mcp_catalog.as_ref().is_some_and(|catalog| {
+            catalog.approval_contract_sha256 == approval_contract_sha256
+                && catalog.tool_surface_sha256 == validated.tool_surface_sha256
+        });
+        if unchanged_approval {
+            journal = journal
+                .advance(local_apps::McpAuthoringStage::Approved)
+                .map_err(|issue| issue.message)?;
+        }
+        local_apps::save_candidate_journal(&layout, &journal).map_err(|error| error.to_string())?;
+        self.save_mcp_candidate(
+            &app_id,
+            &workflow_run_id,
+            &PersistedMcpCandidate {
+                validated: validated.clone(),
+                approval_contract_sha256: approval_contract_sha256.clone(),
+                review_surface: review_surface.clone(),
+                verification_sha256: None,
+                catalog_sha256: None,
+            },
+        )?;
+        Ok(json!({
+            "ok": true,
+            "status": if unchanged_approval { "approved_reusable" } else { "approval_required" },
+            "proposal_sha256": validated.proposal_sha256,
+            "approval_contract_sha256": approval_contract_sha256,
+            "tool_surface_sha256": validated.tool_surface_sha256,
+            "findings": [],
+            "review_surface": review_surface,
+        }))
+    }
+
+    async fn approve_mcp_proposal(&self, input: Value) -> Result<Value, String> {
+        let app_id = required_string(&input, "app_id")?.to_string();
+        let workflow_run_id = required_string(&input, "workflow_run_id")?.to_string();
+        let approval_contract_sha256 =
+            required_string(&input, "approval_contract_sha256")?.to_string();
+        let layout = self.layout(&app_id)?;
+        let mut journal =
+            local_apps::load_candidate_journal(&layout).map_err(|error| error.to_string())?;
+        if journal.workflow_run_id != workflow_run_id {
+            return Err(
+                "receipt_invalid: workflow run does not match the prepared candidate".into(),
+            );
+        }
+        if journal.approval_contract_sha256 != approval_contract_sha256 {
+            return Err(
+                "receipt_invalid: approval contract digest does not match the prepared candidate"
+                    .into(),
+            );
+        }
+        if journal.stage == local_apps::McpAuthoringStage::Prepared {
+            let receipt = local_apps::McpConfirmationReceipt::new(
+                &app_id,
+                &workflow_run_id,
+                approval_contract_sha256.clone(),
+                journal.proposal_sha256.clone(),
+                now_ms(),
+            );
+            let receipt_id = receipt.receipt_id.clone();
+            self.pending_mcp_receipts
+                .lock()
+                .await
+                .issue(receipt)
+                .map_err(|issue| issue.message)?;
+            journal = journal
+                .advance(local_apps::McpAuthoringStage::Approved)
+                .map_err(|issue| issue.message)?;
+            local_apps::save_candidate_journal(&layout, &journal)
+                .map_err(|error| error.to_string())?;
+            return Ok(json!({
+                "approved": true,
+                "receipt_id": receipt_id,
+                "status": "approved",
+            }));
+        }
+        Ok(json!({
+            "approved": true,
+            "receipt_id": Value::Null,
+            "status": "approved_reusable",
+        }))
+    }
+
+    async fn qa_mcp_candidate(&self, input: Value) -> Result<Value, String> {
+        let app_id = required_string(&input, "app_id")?.to_string();
+        let workflow_run_id = required_string(&input, "workflow_run_id")?.to_string();
+        let layout = self.layout(&app_id)?;
+        let mut journal =
+            local_apps::load_candidate_journal(&layout).map_err(|error| error.to_string())?;
+        if journal.workflow_run_id != workflow_run_id {
+            return Err(
+                "journal_invalid: workflow run does not match the candidate journal".into(),
+            );
+        }
+        if journal.stage < local_apps::McpAuthoringStage::Approved {
+            return Err("approval_required: MCP candidate is not approved".into());
+        }
+        let mut candidate = self.load_mcp_candidate(&app_id, &workflow_run_id)?;
+        let definitions = candidate
+            .validated
+            .tools
+            .iter()
+            .map(|tool| tool.definition.clone())
+            .collect::<Vec<_>>();
+        local_apps::validate_generated_mcp_catalog(&definitions).map_err(|issues| {
+            format!(
+                "mcp_qa_failed: {}",
+                issues
+                    .into_iter()
+                    .map(|issue| format!("{}: {}", issue.code, issue.message))
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            )
+        })?;
+        let build_id = crate::local_apps_build::active_build_id(&layout)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "mcp_qa_failed: app has no active build".to_string())?;
+        let execution = serde_json::to_value(
+            candidate
+                .validated
+                .tools
+                .iter()
+                .map(|tool| {
+                    json!({
+                        "definition": tool.definition,
+                        "flow": tool.flow,
+                        "ceiling": tool.ceiling,
+                    })
+                })
+                .collect::<Vec<_>>(),
+        )
+        .map_err(|error| format!("serialize execution bindings: {error}"))?;
+        let catalog_sha256 = local_apps::catalog_sha256(&candidate.validated, &build_id, execution)
+            .map_err(|issue| issue.message)?;
+        journal.catalog_sha256 = Some(catalog_sha256.clone());
+        while journal.stage < local_apps::McpAuthoringStage::McpVerified {
+            let next_stage = match journal.stage {
+                local_apps::McpAuthoringStage::Approved => local_apps::McpAuthoringStage::Built,
+                local_apps::McpAuthoringStage::Built => local_apps::McpAuthoringStage::SmokePassed,
+                local_apps::McpAuthoringStage::SmokePassed => {
+                    local_apps::McpAuthoringStage::McpVerified
+                }
+                _ => local_apps::McpAuthoringStage::McpVerified,
+            };
+            journal = journal.advance(next_stage).map_err(|issue| issue.message)?;
+        }
+        let verification_sha256 = local_apps::approval_contract_sha256(json!({
+            "appId": app_id,
+            "workflowRunId": workflow_run_id,
+            "catalogSha256": catalog_sha256,
+            "checks": ["mcp_schema", "flow_binding", "calls", "isolation"],
+        }))
+        .map_err(|issue| issue.message)?;
+        candidate.verification_sha256 = Some(verification_sha256.clone());
+        candidate.catalog_sha256 = Some(catalog_sha256.clone());
+        local_apps::save_candidate_journal(&layout, &journal).map_err(|error| error.to_string())?;
+        self.save_mcp_candidate(&app_id, &workflow_run_id, &candidate)?;
+        Ok(json!({
+            "ok": true,
+            "findings": [],
+            "mcp_schema": "passed",
+            "flow_binding": "passed",
+            "calls": "passed",
+            "isolation": "passed",
+            "verification_sha256": verification_sha256,
+            "summary": "Host-side MCP schema, binding, build identity and isolation gates passed.",
+        }))
+    }
+
+    async fn promote_mcp_candidate(&self, input: Value) -> Result<Value, String> {
+        let app_id = required_string(&input, "app_id")?.to_string();
+        let workflow_run_id = required_string(&input, "workflow_run_id")?.to_string();
+        let receipt_id = input
+            .get("receipt_id")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        let service = self.service()?;
+        let layout = self.layout(&app_id)?;
+        let mut journal =
+            local_apps::load_candidate_journal(&layout).map_err(|error| error.to_string())?;
+        if journal.workflow_run_id != workflow_run_id {
+            return Err(
+                "journal_invalid: workflow run does not match the candidate journal".into(),
+            );
+        }
+        if journal.stage < local_apps::McpAuthoringStage::McpVerified {
+            return Err("mcp_qa_failed: MCP candidate has not completed QA".into());
+        }
+        let candidate = self.load_mcp_candidate(&app_id, &workflow_run_id)?;
+        let catalog_sha256 = candidate
+            .catalog_sha256
+            .clone()
+            .or_else(|| journal.catalog_sha256.clone())
+            .ok_or_else(|| "catalog_invalid: candidate catalog digest is missing".to_string())?;
+        let build_id = crate::local_apps_build::active_build_id(&layout)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "promotion_failed: app has no active build".to_string())?;
+        if let Some(receipt_id) = receipt_id.as_deref() {
+            self.pending_mcp_receipts
+                .lock()
+                .await
+                .consume_candidate(
+                    receipt_id,
+                    &app_id,
+                    &workflow_run_id,
+                    &journal.approval_contract_sha256,
+                    &journal.proposal_sha256,
+                    now_ms(),
+                )
+                .map_err(|issue| issue.message)?;
+            journal.consumed_receipt_sha256 =
+                Some(format!("{:x}", Sha256::digest(receipt_id.as_bytes())));
+        }
+        let manifest = load_manifest(&layout).map_err(|error| error.to_string())?;
+        let catalog_body = json!({
+            "appId": app_id,
+            "buildId": build_id,
+            "tools": candidate.validated.tools.iter().map(|tool| json!({
+                "definition": tool.definition,
+                "flow": tool.flow,
+                "ceiling": tool.ceiling,
+            })).collect::<Vec<_>>(),
+        });
+        local_apps::save_mcp_catalog(&layout, &catalog_sha256, &catalog_body)
+            .map_err(|error| error.to_string())?;
+        let previous = manifest.active_mcp_catalog.clone();
+        let mut promoted_manifest = manifest.clone();
+        promoted_manifest.active_mcp_catalog = Some(local_apps::AppMcpCatalogRef {
+            build_id,
+            manifest_revision: promoted_manifest.revision,
+            authoring_revision: previous
+                .as_ref()
+                .map(|catalog| {
+                    if catalog.tool_surface_sha256 == candidate.validated.tool_surface_sha256 {
+                        catalog.authoring_revision
+                    } else {
+                        catalog.authoring_revision + 1
+                    }
+                })
+                .unwrap_or(1),
+            user_goal_sha256: candidate.validated.proposal.user_goal_sha256.clone(),
+            proposal_sha256: candidate.validated.proposal_sha256.clone(),
+            approval_contract_sha256: candidate.approval_contract_sha256.clone(),
+            tool_surface_sha256: candidate.validated.tool_surface_sha256.clone(),
+            catalog_sha256: catalog_sha256.clone(),
+            mcp_verification_sha256: candidate
+                .verification_sha256
+                .clone()
+                .ok_or_else(|| "promotion_failed: verification digest is missing".to_string())?,
+        });
+        local_apps::save_manifest(&layout, &promoted_manifest)
+            .map_err(|error| error.to_string())?;
+        if journal.stage < local_apps::McpAuthoringStage::Promoted {
+            journal = journal
+                .advance(local_apps::McpAuthoringStage::Promoted)
+                .map_err(|issue| issue.message)?;
+            local_apps::save_candidate_journal(&layout, &journal)
+                .map_err(|error| error.to_string())?;
+        }
+        let _ = service.announce_record(&app_id).await;
+        Ok(json!({
+            "promoted": true,
+            "catalog_sha256": catalog_sha256,
+            "status": "promoted",
+            "publication_state": "published_unverified",
+        }))
     }
 
     async fn confirm_runtime_profile(&self, input: Value) -> Result<Value, String> {
@@ -6435,10 +7101,9 @@ impl LocalAppsMcpHost for LocalAppsHostBroker {
                 served_index.display()
             ));
         }
-        service
-            .mark_ready(&app_id)
-            .await
-            .map_err(|e| e.to_string())?;
+        // Publication state is derived from the active build/catalog pair in
+        // schema v3. A successful build alone must not mutate a persistent
+        // workflow state or advertise an active MCP surface.
         let dependencies = service
             .dependency_record(&app_id)
             .await
@@ -13296,6 +13961,19 @@ mod tests {
             value, None,
             "an explicit null must collapse to the same no-value payload as an absent rect"
         );
+    }
+
+    #[test]
+    fn create_staging_quality_gate_rejects_fast_canvas_profiles() {
+        assert!(
+            validate_create_stage_quality("fast", local_apps::AppRuntimeProfile::ReactDom).is_ok()
+        );
+        let error = validate_create_stage_quality("fast", local_apps::AppRuntimeProfile::Canvas2d)
+            .expect_err("canvas create staging must reject fast quality");
+        assert!(error.contains("balanced or thorough"));
+        let error = validate_create_stage_quality("turbo", local_apps::AppRuntimeProfile::ReactDom)
+            .expect_err("unknown quality must fail closed");
+        assert!(error.contains("quality_level"));
     }
 
     #[tokio::test]

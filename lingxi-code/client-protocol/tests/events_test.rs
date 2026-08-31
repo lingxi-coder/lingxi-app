@@ -506,13 +506,13 @@ fn apps_changed_round_trips() {
 fn app_workflow_changed_round_trips() {
     let ev = ClientEvent::AppWorkflowChanged {
         app_id: "habits-1a2b".to_string(),
-        state: AppWorkflowStateDto::Ready,
-        detail: Some("build approved".to_string()),
+        state: AppWorkflowStateDto::PublishedUnverified,
+        detail: Some("catalog promoted".to_string()),
     };
     let json = serde_json::to_value(&ev).expect("serialize AppWorkflowChanged");
     assert_eq!(json["type"], "app_workflow_changed");
-    assert_eq!(json["state"], "ready");
-    assert_eq!(json["detail"], "build approved");
+    assert_eq!(json["state"], "published_unverified");
+    assert_eq!(json["detail"], "catalog promoted");
     let back: ClientEvent = serde_json::from_value(json).expect("deserialize AppWorkflowChanged");
     assert_eq!(back, ev);
 
@@ -659,7 +659,8 @@ fn extended_local_app_events_round_trip() {
                     git_enabled: true,
                     created_at_ms: 11,
                     updated_at_ms: 22,
-                    workflow_state: client_protocol::local_apps::AppWorkflowStateDto::Ready,
+                    workflow_state:
+                        client_protocol::local_apps::AppWorkflowStateDto::PublishedUnverified,
                     conversation_id: Some("conv-9".to_string()),
                     init_session_id: Some("init-1".to_string()),
                     workspace_rel: "apps/habits-1a2b/workspace".to_string(),

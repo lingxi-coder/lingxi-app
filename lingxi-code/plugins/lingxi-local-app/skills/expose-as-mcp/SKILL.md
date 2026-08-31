@@ -13,29 +13,21 @@ evaluating whether it actually works, registering or promoting anything —
 belongs to `$mcp-tool-design`, `$mcp-flow-binding`, `$mcp-qa`, or to
 Host-owned validation this skill never performs itself.
 
-## This subsystem does not exist in code yet
+## Host-authority boundary
 
-Per-App MCP authoring is §12 of the plugin's frozen design
-(`docs/local-apps/LOCAL-APP-PLUGIN-DESIGN-V2.md`), scheduled for Phase 6
-("Per-App MCP authoring 与 persistence") and Phase 7 ("Logical server、
-registry 与 listChanged"). As of this writing there is no
-`agents/mcp-designer.md`, no `workflows/local-app-mcp-authoring.js`, and no
-`AppMcpProposal` / `McpToolDefinitionDto` / `McpPermissionCeiling` type
-anywhere in the plugin package or the Rust host. Everything below describes
-the contract exactly as §12 specifies it, not code you can inspect today.
-Naming the workflow through the `Workflow` tool right now will fail because
-the workflow script doesn't exist; run this the moment it lands, and never
-report having run it before then.
+Per-App MCP authoring is §12 of the plugin's frozen design. The Plugin ships
+`agents/mcp-designer.md` and the discoverable
+`lingxi-local-app:local-app-mcp-authoring` workflow. The workflow performs
+the evidence → proposal → Host validation → approval → MCP QA → atomic
+promotion chain; report `needs_input` or `mcp_authoring_required` when Host
+validation cannot produce a safe candidate, and never bypass Host authority.
 
 ## The three situations
 
-The manifest field that would settle this — schema v3's
-`active_mcp_catalog: Option<AppMcpCatalogRef>` (§16.1) — doesn't exist
-either: today's `AppManifest` (`local-apps/src/manifest.rs:354`) has no MCP
-catalog field at all, only `runtime_profile` / `dependency_snapshot` /
-`surface`. Once schema v3 lands, classify by what that field holds; until
-then, treat this as the intended logic to implement against, not something
-to query today:
+The Host-owned manifest field that settles this is schema v3's
+`active_mcp_catalog: Option<AppMcpCatalogRef>` (§16.1), alongside
+`runtime_profile` / `dependency_snapshot` / `surface`. Classify by this
+Host-reloaded field; do not infer catalog state from caller arguments:
 
 - **Initial** — the app has no active catalog yet (`active_mcp_catalog` is
   `None`). The proposal folds into the single unified create-confirmation
@@ -54,11 +46,11 @@ to query today:
 ## Starting the workflow
 
 ```text
-{"name": "local-app-mcp-authoring", "args": {"app_id": "<id>", "user_goal": "<text>"}}
+{"name": "lingxi-local-app:local-app-mcp-authoring", "args": {"app_id": "<id>", "user_goal": "<text>"}}
 ```
 
 through the `Workflow` tool — the same generic invocation `$local-app-test`
-already uses for `local-app-use-test`. Per §12.2 the workflow accepts
+uses for `lingxi-local-app:local-app-use-test`. Per §12.2 the workflow accepts
 **only** `app_id` and `user_goal`; the Host derives everything else
 (evidence, active build/catalog identity, capability graph) on its own.
 Never pass raw tool definitions, a server name, annotations, permission
@@ -66,6 +58,9 @@ rules, a Flow ID, a workspace path, or a catalog/proposal digest — §12.2
 names all six as explicitly rejected inputs, not merely unnecessary ones.
 
 ## Reading what comes back
+
+The workflow returns a structured authoring handoff. The result can be
+`needs_input`, `mcp_authoring_required`, `approval_required`, or `promoted`.
 
 The workflow can return `needs_input` (relay the focused questions to the
 user and resume — don't guess an answer for them) or

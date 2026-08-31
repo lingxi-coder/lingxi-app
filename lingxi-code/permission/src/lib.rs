@@ -44,6 +44,7 @@ pub mod host_context;
 pub mod internal_writes;
 pub mod layers;
 pub mod loader;
+pub mod mcp_policy;
 pub mod mode;
 pub mod mode_policy;
 mod model_path;
@@ -121,6 +122,7 @@ pub use loader::{
     default_mode_from_settings_json, permission_rule_file_warning, permission_rule_startup_warning,
     permission_rules_from_settings_json,
 };
+pub use mcp_policy::{clamp_mcp_permission_result, permission_rules_from_mcp_tool_policies};
 pub use mode::{next_permission_mode, PermissionMode};
 pub use mode_policy::is_plan_safe_tool;
 pub use path_constraints::{check_path_constraints, PathConstraintAsk};
@@ -139,7 +141,10 @@ pub use result::{
     ClassifierKind, PermissionDecisionReason, PermissionResult, PermissionUpdateDestination,
     SandboxOverrideReason,
 };
-pub use rule::{PermissionBehavior, PermissionRule, PermissionRuleSource, PermissionRuleValue};
+pub use rule::{
+    normalize_legacy_tool_name, PermissionBehavior, PermissionRule, PermissionRuleSource,
+    PermissionRuleValue,
+};
 pub use sandbox_auto_allow::SandboxAutoAllowConfig;
 pub use sed_validation::{
     sed_auto_allow_verdict, sed_constraint_verdict, SedVerdict, SED_ASK_MESSAGE, SED_ASK_REASON,

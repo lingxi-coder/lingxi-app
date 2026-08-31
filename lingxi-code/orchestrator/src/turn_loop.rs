@@ -2943,6 +2943,53 @@ pub(crate) fn rule_decision_otel_source(rule_source: Option<&str>, allow: bool) 
     }
 }
 
+/// A tool-owned ASK is part of the call's permission contract, rather than a
+/// replacement for the policy gate's result.  MCP tools expose their clamp via
+/// the `Tool` metadata and structured `PermissionDecisionReason`; workflow
+/// tools expose the nested Read check through `blocked_path`.  Keep the
+/// ordinary Bash sandbox ASK separate so its existing allow-rule/bypass
+/// carve-outs remain unchanged.
+fn tool_permission_ask_is_protected(
+    tool: &dyn tool_api::tool_trait::Tool,
+    result: &permission::PermissionResult,
+) -> bool {
+    let permission::PermissionResult::Ask {
+        reason, metadata, ..
+    } = result
+    else {
+        return false;
+    };
+    tool.is_mcp()
+        || matches!(
+            reason,
+            permission::PermissionDecisionReason::PermissionPromptTool { .. }
+        )
+        || metadata.blocked_path.is_some()
+}
+
+/// Preserve the tool's own structured deny provenance when it tightens a
+/// policy Allow/Ask.  This is used at the dispatch boundary so a tool-local
+/// deny cannot be hidden by an outer allow rule or mode.
+fn tool_permission_deny_resolution(
+    name: &str,
+    reason: &permission::PermissionDecisionReason,
+    explanation: Option<&str>,
+) -> PermissionResolution {
+    let (decision_reason_type, decision_reason) = tool_ask_reason_context(reason);
+    PermissionResolution::Deny {
+        reason: explanation.map_or_else(
+            || format!("Permission to use {name} has been denied."),
+            str::to_string,
+        ),
+        source: PermissionDecisionSource::Unspecified,
+        rule_source: None,
+        decision_reason_type,
+        decision_reason,
+        behavior_ask: false,
+        content_blocks: Vec::new(),
+    }
+}
+
 /// HOOK.2 twin of [`dispatch_tool_uses`] that ALSO returns whether any
 /// `PreToolUse` hook in this batch requested `continue:false`
 /// (preventContinuation). The batched turn loop
@@ -3893,10 +3940,14 @@ pub(crate) async fn dispatch_tool_uses_tracked(
         // else the normal `check` (which may delegate an `Ask` to the prompt
         // transport). Uses the post-hook `effective_input` so a Pre hook can
         // rewrite a tool argument before the permission check sees it.
+        let requires_user_interaction = tool_handle.requires_user_interaction();
+        let restricted_protected_mutation = orch
+            .perms
+            .is_restricted_protected_mutation(name, &effective_input);
         let hook_allowed = matches!(
             pre_agg.decision,
             Some(HookDecision::Approve | HookDecision::Allow)
-        );
+        ) && !requires_user_interaction;
         // R-D3: a PreToolUse hook `permissionDecision:"ask"` forces the interactive
         // prompt even over a configured allow rule (the resolution upgrade in the
         // normal-gate branch below). Mutually exclusive with `hook_allowed`.
@@ -3933,6 +3984,16 @@ pub(crate) async fn dispatch_tool_uses_tracked(
             .lock()
             .await
             .remove(tool_use_id);
+        // Every real dispatch performs the tool-owned permission check before
+        // any policy outcome can reach `call`.  This is deliberately outside
+        // the policy-resolution branches: an explicit allow rule, bypass mode,
+        // hook allow, plan allow, or orphan recovery must not skip a tool-local
+        // deny/ask (MCP ceilings, requiresUserInteraction, and Workflow's
+        // nested Read check all live here).
+        let tool_permission_result = tool_handle.check_permissions(&effective_input, &ctx).await;
+        let tool_ask_is_protected =
+            tool_permission_ask_is_protected(tool_handle.as_ref(), &tool_permission_result);
+        let non_normal_permission_path = forced_decision.is_some() || plan_mode || hook_allowed;
         // OTEL `code_edit_tool.decision` / `tool_decision` source label,
         // threaded out of the decision branches below.
         //
@@ -3956,28 +4017,14 @@ pub(crate) async fn dispatch_tool_uses_tracked(
             // decision reason survives the recovery (CC default arm).
             decision_otel_source = "unknown";
             forced
-        } else if plan_mode {
-            let plan_decision = orch.perms.check_in_plan_mode(name, &effective_input).await;
-            // GATE-SYSMSG-01: a plan-mode mutation deny is a LOCAL deny the oracle
-            // emits `permission_denied` for. `check_in_plan_mode` is 2-valued, so
-            // the structured reason (mode vs a plan-visible deny rule) is not
-            // available here — emit the message with the discriminants omitted
-            // (still a valid oracle subsequence). No-op on non-stdio transports.
-            if let PermissionDecision::Deny { reason } = &plan_decision {
-                let sysmsg_ctx = traits::permission_gate::PermissionCheckContext {
-                    tool_use_id: Some(tool_use_id.to_string()),
-                    ..Default::default()
-                };
-                orch.perms
-                    .on_permission_denied(name, &sysmsg_ctx, None, None, reason)
-                    .await;
-            }
-            plan_decision
-        } else if hook_allowed {
+        } else if hook_allowed && !plan_mode {
             // Carry the REAL tool_use_id so a hook-allow→ask-rule re-check emits a
             // byte-faithful stdio `can_use_tool` (correlatable id + decision_reason).
             let ctx = traits::permission_gate::PermissionCheckContext {
                 tool_use_id: Some(tool_use_id.to_string()),
+                requires_user_interaction,
+                suppress_always_allow_rule: requires_user_interaction
+                    || restricted_protected_mutation,
                 ..Default::default()
             };
             let hook_outcome = orch
@@ -3994,6 +4041,19 @@ pub(crate) async fn dispatch_tool_uses_tracked(
                     hook_decision_classification = decision_classification;
                     if let Some(updated) = updated_input {
                         effective_input = updated;
+                    }
+                    PermissionDecision::Allow
+                }
+                traits::permission_gate::PermissionOutcome::AllowAuto { updated_input } => {
+                    if let Some(updated) = updated_input {
+                        effective_input = updated;
+                    }
+                    if let Err(error) = orch.perms.set_permission_mode("auto").await {
+                        // The current call was explicitly approved, but never
+                        // claim Auto mode when the atomic live-mode write fails.
+                        tracing::warn!(%error, "permission prompt approved Auto mode but mode switch failed");
+                    } else {
+                        decision_otel_source = "user_temporary";
                     }
                     PermissionDecision::Allow
                 }
@@ -4023,16 +4083,24 @@ pub(crate) async fn dispatch_tool_uses_tracked(
             // hooks fire the way claude-code does.
             let resolution_ctx = traits::permission_gate::PermissionCheckContext {
                 tool_use_id: Some(tool_use_id.to_string()),
+                requires_user_interaction,
+                suppress_always_allow_rule: requires_user_interaction
+                    || restricted_protected_mutation,
                 is_non_interactive_session: !orch.config.interactive_permissions,
                 ..Default::default()
             };
-            let resolution = orch
-                .perms
-                .resolve_detailed_or_abort(name, &effective_input, &resolution_ctx)
-                .await
-                .map_err(|abort| OrchestratorError::PermissionAbort {
-                    message: abort.message,
-                })?;
+            let resolution = if plan_mode {
+                orch.perms
+                    .resolve_detailed_in_plan_mode_or_abort(name, &effective_input, &resolution_ctx)
+                    .await
+            } else {
+                orch.perms
+                    .resolve_detailed_or_abort(name, &effective_input, &resolution_ctx)
+                    .await
+            }
+            .map_err(|abort| OrchestratorError::PermissionAbort {
+                message: abort.message,
+            })?;
             // R-D3: a PreToolUse hook `permissionBehavior:"ask"` (HookDecision::Ask)
             // forces the interactive prompt even over a configured ALLOW rule, but a
             // DENY rule still overrides the hook. This is 1:1 with claude-code's
@@ -4046,7 +4114,6 @@ pub(crate) async fn dispatch_tool_uses_tracked(
             // overrides), plan mode already bound above, and a resolved `Ask` already
             // prompts. Precedence is therefore deny > ask > allow — matching the
             // binary, NOT a divergence. No-op unless a hook returned `ask`.
-            let requires_user_interaction = tool_handle.requires_user_interaction();
             // This flag is metadata for an existing Ask/callback path; it must
             // not create an Ask by itself. The normal TUI tool owns its question
             // UI, and a generic permission prompt here would duplicate it.
@@ -4056,92 +4123,69 @@ pub(crate) async fn dispatch_tool_uses_tracked(
             } else {
                 resolution
             };
-            // BASH-10 — the TOOL's own `Tool::check_permissions` refinement
-            // (claude-code `a6e`'s `l = await e.checkPermissions(input, ctx)`,
-            // 2.1.238 BIN off **290296046**).
-            //
-            // In claude-code the tool hook runs INSIDE the policy evaluation and
-            // its `ask` survives the later allow-rule / bypassPermissions arms
-            // when the reason is one of the protected kinds
-            // (`…||l.decisionReason?.type==="sandboxOverride"||…`). LingXi's
-            // policy is a separate crate that cannot call back into a `Tool`, so
-            // the composition happens here — and the GUARD the oracle spells out
-            // inside `BashTool.checkPermissions`
-            // (`r.behavior!=="deny" && r.behavior!=="ask" && !XXn(r.decisionReason)`)
-            // is applied on this side, because it is a property of the BASE
-            // decision that only the gate knows:
-            //
-            //   * `behavior !== "deny" / "ask"`  ⇒ resolution is `Allow`
-            //   * `!XXn(decisionReason)`         ⇒ the allow did NOT come from a
-            //     permission RULE ⇒ `rule_source` is `None`
-            //
-            // Every tool whose `check_permissions` returns `Allow` (all of them
-            // but `Bash` on the sandbox-override path) leaves the resolution
-            // untouched, so this is a strict no-op for them.
-            //
-            // DOCUMENTED NARROWING: `XXn` distinguishes a `rule` decisionReason
-            // produced by the BASH-COMMAND rule evaluation (`M8n`), whereas
-            // `rule_source` here is `Some` for any matched rule — including a
-            // TOOL-WIDE `Bash` allow rule, which in `a6e` would NOT suppress the
-            // sandboxOverride ask (that arm returns before `Bni`'s allow-rule
-            // check). The port therefore skips the escalation in the tool-wide
-            // allow-rule case; the common content-rule case (`Bash(cmd:*)`)
-            // matches the oracle exactly.
-            //
-            // BYPASS CARVE-OUT (load-bearing): under `bypassPermissions` the
-            // oracle's protected-reason arm is `!p && (…||"sandboxOverride"||…)`
-            // — the `!p` conjunct means the sandboxOverride ask does NOT survive
-            // bypass; only `f` (a `safetyCheck` in the dangerous-removal prefix
-            // set) does, and no tool hook produces one. Wiring the hook without
-            // this guard would make bypassPermissions start prompting, which is
-            // the exact class of regression the 2.1.211 bypass audit found.
+            // Compose the tool-owned permission result with the policy
+            // resolution.  A tool DENY is always final, including over an
+            // explicit allow rule, auto, bypass, or a hook-approved path.
+            // Protected tool ASKs (MCP ceilings / requiresUI and Workflow's
+            // nested Read check) also survive matched allows and bypass.  The
+            // ordinary Bash sandbox ASK retains its historical rule-source and
+            // bypass carve-outs below.
             let bypass_mode = orch
                 .permission_mode()
                 .is_some_and(|m| m == "bypassPermissions");
             let mut tool_ask_reason: Option<permission::PermissionDecisionReason> = None;
-            let resolution = if matches!(
-                &resolution,
-                PermissionResolution::Allow { rule_source } if rule_source.is_none()
-            ) {
-                match tool_handle.check_permissions(&effective_input, &ctx).await {
-                    // `if(l?.behavior==="deny") return l` runs BEFORE `a6e`'s
-                    // bypass arm, so a tool DENY binds even under bypass; only
-                    // the ASK is carved out below.
-                    permission::PermissionResult::Ask { .. } if bypass_mode => resolution,
-                    permission::PermissionResult::Ask { reason, .. } => {
-                        let (rt, rtext) = tool_ask_reason_context(&reason);
-                        tool_ask_reason = Some(reason);
-                        PermissionResolution::AskWithContext {
-                            decision_reason_type: rt,
-                            decision_reason: rtext,
-                        }
-                    }
-                    // A tool `Deny` also binds in `a6e`
-                    // (`if(l?.behavior==="deny") return l`). No builtin returns
-                    // one from this arm today.
+            let resolution = match (&resolution, &tool_permission_result) {
+                (
+                    _,
                     permission::PermissionResult::Deny {
                         reason,
                         explanation,
                         ..
-                    } => {
-                        let (rt, rtext) = tool_ask_reason_context(&reason);
-                        PermissionResolution::Deny {
-                            reason: explanation.unwrap_or_else(|| {
-                                format!("Permission to use {name} has been denied.")
-                            }),
-                            source: PermissionDecisionSource::Unspecified,
-                            rule_source: None,
+                    },
+                ) => tool_permission_deny_resolution(name, reason, explanation.as_deref()),
+                (
+                    PermissionResolution::Allow { rule_source },
+                    permission::PermissionResult::Ask { reason, .. },
+                ) if tool_ask_is_protected
+                    || (rule_source.is_none() && (!bypass_mode || requires_user_interaction)) =>
+                {
+                    let (rt, rtext) = tool_ask_reason_context(reason);
+                    tool_ask_reason = Some(reason.clone());
+                    PermissionResolution::AskWithContext {
+                        decision_reason_type: rt,
+                        decision_reason: rtext,
+                    }
+                }
+                (
+                    PermissionResolution::Ask | PermissionResolution::AskWithContext { .. },
+                    permission::PermissionResult::Ask { reason, .. },
+                ) if tool_ask_is_protected => {
+                    let (rt, rtext) = tool_ask_reason_context(reason);
+                    tool_ask_reason = Some(reason.clone());
+                    match &resolution {
+                        PermissionResolution::AskWithContext { .. } => resolution,
+                        _ => PermissionResolution::AskWithContext {
                             decision_reason_type: rt,
                             decision_reason: rtext,
-                            behavior_ask: false,
-                            content_blocks: Vec::new(),
-                        }
+                        },
                     }
-                    permission::PermissionResult::Allow { .. } => resolution,
                 }
-            } else {
-                resolution
+                // For ordinary Bash sandbox asks, only the old no-rule path
+                // reaches the tool-owned refinement; an explicit rule or
+                // bypass remains authoritative as before.
+                _ => resolution,
             };
+            // Tool-owned interaction must remain a per-call human decision.
+            // Compute this AFTER the tool's own check has had a chance to
+            // escalate an otherwise-permitted call to Ask. Merely being an
+            // interactive tool must not create a generic permission prompt
+            // (AskUserQuestion owns its business UI).
+            let suppress_always_allow_rule = (requires_user_interaction
+                || restricted_protected_mutation)
+                && matches!(
+                    resolution,
+                    PermissionResolution::Ask | PermissionResolution::AskWithContext { .. }
+                );
             let ask_reason_context = match &resolution {
                 PermissionResolution::AskWithContext {
                     decision_reason_type,
@@ -4256,7 +4300,20 @@ pub(crate) async fn dispatch_tool_uses_tracked(
                     };
                     let req_agg = orch.hooks.execute(req_event, hook_ctx.clone()).await;
                     match req_agg.decision {
-                        Some(HookDecision::Approve | HookDecision::Allow) => {
+                        Some(HookDecision::Approve | HookDecision::Allow)
+                            if tool_ask_reason.is_none() =>
+                        {
+                            // PermissionRequest allow responses may carry raw
+                            // `updatedPermissions` entries. Apply and persist
+                            // them before resolving the rescued call so the
+                            // same live gate observes the host's updates.
+                            if !req_agg.permission_updates.is_empty() {
+                                orch.perms
+                                    .apply_permission_updates(&req_agg.permission_updates);
+                                orch.perms
+                                    .persist_permission_updates(&req_agg.permission_updates)
+                                    .await;
+                            }
                             // (cc 2.1.218 `Fxy`) The headless PermissionRequest
                             // rescue re-checks the rules (`epr(_pt(...))`, where an
                             // ask rule becomes a HARD DENY — no prompt is available
@@ -4264,7 +4321,9 @@ pub(crate) async fn dispatch_tool_uses_tracked(
                             // `updatedInput` OR the tool `requiresUserInteraction`:
                             //   if(a.updatedInput||e.requiresUserInteraction?.()){…}
                             //   return {behavior:"allow", updatedInput:l, …}
-                            // With NEITHER trigger the allow STANDS UNCHECKED — we
+                            // A tool-owned Ask is excluded from this rescue arm: its
+                            // requiresUserInteraction contract cannot be overridden
+                            // by a PermissionRequest hook allow. With NEITHER trigger the allow STANDS UNCHECKED — we
                             // must NOT re-run the rule/mode verdict, or the rescue is
                             // defeated in its primary use case (an ordinary ask rule
                             // the hook meant to pre-approve would re-prompt / hard
@@ -4305,6 +4364,11 @@ pub(crate) async fn dispatch_tool_uses_tracked(
                         }
                         Some(HookDecision::Block) => {
                             decision_otel_source = "hook";
+                            if req_agg.interrupt {
+                                if let Some(cancel) = cancel.as_ref() {
+                                    cancel.cancel();
+                                }
+                            }
                             PermissionDecision::Deny {
                                 reason: req_agg
                                     .reason
@@ -4312,111 +4376,208 @@ pub(crate) async fn dispatch_tool_uses_tracked(
                             }
                         }
                         _ => {
-                            // Delegate to the inner prompt transport, carrying the
-                            // REAL tool_use_id (so a stdio `can_use_tool` request is
-                            // byte-faithful) and applying the host's `updatedInput`
-                            // rewrite to the input the tool actually runs with.
-                            let ctx = traits::permission_gate::PermissionCheckContext {
-                                tool_use_id: Some(tool_use_id.to_string()),
-                                requires_user_interaction,
-                                // HOOK-ASKFLOOR-03: a PreToolUse hook `ask` sets the
-                                // floor so the Auto classifier can't re-allow past it
-                                // (policy_gate Ask arm gates the classifier on this).
-                                hook_ask_floor: hook_ask,
-                                is_non_interactive_session: !orch.config.interactive_permissions,
-                                decision_reason_type: ask_reason_context.0.clone(),
-                                decision_reason: ask_reason_context.1.clone(),
-                                ..Default::default()
-                            };
-                            // BASH-10: an ask that the TOOL raised must NOT be
-                            // re-derived from the rule/mode layer — `PolicyPermissionGate`
-                            // would recompute the very allow the tool escalated
-                            // and silently defeat it. `ask_via_transport` hands
-                            // the call straight to the prompt transport (the
-                            // same `self.inner.check_with_context` the gate's own
-                            // Ask arm reaches after it has decided to prompt).
-                            // Unreachable unless a tool returned `Ask` above, so
-                            // every policy-originated ask keeps the old call.
-                            let outcome = if tool_ask_reason.is_some() {
-                                orch.perms
-                                    .ask_via_transport(name, &effective_input, &ctx)
-                                    .await
+                            if plan_mode && !orch.config.interactive_permissions {
+                                PermissionDecision::Deny {
+                                    reason: permission::headless_gate::headless_deny_message(name),
+                                }
                             } else {
-                                orch.perms
-                                    .check_with_context(name, &effective_input, &ctx)
-                                    .await
-                            };
-                            match outcome {
-                                traits::permission_gate::PermissionOutcome::Allow {
-                                    updated_input,
-                                    // `permission_updates` (the host's
-                                    // `updatedPermissions`) are applied + persisted
-                                    // inside the stdio gate itself, which holds the
-                                    // settings paths.
-                                    permission_updates: _,
-                                    decision_classification,
-                                } => {
-                                    // The host's explicit classification wins when
-                                    // valid; absent/unknown values were normalized to
-                                    // `None` by the transport and use Claude's
-                                    // temporary-allow fallback.
-                                    decision_otel_source = decision_classification.map_or(
+                                // Delegate to the inner prompt transport, carrying the
+                                // REAL tool_use_id (so a stdio `can_use_tool` request is
+                                // byte-faithful) and applying the host's `updatedInput`
+                                // rewrite to the input the tool actually runs with.
+                                let ctx = traits::permission_gate::PermissionCheckContext {
+                                    tool_use_id: Some(tool_use_id.to_string()),
+                                    requires_user_interaction,
+                                    suppress_always_allow_rule,
+                                    // HOOK-ASKFLOOR-03: a PreToolUse hook `ask` sets the
+                                    // floor so the Auto classifier can't re-allow past it
+                                    // (policy_gate Ask arm gates the classifier on this).
+                                    hook_ask_floor: hook_ask,
+                                    is_non_interactive_session: !orch
+                                        .config
+                                        .interactive_permissions,
+                                    decision_reason_type: ask_reason_context.0.clone(),
+                                    decision_reason: ask_reason_context.1.clone(),
+                                    ..Default::default()
+                                };
+                                // BASH-10: an ask that the TOOL raised must NOT be
+                                // re-derived from the rule/mode layer — `PolicyPermissionGate`
+                                // would recompute the very allow the tool escalated
+                                // and silently defeat it. `ask_via_transport` hands
+                                // the call straight to the prompt transport (the
+                                // same `self.inner.check_with_context` the gate's own
+                                // Ask arm reaches after it has decided to prompt).
+                                // Unreachable unless a tool returned `Ask` above, so
+                                // every policy-originated ask keeps the old call.
+                                let outcome = if tool_ask_reason.is_some() {
+                                    orch.perms
+                                        .ask_via_transport(name, &effective_input, &ctx)
+                                        .await
+                                } else {
+                                    orch.perms
+                                        .check_with_context(name, &effective_input, &ctx)
+                                        .await
+                                };
+                                match outcome {
+                                    traits::permission_gate::PermissionOutcome::Allow {
+                                        updated_input,
+                                        // `permission_updates` (the host's
+                                        // `updatedPermissions`) are applied + persisted
+                                        // inside the stdio gate itself, which holds the
+                                        // settings paths.
+                                        permission_updates: _,
+                                        decision_classification,
+                                    } => {
+                                        // The host's explicit classification wins when
+                                        // valid; absent/unknown values were normalized to
+                                        // `None` by the transport and use Claude's
+                                        // temporary-allow fallback.
+                                        decision_otel_source = decision_classification.map_or(
                                         "user_temporary",
                                         traits::permission_gate::ToolDecisionClassification::as_str,
                                     );
-                                    if let Some(u) = updated_input {
-                                        effective_input = u;
+                                        if let Some(u) = updated_input {
+                                            effective_input = u;
+                                        }
+                                        PermissionDecision::Allow
                                     }
-                                    PermissionDecision::Allow
-                                }
-                                traits::permission_gate::PermissionOutcome::Deny { reason } => {
-                                    // An ABORTED prompt is a distinct label: claude-code
-                                    // denies with `decisionReason: iYt` ("tool permission
-                                    // request aborted") when `signal.aborted`, and `eQ_`
-                                    // maps that `other` reason to "user_abort" (the
-                                    // interactive twin is the prompt's `case "cancelled"`
-                                    // → `source:{type:"user_abort"}`). The gate folds both
-                                    // into `Deny`, so the turn's cancel token — the same
-                                    // signal the stdio gate raced to produce this deny —
-                                    // is what separates them.
-                                    // Denial provenance: this arm keeps the
-                                    // `permission-rule` fallthrough, and that is
-                                    // CORRECT for the transport that can observe it.
-                                    // claude-code's `JMn` (binary offset 246277535)
-                                    // wraps a stdio `can_use_tool` result as
-                                    // `{...hostResult, decisionReason:{type:
-                                    // "permissionPromptTool", …}}`, PRESERVING the
-                                    // host's `behavior`. So a host deny reaches the
-                                    // kind classifier as `behavior === "deny"` with a
-                                    // `permissionPromptTool` reason — neither the
-                                    // `ask` branch nor the classifier branch — and
-                                    // falls through to `permission-rule`.
-                                    //
-                                    // `user-rejected` means `behavior === "ask"`,
-                                    // which is what the INTERACTIVE CLI prompt
-                                    // returns (hence `userFeedback: behavior==="ask"
-                                    // ? … : void 0` at offset 235412899). Real
-                                    // transcripts from an interactive session are
-                                    // therefore full of `user-rejected` — but
-                                    // `tool_result_meta` is emitted only by the
-                                    // stream-json transport, whose permission
-                                    // transport is the stdio gate. Do NOT stamp
-                                    // `user-rejected` here: this arm also covers
-                                    // transport failure and a dropped response
-                                    // channel, which claude-code maps to
-                                    // `{type:"other"}` ⇒ `permission-rule` too.
-                                    decision_otel_source =
-                                        if cancel.as_ref().is_some_and(|t| t.is_cancelled()) {
-                                            "user_abort"
+                                    traits::permission_gate::PermissionOutcome::AllowAuto {
+                                        updated_input,
+                                    } => {
+                                        if let Some(u) = updated_input {
+                                            effective_input = u;
+                                        }
+                                        if let Err(error) =
+                                            orch.perms.set_permission_mode("auto").await
+                                        {
+                                            tracing::warn!(
+                                                %error,
+                                                "permission prompt approved Auto mode but mode switch failed"
+                                            );
                                         } else {
-                                            "user_reject"
-                                        };
-                                    PermissionDecision::Deny { reason }
+                                            decision_otel_source = "user_temporary";
+                                        }
+                                        PermissionDecision::Allow
+                                    }
+                                    traits::permission_gate::PermissionOutcome::Deny { reason } => {
+                                        // An ABORTED prompt is a distinct label: claude-code
+                                        // denies with `decisionReason: iYt` ("tool permission
+                                        // request aborted") when `signal.aborted`, and `eQ_`
+                                        // maps that `other` reason to "user_abort" (the
+                                        // interactive twin is the prompt's `case "cancelled"`
+                                        // → `source:{type:"user_abort"}`). The gate folds both
+                                        // into `Deny`, so the turn's cancel token — the same
+                                        // signal the stdio gate raced to produce this deny —
+                                        // is what separates them.
+                                        // Denial provenance: this arm keeps the
+                                        // `permission-rule` fallthrough, and that is
+                                        // CORRECT for the transport that can observe it.
+                                        // claude-code's `JMn` (binary offset 246277535)
+                                        // wraps a stdio `can_use_tool` result as
+                                        // `{...hostResult, decisionReason:{type:
+                                        // "permissionPromptTool", …}}`, PRESERVING the
+                                        // host's `behavior`. So a host deny reaches the
+                                        // kind classifier as `behavior === "deny"` with a
+                                        // `permissionPromptTool` reason — neither the
+                                        // `ask` branch nor the classifier branch — and
+                                        // falls through to `permission-rule`.
+                                        //
+                                        // `user-rejected` means `behavior === "ask"`,
+                                        // which is what the INTERACTIVE CLI prompt
+                                        // returns (hence `userFeedback: behavior==="ask"
+                                        // ? … : void 0` at offset 235412899). Real
+                                        // transcripts from an interactive session are
+                                        // therefore full of `user-rejected` — but
+                                        // `tool_result_meta` is emitted only by the
+                                        // stream-json transport, whose permission
+                                        // transport is the stdio gate. Do NOT stamp
+                                        // `user-rejected` here: this arm also covers
+                                        // transport failure and a dropped response
+                                        // channel, which claude-code maps to
+                                        // `{type:"other"}` ⇒ `permission-rule` too.
+                                        decision_otel_source =
+                                            if cancel.as_ref().is_some_and(|t| t.is_cancelled()) {
+                                                "user_abort"
+                                            } else {
+                                                "user_reject"
+                                            };
+                                        PermissionDecision::Deny { reason }
+                                    }
                                 }
                             }
                         }
                     }
                 }
+            }
+        };
+        // The plan / hook / forced branches above intentionally use their
+        // existing gate entrypoints.  Apply the same tool-owned result after
+        // those branches so a tool-local DENY still binds and a protected ASK
+        // cannot be swallowed by an Allow/Auto/Bypass response.  A headless
+        // owner fails closed instead of handing a protected ask to a transport
+        // that might have no way to represent the prompt.
+        let decision = if !non_normal_permission_path {
+            decision
+        } else {
+            match &tool_permission_result {
+                permission::PermissionResult::Deny { explanation, .. } => match decision {
+                    PermissionDecision::Deny { .. } => decision,
+                    PermissionDecision::Allow => PermissionDecision::Deny {
+                        reason: explanation.as_deref().map_or_else(
+                            || format!("Permission to use {name} has been denied."),
+                            str::to_string,
+                        ),
+                    },
+                },
+                permission::PermissionResult::Ask { reason, .. } if tool_ask_is_protected => {
+                    if matches!(decision, PermissionDecision::Deny { .. }) {
+                        decision
+                    } else if !orch.config.interactive_permissions {
+                        PermissionDecision::Deny {
+                            reason: format!("Permission to use {name} has been denied."),
+                        }
+                    } else {
+                        let (decision_reason_type, decision_reason) =
+                            tool_ask_reason_context(reason);
+                        let ask_ctx = traits::permission_gate::PermissionCheckContext {
+                            tool_use_id: Some(tool_use_id.to_string()),
+                            requires_user_interaction,
+                            suppress_always_allow_rule: requires_user_interaction
+                                || restricted_protected_mutation,
+                            decision_reason_type,
+                            decision_reason,
+                            is_non_interactive_session: !orch.config.interactive_permissions,
+                            ..Default::default()
+                        };
+                        match orch
+                            .perms
+                            .ask_via_transport(name, &effective_input, &ask_ctx)
+                            .await
+                        {
+                            traits::permission_gate::PermissionOutcome::Allow {
+                                updated_input,
+                                ..
+                            } => {
+                                if let Some(updated) = updated_input {
+                                    effective_input = updated;
+                                }
+                                PermissionDecision::Allow
+                            }
+                            traits::permission_gate::PermissionOutcome::AllowAuto {
+                                updated_input,
+                            } => {
+                                if let Some(updated) = updated_input {
+                                    effective_input = updated;
+                                }
+                                PermissionDecision::Allow
+                            }
+                            traits::permission_gate::PermissionOutcome::Deny { reason } => {
+                                PermissionDecision::Deny { reason }
+                            }
+                        }
+                    }
+                }
+                _ => decision,
             }
         };
         // OTEL: record the RESOLVED tool-permission decision — the CC
@@ -7818,7 +7979,8 @@ mod tool_result_persistence_wiring_tests {
 mod tool_hook_wiring_tests {
     use crate::conversation::ConversationOrchestrator;
     use crate::test_support::{
-        noop_hook_executor, MockApiClient, MockOutputStream, StaticMemoryProvider,
+        noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate,
+        StaticMemoryProvider,
     };
     use crate::turn_loop::dispatch_tool_uses_tracked;
     use crate::OrchestratorConfig;
@@ -7830,11 +7992,13 @@ mod tool_hook_wiring_tests {
     use tool_api::context::ToolUseContext;
     use tool_api::progress::ToolProgressSender;
     use tool_api::registry::ToolRegistry;
+    use tool_api::tool_invoker_impl::RegistryToolInvoker;
     use tool_api::tool_trait::{
         CoercedInput, DescriptionOptions, PromptOptions, Tool, ToolCallResult, ToolError,
         ToolStaticContext, ValidationError,
     };
     use traits::permission_gate::{PermissionDecision, PermissionGate, PermissionResolution};
+    use traits::tool_invoker::{SubagentInvocationContext, ToolInvoker};
 
     /// A gate that RESOLVES to a plain allow (the `rule_source` under test) but
     /// whose prompt transport always denies — so "the ask reached the prompt" is
@@ -7860,12 +8024,37 @@ mod tool_hook_wiring_tests {
         }
     }
 
+    /// Injects the Read-side policy denial used by Workflow's scriptPath
+    /// permission check, while leaving the outer Workflow gate free to allow.
+    struct ReadDenyGate;
+
+    #[async_trait]
+    impl PermissionGate for ReadDenyGate {
+        async fn check(&self, _t: &str, _i: &Value) -> PermissionDecision {
+            PermissionDecision::Deny {
+                reason: "prompted-and-declined".into(),
+            }
+        }
+        async fn resolve_detailed(&self, _t: &str, _i: &Value) -> PermissionResolution {
+            PermissionResolution::Deny {
+                reason: "prompted-and-declined".into(),
+                source: traits::permission_gate::PermissionDecisionSource::Rule,
+                rule_source: Some("userSettings".into()),
+                decision_reason_type: Some("rule".into()),
+                decision_reason: None,
+                behavior_ask: false,
+                content_blocks: Vec::new(),
+            }
+        }
+    }
+
     /// A tool with a STRICT schema (so an un-coerced alias key is rejected), an
     /// optional `coerce_input` twin of Bash's `timeout_ms` rule, and an optional
     /// `check_permissions` ask. Records the input `call` actually received.
     struct SeamTool {
         coerce: bool,
         ask: bool,
+        mcp: bool,
         seen: Arc<Mutex<Vec<Value>>>,
     }
 
@@ -7886,6 +8075,9 @@ mod tool_hook_wiring_tests {
         }
         fn is_enabled(&self, _: &ToolStaticContext) -> bool {
             true
+        }
+        fn is_mcp(&self) -> bool {
+            self.mcp
         }
         fn max_result_size_chars(&self) -> usize {
             1024 * 1024
@@ -8012,6 +8204,7 @@ mod tool_hook_wiring_tests {
             SeamTool {
                 coerce: true,
                 ask: false,
+                mcp: false,
                 seen: Arc::new(Mutex::new(Vec::new())),
             },
             None,
@@ -8035,6 +8228,7 @@ mod tool_hook_wiring_tests {
             SeamTool {
                 coerce: false,
                 ask: false,
+                mcp: false,
                 seen: Arc::new(Mutex::new(Vec::new())),
             },
             None,
@@ -8055,6 +8249,7 @@ mod tool_hook_wiring_tests {
             SeamTool {
                 coerce: true,
                 ask: true,
+                mcp: false,
                 seen: Arc::new(Mutex::new(Vec::new())),
             },
             None,
@@ -8075,6 +8270,7 @@ mod tool_hook_wiring_tests {
             SeamTool {
                 coerce: true,
                 ask: false,
+                mcp: false,
                 seen: Arc::new(Mutex::new(Vec::new())),
             },
             None,
@@ -8093,6 +8289,7 @@ mod tool_hook_wiring_tests {
             SeamTool {
                 coerce: true,
                 ask: true,
+                mcp: false,
                 seen: Arc::new(Mutex::new(Vec::new())),
             },
             Some("userSettings"),
@@ -8100,5 +8297,101 @@ mod tool_hook_wiring_tests {
         .await;
         assert!(!text.contains("prompted-and-declined"), "got: {text}");
         assert_eq!(inputs.len(), 1, "a rule allow must bind over the tool ask");
+    }
+
+    /// MCP tool-owned ASK remains protected even when the outer policy
+    /// resolution is an explicit allow-rule.  The structured `is_mcp` marker,
+    /// not a wire-name prefix, selects this protected composition path.
+    #[tokio::test]
+    async fn mcp_tool_ask_overrides_explicit_allow_rule() {
+        let (text, inputs) = dispatch(
+            SeamTool {
+                coerce: true,
+                ask: true,
+                mcp: true,
+                seen: Arc::new(Mutex::new(Vec::new())),
+            },
+            Some("userSettings"),
+        )
+        .await;
+        assert!(text.contains("prompted-and-declined"), "got: {text}");
+        assert!(inputs.is_empty(), "an MCP ceiling ask must not be bypassed");
+    }
+
+    /// Workflow's `scriptPath` check is a tool-local Read permission.  It must
+    /// still run when the outer Workflow policy resolves to an explicit allow;
+    /// otherwise a denied Read would be rescued by the Workflow allow rule.
+    #[tokio::test]
+    async fn workflow_script_path_read_deny_overrides_outer_allow_rule() {
+        let mut registry = ToolRegistry::new();
+        registry.register_builtin(Arc::new(
+            tool_workflow::WorkflowTool::new(None).with_permission_gate(Arc::new(ReadDenyGate)),
+        ) as Arc<dyn Tool>);
+        let orch = ConversationOrchestrator::new(
+            OrchestratorConfig::default(),
+            Arc::new(MockApiClient::new(vec![])),
+            Arc::new(registry),
+            noop_hook_executor(),
+            Arc::new(PromptSpyGate {
+                rule_source: Some("userSettings".into()),
+            }),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            PathBuf::from("/tmp"),
+        );
+        let uses = vec![(
+            ToolUseId::new(),
+            "Workflow".to_string(),
+            json!({ "scriptPath": "denied.js" }),
+            None,
+        )];
+        let (results, ..) = dispatch_tool_uses_tracked(&orch, &uses, None)
+            .await
+            .expect("dispatch must surface a tool_result deny");
+        let ContentBlock::ToolResult {
+            content, is_error, ..
+        } = &results[0]
+        else {
+            panic!("expected a tool_result from Workflow permission denial");
+        };
+        assert!(*is_error);
+        assert!(content.contains("prompted-and-declined"), "got: {content}");
+    }
+
+    /// The same Workflow Read deny must bind on the subagent invoker.  The
+    /// production Workflow tool owns the nested Read check; the outer gate's
+    /// Allow cannot rescue it because tool-local permission is evaluated first.
+    #[tokio::test]
+    async fn workflow_script_path_read_deny_overrides_subagent_allow() {
+        let inner_gate = Arc::new(ReadDenyGate);
+        let workflow = tool_workflow::WorkflowTool::new(None).with_permission_gate(inner_gate);
+        let mut registry = ToolRegistry::new();
+        registry.register_builtin(Arc::new(workflow) as Arc<dyn Tool>);
+        let invoker =
+            RegistryToolInvoker::new(Arc::new(registry)).with_gate(Arc::new(NoOpPermissionGate));
+        let ctx = SubagentInvocationContext {
+            parent_agent_id: None,
+            agent_name: Some("researcher".into()),
+            team_name: Some("alpha".into()),
+            is_async: false,
+            is_non_interactive_session: false,
+            can_show_permission_prompts: true,
+            cwd: None,
+            tool_use_id: Some("toolu_workflow_subagent".into()),
+            depth: 0,
+            observer: None,
+            parent_model: None,
+            parent_model_profile: None,
+            mode_override: None,
+            request_source: None,
+            frozen_command_denies: Vec::new(),
+        };
+        let error = invoker
+            .invoke("Workflow", json!({ "scriptPath": "denied.js" }), ctx)
+            .await
+            .expect_err("nested Read denial must stop subagent Workflow");
+        assert!(
+            matches!(error, traits::tool_invoker::ToolInvokerError::Internal(ref reason) if reason == "prompted-and-declined")
+        );
     }
 }

@@ -72,6 +72,68 @@ final class LingxiCodeUITests: XCTestCase {
         XCTAssertEqual(input.value as? String, "keyboard draft")
     }
 
+    func testVoiceTapRequestsPermissionThenOpensListeningAndSettings() {
+        app.terminate()
+        app.resetAuthorizationStatus(for: .microphone)
+        app.launch()
+        XCTAssertTrue(chatSurface.waitForExistence(timeout: 12), app.debugDescription)
+
+        let voiceButton = app.buttons["composer.voice"]
+        XCTAssertTrue(voiceButton.waitForExistence(timeout: 5), app.debugDescription)
+        voiceButton.tap()
+
+        let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
+        var permissionPromptCount = 0
+        for _ in 0..<2 {
+            let alert = springboard.alerts.firstMatch
+            guard alert.waitForExistence(timeout: 5) else { break }
+            permissionPromptCount += 1
+            XCTAssertTrue(allowSystemPermission(in: alert), alert.debugDescription)
+            if app.staticTexts["正在聆听"].waitForExistence(timeout: 4) {
+                break
+            }
+        }
+
+        XCTAssertGreaterThan(permissionPromptCount, 0, springboard.debugDescription)
+        XCTAssertTrue(app.staticTexts["正在聆听"].waitForExistence(timeout: 8), app.debugDescription)
+        XCTAssertFalse(app.buttons["voice.configure"].exists, app.debugDescription)
+
+        let listeningScreenshot = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
+        listeningScreenshot.name = "Voice-Permission-Granted-Listening"
+        listeningScreenshot.lifetime = .keepAlways
+        add(listeningScreenshot)
+
+        app.buttons["voice.close"].tap()
+        openDrawer()
+        app.buttons["drawer.settings"].tap()
+        XCTAssertTrue(app.staticTexts["设置"].waitForExistence(timeout: 8), app.debugDescription)
+
+        let voiceSettings = app.buttons.matching(
+            NSPredicate(format: "label BEGINSWITH %@", "语音 TTS")
+        ).firstMatch
+        XCTAssertTrue(voiceSettings.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(waitUntilHittable(voiceSettings, timeout: 5), app.debugDescription)
+        voiceSettings.tap()
+
+        XCTAssertTrue(app.navigationBars["语音 TTS"].waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(app.staticTexts["听 · 语音识别"].exists, app.debugDescription)
+        XCTAssertTrue(app.staticTexts["说 · 语音合成"].exists, app.debugDescription)
+
+        let settingsTopScreenshot = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
+        settingsTopScreenshot.name = "Voice-Settings-Top"
+        settingsTopScreenshot.lifetime = .keepAlways
+        add(settingsTopScreenshot)
+
+        app.swipeUp()
+        app.swipeUp()
+        XCTAssertTrue(app.staticTexts["访问与可用性"].waitForExistence(timeout: 5), app.debugDescription)
+
+        let settingsAccessScreenshot = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
+        settingsAccessScreenshot.name = "Voice-Settings-Access"
+        settingsAccessScreenshot.lifetime = .keepAlways
+        add(settingsAccessScreenshot)
+    }
+
     func testComposerShowsUnconfiguredWhenNoProviderExists() {
         app.terminate()
         app.launchEnvironment["LINGXI_UI_TEST_PROVIDER_UNCONFIGURED"] = "1"
@@ -908,6 +970,20 @@ final class LingxiCodeUITests: XCTestCase {
             container.swipeUp()
         }
         return element.exists && element.isHittable
+    }
+
+    private func allowSystemPermission(in alert: XCUIElement) -> Bool {
+        for label in ["允许", "Allow", "好", "OK"] {
+            let button = alert.buttons[label]
+            if button.exists {
+                button.tap()
+                return true
+            }
+        }
+        let buttons = alert.buttons.allElementsBoundByIndex
+        guard let allowButton = buttons.last, buttons.count >= 2 else { return false }
+        allowButton.tap()
+        return true
     }
 
     /// A model can appear twice — once under 最近使用 and once under its own

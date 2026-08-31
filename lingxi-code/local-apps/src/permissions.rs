@@ -34,7 +34,7 @@ const MAX_PERMISSIONS_BYTES: u64 = 512 * 1024;
 ///   session's cwd IS that workspace; it is not the `./` doing the scoping.
 const LOCAL_APP_WORKSPACE_PERMISSION_SETTINGS: &[u8] = include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/templates/vite-react-static-v1/.lingxi/settings.local.json"
+    "/assets/default-workspace-settings.local.json"
 ));
 
 fn default_grant_epoch() -> u64 {

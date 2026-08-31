@@ -46,16 +46,19 @@
 //! ## P1.5 — the §6.2 idempotent short-circuit
 //!
 //! A second startup whose digest has not changed must not re-decode
-//! `archive` and must not re-hash a single file. [`ensure_verified_builtin_root`]
+//! `archive`. It does re-hash the promoted files because they remain writable;
+//! accepting only their prior byte counts would trust same-length tampering.
+//! [`ensure_verified_builtin_root`]
 //! gets this from [`short_circuit_candidate`]: a previously-promoted root is
 //! trusted on sight ONLY when a sibling manifest ([`RootManifest`], written by
 //! [`write_manifest`] the moment a root is verified and promoted) still names
-//! this exact digest and every component the caller currently expects. Six
+//! this exact digest and every component the caller currently expects. Seven
 //! independent conditions can defeat it — a missing directory, a directory
 //! that is actually a symlink, a missing manifest, an empty or entry-short
 //! component list, a component whose recorded byte count or digest disagrees
-//! with what the caller declares, or a manifest whose marker field names a
-//! different digest — and each is tested in isolation below specifically so
+//! with what the caller declares, a file whose current bytes no longer hash to
+//! that digest, or a manifest whose marker field names a different digest — and
+//! each is tested in isolation below specifically so
 //! a check that quietly didn't exist could not hide behind a neighbor firing
 //! instead. Every defeat falls all the way through to the same full
 //! decode-and-verify path a first-ever materialization takes; nothing about
@@ -207,8 +210,13 @@ fn manifest_path(data_root: &Path, expected_digest: &str) -> PathBuf {
     data_root.join(format!("root-{expected_digest}.manifest.json"))
 }
 
+fn active_manifest_path(data_root: &Path) -> PathBuf {
+    data_root.join("active.manifest.json")
+}
+
 /// On-disk evidence a promoted root's manifest carries so a LATER call can
-/// trust it without re-decoding the archive or re-hashing any file. See
+/// trust it without re-decoding the archive. Current files are still re-hashed.
+/// See
 /// [`write_manifest`] (the write side, called only after a root is fully
 /// verified and promoted) and [`short_circuit_candidate`] (the read side,
 /// and the exhaustive enumeration of every way this evidence can fail to be
@@ -272,10 +280,105 @@ fn write_manifest(
         path: path.display().to_string(),
         detail: e.to_string(),
     })?;
-    std::fs::write(&path, json).map_err(|e| MaterializeError::Io {
+    atomic_write(&path, &json)
+}
+
+fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), MaterializeError> {
+    static WRITE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+    let parent = path.parent().ok_or_else(|| MaterializeError::Io {
         path: path.display().to_string(),
-        detail: e.to_string(),
-    })
+        detail: "path has no parent".to_string(),
+    })?;
+    std::fs::create_dir_all(parent).map_err(|error| MaterializeError::Io {
+        path: parent.display().to_string(),
+        detail: error.to_string(),
+    })?;
+    let sequence = WRITE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| MaterializeError::Io {
+            path: path.display().to_string(),
+            detail: "non-UTF-8 filename".to_string(),
+        })?;
+    let temp = path.with_file_name(format!(".{name}.tmp-{}-{sequence}", std::process::id()));
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
+    }
+    let result = (|| -> std::io::Result<()> {
+        use std::io::Write as _;
+        let mut file = options.open(&temp)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        std::fs::rename(&temp, path)?;
+        if let Ok(directory) = std::fs::File::open(parent) {
+            let _ = directory.sync_all();
+        }
+        Ok(())
+    })();
+    if let Err(error) = result {
+        let _ = std::fs::remove_file(&temp);
+        return Err(MaterializeError::Io {
+            path: path.display().to_string(),
+            detail: error.to_string(),
+        });
+    }
+    Ok(())
+}
+
+fn active_verified_bundle(data_root: &Path) -> Option<(PathBuf, Vec<PackedFile>)> {
+    let active_path = active_manifest_path(data_root);
+    if !std::fs::symlink_metadata(&active_path)
+        .ok()?
+        .file_type()
+        .is_file()
+    {
+        return None;
+    }
+    let manifest: RootManifest = serde_json::from_slice(&std::fs::read(active_path).ok()?).ok()?;
+    let digest = manifest.digest;
+    let inventory: Vec<PackedFile> = manifest
+        .components
+        .into_iter()
+        .map(|component| PackedFile {
+            path: component.path,
+            bytes: component.bytes,
+            sha256: component.sha256,
+        })
+        .collect();
+    if inventory.is_empty() {
+        return None;
+    }
+    let root = short_circuit_candidate(data_root, &digest, &inventory)?;
+    Some((root, inventory))
+}
+
+fn write_active_manifest(
+    data_root: &Path,
+    expected_digest: &str,
+    inventory: &[PackedFile],
+) -> Result<(), MaterializeError> {
+    let manifest = RootManifest {
+        digest: expected_digest.to_string(),
+        components: inventory
+            .iter()
+            .map(|entry| ManifestComponent {
+                path: entry.path.clone(),
+                bytes: entry.bytes,
+                sha256: entry.sha256.clone(),
+            })
+            .collect(),
+    };
+    let path = active_manifest_path(data_root);
+    let bytes = serde_json::to_vec(&manifest).map_err(|error| MaterializeError::Io {
+        path: path.display().to_string(),
+        detail: error.to_string(),
+    })?;
+    atomic_write(&path, &bytes)
 }
 
 /// A previously-promoted root this call can trust WITHOUT re-decoding
@@ -322,8 +425,17 @@ fn short_circuit_candidate(
         return None;
     }
 
-    // (3): the manifest sibling file must exist and parse as a manifest.
-    let manifest_bytes = std::fs::read(manifest_path(data_root, expected_digest)).ok()?;
+    // (3): the manifest sibling must be a real file (never a symlink) and
+    // parse as a manifest.
+    let manifest_file = manifest_path(data_root, expected_digest);
+    if !std::fs::symlink_metadata(&manifest_file)
+        .ok()?
+        .file_type()
+        .is_file()
+    {
+        return None;
+    }
+    let manifest_bytes = std::fs::read(manifest_file).ok()?;
     let manifest: RootManifest = serde_json::from_slice(&manifest_bytes).ok()?;
 
     // (4): the marker field.
@@ -350,7 +462,44 @@ fn short_circuit_candidate(
         }
     }
 
+    // The manifest proves what was verified at promotion time, but the promoted
+    // root remains writable by the owning process. Re-hash every declared file
+    // before trusting a cached root: type/length checks alone accept a
+    // same-length replacement of a skill, agent, or workflow as verified code.
+    // This still avoids decoding and unpacking the embedded archive.
+    if !root_matches_inventory(&candidate, inventory, true) {
+        return None;
+    }
+
     Some(candidate)
+}
+
+fn root_matches_inventory(root: &Path, inventory: &[PackedFile], verify_hash: bool) -> bool {
+    inventory.iter().all(|entry| {
+        let relative = Path::new(&entry.path);
+        let mut path = root.to_path_buf();
+        let components: Vec<_> = relative.components().collect();
+        for (index, component) in components.iter().enumerate() {
+            let Component::Normal(segment) = component else {
+                return false;
+            };
+            path.push(segment);
+            let Ok(metadata) = std::fs::symlink_metadata(&path) else {
+                return false;
+            };
+            if index + 1 == components.len() {
+                if !metadata.file_type().is_file() || metadata.len() != entry.bytes {
+                    return false;
+                }
+            } else if !metadata.file_type().is_dir() {
+                return false;
+            }
+        }
+        !verify_hash
+            || std::fs::read(&path)
+                .ok()
+                .is_some_and(|bytes| local_apps::sha256_hex(&bytes) == entry.sha256)
+    })
 }
 
 #[cfg(test)]
@@ -553,10 +702,10 @@ fn verify_records_against_inventory(
 ///    leaving the staging directory (with exactly `n` files in it) orphaned
 ///    on disk — nothing below ever renames it, so it is never mistaken for a
 ///    promoted root.
-/// 4. If the digest-named final path is ALREADY a directory, keep it and
-///    discard the staging copy — never destroy a verified root to re-promote
-///    an identical one. Otherwise atomically `rename` the complete staging
-///    directory onto that path.
+/// 4. If the digest-named final path already contains the fully verified
+///    inventory, keep it and discard the staging copy. If it is corrupt or
+///    has the wrong type, quarantine it and atomically promote the verified
+///    staging copy, restoring the old path if promotion fails.
 fn materialize_new_root_with_fault_injection(
     data_root: &Path,
     archive: &[u8],
@@ -619,10 +768,10 @@ fn materialize_new_root_with_fault_injection(
     }
 
     let final_root = promoted_root_path(data_root, expected_digest);
-    if final_root.is_dir() {
-        // Already promoted AT THIS EXACT DIGEST. The promoted path is
-        // digest-named, so a directory sitting here holds, by construction,
-        // the same verified content this call just staged. DESTROYING it in
+    if std::fs::symlink_metadata(&final_root).is_ok() {
+        // A path already occupies this digest address. Verify it before
+        // reuse: a stale manifest, partial external deletion, or a symlink
+        // must not make arbitrary bytes trusted. DESTROYING a valid root in
         // order to re-promote (`remove_dir_all` followed by `rename`, the
         // obvious implementation) would open exactly the window §19.2
         // forbids: a crash between the remove and the rename leaves NO root
@@ -633,11 +782,41 @@ fn materialize_new_root_with_fault_injection(
         // hypothetical. The existing root is therefore kept untouched and
         // the now-redundant staging directory is discarded instead.
         //
-        // (Re-VERIFYING an already-promoted root's on-disk bytes, and
-        // repairing it if they drifted, is §6.2's short-circuit concern and
-        // explicitly later work. The contract this branch owes is narrower
-        // and absolute: promotion never destroys a verified root.)
-        let _ = std::fs::remove_dir_all(&staging);
+        // Invalid content takes the separate quarantine/promote/rollback
+        // branch below, so repair also never leaves the destination absent.
+        if std::fs::symlink_metadata(&final_root)
+            .ok()
+            .is_some_and(|metadata| metadata.file_type().is_dir())
+            && root_matches_inventory(&final_root, inventory, true)
+        {
+            let _ = std::fs::remove_dir_all(&staging);
+            write_manifest(data_root, expected_digest, inventory)?;
+            return Ok(final_root);
+        }
+
+        // The digest-named path exists but is not the verified content we just
+        // staged. Move it aside first; if promote fails, put it back so this
+        // repair attempt does not make the on-disk state worse.
+        let quarantined = data_root.join(format!(
+            ".invalid-{expected_digest}-{}",
+            staging_dir_name(expected_digest)
+        ));
+        std::fs::rename(&final_root, &quarantined).map_err(|e| MaterializeError::Io {
+            path: final_root.display().to_string(),
+            detail: e.to_string(),
+        })?;
+        if let Err(error) = std::fs::rename(&staging, &final_root) {
+            let _ = std::fs::rename(&quarantined, &final_root);
+            return Err(MaterializeError::Io {
+                path: final_root.display().to_string(),
+                detail: error.to_string(),
+            });
+        }
+        if quarantined.is_dir() {
+            let _ = std::fs::remove_dir_all(&quarantined);
+        } else {
+            let _ = std::fs::remove_file(&quarantined);
+        }
         write_manifest(data_root, expected_digest, inventory)?;
         return Ok(final_root);
     }
@@ -714,8 +893,9 @@ pub(crate) fn ensure_verified_builtin_root_with_fault_injection(
 ) -> Result<PathBuf, BuiltinBundleError> {
     // P1.5 (§6.2 short-circuit): a previously-promoted root whose on-disk
     // manifest still names this exact digest and every component the caller
-    // currently expects is returned immediately — `archive` is never decoded
-    // and no file is re-hashed. See `short_circuit_candidate` for the full
+    // currently expects is returned immediately — `archive` is never decoded,
+    // while each writable promoted file is re-hashed. See
+    // `short_circuit_candidate` for the full
     // set of conditions that must ALL hold for this to fire.
     if let Some(root) = short_circuit_candidate(data_root, expected_digest, inventory) {
         return Ok(root);
@@ -735,6 +915,103 @@ pub(crate) fn ensure_verified_builtin_root_with_fault_injection(
                 err.to_string(),
             )),
         },
+    }
+}
+
+// P1.10 (§6.1/§6.2): `build.rs` runs `local_apps::pack` against the checked-in
+// `builtin-plugin-inventory.txt`, and Cargo embeds its deterministic archive
+// and descriptor here. Runtime boot must consume these constants directly:
+// rebuilding a scratch source tree and re-running the packer on every launch
+// would make the cached-root fast path pay a full read/sort/hash pass before it
+// even reached `short_circuit_candidate`.
+include!(concat!(env!("OUT_DIR"), "/lingxi-local-app-descriptor.rs"));
+const COMPILED_PLUGIN_ARCHIVE: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/lingxi-local-app.bundle"));
+
+/// Digest of the exact Plugin archive used by Host template selections.
+/// Keeping this accessor beside the generated descriptor prevents callers
+/// from re-packing the source tree (and accidentally selecting a different
+/// bundle identity than the PluginManager registered).
+pub(crate) fn compiled_plugin_bundle_digest() -> &'static str {
+    COMPILED_PLUGIN_ARCHIVE_DIGEST
+}
+
+/// Return the byte-exact catalog emitted from the verified Plugin inventory.
+/// Host consumers must read Plugin data through this bundle seam instead of
+/// adding another `include_bytes!`/`include_str!` source tree, otherwise the
+/// runtime can accidentally validate bytes that differ from the archive
+/// identity it reports to downstream agents.
+pub(crate) fn compiled_plugin_catalog_bytes() -> &'static [u8] {
+    COMPILED_PLUGIN_CATALOG_BYTES
+}
+
+fn compiled_in_plugin_inventory() -> Vec<PackedFile> {
+    COMPILED_PLUGIN_INVENTORY
+        .iter()
+        .map(|(path, bytes, sha256)| PackedFile {
+            path: (*path).to_string(),
+            bytes: *bytes,
+            sha256: (*sha256).to_string(),
+        })
+        .collect()
+}
+
+/// Names of the skills in the build-time verified Plugin inventory. This is
+/// the scanner/test seam for Phase 2: it derives names from the exact archive
+/// descriptor instead of recreating a mobile bundled skill list.
+pub(crate) fn compiled_plugin_skill_names() -> Vec<String> {
+    COMPILED_PLUGIN_INVENTORY
+        .iter()
+        .filter_map(|(path, _, _)| {
+            path.strip_prefix("skills/")
+                .and_then(|rest| rest.strip_suffix("/SKILL.md"))
+                .map(str::to_owned)
+        })
+        .collect()
+}
+
+/// Materialize the build-time packed plugin archive to a verified root. The
+/// returned inventory is the descriptor generated from the exact packer
+/// output, so component classification cannot drift from the archive bytes.
+///
+/// # Errors
+/// [`BuiltinBundleError::BuiltinBundleUnavailable`] if staging the embedded
+/// source fails, if `local_apps::pack` rejects the (fixed, compiled-in) file
+/// set, or if materialization itself fails with no usable
+/// `previous_verified_root` to fall back to — never a panic.
+pub fn materialize_compiled_in_plugin_bundle(
+    bundle_root: &Path,
+    previous_verified_root: Option<&Path>,
+) -> Result<(PathBuf, Vec<PackedFile>), BuiltinBundleError> {
+    let inventory = compiled_in_plugin_inventory();
+    let materialized_root = bundle_root.join("materialized");
+    let active = active_verified_bundle(&materialized_root);
+    let fallback_root = previous_verified_root
+        .map(Path::to_path_buf)
+        .or_else(|| active.as_ref().map(|(root, _)| root.clone()));
+    let root = ensure_verified_builtin_root(
+        &materialized_root,
+        COMPILED_PLUGIN_ARCHIVE,
+        COMPILED_PLUGIN_ARCHIVE_DIGEST,
+        &inventory,
+        fallback_root.as_deref(),
+    )?;
+    let current_root = promoted_root_path(&materialized_root, COMPILED_PLUGIN_ARCHIVE_DIGEST);
+    if root == current_root {
+        write_active_manifest(
+            &materialized_root,
+            COMPILED_PLUGIN_ARCHIVE_DIGEST,
+            &inventory,
+        )
+        .map_err(|error| BuiltinBundleError::BuiltinBundleUnavailable(error.to_string()))?;
+        Ok((root, inventory))
+    } else if let Some((active_root, active_inventory)) = active {
+        if root == active_root {
+            return Ok((root, active_inventory));
+        }
+        Ok((root, inventory))
+    } else {
+        Ok((root, inventory))
     }
 }
 
@@ -1556,21 +1833,13 @@ mod tests {
     }
 
     /// The §6.2 short-circuit's core promise: a second `ensure_verified_
-    /// builtin_root` call for a digest that has not changed must not unpack
-    /// anything and must not re-verify a single file. "It returned `Ok`"
+    /// builtin_root` call for a digest that has not changed must not decode or
+    /// unpack the archive. It does re-hash the promoted files, because cached
+    /// executable Plugin content remains writable. "It returned `Ok`"
     /// cannot by itself prove that — a full re-verification that happens to
     /// land on the existing-root keep branch (`materialize_new_root_with_
     /// fault_injection`'s `final_root.is_dir()` check) ALSO returns `Ok`
     /// with the same root path.
-    ///
-    /// Nor can "a file mutated under the promoted root survived". That
-    /// observable is VACUOUS here and is deliberately not asserted as a skip
-    /// proof below: a re-verification pass decodes the archive into a fresh
-    /// staging directory and then takes the keep branch, which never writes
-    /// into the already-promoted directory at all — so the mutation survives
-    /// on BOTH paths. (Measured, not assumed: disabling the short-circuit
-    /// call site outright and neutralising only the counter assertion left
-    /// this test GREEN.)
     ///
     /// Two observables that are genuinely decisive are used instead:
     ///
@@ -1649,12 +1918,6 @@ mod tests {
             other => panic!("probe is inert: a garbage archive was not rejected, got {other:?}"),
         }
 
-        // A skip never repairs the promoted root either — §6.2 trades
-        // re-verification away deliberately. Recorded here as the documented
-        // consequence it is, NOT as evidence of skipping (see the doc
-        // comment: this survives a re-verification too).
-        fs::write(first.join("plugin.json"), b"TAMPERED-BY-TEST").unwrap();
-
         let attempts_before = full_materialize_attempts();
         let second = ensure_verified_builtin_root(
             data_root.path(),
@@ -1679,9 +1942,36 @@ mod tests {
         );
         assert_eq!(
             fs::read(first.join("plugin.json")).unwrap(),
-            b"TAMPERED-BY-TEST",
-            "the skip returns the existing root as-is; it does not re-unpack over it"
+            br#"{"variant":1}"#,
+            "the verified cached root must remain byte-identical"
         );
+
+        // A same-length content replacement must defeat the cache evidence and
+        // be repaired from the trusted embedded archive. This is the case a
+        // type/length-only cache check silently accepted.
+        let same_length_tamper = br#"{"variant":9}"#;
+        assert_eq!(same_length_tamper.len(), br#"{"variant":1}"#.len());
+        fs::write(first.join("plugin.json"), same_length_tamper).unwrap();
+        assert_eq!(
+            short_circuit_candidate(data_root.path(), &packed.archive_digest, &packed.inventory),
+            None,
+            "same-length tampering must invalidate the verified-root cache"
+        );
+        let attempts_before_repair = full_materialize_attempts();
+        let repaired = ensure_verified_builtin_root(
+            data_root.path(),
+            &packed.archive,
+            &packed.archive_digest,
+            &packed.inventory,
+            None,
+        )
+        .expect("the embedded archive must repair a same-length replacement");
+        assert_eq!(repaired, first);
+        assert_eq!(
+            fs::read(first.join("plugin.json")).unwrap(),
+            br#"{"variant":1}"#
+        );
+        assert_eq!(full_materialize_attempts(), attempts_before_repair + 1);
 
         // The required inverse: a DIFFERENT archive must NOT be served from
         // the first archive's cached evidence.
@@ -1718,6 +2008,44 @@ mod tests {
             br#"{"variant":2}"#,
             "the second archive's own content must actually have been unpacked"
         );
+    }
+
+    #[test]
+    fn missing_cached_component_is_repaired_from_the_embedded_archive() {
+        let source = tempfile::tempdir().unwrap();
+        let inventory = variant_fixture(source.path(), 1);
+        let packed = pack(source.path(), &inventory).unwrap();
+        let data_root = tempfile::tempdir().unwrap();
+
+        let root = ensure_verified_builtin_root(
+            data_root.path(),
+            &packed.archive,
+            &packed.archive_digest,
+            &packed.inventory,
+            None,
+        )
+        .unwrap();
+        let missing = root.join("skills/router.md");
+        let expected = fs::read(&missing).unwrap();
+        fs::remove_file(&missing).unwrap();
+        assert_eq!(
+            short_circuit_candidate(data_root.path(), &packed.archive_digest, &packed.inventory),
+            None,
+            "a manifest cannot make a missing component trusted"
+        );
+
+        let attempts_before = full_materialize_attempts();
+        let repaired = ensure_verified_builtin_root(
+            data_root.path(),
+            &packed.archive,
+            &packed.archive_digest,
+            &packed.inventory,
+            None,
+        )
+        .expect("the archive must replace a corrupt digest-addressed root");
+        assert_eq!(repaired, root);
+        assert_eq!(fs::read(missing).unwrap(), expected);
+        assert_eq!(full_materialize_attempts(), attempts_before + 1);
     }
 
     /// One of §6.2's five INDEPENDENT defeat conditions: the manifest's
@@ -2201,6 +2529,97 @@ mod tests {
             None,
             "a symlink at the promoted-root path must never be trusted, even when it \
              resolves to genuinely valid content"
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // P1.10 — wiring the packer + this materializer for the compiled-in
+    // plugin bundle.
+    // -----------------------------------------------------------------
+
+    /// [`materialize_compiled_in_plugin_bundle`] must produce a root holding
+    /// the REAL, build-time packed `plugins/lingxi-local-app/` content — named
+    /// files, not merely a non-zero count — and the returned inventory must
+    /// equal the generated descriptor exactly.
+    #[test]
+    fn compiled_in_plugin_bundle_materializes_the_real_plugin_files() {
+        let bundle_root = tempfile::tempdir().unwrap();
+        let (root, inventory) = materialize_compiled_in_plugin_bundle(bundle_root.path(), None)
+            .expect("the compiled-in plugin bundle must materialize");
+
+        assert_eq!(
+            inventory.len(),
+            COMPILED_PLUGIN_INVENTORY.len(),
+            "the resolved inventory must name every compiled file exactly once"
+        );
+        for (path, _, _) in COMPILED_PLUGIN_INVENTORY {
+            assert!(
+                inventory.iter().any(|entry| entry.path == *path),
+                "{path} is compiled in but missing from the resolved inventory"
+            );
+        }
+
+        // Name a specific real file's real content — not just "some file
+        // exists" — at the VERIFIED root the function returned.
+        let device_skill = fs::read_to_string(root.join("skills/device/SKILL.md"))
+            .expect("skills/device/SKILL.md must be materialized on disk at the verified root");
+        let real_skill_marker = ["window", ".", "lingxi", ".v2"].concat();
+        assert!(
+            device_skill.contains(&real_skill_marker),
+            "the materialized skill file must be the real repository content, got: {device_skill}"
+        );
+        let builder_agent = fs::read_to_string(root.join("agents/builder.md"))
+            .expect("agents/builder.md must be materialized on disk at the verified root");
+        assert!(
+            builder_agent.contains("name: builder"),
+            "the materialized agent file must be the real repository content, got: {builder_agent}"
+        );
+    }
+
+    /// A second call against the SAME `bundle_root` must be the §6.2
+    /// short-circuit — recognizing the unchanged compiled-in digest — not a
+    /// second decode + verify. The pack already happened in `build.rs`, so
+    /// runtime cannot accidentally restage or repack the source tree first.
+    #[test]
+    fn compiled_in_plugin_bundle_is_idempotent_across_calls() {
+        let bundle_root = tempfile::tempdir().unwrap();
+        let (first_root, first_inventory) =
+            materialize_compiled_in_plugin_bundle(bundle_root.path(), None)
+                .expect("first materialization must succeed");
+
+        let attempts_before = full_materialize_attempts();
+        let (second_root, second_inventory) =
+            materialize_compiled_in_plugin_bundle(bundle_root.path(), None)
+                .expect("second materialization must succeed");
+
+        assert_eq!(
+            first_root, second_root,
+            "the same compiled-in bundle must resolve to the same verified root"
+        );
+        assert_eq!(first_inventory, second_inventory);
+        assert_eq!(
+            full_materialize_attempts(),
+            attempts_before,
+            "an unchanged compiled-in digest must not re-enter the decode/verify path"
+        );
+    }
+
+    #[test]
+    fn compiled_bundle_records_a_restart_visible_verified_fallback() {
+        let bundle_root = tempfile::tempdir().unwrap();
+        let (root, inventory) = materialize_compiled_in_plugin_bundle(bundle_root.path(), None)
+            .expect("initial compiled bundle materialization");
+
+        let active = active_verified_bundle(&bundle_root.path().join("materialized"))
+            .expect("production restart must discover the last verified root without an argument");
+        assert_eq!(active.0, root);
+        assert_eq!(active.1, inventory);
+
+        fs::remove_file(root.join(&inventory[0].path)).unwrap();
+        assert_eq!(
+            active_verified_bundle(&bundle_root.path().join("materialized")),
+            None,
+            "a stale active pointer must not turn a damaged previous root into a fallback"
         );
     }
 }

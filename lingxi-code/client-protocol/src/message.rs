@@ -10,7 +10,6 @@
 
 use serde::{Deserialize, Serialize};
 
-
 /// A complete conversation message — a role plus an ordered list of content
 /// blocks. Reproduces the assistant message a turn produced (or a resumed
 /// scrollback entry).

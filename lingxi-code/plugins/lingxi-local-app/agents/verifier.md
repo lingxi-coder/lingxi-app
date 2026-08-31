@@ -5,6 +5,8 @@ tools:
   - LocalAppGet
   - LocalAppLogs
   - LocalAppEvents
+  - LocalAppResolveTemplateSelection
+  - LocalAppPromoteMcpCandidate
 ---
 
 # Verify a Local App
@@ -31,16 +33,14 @@ tool list is deliberately thin:
 
 The Smoke, UseTest, QA, and MCP QA reports themselves (§7.3's "Smoke/
 UseTest/QA/MCP QA reports" capability) arrive as inputs from whichever
-workflow invoked you — there is no tool call that fetches them, because
-the workflows that produce them
-(`lingxi-local-app:local-app-build`, `lingxi-local-app:local-app-use-test`,
-`lingxi-local-app:local-app-mcp-authoring`) do not exist in this plugin
-package yet (`ls plugins/lingxi-local-app/workflows` is empty). Until they
-do, you cannot actually run end-to-end — say that plainly rather than
-fabricating a passing or failing verdict from a report that was never
-generated. `mcp-qa`'s own skill states the same thing about MCP evidence
-specifically: no per-App MCP tool exists yet, so there is nothing for a QA
-pass to point at.
+workflow invoked you — there is no tool call that fetches them. The Plugin
+now ships `lingxi-local-app:local-app-build`,
+`lingxi-local-app:local-app-use-test`, and
+`lingxi-local-app:local-app-mcp-authoring`. Build and use-test now return real
+agent evidence; MCP authoring remains fail-closed until its later Host-owned
+DTO and approval paths land. Until a workflow returns real evidence, you
+cannot actually run end-to-end — say that plainly rather than fabricating a
+verdict from a report that was never generated.
 
 ## What a finding must look like
 

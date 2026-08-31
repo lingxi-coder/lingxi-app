@@ -79,6 +79,8 @@ impl std::fmt::Display for AppRuntimeProfileStatus {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct BuildProvenance {
     version: u8,
+    #[serde(rename = "buildId")]
+    build_id: String,
     #[serde(rename = "buildKey")]
     build_key: String,
     #[serde(rename = "runtimeContractSha256")]
@@ -1446,6 +1448,7 @@ fn write_build_provenance(
     let temp = parent.join(format!(".{BUILD_PROVENANCE_FILE}.tmp-{}", now_stamp()));
     let body = serde_json::to_vec_pretty(&BuildProvenance {
         version: BUILD_PROVENANCE_VERSION,
+        build_id: output_sha256.to_string(),
         build_key: build_key.to_string(),
         runtime_contract_sha256: runtime_contract_sha256.to_string(),
         dependency_snapshot_sha256: dependency_snapshot_sha256.to_string(),
@@ -1458,6 +1461,27 @@ fn write_build_provenance(
         let _ = std::fs::remove_file(&temp);
         AppError::Io(format!("publish build provenance: {error}"))
     })
+}
+
+pub(crate) fn active_build_id(layout: &AppLayout) -> Result<Option<String>, AppError> {
+    let build_root = layout.root().join(layout.build_rel(false));
+    let provenance_path = build_provenance_path(&build_root);
+    let body = match std::fs::read_to_string(&provenance_path) {
+        Ok(body) => body,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(AppError::Io(format!("read build receipt: {error}")));
+        }
+    };
+    let provenance: BuildProvenance = serde_json::from_str(&body).map_err(|error| {
+        AppError::StorageCorrupt(format!(
+            "runtime_contract_corrupt: invalid build receipt: {error}"
+        ))
+    })?;
+    if provenance.version != BUILD_PROVENANCE_VERSION {
+        return Ok(None);
+    }
+    Ok(Some(provenance.build_id))
 }
 
 /// Validate only the immutable launch identity and promoted output. This gate
@@ -4152,7 +4176,7 @@ mod tests {
     fn the_locked_bridge_exposes_the_native_wire_contract() {
         let bridge = include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../local-apps/templates/runtime-profiles/react-dom/r1/lib/lingxi-bridge.js"
+            "/../../plugins/lingxi-local-app/assets/templates/react-dom/r1/lib/lingxi-bridge.js"
         ));
         for anchor in [
             "records[].document",
@@ -4205,15 +4229,15 @@ mod tests {
     fn platform_adapter_declares_distinct_phone_and_tablet_presentations() {
         let adapter = include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../local-apps/templates/runtime-profiles/react-dom/r1/lib/platform-adapter.js"
+            "/../../plugins/lingxi-local-app/assets/templates/react-dom/r1/lib/platform-adapter.js"
         ));
         let foundation = include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../local-apps/templates/runtime-profiles/react-dom/r1/styles/foundation.css"
+            "/../../plugins/lingxi-local-app/assets/templates/react-dom/r1/styles/foundation.css"
         ));
         let vite_config = include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../local-apps/templates/runtime-profiles/react-dom/r1/vite.config.mjs"
+            "/../../plugins/lingxi-local-app/assets/templates/react-dom/r1/vite.config.mjs"
         ));
         for marker in [
             "ios:iphone",

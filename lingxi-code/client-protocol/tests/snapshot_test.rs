@@ -634,7 +634,7 @@ fn event_goldens() -> Vec<(&'static str, ClientEvent)> {
             "event/app_workflow_changed.json",
             ClientEvent::AppWorkflowChanged {
                 app_id: "habits-1a2b".to_string(),
-                state: AppWorkflowStateDto::Ready,
+                state: AppWorkflowStateDto::PublishedUnverified,
                 detail: None,
             },
         ),
@@ -1412,6 +1412,8 @@ fn permission_request_goldens() -> Vec<(&'static str, PermissionRequest)> {
                 },
                 worker: None,
                 owner: None,
+                suppress_always_allow_rule: false,
+                auto_mode_prompt: None,
             },
         ),
         (
@@ -1423,6 +1425,8 @@ fn permission_request_goldens() -> Vec<(&'static str, PermissionRequest)> {
                 },
                 worker: None,
                 owner: None,
+                suppress_always_allow_rule: false,
+                auto_mode_prompt: None,
             },
         ),
         (
@@ -1432,6 +1436,8 @@ fn permission_request_goldens() -> Vec<(&'static str, PermissionRequest)> {
                 kind: PermissionKindDto::BypassPermissionsMode,
                 worker: None,
                 owner: None,
+                suppress_always_allow_rule: false,
+                auto_mode_prompt: None,
             },
         ),
         (
@@ -1449,6 +1455,8 @@ fn permission_request_goldens() -> Vec<(&'static str, PermissionRequest)> {
                     team: None,
                 }),
                 owner: None,
+                suppress_always_allow_rule: false,
+                auto_mode_prompt: None,
             },
         ),
     ]

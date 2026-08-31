@@ -210,19 +210,217 @@ pub struct ServerCapabilitiesDto {
     pub experimental: std::collections::HashMap<String, Value>,
 }
 
+/// Per-tool permission policy declared alongside an MCP server's tool config.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum McpToolPermissionPolicy {
+    /// Grant an allow rule for the matched tool.
+    AlwaysAllow,
+    /// Force an ask rule for the matched tool.
+    AlwaysAsk,
+    /// Grant a deny rule for the matched tool.
+    AlwaysDeny,
+}
+
+impl McpToolPermissionPolicy {
+    /// Parse config-facing spellings, accepting both `allow` and `always_allow`.
+    #[must_use]
+    pub fn from_policy_str(value: &str) -> Option<Self> {
+        match value {
+            "allow" | "always_allow" => Some(Self::AlwaysAllow),
+            "ask" | "always_ask" => Some(Self::AlwaysAsk),
+            "deny" | "always_deny" => Some(Self::AlwaysDeny),
+            _ => None,
+        }
+    }
+
+    /// Return the stricter of two policy declarations (`deny` > `ask` > `allow`).
+    #[must_use]
+    pub fn strictest(self, other: Self) -> Self {
+        use McpToolPermissionPolicy::{AlwaysAllow, AlwaysAsk, AlwaysDeny};
+        match (self, other) {
+            (AlwaysDeny, _) | (_, AlwaysDeny) => AlwaysDeny,
+            (AlwaysAsk, _) | (_, AlwaysAsk) => AlwaysAsk,
+            (AlwaysAllow, AlwaysAllow) => AlwaysAllow,
+        }
+    }
+}
+
+/// Tighten-only per-tool permission ceiling derived from host/org/server policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum McpPermissionCeiling {
+    /// Do not add any extra ceiling beyond the ordinary rule walk.
+    Allow,
+    /// Clamp the final result to an interactive ask at minimum.
+    Ask,
+    /// Clamp the final result to deny.
+    Deny,
+}
+
+impl McpPermissionCeiling {
+    /// Parse the config-facing `toolPermissions` / org-policy spellings.
+    #[must_use]
+    pub fn from_policy_str(value: &str) -> Option<Self> {
+        match value {
+            "allow" => Some(Self::Allow),
+            "ask" => Some(Self::Ask),
+            "blocked" | "deny" => Some(Self::Deny),
+            _ => None,
+        }
+    }
+
+    /// Return the stricter of two ceilings (`deny` > `ask` > `allow`).
+    #[must_use]
+    pub fn strictest(self, other: Self) -> Self {
+        use McpPermissionCeiling::{Allow, Ask, Deny};
+        match (self, other) {
+            (Deny, _) | (_, Deny) => Deny,
+            (Ask, _) | (_, Ask) => Ask,
+            (Allow, Allow) => Allow,
+        }
+    }
+}
+
+/// Standard MCP icon descriptor for a tool.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpIconDto {
+    /// Verified icon source URI.
+    pub src: String,
+    /// Optional MIME type for the icon.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mime_type: Option<String>,
+    /// Declared size labels.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sizes: Vec<String>,
+    /// Optional theme discriminator.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub theme: Option<String>,
+}
+
+/// Optional MCP tool annotations.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpToolAnnotationsDto {
+    /// Optional user-facing title override.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    /// Whether the tool is host-proven read-only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub read_only_hint: Option<bool>,
+    /// Whether the tool may be destructive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub destructive_hint: Option<bool>,
+    /// Whether the host can prove the tool is idempotent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idempotent_hint: Option<bool>,
+    /// Whether the tool touches the outside world.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub open_world_hint: Option<bool>,
+}
+
+/// MCP task-support declaration for one tool.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum McpToolTaskSupportDto {
+    /// This tool does not participate in MCP Tasks.
+    Forbidden,
+    /// This tool may opt into MCP Tasks.
+    Optional,
+    /// This tool requires MCP Tasks.
+    Required,
+}
+
+/// Optional execution metadata for one tool.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpToolExecutionDto {
+    /// Declared MCP Tasks support level for this tool.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_support: Option<McpToolTaskSupportDto>,
+}
+
+/// Config-facing per-tool policy record carried outside the MCP wire `Tool`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct McpConfiguredToolPolicyDto {
+    /// Upstream raw tool name before `mcp__<server>__...` qualification.
+    pub name: String,
+    /// Optional producer-side permission rule declaration.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        alias = "permissionPolicy"
+    )]
+    pub permission_policy: Option<McpToolPermissionPolicy>,
+    /// Optional organization ceiling for this tool.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        alias = "orgMaxPermission"
+    )]
+    pub org_max_permission: Option<McpPermissionCeiling>,
+}
+
+/// Standard MCP 2025-11-25 `Tool` wire definition.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpToolDefinitionDto {
+    /// Raw tool name exposed by the server.
+    pub name: String,
+    /// Optional user-facing title.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    /// Optional user-facing description.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// Input JSON Schema.
+    pub input_schema: Value,
+    /// Optional structured output JSON Schema.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_schema: Option<Value>,
+    /// Optional derived annotations.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub annotations: Option<McpToolAnnotationsDto>,
+    /// Optional execution metadata.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution: Option<McpToolExecutionDto>,
+    /// Optional icon list.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub icons: Vec<McpIconDto>,
+    /// Opaque vendor metadata preserved byte-for-byte.
+    #[serde(rename = "_meta", default, skip_serializing_if = "Option::is_none")]
+    pub meta: Option<Value>,
+}
+
+impl McpToolDefinitionDto {
+    /// Construct a minimal wire `Tool` definition.
+    #[must_use]
+    pub fn new(name: impl Into<String>, input_schema: Value) -> Self {
+        Self {
+            name: name.into(),
+            title: None,
+            description: None,
+            input_schema,
+            output_schema: None,
+            annotations: None,
+            execution: None,
+            icons: Vec::new(),
+            meta: None,
+        }
+    }
+}
+
 /// One tool advertised by an MCP server.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct McpToolDto {
     /// Server name (logical, e.g. registry key).
     pub server_name: String,
-    /// Tool name as exposed by the server.
-    pub tool_name: String,
-    /// Human-readable description shown to the model.
-    pub description: String,
-    /// JSON-Schema for the tool's input.
-    pub input_schema: Value,
     /// Engine-side fully-qualified identifier (`mcp__<server>__<tool>`).
     pub full_name: String,
+    /// Standard MCP tool definition sent on the wire.
+    pub definition: McpToolDefinitionDto,
     /// Retrieval prefilter hint from `tool._meta['anthropic/searchHint']`
     /// (e.g. `"shell"`, `"editor"`). `None` when absent or when the server
     /// did not set `_meta`. Forwarded from [`mcp::client::ToolMeta`] per
@@ -235,6 +433,64 @@ pub struct McpToolDto {
     /// the `searchHint` matches. Forwarded from `client.ts:1779-1780`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub always_load: Option<bool>,
+    /// Tighten-only permission ceiling derived outside the MCP wire definition.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effective_max_permission: Option<McpPermissionCeiling>,
+}
+
+impl McpToolDto {
+    /// Construct one host-enriched advertised tool entry.
+    #[must_use]
+    pub fn new(
+        server_name: impl Into<String>,
+        full_name: impl Into<String>,
+        definition: McpToolDefinitionDto,
+    ) -> Self {
+        Self {
+            server_name: server_name.into(),
+            full_name: full_name.into(),
+            definition,
+            search_hint: None,
+            always_load: None,
+            effective_max_permission: None,
+        }
+    }
+
+    /// Raw tool name declared by the MCP server.
+    #[must_use]
+    pub fn tool_name(&self) -> &str {
+        &self.definition.name
+    }
+
+    /// Human-readable description, or the empty string when the server omitted it.
+    #[must_use]
+    pub fn description(&self) -> &str {
+        self.definition.description.as_deref().unwrap_or("")
+    }
+
+    /// Input JSON Schema.
+    #[must_use]
+    pub fn input_schema(&self) -> &Value {
+        &self.definition.input_schema
+    }
+
+    /// Output JSON Schema, when declared.
+    #[must_use]
+    pub fn output_schema(&self) -> Option<&Value> {
+        self.definition.output_schema.as_ref()
+    }
+
+    /// Whether the server marked the tool as requiring interaction.
+    #[must_use]
+    pub fn requires_user_interaction(&self) -> bool {
+        self.definition
+            .meta
+            .as_ref()
+            .and_then(Value::as_object)
+            .and_then(|meta| meta.get("anthropic/requiresUserInteraction"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+    }
 }
 
 /// One resource advertised by an MCP server.

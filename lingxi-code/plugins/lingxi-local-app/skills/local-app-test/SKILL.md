@@ -35,8 +35,8 @@ check it broke.
 ## Running it
 
 Invoke the use-test workflow through the `Workflow` tool, the same way
-`$create-local-app`'s build orchestration invokes `local-app-build` and
-`local-canvas-build` — `{"name": "local-app-use-test", "args": {"app_id":
+`$create-local-app`'s build orchestration invokes the unified
+`lingxi-local-app:local-app-build` workflow — `{"name": "lingxi-local-app:local-app-use-test", "args": {"app_id":
 "<id>", ...}}`. The workflow (per the plugin's frozen design, §11.3) takes
 the app id, a scope, and a scenario/quality policy; the host injects the
 app's own build and runtime-profile identity rather than trusting a

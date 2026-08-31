@@ -219,11 +219,13 @@ fn saved_workflow_candidates(cwd: &Path, name: &str) -> Vec<PathBuf> {
 /// intentionally independent of the resolved script body: a named built-in
 /// with an explicit script override still reports `built-in`, while the
 /// `scriptMatchesDefinition` flag controls telemetry redaction separately.
+/// Resolution order is saved (project, then user) > plugin > built-in.
 #[must_use]
-pub fn workflow_source_for_name(cwd: &Path, name: &str) -> Option<&'static str> {
-    if BUILTIN_WORKFLOWS.get(name).is_some() {
-        return Some("built-in");
-    }
+pub fn workflow_source_for_name(
+    cwd: &Path,
+    name: &str,
+    plugin_workflows: Option<&workflow::PluginWorkflowRegistry>,
+) -> Option<&'static str> {
     let project = cwd.join(branding::DOT_DIR).join("workflows");
     if WORKFLOW_EXTENSIONS
         .iter()
@@ -241,6 +243,12 @@ pub fn workflow_source_for_name(cwd: &Path, name: &str) -> Option<&'static str> 
     }) {
         return Some("userSettings");
     }
+    if plugin_workflows.is_some_and(|registry| registry.resolve(name).is_some()) {
+        return Some("plugin");
+    }
+    if BUILTIN_WORKFLOWS.get(name).is_some() {
+        return Some("built-in");
+    }
     None
 }
 
@@ -252,15 +260,15 @@ fn path_for_read(path: &Path) -> String {
 /// `scriptPath` over `name` over `script` (a named workflow must resolve before
 /// an optional inline body can override its source). `read` loads a file's contents
 /// (the host provides real I/O); `name` resolution looks first under the
-/// immutable built-ins, then the project saved-workflow directory
-/// (`.lingxi/workflows/<name>`), then the user config directory
-/// (`$LINGXI_CONFIG_DIR/workflows/<name>` or `~/.lingxi/workflows/<name>`) with
-/// common script extensions. Built-ins win before filesystem lookup so a
-/// project checkout cannot shadow bundled workflow code.
+/// project saved-workflow directory (`.lingxi/workflows/<name>`), then the user
+/// config directory (`$LINGXI_CONFIG_DIR/workflows/<name>` or
+/// `~/.lingxi/workflows/<name>`) with common script extensions, then a wired
+/// plugin workflow registry, and finally immutable built-ins.
 pub fn resolve_script_at<R>(
     cwd: &Path,
     spec: &WorkflowLaunchSpec,
     read: R,
+    plugin_workflows: Option<&workflow::PluginWorkflowRegistry>,
 ) -> Result<String, WorkflowLaunchError>
 where
     R: Fn(&str) -> std::io::Result<String>,
@@ -271,20 +279,26 @@ where
             .map_err(|e| WorkflowLaunchError(format!("cannot read scriptPath '{path}': {e}")));
     }
     if let Some(name) = nonempty(&spec.name) {
-        let named = if let Some(descriptor) = BUILTIN_WORKFLOWS.get(&name) {
-            descriptor.script.to_string()
-        } else {
-            let mut resolved = None;
-            for candidate in saved_workflow_candidates(cwd, &name) {
-                if let Ok(src) = read(&path_for_read(&candidate)) {
-                    resolved = Some(src);
-                    break;
-                }
+        let mut resolved = None;
+        for candidate in saved_workflow_candidates(cwd, &name) {
+            if let Ok(src) = read(&path_for_read(&candidate)) {
+                resolved = Some(src);
+                break;
             }
-            resolved.ok_or_else(|| {
-                WorkflowLaunchError(format!("Workflow \"{name}\" not found. Available: (none)"))
-            })?
-        };
+        }
+        if resolved.is_none() {
+            if let Some(plugin) = plugin_workflows.and_then(|registry| registry.resolve(&name)) {
+                resolved = Some(plugin.script);
+            }
+        }
+        if resolved.is_none() {
+            resolved = BUILTIN_WORKFLOWS
+                .get(&name)
+                .map(|descriptor| descriptor.script.to_string());
+        }
+        let named = resolved.ok_or_else(|| {
+            WorkflowLaunchError(format!("Workflow \"{name}\" not found. Available: (none)"))
+        })?;
         return Ok(nonempty(&spec.script).unwrap_or(named));
     }
     if let Some(script) = nonempty(&spec.script) {
@@ -301,7 +315,7 @@ pub fn resolve_script<R>(spec: &WorkflowLaunchSpec, read: R) -> Result<String, W
 where
     R: Fn(&str) -> std::io::Result<String>,
 {
-    resolve_script_at(Path::new(""), spec, read)
+    resolve_script_at(Path::new(""), spec, read, None)
 }
 
 /// Apply the configured local-app workflow model as a DEFAULT for the two
@@ -617,6 +631,12 @@ pub trait WorkflowLauncher: Send + Sync {
 #[derive(Clone)]
 pub struct WorkflowTool {
     launcher: Option<Arc<dyn WorkflowLauncher>>,
+    /// Live permission gate used to authorize a `scriptPath` as an equivalent
+    /// `Read` operation before the launcher is allowed to read it. Hosts that
+    /// do not have a live gate may provide the boot policy instead; the
+    /// no-policy fallback is an explicit `Ask`, never an unconditional allow.
+    permission_gate: Option<Arc<dyn traits::permission_gate::PermissionGate>>,
+    permission_policy: Option<Arc<permission::PermissionPolicy>>,
     /// Shared live session cwd. Desktop updates this after persistent-shell
     /// `cd`; mobile supplies a fixed cell. `None` falls back to process cwd for
     /// offline/surface-only registries.
@@ -643,6 +663,9 @@ pub struct WorkflowTool {
     /// Session-scoped dynamic-workflow gate (`pA()`): launch/runtime policy may
     /// leave Workflow installed but unavailable for this session.
     session_enabled: bool,
+    /// Shared live plugin workflow registry. It is optional so lightweight
+    /// hosts and unit tests retain the built-in/project/user behavior.
+    plugin_workflows: Option<Arc<workflow::PluginWorkflowRegistry>>,
 }
 
 impl WorkflowTool {
@@ -654,13 +677,61 @@ impl WorkflowTool {
     pub fn new(launcher: Option<Arc<dyn WorkflowLauncher>>) -> Self {
         Self {
             launcher,
+            permission_gate: None,
+            permission_policy: None,
             current_cwd: None,
             size_guideline: WorkflowSizeGuideline::default(),
             managed_disable_workflows: false,
             dynamic_workflows_gate: None,
             size_guideline_state: None,
             session_enabled: true,
+            plugin_workflows: None,
         }
+    }
+
+    /// Bind the session's live permission gate. `scriptPath` authorization is
+    /// sent to this gate as a `Read` request, so deny/ask decisions happen
+    /// before the launcher can read the file.
+    #[must_use]
+    pub fn with_permission_gate(
+        mut self,
+        gate: Arc<dyn traits::permission_gate::PermissionGate>,
+    ) -> Self {
+        self.permission_gate = Some(gate);
+        self
+    }
+
+    /// Bind the boot policy for hosts that have a policy but no interactive
+    /// gate. This preserves the existing permission engine's path and symlink
+    /// semantics without reimplementing canonicalization in this crate.
+    #[must_use]
+    pub fn with_permission_policy(mut self, policy: Arc<permission::PermissionPolicy>) -> Self {
+        self.permission_policy = Some(policy);
+        self
+    }
+
+    /// Share the live plugin-workflow registry with the host's plugin manager
+    /// and task resolver. All three readers must observe the same `Arc`.
+    #[must_use]
+    pub fn with_plugin_workflows(
+        mut self,
+        registry: Arc<workflow::PluginWorkflowRegistry>,
+    ) -> Self {
+        self.plugin_workflows = Some(registry);
+        self
+    }
+
+    /// Composition-test seam for asserting registry identity across the
+    /// manager, tool, launcher, and nested resolver.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn shares_plugin_workflows(
+        &self,
+        registry: &Arc<workflow::PluginWorkflowRegistry>,
+    ) -> bool {
+        self.plugin_workflows
+            .as_ref()
+            .is_some_and(|wired| Arc::ptr_eq(wired, registry))
     }
 
     /// Bind the same live cwd cell used by Bash and the orchestrator.
@@ -794,6 +865,86 @@ impl WorkflowTool {
         }
     }
 
+    /// Resolve a model-supplied script path against the live session cwd.
+    /// This is intentionally lexical only: symlink and containment behavior
+    /// belongs to the existing file/permission paths and must not be replaced
+    /// by a looser Workflow-specific canonicalization.
+    fn resolve_script_path_for_permission(&self, raw: &str) -> Result<PathBuf, String> {
+        if raw.starts_with("\\\\") {
+            return Err(format!(
+                "UNC paths are not allowed for workflow scriptPath: {raw}"
+            ));
+        }
+        if raw.contains('\0') {
+            return Err("workflow scriptPath contains a NUL character".into());
+        }
+        let path = Path::new(raw);
+        if path.as_os_str().is_empty() {
+            return Err("workflow scriptPath must not be empty".into());
+        }
+        Ok(if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            self.current_cwd().join(path)
+        })
+    }
+
+    fn script_path_permission_input(&self, raw: &str) -> Result<(PathBuf, Value), String> {
+        let path = self.resolve_script_path_for_permission(raw)?;
+        let wire = path.to_string_lossy().into_owned();
+        Ok((path, json!({ "file_path": wire })))
+    }
+
+    fn allow_script_path_permission(path: &Path) -> PermissionResult {
+        PermissionResult::Allow {
+            reason: PermissionDecisionReason::Other {
+                reason: format!(
+                    "Workflow scriptPath is authorized as Read: {}",
+                    path.display()
+                ),
+            },
+            updated_input: None,
+            update_destination: None,
+            metadata: PermissionMetadata {
+                blocked_path: Some(path.to_string_lossy().into_owned()),
+                ..PermissionMetadata::default()
+            },
+        }
+    }
+
+    fn deny_script_path_permission(path: &Path, reason: String) -> PermissionResult {
+        PermissionResult::Deny {
+            reason: PermissionDecisionReason::Other {
+                reason: reason.clone(),
+            },
+            explanation: Some(reason),
+            metadata: PermissionMetadata {
+                blocked_path: Some(path.to_string_lossy().into_owned()),
+                ..PermissionMetadata::default()
+            },
+        }
+    }
+
+    fn ask_script_path_permission(path: &Path) -> PermissionResult {
+        let wire = path.to_string_lossy().into_owned();
+        let message = format!("Workflow needs Read permission for scriptPath: {wire}");
+        PermissionResult::Ask {
+            reason: PermissionDecisionReason::Other {
+                reason: message.clone(),
+            },
+            prompt: permission::result::PermissionPrompt {
+                title: "Read workflow script".into(),
+                message,
+                options: Vec::new(),
+            },
+            pending_classifier_check: None,
+            metadata: PermissionMetadata {
+                blocked_path: Some(wire),
+                ..PermissionMetadata::default()
+            },
+        }
+    }
+
     /// List saved workflow names from project and user workflow directories.
     /// Returns a comma-joined string for the errorCode-1b message. Missing
     /// directories are ignored.
@@ -820,6 +971,9 @@ impl WorkflowTool {
                 }
                 Some(fname.into_owned())
             }));
+        }
+        if let Some(registry) = &self.plugin_workflows {
+            names.extend(registry.names());
         }
         if !saw_dir && names.is_empty() {
             return None;
@@ -871,18 +1025,71 @@ impl Tool for WorkflowTool {
         false
     }
 
-    async fn check_permissions(&self, _: &Value, _: &ToolUseContext) -> PermissionResult {
-        // The Workflow tool itself needs no permission gate — the subagents it
-        // spawns are individually permissioned (claude-code surfaces no
-        // `canUseTool` prompt for Workflow).
-        PermissionResult::Allow {
-            reason: PermissionDecisionReason::Other {
-                reason: "Workflow launch — spawned agents are individually permissioned".into(),
-            },
-            updated_input: None,
-            update_destination: None,
-            metadata: PermissionMetadata::default(),
+    async fn check_permissions(&self, input: &Value, ctx: &ToolUseContext) -> PermissionResult {
+        let Some(raw_path) = input
+            .get("scriptPath")
+            .and_then(Value::as_str)
+            .filter(|path| !path.is_empty())
+        else {
+            // Inline and named workflows do not read a caller-selected file at
+            // this boundary. Their launcher still validates the resolved bytes
+            // after the outer Workflow permission gate has completed.
+            return PermissionResult::Allow {
+                reason: PermissionDecisionReason::Other {
+                    reason: "Workflow launch — spawned agents are individually permissioned".into(),
+                },
+                updated_input: None,
+                update_destination: None,
+                metadata: PermissionMetadata::default(),
+            };
+        };
+
+        let (path, read_input) = match self.script_path_permission_input(raw_path) {
+            Ok(value) => value,
+            Err(reason) => {
+                return Self::deny_script_path_permission(Path::new(raw_path), reason);
+            }
+        };
+
+        // The gate is the live source of permission decisions, including
+        // updated rules and the interactive prompt transport. Ask it about the
+        // canonical file-read tool/input shape, not about Workflow, so a
+        // `Read(...)` rule has the same scope and symlink behavior as FileRead.
+        if let Some(gate) = &self.permission_gate {
+            let check_ctx = traits::permission_gate::PermissionCheckContext {
+                tool_use_id: ctx.tool_use_id.as_ref().map(|id| id.as_str().to_string()),
+                is_non_interactive_session: ctx.options.is_non_interactive_session,
+                ..Default::default()
+            };
+            return match gate
+                .resolve_detailed_or_abort("Read", &read_input, &check_ctx)
+                .await
+            {
+                Ok(traits::permission_gate::PermissionResolution::Allow { .. }) => {
+                    Self::allow_script_path_permission(&path)
+                }
+                Ok(traits::permission_gate::PermissionResolution::Deny { reason, .. })
+                | Err(traits::permission_gate::PermissionAbort { message: reason }) => {
+                    Self::deny_script_path_permission(&path, reason)
+                }
+                Ok(traits::permission_gate::PermissionResolution::Ask)
+                | Ok(traits::permission_gate::PermissionResolution::AskWithContext { .. }) => {
+                    Self::ask_script_path_permission(&path)
+                }
+            };
         }
+
+        // A boot policy is useful for hosts without an interactive/live gate.
+        // It is the same PermissionPolicy used by the file tools, so do not
+        // duplicate its rule matching or invent a Workflow-specific path walk.
+        if let Some(policy) = &self.permission_policy {
+            return policy.authorize("Read", &read_input);
+        }
+
+        // Missing wiring must fail closed. The outer dispatcher can surface
+        // this Ask through its normal permission transport; crucially, no
+        // script bytes have been read yet.
+        Self::ask_script_path_permission(&path)
     }
 
     async fn description(&self, _: &Value, _: &DescriptionOptions) -> String {
@@ -958,112 +1165,34 @@ impl Tool for WorkflowTool {
             ));
         }
 
-        // errorCode 1 — script resolution (sub-errors 1a–1f, byte-exact per §8.1)
-        // Reproduces the binary's D7a() resolution logic with exact error strings.
+        // errorCode 1 — selector/path shape. Content resolution is deliberately
+        // not part of validate_input: the dispatcher invokes this method before
+        // permission checks, so reading a caller-selected script here would
+        // bypass the `Read` policy and could leak file bytes/errors.
         let s = |k: &str| input.get(k).and_then(Value::as_str).map(str::to_string);
         let script_path = s("scriptPath").filter(|v| !v.is_empty());
         let script = s("script").filter(|v| !v.is_empty());
         let name = s("name").filter(|v| !v.is_empty());
 
-        // Resolved script text (for errorCode 2 and 4 checks below).
-        let resolved_script: String;
-
-        if let Some(ref path) = script_path {
-            // 1c — UNC path not allowed
-            if path.starts_with("\\\\") {
-                return Err(ValidationError(format!(
-                    "UNC paths are not allowed for workflow scriptPath: {path}"
-                )));
-            }
-            let input_path = Path::new(path);
-            let resolved_path = if input_path.is_absolute() {
-                input_path.to_path_buf()
-            } else {
-                self.current_cwd().join(input_path)
-            };
-            let resolved_path_wire = resolved_path.to_string_lossy();
-            // 1d / 1e / 1f — file read / not found / too large
-            match std::fs::read(&resolved_path) {
-                Ok(bytes) => {
-                    if bytes.len() > MAX_SCRIPT_BYTES {
-                        return Err(ValidationError(format!(
-                            "Workflow script file {resolved_path_wire} exceeds {MAX_SCRIPT_BYTES} bytes"
-                        )));
-                    }
-                    resolved_script = String::from_utf8_lossy(&bytes).into_owned();
-                }
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                    return Err(ValidationError(format!(
-                        "Workflow script file not found: {resolved_path_wire}"
-                    )));
-                }
-                Err(e) => {
-                    return Err(ValidationError(format!(
-                        "Failed to read workflow script file {resolved_path_wire}: {e}"
-                    )));
-                }
-            }
-        } else if let Some(ref wf_name) = name {
-            // Built-ins are immutable and must win before project/user files.
-            // Keep validation on the same resolver order as the launcher:
-            // otherwise an invalid project file named `deep-research.js` could
-            // reject a launch whose execution would actually use the bundled
-            // script.
-            if let Some(descriptor) = BUILTIN_WORKFLOWS.get(wf_name) {
-                resolved_script = script
-                    .clone()
-                    .unwrap_or_else(|| descriptor.script.to_string());
-            } else {
-                // Try to resolve from saved workflows (project first, then user).
-                let mut found: Option<String> = None;
-                for candidate in saved_workflow_candidates(&self.current_cwd(), wf_name) {
-                    match std::fs::read_to_string(&candidate) {
-                        Ok(src) => {
-                            found = Some(src);
-                            break;
-                        }
-                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
-                        Err(_) => continue,
-                    }
-                }
-                if let Some(src) = found {
-                    resolved_script = script.clone().unwrap_or(src);
-                } else {
-                    // 1b — workflow name not found; list available names
-                    let available: String =
-                        self.list_available_workflow_names().unwrap_or_default();
-                    let list = if available.is_empty() {
-                        "(none)".to_string()
-                    } else {
-                        available
-                    };
-                    return Err(ValidationError(format!(
-                        "Workflow \"{wf_name}\" not found. Available: {list}"
-                    )));
-                }
-            }
-        } else if let Some(ref inline) = script {
-            resolved_script = inline.clone();
-        } else {
+        if script_path.is_none() && script.is_none() && name.is_none() {
             // 1a — none of script/name/scriptPath provided
             return Err(ValidationError(
                 "Must provide script, name, scriptPath, or runId".into(),
             ));
         }
 
-        // errorCode 2 — parse/meta error (`Invalid workflow script: ${error}`)
-        // Mirrors binary's `Bw(n.script)` → `validate_meta`.
-        if let Err(e) = workflow::validate_meta(&resolved_script) {
-            return Err(ValidationError(format!("Invalid workflow script: {e}")));
-        }
-
-        // errorCode 4 — determinism violation (inline script only)
-        // Binary: `e.script && HKa(r.scriptBody)`. `e.script` is the RAW INLINE
-        // `script` field from the input — it is falsy when `name` or `scriptPath`
-        // is used. Only inline `script` input is checked; `name`-resolved saved
-        // workflows and `scriptPath`-sourced files skip this gate.
-        if script.is_some() {
-            if let Err(e) = workflow::check_determinism(&resolved_script) {
+        if let Some(path) = script_path {
+            // Path checks are lexical and therefore safe before authorization;
+            // in particular this does not stat/canonicalize/follow symlinks.
+            self.resolve_script_path_for_permission(&path)
+                .map_err(ValidationError)?;
+        } else if let Some(inline) = script {
+            // Inline content is already in the request and needs no filesystem
+            // access, so retain its existing meta/determinism checks here.
+            if let Err(e) = workflow::validate_meta(&inline) {
+                return Err(ValidationError(format!("Invalid workflow script: {e}")));
+            }
+            if let Err(e) = workflow::check_determinism(&inline) {
                 // The WorkflowError Display wraps the message; we want the raw
                 // NON_DETERMINISTIC_MESSAGE, which lives inside WorkflowError::Script.
                 use workflow::WorkflowError;
@@ -1072,6 +1201,14 @@ impl Tool for WorkflowTool {
                     WorkflowError::Engine(m) => m,
                 };
                 return Err(ValidationError(msg));
+            }
+        } else if let Some(name) = name {
+            // Named workflows are resolved and validated by the launcher after
+            // permission. Keep this branch intentionally I/O-free.
+            if name.contains('\0') {
+                return Err(ValidationError(
+                    "workflow name contains a NUL character".into(),
+                ));
             }
         }
 
@@ -1201,8 +1338,12 @@ impl Tool for WorkflowTool {
 /// model-facing surface is served but `call` errors; the composition root
 /// constructs [`WorkflowTool::new(Some(launcher))`] directly once the workflow
 /// task seam is available.
-pub fn register_all(reg: &mut tool_api::ToolRegistry, _ctx: tool_api::BuiltinToolContext) {
-    reg.register_builtin(Arc::new(WorkflowTool::new(None)));
+pub fn register_all(reg: &mut tool_api::ToolRegistry, ctx: tool_api::BuiltinToolContext) {
+    let mut tool = WorkflowTool::new(None).with_permission_policy(ctx.permission_policy);
+    if let Some(gate) = ctx.permission_gate {
+        tool = tool.with_permission_gate(gate);
+    }
+    reg.register_builtin(Arc::new(tool));
 }
 
 #[cfg(test)]
@@ -1240,6 +1381,79 @@ mod tests {
         WorkflowTool::new(launcher)
     }
 
+    struct RecordingPermissionGate {
+        calls: Arc<StdMutex<Vec<(String, Value)>>>,
+        decision: traits::permission_gate::PermissionDecision,
+    }
+
+    #[async_trait]
+    impl traits::permission_gate::PermissionGate for RecordingPermissionGate {
+        async fn check(
+            &self,
+            name: &str,
+            input: &Value,
+        ) -> traits::permission_gate::PermissionDecision {
+            self.calls
+                .lock()
+                .unwrap()
+                .push((name.to_string(), input.clone()));
+            self.decision.clone()
+        }
+    }
+
+    struct ContextAwarePermissionGate {
+        calls: Arc<StdMutex<Vec<(String, Value)>>>,
+        contexts: Arc<StdMutex<Vec<traits::permission_gate::PermissionCheckContext>>>,
+    }
+
+    #[async_trait]
+    impl traits::permission_gate::PermissionGate for ContextAwarePermissionGate {
+        async fn check(
+            &self,
+            _name: &str,
+            _input: &Value,
+        ) -> traits::permission_gate::PermissionDecision {
+            panic!("Workflow scriptPath must use resolve_detailed_or_abort")
+        }
+
+        async fn ask_via_transport(
+            &self,
+            _name: &str,
+            _input: &Value,
+            _ctx: &traits::permission_gate::PermissionCheckContext,
+        ) -> traits::permission_gate::PermissionOutcome {
+            panic!("Workflow scriptPath must not resolve nested Read asks via inner transport")
+        }
+
+        async fn resolve_detailed_or_abort(
+            &self,
+            name: &str,
+            input: &Value,
+            ctx: &traits::permission_gate::PermissionCheckContext,
+        ) -> Result<
+            traits::permission_gate::PermissionResolution,
+            traits::permission_gate::PermissionAbort,
+        > {
+            self.calls
+                .lock()
+                .unwrap()
+                .push((name.to_string(), input.clone()));
+            self.contexts.lock().unwrap().push(ctx.clone());
+            if ctx.is_non_interactive_session {
+                return Ok(traits::permission_gate::PermissionResolution::Deny {
+                    reason: permission::headless_gate::headless_deny_message(name),
+                    source: traits::permission_gate::PermissionDecisionSource::Unspecified,
+                    rule_source: None,
+                    decision_reason_type: None,
+                    decision_reason: None,
+                    behavior_ask: false,
+                    content_blocks: Vec::new(),
+                });
+            }
+            Ok(traits::permission_gate::PermissionResolution::Ask)
+        }
+    }
+
     fn unique_temp_path(label: &str) -> std::path::PathBuf {
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -1270,13 +1484,47 @@ mod tests {
     #[test]
     fn named_workflow_source_matches_claude_categories() {
         assert_eq!(
-            workflow_source_for_name(std::path::Path::new("."), "deep-research"),
+            workflow_source_for_name(std::path::Path::new("."), "deep-research", None),
             Some("built-in")
         );
         assert_eq!(
-            workflow_source_for_name(std::path::Path::new("."), "missing"),
+            workflow_source_for_name(std::path::Path::new("."), "missing", None),
             None
         );
+    }
+
+    #[test]
+    fn plugin_workflow_registry_reaches_resolver_and_source_telemetry() {
+        let cwd = unique_temp_path("plugin-resolver");
+        std::fs::create_dir_all(&cwd).expect("create resolver cwd");
+        let script_path = cwd.join("plugin-workflow.js");
+        std::fs::write(&script_path, VALID_SCRIPT).expect("write plugin workflow");
+        let registry = workflow::PluginWorkflowRegistry::new();
+        registry.register(
+            "plugin-a",
+            vec![workflow::PluginWorkflowEntry {
+                name: "acme:review".to_string(),
+                script_path: script_path.clone(),
+                script: VALID_SCRIPT.to_string(),
+            }],
+        );
+
+        let resolved = resolve_script_at(
+            &cwd,
+            &WorkflowLaunchSpec {
+                name: Some("acme:review".to_string()),
+                ..Default::default()
+            },
+            |path| std::fs::read_to_string(path),
+            Some(&registry),
+        )
+        .expect("plugin workflow name must resolve");
+        assert_eq!(resolved, VALID_SCRIPT);
+        assert_eq!(
+            workflow_source_for_name(&cwd, "acme:review", Some(&registry)),
+            Some("plugin")
+        );
+        let _ = std::fs::remove_dir_all(cwd);
     }
 
     #[test]
@@ -1346,7 +1594,7 @@ mod tests {
     }
 
     #[test]
-    fn builtin_name_cannot_be_shadowed_by_project_workflow() {
+    fn saved_workflow_shadows_builtin_name() {
         let read = |path: &str| {
             if path == ".lingxi/workflows/deep-research.js" {
                 Ok("MALICIOUS_PROJECT_OVERRIDE".to_string())
@@ -1362,8 +1610,7 @@ mod tests {
             read,
         )
         .expect("built-in resolves");
-        assert!(resolved.contains("const VOTES_PER_CLAIM = 3"));
-        assert!(!resolved.contains("MALICIOUS_PROJECT_OVERRIDE"));
+        assert_eq!(resolved, "MALICIOUS_PROJECT_OVERRIDE");
     }
 
     #[test]
@@ -1789,22 +2036,214 @@ mod tests {
 
         t.validate_input(&json!({ "scriptPath": "workflow.js" }), &ctx)
             .await
-            .expect("relative scriptPath resolves from the live cwd");
+            .expect("relative scriptPath syntax is valid from the live cwd");
         *cwd.lock().unwrap() = moved.clone();
-        let error = t
-            .validate_input(&json!({ "scriptPath": "workflow.js" }), &ctx)
+        t.validate_input(&json!({ "scriptPath": "workflow.js" }), &ctx)
             .await
-            .unwrap_err();
-        assert_eq!(
-            error.0,
-            format!(
-                "Workflow script file not found: {}",
-                moved.join("workflow.js").display()
-            )
-        );
+            .expect("validation must not read the moved-away scriptPath");
 
         let _ = std::fs::remove_dir_all(root);
         let _ = std::fs::remove_dir_all(moved);
+    }
+
+    #[tokio::test]
+    async fn script_path_validation_is_io_free_and_permission_uses_live_read_shape() {
+        let cwd = unique_temp_path("script-path-permission");
+        std::fs::create_dir_all(&cwd).unwrap();
+        // A directory at the script path makes an eager std::fs::read fail,
+        // proving validate_input does not inspect the path before permission.
+        let script_path = cwd.join("script.js");
+        std::fs::create_dir(&script_path).unwrap();
+        let calls = Arc::new(StdMutex::new(Vec::new()));
+        let gate = Arc::new(RecordingPermissionGate {
+            calls: calls.clone(),
+            decision: traits::permission_gate::PermissionDecision::Allow,
+        });
+        let tool = tool(None)
+            .with_current_cwd(Arc::new(std::sync::Mutex::new(cwd.clone())))
+            .with_permission_gate(gate);
+        let ctx = tool_api::test_support::fresh_ctx();
+
+        tool.validate_input(&json!({ "scriptPath": "script.js" }), &ctx)
+            .await
+            .expect("path syntax validation must not read scriptPath");
+        assert!(matches!(
+            tool.check_permissions(&json!({ "scriptPath": "script.js" }), &ctx)
+                .await,
+            PermissionResult::Allow { .. }
+        ));
+        assert_eq!(
+            calls.lock().unwrap().as_slice(),
+            &[(
+                "Read".to_string(),
+                json!({ "file_path": cwd.join("script.js").to_string_lossy() })
+            )]
+        );
+
+        let _ = std::fs::remove_dir_all(cwd);
+    }
+
+    #[tokio::test]
+    async fn script_path_permission_propagates_tool_context_keeps_ask_source_first_and_fails_closed_headless(
+    ) {
+        let cwd = unique_temp_path("script-path-headless");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let calls = Arc::new(StdMutex::new(Vec::new()));
+        let contexts = Arc::new(StdMutex::new(Vec::new()));
+        let gate = Arc::new(ContextAwarePermissionGate {
+            calls: calls.clone(),
+            contexts: contexts.clone(),
+        });
+        let tool = tool(None)
+            .with_current_cwd(Arc::new(std::sync::Mutex::new(cwd.clone())))
+            .with_permission_gate(gate);
+        let mut interactive_ctx = tool_api::test_support::fresh_ctx();
+        interactive_ctx.tool_use_id = Some("toolu_workflow_interactive".into());
+
+        let interactive = tool
+            .check_permissions(&json!({ "scriptPath": "script.js" }), &interactive_ctx)
+            .await;
+        assert!(matches!(interactive, PermissionResult::Ask { .. }));
+
+        let mut headless_ctx = tool_api::test_support::fresh_ctx();
+        headless_ctx.tool_use_id = Some("toolu_workflow_headless".into());
+        headless_ctx.options.is_non_interactive_session = true;
+        let headless = tool
+            .check_permissions(&json!({ "scriptPath": "script.js" }), &headless_ctx)
+            .await;
+        match headless {
+            PermissionResult::Deny {
+                explanation: Some(reason),
+                ..
+            } => {
+                assert_eq!(
+                    reason,
+                    permission::headless_gate::headless_deny_message("Read")
+                );
+            }
+            other => panic!("expected headless deny, got {other:?}"),
+        }
+
+        assert_eq!(
+            calls.lock().unwrap().as_slice(),
+            &[
+                (
+                    "Read".to_string(),
+                    json!({ "file_path": cwd.join("script.js").to_string_lossy() })
+                ),
+                (
+                    "Read".to_string(),
+                    json!({ "file_path": cwd.join("script.js").to_string_lossy() })
+                )
+            ]
+        );
+        let recorded = contexts.lock().unwrap();
+        assert_eq!(recorded.len(), 2);
+        assert_eq!(
+            recorded[0].tool_use_id.as_deref(),
+            Some("toolu_workflow_interactive")
+        );
+        assert!(!recorded[0].is_non_interactive_session);
+        assert_eq!(
+            recorded[1].tool_use_id.as_deref(),
+            Some("toolu_workflow_headless")
+        );
+        assert!(recorded[1].is_non_interactive_session);
+
+        let _ = std::fs::remove_dir_all(cwd);
+    }
+
+    #[tokio::test]
+    async fn script_path_deny_happens_without_script_content_in_validation_or_result() {
+        let cwd = unique_temp_path("script-path-deny");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let script_path = cwd.join("secret.js");
+        std::fs::create_dir(&script_path).unwrap();
+        let calls = Arc::new(StdMutex::new(Vec::new()));
+        let gate = Arc::new(RecordingPermissionGate {
+            calls,
+            decision: traits::permission_gate::PermissionDecision::Deny {
+                reason: "Read denied by policy".into(),
+            },
+        });
+        let tool = tool(None)
+            .with_current_cwd(Arc::new(std::sync::Mutex::new(cwd.clone())))
+            .with_permission_gate(gate);
+        let ctx = tool_api::test_support::fresh_ctx();
+        tool.validate_input(&json!({ "scriptPath": "secret.js" }), &ctx)
+            .await
+            .expect("validation must not read a denied scriptPath");
+
+        let result = tool
+            .check_permissions(&json!({ "scriptPath": "secret.js" }), &ctx)
+            .await;
+        let rendered = format!("{result:?}");
+        assert!(matches!(result, PermissionResult::Deny { .. }));
+        assert!(!rendered.contains("secret workflow contents"));
+        assert!(rendered.contains("Read denied by policy"));
+
+        let _ = std::fs::remove_dir_all(cwd);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn script_path_symlink_stays_lexical_for_existing_permission_semantics() {
+        use std::os::unix::fs::symlink;
+
+        let cwd = unique_temp_path("script-path-symlink");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let target = cwd.join("target.js");
+        let link = cwd.join("link.js");
+        std::fs::write(&target, "secret workflow contents").unwrap();
+        symlink(&target, &link).unwrap();
+        let calls = Arc::new(StdMutex::new(Vec::new()));
+        let gate = Arc::new(RecordingPermissionGate {
+            calls: calls.clone(),
+            decision: traits::permission_gate::PermissionDecision::Allow,
+        });
+        let tool = tool(None)
+            .with_current_cwd(Arc::new(std::sync::Mutex::new(cwd.clone())))
+            .with_permission_gate(gate);
+        let ctx = tool_api::test_support::fresh_ctx();
+
+        tool.validate_input(&json!({ "scriptPath": "link.js" }), &ctx)
+            .await
+            .expect("symlink path validation must not follow the link");
+        assert!(matches!(
+            tool.check_permissions(&json!({ "scriptPath": "link.js" }), &ctx)
+                .await,
+            PermissionResult::Allow { .. }
+        ));
+        let recorded = calls.lock().unwrap();
+        assert_eq!(recorded.len(), 1);
+        assert_eq!(recorded[0].0, "Read");
+        assert_eq!(
+            recorded[0].1["file_path"],
+            cwd.join("link.js").to_string_lossy().as_ref()
+        );
+        assert_ne!(
+            recorded[0].1["file_path"],
+            target.to_string_lossy().as_ref(),
+            "Workflow must reuse the existing permission path semantics"
+        );
+
+        let _ = std::fs::remove_dir_all(cwd);
+    }
+
+    #[tokio::test]
+    async fn script_path_without_permission_wiring_fails_closed_with_an_ask() {
+        let cwd = unique_temp_path("script-path-no-gate");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let tool = tool(None).with_current_cwd(Arc::new(std::sync::Mutex::new(cwd.clone())));
+        let ctx = tool_api::test_support::fresh_ctx();
+
+        let result = tool
+            .check_permissions(&json!({ "scriptPath": "script.js" }), &ctx)
+            .await;
+        assert!(matches!(result, PermissionResult::Ask { .. }));
+        assert!(!format!("{result:?}").contains("secret workflow contents"));
+
+        let _ = std::fs::remove_dir_all(cwd);
     }
 
     #[tokio::test]
@@ -1937,7 +2376,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn builtin_validation_cannot_be_blocked_by_project_shadow() {
+    async fn saved_shadow_is_validated_before_builtin() {
         let t = tool(None);
         let ctx = tool_api::test_support::fresh_ctx();
         let _guard = ENV_LOCK.lock().unwrap();
@@ -1958,7 +2397,74 @@ mod tests {
         } else {
             let _ = std::fs::remove_file(&shadow);
         }
-        result.expect("immutable built-in must validate independently of project shadow");
+        result.expect("script content is validated by the post-authorization launcher");
+    }
+
+    #[tokio::test]
+    async fn saved_plugin_builtin_precedence_is_identical_across_all_tool_paths() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        std::env::remove_var("LINGXI_DISABLE_WORKFLOWS");
+        let cwd = unique_temp_path("three-tier-precedence");
+        let saved_dir = cwd.join(branding::DOT_DIR).join("workflows");
+        std::fs::create_dir_all(&saved_dir).unwrap();
+        let saved_path = saved_dir.join("deep-research.js");
+        std::fs::write(&saved_path, "invalid saved workflow").unwrap();
+
+        let registry = Arc::new(workflow::PluginWorkflowRegistry::new());
+        registry.register(
+            "plugin-a",
+            vec![workflow::PluginWorkflowEntry {
+                name: "deep-research".to_string(),
+                script_path: cwd.join("plugin.js"),
+                script: "invalid plugin workflow".to_string(),
+            }],
+        );
+        let spec = WorkflowLaunchSpec {
+            name: Some("deep-research".to_string()),
+            ..Default::default()
+        };
+        let resolve = || {
+            resolve_script_at(
+                &cwd,
+                &spec,
+                |path| std::fs::read_to_string(path),
+                Some(registry.as_ref()),
+            )
+        };
+        let tool = WorkflowTool::new(None)
+            .with_current_cwd(Arc::new(std::sync::Mutex::new(cwd.clone())))
+            .with_plugin_workflows(registry.clone());
+        let ctx = tool_api::test_support::fresh_ctx();
+
+        assert_eq!(resolve().unwrap(), "invalid saved workflow");
+        assert_eq!(
+            workflow_source_for_name(&cwd, "deep-research", Some(registry.as_ref())),
+            Some("projectSettings")
+        );
+        tool.validate_input(&json!({"name": "deep-research"}), &ctx)
+            .await
+            .expect("named workflow validation must not read the saved winner");
+
+        std::fs::remove_file(&saved_path).unwrap();
+        assert_eq!(resolve().unwrap(), "invalid plugin workflow");
+        assert_eq!(
+            workflow_source_for_name(&cwd, "deep-research", Some(registry.as_ref())),
+            Some("plugin")
+        );
+        tool.validate_input(&json!({"name": "deep-research"}), &ctx)
+            .await
+            .expect("named workflow validation must not read the plugin winner");
+
+        registry.unregister("plugin-a");
+        assert!(resolve().unwrap().contains("const VOTES_PER_CLAIM = 3"));
+        assert_eq!(
+            workflow_source_for_name(&cwd, "deep-research", Some(registry.as_ref())),
+            Some("built-in")
+        );
+        tool.validate_input(&json!({"name": "deep-research"}), &ctx)
+            .await
+            .expect("builtin is the final fallback");
+        let _ = std::fs::remove_dir_all(cwd);
     }
 
     #[tokio::test]

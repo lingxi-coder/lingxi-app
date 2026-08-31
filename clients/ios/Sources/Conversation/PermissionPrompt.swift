@@ -7,7 +7,7 @@
 // tool needs approval (e.g. a Write/Bash invocation) and parks the turn on a
 // oneshot until the user answers. `EnginePermissionSink` forwards each request
 // onto `ConversationModel.pendingPermissions`; the app-level host presents the
-// head above the current UIKit surface with three actions — Deny / Allow always /
+// head above the current UIKit surface with actions — Deny / Allow always /
 // Allow once — each resolving
 // the park by submitting `ClientCommand.approvePermission` / `denyPermission`
 // (correlated by `requestId`) back through the `MobileEngineHandle`.
@@ -354,7 +354,11 @@ import SwiftUI
 
                         Divider().overlay(t.border)
 
-                        actionRow(requestId: pending.requestId)
+                        actionRow(
+                            requestId: pending.requestId,
+                            suppressAlwaysAllowRule: pending.suppressAlwaysAllowRule,
+                            autoModePrompt: pending.autoModePrompt
+                        )
                             .padding(.horizontal, 16)
                             .padding(.vertical, 12)
                             .background(t.surface)
@@ -405,18 +409,39 @@ import SwiftUI
         }
 
         /// Deny / Allow always / Allow once — mirroring the Electron button order
-        /// and response mapping. Allow-once is the accent (primary) action.
-        private func actionRow(requestId: UInt64) -> some View {
+        /// and response mapping. A request that requires fresh human approval
+        /// omits the persistent actions. Allow-once is always available.
+        private func actionRow(
+            requestId: UInt64,
+            suppressAlwaysAllowRule: Bool,
+            autoModePrompt: AutoModePromptDto?
+        ) -> some View {
             HStack(spacing: 8) {
                 promptButton(String(localized: "permission_deny"), tint: t.danger, filled: false) {
                     onDeny(requestId)
                 }
-                promptButton(String(localized: "permission_allow_always"), tint: t.text2, filled: false) {
-                    onApprove(requestId, .allowAlways)
+                if !suppressAlwaysAllowRule && autoModePrompt == nil {
+                    promptButton(String(localized: "permission_allow_always"), tint: t.text2, filled: false) {
+                        onApprove(requestId, .allowAlways)
+                    }
+                }
+                if !suppressAlwaysAllowRule, let autoModePrompt {
+                    promptButton(autoModeApprovalLabel(autoModePrompt), tint: .white, filled: true) {
+                        onApprove(requestId, .allowAuto)
+                    }
                 }
                 promptButton(String(localized: "permission_allow"), tint: .white, filled: true) {
                     onApprove(requestId, .allowOnce)
                 }
+            }
+        }
+
+        private func autoModeApprovalLabel(_ prompt: AutoModePromptDto) -> String {
+            switch prompt {
+            case .workflowBash:
+                return "Yes, and switch to auto mode"
+            case .exitPlanMode:
+                return "Yes, and use auto mode"
             }
         }
 

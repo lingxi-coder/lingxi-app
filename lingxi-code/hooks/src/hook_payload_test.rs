@@ -220,6 +220,152 @@ mod tests {
     }
 
     #[test]
+    fn parse_response_rejects_known_fields_with_wrong_types() {
+        let cases = [
+            (
+                r#"{"continue":"no"}"#,
+                "Hook JSON output validation failed — continue: expected boolean, received string",
+            ),
+            (
+                r#"{"decision":123}"#,
+                "Hook JSON output validation failed — decision: expected string, received number",
+            ),
+            (
+                r#"{"hookSpecificOutput":"bad"}"#,
+                "Hook JSON output validation failed — hookSpecificOutput: expected object, received string",
+            ),
+            (
+                r#"{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":false}}"#,
+                "Hook JSON output validation failed — hookSpecificOutput.permissionDecision: expected string, received boolean",
+            ),
+        ];
+        for (raw, expected) in cases {
+            let err = parse_response(raw, "PreToolUse").unwrap_err();
+            assert_eq!(err.to_string(), expected, "raw output: {raw}");
+        }
+    }
+
+    #[test]
+    fn parse_response_keeps_unknown_fields_forward_compatible() {
+        let response = parse_response(
+            r#"{"futureField":123,"hookSpecificOutput":{"hookEventName":"PreToolUse"}}"#,
+            "PreToolUse",
+        )
+        .unwrap();
+        assert_eq!(response.decision, None);
+    }
+
+    #[test]
+    fn parse_response_rejects_invalid_permission_request_answer() {
+        let cases = [
+            (
+                r#"{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":"allow"}}"#,
+                "Hook JSON output validation failed — hookSpecificOutput.decision: expected object, received string",
+            ),
+            (
+                r#"{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":123}}}"#,
+                "Hook JSON output validation failed — hookSpecificOutput.decision.behavior: expected string, received number",
+            ),
+            (
+                r#"{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"ask"}}}"#,
+                "Hook JSON output validation failed — hookSpecificOutput.decision.behavior: expected \"allow\" | \"deny\", received invalid value",
+            ),
+            (
+                r#"{"hookSpecificOutput":{"hookEventName":"PermissionRequest"}}"#,
+                "Hook JSON output validation failed — hookSpecificOutput.decision: expected object, received missing",
+            ),
+        ];
+        for (raw, expected) in cases {
+            let err = parse_response(raw, "PermissionRequest").unwrap_err();
+            assert_eq!(err.to_string(), expected, "raw output: {raw}");
+        }
+    }
+
+    #[test]
+    fn parse_response_permission_request_allow_maps_nested_fields() {
+        let raw = r#"{
+            "hookSpecificOutput": {
+                "hookEventName": "PermissionRequest",
+                "decision": {
+                    "behavior": "allow",
+                    "updatedInput": {"command": "printf safe"},
+                    "updatedPermissions": [{
+                        "type": "addRules",
+                        "rules": [{"toolName": "Bash", "ruleContent": "printf *"}],
+                        "behavior": "allow",
+                        "destination": "session"
+                    }]
+                }
+            }
+        }"#;
+        let response = parse_response(raw, "PermissionRequest").unwrap();
+        assert_eq!(response.decision, Some(HookDecision::Allow));
+        assert_eq!(
+            response.updated_input,
+            Some(json!({"command": "printf safe"}))
+        );
+        assert_eq!(
+            response.updated_permissions,
+            Some(vec![json!({
+                "type": "addRules",
+                "rules": [{"toolName": "Bash", "ruleContent": "printf *"}],
+                "behavior": "allow",
+                "destination": "session"
+            })])
+        );
+        assert!(matches!(
+            response.permission_request_result,
+            Some(crate::response::PermissionRequestResult::Allow {
+                updated_input: Some(_),
+                updated_permissions: Some(_),
+            })
+        ));
+    }
+
+    #[test]
+    fn parse_response_permission_request_deny_maps_message_and_interrupt() {
+        let response = parse_response(
+            r#"{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"deny","message":"not safe","interrupt":true}}}"#,
+            "PermissionRequest",
+        )
+        .unwrap();
+        assert_eq!(response.decision, Some(HookDecision::Block));
+        assert_eq!(response.reason.as_deref(), Some("not safe"));
+        assert_eq!(response.interrupt, Some(true));
+        assert!(matches!(
+            response.permission_request_result,
+            Some(crate::response::PermissionRequestResult::Deny {
+                message: Some(_),
+                interrupt: Some(true),
+            })
+        ));
+    }
+
+    #[test]
+    fn parse_response_permission_request_does_not_use_pre_tool_use_shape() {
+        let response = parse_response(
+            r#"{"reason":"legacy","hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"allow"},"permissionDecision":"deny","permissionDecisionReason":"legacy reason","updatedInput":{"wrong":true}}}"#,
+            "PermissionRequest",
+        )
+        .unwrap();
+        assert_eq!(response.decision, Some(HookDecision::Allow));
+        assert_eq!(response.updated_input, None);
+        assert_eq!(response.reason, None);
+    }
+
+    #[test]
+    fn parse_response_permission_request_rejects_malformed_permission_update() {
+        let err = parse_response(
+            r#"{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"allow","updatedPermissions":[{"type":"addRules","rules":[{"toolName":4}],"behavior":"allow","destination":"session"}]}}}"#,
+            "PermissionRequest",
+        )
+        .unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("updatedPermissions.0.rules.0.toolName"));
+    }
+
+    #[test]
     fn parse_response_keeps_system_message_and_additional_context_separate() {
         // Parity with claude-code: `systemMessage` and
         // `hookSpecificOutput.additionalContext` are DISTINCT fields routed to
@@ -2075,13 +2221,15 @@ mod tests {
     }
 
     #[test]
-    fn parse_response_non_array_watch_paths_is_ignored() {
-        // A non-array value has no `Vec<String>` representation → ignored (None).
-        let r = parse_response(
+    fn parse_response_non_array_watch_paths_is_schema_error() {
+        let err = parse_response(
             r#"{"hookSpecificOutput":{"hookEventName":"FileChanged","watchPaths":".env"}}"#,
             "FileChanged",
         )
-        .unwrap();
-        assert!(r.watch_paths.is_none());
+        .unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "Hook JSON output validation failed — hookSpecificOutput.watchPaths: expected array, received string"
+        );
     }
 }

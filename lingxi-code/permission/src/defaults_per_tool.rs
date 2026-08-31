@@ -8,18 +8,19 @@
 //! side-effects), 21 `AllowByDefault` (read-only or agent-local) = 44 tools,
 //! plus one synthetic `<unknown>` fallback.
 //!
-//! MOBILE DIVERGENCE: 23 further `LocalApp*` rows for the first-party
+//! MOBILE DIVERGENCE: 27 further `LocalApp*` rows for the first-party
 //! local-app host operations (`engine_mobile::local_apps_tools`). They have no
 //! oracle counterpart — claude-code has no host-owned local-app surface — and
-//! are split by REVERSIBILITY: 9 `AllowByDefault` (read-only, plus the
-//! network-disabled build, the restartable local preview runtime, and the
-//! shell-scaffolding commit), 14 `DenyByDefault` (user data, UI actuation,
-//! view capture, checkpoint restore, network).
+//! are split by REVERSIBILITY: 12 `AllowByDefault` (read-only, plus the
+//! network-disabled build, the restartable local preview runtime, the
+//! shell-scaffolding commit, and template-selection staging), 15
+//! `DenyByDefault` (user data, UI actuation, view capture, checkpoint restore,
+//! network, and template validation).
 //!
 //! Both splits are asserted in
 //! `tests::the_counts_in_this_module_doc_are_the_counts_in_the_table` — this
-//! paragraph claimed "11 / 11" for what was in fact 8 / 14 until that test
-//! existed, and nothing failed.
+//! paragraph's four counts are asserted so additions cannot silently desync
+//! the documentation from the table.
 #![forbid(unsafe_code)]
 
 use std::collections::HashMap;
@@ -31,7 +32,7 @@ static TOOL_DEFAULTS: OnceLock<HashMap<&'static str, PromptDefault>> = OnceLock:
 
 fn init_defaults() -> HashMap<&'static str, PromptDefault> {
     use PromptDefault::{AllowByDefault, DenyByDefault};
-    let mut m: HashMap<&'static str, PromptDefault> = HashMap::with_capacity(41);
+    let mut m: HashMap<&'static str, PromptDefault> = HashMap::with_capacity(71);
 
     // Allow-by-default tools ([Y/n]) — 21 entries. (It said 20 while there
     // were 21, from before `ListAgents` was added; the count is asserted in
@@ -101,6 +102,8 @@ fn init_defaults() -> HashMap<&'static str, PromptDefault> {
     // is not bound to an app workspace.
     m.insert("LocalAppList", AllowByDefault);
     m.insert("LocalAppGet", AllowByDefault);
+    m.insert("LocalAppTemplateCatalog", AllowByDefault);
+    m.insert("LocalAppResolveTemplateSelection", AllowByDefault);
     m.insert("LocalAppLogs", AllowByDefault);
     m.insert("LocalAppCheckpointList", AllowByDefault);
     // NOT auto-allowed: `read_app_events` DRAINS the unread queue and advances
@@ -136,6 +139,8 @@ fn init_defaults() -> HashMap<&'static str, PromptDefault> {
     // conversation and needed the agent to commit the create without a prompt.
     // That flow is gone; the exemption went with it.
     m.insert("LocalAppCreate", DenyByDefault);
+    m.insert("LocalAppValidateTemplateSelection", DenyByDefault);
+    m.insert("LocalAppStageCreate", AllowByDefault);
     // Effects the user cannot trivially undo, or that reach the network.
     // These two expose an app's CONTENT — user records and the live WebView
     // DOM. Binding scopes them inside an app workspace, but a GLOBAL
@@ -156,8 +161,8 @@ fn init_defaults() -> HashMap<&'static str, PromptDefault> {
     m.insert("LocalAppBackgroundCancel", DenyByDefault);
     m.insert("LocalAppBackgroundRetry", DenyByDefault);
 
-    // 44 oracle-parity tools + 23 mobile local-app builtins.
-    debug_assert_eq!(m.len(), 67, "tool defaults table must list all 67 tools");
+    // 44 oracle-parity tools + 27 mobile local-app builtins.
+    debug_assert_eq!(m.len(), 71, "tool defaults table must list all 71 tools");
     m
 }
 
@@ -184,6 +189,9 @@ mod tests {
         for name in [
             "LocalAppList",
             "LocalAppGet",
+            "LocalAppTemplateCatalog",
+            "LocalAppResolveTemplateSelection",
+            "LocalAppStageCreate",
             "LocalAppLogs",
             "LocalAppCheckpointList",
             "LocalAppBackgroundList",
@@ -205,6 +213,7 @@ mod tests {
             // caller here is an agent creating an app from a global or project
             // chat, with the user present to answer.
             "LocalAppCreate",
+            "LocalAppValidateTemplateSelection",
             // Expose app CONTENT; a global chat can name any app.
             "LocalAppQueryData",
             "LocalAppInspectUi",
@@ -298,15 +307,12 @@ mod tests {
         let oracle = m.keys().filter(|k| !k.starts_with("LocalApp")).count();
         let mobile = m.keys().filter(|k| k.starts_with("LocalApp")).count();
         assert_eq!(oracle, 44, "oracle-parity tool count changed");
-        assert_eq!(mobile, 23, "local-app builtin count changed");
+        assert_eq!(mobile, 27, "local-app builtin count changed");
         assert_eq!(m.len(), oracle + mobile);
     }
 
-    /// The module doc states four counts. Nothing checked them, and the mobile
-    /// split had silently rotted to "11 `AllowByDefault` / 11 `DenyByDefault`"
-    /// while the table actually held 8 / 14 — a claim of completeness the
-    /// module did not have, which is exactly the kind of thing a reviewer
-    /// reads and stops looking at.
+    /// The module doc states four counts. Assert each one so the documentation
+    /// and table stay synchronized as local-app tools evolve.
     #[test]
     fn the_counts_in_this_module_doc_are_the_counts_in_the_table() {
         let m = init_defaults();
@@ -327,9 +333,9 @@ mod tests {
         );
         assert_eq!(
             count(true, PromptDefault::AllowByDefault),
-            9,
+            12,
             "mobile allow"
         );
-        assert_eq!(count(true, PromptDefault::DenyByDefault), 14, "mobile deny");
+        assert_eq!(count(true, PromptDefault::DenyByDefault), 15, "mobile deny");
     }
 }

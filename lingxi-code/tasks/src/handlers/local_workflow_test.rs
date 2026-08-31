@@ -18,6 +18,28 @@ use traits::{BudgetError, SubagentUsage};
 
 static ENV_LOCK: StdMutex<()> = StdMutex::new(());
 
+#[tokio::test]
+async fn nested_name_resolves_plugin_snapshot_after_saved_miss() {
+    let fs: Arc<dyn FileSystem> = Arc::new(InMemoryFs::new());
+    let registry = workflow::PluginWorkflowRegistry::new();
+    let script =
+        "export const meta = { name: 'nested', description: 'nested plugin' };\nreturn 7;\n";
+    registry.register(
+        "plugin-a",
+        vec![workflow::PluginWorkflowEntry {
+            name: "acme:nested".to_string(),
+            script_path: PathBuf::from("/plugins/acme/nested.js"),
+            script: script.to_string(),
+        }],
+    );
+
+    let resolved =
+        resolve_nested_script(&json!({"name": "acme:nested"}), Some(&fs), Some(&registry))
+            .await
+            .expect("nested plugin workflow");
+    assert_eq!(resolved, script);
+}
+
 #[test]
 fn terminal_metrics_distinguish_done_error_skipped_and_empty_results() {
     assert!(workflow_result_value_is_empty(&json!("")));
@@ -1513,6 +1535,7 @@ async fn top_level_args_global_reaches_the_script() {
             allow_nested: false,
             args: Some(r#"{"a":5}"#.to_string()),
             fs: None,
+            plugin_workflows: None,
         },
         Arc::new(std::sync::atomic::AtomicBool::new(false)),
         Arc::new(AnalyticsBus::new()),
@@ -1557,6 +1580,7 @@ async fn workflow_runs_a_nested_scriptpath_inline_sharing_the_runtime() {
             allow_nested: true,
             args: None,
             fs: Some(fs),
+            plugin_workflows: None,
         },
         Arc::new(std::sync::atomic::AtomicBool::new(false)),
         Arc::new(AnalyticsBus::new()),
@@ -1614,6 +1638,7 @@ async fn workflow_runs_a_nested_name_from_user_workflows_dir() {
             allow_nested: true,
             args: None,
             fs: Some(fs),
+            plugin_workflows: None,
         },
         Arc::new(std::sync::atomic::AtomicBool::new(false)),
         Arc::new(AnalyticsBus::new()),

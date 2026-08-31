@@ -1,0 +1,99 @@
+{
+  "schemaVersion": 1,
+  "toolchainKey": "pnpm@11.22.0/node@24.18.1",
+  "templates": [
+    {
+      "templateId": "react-dom-r1",
+      "family": "react_dom",
+      "revision": 1,
+      "surface": "dom",
+      "summary": "DOM app shell with Ionic React routing and ordinary form/data surfaces",
+      "recommendedFor": [
+        "forms",
+        "data pages",
+        "routed navigation"
+      ],
+      "notFor": [
+        "custom game loop"
+      ],
+      "contractSha256": "5fe4940d24bd8ebc065acfd96b9bcf3b6c6ee35b8cda881f3ee0c8d89afe2cfd",
+      "inventorySha256": "ecac9d15d74397a31d8aace88321b9a1c5e82c263ae2279438d6b62f8255308d",
+      "available": true
+    },
+    {
+      "templateId": "canvas-2d-r1",
+      "family": "canvas_2d",
+      "revision": 1,
+      "surface": "canvas",
+      "summary": "Whole-surface 2D canvas runtime with a bounded frame loop",
+      "recommendedFor": [
+        "2D visualization",
+        "custom canvas",
+        "single-surface interaction"
+      ],
+      "notFor": [
+        "ordinary forms"
+      ],
+      "contractSha256": "762c4e6ab401a428a99c05626dfcae1c03600f536b3cf432c080ca892ea8bda0",
+      "inventorySha256": "aad1a8efd2085a449f01826d8afe3d860c5b110726efa633fb7b35d744a974d9",
+      "available": true
+    },
+    {
+      "templateId": "three-3d-r1",
+      "family": "three_3d",
+      "revision": 1,
+      "surface": "canvas",
+      "summary": "Three.js 3D scene runtime with lifecycle and interaction helpers",
+      "recommendedFor": [
+        "3D scene",
+        "WebGL visualization",
+        "camera interaction"
+      ],
+      "notFor": [
+        "ordinary forms"
+      ],
+      "contractSha256": "5aa58fabc2ef442ef8107c1f8fd55d6674081e9481b8a7761bf12180fb22c047",
+      "inventorySha256": "fa96ba4a2377df3a0e873580462d1b7ac95dcca4247933ff80892253c91cf5b9",
+      "available": true
+    },
+    {
+      "templateId": "phaser-2d-r1",
+      "family": "phaser_2d",
+      "revision": 1,
+      "surface": "canvas",
+      "summary": "Scene-based 2D game runtime with sprite, input and collision support",
+      "recommendedFor": [
+        "multi-scene game",
+        "sprites",
+        "tilemap",
+        "collision"
+      ],
+      "notFor": [
+        "ordinary forms",
+        "static data pages"
+      ],
+      "contractSha256": "7fd39e60eff9b7491062506f97a7b39f796f4d735e8716a7ed6d9fd7604695b1",
+      "inventorySha256": "b5adb57311e4f152001caf112e5a2479ecabbc85fca4265203b1b7fb73082920",
+      "available": true
+    },
+    {
+      "templateId": "babylon-3d-r1",
+      "family": "babylon_3d",
+      "revision": 1,
+      "surface": "canvas",
+      "summary": "Babylon 3D runtime with glTF and Havok integration (availability gated)",
+      "recommendedFor": [
+        "advanced 3D scene",
+        "glTF",
+        "physics"
+      ],
+      "notFor": [
+        "ordinary forms"
+      ],
+      "contractSha256": "82827767bbc86238031a90bf8433eda71a7e111fb4468e726433328739fd4bb4",
+      "inventorySha256": "12c7652fed18857d0693c1aa21e3bacc61c24183831a221eb99634c3d2807fab",
+      "available": false,
+      "availabilityReason": "babylon_3d remains gated pending iOS/Android Babylon + glTF + Havok real-device validation"
+    }
+  ]
+}

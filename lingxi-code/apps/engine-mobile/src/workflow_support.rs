@@ -13,6 +13,7 @@
 //! therefore the same `TuiBridgeResolver` → broker → client channel) the
 //! main session uses.
 
+use serde_json::Value;
 use std::sync::Arc;
 
 #[derive(Debug, Clone)]
@@ -976,6 +977,9 @@ pub(crate) struct MobileWorkflowLauncher {
     pub(crate) session_uuid: Arc<std::sync::Mutex<String>>,
     pub(crate) checkpoints: Arc<MobileWorkflowCheckpointStore>,
     pub(crate) status_sink: Arc<MobileWorkflowStatusSink>,
+    /// Same live registry written by the mobile PluginManager and read by the
+    /// Workflow tool plus nested resolver.
+    pub(crate) plugin_workflows: Arc<workflow::PluginWorkflowRegistry>,
 }
 
 /// Return whether a launch resolves to one of the immutable local-app build
@@ -992,6 +996,7 @@ fn is_mobile_local_app_builtin(
     spec: &tool_workflow::WorkflowLaunchSpec,
     script: &str,
     trusted_local_app_resume: bool,
+    verified_plugin_workflow: bool,
 ) -> bool {
     let is_resume = spec
         .resume_from_run_id
@@ -1017,13 +1022,99 @@ fn is_mobile_local_app_builtin(
                     descriptor.is_local_app_build && descriptor.script == script
                 })
         });
+    // Phase 4's single workflow is supplied by the verified mobile Plugin
+    // registry. Its fully-qualified name is the identity, while the script
+    // itself retains the short `meta.name` required by the workflow parser.
+    // Only the named, non-overridden form is accepted here; an inline script
+    // cannot borrow Local App build authority by copying that name.
+    let named_plugin_builtin = !is_resume
+        && no_script_path
+        && no_inline_override
+        && spec.name.as_deref() == Some(crate::local_app_plugin_binding::PLUGIN_BUILD_WORKFLOW_ID);
     // Exact current bundled bytes are authoritative even for a resume whose
     // terminal checkpoint has already been removed. This is safe because the
     // immutable descriptor body, rather than a caller-controlled name/path,
     // identifies the built-in. Non-exact resumes still require trusted
     // checkpoint provenance below.
     let bundled_script = is_current_local_app_builtin_script(script);
-    named_builtin || bundled_script || trusted_local_app_resume
+    named_builtin
+        || (named_plugin_builtin && verified_plugin_workflow)
+        || bundled_script
+        || trusted_local_app_resume
+}
+
+/// A plugin-qualified name is not authority by itself: a project workflow can
+/// shadow the same name in the normal saved-workflow precedence chain.  Only
+/// the exact immutable script snapshot currently registered by the Host's
+/// Plugin registry may receive Local App launch-context authority.
+fn is_verified_plugin_workflow(
+    spec: &tool_workflow::WorkflowLaunchSpec,
+    script: &str,
+    registry: &workflow::PluginWorkflowRegistry,
+) -> bool {
+    let Some(name) = spec.name.as_deref() else {
+        return false;
+    };
+    if !crate::local_app_plugin_binding::is_plugin_workflow_id(name) {
+        return false;
+    }
+    if spec
+        .script_path
+        .as_deref()
+        .filter(|path| !path.is_empty())
+        .is_some()
+        || spec
+            .script
+            .as_deref()
+            .filter(|inline| !inline.is_empty())
+            .is_some()
+    {
+        return false;
+    }
+    registry
+        .resolve(name)
+        .is_some_and(|entry| entry.script == script)
+}
+
+/// Reject caller fields outside the narrow public workflow contract before
+/// the Host adds its private context.  Authority-bearing keys are accepted
+/// nowhere on the public launch surface: they are rejected here and only
+/// later re-injected by the Host. Every other unexpected field fails at the
+/// launch boundary instead of reaching a Plugin script with an ambiguous
+/// source of truth.
+fn validate_namespaced_local_app_external_args(
+    spec: &tool_workflow::WorkflowLaunchSpec,
+) -> Result<(), tool_workflow::WorkflowLaunchError> {
+    let Some(name) = spec.name.as_deref() else {
+        return Ok(());
+    };
+    let Some(object) = spec.args.as_ref().and_then(serde_json::Value::as_object) else {
+        return Ok(());
+    };
+    for key in object.keys() {
+        let allowed = match name {
+            name if name == crate::local_app_plugin_binding::PLUGIN_BUILD_WORKFLOW_ID => matches!(
+                key.as_str(),
+                "operation" | "app_id" | "spec" | "revision_prompt" | "quality_level"
+            ),
+            name if name == crate::local_app_plugin_binding::PLUGIN_USE_TEST_WORKFLOW_ID => {
+                matches!(
+                    key.as_str(),
+                    "app_id" | "scope" | "scenarios" | "quality_level"
+                )
+            }
+            name if name == crate::local_app_plugin_binding::PLUGIN_MCP_AUTHORING_WORKFLOW_ID => {
+                matches!(key.as_str(), "app_id" | "user_goal")
+            }
+            _ => true,
+        };
+        if !allowed {
+            return Err(tool_workflow::WorkflowLaunchError(format!(
+                "{name}: unknown external field {key:?}; Host accepts only the declared workflow contract"
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn is_current_local_app_builtin_script(script: &str) -> bool {
@@ -1050,7 +1141,10 @@ fn local_app_resume_identity_id(
     spec.name
         .as_deref()
         .filter(|name| !name.is_empty())
-        .filter(|&name| tool_workflow::BUILTIN_WORKFLOWS.is_local_app_build_workflow(name))
+        .filter(|&name| {
+            is_namespaced_local_app_workflow(name)
+                || tool_workflow::BUILTIN_WORKFLOWS.is_local_app_build_workflow(name)
+        })
         .map(str::to_string)
         .or_else(|| {
             workflow::meta_string_value(script, "name")
@@ -1062,8 +1156,8 @@ fn local_app_resume_resolution_for_record(
     record: &WorkflowProvenanceRecord,
     local_identity_id: Option<String>,
 ) -> Option<LocalAppResumeResolution> {
-    let record_is_local =
-        tool_workflow::BUILTIN_WORKFLOWS.is_local_app_build_workflow(&record.workflow_id);
+    let record_is_local = is_namespaced_local_app_workflow(&record.workflow_id)
+        || tool_workflow::BUILTIN_WORKFLOWS.is_local_app_build_workflow(&record.workflow_id);
     let hash_is_current = is_current_local_app_builtin_hash(&record.script_sha256);
     let expected_workflow_id = if record_is_local {
         Some(record.workflow_id.clone())
@@ -1093,6 +1187,10 @@ fn local_app_resume_resolution_for_record(
         provenance,
         workflow_id: expected_workflow_id,
     })
+}
+
+fn is_namespaced_local_app_workflow(workflow_id: &str) -> bool {
+    crate::local_app_plugin_binding::is_plugin_workflow_id(workflow_id)
 }
 
 fn local_app_resume_provenance_for_launch(
@@ -1184,6 +1282,7 @@ fn apply_materialized_local_app_collections_with_provenance(
         script,
         trusted_local_app_resume,
         None,
+        false,
     )
     // Both thin wrappers exist for callers that only care about the args
     // rewrite; the minted scope is returned by the `_with_identity` form the
@@ -1205,6 +1304,7 @@ fn apply_materialized_local_app_collections_with_identity(
     script: &str,
     trusted_local_app_resume: bool,
     expected_workflow_id: Option<&str>,
+    verified_plugin_workflow: bool,
 ) -> Result<Option<tasks::scope::LocalAppWorkflowTaskScope>, tool_workflow::WorkflowLaunchError> {
     if let Some(expected_workflow_id) = expected_workflow_id {
         let expected_script = tool_workflow::BUILTIN_WORKFLOWS
@@ -1234,7 +1334,12 @@ fn apply_materialized_local_app_collections_with_identity(
                 .to_string(),
         ));
     }
-    if !is_mobile_local_app_builtin(spec, script, trusted_local_app_resume) {
+    if !is_mobile_local_app_builtin(
+        spec,
+        script,
+        trusted_local_app_resume,
+        verified_plugin_workflow,
+    ) {
         // Not one of this Host's Local App build workflows: no args rewrite,
         // and -- crucially -- no scope. A custom workflow that merely reuses a
         // real workflow's `meta.name` lands here, because the predicate above
@@ -1252,11 +1357,18 @@ fn apply_materialized_local_app_collections_with_identity(
                 .filter(|&name| tool_workflow::BUILTIN_WORKFLOWS.is_local_app_build_workflow(name))
                 .map(str::to_string)
         })
+        .or_else(|| {
+            spec.name
+                .as_deref()
+                .filter(|name| *name == crate::local_app_plugin_binding::PLUGIN_BUILD_WORKFLOW_ID)
+                .map(str::to_string)
+        })
         .ok_or_else(|| {
             tool_workflow::WorkflowLaunchError(
                 "cannot identify the local-app built-in workflow being launched".to_string(),
             )
-        })?;
+        })?
+        .to_string();
 
     let args = spec.args.as_mut().ok_or_else(|| {
         tool_workflow::WorkflowLaunchError(
@@ -1276,8 +1388,87 @@ fn apply_materialized_local_app_collections_with_identity(
             tool_workflow::WorkflowLaunchError(
                 "local-app build workflow requires a non-empty args.app_id".to_string(),
             )
+        })?
+        .to_string();
+    let operation = object
+        .get("operation")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("update")
+        .to_string();
+    let is_plugin_workflow = launched_workflow_id
+        == crate::local_app_plugin_binding::PLUGIN_BUILD_WORKFLOW_ID
+        && verified_plugin_workflow;
+    if is_plugin_workflow && operation == "create" {
+        // Create is intentionally allowed to start before Manifest/profile
+        // persistence. Read only the host-created record mirror to prove this
+        // is an empty shell; the selector will obtain the verified catalog and
+        // submit its proposal through LocalAppValidateTemplateSelection.
+        let mirror = layout_for_app_record(app_data_root, &app_id)?;
+        let scaffolded = mirror
+            .get("app")
+            .and_then(|value| value.get("scaffolded"))
+            .and_then(serde_json::Value::as_bool)
+            .ok_or_else(|| {
+                tool_workflow::WorkflowLaunchError(format!(
+                    "local-app create workflow requires a valid host record mirror for app {app_id:?}"
+                ))
+            })?;
+        if scaffolded {
+            return Err(tool_workflow::WorkflowLaunchError(
+                "local-app create workflow only accepts an unscaffolded shell; update/verify use persisted profile"
+                    .into(),
+            ));
+        }
+        let catalog = crate::local_app_template_catalog::catalog_view().map_err(|error| {
+            tool_workflow::WorkflowLaunchError(format!(
+                "cannot read verified template catalog: {error}"
+            ))
         })?;
-    let layout = local_apps::AppLayout::new(app_data_root, app_id).map_err(|error| {
+        let workflow_run_id = object
+            .get("workflow_run_id")
+            .and_then(serde_json::Value::as_str)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| {
+                tool_workflow::WorkflowLaunchError(
+                    "local-app create workflow requires Host-minted workflow_run_id".into(),
+                )
+            })?
+            .to_string();
+        let selector_capability = crate::local_app_template_catalog::issue_selector_capability(
+            app_data_root,
+            &app_id,
+            &workflow_run_id,
+        )
+        .map_err(tool_workflow::WorkflowLaunchError)?;
+        object.insert(
+            "selector_capability".into(),
+            serde_json::Value::String(selector_capability.clone()),
+        );
+        object.insert(
+            "host_context".into(),
+            serde_json::json!({
+                "source": "verified_host",
+                "operation": "create",
+                "app_id": app_id,
+                "scaffolded": false,
+                "workflow_run_id": workflow_run_id,
+                "selector_capability": selector_capability,
+                "template_catalog": {
+                    "catalog_digest": catalog.catalog_digest,
+                    "available_template_ids": catalog.templates.iter().map(|entry| entry.template_id.clone()).collect::<Vec<_>>(),
+                },
+                "staging": {"isolated": true, "final_publish": false}
+            }),
+        );
+        let scope =
+            tasks::scope::LocalAppWorkflowTaskScope::for_build(&app_id).map_err(|error| {
+                tool_workflow::WorkflowLaunchError(format!(
+                    "cannot authorize local-app create workflow: {error}"
+                ))
+            })?;
+        return Ok(Some(scope));
+    }
+    let layout = local_apps::AppLayout::new(app_data_root, &app_id).map_err(|error| {
         tool_workflow::WorkflowLaunchError(format!(
             "cannot resolve local-app manifest for app {app_id:?}: {error}"
         ))
@@ -1318,7 +1509,10 @@ fn apply_materialized_local_app_collections_with_identity(
     // of an inline string comparison.
     let plugin_binding =
         crate::local_app_plugin_binding::LocalAppPluginBinding::resolve(build_target);
-    plugin_binding.enforce(app_id, binding.family, &launched_workflow_id)?;
+    let binding_family = binding.family;
+    let binding_revision = binding.revision;
+    let binding_contract_sha256 = binding.contract_sha256.clone();
+    plugin_binding.enforce(&app_id, binding_family, &launched_workflow_id)?;
     // Everything above is what makes this `app_id` trustworthy enough to mint
     // authority from, and it is why the scope is minted HERE rather than at
     // the spawn call below. By this line the Host has established, from state
@@ -1343,29 +1537,82 @@ fn apply_materialized_local_app_collections_with_identity(
     // bundled bytes are running. Naming another app there does not hand the
     // forger that app's authority; it hands them a build of that app, which is
     // the same thing the tool would have done anyway.
-    let scope = tasks::scope::LocalAppWorkflowTaskScope::for_build(app_id).map_err(|error| {
+    let scope = tasks::scope::LocalAppWorkflowTaskScope::for_build(&app_id).map_err(|error| {
         tool_workflow::WorkflowLaunchError(format!(
             "cannot authorize local-app build workflow: {error}"
         ))
     })?;
-    object.insert(
-        "runtime_profile".to_string(),
-        serde_json::json!({
-            "family": binding.family.as_str(),
-            "revision": binding.revision,
-            "contract_sha256": binding.contract_sha256,
-        }),
-    );
+    let runtime_profile = serde_json::json!({
+        "family": binding_family.as_str(),
+        "revision": binding_revision,
+        "contract_sha256": binding_contract_sha256,
+    });
     let collection_ids = manifest
         .collections
-        .into_iter()
-        .map(|collection| serde_json::Value::String(collection.id))
+        .iter()
+        .map(|collection| serde_json::Value::String(collection.id.clone()))
         .collect();
+    object.insert("runtime_profile".to_string(), runtime_profile.clone());
+    let expected_writable_collections = serde_json::Value::Array(collection_ids);
     object.insert(
         "expected_writable_collections".to_string(),
-        serde_json::Value::Array(collection_ids),
+        expected_writable_collections.clone(),
     );
+    if is_plugin_workflow {
+        let catalog = crate::local_app_template_catalog::catalog_view().map_err(|error| {
+            tool_workflow::WorkflowLaunchError(format!(
+                "cannot read verified template catalog: {error}"
+            ))
+        })?;
+        object.insert(
+            "host_context".into(),
+            serde_json::json!({
+                "source": "verified_host",
+                "operation": operation,
+                "app_id": app_id,
+                "runtime_profile": runtime_profile,
+                "template_catalog": {
+                    "catalog_digest": catalog.catalog_digest,
+                    "available_template_ids": catalog.templates.iter().map(|entry| entry.template_id.clone()).collect::<Vec<_>>(),
+                },
+                "expected_writable_collections": expected_writable_collections,
+                "dependency_snapshot": {"verified": true},
+                "staging": {"isolated": true, "final_publish": false}
+            }),
+        );
+    }
     Ok(Some(scope))
+}
+
+/// Read a host-created app record mirror without exposing a second persistence
+/// API to workflow scripts. The JSON shape is checked by the workflow launch
+/// boundary before a create run receives authority.
+fn layout_for_app_record(
+    app_data_root: &std::path::Path,
+    app_id: &str,
+) -> Result<serde_json::Value, tool_workflow::WorkflowLaunchError> {
+    let layout = local_apps::AppLayout::new(app_data_root, app_id).map_err(|error| {
+        tool_workflow::WorkflowLaunchError(format!(
+            "cannot resolve local-app app {app_id:?}: {error}"
+        ))
+    })?;
+    let path = layout
+        .root()
+        .join(layout.workspace_rel())
+        .join(".lingxi")
+        .join("app.json");
+    let bytes = std::fs::read(&path).map_err(|error| {
+        tool_workflow::WorkflowLaunchError(format!(
+            "cannot read local-app record mirror {}: {error}",
+            path.display()
+        ))
+    })?;
+    serde_json::from_slice(&bytes).map_err(|error| {
+        tool_workflow::WorkflowLaunchError(format!(
+            "cannot parse local-app record mirror {}: {error}",
+            path.display()
+        ))
+    })
 }
 
 /// Re-mint Local App build authority for one restart-recovered checkpoint
@@ -1450,8 +1697,17 @@ impl tool_workflow::WorkflowLauncher for MobileWorkflowLauncher {
                 cwd.join(path)
             }
         };
-        let script =
-            tool_workflow::resolve_script_at(&cwd, &spec, |p| std::fs::read_to_string(abs(p)))?;
+        let script = tool_workflow::resolve_script_at(
+            &cwd,
+            &spec,
+            |p| std::fs::read_to_string(abs(p)),
+            Some(self.plugin_workflows.as_ref()),
+        )?;
+        let verified_plugin_workflow =
+            is_verified_plugin_workflow(&spec, &script, self.plugin_workflows.as_ref());
+        if verified_plugin_workflow {
+            validate_namespaced_local_app_external_args(&spec)?;
+        }
         // Reject a malformed `meta` block at the tool boundary; the byte-exact
         // message surfaces to the model as the tool error (desktop parity).
         workflow::validate_meta(&script).map_err(|e| {
@@ -1567,21 +1823,69 @@ impl tool_workflow::WorkflowLauncher for MobileWorkflowLauncher {
         let expected_workflow_id = resume_resolution
             .as_ref()
             .and_then(|resolution| resolution.workflow_id.as_deref());
+        // Mint the run id before enrichment so create's candidate journal is
+        // bound to the same id the task receives. Host context is injected
+        // before the args are serialized into TaskRegistry.
+        let run_id = tool_workflow::mint_run_id(spec.resume_from_run_id.as_deref());
+        sanitize_namespaced_local_app_args(&mut spec);
         // The Host's own answer to "is this a Local App build, and of which
         // app": minted from the resolved app/binding, never from `spec.args`
         // or the workflow name. `None` for every other launch, which leaves
         // the task row authority-free (no workspace lease, no delete block).
-        let local_app_scope = apply_materialized_local_app_collections_with_identity(
+        if spec.name.as_deref() == Some(crate::local_app_plugin_binding::PLUGIN_BUILD_WORKFLOW_ID) {
+            if let Some(object) = spec.args.as_mut().and_then(Value::as_object_mut) {
+                object.insert("workflow_run_id".into(), Value::String(run_id.clone()));
+            }
+        }
+        let mut local_app_scope = apply_materialized_local_app_collections_with_identity(
             &self.app_data_root,
             &mut spec,
             &script,
             trusted_local_app_resume,
             expected_workflow_id,
+            verified_plugin_workflow,
         )?;
-        // Mint the run id at launch (fresh) or reuse the resume id. Host
-        // clock use is fine — only the workflow SCRIPT is barred from the
-        // clock. Shape: `wf_` + 8 hex + `-` + 3 hex.
-        let run_id = tool_workflow::mint_run_id(spec.resume_from_run_id.as_deref());
+        // The create path receives the run id as a Host-injected field only;
+        // it is not part of the external Workflow tool contract.
+        if spec.name.as_deref() == Some(crate::local_app_plugin_binding::PLUGIN_BUILD_WORKFLOW_ID) {
+            if let Some(context) = spec
+                .args
+                .as_mut()
+                .and_then(Value::as_object_mut)
+                .and_then(|object| object.get_mut("host_context"))
+                .and_then(Value::as_object_mut)
+            {
+                context.insert("workflow_run_id".into(), Value::String(run_id.clone()));
+            }
+        }
+        enrich_persisted_plugin_workflow_context(
+            &self.app_data_root,
+            &mut spec,
+            &run_id,
+            verified_plugin_workflow,
+        )?;
+        if local_app_scope.is_none()
+            && spec.name.as_deref()
+                == Some(crate::local_app_plugin_binding::PLUGIN_MCP_AUTHORING_WORKFLOW_ID)
+        {
+            if let Some(app_id) = spec
+                .args
+                .as_ref()
+                .and_then(Value::as_object)
+                .and_then(|object| object.get("app_id"))
+                .and_then(Value::as_str)
+            {
+                local_app_scope = Some(
+                    tasks::scope::LocalAppWorkflowTaskScope::for_mcp_authoring(app_id).map_err(
+                        |error| {
+                            tool_workflow::WorkflowLaunchError(format!(
+                                "cannot authorize local-app MCP authoring workflow: {error}"
+                            ))
+                        },
+                    )?,
+                );
+            }
+        }
         let workflow_name = workflow::meta_string_value(&script, "name");
         tool_workflow::apply_local_app_build_default_model(&cwd, &script, &mut spec.args)?;
         let summary = workflow::meta_string_value(&script, "description");
@@ -1667,9 +1971,19 @@ impl tool_workflow::WorkflowLauncher for MobileWorkflowLauncher {
                 .name
                 .as_deref()
                 .filter(|s| !s.is_empty())
-                .and_then(|name| tool_workflow::workflow_source_for_name(&cwd, name));
-            let script_is_verbatim_builtin =
-                is_mobile_local_app_builtin(&spec, &script, trusted_local_app_resume);
+                .and_then(|name| {
+                    tool_workflow::workflow_source_for_name(
+                        &cwd,
+                        name,
+                        Some(self.plugin_workflows.as_ref()),
+                    )
+                });
+            let script_is_verbatim_builtin = is_mobile_local_app_builtin(
+                &spec,
+                &script,
+                trusted_local_app_resume,
+                verified_plugin_workflow,
+            );
             let (invocation_mode, workflow_source) = if has_script_path {
                 ("scriptPath".to_string(), "scriptPath".to_string())
             } else if has_name {
@@ -1685,9 +1999,11 @@ impl tool_workflow::WorkflowLauncher for MobileWorkflowLauncher {
                 ("inline".to_string(), "inline".to_string())
             };
             let script_sha256 = sha256_hex(script.as_bytes());
-            let workflow_id = workflow_name
-                .clone()
-                .filter(|name| !name.is_empty())
+            let namespaced_plugin_workflow = verified_plugin_workflow
+                .then(|| spec.name.as_deref().expect("verified Plugin workflow name"))
+                .map(str::to_string);
+            let workflow_id = namespaced_plugin_workflow
+                .or_else(|| workflow_name.clone().filter(|name| !name.is_empty()))
                 .or_else(|| spec.name.clone())
                 .unwrap_or_default();
             // Fresh local-app launches leave a durable provenance record beside
@@ -1700,7 +2016,8 @@ impl tool_workflow::WorkflowLauncher for MobileWorkflowLauncher {
                 .filter(|run_id| !run_id.is_empty())
                 .is_none()
                 && !session_uuid.is_empty()
-                && tool_workflow::BUILTIN_WORKFLOWS.is_local_app_build_workflow(&workflow_id)
+                && (tool_workflow::BUILTIN_WORKFLOWS.is_local_app_build_workflow(&workflow_id)
+                    || workflow_id.starts_with("lingxi-local-app:"))
             {
                 self.checkpoints
                     .write_provenance_sidecar(
@@ -1812,6 +2129,262 @@ impl tool_workflow::WorkflowLauncher for MobileWorkflowLauncher {
         .await;
         drop(reservation);
         launch_result
+    }
+}
+
+/// Add the same Host-owned identity envelope to the Plugin's standalone
+/// use-test workflow. Unlike create, use-test is only valid for an already
+/// scaffolded app, so the persisted manifest/profile and dependency snapshot
+/// are fail-closed prerequisites.
+fn enrich_persisted_plugin_workflow_context(
+    app_data_root: &std::path::Path,
+    spec: &mut tool_workflow::WorkflowLaunchSpec,
+    run_id: &str,
+    verified_plugin_workflow: bool,
+) -> Result<(), tool_workflow::WorkflowLaunchError> {
+    if !verified_plugin_workflow {
+        return Ok(());
+    }
+    let Some(name) = spec.name.as_deref() else {
+        return Ok(());
+    };
+    if !matches!(
+        name,
+        crate::local_app_plugin_binding::PLUGIN_USE_TEST_WORKFLOW_ID
+            | crate::local_app_plugin_binding::PLUGIN_MCP_AUTHORING_WORKFLOW_ID
+    ) {
+        return Ok(());
+    }
+    let args = spec.args.as_mut().ok_or_else(|| {
+        tool_workflow::WorkflowLaunchError("local-app-use-test requires Host-enriched args".into())
+    })?;
+    let object = args.as_object_mut().ok_or_else(|| {
+        tool_workflow::WorkflowLaunchError("local-app-use-test args must be an object".into())
+    })?;
+    let app_id = object
+        .get("app_id")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| tool_workflow::WorkflowLaunchError(format!("{name} requires app_id")))?
+        .to_string();
+    let layout = local_apps::AppLayout::new(app_data_root, &app_id).map_err(|error| {
+        tool_workflow::WorkflowLaunchError(format!("cannot resolve app {app_id:?}: {error}"))
+    })?;
+    let manifest = local_apps::load_manifest(&layout).map_err(|error| {
+        tool_workflow::WorkflowLaunchError(format!("cannot load persisted app profile: {error}"))
+    })?;
+    let catalog = crate::local_app_template_catalog::catalog_view().map_err(|error| {
+        tool_workflow::WorkflowLaunchError(format!(
+            "cannot read verified template catalog: {error}"
+        ))
+    })?;
+    let binding = manifest.runtime_profile.as_ref();
+    let runtime_profile = binding.map(|binding| {
+        serde_json::json!({
+            "family": binding.family.as_str(),
+            "revision": binding.revision,
+            "contract_sha256": binding.contract_sha256,
+            "surface": binding.family.surface().as_str(),
+        })
+    });
+    let expected_writable_collections = Value::Array(
+        manifest
+            .collections
+            .iter()
+            .map(|collection| Value::String(collection.id.clone()))
+            .collect(),
+    );
+    object.insert("workflow_run_id".into(), Value::String(run_id.into()));
+    if let Some(runtime_profile) = runtime_profile.clone() {
+        object.insert("runtime_profile".into(), runtime_profile);
+    }
+    object.insert(
+        "expected_writable_collections".into(),
+        expected_writable_collections.clone(),
+    );
+    let invocation_capability = format!("mcpv_{}", uuid::Uuid::new_v4().simple());
+    if name == crate::local_app_plugin_binding::PLUGIN_MCP_AUTHORING_WORKFLOW_ID {
+        object.insert(
+            "host_context".into(),
+            serde_json::json!({
+                "source": "verified_host",
+                "operation": if manifest.active_mcp_catalog.is_some() { "revise" } else { "initial" },
+                "app_id": app_id,
+                "workflow_run_id": run_id,
+                "invocation_capability": invocation_capability,
+                "runtime_profile": runtime_profile.unwrap_or(Value::Null),
+                "template_catalog": {
+                    "catalog_digest": catalog.catalog_digest,
+                    "available_template_ids": catalog.templates.iter().map(|entry| entry.template_id.clone()).collect::<Vec<_>>(),
+                },
+                "expected_writable_collections": expected_writable_collections,
+                "dependency_snapshot": {"verified": manifest.dependency_snapshot.is_some()},
+                "active_catalog": manifest.active_mcp_catalog.clone(),
+            }),
+        );
+        return Ok(());
+    }
+    let Some(binding) = binding else {
+        return Err(tool_workflow::WorkflowLaunchError(
+            "local-app-use-test requires a persisted runtime profile".into(),
+        ));
+    };
+    if manifest.dependency_snapshot.is_none() {
+        return Err(tool_workflow::WorkflowLaunchError(
+            "local-app-use-test requires a verified dependency snapshot".into(),
+        ));
+    }
+    object.insert(
+        "host_context".into(),
+        serde_json::json!({
+            "source": "verified_host",
+            "operation": "verify",
+            "app_id": app_id,
+            "workflow_run_id": run_id,
+            "runtime_profile": {
+                "family": binding.family.as_str(),
+                "revision": binding.revision,
+                "contract_sha256": binding.contract_sha256,
+                "surface": binding.family.surface().as_str(),
+            },
+            "template_catalog": {
+                "catalog_digest": catalog.catalog_digest,
+                "available_template_ids": catalog.templates.iter().map(|entry| entry.template_id.clone()).collect::<Vec<_>>(),
+            },
+            "expected_writable_collections": object.get("expected_writable_collections").cloned().unwrap_or(Value::Array(Vec::new())),
+            "dependency_snapshot": {"verified": true},
+        }),
+    );
+    Ok(())
+}
+
+/// Remove all authority-bearing fields from caller args before a namespaced
+/// Local App workflow is enriched. The workflow receives these values only
+/// from this launch boundary; allowing a caller-provided `runtime_profile`,
+/// template handle, collection list or context to survive would turn the
+/// Plugin script into its own authority source.
+fn sanitize_namespaced_local_app_args(spec: &mut tool_workflow::WorkflowLaunchSpec) {
+    let Some(name) = spec.name.as_deref() else {
+        return;
+    };
+    if !crate::local_app_plugin_binding::is_plugin_workflow_id(name) {
+        return;
+    }
+    let Some(object) = spec.args.as_mut().and_then(Value::as_object_mut) else {
+        return;
+    };
+    for key in [
+        "host_context",
+        "runtime_profile",
+        "expected_writable_collections",
+        "selector_capability",
+        "validated_selection_handle",
+        "template_selection",
+        "workflow_run_id",
+    ] {
+        object.remove(key);
+    }
+}
+
+#[cfg(test)]
+mod plugin_args_tests {
+    use super::*;
+
+    #[test]
+    fn namespaced_local_app_authority_fields_are_host_owned() {
+        let mut spec = tool_workflow::WorkflowLaunchSpec {
+            name: Some("lingxi-local-app:local-app-build".into()),
+            args: Some(serde_json::json!({
+                "operation": "update",
+                "app_id": "aaaa1111",
+                "runtime_profile": {"family": "babylon_3d"},
+                "host_context": {"source": "caller"},
+                "validated_selection_handle": "vsel_forged",
+                "expected_writable_collections": ["forged"],
+                "workflow_run_id": "wf_forged1"
+            })),
+            ..Default::default()
+        };
+        sanitize_namespaced_local_app_args(&mut spec);
+        let object = spec.args.expect("args");
+        assert_eq!(
+            object.get("operation").and_then(Value::as_str),
+            Some("update")
+        );
+        assert_eq!(
+            object.get("app_id").and_then(Value::as_str),
+            Some("aaaa1111")
+        );
+        for field in [
+            "runtime_profile",
+            "host_context",
+            "validated_selection_handle",
+            "expected_writable_collections",
+            "workflow_run_id",
+        ] {
+            assert!(object.get(field).is_none(), "{field} must be stripped");
+        }
+    }
+
+    #[test]
+    fn project_shadow_cannot_borrow_namespaced_plugin_authority() {
+        let registry = workflow::PluginWorkflowRegistry::new();
+        registry.register(
+            "lingxi-local-app",
+            vec![workflow::PluginWorkflowEntry {
+                name: "lingxi-local-app:local-app-build".into(),
+                script_path: std::path::PathBuf::from("/plugin/local-app-build.js"),
+                script: "export const meta = { name: 'local-app-build' }; return 1;".into(),
+            }],
+        );
+        let spec = tool_workflow::WorkflowLaunchSpec {
+            name: Some("lingxi-local-app:local-app-build".into()),
+            ..Default::default()
+        };
+        assert!(!is_verified_plugin_workflow(
+            &spec,
+            "export const meta = { name: 'local-app-build' }; return forged;",
+            &registry,
+        ));
+        assert!(!is_mobile_local_app_builtin(
+            &spec,
+            "export const meta = { name: 'local-app-build' }; return forged;",
+            false,
+            false,
+        ));
+    }
+
+    #[test]
+    fn namespaced_plugin_rejects_renderer_and_workspace_overrides_at_launch() {
+        let spec = tool_workflow::WorkflowLaunchSpec {
+            name: Some("lingxi-local-app:local-app-build".into()),
+            args: Some(serde_json::json!({
+                "operation": "create",
+                "app_id": "aaaa1111",
+                "renderer": "canvas",
+                "workspace_path": "/tmp/forged"
+            })),
+            ..Default::default()
+        };
+        let error = validate_namespaced_local_app_external_args(&spec)
+            .expect_err("renderer/workspace overrides must not reach the Plugin");
+        assert!(error.to_string().contains("renderer"));
+    }
+
+    #[test]
+    fn namespaced_plugin_rejects_authority_override_fields_at_launch() {
+        let spec = tool_workflow::WorkflowLaunchSpec {
+            name: Some("lingxi-local-app:local-app-build".into()),
+            args: Some(serde_json::json!({
+                "operation": "create",
+                "app_id": "aaaa1111",
+                "validated_selection_handle": "vsel_forged",
+            })),
+            ..Default::default()
+        };
+        let error = validate_namespaced_local_app_external_args(&spec)
+            .expect_err("Host-owned fields must be rejected at the public launch boundary");
+        assert!(error.to_string().contains("validated_selection_handle"));
     }
 }
 
@@ -3070,6 +3643,7 @@ mod run_id_tests {
                 .script,
             true,
             checkpoint_resolution.workflow_id.as_deref(),
+            false,
         )
         .expect_err("checkpoint DOM provenance must reject a canvas swap");
 
@@ -3395,6 +3969,7 @@ mod run_id_tests {
                 .script,
             true,
             dom_to_canvas_resolution.workflow_id.as_deref(),
+            false,
         )
         .expect_err("DOM provenance must reject a canvas script swap");
 
@@ -3445,6 +4020,7 @@ mod run_id_tests {
             dom_descriptor,
             true,
             canvas_to_dom_resolution.workflow_id.as_deref(),
+            false,
         )
         .expect_err("canvas provenance must reject a DOM script swap");
 
@@ -3798,6 +4374,7 @@ mod run_id_tests {
             session_uuid,
             checkpoints,
             status_sink,
+            plugin_workflows: Arc::new(workflow::PluginWorkflowRegistry::new()),
         }
     }
 
@@ -3885,6 +4462,7 @@ mod run_id_tests {
                     .script,
                 false,
                 None,
+                false,
             )
             .expect("the Host resolves this app")
             .expect("a genuine local-app build gets a scope");
@@ -4008,6 +4586,7 @@ mod run_id_tests {
                 forged_body,
                 false,
                 None,
+                false,
             )
             .expect("a custom workflow is not refused here, only left unscoped");
             assert!(
@@ -4259,6 +4838,7 @@ mod workspace_lease_forwarding_tests {
             parent_model: None,
             parent_model_profile: None,
             mode_override: None,
+            request_source: None,
             frozen_command_denies: Vec::new(),
         }
     }

@@ -604,6 +604,14 @@ pub async fn run_cli(args: Vec<OsString>) -> i32 {
     startup_trace::init(parsed.debug_filter());
     startup_trace::mark("argv_parse");
 
+    // `--restricted` is a session capability, not a permission mode. Export
+    // the resolved bit before any child/session path can be started so nested
+    // CLI workers inherit the same hardening even when they do not receive the
+    // original argv vector.
+    if parsed.restricted_enabled() {
+        std::env::set_var("LINGXI_RESTRICTED", "1");
+    }
+
     // `--debug` is now `Option<String>` (optional category filter); collapse to
     // on/off for logging init. `--mcp-debug` (deprecated alias) and `--debug-file`
     // also imply debug mode.
@@ -809,6 +817,16 @@ pub async fn run_cli(args: Vec<OsString>) -> i32 {
         );
         return exit_codes::NOT_IMPLEMENTED;
     }
+    if parsed.restricted_enabled()
+        && (parsed.remote_control.is_some()
+            || matches!(
+                parsed.command.as_ref(),
+                Some(crate::commands::Commands::RemoteControl(_))
+            ))
+    {
+        eprintln!("Cloud sessions cannot be created from a --restricted session");
+        return exit_codes::RUNTIME_ERROR;
+    }
     if parsed.remote_control.is_some() {
         eprintln!(
             "lingxi-cli: --remote-control requires the unavailable Anthropic relay/auth protocol."
@@ -959,6 +977,17 @@ pub async fn run_cli(args: Vec<OsString>) -> i32 {
     // runs exactly once, before mode dispatch, for ALL modes — a refusal exits 1
     // before any runtime is built, so the interactive paths never re-run it.
     let (permission_mode, permission_notice) = resolve_permission_mode(&parsed);
+    // Restricted sessions never enter or expose bypassPermissions. Keep this
+    // check before bypass safety/setup so a rejected request cannot trigger a
+    // trust dialog, mutate launch state, or construct a permissive runtime.
+    if parsed.restricted_enabled()
+        && (permission_mode == permission::PermissionMode::BypassPermissions
+            || parsed.dangerously_skip_permissions
+            || parsed.allow_dangerously_skip_permissions)
+    {
+        eprintln!("bypassPermissions not supported in restricted mode");
+        return exit_codes::RUNTIME_ERROR;
+    }
     // Guards run when bypass is requested OR resolved (setup.ts:396).
     if permission_mode == permission::PermissionMode::BypassPermissions
         || parsed.dangerously_skip_permissions
@@ -1455,13 +1484,17 @@ pub(crate) fn resolve_permission_mode(argv: &Argv) -> (permission::PermissionMod
 /// no-op default `{ default_mode: None, bypass_disabled: false }` — a faithful
 /// port of TS `getSettings_DEPRECATED() || {}`.
 ///
-/// `parsed` is currently unused (the CLI has no settings-path override flag);
-/// it is threaded for forward-compatibility with such a flag.
+/// Explicit `--settings` is read after ambient files so it remains effective
+/// in restricted mode even while user/project/local files are suppressed.
 pub(crate) fn read_cli_mode_settings(parsed: &Argv) -> permission::CliModeSettings {
     // `--setting-sources <user,project,local>` gates which settings files this
     // permission-mode reader consults too (claude scopes ALL settings loading,
     // not just providers/routing). `None` ⟶ both layers (default).
-    let (incl_user, incl_project) = init::setting_source_flags(parsed.setting_sources.as_deref());
+    let (incl_user, incl_project) = if parsed.restricted_enabled() {
+        (false, false)
+    } else {
+        init::setting_source_flags(parsed.setting_sources.as_deref())
+    };
     let project_dir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     let mut default_mode = None;
     let mut bypass_disabled = false;
@@ -1514,6 +1547,31 @@ pub(crate) fn read_cli_mode_settings(parsed: &Argv) -> permission::CliModeSettin
             {
                 skip_dangerous_mode_permission_prompt = true;
             }
+        }
+    }
+    if let Some(raw) = parsed
+        .settings
+        .as_deref()
+        .and_then(|_| init::parse_flag_settings(parsed.settings.as_deref()))
+        .and_then(|settings| serde_json::to_string(&settings).ok())
+    {
+        let source = permission::PermissionRuleSource::FlagSettings;
+        if let Some(m) = permission::default_mode_from_settings_json(&raw) {
+            default_mode = Some(m);
+            if m == permission::PermissionMode::Auto
+                && permission::loader::auto_mode_grantable_by_source(source)
+            {
+                auto_default_from_trusted = true;
+            }
+        }
+        if permission::bypass_permissions_disabled_from_settings_json(&raw) {
+            bypass_disabled = true;
+        }
+        if permission::auto_mode_disabled_from_settings_json(&raw) {
+            auto_mode_disabled = true;
+        }
+        if permission::loader::skip_dangerous_mode_permission_prompt_from_settings_json(&raw) {
+            skip_dangerous_mode_permission_prompt = true;
         }
     }
     // MODE-BG-DISCLAIMER-02: bg-session downgrade inputs. `is_bg_session` is

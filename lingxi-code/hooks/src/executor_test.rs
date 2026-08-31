@@ -640,6 +640,226 @@ mod command_arm_tests {
     }
 
     #[tokio::test]
+    async fn permission_request_json_allow_carries_rewrite_and_raw_updates() {
+        let runner = MockRunner::ok(output(
+            r#"{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"allow","updatedInput":{"command":"printf safe"},"updatedPermissions":[{"type":"addRules","rules":[{"toolName":"Bash"}],"behavior":"allow","destination":"session"}]}}}"#,
+            "",
+            0,
+        ));
+        let exec = executor_for(HookEventType::PermissionRequest, runner);
+        let event = HookEvent::PermissionRequest {
+            tool_name: "Bash".into(),
+            tool_input: json!({"command": "printf unsafe"}),
+            reason: "needs approval".into(),
+        };
+
+        let agg = exec.execute(event, HookContext::default()).await;
+
+        assert_eq!(agg.decision, Some(HookDecision::Allow));
+        assert_eq!(agg.modified_input, Some(json!({"command": "printf safe"})));
+        assert_eq!(agg.permission_updates.len(), 1);
+        assert_eq!(agg.permission_updates[0]["destination"], "session");
+        assert!(agg.interrupt == false);
+    }
+
+    #[tokio::test]
+    async fn permission_request_json_deny_carries_message_and_interrupt() {
+        let runner = MockRunner::ok(output(
+            r#"{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"deny","message":"not safe","interrupt":true}}}"#,
+            "ignored stderr",
+            2,
+        ));
+        let exec = executor_for(HookEventType::PermissionRequest, runner);
+        let event = HookEvent::PermissionRequest {
+            tool_name: "Bash".into(),
+            tool_input: json!({"command": "rm -rf /"}),
+            reason: "needs approval".into(),
+        };
+
+        let agg = exec.execute(event, HookContext::default()).await;
+
+        assert_eq!(agg.decision, Some(HookDecision::Block));
+        assert_eq!(agg.reason.as_deref(), Some("not safe"));
+        assert!(agg.interrupt);
+    }
+
+    #[tokio::test]
+    async fn permission_request_plain_exit_two_is_not_a_block() {
+        let runner = MockRunner::ok(output("", "ignored stderr", 2));
+        let exec = executor_for(HookEventType::PermissionRequest, runner);
+        let event = HookEvent::PermissionRequest {
+            tool_name: "Bash".into(),
+            tool_input: json!({"command": "rm -rf /"}),
+            reason: "needs approval".into(),
+        };
+
+        let agg = exec.execute(event, HookContext::default()).await;
+
+        assert_eq!(agg.decision, None);
+        assert_eq!(agg.reason, None);
+        let (_, result) = &agg.all_results[0];
+        assert_eq!(result.stderr, "ignored stderr");
+        assert_eq!(result.exit_code, Some(2));
+        assert!(result.response.is_none());
+    }
+
+    #[tokio::test]
+    async fn json_parse_failure_is_error_for_non_blocking_exits() {
+        // Once stdout starts with `{`, a malformed payload is JSON output, not
+        // ordinary hook text. Non-blocking exits surface the parser error and
+        // never become a successful plain-text hook result.
+        for exit_code in [0, 1] {
+            let runner = MockRunner::ok(output("{bad", "child diagnostic", exit_code));
+            let exec = executor_with(runner);
+
+            let agg = exec.execute(pre_event(), HookContext::default()).await;
+
+            assert_eq!(agg.decision, None, "JSON parse failure must not block");
+            let (_, r) = &agg.all_results[0];
+            assert!(matches!(r.outcome, HookOutcome::Error));
+            assert_eq!(r.exit_code, Some(exit_code));
+            assert_eq!(r.stdout, "{bad");
+            assert_eq!(
+                r.stderr,
+                "hook response is not valid JSON: key must be a string at line 1 column 2"
+            );
+            assert!(r.response.is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn json_parse_failure_at_exit_two_keeps_block_fallback() {
+        // Exit 2 remains the command-hook blocking signal even when the
+        // payload that preceded it looked like JSON but could not be parsed.
+        let runner = MockRunner::ok(output("{bad", "child diagnostic", 2));
+        let exec = executor_with(runner);
+
+        let agg = exec.execute(pre_event(), HookContext::default()).await;
+
+        assert_eq!(agg.decision, Some(HookDecision::Block));
+        let (_, r) = &agg.all_results[0];
+        assert!(matches!(r.outcome, HookOutcome::Error));
+        assert_eq!(r.exit_code, Some(2));
+        assert_eq!(r.stderr, "child diagnostic");
+        assert_eq!(
+            r.response
+                .as_ref()
+                .and_then(|response| response.reason.as_deref()),
+            Some("[hook.sh --check]: child diagnostic")
+        );
+    }
+
+    #[tokio::test]
+    async fn json_schema_failure_is_error_for_non_blocking_exits() {
+        // A valid JSON object with a known field of the wrong type is a schema
+        // failure. Non-blocking exits must not be reinterpreted as success.
+        for exit_code in [0, 1] {
+            let runner = MockRunner::ok(output(
+                r#"{"continue":"no"}"#,
+                "child diagnostic",
+                exit_code,
+            ));
+            let exec = executor_with(runner);
+
+            let agg = exec.execute(pre_event(), HookContext::default()).await;
+
+            assert_eq!(agg.decision, None, "schema failure must not block");
+            let (_, r) = &agg.all_results[0];
+            assert!(matches!(r.outcome, HookOutcome::Error));
+            assert_eq!(r.exit_code, Some(exit_code));
+            assert_eq!(
+                r.stderr,
+                "Hook JSON output validation failed — continue: expected boolean, received string"
+            );
+            assert!(r.response.is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn json_schema_failure_at_exit_two_keeps_block_fallback() {
+        // Exit 2 remains a block even when JSON schema validation fails.
+        let runner = MockRunner::ok(output(r#"{"continue":"no"}"#, "child diagnostic", 2));
+        let exec = executor_with(runner);
+
+        let agg = exec.execute(pre_event(), HookContext::default()).await;
+
+        assert_eq!(agg.decision, Some(HookDecision::Block));
+        let (_, r) = &agg.all_results[0];
+        assert!(matches!(r.outcome, HookOutcome::Error));
+        assert_eq!(r.exit_code, Some(2));
+        assert_eq!(r.stderr, "child diagnostic");
+        assert_eq!(
+            agg.reason.as_deref(),
+            Some("[hook.sh --check]: child diagnostic")
+        );
+    }
+
+    #[tokio::test]
+    async fn pre_tool_use_invalid_permission_answer_is_schema_error() {
+        let runner = MockRunner::ok(output(
+            r#"{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":123}}"#,
+            "",
+            0,
+        ));
+        let exec = executor_with(runner);
+
+        let agg = exec.execute(pre_event(), HookContext::default()).await;
+
+        assert_eq!(agg.decision, None);
+        let (_, result) = &agg.all_results[0];
+        assert!(matches!(result.outcome, HookOutcome::Error));
+        assert!(result.response.is_none());
+        assert!(result.stderr.contains("Hook JSON output validation failed"));
+        assert!(result.stderr.contains("permissionDecision"));
+    }
+
+    #[tokio::test]
+    async fn permission_request_invalid_answer_is_schema_error() {
+        let runner = MockRunner::ok(output(
+            r#"{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":"allow"}}"#,
+            "",
+            0,
+        ));
+        let exec = executor_for(HookEventType::PermissionRequest, runner);
+        let event = HookEvent::PermissionRequest {
+            tool_name: "Bash".into(),
+            tool_input: json!({"command": "rm -rf /"}),
+            reason: "destructive".into(),
+        };
+
+        let agg = exec.execute(event, HookContext::default()).await;
+
+        assert_eq!(agg.decision, None);
+        let (_, result) = &agg.all_results[0];
+        assert!(matches!(result.outcome, HookOutcome::Error));
+        assert!(result.response.is_none());
+        assert!(result.stderr.contains("Hook JSON output validation failed"));
+        assert!(result.stderr.contains("hookSpecificOutput.decision"));
+    }
+
+    #[tokio::test]
+    async fn json_event_mismatch_is_error_not_plain_text_fallback() {
+        let runner = MockRunner::ok(output(
+            r#"{"hookSpecificOutput":{"hookEventName":"PostToolUse"}}"#,
+            "",
+            0,
+        ));
+        let exec = executor_with(runner);
+
+        let agg = exec.execute(pre_event(), HookContext::default()).await;
+
+        assert_eq!(agg.decision, None, "event mismatch must not block");
+        let (_, r) = &agg.all_results[0];
+        assert!(matches!(r.outcome, HookOutcome::Error));
+        assert_eq!(r.exit_code, Some(0));
+        assert_eq!(
+            r.stderr,
+            "hook response hookEventName mismatch: expected 'PreToolUse', got 'PostToolUse'"
+        );
+        assert!(r.response.is_none());
+    }
+
+    #[tokio::test]
     async fn other_nonzero_is_non_blocking_error() {
         let runner = MockRunner::ok(output("", "transient", 1));
         let exec = executor_with(runner);

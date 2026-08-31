@@ -400,6 +400,25 @@ fn should_enforce_permissions(
     }
 }
 
+/// Add config-side MCP tool policy rules to the boot rule vector.  Keeping the
+/// fold in a small helper makes the composition boundary explicit and gives
+/// tests a lightweight seam without booting the full desktop runtime.
+fn append_mcp_permission_rules(
+    rules: &mut Vec<permission::PermissionRule>,
+    servers: &[mcp::McpServerConfig],
+    allow_managed_permission_rules_only: bool,
+) {
+    if allow_managed_permission_rules_only {
+        return;
+    }
+    for server in servers {
+        rules.extend(permission::permission_rules_from_mcp_tool_policies(
+            &server.name,
+            &server.tools,
+        ));
+    }
+}
+
 /// Everything the boot permission-policy construction folds out of the
 /// settings tiers, produced by [`load_boot_permission_tiers`].
 struct BootPermissionTiers {
@@ -461,6 +480,19 @@ async fn load_boot_permission_tiers(
     lingxi_home: &std::path::Path,
     cwd: &std::path::Path,
     setting_source_scope: (bool, bool),
+) -> BootPermissionTiers {
+    load_boot_permission_tiers_with_flag(lingxi_home, cwd, setting_source_scope, None).await
+}
+
+/// Variant of [`load_boot_permission_tiers`] that also folds the explicit
+/// `--settings`/flagSettings layer.  Restricted mode deliberately disables
+/// ambient user/project/local tiers, but the CLI supplied layer remains an
+/// explicit trusted input and therefore must not disappear with them.
+async fn load_boot_permission_tiers_with_flag(
+    lingxi_home: &std::path::Path,
+    cwd: &std::path::Path,
+    setting_source_scope: (bool, bool),
+    flag_settings: Option<&engine::settings::SettingsJson>,
 ) -> BootPermissionTiers {
     let mut rules = Vec::new();
     // With no explicit setting, new sessions start in Auto.  The resolved
@@ -551,6 +583,40 @@ async fn load_boot_permission_tiers(
                 .extend(permission::additional_directories_from_settings_json(&raw));
             raw_tiers.push(raw); // ascending priority preserved for sandbox derivation
         }
+    }
+    // Explicit `--settings` is the trusted flagSettings tier between local and
+    // managed settings. This is intentionally outside the file-tier scope
+    // loop: restricted mode suppresses ambient files, not the user's explicit
+    // launch configuration.
+    if let Some(raw) = flag_settings.and_then(|settings| serde_json::to_string(settings).ok()) {
+        let source = permission::PermissionRuleSource::FlagSettings;
+        match permission::permission_rules_from_settings_json(&raw, source) {
+            Ok(mut r) => {
+                for rule in &r {
+                    if let Some(line) =
+                        permission::permission_rule_startup_warning(rule, "--settings")
+                    {
+                        tracing::warn!("{line}");
+                    }
+                }
+                rules.append(&mut r);
+            }
+            Err(e) => tracing::warn!(error = %e, "skipping malformed --settings permissions"),
+        }
+        if let Some(m) = permission::default_mode_from_settings_json(&raw) {
+            mode = m;
+        }
+        if permission::bypass_permissions_disabled_from_settings_json(&raw) {
+            bypass_disabled = true;
+        }
+        if permission::auto_mode_disabled_from_settings_json(&raw) {
+            auto_mode_disabled = true;
+        }
+        if permission::classify_all_shell_from_settings_json(&raw) {
+            classify_all_shell = true;
+        }
+        additional_working_dirs.extend(permission::additional_directories_from_settings_json(&raw));
+        raw_tiers.push(raw);
     }
     // Managed (policySettings) tier — HIGHEST priority, read LAST. Deliberately
     // NOT gated by `--setting-sources` (see the doc comment above).
@@ -1758,6 +1824,9 @@ struct TaskRegistryWorkflowLauncher {
     /// from the composition root's `main_session_uuid` so the transcript dir
     /// anchors on the correct session.
     session_uuid: String,
+    /// Shared live plugin workflow registry used by launch resolution and
+    /// telemetry source classification.
+    plugin_workflows: Arc<workflow::PluginWorkflowRegistry>,
 }
 
 #[async_trait::async_trait]
@@ -1779,8 +1848,12 @@ impl tool_workflow::WorkflowLauncher for TaskRegistryWorkflowLauncher {
                 cwd.join(path)
             }
         };
-        let script =
-            tool_workflow::resolve_script_at(&cwd, &spec, |p| std::fs::read_to_string(abs(p)))?;
+        let script = tool_workflow::resolve_script_at(
+            &cwd,
+            &spec,
+            |p| std::fs::read_to_string(abs(p)),
+            Some(self.plugin_workflows.as_ref()),
+        )?;
         // Reject a malformed `meta` block at the tool boundary (claude-code parses
         // + validates `meta` when the Workflow tool accepts a script). The
         // byte-exact message surfaces to the model as the tool error.
@@ -1933,7 +2006,13 @@ impl tool_workflow::WorkflowLauncher for TaskRegistryWorkflowLauncher {
                 .name
                 .as_deref()
                 .filter(|s| !s.is_empty())
-                .and_then(|name| tool_workflow::workflow_source_for_name(&cwd, name));
+                .and_then(|name| {
+                    tool_workflow::workflow_source_for_name(
+                        &cwd,
+                        name,
+                        Some(self.plugin_workflows.as_ref()),
+                    )
+                });
             let named_builtin = spec
                 .name
                 .as_deref()
@@ -2374,6 +2453,8 @@ pub fn desktop_skill_registry() -> SkillRegistry {
 ///     add_dir: Vec::new(),
 ///     cli_mcp_servers: Vec::new(),
 ///     strict_mcp_config: false,
+///     restricted: false,
+///     restricted_tools: None,
 ///     exclude_dynamic_system_prompt_sections: false,
 ///     setting_source_scope: (true, true),
 ///     customization_gates: engine_desktop::CustomizationGates::default(),
@@ -2649,6 +2730,15 @@ pub struct DesktopConfig {
     /// `--agents` flag (`r?.strictMcpConfig && t.source !== "flagSettings"`).
     /// `false` (the default) ⟶ no strict gating.
     pub strict_mcp_config: bool,
+    /// Claude Code 2.1.251 restricted-session bit. This is deliberately
+    /// separate from [`permission::PermissionMode`]: restricted sessions may
+    /// still use the normal default/auto mode, but have a narrower tool pool,
+    /// setting-source scope, and a hard bypass prohibition.
+    pub restricted: bool,
+    /// Explicit `--tools` names supplied for a restricted session. `Some` is a
+    /// complete built-in allowlist (including `Some(vec![])` for `--tools ""`)
+    /// and `None` applies the restricted default filter.
+    pub restricted_tools: Option<Vec<String>>,
     /// CLI `--exclude-dynamic-system-prompt-sections`. Threaded into
     /// `OrchestratorConfig::exclude_dynamic_system_prompt_sections`: moves the
     /// per-machine env block out of the (cacheable) system prompt and into the
@@ -3041,6 +3131,11 @@ impl std::fmt::Debug for DesktopConfig {
             .field("add_dir", &self.add_dir)
             .field("cli_mcp_server_count", &self.cli_mcp_servers.len())
             .field("strict_mcp_config", &self.strict_mcp_config)
+            .field("restricted", &self.restricted)
+            .field(
+                "restricted_tools",
+                &self.restricted_tools.as_ref().map(Vec::len),
+            )
             .field(
                 "exclude_dynamic_system_prompt_sections",
                 &self.exclude_dynamic_system_prompt_sections,
@@ -3116,6 +3211,8 @@ impl Default for DesktopConfig {
             cli_mcp_servers: Vec::new(),
             // Default: no `--strict-mcp-config` (ambient MCP configs load).
             strict_mcp_config: false,
+            restricted: false,
+            restricted_tools: None,
             exclude_dynamic_system_prompt_sections: false,
             // Default: all setting tiers load (absent `--setting-sources`).
             setting_source_scope: (true, true),
@@ -3670,6 +3767,11 @@ pub struct DesktopRuntime {
     /// The desktop task registry shared with the tool context (the TUI / a
     /// transport wraps it in a poller to read live background-task state).
     pub task_registry: Arc<tasks::registry::TaskRegistry>,
+    /// Test-only handle to the exact Workflow tool registered by the desktop
+    /// composition root. Keeping this observable lets the composition test
+    /// exercise the live permission gate rather than a separately-built tool.
+    #[cfg(test)]
+    pub(crate) wired_workflow_tool: Arc<tool_workflow::WorkflowTool>,
     /// Event-driven lifecycle/progress feed for the interactive TUI. Hosts
     /// take this receiver once and merge it into their existing TurnEvent
     /// channel; a host that does not render a TUI may simply drop it.
@@ -4460,6 +4562,78 @@ fn load_merged_settings(project_dir: &Path) -> Option<engine::settings::Effectiv
     Some(value)
 }
 
+/// Build the settings snapshot visible to a session. Restricted sessions
+/// suppress ambient user/project/local files while retaining environment,
+/// explicit `--settings`, and managed policy layers. Keeping this composition
+/// in one helper prevents feature-specific readers from accidentally widening
+/// the restricted source scope.
+fn load_effective_settings_for_config(
+    cfg: &DesktopConfig,
+    managed_raw_tiers: &[String],
+) -> Option<engine::settings::EffectiveSettings> {
+    let env: BTreeMap<String, String> = std::env::vars().collect();
+    let managed_layers: Vec<engine::settings::SettingsJson> = managed_raw_tiers
+        .iter()
+        .filter_map(|raw| serde_json::from_str(raw).ok())
+        .collect();
+    let (include_user, include_project) = if cfg.restricted {
+        (false, false)
+    } else {
+        cfg.setting_source_scope
+    };
+    engine::settings::Settings::load_with_layers_from_user_path(
+        engine::settings::LoadInputs {
+            env: &env,
+            project_dir: &cfg.cwd,
+            defaults: engine::settings::SettingsJson::default(),
+        },
+        engine::settings::FileLayerScope {
+            include_user,
+            include_project,
+            include_local: include_project,
+        },
+        engine::settings::SupplementalLayers {
+            cli_layer: cfg.flag_settings.as_ref(),
+            managed_layers: &managed_layers,
+        },
+        Some(&cfg.lingxi_home.join("settings.json")),
+    )
+    .ok()
+}
+
+/// Synchronous counterpart used by [`api_service_from_stack`], whose public
+/// API intentionally remains synchronous for already-resolved LLM stacks.
+/// Keep this read-only mirror of `settings_watch::managed_settings_raw_tiers`
+/// narrow: restricted sessions need managed `awsAuthRefresh` settings here,
+/// while user/project/local settings remain excluded by
+/// `load_effective_settings_for_config`.
+fn managed_settings_raw_tiers_sync() -> Vec<String> {
+    let managed = crate::settings_watch::managed_settings_dir();
+    let mut out = Vec::new();
+    if let Ok(raw) = std::fs::read_to_string(managed.join("managed-settings.json")) {
+        out.push(raw);
+    }
+    let drop_in = managed.join("managed-settings.d");
+    let Ok(entries) = std::fs::read_dir(&drop_in) else {
+        return out;
+    };
+    let mut names = Vec::new();
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name_string = name.to_string_lossy();
+        if name_string.ends_with(".json") && !name_string.starts_with('.') {
+            names.push(name);
+        }
+    }
+    names.sort();
+    for name in names {
+        if let Ok(raw) = std::fs::read_to_string(drop_in.join(name)) {
+            out.push(raw);
+        }
+    }
+    out
+}
+
 static SETTINGS_CACHE: OnceLock<Mutex<Option<MergedSettingsCacheEntry>>> = OnceLock::new();
 
 fn load_merged_output_style(project_dir: &std::path::Path) -> Option<String> {
@@ -4733,8 +4907,9 @@ fn merge_agent_frontmatter_mcp_servers(
 }
 
 /// Read the merged `settings.enabledPlugins` allowlist (`plugin@marketplace` →
-/// enabled) from the user then project `settings.json`, project last so it wins
-/// on conflict. Mirrors `loadPluginsFromMarketplaces`'s
+/// enabled). Ambient user/project roots are optional; restricted sessions pass
+/// `include_ambient = false` and therefore receive only explicit flagSettings
+/// and managed policy entries. Mirrors `loadPluginsFromMarketplaces`'s
 /// `{...getAddDirEnabledPlugins(), ...settings.enabledPlugins}` merge
 /// (`pluginLoader.ts:1898`) at the priority that matters for the cache-only
 /// boot. Malformed files / a missing key degrade to an empty map (no plugins),
@@ -4743,23 +4918,53 @@ async fn load_enabled_plugins(
     lingxi_home: &std::path::Path,
     cwd: &std::path::Path,
     additional_project_roots: &[std::path::PathBuf],
+    include_ambient: bool,
+    flag_settings: Option<&engine::settings::SettingsJson>,
 ) -> std::collections::BTreeMap<String, bool> {
     let mut merged: std::collections::BTreeMap<String, bool> = std::collections::BTreeMap::new();
-    let user = lingxi_home.join("settings.json");
-    let project = cwd.join(branding::DOT_DIR).join("settings.json");
-    // User first, project second → project overrides on identical keys.
-    let mut paths = vec![user, project];
-    paths.extend(
-        additional_project_roots
-            .iter()
-            .map(|root| root.join(branding::DOT_DIR).join("settings.json")),
-    );
-    for path in paths {
-        let Ok(raw) = tokio::fs::read_to_string(&path).await else {
-            continue;
-        };
+    if include_ambient {
+        let user = lingxi_home.join("settings.json");
+        let project = cwd.join(branding::DOT_DIR).join("settings.json");
+        // User first, project second → project overrides on identical keys.
+        let mut paths = vec![user, project];
+        paths.extend(
+            additional_project_roots
+                .iter()
+                .map(|root| root.join(branding::DOT_DIR).join("settings.json")),
+        );
+        for path in paths {
+            let Ok(raw) = tokio::fs::read_to_string(&path).await else {
+                continue;
+            };
+            let Ok(json) = serde_json::from_str::<serde_json::Value>(&raw) else {
+                tracing::warn!(path = %path.display(), "skipping malformed settings.json for enabledPlugins");
+                continue;
+            };
+            if let Some(map) = json.get("enabledPlugins").and_then(|v| v.as_object()) {
+                for (k, v) in map {
+                    if let Some(b) = v.as_bool() {
+                        merged.insert(k.clone(), b);
+                    }
+                }
+            }
+        }
+    }
+    // Explicit `--settings` is trusted even when ambient settings are
+    // suppressed. It has higher precedence than ambient files and lower than
+    // managed policy, matching the canonical settings tier order.
+    if let Some(settings) = flag_settings {
+        if let Some(enabled) = settings.enabled_plugins.as_ref() {
+            for (plugin, active) in enabled {
+                if let Some(active) = active.as_bool() {
+                    merged.insert(plugin.clone(), active);
+                }
+            }
+        }
+    }
+    // Managed policy is always eligible, including when restricted mode has
+    // disabled all ambient file settings.
+    for raw in crate::settings_watch::managed_settings_raw_tiers().await {
         let Ok(json) = serde_json::from_str::<serde_json::Value>(&raw) else {
-            tracing::warn!(path = %path.display(), "skipping malformed settings.json for enabledPlugins");
             continue;
         };
         if let Some(map) = json.get("enabledPlugins").and_then(|v| v.as_object()) {
@@ -4774,23 +4979,32 @@ async fn load_enabled_plugins(
 }
 
 /// Read the merged `settings.pluginConfigs` scope (`plugin → {options,
-/// mcpServers}`) from the user settings and managed policy tiers only. Project
-/// / local settings are intentionally ignored: cloned repositories must not be
-/// able to feed `${user_config.*}` substitutions. This is the composition-root
-/// READ that seeds [`plugin::PluginManager::with_plugin_configs`]; without it
-/// the manager's `plugin_configs` is always empty and non-sensitive options
-/// from settings.json never reach `resolve_user_config`. Malformed files / a
-/// missing key degrade to an empty map (no persisted config), matching the
-/// resilient read-only boot.
+/// mcpServers}`). Restricted sessions skip the user settings file, while the
+/// explicit flagSettings and managed policy tiers remain eligible. This is the
+/// composition-root READ that seeds
+/// [`plugin::PluginManager::with_plugin_configs`]; malformed files / a missing
+/// key degrade to an empty map (no persisted config), matching resilient boot.
 async fn load_plugin_configs(
     lingxi_home: &std::path::Path,
+    restricted: bool,
+    flag_settings: Option<&engine::settings::SettingsJson>,
 ) -> std::collections::HashMap<String, plugin::PluginUserConfig> {
     let mut merged: std::collections::HashMap<String, plugin::PluginUserConfig> =
         std::collections::HashMap::new();
-    let user = lingxi_home.join("settings.json");
-    if let Ok(raw) = tokio::fs::read_to_string(&user).await {
-        if let Ok(serde_json::Value::Object(map)) = serde_json::from_str::<serde_json::Value>(&raw)
-        {
+    if !restricted {
+        let user = lingxi_home.join("settings.json");
+        if let Ok(raw) = tokio::fs::read_to_string(&user).await {
+            if let Ok(serde_json::Value::Object(map)) =
+                serde_json::from_str::<serde_json::Value>(&raw)
+            {
+                for (plugin, cfg) in plugin::PluginUserConfig::from_settings_map(&map) {
+                    merged.insert(plugin, cfg);
+                }
+            }
+        }
+    }
+    if let Some(settings) = flag_settings.and_then(|settings| serde_json::to_value(settings).ok()) {
+        if let serde_json::Value::Object(map) = settings {
             for (plugin, cfg) in plugin::PluginUserConfig::from_settings_map(&map) {
                 merged.insert(plugin, cfg);
             }
@@ -4844,16 +5058,25 @@ async fn discover_plugin_set(
     plugins_dir: &std::path::Path,
     cli_plugin_dirs: &[std::path::PathBuf],
     additional_project_roots: &[std::path::PathBuf],
+    restricted: bool,
+    flag_settings: Option<&engine::settings::SettingsJson>,
 ) -> Vec<(
     protocol::PluginId,
     plugin::PluginManifest,
     std::path::PathBuf,
 )> {
-    let mut discovered = if ambient {
-        let enabled = load_enabled_plugins(lingxi_home, cwd, additional_project_roots).await;
+    let mut discovered = if ambient || restricted || flag_settings.is_some() {
+        let enabled = load_enabled_plugins(
+            lingxi_home,
+            cwd,
+            additional_project_roots,
+            ambient && !restricted,
+            flag_settings,
+        )
+        .await;
         let mut d = plugin::discover_effective_plugins(plugins_dir, &enabled).await;
         // Fallback: no allowlist match ⇒ flat-walk for direct plugin dirs.
-        if d.is_empty() {
+        if d.is_empty() && ambient {
             d = plugin::discover_installed_plugins(plugins_dir).await;
         }
         d
@@ -5012,6 +5235,10 @@ pub struct PluginRuntime {
     additional_project_roots: Arc<RwLock<Vec<std::path::PathBuf>>>,
     ambient: bool,
     inline: bool,
+    /// Session settings provenance. Restricted refreshes must not re-open
+    /// ambient user/project/local plugin configuration.
+    restricted: bool,
+    flag_settings: Option<engine::settings::SettingsJson>,
 }
 
 impl PluginRuntime {
@@ -5021,7 +5248,9 @@ impl PluginRuntime {
     /// live plugins are left untouched (no MCP reconnect churn).
     pub async fn refresh(&self) -> PluginRefreshCounts {
         self.manager
-            .replace_plugin_configs(load_plugin_configs(&self.home).await)
+            .replace_plugin_configs(
+                load_plugin_configs(&self.home, self.restricted, self.flag_settings.as_ref()).await,
+            )
             .await;
         self.manager
             .replace_blocked_marketplaces(load_blocked_marketplaces().await)
@@ -5036,6 +5265,8 @@ impl PluginRuntime {
             &self.plugins_dir,
             &self.cli_plugin_dirs,
             &additional_project_roots,
+            self.restricted,
+            self.flag_settings.as_ref(),
         )
         .await;
 
@@ -6442,7 +6673,7 @@ pub fn api_service_from_stack(
     .with_custom_cli_betas(cfg.custom_betas.clone())
     .with_thinking(cfg.session_thinking);
 
-    match aws_auth_refresher(cwd, analytics_bus) {
+    match aws_auth_refresher(cfg, cwd, analytics_bus) {
         Some(refresher) => service.with_aws_auth(refresher),
         None => service,
     }
@@ -6456,16 +6687,22 @@ pub fn api_service_from_stack(
 /// so the workspace-trust gate (a project-sourced refresh command is refused
 /// before trust is accepted) is enforced identically in both.
 fn aws_auth_refresher(
+    cfg: &DesktopConfig,
     cwd: &std::path::Path,
     analytics_bus: Arc<telemetry::AnalyticsBus>,
 ) -> Option<Arc<llm_client::AwsAuthRefresher>> {
-    let env_vars: std::collections::BTreeMap<String, String> = std::env::vars().collect();
-    let aws_settings = engine::settings::Settings::load(engine::settings::LoadInputs {
-        env: &env_vars,
-        project_dir: cwd,
-        defaults: engine::settings::schema::SettingsJson::default(),
-    })
-    .ok()
+    let aws_settings = if cfg.restricted {
+        let managed = managed_settings_raw_tiers_sync();
+        load_effective_settings_for_config(cfg, &managed)
+    } else {
+        let env_vars: std::collections::BTreeMap<String, String> = std::env::vars().collect();
+        engine::settings::Settings::load(engine::settings::LoadInputs {
+            env: &env_vars,
+            project_dir: cwd,
+            defaults: engine::settings::schema::SettingsJson::default(),
+        })
+        .ok()
+    }
     .map(|eff| {
         let from_project = |field: &str| {
             eff.effective_for(field).is_some_and(|p| {
@@ -6503,7 +6740,16 @@ pub async fn build(
     permission_sink: Arc<dyn PermissionRequestSink>,
 ) -> Result<DesktopRuntime, BuildError> {
     let cwd = cfg.cwd.clone();
-    let vision_delegation_enabled = load_merged_vision_delegation_enabled(&cwd);
+    let managed_settings_for_strict = crate::settings_watch::managed_settings_raw_tiers().await;
+    let effective_settings = load_effective_settings_for_config(&cfg, &managed_settings_for_strict);
+    let vision_delegation_enabled = if cfg.restricted {
+        effective_settings
+            .as_ref()
+            .and_then(|settings| settings.settings.vision_delegation_enabled)
+            .unwrap_or(true)
+    } else {
+        load_merged_vision_delegation_enabled(&cwd)
+    };
 
     // On-disk data-retention sweep (claude-code `fWu`). DELETES stale
     // session-file entries (todos/statsig/logs older than the retention period),
@@ -6696,7 +6942,7 @@ pub async fn build(
     // the global config). With the driver attached, a Bedrock 401/403
     // (expired STS) runs the refresh script and retries instead of
     // dead-ending — bounded at Ygf=2 inside the drive loops.
-    let service_built = match aws_auth_refresher(&cwd, analytics_bus.clone()) {
+    let service_built = match aws_auth_refresher(&cfg, &cwd, analytics_bus.clone()) {
         Some(refresher) => service_built.with_aws_auth(refresher),
         None => service_built,
     };
@@ -6755,7 +7001,13 @@ pub async fn build(
     orch_cfg.interactive_permissions = interactive_session;
     // Resolve output style before query identity: Claude Code includes builtin
     // output-style names in `repl_main_thread:outputStyle:*`.
-    let output_style = load_merged_output_style(&cfg.cwd);
+    let output_style = if cfg.restricted {
+        effective_settings
+            .as_ref()
+            .and_then(|settings| settings.settings.output_style.clone())
+    } else {
+        load_merged_output_style(&cfg.cwd)
+    };
     // Claude Code 2.1.245: CLI is `repl_main_thread`, SDK/bridge transport is
     // `sdk`, and print is the explicit headless print mode only.
     let (query_source, print) = session_composition
@@ -6777,8 +7029,14 @@ pub async fn build(
     // via `with_initial_effort`). `None` (no `--effort`) omits the field, keeping
     // transcripts byte-identical.
     orch_cfg.effort.clone_from(&cfg.initial_effort);
-    orch_cfg.workflow_keyword_trigger_enabled =
-        load_merged_workflow_keyword_trigger_enabled(&cfg.cwd);
+    orch_cfg.workflow_keyword_trigger_enabled = if cfg.restricted {
+        effective_settings
+            .as_ref()
+            .and_then(|settings| settings.settings.workflow_keyword_trigger_enabled)
+            .unwrap_or(false)
+    } else {
+        load_merged_workflow_keyword_trigger_enabled(&cfg.cwd)
+    };
     // CLI `--max-turns` / `--max-budget` caps. Unset leaves the OrchestratorConfig
     // defaults (unbounded turns / no cost cap). USD → nano-USD for the cost cap.
     if let Some(max_turns) = cfg.max_turns {
@@ -6819,12 +7077,22 @@ pub async fn build(
     // `# Output Style: <name>` section (Explanatory / Learning builtins). `None`
     // / "default" / unknown ⇒ no section (prompt byte-identical to before).
     orch_cfg.output_style = output_style;
-    traits::session_flags::set_show_thinking_summaries(load_merged_show_thinking_summaries(
-        &cfg.cwd,
-    ));
-    traits::session_flags::set_agent_push_notif_enabled(load_merged_agent_push_notif_enabled(
-        &cfg.cwd,
-    ));
+    traits::session_flags::set_show_thinking_summaries(if cfg.restricted {
+        effective_settings
+            .as_ref()
+            .and_then(|settings| settings.settings.show_thinking_summaries)
+            .unwrap_or(false)
+    } else {
+        load_merged_show_thinking_summaries(&cfg.cwd)
+    });
+    traits::session_flags::set_agent_push_notif_enabled(if cfg.restricted {
+        effective_settings
+            .as_ref()
+            .and_then(|settings| settings.settings.agent_push_notif_enabled)
+            .unwrap_or(false)
+    } else {
+        load_merged_agent_push_notif_enabled(&cfg.cwd)
+    });
     // OUTSTYLE.3: custom output-style search dirs — user (`~/.lingxi/output-styles`)
     // then project (`<cwd>/.lingxi/output-styles`), in increasing priority so a
     // project style overrides a user one and both override the builtins. A
@@ -7113,7 +7381,6 @@ pub async fn build(
     // project `.mcp.json` (mcp_paths[0]), user + local both inside the global
     // config `~/.lingxi.json` (mcp_paths[1]); local is keyed by the canonical
     // project key for `cwd`.
-    let managed_settings_for_strict = crate::settings_watch::managed_settings_raw_tiers().await;
     let strict_plugin_policy = Arc::new(plugin::StrictPluginOnlyPolicy::from_settings_tiers(
         managed_settings_for_strict.iter().map(String::as_str),
     ));
@@ -7421,6 +7688,25 @@ pub async fn build(
             }
         }
     }
+    if !skip_settings_hooks && !strict_plugin_only_hooks {
+        if let Some(raw) = cfg
+            .flag_settings
+            .as_ref()
+            .and_then(|settings| serde_json::to_string(settings).ok())
+        {
+            match hooks::parse_hooks_from_settings_json(
+                &raw,
+                hooks::definition::HookSource::Session,
+            ) {
+                Ok(hooks_vec) => {
+                    for hook in hooks_vec {
+                        hook_registry.register(hook);
+                    }
+                }
+                Err(error) => tracing::warn!(error = %error, "skipping malformed --settings hooks"),
+            }
+        }
+    }
     // Policy hooks remain authoritative under strict-plugin-only and safe
     // mode. Bare mode disables hooks entirely.
     if !cfg.customization_gates.bare {
@@ -7480,11 +7766,12 @@ pub async fn build(
     //   to surface a prompt, so they keep the `NoOpPermissionGate` (always-allow) or
     //   `DenyOnAskGate` (deny-on-ask) inner per `use_noop_permission_gate` /
     //   `deny_unresolved_ask`. Either way deny rules + modes are enforced below.
-    let enforce_permissions = should_enforce_permissions(
-        std::env::var("LINGXI_ENFORCE_PERMISSIONS").ok().as_deref(),
-        cfg.use_noop_permission_gate,
-        cfg.permission_mode,
-    );
+    let enforce_permissions = cfg.restricted
+        || should_enforce_permissions(
+            std::env::var("LINGXI_ENFORCE_PERMISSIONS").ok().as_deref(),
+            cfg.use_noop_permission_gate,
+            cfg.permission_mode,
+        );
     // Read(deny) → search-exclude globs (GrepTool.ts:417-427, glob.ts lLa()).
     // Populated inside the enforcement branch below from the boot policy and
     // threaded into the tool ctx so `Grep`/`Glob` skip denied/sensitive paths.
@@ -7530,15 +7817,38 @@ pub async fn build(
         // `allowManagedPermissionRulesOnly: true` drops every non-managed rule.
         // Full tier semantics on `load_boot_permission_tiers`.
         let BootPermissionTiers {
-            rules,
+            mut rules,
             mut mode,
             bypass_disabled,
             auto_mode_disabled,
             classify_all_shell,
             mut additional_working_dirs,
-            raw_tiers,
+            mut raw_tiers,
             allow_managed_permission_rules_only,
-        } = load_boot_permission_tiers(&cfg.lingxi_home, &cwd, cfg.setting_source_scope).await;
+        } = load_boot_permission_tiers_with_flag(
+            &cfg.lingxi_home,
+            &cwd,
+            cfg.setting_source_scope,
+            cfg.flag_settings.as_ref(),
+        )
+        .await;
+        if cfg.restricted {
+            // Restricted file tools are confined to cwd plus the explicit
+            // `--add-dir` launch roots. Even trusted flag/managed settings
+            // must not smuggle ordinary `additionalDirectories` into the
+            // filesystem trust set.
+            additional_working_dirs.clear();
+        }
+        // MCP config-side tool policies are part of the same rule composition
+        // as settings rules.  Keep them in their dedicated source bucket so
+        // `PermissionPolicy::authorize` preserves deny > ask > allow and the
+        // existing source precedence; do not bypass the policy gate with an
+        // app-local side check.
+        append_mcp_permission_rules(
+            &mut rules,
+            &mcp_configs,
+            allow_managed_permission_rules_only,
+        );
         // CLI `--add-dir <directories...>`: union the host-provided dirs into
         // the working-dir set, exactly like a settings-tier
         // `additionalDirectories` entry (claude-code "Additional directories
@@ -7626,6 +7936,7 @@ pub async fn build(
                 .with_workspace_leases(workspace_leases.clone())
                 .with_sandbox_runtime(sandbox_auto_allow)
                 .with_managed_permission_rules_only(allow_managed_permission_rules_only)
+                .with_restricted(cfg.restricted)
                 // `autoMode.classifyAllShell` escalation (`QOi()`): any tier enabling
                 // it suspends every Bash/PowerShell allow rule in auto mode.
                 .with_classify_all_shell(classify_all_shell)
@@ -7637,8 +7948,9 @@ pub async fn build(
                 // vetoes it. (`g`, the Statsig remote killswitch, is a documented
                 // omission here like the other remote gates.)
                 .with_bypass_available(
-                    (mode == permission::PermissionMode::BypassPermissions
-                        || cfg.allow_dangerously_skip_permissions)
+                    !cfg.restricted
+                        && (mode == permission::PermissionMode::BypassPermissions
+                            || cfg.allow_dangerously_skip_permissions)
                         && !bypass_disabled,
                 )
                 // Enable PowerShell path-containment via a real `pwsh` parse
@@ -7784,7 +8096,19 @@ pub async fn build(
     // (`allowedHttpHookUrls` / `httpHookAllowedEnvVars`) from the merged settings
     // so the HTTP hook executor gates outbound URLs + intersects the per-hook
     // env-var allowlist. `(None, None)` = no restriction (behavior-neutral).
-    let (http_hook_urls, http_hook_env_vars) = load_merged_http_hook_policy(&cwd);
+    let (http_hook_urls, http_hook_env_vars) = if cfg.restricted {
+        effective_settings
+            .as_ref()
+            .map(|settings| {
+                (
+                    settings.settings.allowed_http_hook_urls.clone(),
+                    settings.settings.http_hook_allowed_env_vars.clone(),
+                )
+            })
+            .unwrap_or((None, None))
+    } else {
+        load_merged_http_hook_policy(&cwd)
+    };
     // Transcript sink for the per-hook-run `attachment` records claude-code
     // persists (one `hook_success` / `hook_non_blocking_error` /
     // `hook_cancelled` line per hook run). Created empty here because the hook
@@ -7798,7 +8122,14 @@ pub async fn build(
             http.clone(),
             hook_runtime as Arc<dyn traits::RuntimeSpawner>,
         )
-        .with_policy_disable_all_hooks(load_merged_disable_all_hooks(&cwd))
+        .with_policy_disable_all_hooks(if cfg.restricted {
+            effective_settings
+                .as_ref()
+                .and_then(|settings| settings.settings.disable_all_hooks)
+                .unwrap_or(false)
+        } else {
+            load_merged_disable_all_hooks(&cwd)
+        })
         .with_http_hook_policy(http_hook_urls, http_hook_env_vars)
         .with_process_runner(
             Arc::new(PosixProcess::new()) as Arc<dyn traits::ProcessRunner>,
@@ -8336,6 +8667,9 @@ pub async fn build(
     // "no stuck Running" wiring bash + local_agent already have.
     let local_workflow_status_sink =
         Arc::new(tasks::registry_status_sink::RegistryStatusSink::new());
+    // One live table is shared by the plugin lifecycle, Workflow tool,
+    // launcher, and nested workflow handler. PluginManager is its only writer.
+    let plugin_workflow_registry = Arc::new(workflow::PluginWorkflowRegistry::new());
     let (workflow_event_tx, workflow_event_rx) =
         tokio::sync::mpsc::unbounded_channel::<DesktopWorkflowEvent>();
     let local_workflow_event_sink = Arc::new(DesktopWorkflowEventSink {
@@ -8359,6 +8693,7 @@ pub async fn build(
             .with_turn_baseline_cell(local_workflow_turn_baseline.clone())
             .with_workspace_permission_leases(workspace_leases.clone(), cwd.clone())
             .with_worktree_manager(worktree_manager.clone())
+            .with_plugin_workflows(plugin_workflow_registry.clone())
             .with_status_sink(
                 local_workflow_event_sink.clone() as Arc<dyn tasks::handlers::TaskStatusSink>
             )
@@ -8463,18 +8798,24 @@ pub async fn build(
         // Read the USER tier (lingxi_home/settings.json) separately so the
         // source-restricted `allowAppleEvents` resolution can consult it: CC honors
         // allowAppleEvents from user / managed / flag only, NOT project/local.
-        let user_settings_raw = tokio::fs::read_to_string(cfg.lingxi_home.join("settings.json"))
-            .await
-            .ok();
+        let user_settings_raw = if cfg.restricted {
+            None
+        } else {
+            tokio::fs::read_to_string(cfg.lingxi_home.join("settings.json"))
+                .await
+                .ok()
+        };
         if let Some(raw) = &user_settings_raw {
             tiers.push(raw.clone());
         }
-        for p in [
-            cwd.join(branding::DOT_DIR).join("settings.json"),
-            cwd.join(branding::DOT_DIR).join("settings.local.json"),
-        ] {
-            if let Ok(raw) = tokio::fs::read_to_string(&p).await {
-                tiers.push(raw);
+        if !cfg.restricted {
+            for p in [
+                cwd.join(branding::DOT_DIR).join("settings.json"),
+                cwd.join(branding::DOT_DIR).join("settings.local.json"),
+            ] {
+                if let Ok(raw) = tokio::fs::read_to_string(&p).await {
+                    tiers.push(raw);
+                }
             }
         }
         // CLI `--settings` / `flagSettings` sits between localSettings and
@@ -8746,7 +9087,14 @@ pub async fn build(
         // (P2-14) `settings.skipWebFetchPreflight` → WebFetch skips the
         // domain-blocklist preflight (enterprise escape hatch). Read from the
         // merged settings via the same `Settings::load` seam as outputStyle.
-        skip_web_fetch_preflight: load_merged_skip_web_fetch_preflight(&cwd),
+        skip_web_fetch_preflight: if cfg.restricted {
+            effective_settings
+                .as_ref()
+                .and_then(|settings| settings.settings.skip_web_fetch_preflight)
+                .unwrap_or(false)
+        } else {
+            load_merged_skip_web_fetch_preflight(&cwd)
+        },
         // (M-15) `settings.askUserQuestionTimeout` → the AskUserQuestion resolver's
         // idle window. Read from the merged settings via the same `Settings::load`
         // seam; parsed into `AskUserQuestionTimeout` at `tool_ui` registration.
@@ -9105,6 +9453,8 @@ pub async fn build(
     // task through it and returns `{status:"async_launched", taskId, taskType}`.
     let dynamic_workflows_gate;
     let workflow_size_guideline_state;
+    #[cfg(test)]
+    let mut wired_workflow_tool: Option<Arc<tool_workflow::WorkflowTool>> = None;
     {
         let workflow_launcher: Arc<dyn tool_workflow::WorkflowLauncher> =
             Arc::new(TaskRegistryWorkflowLauncher {
@@ -9113,6 +9463,7 @@ pub async fn build(
                 current_cwd: current_cwd_cell.clone(),
                 lingxi_home: cfg.lingxi_home.clone(),
                 session_uuid: main_session_uuid.clone(),
+                plugin_workflows: plugin_workflow_registry.clone(),
             });
         // Resolve the workflow-size setting through the canonical settings
         // composition: default → user → project → local → flag → managed.
@@ -9152,7 +9503,7 @@ pub async fn build(
             workflow_policy_enabled && workflow_session_enabled,
             workflow_session_managed || !workflow_policy_enabled,
         );
-        tools_inner.register_builtin(Arc::new(
+        let workflow_tool = Arc::new(
             tool_workflow::WorkflowTool::new(Some(workflow_launcher))
                 .with_current_cwd(current_cwd_cell.clone())
                 .with_size_guideline_state(workflow_size_guideline_state.clone())
@@ -9163,8 +9514,15 @@ pub async fn build(
                 )
                 .with_disable_workflows(managed_disable_workflows)
                 .with_dynamic_workflows_gate(dynamic_workflows_gate.clone())
-                .with_session_enabled(workflow_session_enabled),
-        ));
+                .with_session_enabled(workflow_session_enabled)
+                .with_permission_gate(perms.clone())
+                .with_plugin_workflows(plugin_workflow_registry.clone()),
+        );
+        #[cfg(test)]
+        {
+            wired_workflow_tool = Some(workflow_tool.clone());
+        }
+        tools_inner.register_builtin(workflow_tool);
     }
     for (conn_id, mcp_tools) in
         tool_mcp::build_registered_mcp_tools(&mcp_registry, mcp_tool_ctx.clone()).await
@@ -9208,6 +9566,14 @@ pub async fn build(
             ));
             slot
         });
+
+    // Claude Code 2.1.251 restricted mode narrows only the built-in pool. An
+    // explicit `--tools` list is the complete built-in allowlist; absent that
+    // list, the registry uses its centralized code-running/WebFetch deny set.
+    // Dynamic MCP/LSP/plugin tools remain governed by their existing policy.
+    if cfg.restricted {
+        tools_inner.set_restricted_builtin_filter(cfg.restricted_tools.as_deref());
+    }
 
     // Tool Search (2.1.207): now that the registry is fully assembled (builtins
     // + workflow + MCP + structured-output + end-conversation), publish the
@@ -9378,31 +9744,25 @@ pub async fn build(
     // Clone `cwd` for the settings watcher before it is moved into the
     // orchestrator constructor below.
     let watch_cwd = cwd.clone();
-    // Decide whether to spawn the settings watcher (7.2) BEFORE `hook_registry`
-    // is moved into the orchestrator: spawn only when a `ConfigChange` hook is
-    // registered (the fire is a strict no-op otherwise, so the background
-    // watcher would be pure overhead).
-    // Snapshot under ONE registry read: both the `ConfigChange` gate and the
-    // `FileChanged` watch-path matchers (collected before `hook_registry` is
-    // moved into the orchestrator). A `FileChanged` hook's group `matcher`
+    // Keep a clone for the settings watcher before `perms` is moved into the
+    // orchestrator. The watcher must remain live even without ConfigChange
+    // hooks because managed `disableAutoMode` is a safety policy, not an
+    // optional notification hook.
+    let settings_permission_gate = perms.clone();
+    // Snapshot the FileChanged hook matchers under ONE registry read before
+    // `hook_registry` is moved into the orchestrator. A `FileChanged` hook's group `matcher`
     // (`HookDefinition::matcher()`) is the pipe-separated filename list
     // claude-code's `resolveWatchPaths` reads (`fileChangedWatcher.ts:48-65`).
-    let (has_config_change_hook, file_changed_matchers): (bool, Vec<String>) = {
+    let file_changed_matchers: Vec<String> = {
         let reg = hook_registry.read().await;
         let all = reg.all_hooks();
-        let has_config_change = all.iter().any(|h| {
-            h.events
-                .contains(&hooks::events::HookEventType::ConfigChange)
-        });
-        let matchers = all
-            .iter()
+        all.iter()
             .filter(|h| {
                 h.events
                     .contains(&hooks::events::HookEventType::FileChanged)
             })
             .filter_map(|h| h.matcher().map(ToString::to_string))
-            .collect();
-        (has_config_change, matchers)
+            .collect()
     };
     // Build the `FileChanged` firer over the SAME `Arc<HookExecutorImpl>` the
     // orchestrator is about to take ownership of (mirrors the `cwd_changed_firer`
@@ -9480,7 +9840,17 @@ pub async fn build(
     let goal_workspace_trusted = migrations::global_config::global_config_path()
         .map(|cfg| migrations::global_config::check_has_trust_dialog_accepted(&cfg, &cwd))
         .unwrap_or(false);
-    let goal_hooks_restricted = load_merged_hooks_restricted(&cwd);
+    let goal_hooks_restricted = if cfg.restricted {
+        effective_settings
+            .as_ref()
+            .map(|settings| {
+                settings.settings.disable_all_hooks.unwrap_or(false)
+                    || settings.settings.allow_managed_hooks_only.unwrap_or(false)
+            })
+            .unwrap_or(false)
+    } else {
+        load_merged_hooks_restricted(&cwd)
+    };
     let orch_builder = ConversationOrchestrator::new_with_streaming(
         orch_cfg,
         api_client,
@@ -10000,13 +10370,18 @@ pub async fn build(
     //       context via: … --plugin-dir") but not safe mode; they load AFTER
     //       the marketplace-installed discovery through the SAME `pm.enable`
     //       materialisation path (binary `EBm` → the shared plugin merge).
-    let ambient_plugins = !cfg.customization_gates.disables_plugins();
+    let ambient_plugins = !cfg.restricted && !cfg.customization_gates.disables_plugins();
     let inline_plugins = !cfg.cli_plugin_dirs.is_empty() && !cfg.customization_gates.safe_mode;
+    // Restricted mode suppresses ambient user/project/local plugin settings,
+    // but it must still materialise the trusted managed/flag settings tier.
+    // Keep the existing safe/bare gates authoritative: those modes disable
+    // plugins unless an explicit `--plugin-dir` survives via `inline_plugins`.
+    let restricted_policy_plugins = cfg.restricted && !cfg.customization_gates.disables_plugins();
     // (`/reload-plugins`) The retained plugin subsystem — `None` when plugins are
     // entirely disabled (safe mode / `--bare` with no `--plugin-dir`), so the
     // interactive refresh reports "plugins disabled" rather than reloading.
     let mut plugin_runtime: Option<Arc<PluginRuntime>> = None;
-    if ambient_plugins || inline_plugins {
+    if ambient_plugins || inline_plugins || restricted_policy_plugins {
         let plugins_dir = std::env::var_os("LINGXI_PLUGIN_CACHE_DIR")
             .map_or_else(|| cfg.lingxi_home.join("plugins"), std::path::PathBuf::from);
         // Primary (faithful) path: resolve the `settings.enabledPlugins`
@@ -10024,6 +10399,8 @@ pub async fn build(
             &plugins_dir,
             &cfg.cli_plugin_dirs,
             &[],
+            cfg.restricted,
+            cfg.flag_settings.as_ref(),
         )
         .await;
         // Build the manager UNCONDITIONALLY (even when zero plugins resolve on
@@ -10045,7 +10422,8 @@ pub async fn build(
         // just field defaults) and injects `LINGXI_PLUGIN_OPTION_*` into plugin
         // hooks. Sensitive values are NOT here — they resolve live from
         // `CredentialManager`.
-        let plugin_configs = load_plugin_configs(&cfg.lingxi_home).await;
+        let plugin_configs =
+            load_plugin_configs(&cfg.lingxi_home, cfg.restricted, cfg.flag_settings.as_ref()).await;
         let blocked_marketplaces = load_blocked_marketplaces().await;
         let pm = Arc::new(
             plugin::PluginManager::new(
@@ -10066,7 +10444,8 @@ pub async fn build(
             )
             .with_agent_catalog(plugin_agent_catalog.clone())
             .with_plugin_configs(plugin_configs)
-            .with_blocked_marketplaces(blocked_marketplaces),
+            .with_blocked_marketplaces(blocked_marketplaces)
+            .with_plugin_workflows(plugin_workflow_registry.clone()),
         );
         for (id, manifest, dir) in discovered {
             let plugin_name = manifest.name.clone();
@@ -10099,6 +10478,8 @@ pub async fn build(
             additional_project_roots: repo_root_reloader.registered_roots(),
             ambient: ambient_plugins,
             inline: inline_plugins,
+            restricted: cfg.restricted,
+            flag_settings: cfg.flag_settings.clone(),
         }));
     }
     repo_root_reloader
@@ -10415,37 +10796,26 @@ pub async fn build(
     //       `utils/hooks.ts:4214`). The Rust port had no watcher; this wires it
     //       at the composition root via the in-tree `notify`-backed
     //       `FileSystem::watch` primitive (`platform-posix`'s `watch_helper`).
-    //       SCOPE is firing the hook only — the live settings RELOAD/re-apply
-    //       (claude-code's `fanOut`) is a separate concern, intentionally not
-    //       done here. Best-effort: the watcher fires `fire_config_change`,
-    //       which discards the aggregate (a failing/blocking `ConfigChange`
-    //       hook never breaks the watch loop) and is a strict no-op when no
-    //       `ConfigChange` hook is registered. The handle is returned on the
-    //       runtime so it lives for the session; dropping the runtime aborts
-    //       the watch tasks (RAII), releasing the OS handles cleanly.
+    //       The watcher fires `fire_config_change` BEFORE applying the narrow
+    //       managed `disableAutoMode` update. Hook execution is best-effort,
+    //       while the safety callback is required even when no ConfigChange
+    //       hook is registered. Ordinary user/project/local settings are not
+    //       reloaded here. The handle is returned on the runtime so it lives
+    //       for the session; dropping the runtime aborts the watch tasks
+    //       (RAII), releasing the OS handles cleanly.
     //
     //       The full `platform-posix` `FileSystem` is used here (NOT the
     //       `posix-minimal` one wired into the engine) because only it has the
     //       real `notify`-backed `watch`; `posix-minimal::watch` is an
     //       empty-stream stub, so wiring it would observe no events.
     //
-    //       GATED (decided above, before `hook_registry` moved into the
-    //       orchestrator): only spawn the watcher when at least one
-    //       `ConfigChange` hook is registered. The fire is a strict no-op
-    //       otherwise, so the background `notify` watcher (and its blocking pump
-    //       thread) would be pure overhead in the common no-hook case — gating
-    //       keeps boot cheap and avoids holding an OS watch handle nobody
-    //       consumes.
-    let settings_watcher = if has_config_change_hook {
-        let watch_fs: Arc<dyn traits::FileSystem> =
-            Arc::new(PosixFileSystem::new(watch_cwd.clone()));
-        let firer: Arc<dyn settings_watch::ConfigChangeFirer> = orch.clone();
+    let watch_fs: Arc<dyn traits::FileSystem> = Arc::new(PosixFileSystem::new(watch_cwd.clone()));
+    let firer: Arc<dyn settings_watch::ConfigChangeFirer> = orch.clone();
+    let settings_watcher =
         settings_watch::SettingsWatcher::new(&cfg.lingxi_home, &watch_cwd, firer)
+            .with_permission_gate(settings_permission_gate)
             .spawn(watch_fs)
-            .await
-    } else {
-        settings_watch::SettingsWatcherHandle::empty()
-    };
+            .await;
 
     // (7.3) FileChanged lifecycle: start the file-changed watcher now that the
     //       orchestrator + hook registry are wired. claude-code resolves a set
@@ -10536,6 +10906,8 @@ pub async fn build(
         dispatcher,
         auth,
         task_registry,
+        #[cfg(test)]
+        wired_workflow_tool: wired_workflow_tool.expect("desktop Workflow tool is registered"),
         coordinator,
         coordinator_mode,
         permission_gate: adapter_gate,
@@ -11397,6 +11769,52 @@ mod tests {
         );
     }
 
+    /// Composition regression for the desktop/CLI registration path: the
+    /// Workflow instance built by `engine_desktop::build` must use the same
+    /// enforcing gate as the rest of the runtime. A directory at `scriptPath`
+    /// makes any pre-authorization read fail, while the flag-settings deny
+    /// proves the live Read policy is consulted first.
+    #[tokio::test]
+    async fn desktop_workflow_script_path_is_read_gated_before_launcher_io() {
+        use permission::PermissionResult;
+        use tool_api::Tool as _;
+
+        let (_tmp, mut cfg) = test_config(false);
+        let script_path = cfg.cwd.join("secret.js");
+        std::fs::create_dir(&script_path).expect("directory path must be unreadable as a script");
+        cfg.flag_settings = Some(
+            serde_json::from_value(serde_json::json!({
+                "permissions": { "deny": ["Read(./secret.js)"] }
+            }))
+            .expect("flag settings deny rule must parse"),
+        );
+
+        let output: Arc<dyn traits::OutputStream> =
+            Arc::new(orchestrator::test_support::MockOutputStream::new());
+        let permission_sink: Arc<dyn client_adapter::PermissionRequestSink> =
+            Arc::new(RecordingPermissionSink::default());
+        let runtime = build(cfg, output, permission_sink)
+            .await
+            .expect("desktop build must succeed without reading scriptPath");
+        let input = serde_json::json!({
+            "scriptPath": script_path.to_string_lossy().into_owned()
+        });
+        let ctx = tool_api::test_support::fresh_ctx();
+
+        runtime
+            .wired_workflow_tool
+            .validate_input(&input, &ctx)
+            .await
+            .expect("scriptPath shape validation must not touch the directory");
+        let decision = runtime
+            .wired_workflow_tool
+            .check_permissions(&input, &ctx)
+            .await;
+        assert!(matches!(decision, PermissionResult::Deny { .. }));
+        let rendered = format!("{decision:?}");
+        assert!(!rendered.contains("secret workflow contents"));
+    }
+
     /// (M4 cc2.1.198) `--agents` flag agents merge with `flagSettings`
     /// precedence (`XXt`: flag REPLACES a same-named user/project agent, else
     /// appends) and are IGNORED in safe mode (warn — the `--agents: ignored in
@@ -11473,6 +11891,8 @@ mod tests {
                 disabled: false,
                 timeout_ms: None,
                 always_load: false,
+                tools: Vec::new(),
+                tool_permissions: std::collections::BTreeMap::new(),
                 config_error: None,
             }
         }
@@ -11852,6 +12272,8 @@ mod tests {
             add_dir: Vec::new(),
             cli_mcp_servers: Vec::new(),
             strict_mcp_config: false,
+            restricted: false,
+            restricted_tools: None,
             exclude_dynamic_system_prompt_sections: false,
             setting_source_scope: (true, true),
             customization_gates: super::CustomizationGates::default(),
@@ -14527,6 +14949,40 @@ mod tests {
     }
 
     #[test]
+    fn mcp_tool_policy_rules_are_composed_into_the_boot_policy() {
+        let server = mcp::McpServerConfig {
+            name: "remote.server".into(),
+            spec: traits::McpTransportSpec::InProcess {
+                registry_key: "remote.server".into(),
+            },
+            scope: mcp::ConfigScope::Dynamic,
+            disabled: false,
+            timeout_ms: None,
+            always_load: false,
+            tools: vec![traits::McpConfiguredToolPolicyDto {
+                name: "delete_data".into(),
+                permission_policy: Some(traits::McpToolPermissionPolicy::AlwaysDeny),
+                org_max_permission: None,
+            }],
+            tool_permissions: std::collections::BTreeMap::new(),
+            config_error: None,
+        };
+        let mut rules = Vec::new();
+        super::append_mcp_permission_rules(&mut rules, &[server], false);
+        let policy = permission::PermissionPolicy::from_rules(
+            permission::PermissionMode::BypassPermissions,
+            rules,
+        );
+        assert!(matches!(
+            policy.authorize("mcp__remote_server__delete_data", &serde_json::json!({})),
+            permission::PermissionResult::Deny {
+                reason: permission::PermissionDecisionReason::MatchedRule { .. },
+                ..
+            }
+        ));
+    }
+
+    #[test]
     fn sandbox_runtime_config_from_settings_tiers_is_opt_in() {
         use super::sandbox_runtime_config_from_settings_tiers;
         let ctx = sandbox::policy_convert::SandboxConvertContext::default();
@@ -15926,6 +16382,8 @@ mod tests {
             additional_project_roots: Arc::new(RwLock::new(Vec::new())),
             ambient: true,
             inline: false,
+            restricted: false,
+            flag_settings: None,
         };
 
         // First refresh: A enables, its command lands in the live registry.
@@ -15966,6 +16424,180 @@ mod tests {
         );
         let ids = manager.loaded_plugin_ids().await;
         assert_eq!(ids.len(), 1, "only B remains loaded after the swap");
+    }
+
+    /// Restricted refreshes must keep the startup source boundary: a user
+    /// `enabledPlugins` setting is ignored even when the runtime object was
+    /// constructed with an ambient-capable flag, while a normal runtime still
+    /// sees that same setting. An explicit flagSettings allowlist remains
+    /// available in restricted mode.
+    #[tokio::test]
+    async fn plugin_runtime_refresh_respects_restricted_settings_sources() {
+        use tokio::sync::RwLock;
+
+        let _managed_env_lock = MANAGED_ENV_LOCK.lock().unwrap();
+        let previous_managed_dir = std::env::var_os(super::settings_watch::MANAGED_DIR_ENV);
+        let tmp = tempfile::tempdir().unwrap();
+        let isolated_managed_dir = tmp.path().join("empty-managed");
+        std::env::set_var(
+            super::settings_watch::MANAGED_DIR_ENV,
+            &isolated_managed_dir,
+        );
+        let home = tmp.path().join("home");
+        let cwd = tmp.path().join("cwd");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(&cwd).unwrap();
+        let plugins_dir = home.join("plugins");
+        write_cached_plugin(&plugins_dir, "mkt", "ambient", "1.0.0", "ambient_cmd");
+        write_enabled_plugins(&home, &[("ambient@mkt", true)]);
+
+        let restricted_catalog = Arc::new(RwLock::new(Vec::new()));
+        let (restricted_manager, restricted_commands) = make_reload_test_manager(
+            &plugins_dir,
+            &cwd,
+            &tmp.path().join("restricted-secrets"),
+            restricted_catalog,
+        )
+        .await;
+        let restricted = super::PluginRuntime {
+            manager: restricted_manager.clone(),
+            plugins_dir: plugins_dir.clone(),
+            home: home.clone(),
+            cwd: cwd.clone(),
+            cli_plugin_dirs: Vec::new(),
+            additional_project_roots: Arc::new(RwLock::new(Vec::new())),
+            // Deliberately leave ambient=true to prove the session bit, not a
+            // caller convention, closes the user/project settings path.
+            ambient: true,
+            inline: false,
+            restricted: true,
+            flag_settings: None,
+        };
+        let restricted_counts = restricted.refresh().await;
+        assert_eq!(restricted_counts.enabled, 0);
+        assert!(
+            restricted_commands
+                .read()
+                .await
+                .resolve("ambient:ambient_cmd")
+                .is_none(),
+            "restricted refresh must not activate a user-enabled ambient plugin"
+        );
+
+        // Managed policy remains trusted in restricted mode even though the
+        // same runtime was deliberately given an ambient-capable flag.
+        let managed_dir = tmp.path().join("managed");
+        std::fs::create_dir_all(&managed_dir).unwrap();
+        std::fs::write(
+            managed_dir.join("managed-settings.json"),
+            r#"{"enabledPlugins":{"ambient@mkt":true}}"#,
+        )
+        .unwrap();
+        std::env::set_var(super::settings_watch::MANAGED_DIR_ENV, &managed_dir);
+        let managed_catalog = Arc::new(RwLock::new(Vec::new()));
+        let (managed_manager, managed_commands) = make_reload_test_manager(
+            &plugins_dir,
+            &cwd,
+            &tmp.path().join("managed-secrets"),
+            managed_catalog,
+        )
+        .await;
+        let managed = super::PluginRuntime {
+            manager: managed_manager,
+            plugins_dir: plugins_dir.clone(),
+            home: home.clone(),
+            cwd: cwd.clone(),
+            cli_plugin_dirs: Vec::new(),
+            additional_project_roots: Arc::new(RwLock::new(Vec::new())),
+            ambient: true,
+            inline: false,
+            restricted: true,
+            flag_settings: None,
+        };
+        let managed_counts = managed.refresh().await;
+        assert_eq!(managed_counts.enabled, 1);
+        assert!(
+            managed_commands
+                .read()
+                .await
+                .resolve("ambient:ambient_cmd")
+                .is_some(),
+            "restricted refresh must retain a managed enabledPlugins entry"
+        );
+        // Keep the remainder of this test isolated from any host policy, then
+        // restore the caller's environment after the normal-session assertion.
+        std::env::set_var(
+            super::settings_watch::MANAGED_DIR_ENV,
+            &isolated_managed_dir,
+        );
+
+        let flag_settings: engine::settings::SettingsJson =
+            serde_json::from_str(r#"{"enabledPlugins":{"ambient@mkt":true}}"#).unwrap();
+        let flagged_catalog = Arc::new(RwLock::new(Vec::new()));
+        let (flagged_manager, flagged_commands) = make_reload_test_manager(
+            &plugins_dir,
+            &cwd,
+            &tmp.path().join("flagged-secrets"),
+            flagged_catalog,
+        )
+        .await;
+        let flagged = super::PluginRuntime {
+            manager: flagged_manager.clone(),
+            plugins_dir: plugins_dir.clone(),
+            home: home.clone(),
+            cwd: cwd.clone(),
+            cli_plugin_dirs: Vec::new(),
+            additional_project_roots: Arc::new(RwLock::new(Vec::new())),
+            ambient: false,
+            inline: false,
+            restricted: true,
+            flag_settings: Some(flag_settings),
+        };
+        let flagged_counts = flagged.refresh().await;
+        assert_eq!(flagged_counts.enabled, 1);
+        assert!(
+            flagged_commands
+                .read()
+                .await
+                .resolve("ambient:ambient_cmd")
+                .is_some(),
+            "explicit flagSettings plugin allowlist remains effective"
+        );
+
+        let normal_catalog = Arc::new(RwLock::new(Vec::new()));
+        let (normal_manager, normal_commands) = make_reload_test_manager(
+            &plugins_dir,
+            &cwd,
+            &tmp.path().join("normal-secrets"),
+            normal_catalog,
+        )
+        .await;
+        let normal = super::PluginRuntime {
+            manager: normal_manager.clone(),
+            plugins_dir,
+            home,
+            cwd,
+            cli_plugin_dirs: Vec::new(),
+            additional_project_roots: Arc::new(RwLock::new(Vec::new())),
+            ambient: true,
+            inline: false,
+            restricted: false,
+            flag_settings: None,
+        };
+        let normal_counts = normal.refresh().await;
+        assert_eq!(normal_counts.enabled, 1);
+        assert!(
+            normal_commands
+                .read()
+                .await
+                .resolve("ambient:ambient_cmd")
+                .is_some(),
+            "nonrestricted refresh must retain ambient user settings"
+        );
+        match previous_managed_dir {
+            Some(value) => std::env::set_var(super::settings_watch::MANAGED_DIR_ENV, value),
+            None => std::env::remove_var(super::settings_watch::MANAGED_DIR_ENV),
+        }
     }
 
     /// Build a `PluginManager` (Arc, holding a fresh command registry to assert
@@ -16166,6 +16798,8 @@ mod tests {
             additional_project_roots: Arc::new(RwLock::new(Vec::new())),
             ambient: true,
             inline: false,
+            restricted: false,
+            flag_settings: None,
         };
 
         let c = rt.refresh().await;
@@ -16288,6 +16922,8 @@ mod tests {
             additional_project_roots: Arc::new(RwLock::new(Vec::new())),
             ambient: true,
             inline: false,
+            restricted: false,
+            flag_settings: None,
         };
 
         let c = rt.refresh().await;
@@ -16308,9 +16944,8 @@ mod tests {
     /// shipping every component type `PluginManager::enable` materializes —
     /// commands, a skill (`skills/<dir>/SKILL.md`), a benign agent, an
     /// `output-styles/*.md` style, a `hooks/hooks.json` hook, a `.mcp.json`
-    /// server, and a `.lsp.json` server — plus a `workflows/` script for the
-    /// P0a-new slot that discovery populates but (see the required test
-    /// below) nothing at the desktop composition root yet materializes.
+    /// server, and a `.lsp.json` server — plus a `workflows/` script that is
+    /// materialized into the shared plugin-workflow registry.
     ///
     /// ⚠️ Fixture invariant, load-bearing for the test below: wherever a
     /// component's registered name and its filename/directory are separate
@@ -16448,7 +17083,8 @@ mod tests {
     /// `PluginRuntime::refresh` exactly like the three tests above — wired
     /// to the same registry shapes `lib.rs`'s §6.5 composition-root block
     /// wires (`with_agent_catalog`, the manager's own command / skill /
-    /// hook / output-style / MCP / LSP registries), and asserts each
+    /// hook / output-style / MCP / LSP registries plus the shared
+    /// plugin-workflow registry), and asserts each
     /// component reaches ITS OWN live registry by the fixture's own
     /// identifier (command/skill/agent name, a hook command marker, the
     /// MCP/LSP scoped server name) — never a single "registries are
@@ -16495,28 +17131,7 @@ mod tests {
     /// REAL third-party plugin is the actual check, and this machine test is
     /// the last cheap abort point before Phase 1. Concretely, still open:
     ///
-    /// 1. **Workflows have no live registry to reach.** Unlike the other
-    ///    seven components, `PluginManager::load_plugin` never reads
-    ///    `manifest.components.workflows` at all (`grep -c
-    ///    'components.workflows' plugin/src/manager.rs` → 0), and no
-    ///    PRODUCTION code under `apps/engine-desktop` calls
-    ///    `plugin::build_plugin_workflow_inventory`,
-    ///    `plugin::resolve_named_workflow`, or constructs a
-    ///    `plugin::VerifiedWorkflowHandle` — the only caller of any of the
-    ///    three in this file is the assertion at the bottom of this test. `plugin/src/manifest.rs`'s own
-    ///    doc comment says it plainly: "except for `workflows`, which
-    ///    discovery populates but nothing materializes yet." So there is no
-    ///    live workflow registry for this test to assert against — claiming
-    ///    one would be testing a registry that does not exist. The honest
-    ///    claim below is narrower: the exact `PluginManifest` the
-    ///    composition root's bootstrap loop hands to `pm.enable()` carries
-    ///    the shipped script in `components.workflows`, and the `plugin`
-    ///    crate's own next-layer function (`build_plugin_workflow_inventory`)
-    ///    turns it into a correctly namespaced inventory entry — i.e. the
-    ///    data survives all the way to the composition root's front door.
-    ///    It proves nothing about what happens past that door, because
-    ///    nothing happens past that door today.
-    /// 2. **The skill registry this test observes is not wired to anything
+    /// 1. **The skill registry this test observes is not wired to anything
     ///    else even in production.** `lib.rs`'s §6.5 comment says so
     ///    directly: the composition root hands `PluginManager` a FRESH
     ///    `SkillRegistry::new()`, not the shared instance (if any) a real
@@ -16526,25 +17141,25 @@ mod tests {
     ///    thing `plugin/tests/materialize.rs` already proves at the crate
     ///    level — not that a plugin skill is visible to a real session
     ///    today. That gap predates this task and is not introduced by it.
-    /// 3. **No real MCP or LSP server is dialed.** The MCP fixture's `echo`
+    /// 2. **No real MCP or LSP server is dialed.** The MCP fixture's `echo`
     ///    is not an MCP server and the LSP fixture's server is never
     ///    started (LSP registration only seeds a `Disconnected` config); so
     ///    this test proves the scoped config REACHES the registry, not that
     ///    a real plugin's real server would actually connect, speak its
     ///    protocol, or survive the reconnect loop.
-    /// 4. **Nothing here drives a real turn.** No tool call fires the
+    /// 3. **Nothing here drives a real turn.** No tool call fires the
     ///    registered hook; no `/`-command actually invokes the plugin
     ///    command; no session spawns the plugin agent via the Task tool; no
     ///    model ever sees the plugin skill in the per-turn skill listing.
     ///    Each of those is a further hop past "materialized into a
     ///    registry" that only a live session exercises.
-    /// 5. **No real fetch/marketplace/trust path.** The plugin here is
+    /// 4. **No real fetch/marketplace/trust path.** The plugin here is
     ///    written directly into the versioned cache layout, bypassing
     ///    `install`'s network arms (git clone / marketplace HTTP / `.mcpb`
     ///    unpack — still stubs), the marketplace catalog trust/policy gate,
     ///    and the blocklist matching a REAL persisted `PluginId` across a
     ///    restart (in-process `PluginId::new()` is a fresh UUID every run).
-    /// 6. **No `/reload-plugins` CLI round-trip.** `PluginRuntime::refresh`
+    /// 5. **No `/reload-plugins` CLI round-trip.** `PluginRuntime::refresh`
     ///    is called directly, not through the interactive slash-command
     ///    binding a real user types.
     ///
@@ -16577,7 +17192,8 @@ mod tests {
         std::fs::create_dir_all(&home).unwrap();
         std::fs::create_dir_all(&cwd).unwrap();
         let plugins_dir = home.join("plugins");
-        write_full_component_third_party_plugin(&plugins_dir, "mkt", "acmeplugin", "1.0.0");
+        let plugin_dir =
+            write_full_component_third_party_plugin(&plugins_dir, "mkt", "acmeplugin", "1.0.0");
         write_enabled_plugins(&home, &[("acmeplugin@mkt", true)]);
 
         // Every registry the composition root wires `PluginManager` to
@@ -16591,6 +17207,7 @@ mod tests {
         let mcp_registry = Arc::new(McpRegistry::new(Arc::new(PosixMcpTransport::new())));
         let lsp_registry = Arc::new(LspRegistry::new(Arc::new(PosixLspTransport::new())));
         let agent_catalog = Arc::new(RwLock::new(Vec::new()));
+        let plugin_workflow_registry = Arc::new(workflow::PluginWorkflowRegistry::new());
 
         let storage = PlainTextSecureStorage::new(tmp.path().join("secrets"))
             .await
@@ -16617,7 +17234,8 @@ mod tests {
                 lsp_registry.clone(),
                 tool_registry.clone(),
             )
-            .with_agent_catalog(agent_catalog.clone()),
+            .with_agent_catalog(agent_catalog.clone())
+            .with_plugin_workflows(plugin_workflow_registry.clone()),
         );
         let rt = super::PluginRuntime {
             manager: manager.clone(),
@@ -16628,6 +17246,8 @@ mod tests {
             additional_project_roots: Arc::new(RwLock::new(Vec::new())),
             ambient: true,
             inline: false,
+            restricted: false,
+            flag_settings: None,
         };
 
         let counts = rt.refresh().await;
@@ -16789,12 +17409,31 @@ mod tests {
             );
         }
 
-        // ── workflows — the honest boundary (see this test's doc comment
-        //    for the full reasoning): no live registry exists, so the
-        //    strongest reachable claim is that the data survives discovery
-        //    all the way to the composition root's bootstrap front door. ──
-        let discovered_at_boot =
-            super::discover_plugin_set(true, false, &home, &cwd, &plugins_dir, &[], &[]).await;
+        // ── workflows ─────────────────────────────────────────────────
+        // The same live registry the desktop composition root shares with the
+        // plugin manager, Workflow tool, launcher, and nested resolver must
+        // contain the script under the plugin-qualified meta.name.
+        let registered_workflow = plugin_workflow_registry
+            .resolve("acmeplugin:assemble")
+            .expect("the plugin workflow must be materialized in the shared registry");
+        assert_eq!(
+            registered_workflow.script_path,
+            std::fs::canonicalize(plugin_dir.join("workflows").join("build.js"))
+                .expect("fixture workflow path must canonicalize")
+        );
+        assert!(registered_workflow.script.contains("name: 'assemble'"));
+        let discovered_at_boot = super::discover_plugin_set(
+            true,
+            false,
+            &home,
+            &cwd,
+            &plugins_dir,
+            &[],
+            &[],
+            false,
+            None,
+        )
+        .await;
         assert_eq!(
             discovered_at_boot.len(),
             1,
@@ -17198,6 +17837,7 @@ mod workspace_lease_forwarding_tests {
             parent_model: None,
             parent_model_profile: None,
             mode_override: None,
+            request_source: None,
             frozen_command_denies: Vec::new(),
         }
     }

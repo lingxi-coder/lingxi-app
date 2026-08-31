@@ -25,6 +25,22 @@
 
 use crate::local_apps_build::LocalAppBuildTarget;
 
+/// Canonical Plugin-qualified workflow identities.  Keeping these reserved
+/// names in the composition binding lets the workflow launcher avoid a second
+/// production-side identity table (and keeps project workflows that merely
+/// shadow the names from gaining Host authority).
+pub(crate) const PLUGIN_BUILD_WORKFLOW_ID: &str = "lingxi-local-app:local-app-build";
+pub(crate) const PLUGIN_USE_TEST_WORKFLOW_ID: &str = "lingxi-local-app:local-app-use-test";
+pub(crate) const PLUGIN_MCP_AUTHORING_WORKFLOW_ID: &str =
+    "lingxi-local-app:local-app-mcp-authoring";
+
+pub(crate) fn is_plugin_workflow_id(workflow_id: &str) -> bool {
+    matches!(
+        workflow_id,
+        PLUGIN_BUILD_WORKFLOW_ID | PLUGIN_USE_TEST_WORKFLOW_ID | PLUGIN_MCP_AUTHORING_WORKFLOW_ID
+    )
+}
+
 /// The single Local App build workflow authorized for a build target.
 ///
 /// This is the map [`LocalAppPluginBinding::resolve`] wraps in a typed
@@ -99,7 +115,14 @@ impl LocalAppPluginBinding {
         family: local_apps::AppRuntimeProfile,
         launched_workflow_id: &str,
     ) -> Result<(), tool_workflow::WorkflowLaunchError> {
-        if launched_workflow_id != self.handle.id() {
+        // The Plugin registry uses the fully-qualified identity while legacy
+        // built-in checkpoints still carry the bare pre-Plugin id. Accept the
+        // namespaced spelling as the canonical Phase4 route and retain the
+        // bare spelling only for resumable legacy rows; no family-specific
+        // second workflow is selected by this compatibility branch.
+        let namespaced_plugin_id = PLUGIN_BUILD_WORKFLOW_ID;
+        if launched_workflow_id != self.handle.id() && launched_workflow_id != namespaced_plugin_id
+        {
             return Err(tool_workflow::WorkflowLaunchError(format!(
                 "app {app_id:?} is pinned to runtime profile {family}, which must use {}; \
                  refusing caller-selected workflow {launched_workflow_id}",

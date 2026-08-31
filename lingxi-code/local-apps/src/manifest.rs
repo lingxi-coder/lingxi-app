@@ -44,6 +44,10 @@ pub const PERMISSIONS_FILE: &str = "permissions.json";
 pub const GENERATION_JOBS_FILE: &str = "generation-jobs.json";
 /// App-to-conversation mailbox filename.
 pub const MAILBOX_FILE: &str = "mailbox.json";
+/// Host-owned MCP catalog root under one app's private data directory.
+pub const MCP_DIR: &str = "mcp";
+pub const MCP_CATALOGS_DIR: &str = "catalogs";
+pub const MCP_AUTHORING_JOURNAL_FILE: &str = "authoring-journal.json";
 
 const MAX_MANIFEST_BYTES: u64 = 2 * 1024 * 1024;
 /// Maximum UTF-8 byte length for manifest, collection and field display names.
@@ -348,6 +352,128 @@ impl AppDependencySnapshot {
     }
 }
 
+/// Immutable provenance for the plugin template snapshot used to scaffold an
+/// app.  This is Host-owned metadata: generated source never gets to change
+/// the plugin identity or the bytes from which managed files are restored.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppTemplateOrigin {
+    pub plugin_id: String,
+    pub plugin_version: String,
+    pub template_id: String,
+    pub template_sha256: String,
+}
+
+impl AppTemplateOrigin {
+    pub const BUILTIN_PLUGIN_ID: &'static str = "lingxi-local-app@builtin";
+
+    fn validate(&self) -> Result<(), AppError> {
+        if self.plugin_id != Self::BUILTIN_PLUGIN_ID {
+            return Err(AppError::InvalidRequest(
+                "templateOrigin pluginId must be lingxi-local-app@builtin".into(),
+            ));
+        }
+        for (label, value) in [
+            ("pluginVersion", &self.plugin_version),
+            ("templateId", &self.template_id),
+        ] {
+            if value.trim().is_empty()
+                || value.len() > 128
+                || value.contains('/')
+                || value.contains('\\')
+            {
+                return Err(AppError::InvalidRequest(format!(
+                    "templateOrigin {label} is invalid"
+                )));
+            }
+        }
+        if !is_sha256_hex(&self.template_sha256) {
+            return Err(AppError::InvalidRequest(
+                "templateOrigin templateSha256 must be 64 lowercase hex bytes".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Host-owned pointer to an immutable, QA-verified MCP catalog.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppMcpCatalogRef {
+    pub build_id: String,
+    pub manifest_revision: u64,
+    pub authoring_revision: u64,
+    pub user_goal_sha256: String,
+    pub proposal_sha256: String,
+    pub approval_contract_sha256: String,
+    pub tool_surface_sha256: String,
+    pub catalog_sha256: String,
+    pub mcp_verification_sha256: String,
+}
+
+/// Read-only publication projection. It is derived from trusted active
+/// pointers and evidence; it is never serialized into `AppRecord`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AppPublicationState {
+    Draft,
+    PublishedUnverified,
+    PublishedVerified,
+}
+
+/// Derive publication state from the active build/catalog pair.
+pub fn derive_publication_state(
+    manifest: &AppManifest,
+    active_build_id: Option<&str>,
+    ui_verified: bool,
+) -> Result<AppPublicationState, AppError> {
+    match (active_build_id, manifest.active_mcp_catalog.as_ref()) {
+        (None, None) => Ok(AppPublicationState::Draft),
+        (Some(build_id), Some(catalog)) if build_id == catalog.build_id => {
+            if ui_verified {
+                Ok(AppPublicationState::PublishedVerified)
+            } else {
+                Ok(AppPublicationState::PublishedUnverified)
+            }
+        }
+        _ => Err(AppError::InvalidRequest(
+            "active_state_corrupt: active build and MCP catalog must be paired".into(),
+        )),
+    }
+}
+
+impl AppMcpCatalogRef {
+    fn validate(&self) -> Result<(), AppError> {
+        if self.build_id.trim().is_empty()
+            || self.build_id.len() > 128
+            || self.build_id.contains('/')
+        {
+            return Err(AppError::InvalidRequest(
+                "activeMcpCatalog buildId is invalid".into(),
+            ));
+        }
+        if self.manifest_revision == 0 || self.authoring_revision == 0 {
+            return Err(AppError::InvalidRequest(
+                "activeMcpCatalog revisions must be positive".into(),
+            ));
+        }
+        for (label, value) in [
+            ("userGoalSha256", &self.user_goal_sha256),
+            ("proposalSha256", &self.proposal_sha256),
+            ("approvalContractSha256", &self.approval_contract_sha256),
+            ("toolSurfaceSha256", &self.tool_surface_sha256),
+            ("catalogSha256", &self.catalog_sha256),
+            ("mcpVerificationSha256", &self.mcp_verification_sha256),
+        ] {
+            if !is_sha256_hex(value) {
+                return Err(AppError::InvalidRequest(format!(
+                    "activeMcpCatalog {label} must be 64 lowercase hex bytes"
+                )));
+            }
+        }
+        Ok(())
+    }
+}
+
 /// Versioned local application manifest.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -389,6 +515,12 @@ pub struct AppManifest {
     /// Host-verified dependency snapshot for a scaffolded app.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dependency_snapshot: Option<AppDependencySnapshot>,
+    /// Immutable plugin/template provenance. Present exactly when scaffolded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub template_origin: Option<AppTemplateOrigin>,
+    /// Active MCP catalog pointer. Candidates remain in Host staging/journal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_mcp_catalog: Option<AppMcpCatalogRef>,
 }
 
 impl AppManifest {
@@ -410,6 +542,8 @@ impl AppManifest {
             surface: None,
             runtime_profile: None,
             dependency_snapshot: None,
+            template_origin: None,
+            active_mcp_catalog: None,
         }
     }
 
@@ -544,14 +678,27 @@ impl AppManifest {
         if let Some(device_context) = &self.device_context {
             device_context.validate()?;
         }
+        if self.active_mcp_catalog.is_some()
+            && (self.surface.is_none()
+                || self.runtime_profile.is_none()
+                || self.dependency_snapshot.is_none()
+                || self.template_origin.is_none())
+        {
+            return Err(AppError::InvalidRequest(
+                "active_state_corrupt: activeMcpCatalog requires a complete scaffold identity"
+                    .into(),
+            ));
+        }
         match (
             &self.surface,
             &self.runtime_profile,
             &self.dependency_snapshot,
+            &self.template_origin,
         ) {
-            (None, None, None) => {}
-            (Some(surface), Some(binding), snapshot) => {
+            (None, None, None, None) if self.active_mcp_catalog.is_none() => {}
+            (Some(surface), Some(binding), snapshot, Some(template_origin)) => {
                 binding.validate()?;
+                template_origin.validate()?;
                 if binding.family.surface() != *surface {
                     return Err(AppError::InvalidRequest(format!(
                         "runtimeProfile family {} does not match manifest surface {}",
@@ -568,19 +715,37 @@ impl AppManifest {
                     }
                 }
             }
-            (Some(_), None, None) => {
+            (Some(_), None, None, _) => {
                 return Err(AppError::InvalidRequest(
                     "scaffolded apps must commit a runtimeProfile with the surface".into(),
                 ));
             }
-            (None, None, Some(_)) | (None, Some(_), _) => {
+            (None, None, Some(_), _) | (None, Some(_), _, _) => {
                 return Err(AppError::InvalidRequest(
                     "surface, runtimeProfile, and dependencySnapshot must agree on scaffold identity".into(),
                 ));
             }
             _ => {
                 return Err(AppError::InvalidRequest(
-                    "dependencySnapshot requires a matching surface and runtimeProfile".into(),
+                    "templateOrigin/dependencySnapshot requires a matching surface and runtimeProfile".into(),
+                ));
+            }
+        }
+        if let Some(catalog) = &self.active_mcp_catalog {
+            catalog.validate()?;
+            if self.surface.is_none()
+                || self.runtime_profile.is_none()
+                || self.dependency_snapshot.is_none()
+                || self.template_origin.is_none()
+            {
+                return Err(AppError::InvalidRequest(
+                    "active_state_corrupt: activeMcpCatalog requires a complete scaffold identity"
+                        .into(),
+                ));
+            }
+            if catalog.manifest_revision > self.revision {
+                return Err(AppError::InvalidRequest(
+                    "activeMcpCatalog manifestRevision cannot exceed manifest revision".into(),
                 ));
             }
         }
@@ -759,6 +924,28 @@ impl AppLayout {
         self.app_dir_rel().join(MAILBOX_FILE)
     }
 
+    /// Root-relative immutable active/candidate MCP catalog path.
+    pub fn mcp_catalog_rel(&self, catalog_sha256: &str) -> Result<PathBuf, AppError> {
+        if !is_sha256_hex(catalog_sha256) {
+            return Err(AppError::InvalidRequest(
+                "catalog digest must be 64 lowercase hex bytes".into(),
+            ));
+        }
+        Ok(self
+            .app_dir_rel()
+            .join(MCP_DIR)
+            .join(MCP_CATALOGS_DIR)
+            .join(format!("{catalog_sha256}.json")))
+    }
+
+    /// Root-relative durable MCP authoring journal.
+    #[must_use]
+    pub fn mcp_authoring_journal_rel(&self) -> PathBuf {
+        self.app_dir_rel()
+            .join(MCP_DIR)
+            .join(MCP_AUTHORING_JOURNAL_FILE)
+    }
+
     /// Root-relative host-owned Agent session catalog.
     #[must_use]
     pub fn agent_sessions_rel(&self) -> PathBuf {
@@ -799,11 +986,62 @@ impl AppLayout {
             self.app_dir_rel()
                 .join(crate::agent_sessions::AGENT_SESSION_HISTORY_DIR),
             self.app_dir_rel().join(crate::background::CANCEL_DIR),
+            self.app_dir_rel().join(MCP_DIR).join(MCP_CATALOGS_DIR),
         ] {
             ensure_private_directory(&self.root, &relative)?;
         }
         Ok(())
     }
+}
+
+/// Persist one Host-owned immutable catalog. Rewriting a digest with
+/// different bytes fails closed; retrying the exact same bytes is idempotent.
+pub fn save_mcp_catalog(
+    layout: &AppLayout,
+    catalog_sha256: &str,
+    catalog: &Value,
+) -> Result<(), AppError> {
+    let path = layout.mcp_catalog_rel(catalog_sha256)?;
+    let actual = canonical_hash(catalog.clone(), "MCP catalog")?;
+    if actual != catalog_sha256 {
+        return Err(AppError::InvalidRequest(
+            "MCP catalog bytes do not match catalog_sha256".into(),
+        ));
+    }
+    layout.initialize()?;
+    let mut body = serde_json::to_vec_pretty(catalog)
+        .map_err(|error| AppError::Io(format!("serialize MCP catalog: {error}")))?;
+    body.push(b'\n');
+    let absolute = layout.root().join(&path);
+    if absolute.exists() {
+        let existing = rooted_fs::read_to_string_limited(layout.root(), &path, MAX_MANIFEST_BYTES)
+            .map_err(|error| AppError::from_fs("read immutable MCP catalog", &error))?;
+        let existing_value: Value = serde_json::from_str(&existing)
+            .map_err(|error| AppError::StorageCorrupt(format!("MCP catalog: {error}")))?;
+        if canonical_hash(existing_value, "MCP catalog")? != catalog_sha256 {
+            return Err(AppError::StorageCorrupt(
+                "immutable MCP catalog digest was rewritten".into(),
+            ));
+        }
+        return Ok(());
+    }
+    rooted_fs::atomic_write(layout.root(), &path, &body, AtomicWriteOptions::default())
+        .map_err(|error| AppError::from_fs("write immutable MCP catalog", &error))
+}
+
+/// Load one immutable Host-owned catalog by its digest.
+pub fn load_mcp_catalog(layout: &AppLayout, catalog_sha256: &str) -> Result<Value, AppError> {
+    let path = layout.mcp_catalog_rel(catalog_sha256)?;
+    let body = rooted_fs::read_to_string_limited(layout.root(), &path, MAX_MANIFEST_BYTES)
+        .map_err(|error| AppError::from_fs("read MCP catalog", &error))?;
+    let catalog: Value = serde_json::from_str(&body)
+        .map_err(|error| AppError::StorageCorrupt(format!("MCP catalog: {error}")))?;
+    if canonical_hash(catalog.clone(), "MCP catalog")? != catalog_sha256 {
+        return Err(AppError::StorageCorrupt(
+            "MCP catalog bytes do not match its filename digest".into(),
+        ));
+    }
+    Ok(catalog)
 }
 
 /// Persist a validated manifest atomically.
@@ -1011,6 +1249,8 @@ mod tests {
             surface: None,
             runtime_profile: None,
             dependency_snapshot: None,
+            template_origin: None,
+            active_mcp_catalog: None,
         }
     }
 
@@ -1043,6 +1283,12 @@ mod tests {
             family: AppRuntimeProfile::Three3d,
             revision: 1,
             contract_sha256: "a".repeat(64),
+        });
+        profiled.template_origin = Some(AppTemplateOrigin {
+            plugin_id: AppTemplateOrigin::BUILTIN_PLUGIN_ID.into(),
+            plugin_version: "builtin".into(),
+            template_id: "three-3d-r1".into(),
+            template_sha256: "a".repeat(64),
         });
         profiled.dependency_snapshot = Some(AppDependencySnapshot {
             requested_sha256: "b".repeat(64),
@@ -1379,6 +1625,77 @@ mod tests {
             manifest.collections.is_empty(),
             "collections now come from the LLM plan, not from a template"
         );
+    }
+
+    #[test]
+    fn schema_v3_publication_pair_invariants_fail_closed() {
+        let mut shell = AppManifest::for_new_app("schema-v3", "Schema");
+        shell.active_mcp_catalog = Some(AppMcpCatalogRef {
+            build_id: "build".into(),
+            manifest_revision: 1,
+            authoring_revision: 1,
+            user_goal_sha256: "0".repeat(64),
+            proposal_sha256: "0".repeat(64),
+            approval_contract_sha256: "0".repeat(64),
+            tool_surface_sha256: "0".repeat(64),
+            catalog_sha256: "0".repeat(64),
+            mcp_verification_sha256: "0".repeat(64),
+        });
+        let error = shell.validate().unwrap_err();
+        assert!(error.to_string().contains("active_state_corrupt"));
+
+        let mut published = AppManifest::for_new_app("schema-v3", "Schema");
+        published.revision = 1;
+        published.surface = Some(AppSurface::Dom);
+        published.runtime_profile = Some(AppRuntimeProfileBinding {
+            family: AppRuntimeProfile::ReactDom,
+            revision: 1,
+            contract_sha256: "1".repeat(64),
+        });
+        published.dependency_snapshot = None;
+        published.template_origin = Some(AppTemplateOrigin {
+            plugin_id: AppTemplateOrigin::BUILTIN_PLUGIN_ID.into(),
+            plugin_version: "builtin".into(),
+            template_id: "react-dom-r1".into(),
+            template_sha256: "1".repeat(64),
+        });
+        // A scaffold draft may have no dependency snapshot until install.
+        assert!(published.validate().is_ok());
+    }
+
+    #[test]
+    fn publication_state_is_derived_and_unpaired_active_fails_closed() {
+        let mut manifest = AppManifest::for_new_app("state-app", "State");
+        assert_eq!(
+            derive_publication_state(&manifest, None, false).unwrap(),
+            AppPublicationState::Draft
+        );
+        manifest.active_mcp_catalog = Some(AppMcpCatalogRef {
+            build_id: "build-1".into(),
+            manifest_revision: 1,
+            authoring_revision: 1,
+            user_goal_sha256: "0".repeat(64),
+            proposal_sha256: "0".repeat(64),
+            approval_contract_sha256: "0".repeat(64),
+            tool_surface_sha256: "0".repeat(64),
+            catalog_sha256: "0".repeat(64),
+            mcp_verification_sha256: "0".repeat(64),
+        });
+        assert!(derive_publication_state(&manifest, Some("build-1"), false).is_ok());
+        assert!(derive_publication_state(&manifest, Some("build-2"), false).is_err());
+        assert!(derive_publication_state(&manifest, None, false).is_err());
+    }
+
+    #[test]
+    fn immutable_mcp_catalog_round_trips_and_rejects_rewrite() {
+        let root = tempfile::tempdir().unwrap();
+        let layout = AppLayout::new(root.path(), "catalog-app").unwrap();
+        let catalog = serde_json::json!({"tools": [{"name": "read"}]});
+        let digest = crate::mcp_authoring::approval_contract_sha256(catalog.clone()).unwrap();
+        save_mcp_catalog(&layout, &digest, &catalog).unwrap();
+        assert_eq!(load_mcp_catalog(&layout, &digest).unwrap(), catalog);
+        let different = serde_json::json!({"tools": [{"name": "write"}]});
+        assert!(save_mcp_catalog(&layout, &digest, &different).is_err());
     }
 
     #[cfg(unix)]

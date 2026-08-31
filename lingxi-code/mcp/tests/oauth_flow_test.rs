@@ -363,6 +363,8 @@ fn http_cfg(name: &str, oauth: Option<McpOAuthConfigDto>) -> McpServerConfig {
         disabled: false,
         timeout_ms: None,
         always_load: false,
+        tools: Vec::new(),
+        tool_permissions: std::collections::BTreeMap::new(),
         config_error: None,
     }
 }
@@ -540,6 +542,8 @@ async fn static_token_server_spec_is_unchanged() {
         disabled: false,
         timeout_ms: None,
         always_load: false,
+        tools: Vec::new(),
+        tool_permissions: std::collections::BTreeMap::new(),
         config_error: None,
     };
 

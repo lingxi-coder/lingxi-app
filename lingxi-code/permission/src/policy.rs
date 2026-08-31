@@ -71,6 +71,10 @@ pub struct PermissionPolicy {
     pub denial_tracking: Mutex<DenialTrackingState>,
     /// Killswitch that overrides `BypassPermissions` back to `Ask`.
     pub bypass_killswitch_active: bool,
+    /// Claude Code 2.1.251 restricted-session capability. This is intentionally
+    /// separate from [`PermissionMode`]: it hardens tool/settings/protected-file
+    /// paths without changing the user's selected permission mode.
+    pub restricted: bool,
     /// Auto-mode killswitch — 1:1 with claude-code `Bpa()` (the
     /// `disableAutoMode == "disable"` settings flag at either position). When
     /// `true`, the live `set_permission_mode` gate refuses `auto`
@@ -175,6 +179,7 @@ impl PermissionPolicy {
             ask_rules: HashMap::new(),
             denial_tracking: Mutex::new(DenialTrackingState::default()),
             bypass_killswitch_active: false,
+            restricted: false,
             auto_mode_disabled: false,
             bypass_permissions_available: false,
             roots: None,
@@ -387,6 +392,48 @@ impl PermissionPolicy {
         self
     }
 
+    /// Mark this policy as belonging to a restricted session. Restricted
+    /// protected mutations remain an `Ask` even when an ordinary allow rule,
+    /// bypass-like mode, or tool-local auto path would otherwise allow them.
+    #[must_use]
+    pub fn with_restricted(mut self, restricted: bool) -> Self {
+        self.restricted = restricted;
+        self
+    }
+
+    /// Return whether this call is a protected mutation under restricted mode.
+    /// The classification reuses the existing file-tool grouping and
+    /// `check_path_safety_for_auto_edit` provenance instead of guessing from
+    /// arbitrary input strings. Config writes are identified by the Config tool
+    /// contract (`value` present), while file writes use the canonical path
+    /// field from [`crate::filesystem::input_path_for_tool`].
+    #[must_use]
+    pub fn is_restricted_protected_mutation(
+        &self,
+        tool_name: &str,
+        input: &serde_json::Value,
+    ) -> bool {
+        if !self.restricted {
+            return false;
+        }
+        if tool_name == "Config" && input.get("value").is_some() {
+            return true;
+        }
+        if file_tool_kind(tool_name) != FileToolKind::Editor {
+            return false;
+        }
+        let Some(roots) = self.roots.as_ref() else {
+            return false;
+        };
+        let Some(raw_path) = input_path_for_tool(tool_name, input, roots) else {
+            return false;
+        };
+        matches!(
+            check_path_safety_for_auto_edit(raw_path.as_ref(), roots),
+            AutoEditSafety::Unsafe { .. }
+        )
+    }
+
     /// Enable phase-3a file-path content matching by supplying the filesystem
     /// roots a rule's [`PermissionRuleSource`] resolves against. Without this,
     /// content rules for file tools fall back to phase-2 tool-wide matching.
@@ -596,6 +643,17 @@ impl PermissionPolicy {
         {
             return deny_with_mode(PermissionMode::DontAsk);
         }
+        // RESTRICTED-01: settings/git/tool-configuration writes require a
+        // person or the configured permission handler. Apply this after the
+        // ordinary rule/mode walk so explicit deny/ask decisions retain their
+        // original provenance, but no allow-like path (including bypass mode,
+        // an allow rule, or a tool-local auto allowance) can skip the prompt.
+        if self.restricted
+            && self.is_restricted_protected_mutation(tool_name, input)
+            && matches!(result, PermissionResult::Allow { .. })
+        {
+            return ask_for_restricted_protected_mutation(tool_name, input);
+        }
         result
     }
 
@@ -625,6 +683,7 @@ impl PermissionPolicy {
                     .unwrap_or_else(|e| e.into_inner()),
             ),
             bypass_killswitch_active: self.bypass_killswitch_active,
+            restricted: self.restricted,
             auto_mode_disabled: self.auto_mode_disabled,
             bypass_permissions_available: self.bypass_permissions_available,
             roots: self.roots.clone(),
@@ -2913,6 +2972,38 @@ fn deny_with_mode(mode: PermissionMode) -> PermissionResult {
     }
 }
 
+/// Construct the restricted-mode approval request for a protected mutation.
+/// Keeping this as a safety-check reason ensures hook re-checks and transport
+/// metadata follow the existing protected-ask path instead of inventing a
+/// second bypass/allow mechanism.
+fn ask_for_restricted_protected_mutation(
+    tool_name: &str,
+    input: &serde_json::Value,
+) -> PermissionResult {
+    let target = input
+        .get("file_path")
+        .or_else(|| input.get("notebook_path"))
+        .or_else(|| input.get("setting"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or(tool_name);
+    let reason = format!(
+        "Restricted mode requires a person or configured permission handler to approve writes to settings, git, and tool-configuration files ({target})."
+    );
+    PermissionResult::Ask {
+        reason: PermissionDecisionReason::SafetyCheck {
+            reason: reason.clone(),
+            classifier_approvable: false,
+        },
+        prompt: PermissionPrompt {
+            title: "Restricted mode approval".to_string(),
+            message: reason,
+            options: Vec::new(),
+        },
+        pending_classifier_check: None,
+        metadata: PermissionMetadata::default(),
+    }
+}
+
 fn deny_workspace_host_owned(tool_name: &str) -> PermissionResult {
     PermissionResult::Deny {
         reason: PermissionDecisionReason::Other {
@@ -3442,5 +3533,40 @@ mod ps_acceptedits_policy_test {
                 "{mode:?}: in-cwd write asks via containment, got {r:?}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod restricted_policy_test {
+    use super::*;
+    use crate::PermissionRuleValue;
+    use serde_json::json;
+
+    #[test]
+    fn restricted_protected_file_write_remains_ask_over_allow_rule() {
+        let roots = FsRoots {
+            cwd: PathBuf::from("/workspace"),
+            home: Some(PathBuf::from("/home/test")),
+            lingxi_home: PathBuf::from("/home/test/.lingxi"),
+        };
+        let allow = PermissionRule {
+            value: PermissionRuleValue::from_rule_string("Edit(.git/**)"),
+            behavior: PermissionBehavior::Allow,
+            source: PermissionRuleSource::UserSettings,
+        };
+        let policy = PermissionPolicy::from_rules(PermissionMode::BypassPermissions, [allow])
+            .with_roots(roots)
+            .with_restricted(true);
+        let result = policy.authorize(
+            "Edit",
+            &json!({"file_path": "/workspace/.git/config", "old_string": "x", "new_string": "y"}),
+        );
+        assert!(matches!(
+            result,
+            PermissionResult::Ask {
+                reason: PermissionDecisionReason::SafetyCheck { .. },
+                ..
+            }
+        ));
     }
 }

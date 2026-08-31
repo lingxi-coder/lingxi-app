@@ -5,9 +5,9 @@
 #![forbid(unsafe_code)]
 
 pub use traits::permission_gate::{
-    MatchedAskRule, PermissionAbort, PermissionCheckContext, PermissionDecision,
-    PermissionDecisionSource, PermissionGate, PermissionOutcome, PermissionResolution,
-    PromptWorker,
+    AutoModePrompt, MatchedAskRule, PermissionAbort, PermissionCheckContext, PermissionDecision,
+    PermissionDecisionSource, PermissionGate, PermissionOutcome, PermissionRequestSource,
+    PermissionResolution, PromptWorker,
 };
 pub use traits::prompting_gate::{
     PermissionRequest, PermissionResponse, PromptDecision, PromptDefault, PromptError,

@@ -274,6 +274,11 @@ Usage: {usage}
 {about-with-newline}
 {all-args}{after-help}";
 
+/// The 2.1.251 restricted-mode help text. Keep this as one canonical literal
+/// so the CLI help and downstream snapshots cannot drift from the launcher's
+/// security contract.
+pub const RESTRICTED_HELP: &str = "Restricted mode: removes the built-in tools that run commands or code (Bash, PowerShell, REPL and the other code-running tools) and WebFetch unless --tools names them, and ignores user, project and local settings files (managed settings and --settings still apply; add --strict-mcp-config to skip MCP servers too). Also confines the file tools to the working directories (--add-dir included), refuses bypassPermissions, and lets only a person or the configured permission handler approve writes to settings, git and tool-configuration files.";
+
 /// AI coding assistant — runs a single turn or REPL
 #[derive(Debug, Parser, Clone, Default)]
 // Section ORDER follows the oracle: `Usage:` first, then the description, then
@@ -793,6 +798,13 @@ pub struct Argv {
     #[arg(long = "strict-mcp-config")]
     pub strict_mcp_config: bool,
 
+    /// Restricted mode: removes command/code-running built-ins and WebFetch,
+    /// ignores user/project/local settings, confines file tools to cwd and
+    /// --add-dir, refuses bypassPermissions, and protects settings/git/tool
+    /// configuration writes from non-human approval.
+    #[arg(long = "restricted", help = RESTRICTED_HELP)]
+    pub restricted: bool,
+
     /// Move per-machine sections (cwd, env info, memory paths, git status) from
     /// the system prompt into the first user message. Improves cross-user
     /// prompt-cache reuse. Only applies with the default system prompt.
@@ -1194,6 +1206,18 @@ impl Argv {
             Some(f) if !f.is_empty() => Some(f),
             _ => None,
         }
+    }
+
+    /// Whether this launch is in Claude Code's restricted mode. The CLI flag
+    /// wins over the inherited process environment, while the environment
+    /// form is intentionally limited to the documented `=1` contract. The
+    /// internal LINGXI bit is also accepted so nested workers inherit the
+    /// resolved session capability exported by the launcher.
+    #[must_use]
+    pub fn restricted_enabled(&self) -> bool {
+        self.restricted
+            || std::env::var("CLAUDE_CODE_RESTRICTED").ok().as_deref() == Some("1")
+            || std::env::var("LINGXI_RESTRICTED").ok().as_deref() == Some("1")
     }
 
     /// True iff the binary should start a FRESH REPL.

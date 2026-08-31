@@ -15,22 +15,21 @@
 /// The claude-code version LingXi replicates byte-for-byte (the parity target),
 /// distinct from this workspace's own `CARGO_PKG_VERSION`. claude-code embeds its
 /// `VERSION` in outward-facing identifiers — the `AI_AGENT` child-env value
-/// (`claude-code_2-1-246_agent`) and the WebFetch `User-Agent`
-/// (`claude-code/2.1.246`). LingXi is a 1:1 copy, so it presents the same string.
+/// (`claude-code_2-1-251_agent`) and the WebFetch `User-Agent`
+/// (`claude-code/2.1.251`). LingXi is a 1:1 copy, so it presents the same string.
 /// Single source of truth (R-V1) so the AI_AGENT and User-Agent stamps never drift.
 ///
 /// Raised 2.1.241 → 2.1.245 on 2026-08-25, once the main query-loop identity
 /// (`querySource` / `print` vs non-interactive) matched the 2.1.245 binary.
-/// Raised 2.1.245 → 2.1.246 on 2026-08-25 after black-box checks showed the
-/// public `--help` surface stayed byte-identical while the local oracle binary
-/// moved forward.
+/// Raised 2.1.246 → 2.1.251 on 2026-08-30 after the mcp/plugin byte-alignment
+/// backlog was implemented against the newer oracle.
 ///
 /// The bump is deliberately LAST. It is what this session tells servers and child
 /// processes it is, so raising it before the behaviour matched would overstate
 /// the port — and the port has been burned by the opposite error too (it once
 /// advertised 2.1.217 while implementing 2.1.220), which is why all three
 /// identifiers derive from this one constant.
-pub const CLAUDE_CODE_VERSION: &str = "2.1.246";
+pub const CLAUDE_CODE_VERSION: &str = "2.1.251";
 
 pub mod agent_name_registry;
 pub mod agent_view;
@@ -173,7 +172,9 @@ pub use orchestrator::{
     ReasoningControlSpec, ReasoningSelection, RecapOutcome, RegisterRepoRootOutcome,
     RegisterRepoRootRequest, ResumeRuntimeSnapshot, RewindRowData, StatusSnapshot, TurnOutcome,
 };
-pub use permission_gate::{PermissionDecision, PermissionGate};
+pub use permission_gate::{
+    AutoModePrompt, PermissionDecision, PermissionGate, PermissionRequestSource,
+};
 pub use platform::Platform;
 pub use process::{
     ForegroundOutcome, HookOutputObserver, HookRunOutcome, ProcessError, ProcessHandle,

@@ -17,6 +17,9 @@ skill-api = { path = "../skill-api" }
 command-api = { path = "../command-api" }
 outputstyles = { path = "../outputstyles" }
 lsp = { path = "../lsp" }
+# Shared live plugin-workflow registry; consumers already share this acyclic
+# engine crate, so plugin does not need to own a duplicate resolver.
+workflow = { path = "../workflow" }
 secret = { path = "../secret" }
 serde.workspace = true
 serde_json.workspace = true
@@ -26,7 +29,7 @@ thiserror.workspace = true
 async-trait.workspace = true
 url = "2"
 semver = "1"
-tokio = { version = "1", features = ["sync", "fs", "rt"] }
+tokio = { version = "1", features = ["sync", "fs", "io-util", "rt"] }
 tracing.workspace = true
 # Git plugin-source clone (Stage 1 install arm) — the same vendored libgit2 the
 # Android git tool uses, so no new external system dependency is introduced.

@@ -108,6 +108,7 @@ impl TurnDriver for ReconnectIsolationDriver {
                         },
                         worker: None,
                         owner: None,
+                        suppress_always_allow_rule: false,
                     })
                     .await;
             }

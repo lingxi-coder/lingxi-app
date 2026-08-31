@@ -16,10 +16,7 @@
 
 #![forbid(unsafe_code)]
 
-use command_api::{
-    BundledPromptFn, CommandFrontmatter, CommandRegistry, CommandSource, SlashCommand,
-    SlashCommandKind,
-};
+use command_api::CommandRegistry;
 use command_core::{
     register_all_builtin_commands, register_core_batch_1, register_core_batch_2,
     register_core_batch_4, register_core_batch_5,
@@ -75,6 +72,8 @@ pub mod builtin_bundle;
 mod local_app_plugin_binding;
 #[cfg(feature = "uniffi")]
 mod local_app_runtime_profiles;
+#[cfg(feature = "uniffi")]
+mod local_app_template_catalog;
 #[cfg(feature = "uniffi")]
 mod local_apps_build;
 #[cfg(feature = "uniffi")]
@@ -158,29 +157,20 @@ uniffi::setup_scaffolding!();
 // network/local-path install arm cannot be smuggled through this door and
 // come out re-labeled trusted.
 //
-// What this task deliberately leaves undone, because it is out of scope for
-// this task's owned files (`Cargo.toml` / `lib.rs` /
-// `local_app_plugin_binding.rs`):
-//   - Wiring this into `host::build_mobile_inner` — `host.rs` is owned by a
-//     different task/session; the functions below are ready for it to call
-//     but nothing calls them yet outside this file's own tests.
-//   - Embedding the plugin's real components (skills/agents/workflows under
-//     `plugins/lingxi-local-app/`) — `manifest.components` is left at
-//     `PluginComponents::default()` until the compiled-in bundle
-//     (`builtin_bundle`/`local_apps::packer`) has a materialized on-device
-//     root for this manifest to point components at. That is not a load
-//     failure today: `PluginManager::load_plugin` materializes zero
-//     components and returns `Ok` when a manifest declares none.
-//   - §19.0's binary-size/startup budgets
-//     (`local-apps/src/performance_thresholds.rs`'s `load_baseline()`, which
-//     has no caller anywhere in the workspace) start binding once `plugin`
-//     is linked in by this task. The natural call site is inside
-//     `host::build_mobile_inner`, right after it wires this plugin edge in —
-//     not here, since this file never constructs the real on-device
-//     `MobileRuntime`.
+// Remaining work is intentionally narrow: §19.0's binary-size/startup
+// budgets (`local-apps/src/performance_thresholds.rs`'s `load_baseline()`)
+// still need a production measurement call site. The compiled-in bundle and
+// verified registration path are wired by `builtin_bundle` plus
+// `host::build_mobile_inner`; this module remains the manifest/composition
+// seam and does not own runtime measurement.
 /// The one plugin name mobile ever discovers (§19.2's completion condition).
 #[cfg(feature = "uniffi")]
 pub const MOBILE_BUILTIN_PLUGIN_NAME: &str = "lingxi-local-app";
+
+/// Manifest fallback used only when the bare `enabledPlugins` key is absent.
+#[cfg(feature = "uniffi")]
+pub const MOBILE_BUILTIN_PLUGIN_DEFAULT_ENABLED: bool =
+    builtin_bundle::COMPILED_PLUGIN_DEFAULT_ENABLED;
 
 /// The compiled-in identity of that one plugin, as a fixed UUID.
 ///
@@ -213,24 +203,22 @@ pub fn mobile_builtin_plugin_id() -> protocol::PluginId {
     protocol::PluginId::from_uuid(uuid::Uuid::from_u128(MOBILE_BUILTIN_PLUGIN_UUID))
 }
 
-/// Build the compiled-in Local App plugin's manifest.
-///
-/// `source` is stamped `PluginSource::BuiltIn` here directly (and re-stamped
-/// by `register_verified_builtin` unconditionally regardless, so this can
-/// never silently drift from it) so [`mobile_builtin_plugins`] itself already
-/// carries the completion condition's shape — name and source — without
-/// waiting on registration against a live `PluginManager`.
+/// Build the compiled-in Local App plugin manifest from its packaged
+/// `.lingxi-plugin/plugin.json`. The build script parses and validates that
+/// asset and generates these constants, so malformed metadata fails the build
+/// rather than panicking during mobile boot. Host lifecycle fields remain
+/// owned here.
 #[cfg(feature = "uniffi")]
 fn mobile_builtin_plugin_manifest() -> (protocol::PluginId, plugin::PluginManifest) {
     let id = mobile_builtin_plugin_id();
     let manifest = plugin::PluginManifest {
         id,
-        name: MOBILE_BUILTIN_PLUGIN_NAME.to_string(),
-        display_name: None,
-        default_enabled: true,
-        version: "1.0.0".to_string(),
-        description: "On-device Local App authoring/build/test workflow set.".to_string(),
-        author: Some(branding::PRODUCT_NAME.to_string()),
+        name: builtin_bundle::COMPILED_PLUGIN_NAME.to_string(),
+        display_name: Some(builtin_bundle::COMPILED_PLUGIN_DISPLAY_NAME.to_string()),
+        default_enabled: builtin_bundle::COMPILED_PLUGIN_DEFAULT_ENABLED,
+        version: builtin_bundle::COMPILED_PLUGIN_VERSION.to_string(),
+        description: builtin_bundle::COMPILED_PLUGIN_DESCRIPTION.to_string(),
+        author: Some(builtin_bundle::COMPILED_PLUGIN_AUTHOR.to_string()),
         homepage: None,
         source: plugin::PluginSource::BuiltIn,
         components: plugin::PluginComponents::default(),
@@ -291,6 +279,15 @@ pub async fn register_mobile_builtin_plugin(
 
 /// Register every mobile-builtin plugin (today: exactly the one
 /// [`mobile_builtin_plugins`] names) into `manager`.
+///
+/// This is the PRE-materialization shape: every `install_dir` is
+/// `PathBuf::new()` and every manifest's `components` is
+/// `PluginComponents::default()` (see [`mobile_builtin_plugin_manifest`]), so
+/// registering it is a manifest over nothing — `PluginManager::load_plugin`
+/// trivially succeeds having loaded zero commands/agents/skills. Kept for the
+/// tests below that predate P1.10's boot wiring; the production boot path
+/// (`host::build_mobile_inner`) calls
+/// [`register_mobile_builtin_plugins_materialized`] instead.
 #[cfg(feature = "uniffi")]
 pub async fn register_mobile_builtin_plugins(
     manager: &plugin::PluginManager,
@@ -299,6 +296,96 @@ pub async fn register_mobile_builtin_plugins(
         register_mobile_builtin_plugin(manager, &id, manifest, install_dir).await?;
     }
     Ok(())
+}
+
+/// P1.10 (§19.2) — classify the compiled-in plugin's resolved packer
+/// inventory into the [`plugin::PluginComponents`] `PluginManager::load_plugin` reads,
+/// following the exact directory convention `plugins/lingxi-local-app/` ships
+/// under: every `agents/*.md` path becomes an agent component, every
+/// `skills/<name>/SKILL.md` a skill component, every `workflows/*.js` a
+/// workflow component. `schemas/*.json` files are content the agents/skills
+/// reference by path, not components of their own, so they classify into
+/// none of the three and are silently skipped here (still present — digest-
+/// verified — at the materialized root either way).
+///
+/// Driven by `inventory` (the packer's OWN resolved path list for this exact
+/// materialized root) rather than by a second, hand-maintained path list, so
+/// this can never name a component the materialized root does not actually
+/// contain.
+#[cfg(feature = "uniffi")]
+fn mobile_builtin_plugin_components(
+    inventory: &[local_apps::PackedFile],
+) -> plugin::PluginComponents {
+    let mut components = plugin::PluginComponents::default();
+    for entry in inventory {
+        let path = entry.path.as_str();
+        let component = plugin::ComponentPath {
+            path: std::path::PathBuf::from(path),
+            metadata: None,
+        };
+        if path.starts_with("agents/") && path.ends_with(".md") {
+            components.agents.push(component);
+        } else if path.starts_with("skills/") && path.ends_with("/SKILL.md") {
+            components.skills.push(component);
+        } else if path.starts_with("workflows/") && path.ends_with(".js") {
+            components.workflows.push(component);
+        }
+    }
+    components
+}
+
+/// P1.10 (§19.2) — materialize the compiled-in plugin bundle to a verified,
+/// digest-checked root (via [`builtin_bundle::materialize_compiled_in_plugin_bundle`])
+/// and build this crate's one compiled-in plugin's manifest with
+/// `components` populated FROM that root's own resolved inventory, rather
+/// than left at `PluginComponents::default()`.
+///
+/// # Errors
+/// [`builtin_bundle::BuiltinBundleError::BuiltinBundleUnavailable`] under the
+/// same conditions [`builtin_bundle::materialize_compiled_in_plugin_bundle`]
+/// can fail — never a panic, and never a manifest handed back pointing at an
+/// unverified root.
+#[cfg(feature = "uniffi")]
+pub fn materialize_mobile_builtin_plugin(
+    bundle_root: &std::path::Path,
+    previous_verified_root: Option<&std::path::Path>,
+) -> Result<
+    (
+        protocol::PluginId,
+        plugin::PluginManifest,
+        std::path::PathBuf,
+    ),
+    builtin_bundle::BuiltinBundleError,
+> {
+    let (root, inventory) =
+        builtin_bundle::materialize_compiled_in_plugin_bundle(bundle_root, previous_verified_root)?;
+    let (id, mut manifest) = mobile_builtin_plugin_manifest();
+    manifest.components = mobile_builtin_plugin_components(&inventory);
+    Ok((id, manifest, root))
+}
+
+/// P1.10 (§19.2) — the production boot-path sibling of
+/// [`register_mobile_builtin_plugins`]: materialize the compiled-in bundle to
+/// a verified root FIRST, then register the plugin against THAT root instead
+/// of `PathBuf::new()`. `host::build_mobile_inner` calls this, not the
+/// pre-materialization function above.
+///
+/// A materialization failure is reported (never panics) and leaves the
+/// plugin unregistered for this boot — the caller decides whether that is
+/// fatal; today `build_mobile_inner` logs and continues, matching how
+/// [`register_mobile_builtin_plugins`]'s own failure was already handled
+/// before this task.
+#[cfg(feature = "uniffi")]
+pub async fn register_mobile_builtin_plugins_materialized(
+    manager: &plugin::PluginManager,
+    bundle_root: &std::path::Path,
+    previous_verified_root: Option<&std::path::Path>,
+) -> Result<std::path::PathBuf, plugin::PluginManagerError> {
+    let (id, manifest, root) =
+        materialize_mobile_builtin_plugin(bundle_root, previous_verified_root)
+            .map_err(|error| plugin::PluginManagerError::Io(error.to_string()))?;
+    register_mobile_builtin_plugin(manager, &id, manifest, root.clone()).await?;
+    Ok(root)
 }
 
 #[cfg(all(test, feature = "uniffi"))]
@@ -792,11 +879,24 @@ mod android_ui_registration_tests {
 }
 
 /// Assemble the mobile builtin **skill** registry.
+///
+/// Local App skills are no longer bundled here. The returned registry is kept
+/// as a compatibility seam for packager callers while the verified Plugin
+/// registry is the only production source for those skills.
 #[must_use]
 pub fn mobile_skill_registry() -> SkillRegistry {
     let mut reg = SkillRegistry::new();
     skill_api::register_mobile(&mut reg);
     reg
+}
+
+/// Return skill names from the build-time verified Local App Plugin inventory.
+/// This is the only production/test seam for component-name derivation after
+/// mobile bundled Local App skill bodies were removed.
+#[cfg(feature = "uniffi")]
+#[must_use]
+pub fn mobile_plugin_skill_names() -> Vec<String> {
+    builtin_bundle::compiled_plugin_skill_names()
 }
 
 /// Assemble the mobile slash-command registry: the core handlers plus the
@@ -827,10 +927,9 @@ pub fn mobile_command_registry(
     reg
 }
 
-/// Register the mobile authoritative bundled prompt catalog: the command-core
-/// programmatic bundled prompts (for example `/loop`) plus the mobile-only
-/// bundled skill set. Call this after any disk-sourced load on mobile so the
-/// shipped bundled prompts keep precedence over same-name on-device decoys.
+/// Register the mobile authoritative bundled prompt catalog (for example
+/// `/loop`). Local App skills are file-backed Plugin commands and are added by
+/// `PluginManager` after this base catalog is installed.
 pub(crate) fn register_mobile_bundled_prompt_commands(reg: &mut CommandRegistry) {
     // Bundled programmatic skills (`/loop`), mirroring desktop. Gated on the cron
     // kill-switch (loop.ts:83); mobile starts no cron scheduler so a scheduled
@@ -838,317 +937,6 @@ pub(crate) fn register_mobile_bundled_prompt_commands(reg: &mut CommandRegistry)
     let cron_enabled =
         !traits::env::is_env_truthy(std::env::var("LINGXI_DISABLE_CRON").ok().as_deref());
     command_core::register_bundled_skills(reg, cron_enabled);
-    register_mobile_skill_commands(reg);
-}
-
-/// Mirror the compiled-in mobile Skill registry into the slash-command
-/// catalog. The Skill tool remains the canonical invocation path, but a
-/// settings screen and `/` palette must see the same shipped mobile skills —
-/// so this iterates `skills` itself rather than carrying a second, independent
-/// name list that could drift out of sync with it (and, before this, could
-/// silently skip a name the list still mentioned but the registry had dropped,
-/// or simply never mention a name the registry had gained). The prompt body is
-/// the exact bundled content, and both invocation paths use the standard
-/// argument expansion semantics so they receive identical guidance.
-pub(crate) fn register_mobile_skill_commands(reg: &mut CommandRegistry) {
-    register_mobile_skill_commands_from(reg, &mobile_skill_registry());
-}
-
-/// The derivation itself, parameterised on the registry it mirrors so tests
-/// can grow or shrink it independently of the compiled-in mobile skill set —
-/// see `mobile_skill_list_is_derived_from_the_live_registry` below.
-/// `skills.get(name)` can never miss here: `name` always comes from
-/// `skills.names()` on the very same registry, so a skill present in `skills`
-/// but absent from the mirrored command set is now a structural
-/// impossibility rather than a silent `continue`.
-fn register_mobile_skill_commands_from(reg: &mut CommandRegistry, skills: &SkillRegistry) {
-    for name in skills.names() {
-        let skill = skills
-            .get(name)
-            .expect("name was just read from this registry's own names()");
-        reg.register_command(SlashCommand {
-            name: skill.name.clone(),
-            description: skill.description.clone(),
-            source: CommandSource::Bundled,
-            kind: SlashCommandKind::Bundled {
-                frontmatter: CommandFrontmatter::default(),
-                prompt_fn: Some(Arc::new(MobileSkillPrompt {
-                    body: skill.content.clone(),
-                })),
-            },
-            loaded_from: Some("bundled".into()),
-            user_invocable: Some(true),
-            has_user_specified_description: true,
-            ..SlashCommand::default()
-        });
-    }
-}
-
-struct MobileSkillPrompt {
-    body: String,
-}
-
-impl BundledPromptFn for MobileSkillPrompt {
-    fn build(&self, args: &str) -> String {
-        command_api::substitute_arguments_faithful(&self.body, Some(args), true, &[])
-            .expect("bundled mobile skills have no named arguments")
-    }
-}
-
-#[cfg(test)]
-mod mobile_skill_command_tests {
-    use super::*;
-
-    #[test]
-    fn slash_skills_are_all_registered_and_keep_complete_bundled_content() {
-        let mut commands = CommandRegistry::new();
-        register_mobile_skill_commands(&mut commands);
-
-        let mut names: Vec<_> = commands
-            .list_all()
-            .into_iter()
-            .map(|command| command.name.as_str())
-            .collect();
-        names.sort_unstable();
-        assert_eq!(
-            names,
-            vec![
-                "accessibility",
-                "babylon-3d-local-app",
-                "canvas-2d-local-app",
-                "create-local-app",
-                "frontend-design",
-                "frontend-qa",
-                "ionic-react-local-app",
-                "phaser-2d-local-app",
-                "react-best-practices",
-                "threejs-local-app",
-            ]
-        );
-
-        let skills = mobile_skill_registry();
-        // D2 value-level companion to
-        // `mobile_skill_command_wrapper_stays_an_unfiltered_delegation` below:
-        // the mirrored command set must equal the LIVE registry's name set,
-        // computed here rather than typed out. The hardcoded vector above pins
-        // WHICH ten skills ship today; this pins that the mirror is TOTAL over
-        // whatever the registry actually holds, so the day an eleventh bundled
-        // skill lands, a filter anywhere on the production path that silently
-        // drops it fails here by value.
-        let mut live_names = skills.names();
-        live_names.sort_unstable();
-        assert_eq!(
-            names, live_names,
-            "the slash mirror must cover exactly the live mobile skill registry, \
-             no more and no less"
-        );
-        let test_cases = [
-            ("ionic-react-local-app", ""),
-            ("canvas-2d-local-app", "focus"),
-            ("threejs-local-app", "  focus  "),
-            ("phaser-2d-local-app", "focus"),
-            ("babylon-3d-local-app", "focus"),
-            ("ionic-react-local-app", " \t "),
-        ];
-        for (name, args) in test_cases {
-            let command = commands.resolve(name).expect("bundled slash skill");
-            let SlashCommandKind::Bundled {
-                prompt_fn: Some(prompt),
-                ..
-            } = &command.kind
-            else {
-                panic!("{name} must be a bundled prompt command");
-            };
-            let expected = command_api::substitute_arguments_faithful(
-                &skills.get(name).expect("bundled skill").content,
-                Some(args),
-                true,
-                &[],
-            )
-            .expect("bundled mobile skills have no named arguments");
-            let built = prompt.build(args);
-            if args.is_empty() {
-                assert_eq!(
-                    expected,
-                    skills.get(name).expect("bundled skill").content,
-                    "empty args must leave the bundled body unchanged"
-                );
-                assert!(
-                    !built.contains("\n\nARGUMENTS:"),
-                    "empty args must not append an ARGUMENTS footer"
-                );
-            }
-            assert_eq!(
-                built, expected,
-                "slash invocation must match Skill's standard argument expansion"
-            );
-            if !args.is_empty() {
-                assert!(
-                    built.ends_with(&format!("\n\nARGUMENTS: {args}")),
-                    "nonempty args must reach the built prompt with the exact raw ARGUMENTS footer"
-                );
-            }
-            if args == " \t " {
-                assert_ne!(
-                    built,
-                    skills.get(name).expect("bundled skill").content,
-                    "whitespace-only args currently count as nonempty and must keep the raw ARGUMENTS footer"
-                );
-            }
-        }
-    }
-
-    /// P-1.5 — `register_mobile_skill_commands` must derive its slash-command
-    /// set from `mobile_skill_registry()` itself, never from a second,
-    /// independent name list.
-    ///
-    /// A value-only comparison against the current ten names cannot catch a
-    /// reintroduced hardcoded list: a regression would almost certainly carry
-    /// exactly those ten names back (they are exactly what this task removes),
-    /// so the output would look identical either way. The only place the two
-    /// shapes actually diverge is a skill the list was never told about: a
-    /// hardcoded array skips it via the `continue` this task removed; deriving
-    /// from `skills.names()` cannot. So this test GROWS the registry with an
-    /// eleventh skill the original ten-name array never mentioned, and
-    /// requires it to gain a slash command anyway.
-    #[test]
-    fn mobile_skill_list_is_derived_from_the_live_registry() {
-        let planted_name = "planted-eleventh-mobile-skill";
-        let mut grown = mobile_skill_registry();
-        assert!(
-            grown.get(planted_name).is_none(),
-            "fixture name must not already collide with a real bundled skill"
-        );
-        grown.register(skill_api::Skill {
-            name: planted_name.to_string(),
-            description: "planted for mobile_skill_list_is_derived_from_the_live_registry"
-                .to_string(),
-            frontmatter: skill_api::SkillFrontmatter {
-                name: planted_name.to_string(),
-                description: "planted".to_string(),
-                ..Default::default()
-            },
-            content: "planted content".to_string(),
-            source: skill_api::SkillSource::Bundled,
-            loaded_from: skill_api::LoadedFrom::Bundled,
-            plugin_id: None,
-            file_path: "<planted-for-test>".into(),
-        });
-
-        let mut commands = CommandRegistry::new();
-        register_mobile_skill_commands_from(&mut commands, &grown);
-
-        assert!(
-            commands.resolve(planted_name).is_some(),
-            "a skill registered into the live registry after the ten-name array \
-             was removed must automatically gain a slash command — if this \
-             fails, something is once again filtering the mirror through a \
-             name list independent of `skills`, which would silently skip any \
-             skill that list does not mention"
-        );
-
-        // The original ten must still be present alongside the planted one —
-        // growing the registry must ADD to the mirrored set, not replace it.
-        let names: std::collections::BTreeSet<&str> = commands
-            .list_all()
-            .into_iter()
-            .map(|command| command.name.as_str())
-            .collect();
-        for original in [
-            "create-local-app",
-            "frontend-design",
-            "frontend-qa",
-            "accessibility",
-            "react-best-practices",
-            "ionic-react-local-app",
-            "canvas-2d-local-app",
-            "threejs-local-app",
-            "phaser-2d-local-app",
-            "babylon-3d-local-app",
-        ] {
-            assert!(
-                names.contains(original),
-                "{original} must still be mirrored alongside the planted skill"
-            );
-        }
-        assert_eq!(
-            names.len(),
-            11,
-            "expected the original ten plus the planted skill"
-        );
-    }
-
-    /// D2 — the production WRAPPER frame, not just the derivation it delegates
-    /// to.
-    ///
-    /// `mobile_skill_list_is_derived_from_the_live_registry` above exercises
-    /// `register_mobile_skill_commands_from`, so it proves the DERIVATION is
-    /// total over the registry it is handed. It cannot see a filter one frame
-    /// up, inside `register_mobile_skill_commands` itself — and today no
-    /// value-level test can: the bundled registry holds exactly ten skills, so
-    /// a literal-free filter that keeps at least ten
-    /// (`mobile_skill_registry().names().into_iter().take(10)`, or a
-    /// `filter` on a running count) is the identity function right now. It
-    /// starts dropping skills only once an eleventh bundled skill lands —
-    /// which is precisely the defect P-1.5 removed, silently reintroduced,
-    /// invisible to every value assertion in this file and to the
-    /// component-literal scanner too, because such a filter names no skill.
-    ///
-    /// What CAN be pinned today is the shape of that frame: the wrapper must
-    /// stay one unconditional delegation of the WHOLE live registry, with
-    /// nothing sitting between `mobile_skill_registry()` and the derivation.
-    /// Any filter, truncation, `if`, or second name list introduced there
-    /// changes this body and fails here, whether or not it mentions a skill
-    /// name. (The one frame further up, `register_mobile_bundled_prompt_commands`,
-    /// hands the wrapper nothing but `reg`, so it has no registry to filter.)
-    #[test]
-    fn mobile_skill_command_wrapper_stays_an_unfiltered_delegation() {
-        const SOURCE: &str = include_str!("lib.rs");
-        // Assembled from fragments so this needle cannot match its own literal
-        // in the scanned source — the count assertion below then means the
-        // wrapper is defined exactly once and we are reading THAT definition.
-        let needle = concat!(
-            "pub(crate) fn ",
-            "register_mobile_skill_commands",
-            "(reg: &mut CommandRegistry) {"
-        );
-        assert_eq!(
-            SOURCE.matches(needle).count(),
-            1,
-            "expected exactly one definition of the mobile skill-command wrapper"
-        );
-        let start = SOURCE.find(needle).expect("wrapper definition") + needle.len();
-        let mut depth = 1usize;
-        let mut end = None;
-        for (offset, ch) in SOURCE[start..].char_indices() {
-            match ch {
-                '{' => depth += 1,
-                '}' => {
-                    depth -= 1;
-                    if depth == 0 {
-                        end = Some(start + offset);
-                        break;
-                    }
-                }
-                _ => {}
-            }
-        }
-        let end = end.expect("unbalanced braces while reading the wrapper body");
-        let body = SOURCE[start..end]
-            .split_whitespace()
-            .collect::<Vec<_>>()
-            .join(" ");
-        assert_eq!(
-            body, "register_mobile_skill_commands_from(reg, &mobile_skill_registry());",
-            "`register_mobile_skill_commands` must remain a single unconditional \
-             delegation that hands the derivation the ENTIRE live registry. \
-             Anything else in this frame — a `take`/`filter`/`if`, a second name \
-             list, a rebuilt registry — can drop a bundled skill from the slash \
-             palette while every value assertion in this file still passes, \
-             because the registry currently holds exactly ten skills and a \
-             filter that keeps ten is today indistinguishable from no filter"
-        );
-    }
 }
 
 #[cfg(test)]

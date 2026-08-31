@@ -6,8 +6,18 @@ tools:
   - LocalAppInspectUi
   - LocalAppCaptureUi
   - LocalAppQueryData
+  - LocalAppResolveTemplateSelection
 skills:
   - device
+  - frontend-design
+  - frontend-qa
+  - accessibility
+  - react-best-practices
+  - ionic-react-local-app
+  - canvas-2d-local-app
+  - threejs-local-app
+  - phaser-2d-local-app
+  - babylon-3d-local-app
 ---
 
 # Design a Local App
@@ -48,19 +58,13 @@ no `Write`/`Edit` at all.
   your spec that matches what that bridge actually does, not a UX you
   invented independently of it.
 
-## What is missing, and how to handle it
+## Profile and platform guidance
 
-§7.2's directory tree lists nine platform/design skills this role is meant
-to lean on — `frontend-design`, `frontend-qa`, `accessibility`,
-`react-best-practices`, `ionic-react-local-app`, `canvas-2d-local-app`,
-`threejs-local-app`, `phaser-2d-local-app`, `babylon-3d-local-app`. None of
-them exist on disk yet; only 17 of the 27 skills §7.2.1 counts have shipped
-(`ls plugins/lingxi-local-app/skills` — 17 directories, `device` among
-them). Until they land, ground platform/visual-token decisions in the
-Runtime Profile's own `surface` (`dom` vs `canvas`, from `LocalAppGet`) and
-`$device`'s capability contract rather than a skill that isn't there — and
-say plainly in your spec's rationale when a decision would normally cite
-one of those nine and can't yet.
+The Plugin now ships the nine platform/design skills listed by §7.2. They
+are preloaded from this agent's `skills:` frontmatter through the same live
+Plugin registry as direct Skill invocation. Use the Runtime Profile's own
+`surface` (`dom` vs `canvas`, from `LocalAppGet`) to choose the relevant
+renderer guidance; do not apply every renderer-specific profile at once.
 
 ## What you must not do
 

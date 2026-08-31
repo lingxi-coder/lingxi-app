@@ -27,8 +27,9 @@ use tokio::io::AsyncReadExt;
 use tokio::sync::Mutex as AsyncMutex;
 use traits::{
     ElicitRequestDto, ElicitResultDto, McpError, McpNotificationDto, McpNotificationStream,
-    McpPromptDto, McpRawConnection, McpResourceContentDto, McpResourceDto, McpToolDto,
-    McpToolResultDto, McpTransport, McpTransportKind, McpTransportSpec, ServerCapabilitiesDto,
+    McpPromptDto, McpRawConnection, McpResourceContentDto, McpResourceDto, McpToolDefinitionDto,
+    McpToolDto, McpToolResultDto, McpTransport, McpTransportKind, McpTransportSpec,
+    ServerCapabilitiesDto,
 };
 
 /// MCP protocol version this transport advertises in `initialize`.
@@ -463,14 +464,14 @@ impl McpTransport for PosixMcpTransport {
         Ok(parsed
             .tools
             .into_iter()
-            .map(|t| McpToolDto {
-                full_name: format!("mcp__{server_name}__{}", t.name),
-                server_name: server_name.clone(),
-                tool_name: t.name,
-                description: t.description,
-                input_schema: t.input_schema,
-                search_hint: None,
-                always_load: None,
+            .map(|t| {
+                let mut definition = McpToolDefinitionDto::new(t.name, t.input_schema);
+                definition.description = Some(t.description);
+                McpToolDto::new(
+                    server_name.clone(),
+                    format!("mcp__{server_name}__{}", definition.name),
+                    definition,
+                )
             })
             .collect())
     }

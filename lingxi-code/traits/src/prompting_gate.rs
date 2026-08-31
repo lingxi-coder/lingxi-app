@@ -52,7 +52,9 @@ pub enum PermissionRequest {
 /// Outcome of a TUI permission-dialog round-trip (M6-05).
 ///
 /// Maps to [`crate::permission_gate::PermissionDecision`] in the TUI gate:
-/// `AllowOnce` and `AllowAlways` both → `Allow`; `Deny` → `Deny { reason }`.
+/// `AllowOnce`, `AllowAlways`, and `AllowAuto` all → `Allow`; `Deny` →
+/// `Deny { reason }`. `AllowAuto` is handled as a separate rich outcome so the
+/// orchestrator can atomically request the live mode transition.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PermissionResponse {
     /// Allow this single tool call. Does not persist a session rule.
@@ -60,6 +62,10 @@ pub enum PermissionResponse {
     /// Allow this tool for the rest of the session (a session rule is
     /// appended to the orchestrator's in-memory rule list).
     AllowAlways,
+    /// Allow this call and request an atomic transition to Auto mode. This is
+    /// intentionally not persistent and is only emitted for engine-eligible
+    /// prompt rows.
+    AllowAuto,
     /// Reject the tool call.
     Deny,
 }
@@ -186,6 +192,7 @@ mod tests {
             PermissionResponse::AllowAlways
         );
         assert_ne!(PermissionResponse::AllowOnce, PermissionResponse::Deny);
+        assert_ne!(PermissionResponse::AllowOnce, PermissionResponse::AllowAuto);
     }
 
     #[test]
@@ -193,6 +200,7 @@ mod tests {
         assert!(!PermissionResponse::AllowOnce.persist());
         assert!(PermissionResponse::AllowAlways.persist());
         assert!(!PermissionResponse::Deny.persist());
+        assert!(!PermissionResponse::AllowAuto.persist());
     }
 
     #[test]

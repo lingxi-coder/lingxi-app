@@ -101,6 +101,29 @@ fn frozen_command_deny_layers(frozen: &[String]) -> Vec<Value> {
     vec![permission::PermissionLayer::DisallowedTools(kept).to_wire()]
 }
 
+/// Identify a tool-owned ASK without guessing from a wire name.  MCP tools
+/// expose their clamp through `is_mcp`, while Workflow's nested Read check
+/// carries a structured blocked path. `PermissionPromptTool` is the explicit
+/// requires-user-interaction reason. Ordinary Bash sandbox asks intentionally
+/// do not use this protected path and retain their existing carve-outs.
+fn tool_permission_ask_is_protected(
+    tool: &dyn crate::tool_trait::Tool,
+    result: &permission::PermissionResult,
+) -> bool {
+    let permission::PermissionResult::Ask {
+        reason, metadata, ..
+    } = result
+    else {
+        return false;
+    };
+    tool.is_mcp()
+        || metadata.blocked_path.is_some()
+        || matches!(
+            reason,
+            permission::PermissionDecisionReason::PermissionPromptTool { .. }
+        )
+}
+
 /// Wraps an `Arc<ToolRegistry>` as a `dyn ToolInvoker`.
 ///
 /// Cheap to construct; clones share the same registry `Arc`.
@@ -181,6 +204,60 @@ impl ToolInvoker for RegistryToolInvoker {
             input = coerced.input;
         }
 
+        // Tool-owned checks (MCP clamps and Workflow's nested Read gate) run
+        // before either policy outcome can reach the tool body.
+        let tool_use_ctx = crate::context::ToolUseContext {
+            options: crate::context::ToolUseOptions {
+                debug: false,
+                verbose: false,
+                main_loop_model: ctx
+                    .parent_model
+                    .clone()
+                    .unwrap_or_else(|| "subagent".into()),
+                model_profile: ctx.parent_model_profile.clone(),
+                max_budget_nano_usd: None,
+                mcp_clients: vec![],
+                is_non_interactive_session: ctx.is_non_interactive_session,
+                custom_system_prompt: None,
+                append_system_prompt: None,
+            },
+            messages: vec![],
+            tool_use_id: None,
+            agent_id: ctx.parent_agent_id,
+            agent_name: ctx.agent_name.clone(),
+            team_name: ctx.team_name.clone(),
+            content_replacement_state: None,
+            session: None,
+            subagent_registry: Some(self.registry.clone()),
+            cancel: None,
+            fork_parent_system_prompt: None,
+            cwd: ctx.cwd.clone(),
+            depth: ctx.depth,
+            observer: ctx.observer.clone(),
+            file_history: None,
+        };
+        let tool_permission_result = tool.check_permissions(&input, &tool_use_ctx).await;
+        let tool_ask_is_protected =
+            tool_permission_ask_is_protected(tool.as_ref(), &tool_permission_result);
+
+        // A tool-local DENY is authoritative even when no outer gate is
+        // installed (and therefore also over every outer Allow/Auto/Bypass).
+        if let permission::PermissionResult::Deny { explanation, .. } = &tool_permission_result {
+            return Err(ToolInvokerError::Internal(
+                explanation
+                    .clone()
+                    .unwrap_or_else(|| format!("Permission to use {name} has been denied.")),
+            ));
+        }
+        // A protected ASK needs a transport to obtain a human decision.  No
+        // gate or a headless owner must fail closed rather than silently run
+        // the tool-local operation.
+        if tool_ask_is_protected && (self.gate.is_none() || ctx.is_non_interactive_session) {
+            return Err(ToolInvokerError::Internal(format!(
+                "Permission to use {name} has been denied."
+            )));
+        }
+
         // Permission gate (enforcement 3b). The subagent/teammate dispatch
         // surface now consults the same gate as the main loop — previously it
         // dispatched any registered tool unconditionally (the bypass). A `Deny`
@@ -217,6 +294,12 @@ impl ToolInvoker for RegistryToolInvoker {
                 worker,
                 tool_use_id: ctx.tool_use_id.clone(),
                 requires_user_interaction: tool.requires_user_interaction(),
+                // A tool-owned interaction is always per-call. Carry the
+                // persistence guard alongside the transport metadata so TUI,
+                // adapter, and stdio hosts cannot offer or honor a stale
+                // AllowAlways response for subagent dispatches.
+                suppress_always_allow_rule: tool.requires_user_interaction(),
+                request_source: ctx.request_source,
                 // Per-call permission-mode override (claude-code 2.1.207 Agent
                 // `mode` → the child's `toolPermissionContext.mode`): a
                 // `mode:"plan"` subagent's dispatch authorizes under Plan so
@@ -233,78 +316,51 @@ impl ToolInvoker for RegistryToolInvoker {
                 permission_layers: frozen_command_deny_layers(&ctx.frozen_command_denies),
                 ..Default::default()
             };
-            match gate
-                .check_with_context_or_abort(name, &input, &check_ctx)
-                .await
-            {
-                Ok(traits::permission_gate::PermissionOutcome::Allow { updated_input, .. }) => {
+            // Tool-local DENY has priority over every policy result.  For a
+            // protected tool ASK, resolve the policy without its transport
+            // first, then send the single ASK through that same worker-aware
+            // transport; re-running the policy would swallow MCP ceilings or
+            // Workflow's nested Read requirement on an outer Allow.
+            let outcome = if tool_ask_is_protected {
+                let resolution = gate
+                    .resolve_detailed_or_abort(name, &input, &check_ctx)
+                    .await
+                    .map_err(|abort| ToolInvokerError::Abort(abort.message))?;
+                match resolution {
+                    traits::permission_gate::PermissionResolution::Deny { reason, .. } => {
+                        return Err(ToolInvokerError::Internal(reason));
+                    }
+                    traits::permission_gate::PermissionResolution::Allow { .. }
+                    | traits::permission_gate::PermissionResolution::Ask
+                    | traits::permission_gate::PermissionResolution::AskWithContext { .. } => {
+                        gate.ask_via_transport(name, &input, &check_ctx).await
+                    }
+                }
+            } else {
+                gate.check_with_context_or_abort(name, &input, &check_ctx)
+                    .await
+                    .map_err(|abort| ToolInvokerError::Abort(abort.message))?
+            };
+            match outcome {
+                traits::permission_gate::PermissionOutcome::Allow { updated_input, .. } => {
                     if let Some(u) = updated_input {
                         input = u;
                     }
                 }
-                Ok(traits::permission_gate::PermissionOutcome::Deny { reason }) => {
+                traits::permission_gate::PermissionOutcome::AllowAuto { updated_input } => {
+                    // Only the session-owning main turn can atomically switch the
+                    // live permission mode. Subagent dispatch has no such seam,
+                    // so `AllowAuto` degrades to a one-shot allow for THIS call
+                    // while still honoring any host/policy input rewrite.
+                    if let Some(u) = updated_input {
+                        input = u;
+                    }
+                }
+                traits::permission_gate::PermissionOutcome::Deny { reason } => {
                     return Err(ToolInvokerError::Internal(reason));
                 }
-                Err(abort) => return Err(ToolInvokerError::Abort(abort.message)),
             }
         }
-
-        // Synthesize a minimal ToolUseContext. The recursion-lock invariant
-        // requires `subagent_registry` to carry the SAME Arc<ToolRegistry>
-        // this invoker wraps (so a recursive AgentTool call inside the
-        // dispatched tool reuses the same registry — no fresh Arc).
-        let tool_use_ctx = crate::context::ToolUseContext {
-            options: crate::context::ToolUseOptions {
-                debug: false,
-                verbose: false,
-                // The DISPATCHING subagent's own resolved model (claude-code
-                // `runAgent.ts:678` seeds each child's `mainLoopModel:
-                // resolvedAgentModel`), so a recursive `Agent` tool call reads the
-                // IMMEDIATE parent's model via `toolUseContext.options.mainLoopModel`
-                // (claude `AgentTool.tsx:418`). Falls back to the legacy `"subagent"`
-                // placeholder when the dispatching runner wired no parent model.
-                main_loop_model: ctx
-                    .parent_model
-                    .clone()
-                    .unwrap_or_else(|| "subagent".into()),
-                model_profile: ctx.parent_model_profile.clone(),
-                max_budget_nano_usd: None,
-                mcp_clients: vec![],
-                // Use the effective owner mode captured by the runner. It is
-                // deliberately separate from `is_async`: scheduled work can
-                // launch a synchronous child that must remain non-interactive.
-                is_non_interactive_session: ctx.is_non_interactive_session,
-                custom_system_prompt: None,
-                append_system_prompt: None,
-            },
-            messages: vec![],
-            tool_use_id: None,
-            agent_id: ctx.parent_agent_id,
-            // Swarm identity threaded from the dispatching agent (claude-code
-            // `getAgentName()` / `getTeammateContext()?.teamName`): an in-process
-            // teammate's dispatched tools now see the teammate's DISPLAY name +
-            // team name, so the swarm-only `TaskUpdate` side-effects (auto-owner,
-            // owner-change mailbox notification) and `getTaskListId()` key on
-            // them. `None` for one-shot subagents / the leader / main thread.
-            agent_name: ctx.agent_name,
-            team_name: ctx.team_name,
-            content_replacement_state: None,
-            session: None,
-            subagent_registry: Some(self.registry.clone()),
-            cancel: None,
-            fork_parent_system_prompt: None,
-            // Per-agent cwd (worktree isolation / explicit cwd): the dispatched
-            // tools operate here instead of the shared session workspace.
-            cwd: ctx.cwd,
-            // Recursion depth of the DISPATCHING agent (claude `agentContext.depth`)
-            // → so a recursive `Agent` call inside this tool computes the child's
-            // depth and the resolver can gate `Agent` at `depth < 5`.
-            depth: ctx.depth,
-            observer: ctx.observer,
-            // Subagent tool edits are not checkpointed in v1 (the main-loop
-            // turn wires `file_history`; subagent contexts do not carry it).
-            file_history: None,
-        };
 
         // Drop the progress receiver immediately — production tools tolerate
         // a closed progress channel, and we don't surface progress here.
@@ -342,6 +398,7 @@ mod tests {
     use permission::result::PermissionMetadata;
     use permission::{PermissionDecisionReason, PermissionResult};
     use serde_json::json;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Mutex as StdMutex;
 
     fn allow_for_tests() -> PermissionResult {
@@ -424,6 +481,76 @@ mod tests {
         }
         fn interrupt_behavior(&self, _input: &serde_json::Value) -> InterruptBehavior {
             InterruptBehavior::Cancel
+        }
+    }
+
+    /// Probe used to lock the subagent tool-local permission chokepoint.  It
+    /// can model MCP/Workflow-style local DENY/ASK results while recording
+    /// whether the tool body was reached.
+    struct ToolPermissionProbe {
+        result: PermissionResult,
+        is_mcp: bool,
+        calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl Tool for ToolPermissionProbe {
+        fn name(&self) -> &str {
+            "ToolPermissionProbe"
+        }
+        fn input_schema(&self) -> &serde_json::Value {
+            &ECHO_INPUT_SCHEMA
+        }
+        fn is_enabled(&self, _: &ToolStaticContext) -> bool {
+            true
+        }
+        fn is_mcp(&self) -> bool {
+            self.is_mcp
+        }
+        fn max_result_size_chars(&self) -> usize {
+            1024
+        }
+        fn is_concurrency_safe(&self, _: &serde_json::Value) -> bool {
+            true
+        }
+        fn is_read_only(&self, _: &serde_json::Value) -> bool {
+            false
+        }
+        async fn validate_input(
+            &self,
+            _: &serde_json::Value,
+            _: &ToolUseContext,
+        ) -> Result<(), ValidationError> {
+            Ok(())
+        }
+        async fn check_permissions(
+            &self,
+            _: &serde_json::Value,
+            _: &ToolUseContext,
+        ) -> PermissionResult {
+            self.result.clone()
+        }
+        async fn description(&self, _: &serde_json::Value, _: &DescriptionOptions) -> String {
+            "permission probe".into()
+        }
+        async fn prompt(&self, _: &PromptOptions) -> String {
+            String::new()
+        }
+        async fn call(
+            &self,
+            _: serde_json::Value,
+            _: ToolUseContext,
+            _: ToolProgressSender,
+        ) -> Result<ToolCallResult, ToolError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(ToolCallResult {
+                data: json!({ "called": true }),
+                model_content: None,
+                new_messages: vec![],
+                context_modifier: None,
+                is_error: false,
+                mcp_meta: None,
+            })
         }
     }
 
@@ -682,6 +809,7 @@ mod tests {
                     parent_model: None,
                     parent_model_profile: None,
                     mode_override: None,
+                    request_source: None,
                     frozen_command_denies: Vec::new(),
                 },
             )
@@ -845,6 +973,7 @@ mod tests {
             parent_model: None,
             parent_model_profile: None,
             mode_override: None,
+            request_source: None,
             frozen_command_denies: Vec::new(),
         }
     }
@@ -1027,6 +1156,7 @@ mod tests {
             parent_model: None,
             parent_model_profile: None,
             mode_override: None,
+            request_source: None,
             frozen_command_denies: Vec::new(),
         }
     }
@@ -1126,6 +1256,30 @@ mod tests {
         }
     }
 
+    struct AllowAutoNoTransitionGate;
+
+    #[async_trait]
+    impl Gate for AllowAutoNoTransitionGate {
+        async fn check(&self, _name: &str, _input: &Value) -> GateDecision {
+            panic!("AllowAuto test must use the rich context path")
+        }
+
+        async fn check_with_context(
+            &self,
+            _name: &str,
+            _input: &Value,
+            _ctx: &traits::permission_gate::PermissionCheckContext,
+        ) -> traits::permission_gate::PermissionOutcome {
+            traits::permission_gate::PermissionOutcome::AllowAuto {
+                updated_input: Some(json!({ "rewritten": "auto" })),
+            }
+        }
+
+        async fn set_permission_mode(&self, _mode: &str) -> Result<(), String> {
+            panic!("subagent tool dispatch must not attempt a session auto-mode transition")
+        }
+    }
+
     fn ctx_with_tool_use_id(id: &str) -> SubagentInvocationContext {
         SubagentInvocationContext {
             parent_agent_id: None,
@@ -1141,6 +1295,7 @@ mod tests {
             parent_model: None,
             parent_model_profile: None,
             mode_override: None,
+            request_source: None,
             frozen_command_denies: Vec::new(),
         }
     }
@@ -1471,6 +1626,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn dispatch_allow_auto_is_one_shot_and_applies_updated_input() {
+        let invoker = RegistryToolInvoker::new(registry_with_echo())
+            .with_gate(Arc::new(AllowAutoNoTransitionGate));
+        let out = invoker
+            .invoke(
+                "TestEcho",
+                json!({ "original": true }),
+                ctx_with_tool_use_id("toolu_auto"),
+            )
+            .await
+            .expect("AllowAuto still permits the current tool call");
+        assert_eq!(
+            out,
+            json!({ "echo": { "rewritten": "auto" } }),
+            "subagent dispatch must honor updated_input while degrading AllowAuto to this call only"
+        );
+    }
+
+    #[tokio::test]
     async fn dispatch_context_deny_blocks_and_surfaces_reason() {
         // A Deny from the context gate is surfaced as Internal, exactly like the
         // legacy 2-valued path.
@@ -1490,6 +1664,96 @@ mod tests {
             }
             other => panic!("expected Internal(deny), got {other:?}"),
         }
+    }
+
+    fn protected_mcp_ask() -> PermissionResult {
+        PermissionResult::Ask {
+            reason: PermissionDecisionReason::PermissionPromptTool {
+                tool_name: "mcp__srv__write".into(),
+            },
+            prompt: permission::result::PermissionPrompt {
+                title: "Permission required".into(),
+                message: "MCP tool requires approval".into(),
+                options: vec!["Allow once".into(), "Deny".into()],
+            },
+            pending_classifier_check: None,
+            metadata: PermissionMetadata::default(),
+        }
+    }
+
+    fn probe_registry(
+        result: PermissionResult,
+        is_mcp: bool,
+        calls: Arc<AtomicUsize>,
+    ) -> Arc<ToolRegistry> {
+        let mut registry = ToolRegistry::new();
+        registry.register_builtin(Arc::new(ToolPermissionProbe {
+            result,
+            is_mcp,
+            calls,
+        }));
+        Arc::new(registry)
+    }
+
+    #[tokio::test]
+    async fn tool_local_deny_blocks_subagent_even_without_outer_gate() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let invoker = RegistryToolInvoker::new(probe_registry(
+            PermissionResult::Deny {
+                reason: PermissionDecisionReason::Other {
+                    reason: "local deny".into(),
+                },
+                explanation: Some("tool-local deny".into()),
+                metadata: PermissionMetadata::default(),
+            },
+            true,
+            calls.clone(),
+        ));
+        let error = invoker
+            .invoke("ToolPermissionProbe", json!({}), no_ctx())
+            .await
+            .expect_err("tool-local deny must bind without a policy gate");
+        assert!(
+            matches!(error, ToolInvokerError::Internal(ref reason) if reason == "tool-local deny")
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn protected_mcp_ask_uses_worker_attributed_transport_over_allow() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let seen = Arc::new(StdMutex::new(None));
+        let gate = Arc::new(WorkerRecordingGate { seen: seen.clone() });
+        let invoker =
+            RegistryToolInvoker::new(probe_registry(protected_mcp_ask(), true, calls.clone()))
+                .with_gate(gate);
+        let mut ctx = ctx_with_tool_use_id("toolu_mcp_ask");
+        ctx.is_non_interactive_session = false;
+        invoker
+            .invoke("ToolPermissionProbe", json!({}), ctx)
+            .await
+            .expect("interactive worker transport approves the protected ask");
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        let worker = seen.lock().unwrap().clone().expect("gate consulted");
+        assert_eq!(worker.expect("worker attribution").name, "researcher");
+    }
+
+    #[tokio::test]
+    async fn protected_mcp_ask_fails_closed_for_headless_subagent() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let invoker =
+            RegistryToolInvoker::new(probe_registry(protected_mcp_ask(), true, calls.clone()))
+                .with_gate(Arc::new(WorkerRecordingGate {
+                    seen: Arc::new(StdMutex::new(None)),
+                }));
+        let mut ctx = ctx_with_tool_use_id("toolu_mcp_headless");
+        ctx.is_non_interactive_session = true;
+        let error = invoker
+            .invoke("ToolPermissionProbe", json!({}), ctx)
+            .await
+            .expect_err("headless protected ask must fail closed");
+        assert!(matches!(error, ToolInvokerError::Internal(_)));
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]

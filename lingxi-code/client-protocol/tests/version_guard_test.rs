@@ -1291,7 +1291,14 @@ fn current_contract_index() -> ContractIndex {
 
     // ── Local-apps DTOs (local_apps.rs) ───────────────────────────────────
     put("AppWorkflowStateDto::Draft", "draft");
-    put("AppWorkflowStateDto::Ready", "ready");
+    put(
+        "AppWorkflowStateDto::PublishedUnverified",
+        "published_unverified",
+    );
+    put(
+        "AppWorkflowStateDto::PublishedVerified",
+        "published_verified",
+    );
 
     put("AppRuntimeStateDto::Stopped", "stopped");
     put("AppRuntimeStateDto::Starting", "starting");
@@ -2253,6 +2260,8 @@ fn contract_index_covers_every_dto() {
             team: None,
         }),
         owner: None,
+        suppress_always_allow_rule: false,
+        auto_mode_prompt: None,
     };
     let _resolved = PermissionResolved {
         request_id: 0,

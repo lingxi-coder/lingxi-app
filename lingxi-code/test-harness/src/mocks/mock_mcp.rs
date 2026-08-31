@@ -16,8 +16,8 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use traits::{
     ElicitRequestDto, ElicitResultDto, McpError, McpNotificationStream, McpPromptDto,
-    McpRawConnection, McpResourceContentDto, McpResourceDto, McpToolDto, McpToolResultDto,
-    McpTransport, McpTransportKind, McpTransportSpec, ServerCapabilitiesDto,
+    McpRawConnection, McpResourceContentDto, McpResourceDto, McpToolDefinitionDto, McpToolDto,
+    McpToolResultDto, McpTransport, McpTransportKind, McpTransportSpec, ServerCapabilitiesDto,
 };
 
 /// Per-server `resources/list` behavior the responder applies (Batch 5c).
@@ -139,15 +139,13 @@ impl MockMcpTransport {
     ///
     /// The full name follows the engine's convention `mcp__<server>__<tool>`.
     pub fn add_tool(&self, name: &str) {
-        self.tools.lock().unwrap().push(McpToolDto {
-            server_name: "mock".into(),
-            tool_name: name.into(),
-            description: format!("{name} test tool"),
-            input_schema: serde_json::json!({"type": "object"}),
-            full_name: format!("mcp__mock__{name}"),
-            search_hint: None,
-            always_load: None,
-        });
+        let mut definition = McpToolDefinitionDto::new(name, serde_json::json!({"type": "object"}));
+        definition.description = Some(format!("{name} test tool"));
+        self.tools.lock().unwrap().push(McpToolDto::new(
+            "mock",
+            format!("mcp__mock__{name}"),
+            definition,
+        ));
     }
 }
 

@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
 
-use crate::response::{HookDecision, HookResponse};
+use crate::response::{HookDecision, HookResponse, PermissionRequestResult};
 
 /// Marker unit struct that serializes/deserializes as the literal `"PreToolUse"`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1178,6 +1178,30 @@ pub enum HookResponseParseError {
     /// JSON parsed but the top level is not an object.
     #[error("hook response is not a JSON object")]
     NotObject,
+    /// JSON parsed as an object, but a known hook-output field has the wrong
+    /// type. Unknown fields remain intentionally compatible and are ignored.
+    /// The wording follows Claude Code 2.1.251's `Hook JSON output validation
+    /// failed` diagnostic closely enough for callers to surface the schema
+    /// failure without treating it as a permission decision.
+    #[error(
+        "Hook JSON output validation failed — {field}: expected {expected}, received {actual}"
+    )]
+    Schema {
+        /// Dotted path to the invalid known field.
+        field: String,
+        /// Expected JSON type.
+        expected: &'static str,
+        /// Actual JSON type (or `missing` for a required field).
+        actual: &'static str,
+    },
+    /// A required field in the event-specific output object is absent.
+    #[error("Hook JSON output validation failed — {field}: expected {expected}, received missing")]
+    MissingSchemaField {
+        /// Dotted path to the missing known field.
+        field: String,
+        /// Expected JSON type.
+        expected: &'static str,
+    },
     /// `hookSpecificOutput.hookEventName` didn't match the expected event.
     #[error("hook response hookEventName mismatch: expected '{expected}', got '{got}'")]
     EventNameMismatch {
@@ -1209,10 +1233,366 @@ pub enum HookResponseParseError {
     },
 }
 
+fn json_value_type(value: &Value) -> &'static str {
+    match value {
+        Value::Null => "null",
+        Value::Bool(_) => "boolean",
+        Value::Number(_) => "number",
+        Value::String(_) => "string",
+        Value::Array(_) => "array",
+        Value::Object(_) => "object",
+    }
+}
+
+fn validate_optional_field_type_at(
+    object: &serde_json::Map<String, Value>,
+    field: &str,
+    path: &str,
+    expected: &'static str,
+    is_expected: fn(&Value) -> bool,
+) -> Result<(), HookResponseParseError> {
+    if let Some(value) = object.get(field) {
+        if !is_expected(value) {
+            return Err(HookResponseParseError::Schema {
+                field: path.to_string(),
+                expected,
+                actual: json_value_type(value),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn validate_optional_field_type(
+    object: &serde_json::Map<String, Value>,
+    field: &str,
+    expected: &'static str,
+    is_expected: fn(&Value) -> bool,
+) -> Result<(), HookResponseParseError> {
+    validate_optional_field_type_at(object, field, field, expected, is_expected)
+}
+
+fn validate_optional_nested_field_type(
+    object: &serde_json::Map<String, Value>,
+    field: &str,
+    expected: &'static str,
+    is_expected: fn(&Value) -> bool,
+) -> Result<(), HookResponseParseError> {
+    let path = format!("hookSpecificOutput.{field}");
+    validate_optional_field_type_at(object, field, &path, expected, is_expected)
+}
+
+fn validate_optional_permission_decision_field_type(
+    object: &serde_json::Map<String, Value>,
+    field: &str,
+    expected: &'static str,
+    is_expected: fn(&Value) -> bool,
+) -> Result<(), HookResponseParseError> {
+    let path = format!("hookSpecificOutput.decision.{field}");
+    validate_optional_field_type_at(object, field, &path, expected, is_expected)
+}
+
+fn validate_required_field_type_at(
+    object: &serde_json::Map<String, Value>,
+    field: &str,
+    path: &str,
+    expected: &'static str,
+    is_expected: fn(&Value) -> bool,
+) -> Result<(), HookResponseParseError> {
+    let Some(value) = object.get(field) else {
+        return Err(HookResponseParseError::MissingSchemaField {
+            field: path.to_string(),
+            expected,
+        });
+    };
+    if !is_expected(value) {
+        return Err(HookResponseParseError::Schema {
+            field: path.to_string(),
+            expected,
+            actual: json_value_type(value),
+        });
+    }
+    Ok(())
+}
+
+fn validate_permission_update_array(value: &Value) -> Result<(), HookResponseParseError> {
+    let Some(updates) = value.as_array() else {
+        return Err(HookResponseParseError::Schema {
+            field: "hookSpecificOutput.decision.updatedPermissions".to_string(),
+            expected: "array",
+            actual: json_value_type(value),
+        });
+    };
+    for (index, update) in updates.iter().enumerate() {
+        let path =
+            |field: &str| format!("hookSpecificOutput.decision.updatedPermissions.{index}.{field}");
+        let Some(object) = update.as_object() else {
+            return Err(HookResponseParseError::Schema {
+                field: format!("hookSpecificOutput.decision.updatedPermissions.{index}"),
+                expected: "object",
+                actual: json_value_type(update),
+            });
+        };
+        validate_required_field_type_at(object, "type", &path("type"), "string", Value::is_string)?;
+        let kind = object
+            .get("type")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        if !matches!(
+            kind,
+            "addRules"
+                | "replaceRules"
+                | "removeRules"
+                | "setMode"
+                | "addDirectories"
+                | "removeDirectories"
+        ) {
+            return Err(HookResponseParseError::Schema {
+                field: path("type"),
+                expected: "\"addRules\" | \"replaceRules\" | \"removeRules\" | \"setMode\" | \"addDirectories\" | \"removeDirectories\"",
+                actual: "invalid value",
+            });
+        }
+        validate_required_field_type_at(
+            object,
+            "destination",
+            &path("destination"),
+            "string",
+            Value::is_string,
+        )?;
+        let destination = object
+            .get("destination")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        if !matches!(
+            destination,
+            "userSettings" | "projectSettings" | "localSettings" | "session" | "cliArg"
+        ) {
+            return Err(HookResponseParseError::Schema {
+                field: path("destination"),
+                expected: "\"userSettings\" | \"projectSettings\" | \"localSettings\" | \"session\" | \"cliArg\"",
+                actual: "invalid value",
+            });
+        }
+        match kind {
+            "addRules" | "replaceRules" | "removeRules" => {
+                validate_required_field_type_at(
+                    object,
+                    "rules",
+                    &path("rules"),
+                    "array",
+                    Value::is_array,
+                )?;
+                for (rule_index, rule) in object
+                    .get("rules")
+                    .and_then(Value::as_array)
+                    .expect("validated rules array")
+                    .iter()
+                    .enumerate()
+                {
+                    let rule_path = |field: &str| {
+                        format!(
+                            "hookSpecificOutput.decision.updatedPermissions.{index}.rules.{rule_index}.{field}"
+                        )
+                    };
+                    let Some(rule) = rule.as_object() else {
+                        return Err(HookResponseParseError::Schema {
+                            field: rule_path(""),
+                            expected: "object",
+                            actual: json_value_type(rule),
+                        });
+                    };
+                    validate_required_field_type_at(
+                        rule,
+                        "toolName",
+                        &rule_path("toolName"),
+                        "string",
+                        Value::is_string,
+                    )?;
+                    validate_optional_field_type_at(
+                        rule,
+                        "ruleContent",
+                        &rule_path("ruleContent"),
+                        "string",
+                        Value::is_string,
+                    )?;
+                }
+                validate_required_field_type_at(
+                    object,
+                    "behavior",
+                    &path("behavior"),
+                    "string",
+                    Value::is_string,
+                )?;
+                let behavior = object
+                    .get("behavior")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                if !matches!(behavior, "allow" | "deny" | "ask") {
+                    return Err(HookResponseParseError::Schema {
+                        field: path("behavior"),
+                        expected: "\"allow\" | \"deny\" | \"ask\"",
+                        actual: "invalid value",
+                    });
+                }
+            }
+            "setMode" => {
+                validate_required_field_type_at(
+                    object,
+                    "mode",
+                    &path("mode"),
+                    "string",
+                    Value::is_string,
+                )?;
+                let mode = object
+                    .get("mode")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                if !matches!(
+                    mode,
+                    "default" | "acceptEdits" | "bypassPermissions" | "plan" | "dontAsk"
+                ) {
+                    return Err(HookResponseParseError::Schema {
+                        field: path("mode"),
+                        expected: "\"default\" | \"acceptEdits\" | \"bypassPermissions\" | \"plan\" | \"dontAsk\"",
+                        actual: "invalid value",
+                    });
+                }
+            }
+            "addDirectories" | "removeDirectories" => {
+                validate_required_field_type_at(
+                    object,
+                    "directories",
+                    &path("directories"),
+                    "array",
+                    Value::is_array,
+                )?;
+                for (directory_index, directory) in object
+                    .get("directories")
+                    .and_then(Value::as_array)
+                    .expect("validated directories array")
+                    .iter()
+                    .enumerate()
+                {
+                    if !directory.is_string() {
+                        return Err(HookResponseParseError::Schema {
+                            field: format!(
+                                "hookSpecificOutput.decision.updatedPermissions.{index}.directories.{directory_index}"
+                            ),
+                            expected: "string",
+                            actual: json_value_type(directory),
+                        });
+                    }
+                }
+            }
+            _ => unreachable!("validated permission update type"),
+        }
+    }
+    Ok(())
+}
+
+fn validate_optional_string_array(
+    object: &serde_json::Map<String, Value>,
+    field: &str,
+) -> Result<(), HookResponseParseError> {
+    let Some(value) = object.get(field) else {
+        return Ok(());
+    };
+    let Some(values) = value.as_array() else {
+        return Err(HookResponseParseError::Schema {
+            field: format!("hookSpecificOutput.{field}"),
+            expected: "array",
+            actual: json_value_type(value),
+        });
+    };
+    for (index, value) in values.iter().enumerate() {
+        if !value.is_string() {
+            return Err(HookResponseParseError::Schema {
+                field: format!("hookSpecificOutput.{field}.{index}"),
+                expected: "string",
+                actual: json_value_type(value),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn validate_permission_request_decision(
+    object: &serde_json::Map<String, Value>,
+) -> Result<(), HookResponseParseError> {
+    let Some(value) = object.get("decision") else {
+        return Err(HookResponseParseError::MissingSchemaField {
+            field: "hookSpecificOutput.decision".to_string(),
+            expected: "object",
+        });
+    };
+    let Some(decision) = value.as_object() else {
+        return Err(HookResponseParseError::Schema {
+            field: "hookSpecificOutput.decision".to_string(),
+            expected: "object",
+            actual: json_value_type(value),
+        });
+    };
+    validate_optional_permission_decision_field_type(
+        decision,
+        "behavior",
+        "string",
+        Value::is_string,
+    )?;
+    let Some(behavior) = decision.get("behavior").and_then(Value::as_str) else {
+        return Err(HookResponseParseError::MissingSchemaField {
+            field: "hookSpecificOutput.decision.behavior".to_string(),
+            expected: "string",
+        });
+    };
+    match behavior {
+        "allow" => {
+            validate_optional_permission_decision_field_type(
+                decision,
+                "updatedInput",
+                "object",
+                Value::is_object,
+            )?;
+            validate_optional_permission_decision_field_type(
+                decision,
+                "updatedPermissions",
+                "array",
+                Value::is_array,
+            )?;
+            if let Some(updated_permissions) = decision.get("updatedPermissions") {
+                validate_permission_update_array(updated_permissions)?;
+            }
+        }
+        "deny" => {
+            validate_optional_permission_decision_field_type(
+                decision,
+                "message",
+                "string",
+                Value::is_string,
+            )?;
+            validate_optional_permission_decision_field_type(
+                decision,
+                "interrupt",
+                "boolean",
+                Value::is_boolean,
+            )?;
+        }
+        _ => {
+            return Err(HookResponseParseError::Schema {
+                field: "hookSpecificOutput.decision.behavior".to_string(),
+                expected: "\"allow\" | \"deny\"",
+                actual: "invalid value",
+            });
+        }
+    }
+    Ok(())
+}
+
 /// Parse a hook's JSON reply into a [`HookResponse`].
 ///
 /// `expected_event` is `"PreToolUse"` or `"PostToolUse"` — validates the
-/// nested `hookSpecificOutput.hookEventName` per `hooks.ts:585`.
+/// nested `hookSpecificOutput.hookEventName` per `hooks.ts:585` and rejects
+/// known output fields whose JSON types do not match the hook schema.
 pub fn parse_response(
     raw: &str,
     expected_event: &'static str,
@@ -1220,6 +1600,18 @@ pub fn parse_response(
     let v: Value =
         serde_json::from_str(raw).map_err(|e| HookResponseParseError::Json(e.to_string()))?;
     let obj = v.as_object().ok_or(HookResponseParseError::NotObject)?;
+
+    // Claude Code validates the known output schema before interpreting any
+    // decision. Keep unknown fields forward-compatible, but never silently
+    // coerce a known field of the wrong JSON type into an absent field.
+    validate_optional_field_type(obj, "continue", "boolean", Value::is_boolean)?;
+    validate_optional_field_type(obj, "stopReason", "string", Value::is_string)?;
+    validate_optional_field_type(obj, "suppressOutput", "boolean", Value::is_boolean)?;
+    validate_optional_field_type(obj, "systemMessage", "string", Value::is_string)?;
+    validate_optional_field_type(obj, "terminalSequence", "string", Value::is_string)?;
+    validate_optional_field_type(obj, "decision", "string", Value::is_string)?;
+    validate_optional_field_type(obj, "reason", "string", Value::is_string)?;
+    validate_optional_field_type(obj, "hookSpecificOutput", "object", Value::is_object)?;
     let mut resp = HookResponse::default();
 
     // continue / stopReason. `continue: false` is the *preventContinuation*
@@ -1292,21 +1684,101 @@ pub fn parse_response(
     // top-level `reason` here; the lower `hookSpecificOutput.permissionDecisionReason`
     // parse (below) overrides it, preserving CC's `hsOut.permissionDecisionReason ||
     // e.reason` precedence.
-    if let Some(r) = obj.get("reason").and_then(Value::as_str) {
-        resp.reason = Some(r.to_string());
+    if expected_event != "PermissionRequest" {
+        if let Some(r) = obj.get("reason").and_then(Value::as_str) {
+            resp.reason = Some(r.to_string());
+        }
     }
 
     // hookSpecificOutput
     if let Some(hs) = obj.get("hookSpecificOutput").and_then(Value::as_object) {
-        if let Some(name) = hs.get("hookEventName").and_then(Value::as_str) {
-            if name != expected_event {
-                return Err(HookResponseParseError::EventNameMismatch {
-                    expected: expected_event,
-                    got: name.to_string(),
-                });
-            }
+        let name =
+            hs.get("hookEventName")
+                .ok_or_else(|| HookResponseParseError::MissingSchemaField {
+                    field: "hookSpecificOutput.hookEventName".to_string(),
+                    expected: "string",
+                })?;
+        let name = name
+            .as_str()
+            .ok_or_else(|| HookResponseParseError::Schema {
+                field: "hookSpecificOutput.hookEventName".to_string(),
+                expected: "string",
+                actual: json_value_type(name),
+            })?;
+        if name != expected_event {
+            return Err(HookResponseParseError::EventNameMismatch {
+                expected: expected_event,
+                got: name.to_string(),
+            });
         }
-        if let Some(upd) = hs.get("updatedInput") {
+        // PermissionRequest's `updatedInput` belongs inside its nested
+        // `decision`; the top-level hookSpecificOutput field is the legacy
+        // PreToolUse shape and must not be reused for this event.
+        if expected_event != "PermissionRequest" {
+            validate_optional_nested_field_type(hs, "updatedInput", "object", Value::is_object)?;
+        }
+        validate_optional_nested_field_type(hs, "classifierContext", "string", Value::is_string)?;
+        validate_optional_nested_field_type(hs, "additionalContext", "string", Value::is_string)?;
+        validate_optional_nested_field_type(hs, "retry", "boolean", Value::is_boolean)?;
+        validate_optional_nested_field_type(hs, "permissionDecision", "string", Value::is_string)?;
+        validate_optional_nested_field_type(
+            hs,
+            "permissionDecisionReason",
+            "string",
+            Value::is_string,
+        )?;
+        validate_optional_nested_field_type(hs, "action", "string", Value::is_string)?;
+        validate_optional_nested_field_type(hs, "sessionTitle", "string", Value::is_string)?;
+        validate_optional_nested_field_type(
+            hs,
+            "suppressOriginalPrompt",
+            "boolean",
+            Value::is_boolean,
+        )?;
+        validate_optional_nested_field_type(hs, "displayContent", "string", Value::is_string)?;
+        validate_optional_string_array(hs, "watchPaths")?;
+        validate_optional_nested_field_type(hs, "initialUserMessage", "string", Value::is_string)?;
+        validate_optional_nested_field_type(hs, "reloadSkills", "boolean", Value::is_boolean)?;
+        if expected_event == "PermissionRequest" {
+            validate_permission_request_decision(hs)?;
+            let decision = hs
+                .get("decision")
+                .and_then(Value::as_object)
+                .expect("validated PermissionRequest decision object");
+            let behavior = decision
+                .get("behavior")
+                .and_then(Value::as_str)
+                .expect("validated PermissionRequest behavior");
+            match behavior {
+                "allow" => {
+                    let updated_input = decision.get("updatedInput").cloned();
+                    let updated_permissions = decision
+                        .get("updatedPermissions")
+                        .and_then(Value::as_array)
+                        .cloned();
+                    resp.decision = Some(HookDecision::Allow);
+                    resp.updated_input = updated_input.clone();
+                    resp.updated_permissions = updated_permissions.clone();
+                    resp.permission_request_result = Some(PermissionRequestResult::Allow {
+                        updated_input,
+                        updated_permissions,
+                    });
+                }
+                "deny" => {
+                    let message = decision
+                        .get("message")
+                        .and_then(Value::as_str)
+                        .map(str::to_string);
+                    let interrupt = decision.get("interrupt").and_then(Value::as_bool);
+                    resp.decision = Some(HookDecision::Block);
+                    resp.reason = message.clone();
+                    resp.interrupt = interrupt;
+                    resp.permission_request_result =
+                        Some(PermissionRequestResult::Deny { message, interrupt });
+                }
+                _ => unreachable!("validated PermissionRequest behavior"),
+            }
+        } else if let Some(upd) = hs.get("updatedInput") {
             resp.updated_input = Some(upd.clone());
         }
         // `hookSpecificOutput.updatedMCPToolOutput` (claude-code
@@ -1412,8 +1884,10 @@ pub fn parse_response(
                 }
             }
         }
-        if let Some(r) = hs.get("permissionDecisionReason").and_then(Value::as_str) {
-            resp.reason = Some(r.to_string());
+        if expected_event != "PermissionRequest" {
+            if let Some(r) = hs.get("permissionDecisionReason").and_then(Value::as_str) {
+                resp.reason = Some(r.to_string());
+            }
         }
 
         // Elicitation answer (claude-code `parseElicitationHookOutput`,

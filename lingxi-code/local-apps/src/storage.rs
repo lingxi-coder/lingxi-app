@@ -31,9 +31,9 @@
 //! before the load returns.
 //!
 //! Legacy pipeline documents (`interactions.json`, `design-spec.json`) from
-//! pre-v3 stores are simply IGNORED — never read, never deleted. That, plus
-//! the legacy-state serde aliases on
-//! [`crate::types::AppWorkflowState`], IS the on-disk migration.
+//! pre-v3 stores are simply IGNORED — never read, never deleted. Stale
+//! `workflowState` fields are now inert unknown JSON and no longer participate
+//! in persistence or load-time repair.
 //!
 //! Cross-process coordination: `apps/index.json` is read-modify-written under
 //! the advisory `apps/index.lock` file lock ([`lock_exclusive`]-style, the
@@ -1235,7 +1235,7 @@ pub fn load_all(root: &Path) -> Result<Vec<AppState>, AppError> {
         if repaired {
             tracing::warn!(
                 app_id = %app.record.id,
-                repaired_state = %app.record.workflow_state,
+                repaired_updated_at_ms = app.record.updated_at_ms,
                 "local-apps store was torn by a crash mid-commit; repaired forward"
             );
         }
@@ -1693,8 +1693,6 @@ fn sweep_trash(root: &Path) {
 mod tests {
     use super::*;
     use crate::error::AppErrorCode;
-    use crate::types::AppWorkflowState;
-
     fn new_app(id: &str) -> AppState {
         AppState::create(
             id.into(),
@@ -1743,6 +1741,12 @@ mod tests {
             family: crate::types::AppRuntimeProfile::Canvas2d,
             revision: 1,
             contract_sha256: "0".repeat(64),
+        });
+        partial.template_origin = Some(crate::manifest::AppTemplateOrigin {
+            plugin_id: crate::manifest::AppTemplateOrigin::BUILTIN_PLUGIN_ID.into(),
+            plugin_version: "builtin".into(),
+            template_id: "canvas-2d-r1".into(),
+            template_sha256: "0".repeat(64),
         });
         crate::manifest::save_manifest(&layout, &partial).unwrap();
         std::fs::write(workspace.join("premature.js"), "discard me\n").unwrap();
@@ -1806,7 +1810,6 @@ mod tests {
         assert!(body.starts_with("{\n"));
         assert!(body.ends_with("}\n"));
         assert!(body.contains(&format!("\"schemaVersion\": {APPS_SCHEMA_VERSION}")));
-        assert!(body.contains("\"workflowState\": \"draft\""));
     }
 
     /// The mirror-wins half of torn-commit repair: a crash after the per-app
@@ -1818,36 +1821,32 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut app = new_app("cccc3333");
         save_full(dir.path(), std::slice::from_ref(&app));
-        // The mutation (mark_ready) committed its batch (runtime + mirror)…
-        app.record.workflow_state = AppWorkflowState::Ready;
+        // A mutation committed its batch (runtime + mirror)…
+        app.record.name = "Updated".into();
         app.record.updated_at_ms = 1_700_000_000_500;
         save_app_files(dir.path(), &app).unwrap();
-        // …but the index rewrite was lost to a crash: index still says draft.
+        // …but the index rewrite was lost to a crash: index still says old.
 
         let loaded = load_all(dir.path()).unwrap();
         assert_eq!(loaded.len(), 1);
-        assert_eq!(
-            loaded[0].record.workflow_state,
-            AppWorkflowState::Ready,
-            "the mirror (written after the index) wins"
-        );
+        assert_eq!(loaded[0].record.name, "Updated", "the mirror wins");
         assert_eq!(loaded[0].record.updated_at_ms, 1_700_000_000_500);
         // The repair was persisted: the index now agrees.
         let body = std::fs::read_to_string(dir.path().join("apps/index.json")).unwrap();
-        assert!(body.contains("\"ready\""), "{body}");
+        assert!(body.contains("\"Updated\""), "{body}");
         // A second load needs no repair and sees the same state.
         assert_eq!(load_all(dir.path()).unwrap(), loaded);
     }
 
-    /// The on-disk legacy migration: every pipeline-era `workflowState`
-    /// deserializes to `draft` via the serde aliases, and legacy pipeline
-    /// documents sitting in the app dir are ignored (not read, not deleted).
+    /// Legacy pipeline documents sitting in the app dir are ignored (not read,
+    /// not deleted), and stale `workflowState` bytes in the index/mirror are
+    /// tolerated as unknown fields rather than participating in state.
     #[test]
-    fn legacy_pipeline_states_load_as_draft_and_stale_docs_are_ignored() {
+    fn stale_workflow_state_fields_and_legacy_docs_are_ignored() {
         let dir = tempfile::tempdir().unwrap();
         let app = new_app("dddd4444");
         save_full(dir.path(), std::slice::from_ref(&app));
-        // Rewrite index + mirror with a legacy mid-pipeline state.
+        // Rewrite index + mirror with a stale legacy workflowState field.
         for rel in [
             "apps/index.json",
             "apps/dddd4444/workspace/.lingxi/app.json",
@@ -1870,11 +1869,7 @@ mod tests {
 
         let loaded = load_all(dir.path()).unwrap();
         assert_eq!(loaded.len(), 1);
-        assert_eq!(
-            loaded[0].record.workflow_state,
-            AppWorkflowState::Draft,
-            "a mid-pipeline legacy state can only mean 'not ready yet'"
-        );
+        assert_eq!(loaded[0].record, app.record);
         // The stale documents were left alone.
         assert_eq!(
             std::fs::read_to_string(&stale_interactions).unwrap(),
@@ -2447,7 +2442,7 @@ mod tests {
                 1_700_000_000_101,
             )
             .unwrap();
-        after.record.workflow_state = AppWorkflowState::Ready;
+        after.record.name = "After".into();
         after.record.updated_at_ms = 1_700_000_000_101;
 
         // Fail at runtime.json (the FIRST step): the mirror (later) must not
@@ -2459,7 +2454,7 @@ mod tests {
         let mirror_body =
             std::fs::read_to_string(dir.path().join(metadata_rel("mmmm3333"))).unwrap();
         assert!(
-            !mirror_body.contains("\"ready\""),
+            !mirror_body.contains("\"After\""),
             "the mirror must not be written before runtime"
         );
     }

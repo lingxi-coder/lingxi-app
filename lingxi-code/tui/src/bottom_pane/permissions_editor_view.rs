@@ -50,6 +50,195 @@ pub struct PermissionsSnapshot {
     /// Every rule projected from the user/project/local settings files and the
     /// managed tier, each tagged with its [`PermissionRuleSource`].
     pub rules: Vec<PermissionRule>,
+    /// The auto-mode classifier configuration is intentionally separate from
+    /// `rules`: these entries are not `permissions.allow/ask/deny` rules.
+    pub auto_mode: AutoModeSnapshot,
+}
+
+/// One of the four auto-mode classifier configuration buckets shown by the
+/// `/permissions` Auto mode tab. The names match the `autoMode` settings keys
+/// and the 2.1.251 UI labels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum AutoModeCategory {
+    /// Rules that are soft-approved by the classifier.
+    SoftAllow,
+    /// Rules that require a user confirmation unless another rule applies.
+    SoftDeny,
+    /// Rules that the classifier always rejects.
+    HardDeny,
+    /// Environment facts used to interpret classifier rules.
+    Environment,
+}
+
+impl AutoModeCategory {
+    /// Category order used by the Auto mode tab.
+    pub const ALL: [Self; 4] = [
+        Self::SoftAllow,
+        Self::SoftDeny,
+        Self::HardDeny,
+        Self::Environment,
+    ];
+
+    fn index(self) -> usize {
+        match self {
+            Self::SoftAllow => 0,
+            Self::SoftDeny => 1,
+            Self::HardDeny => 2,
+            Self::Environment => 3,
+        }
+    }
+
+    fn key(self) -> &'static str {
+        match self {
+            Self::SoftAllow => "allow",
+            Self::SoftDeny => "soft_deny",
+            Self::HardDeny => "hard_deny",
+            Self::Environment => "environment",
+        }
+    }
+
+    fn title(self) -> &'static str {
+        match self {
+            Self::SoftAllow => "Soft allow",
+            Self::SoftDeny => "Soft deny",
+            Self::HardDeny => "Hard deny",
+            Self::Environment => "Environment",
+        }
+    }
+
+    /// Number of shipped rules represented by the built-in row.
+    fn builtin_count(self) -> usize {
+        match self {
+            Self::SoftAllow => permission::auto_mode_defaults::DEFAULT_ALLOW_LABELS.len(),
+            Self::SoftDeny => permission::auto_mode_defaults::DEFAULT_SOFT_DENY_LABELS.len(),
+            Self::HardDeny => permission::auto_mode_defaults::DEFAULT_HARD_DENY_LABELS.len(),
+            Self::Environment => permission::auto_mode_defaults::DEFAULT_ENVIRONMENT.len(),
+        }
+    }
+}
+
+/// One user/project/local/managed auto-mode entry. It is separate from
+/// [`PermissionRule`] because auto-mode strings are classifier prose, not
+/// tool permission patterns.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AutoModeRule {
+    /// Which `autoMode` array owns the entry.
+    pub category: AutoModeCategory,
+    /// The raw sentence/path fact as stored in settings.
+    pub value: String,
+    /// Settings tier that supplied this entry.
+    pub source: PermissionRuleSource,
+}
+
+/// Read-only projection of the effective auto-mode classifier configuration.
+///
+/// The built-in rows are represented by `builtin_enabled` rather than copied
+/// into `entries`; this preserves the `$defaults` sentinel semantics and keeps
+/// the UI from presenting shipped defaults as user-authored rules. A configured
+/// rule array without `$defaults` intentionally marks that built-in bucket off.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AutoModeSnapshot {
+    entries: Vec<AutoModeRule>,
+    builtin_enabled: [bool; 4],
+    configured: [bool; 4],
+    unrecognized: bool,
+}
+
+impl Default for AutoModeSnapshot {
+    fn default() -> Self {
+        Self {
+            entries: Vec::new(),
+            builtin_enabled: [true; 4],
+            configured: [false; 4],
+            unrecognized: false,
+        }
+    }
+}
+
+impl AutoModeSnapshot {
+    /// The custom entries in a classifier category, preserving source order.
+    #[must_use]
+    pub fn entries_for_category(&self, category: AutoModeCategory) -> Vec<&AutoModeRule> {
+        self.entries
+            .iter()
+            .filter(|entry| entry.category == category)
+            .collect()
+    }
+
+    /// Whether this category still includes its shipped built-in rules.
+    #[must_use]
+    pub fn builtin_enabled(&self, category: AutoModeCategory) -> bool {
+        self.builtin_enabled[category.index()]
+    }
+
+    /// Whether a settings source explicitly configured this category.
+    #[must_use]
+    pub fn is_configured(&self, category: AutoModeCategory) -> bool {
+        self.configured[category.index()]
+    }
+
+    /// Whether an auto-mode settings object contained an unrecognized shape.
+    #[must_use]
+    pub fn has_unrecognized_entries(&self) -> bool {
+        self.unrecognized
+    }
+
+    /// Number of rows the Auto mode tab renders (four built-in summary rows
+    /// plus custom entries and, when needed, one malformed-config warning).
+    fn row_count(&self) -> usize {
+        4 + self.entries.len() + usize::from(self.unrecognized)
+    }
+
+    fn append_settings_json(&mut self, raw: &str, source: PermissionRuleSource) {
+        let Ok(root) = serde_json::from_str::<serde_json::Value>(raw) else {
+            return;
+        };
+        let Some(auto_mode) = root.get("autoMode") else {
+            return;
+        };
+        let Some(auto_mode) = auto_mode.as_object() else {
+            self.unrecognized = true;
+            return;
+        };
+
+        for category in AutoModeCategory::ALL {
+            let Some(value) = auto_mode.get(category.key()) else {
+                continue;
+            };
+            self.configured[category.index()] = true;
+            let Some(entries) = value.as_array() else {
+                self.unrecognized = true;
+                continue;
+            };
+            let uses_defaults = category != AutoModeCategory::Environment
+                && entries.iter().any(|entry| {
+                    entry.as_str() == Some(permission::auto_mode_setup::AUTO_MODE_DEFAULTS_SENTINEL)
+                });
+            // A configured category without `$defaults` replaces the shipped
+            // rules. Once any source opts out, do not claim the built-ins are
+            // enabled in the effective summary row.
+            if category != AutoModeCategory::Environment && !uses_defaults {
+                self.builtin_enabled[category.index()] = false;
+            }
+            if category == AutoModeCategory::Environment {
+                self.builtin_enabled[category.index()] = false;
+            }
+            for entry in entries {
+                let Some(value) = entry.as_str() else {
+                    self.unrecognized = true;
+                    continue;
+                };
+                if value == permission::auto_mode_setup::AUTO_MODE_DEFAULTS_SENTINEL {
+                    continue;
+                }
+                self.entries.push(AutoModeRule {
+                    category,
+                    value: value.to_string(),
+                    source,
+                });
+            }
+        }
+    }
 }
 
 impl PermissionsSnapshot {
@@ -61,6 +250,7 @@ impl PermissionsSnapshot {
     #[must_use]
     pub fn load(paths: &PermissionPaths) -> Self {
         let mut rules = Vec::new();
+        let mut auto_mode = AutoModeSnapshot::default();
         for (dest, source) in [
             (
                 PermissionUpdateDestination::UserSettings,
@@ -84,6 +274,7 @@ impl PermissionsSnapshot {
             if let Ok(mut projected) = permission_rules_from_settings_json(&raw, source) {
                 rules.append(&mut projected);
             }
+            auto_mode.append_settings_json(&raw, source);
         }
         // Managed (policy) tier: enterprise-managed deny/allow/ask rules the user
         // cannot edit. Loading them here makes the editor's read-only handling
@@ -94,8 +285,10 @@ impl PermissionsSnapshot {
         // same managed dir the engine's settings watcher reads
         // (`<managed>/managed-settings.json` + `managed-settings.d/*.json`); no
         // new plumbing. Best-effort: on most machines the dir is absent → nothing.
-        Self::append_managed_rules(&mut rules, &memory::lingxi_md::hierarchy::managed_path());
-        Self { rules }
+        let managed_dir = memory::lingxi_md::hierarchy::managed_path();
+        Self::append_managed_rules(&mut rules, &managed_dir);
+        Self::append_managed_auto_mode(&mut auto_mode, &managed_dir);
+        Self { rules, auto_mode }
     }
 
     /// Project the managed (policy) settings tier under `managed_dir` into rules
@@ -132,9 +325,39 @@ impl PermissionsSnapshot {
             }
         }
     }
+
+    /// Project managed `autoMode` blocks into the read-only Auto mode tab.
+    /// Uses the same base-file + alphabetical drop-in traversal as managed
+    /// permission rules, keeping policy entries visibly distinct from user
+    /// settings and never treating them as writable permission rules.
+    fn append_managed_auto_mode(snapshot: &mut AutoModeSnapshot, managed_dir: &Path) {
+        fn read_into(path: &Path, snapshot: &mut AutoModeSnapshot) {
+            if let Ok(raw) = std::fs::read_to_string(path) {
+                snapshot.append_settings_json(&raw, PermissionRuleSource::PolicySettings);
+            }
+        }
+        read_into(&managed_dir.join("managed-settings.json"), snapshot);
+        let drop_in = managed_dir.join("managed-settings.d");
+        if let Ok(rd) = std::fs::read_dir(&drop_in) {
+            let mut names: Vec<std::ffi::OsString> = rd
+                .flatten()
+                .map(|e| e.file_name())
+                .filter(|n| {
+                    let s = n.to_string_lossy();
+                    s.ends_with(".json") && !s.starts_with('.')
+                })
+                .collect();
+            names.sort();
+            for name in names {
+                read_into(&drop_in.join(name), snapshot);
+            }
+        }
+    }
 }
 
-/// One of the three rule buckets the editor tabs across.
+/// One of the rule buckets the editor tabs across. `Auto` is a separate
+/// classifier configuration surface; it is deliberately not a
+/// [`PermissionBehavior`] bucket.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PermTab {
     /// `permissions.allow` — auto-approved calls.
@@ -143,19 +366,22 @@ pub enum PermTab {
     Ask,
     /// `permissions.deny` — always-blocked calls.
     Deny,
+    /// `autoMode.{environment,allow,soft_deny,hard_deny}` classifier config.
+    Auto,
 }
 
 impl PermTab {
     /// Tab order (also the render order of the tab bar).
-    const ALL: [PermTab; 3] = [PermTab::Allow, PermTab::Ask, PermTab::Deny];
+    pub const ALL: [PermTab; 4] = [PermTab::Allow, PermTab::Ask, PermTab::Deny, PermTab::Auto];
 
     /// The behavior this tab edits.
     #[must_use]
-    pub fn behavior(self) -> PermissionBehavior {
+    pub fn behavior(self) -> Option<PermissionBehavior> {
         match self {
-            PermTab::Allow => PermissionBehavior::Allow,
-            PermTab::Ask => PermissionBehavior::Ask,
-            PermTab::Deny => PermissionBehavior::Deny,
+            PermTab::Allow => Some(PermissionBehavior::Allow),
+            PermTab::Ask => Some(PermissionBehavior::Ask),
+            PermTab::Deny => Some(PermissionBehavior::Deny),
+            PermTab::Auto => None,
         }
     }
 
@@ -166,6 +392,7 @@ impl PermTab {
             PermTab::Allow => "Allow",
             PermTab::Ask => "Ask",
             PermTab::Deny => "Deny",
+            PermTab::Auto => "Auto mode",
         }
     }
 
@@ -174,7 +401,12 @@ impl PermTab {
             PermTab::Allow => 0,
             PermTab::Ask => 1,
             PermTab::Deny => 2,
+            PermTab::Auto => 3,
         }
+    }
+
+    fn is_auto(self) -> bool {
+        self == Self::Auto
     }
 }
 
@@ -209,6 +441,20 @@ fn source_label(source: PermissionRuleSource) -> &'static str {
     }
 }
 
+/// Human-readable source label for an auto-mode entry. The classifier's own
+/// UI calls these settings tiers out in prose (for example, "from user
+/// settings"), rather than presenting them as ordinary permission buckets.
+#[must_use]
+fn auto_source_label(source: PermissionRuleSource) -> &'static str {
+    match source {
+        PermissionRuleSource::UserSettings => "user settings",
+        PermissionRuleSource::ProjectSettings => "project settings",
+        PermissionRuleSource::LocalSettings => "local settings",
+        PermissionRuleSource::PolicySettings => "managed policy",
+        _ => source_label(source),
+    }
+}
+
 /// Short label for an add destination (the `→ …` hint on the input line).
 #[must_use]
 fn destination_label(dest: PermissionUpdateDestination) -> &'static str {
@@ -232,6 +478,8 @@ pub struct PermissionsEditorState {
     /// and the shared snapshot is refreshed (next `/permissions` open), so the
     /// list never shows a change that failed to write.
     rules: Vec<PermissionRule>,
+    /// The independent auto-mode classifier projection shown by the Auto tab.
+    auto_mode: AutoModeSnapshot,
     /// The active bucket tab.
     tab: PermTab,
     /// Index into the CURRENT tab's rows of the highlighted row.
@@ -253,6 +501,7 @@ impl PermissionsEditorState {
     pub fn new(snapshot: PermissionsSnapshot) -> Self {
         Self {
             rules: snapshot.rules,
+            auto_mode: snapshot.auto_mode,
             tab: PermTab::Allow,
             selected: 0,
             input: String::new(),
@@ -282,11 +531,30 @@ impl PermissionsEditorState {
     /// The rows shown under the current tab, in insertion order.
     #[must_use]
     pub fn rows_for_tab(&self) -> Vec<&PermissionRule> {
-        let behavior = self.tab.behavior();
+        let Some(behavior) = self.tab.behavior() else {
+            return Vec::new();
+        };
         self.rules
             .iter()
             .filter(|r| r.behavior == behavior)
             .collect()
+    }
+
+    /// All custom auto-mode entries, flattened in the same category order used
+    /// for rendering. Built-in summary rows are not returned because they are
+    /// classifier defaults, not editable rules.
+    #[must_use]
+    pub fn auto_mode_entries(&self) -> Vec<&AutoModeRule> {
+        AutoModeCategory::ALL
+            .into_iter()
+            .flat_map(|category| self.auto_mode.entries_for_category(category))
+            .collect()
+    }
+
+    /// Read-only auto-mode snapshot used by rendering and tests.
+    #[must_use]
+    pub fn auto_mode(&self) -> &AutoModeSnapshot {
+        &self.auto_mode
     }
 
     /// The currently selected rule (in the active tab), if any.
@@ -330,7 +598,11 @@ impl PermissionsEditorState {
     }
 
     fn clamp_selected(&mut self) {
-        let n = self.rows_for_tab().len();
+        let n = if self.tab.is_auto() {
+            self.auto_mode.row_count()
+        } else {
+            self.rows_for_tab().len()
+        };
         if n == 0 {
             self.selected = 0;
         } else if self.selected >= n {
@@ -420,6 +692,36 @@ pub fn handle_perm_key(state: &mut PermissionsEditorState, key: KeyEvent) -> Per
         }
     }
 
+    // Auto mode has a distinct classifier configuration model. This editor
+    // intentionally exposes it as a read-only projection until the dedicated
+    // `/auto-mode-setup` review/persist flow can be embedded here; in
+    // particular, never route typed text into `permissions.allow/ask/deny`.
+    if state.tab.is_auto() {
+        return match key.code {
+            KeyCode::Left | KeyCode::BackTab => {
+                state.prev_tab();
+                PermEditorOutcome::Stay
+            }
+            KeyCode::Right | KeyCode::Tab => {
+                state.next_tab();
+                PermEditorOutcome::Stay
+            }
+            KeyCode::Up => {
+                state.selected = state.selected.saturating_sub(1);
+                PermEditorOutcome::Stay
+            }
+            KeyCode::Down => {
+                let n = state.auto_mode.row_count();
+                if n > 0 {
+                    state.selected = (state.selected + 1).min(n - 1);
+                }
+                PermEditorOutcome::Stay
+            }
+            KeyCode::Esc => PermEditorOutcome::Cancel,
+            _ => PermEditorOutcome::Stay,
+        };
+    }
+
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     match key.code {
         KeyCode::Left | KeyCode::BackTab => {
@@ -449,7 +751,9 @@ pub fn handle_perm_key(state: &mut PermissionsEditorState, key: KeyEvent) -> Per
         KeyCode::Enter => {
             let rule = state.input.trim().to_string();
             if !rule.is_empty() {
-                let behavior = state.tab.behavior();
+                let Some(behavior) = state.tab.behavior() else {
+                    return PermEditorOutcome::Stay;
+                };
                 let dest = state.dest;
                 // Emit the add ACTION and clear the buffer, but do NOT insert the
                 // row locally: it appears only after the persist lands + the
@@ -536,13 +840,23 @@ impl PermissionsEditorView {
         self.state.rows_for_tab().len().max(1)
     }
 
+    /// Total content rows for the active tab, including the Auto mode
+    /// classifier's explanatory header and read-only guidance.
+    fn content_rows(&self) -> usize {
+        if self.state.tab.is_auto() {
+            2 + self.state.auto_mode.row_count() + 1
+        } else {
+            self.rule_line_count() + self.chrome_rows()
+        }
+    }
+
     /// The centered dialog rect, shared by [`Renderable::render`] and
     /// [`Renderable::cursor_pos`].
     fn block_rect(&self, area: Rect) -> Rect {
         // tab bar + rule rows + input + footer (+ optional confirm line): the
         // rendered lines fill the inner area EXACTLY (no phantom padding row), so
         // the input line lands at a position `cursor_pos` can reproduce.
-        let content_rows = self.rule_line_count() + self.chrome_rows();
+        let content_rows = self.content_rows();
         let width = u16::try_from(60usize)
             .unwrap_or(60)
             .min(area.width.saturating_sub(4))
@@ -571,6 +885,96 @@ impl PermissionsEditorView {
         let start = start.min(total.saturating_sub(visible));
         (start, visible)
     }
+
+    /// Render the classifier-specific Auto mode tab. This is a read-only
+    /// projection: the existing permission action channel only understands
+    /// `permissions.allow/ask/deny`, so typing or deleting here must never
+    /// silently persist a classifier sentence in one of those arrays.
+    fn render_auto_mode(&self, inner: Rect, buf: &mut Buffer) {
+        let mut lines = vec![
+            Line::from(
+                "Extra rules for the auto mode classifier. Rules are plain sentences; edit with /auto-mode-setup.",
+            ),
+            Line::from(Span::styled(
+                "⌕ Search…",
+                Style::default().add_modifier(Modifier::DIM),
+            )),
+        ];
+        let mut row_index = 0usize;
+        for category in AutoModeCategory::ALL {
+            let entries = self.state.auto_mode.entries_for_category(category);
+            let builtins = if self.state.auto_mode.builtin_enabled(category) {
+                "[x]"
+            } else {
+                "[ ]"
+            };
+            let status = if category == AutoModeCategory::Environment {
+                if self.state.auto_mode.is_configured(category) {
+                    let source = entries
+                        .first()
+                        .map_or("settings", |entry| auto_source_label(entry.source));
+                    format!("Replaces the built-in default · from {source}")
+                } else {
+                    format!("{builtins} Built-in rules · {}", category.builtin_count())
+                }
+            } else {
+                let suffix = if self.state.auto_mode.builtin_enabled(category) {
+                    String::new()
+                } else {
+                    " · off".to_string()
+                };
+                format!(
+                    "{builtins} Built-in rules · {}{suffix}",
+                    category.builtin_count()
+                )
+            };
+            let summary_style = if row_index == self.state.selected {
+                Style::default().add_modifier(Modifier::BOLD | Modifier::REVERSED)
+            } else {
+                Style::default()
+            };
+            lines.push(Line::from(Span::styled(
+                format!("{:<18}{}", category.title(), status),
+                summary_style,
+            )));
+            row_index += 1;
+
+            for entry in entries {
+                let style = if row_index == self.state.selected {
+                    Style::default().add_modifier(Modifier::BOLD | Modifier::REVERSED)
+                } else {
+                    Style::default()
+                };
+                lines.push(Line::from(Span::styled(
+                    format!(
+                        "{:<18}{}    [from {}]",
+                        category.title(),
+                        entry.value,
+                        auto_source_label(entry.source),
+                    ),
+                    style,
+                )));
+                row_index += 1;
+            }
+        }
+
+        if self.state.auto_mode.has_unrecognized_entries() {
+            let style = if row_index == self.state.selected {
+                Style::default().add_modifier(Modifier::BOLD | Modifier::REVERSED)
+            } else {
+                Style::default().add_modifier(Modifier::DIM)
+            };
+            lines.push(Line::from(Span::styled(
+                "(some autoMode entries are not recognized; edit the settings file carefully)",
+                style,
+            )));
+        }
+        lines.push(Line::from(Span::styled(
+            "Read-only here · /auto-mode-setup opens the reviewed editor · `lingxi-cli auto-mode config` prints effective JSON",
+            Style::default().add_modifier(Modifier::DIM),
+        )));
+        Paragraph::new(lines).render(inner, buf);
+    }
 }
 
 impl Renderable for PermissionsEditorView {
@@ -580,6 +984,11 @@ impl Renderable for PermissionsEditorView {
         let block = Block::new().borders(Borders::ALL).title("Permissions");
         let inner = block.inner(rect);
         block.render(rect, buf);
+
+        if self.state.tab.is_auto() {
+            self.render_auto_mode(inner, buf);
+            return;
+        }
 
         let mut lines: Vec<Line> = Vec::new();
 
@@ -667,13 +1076,16 @@ impl Renderable for PermissionsEditorView {
     }
 
     fn desired_height(&self, _width: u16) -> u16 {
-        let content_rows = self.rule_line_count() + self.chrome_rows();
+        let content_rows = self.content_rows();
         u16::try_from(content_rows + 2).unwrap_or(u16::MAX).max(6)
     }
 
     /// Claim a bar cursor at the end of the input value (the input line), so
     /// typing a new rule shows the caret in the field.
     fn cursor_pos(&self, area: Rect) -> Option<(u16, u16)> {
+        if self.state.tab.is_auto() {
+            return None;
+        }
         let inner = Block::new()
             .borders(Borders::ALL)
             .inner(self.block_rect(area));
@@ -784,6 +1196,7 @@ mod tests {
                     PermissionRuleSource::LocalSettings,
                 ),
             ],
+            auto_mode: AutoModeSnapshot::default(),
         }
     }
 
@@ -948,6 +1361,7 @@ mod tests {
                 PermissionBehavior::Allow,
                 PermissionRuleSource::PolicySettings,
             )],
+            auto_mode: AutoModeSnapshot::default(),
         });
         // Enter over a managed row arms nothing.
         assert_eq!(
@@ -1063,6 +1477,7 @@ mod tests {
                     )
                 })
                 .collect(),
+            auto_mode: AutoModeSnapshot::default(),
         }
     }
 
@@ -1184,5 +1599,198 @@ mod tests {
             let input_row = row_containing(area, &buf, "New rule").expect("input line rendered");
             assert_eq!(cy, input_row, "cursor on input line, not footer");
         }
+    }
+
+    #[test]
+    fn auto_mode_snapshot_keeps_classifier_categories_and_defaults_separate() {
+        let mut snapshot = AutoModeSnapshot::default();
+        assert!(snapshot.builtin_enabled(AutoModeCategory::SoftAllow));
+        assert!(snapshot.builtin_enabled(AutoModeCategory::Environment));
+        snapshot.append_settings_json(
+            r#"{
+                "autoMode": {
+                    "allow": ["custom allow"],
+                    "soft_deny": ["$defaults", "custom soft deny"],
+                    "hard_deny": ["$defaults", "custom hard deny"],
+                    "environment": ["custom environment"]
+                },
+                "permissions": {"allow": ["Read"]}
+            }"#,
+            PermissionRuleSource::UserSettings,
+        );
+
+        assert!(!snapshot.builtin_enabled(AutoModeCategory::SoftAllow));
+        assert!(snapshot.builtin_enabled(AutoModeCategory::SoftDeny));
+        assert!(snapshot.builtin_enabled(AutoModeCategory::HardDeny));
+        assert!(!snapshot.builtin_enabled(AutoModeCategory::Environment));
+        assert_eq!(
+            snapshot
+                .entries_for_category(AutoModeCategory::SoftAllow)
+                .iter()
+                .map(|entry| entry.value.as_str())
+                .collect::<Vec<_>>(),
+            vec!["custom allow"]
+        );
+        assert_eq!(
+            snapshot
+                .entries_for_category(AutoModeCategory::SoftDeny)
+                .iter()
+                .map(|entry| entry.value.as_str())
+                .collect::<Vec<_>>(),
+            vec!["custom soft deny"]
+        );
+        assert_eq!(snapshot.row_count(), 8);
+    }
+
+    #[test]
+    fn auto_mode_tab_is_last_and_navigation_does_not_change_permission_buckets() {
+        assert_eq!(
+            PermTab::ALL,
+            [PermTab::Allow, PermTab::Ask, PermTab::Deny, PermTab::Auto]
+        );
+        let mut s = state();
+        for _ in 0..3 {
+            assert_eq!(
+                handle_perm_key(&mut s, press(KeyCode::Right)),
+                PermEditorOutcome::Stay
+            );
+        }
+        assert_eq!(s.tab(), PermTab::Auto);
+        assert!(s.rows_for_tab().is_empty());
+        assert!(s.auto_mode_entries().is_empty());
+        let _ = handle_perm_key(&mut s, press(KeyCode::Right));
+        assert_eq!(s.tab(), PermTab::Allow, "Auto wraps to Allow");
+    }
+
+    #[test]
+    fn auto_mode_tab_is_read_only_and_never_emits_permission_actions() {
+        let mut auto_mode = AutoModeSnapshot::default();
+        auto_mode.append_settings_json(
+            r#"{"autoMode":{"allow":["classifier sentence"]}}"#,
+            PermissionRuleSource::LocalSettings,
+        );
+        let mut s = PermissionsEditorState::new(PermissionsSnapshot {
+            rules: vec![rule(
+                "Read",
+                PermissionBehavior::Allow,
+                PermissionRuleSource::LocalSettings,
+            )],
+            auto_mode,
+        });
+        for _ in 0..3 {
+            let _ = handle_perm_key(&mut s, press(KeyCode::Right));
+        }
+        assert_eq!(s.tab(), PermTab::Auto);
+        assert_eq!(s.auto_mode_entries().len(), 1);
+        // Printable input, Enter, and Delete are inert in Auto mode. In
+        // particular, the classifier sentence never appears in permissions
+        // rows and no ordinary PermissionAction can be emitted.
+        assert_eq!(
+            handle_perm_key(&mut s, press(KeyCode::Char('x'))),
+            PermEditorOutcome::Stay
+        );
+        assert!(s.input().is_empty());
+        assert_eq!(
+            handle_perm_key(&mut s, press(KeyCode::Enter)),
+            PermEditorOutcome::Stay
+        );
+        assert!(!s.is_confirming_remove());
+        assert_eq!(
+            handle_perm_key(&mut s, press(KeyCode::Delete)),
+            PermEditorOutcome::Stay
+        );
+        assert!(!s.is_confirming_remove());
+    }
+
+    #[test]
+    fn auto_mode_render_shows_builtin_counts_custom_rules_and_sources() {
+        let mut auto_mode = AutoModeSnapshot::default();
+        auto_mode.append_settings_json(
+            r#"{"autoMode":{"allow":["$defaults","custom classifier rule"],"environment":["**Org**: internal"]}}"#,
+            PermissionRuleSource::ProjectSettings,
+        );
+        let mut v = PermissionsEditorView::new(PermissionsSnapshot {
+            rules: Vec::new(),
+            auto_mode,
+        });
+        for _ in 0..3 {
+            v.handle_key(press(KeyCode::Right));
+        }
+        let area = Rect::new(0, 0, 120, 24);
+        let mut buf = Buffer::empty(area);
+        v.render(area, &mut buf);
+        let text = buffer_text(area, &buf);
+        assert!(
+            text.contains("Extra rules for the auto mode classifier"),
+            "{text}"
+        );
+        assert!(text.contains("Soft allow"), "{text}");
+        assert!(text.contains("Built-in rules · 17"), "{text}");
+        assert!(text.contains("custom classifier rule"), "{text}");
+        // The fixed-width dialog can clip the tail of the full source label;
+        // assert the visible, source-specific prefix and the model value.
+        assert!(text.contains("from project"), "{text}");
+        assert_eq!(
+            v.state()
+                .auto_mode()
+                .entries_for_category(AutoModeCategory::SoftAllow)[0]
+                .source,
+            PermissionRuleSource::ProjectSettings
+        );
+        assert!(text.contains("Environment"), "{text}");
+        assert!(text.contains("Replaces the built-in default"), "{text}");
+        assert!(text.contains("Read-only here"), "{text}");
+        assert!(
+            !text.contains("New rule"),
+            "Auto must not show ordinary input: {text}"
+        );
+    }
+
+    #[test]
+    fn permissions_snapshot_loads_auto_mode_from_user_and_local_sources() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let root = std::env::temp_dir().join(format!(
+            "lingxi-perm-auto-load-{}-{}",
+            std::process::id(),
+            SEQ.fetch_add(1, Ordering::Relaxed)
+        ));
+        let home = root.join("home");
+        let cwd = root.join("cwd");
+        std::fs::create_dir_all(home.join(branding::DOT_DIR)).unwrap();
+        std::fs::create_dir_all(cwd.join(branding::DOT_DIR)).unwrap();
+        std::fs::write(
+            home.join("settings.json"),
+            r#"{"autoMode":{"allow":["$defaults","user classifier"]}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            cwd.join(branding::DOT_DIR).join("settings.local.json"),
+            r#"{"autoMode":{"soft_deny":["local classifier"]}}"#,
+        )
+        .unwrap();
+        let snapshot = PermissionsSnapshot::load(&PermissionPaths {
+            lingxi_home: home,
+            cwd: cwd.clone(),
+        });
+        let user = snapshot
+            .auto_mode
+            .entries_for_category(AutoModeCategory::SoftAllow);
+        assert_eq!(user.len(), 1);
+        assert_eq!(user[0].value, "user classifier");
+        assert_eq!(user[0].source, PermissionRuleSource::UserSettings);
+        let local = snapshot
+            .auto_mode
+            .entries_for_category(AutoModeCategory::SoftDeny);
+        assert_eq!(local.len(), 1);
+        assert_eq!(local[0].value, "local classifier");
+        assert_eq!(local[0].source, PermissionRuleSource::LocalSettings);
+        assert!(snapshot
+            .auto_mode
+            .builtin_enabled(AutoModeCategory::SoftAllow));
+        assert!(!snapshot
+            .auto_mode
+            .builtin_enabled(AutoModeCategory::SoftDeny));
+        let _ = std::fs::remove_dir_all(root);
     }
 }

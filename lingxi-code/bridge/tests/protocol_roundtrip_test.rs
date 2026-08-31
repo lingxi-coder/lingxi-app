@@ -186,6 +186,7 @@ fn frame_permission_request_round_trips() {
         },
         worker: None,
         owner: None,
+        suppress_always_allow_rule: false,
     });
     assert_eq!(roundtrip(&f), f);
     let json = serde_json::to_string(&f).unwrap();

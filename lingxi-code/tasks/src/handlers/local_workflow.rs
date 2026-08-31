@@ -886,6 +886,10 @@ pub struct LocalWorkflowHandler {
     /// instead of reusing the engine session cwd (which may belong to another
     /// app or to the host project).
     workspace_root: Option<std::path::PathBuf>,
+    /// Optional live plugin-workflow registry shared with the Workflow tool
+    /// and PluginManager. Nested `workflow({name})` resolves through this
+    /// table only after project/user saved-workflow directories miss.
+    plugin_workflows: Option<Arc<workflow::PluginWorkflowRegistry>>,
 }
 
 impl LocalWorkflowHandler {
@@ -916,7 +920,31 @@ impl LocalWorkflowHandler {
             turn_baseline_cell: None,
             workspace_leases: None,
             workspace_root: None,
+            plugin_workflows: None,
         }
+    }
+
+    /// Share the live plugin-workflow registry with nested workflow calls.
+    #[must_use]
+    pub fn with_plugin_workflows(
+        mut self,
+        registry: Arc<workflow::PluginWorkflowRegistry>,
+    ) -> Self {
+        self.plugin_workflows = Some(registry);
+        self
+    }
+
+    /// Composition-test seam for asserting the nested resolver shares the
+    /// host's one live plugin-workflow table.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn shares_plugin_workflows(
+        &self,
+        registry: &Arc<workflow::PluginWorkflowRegistry>,
+    ) -> bool {
+        self.plugin_workflows
+            .as_ref()
+            .is_some_and(|wired| Arc::ptr_eq(wired, registry))
     }
 
     /// Attach a [`TaskStatusSink`] so terminal transitions are reported.
@@ -1761,6 +1789,8 @@ pub struct NestedConfig {
     pub args: Option<String>,
     /// Filesystem for resolving `workflow({scriptPath})` / `workflow(name)`.
     pub fs: Option<Arc<dyn FileSystem>>,
+    /// Live plugin-workflow registry used after project/user workflow lookup.
+    pub plugin_workflows: Option<Arc<workflow::PluginWorkflowRegistry>>,
 }
 
 /// Per-call plan for one batch: decided sequentially in Phase A (prefix-cache
@@ -1979,6 +2009,7 @@ async fn run_workflow_script_with_live_updates(
         allow_nested,
         args: nested_args,
         fs: nested_fs,
+        plugin_workflows: nested_plugin_workflows,
     } = nested;
     use std::sync::atomic::Ordering;
 
@@ -2175,6 +2206,7 @@ async fn run_workflow_script_with_live_updates(
             let journal_writer = journal_writer.clone();
             let spent = spent.clone();
             let nested_fs = nested_fs.clone();
+            let nested_plugin_workflows = nested_plugin_workflows.clone();
             let budget_total = token_budget_total;
             let baseline = turn_start_baseline;
             let bus_call = bus.clone();
@@ -2249,7 +2281,13 @@ async fn run_workflow_script_with_live_updates(
                     // `workflow()` resolution: read + strip the nested source; `""`
                     // ⇒ the runtime throws "could not resolve".
                     Plan::Resolve(spec) => {
-                        return match resolve_nested_script(&spec, nested_fs.as_ref()).await {
+                        return match resolve_nested_script(
+                            &spec,
+                            nested_fs.as_ref(),
+                            nested_plugin_workflows.as_deref(),
+                        )
+                        .await
+                        {
                             Ok(src) => workflow::strip_meta_export(&src),
                             Err(_) => String::new(),
                         }
@@ -2523,10 +2561,12 @@ async fn run_workflow_script_with_live_updates(
 /// Resolve a `workflow()` reference (`{ name }` or `{ scriptPath }`) to a script
 /// source: `scriptPath` is read through the workflow filesystem; `name` resolves
 /// under project `.lingxi/workflows` first, then the user config workflow
-/// directory (`$LINGXI_CONFIG_DIR/workflows` or `~/.lingxi/workflows`).
+/// directory (`$LINGXI_CONFIG_DIR/workflows` or `~/.lingxi/workflows`), then
+/// a wired plugin registry as the final tier.
 async fn resolve_nested_script(
     spec: &Value,
     fs: Option<&Arc<dyn FileSystem>>,
+    plugin_workflows: Option<&workflow::PluginWorkflowRegistry>,
 ) -> Result<String, String> {
     let fs = fs.ok_or_else(|| "no filesystem to resolve workflow()".to_string())?;
     if let Some(path) = spec
@@ -2557,6 +2597,11 @@ async fn resolve_nested_script(
                 if !fc.content.is_empty() {
                     return Ok(fc.content);
                 }
+            }
+        }
+        if let Some(plugin) = plugin_workflows.and_then(|registry| registry.resolve(name)) {
+            if !plugin.script.is_empty() {
+                return Ok(plugin.script);
             }
         }
         return Err(format!("no saved workflow named '{name}'"));
@@ -2669,6 +2714,7 @@ impl Task for LocalWorkflowHandler {
         let workers = self.workers.clone();
         let output_manager = self.output_manager.clone();
         let fs = ctx.fs.clone();
+        let plugin_workflows = self.plugin_workflows.clone();
         let runtime = ctx.runtime.clone();
         let token_budget_total = self.token_budget_total;
         // The shared `budget.spent()` pool (main loop + all workflows), published
@@ -2947,6 +2993,7 @@ impl Task for LocalWorkflowHandler {
                         allow_nested: true,
                         args: workflow_args,
                         fs: Some(fs.clone()),
+                        plugin_workflows: plugin_workflows.clone(),
                     },
                     worker_cancel,
                     worker_bus.clone(),

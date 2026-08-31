@@ -9,10 +9,12 @@ use async_trait::async_trait;
 use local_apps::{AppError, AppService};
 use protocol::McpConnectionId;
 use serde_json::{json, Value};
-use std::collections::HashSet;
+use sha2::{Digest, Sha256};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, OnceLock};
+use std::time::{Duration, Instant};
 use traits::{
     ElicitRequestDto, ElicitResultDto, McpError, McpNotificationStream, McpPromptDto,
     McpRawConnection, McpResourceContentDto, McpResourceDto, McpToolDto, McpToolResultDto,
@@ -21,6 +23,7 @@ use traits::{
 
 pub const LOCAL_APPS_REGISTRY_KEY: &str = "local_apps";
 const MAX_INPUT_BYTES: usize = 256 * 1024;
+const LOCAL_APP_CALL_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 
 /// Host operations that are deliberately outside the catalog state machine.
 ///
@@ -42,8 +45,9 @@ pub trait LocalAppsMcpHost: Send + Sync {
     async fn capture_ui(&self, input: Value) -> Result<Value, String>;
     async fn restore_checkpoint(&self, input: Value) -> Result<Value, String>;
     /// Build the app workspace with the offline toolchain (v3 agent-driven
-    /// flow): replaces the build source, runs the fixed Vite/Next build under
-    /// the runtime's resource budget, and stamps the app `ready` on success.
+    /// flow): replaces the build source and runs the fixed Vite/Next build
+    /// under the runtime's resource budget. Publication remains Host-derived
+    /// from an active build/catalog pair and is not stamped by this call.
     async fn build_app(&self, input: Value) -> Result<Value, String>;
     /// Start or retry the host-owned dependency install task for one app's
     /// workspace-local `node_modules`.
@@ -52,6 +56,56 @@ pub trait LocalAppsMcpHost: Send + Sync {
     async fn runtime_profiles(&self, input: Value) -> Result<Value, String> {
         let _ = input;
         Err("runtime profile catalog is unavailable in this host build".into())
+    }
+    /// Read the redacted, Host-verified Plugin template catalog.  The
+    /// semantic view intentionally excludes profile family/revision and all
+    /// paths/digests; those are resolved only after a selector proposal.
+    async fn template_catalog(&self, input: Value) -> Result<Value, String> {
+        let _ = input;
+        Err("Local App template catalog is unavailable in this host build".into())
+    }
+    /// Validate a template-selector proposal and persist a run-scoped opaque
+    /// candidate handle.  The caller must provide the Host workflow run id;
+    /// model-supplied profile identity is never accepted.
+    async fn validate_template_selection(&self, input: Value) -> Result<Value, String> {
+        let _ = input;
+        Err("Local App template selection validation is unavailable in this host build".into())
+    }
+    /// Resolve a previously issued candidate handle.  Downstream workflow
+    /// stages use this read path instead of trusting selector output.
+    async fn resolve_template_selection(&self, input: Value) -> Result<Value, String> {
+        let _ = input;
+        Err("Local App template selection resolution is unavailable in this host build".into())
+    }
+    /// Prepare isolated create staging and attest the install-before-build
+    /// dependency input. This never publishes a receipt, manifest or source.
+    async fn stage_create(&self, input: Value) -> Result<Value, String> {
+        let _ = input;
+        Err("Local App create staging is unavailable in this host build".into())
+    }
+    /// Validate an agent-owned semantic MCP proposal, derive Host-owned
+    /// execution metadata and persist a prepared candidate journal.
+    async fn validate_mcp_proposal(&self, input: Value) -> Result<Value, String> {
+        let _ = input;
+        Err("Local App MCP proposal validation is unavailable in this host build".into())
+    }
+    /// Explicitly approve one prepared MCP candidate and mint a single-use
+    /// promote receipt for the current app/run.
+    async fn approve_mcp_proposal(&self, input: Value) -> Result<Value, String> {
+        let _ = input;
+        Err("Local App MCP proposal approval is unavailable in this host build".into())
+    }
+    /// Re-read one approved candidate, run Host-side schema/binding/build
+    /// gates and persist the QA stage.
+    async fn qa_mcp_candidate(&self, input: Value) -> Result<Value, String> {
+        let _ = input;
+        Err("Local App MCP QA is unavailable in this host build".into())
+    }
+    /// Atomically promote one QA-verified candidate catalog and consume its
+    /// receipt without disturbing the previous active pair on failure.
+    async fn promote_mcp_candidate(&self, input: Value) -> Result<Value, String> {
+        let _ = input;
+        Err("Local App MCP promotion is unavailable in this host build".into())
     }
     /// Confirm one runtime profile for one unscaffolded app and mint a short-lived receipt.
     async fn confirm_runtime_profile(&self, input: Value) -> Result<Value, String> {
@@ -164,6 +218,12 @@ pub trait LocalAppsMcpHost: Send + Sync {
         let _ = input;
         Err("declarative flow execution is unavailable in this host build".into())
     }
+    /// Execute one validated active-catalog tool through the Host Flow engine.
+    /// App-provided JS, shell, native modules, remote MCP and WebView callbacks
+    /// never enter this path.
+    async fn execute_mcp_flow(&self, input: Value) -> Result<Value, String> {
+        self.flow_execute(input).await
+    }
     /// Initialize host metadata and the host-owned scaffold for a freshly
     /// created app so the workflow can edit source immediately without any
     /// package-manager or template bootstrap step.
@@ -236,6 +296,14 @@ const SHELL_ALLOWED_OPERATIONS: &[&str] = &[
     "create",
     "runtime_profiles",
     "confirm_runtime_profile",
+    "template_catalog",
+    "validate_template_selection",
+    "resolve_template_selection",
+    "stage_create",
+    "validate_mcp_proposal",
+    "approve_mcp_proposal",
+    "qa_mcp_candidate",
+    "promote_mcp_candidate",
 ];
 
 /// Stable machine-readable prefix on the shell gate's refusal.
@@ -254,6 +322,9 @@ const SHELL_GATE_CODE: &str = "app_not_scaffolded";
 enum LocalAppsMcpScope {
     ConversationAgent,
     App(String),
+    /// One conversation's exported view of one app. The last-listed surface
+    /// is bound at connection creation and checked before each call.
+    ConversationExport(mcp::registry::ConversationExport),
 }
 
 impl LocalAppsMcpScope {
@@ -261,12 +332,79 @@ impl LocalAppsMcpScope {
         match self {
             Self::ConversationAgent => false,
             Self::App(allowed) => allowed == app_id,
+            Self::ConversationExport(scope) => scope.app_id == app_id,
         }
     }
 
     fn is_app_scoped(&self) -> bool {
-        matches!(self, Self::App(_))
+        matches!(self, Self::App(_) | Self::ConversationExport(_))
     }
+
+    fn export(&self) -> Option<&mcp::registry::ConversationExport> {
+        match self {
+            Self::ConversationExport(scope) => Some(scope),
+            _ => None,
+        }
+    }
+}
+
+/// Minimal redacted audit record for one exported Local App call.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocalAppAuditEntry {
+    pub app_id: String,
+    pub catalog_sha256: String,
+    pub tool_name: String,
+    pub input_sha256: String,
+    pub result_status: String,
+    pub latency_ms: u64,
+    pub cancelled: bool,
+}
+
+struct LocalAppCallState {
+    inflight_by_app: HashMap<String, usize>,
+    inflight_total: usize,
+    read_calls: HashMap<String, VecDeque<Instant>>,
+    mutation_calls: HashMap<(String, String), VecDeque<Instant>>,
+}
+
+impl Default for LocalAppCallState {
+    fn default() -> Self {
+        Self {
+            inflight_by_app: HashMap::new(),
+            inflight_total: 0,
+            read_calls: HashMap::new(),
+            mutation_calls: HashMap::new(),
+        }
+    }
+}
+
+struct LocalAppCallGuard {
+    state: Arc<StdMutex<LocalAppCallState>>,
+    app_id: String,
+}
+
+impl Drop for LocalAppCallGuard {
+    fn drop(&mut self) {
+        if let Ok(mut state) = self.state.lock() {
+            if let Some(count) = state.inflight_by_app.get_mut(&self.app_id) {
+                *count = count.saturating_sub(1);
+                if *count == 0 {
+                    state.inflight_by_app.remove(&self.app_id);
+                }
+            }
+            state.inflight_total = state.inflight_total.saturating_sub(1);
+        }
+    }
+}
+
+fn rate_limited(retry_after_ms: u64) -> McpToolResultDto {
+    let mut result =
+        LocalAppsMcpTransport::tool_error("rate_limited: retry after the indicated delay");
+    result.structured_content = Some(json!({
+        "code": "rate_limited",
+        "retry_after_ms": retry_after_ms,
+    }));
+    result
 }
 
 /// Mobile-local implementation of the MCP transport boundary.
@@ -281,6 +419,8 @@ pub struct LocalAppsMcpTransport {
     agent_session_id: Option<String>,
     call_budget: Option<Arc<AgentCallBudget>>,
     connections: StdMutex<HashSet<McpConnectionId>>,
+    local_app_calls: Arc<StdMutex<LocalAppCallState>>,
+    audit: Arc<StdMutex<Vec<LocalAppAuditEntry>>>,
 }
 
 /// Session limits for an app-owned Agent's host calls. The app Agent only
@@ -366,6 +506,40 @@ impl LocalAppsMcpTransport {
         Self::with_scope(root, LocalAppsMcpScope::ConversationAgent)
     }
 
+    /// Create a per-conversation exported logical view over this transport's
+    /// physical in-process hub. The app identity and last-listed surface are
+    /// immutable connection scope, never tool input.
+    pub fn conversation_export(
+        &self,
+        app_id: &str,
+        listed_tool_surface_sha256: &str,
+    ) -> Result<Self, String> {
+        let scope = mcp::registry::ConversationExport::new(app_id, listed_tool_surface_sha256)
+            .map_err(|error| error.to_string())?;
+        let mut scoped = Self::with_scope(
+            self.root.clone(),
+            LocalAppsMcpScope::ConversationExport(scope),
+        );
+        if let Some(value) = self.lingxi_home.get() {
+            let _ = scoped.lingxi_home.set(value.clone());
+        }
+        if let Some(value) = self.service.get() {
+            let _ = scoped.service.set(value.clone());
+        }
+        if let Some(value) = self.host.get() {
+            let _ = scoped.host.set(value.clone());
+        }
+        if let Some(value) = self.session_id.get() {
+            let _ = scoped.session_id.set(value.clone());
+        }
+        if let Some(value) = self.init_session_minter.get() {
+            let _ = scoped.init_session_minter.set(value.clone());
+        }
+        scoped.local_app_calls = Arc::clone(&self.local_app_calls);
+        scoped.audit = Arc::clone(&self.audit);
+        Ok(scoped)
+    }
+
     fn with_scope(root: PathBuf, scope: LocalAppsMcpScope) -> Self {
         Self {
             root,
@@ -378,6 +552,8 @@ impl LocalAppsMcpTransport {
             agent_session_id: None,
             call_budget: None,
             connections: StdMutex::new(HashSet::new()),
+            local_app_calls: Arc::new(StdMutex::new(LocalAppCallState::default())),
+            audit: Arc::new(StdMutex::new(Vec::new())),
         }
     }
 
@@ -449,7 +625,7 @@ impl LocalAppsMcpTransport {
             self.root.clone(),
             LocalAppsMcpScope::App(app_id.to_string()),
         );
-        let scoped = Self {
+        let mut scoped = Self {
             agent_session_id,
             ..scoped
         };
@@ -468,6 +644,8 @@ impl LocalAppsMcpTransport {
         if let Some(value) = self.init_session_minter.get() {
             let _ = scoped.init_session_minter.set(value.clone());
         }
+        scoped.local_app_calls = Arc::clone(&self.local_app_calls);
+        scoped.audit = Arc::clone(&self.audit);
         // A budget is deliberately never inherited from the global
         // Conversation Agent transport. It belongs to exactly one app Agent
         // session and is installed only by `scoped_for_app_with_budget`.
@@ -480,6 +658,14 @@ impl LocalAppsMcpTransport {
             });
         }
         Ok(scoped)
+    }
+
+    /// Snapshot redacted Local App audit entries for Host diagnostics.
+    pub fn local_app_audit_snapshot(&self) -> Vec<LocalAppAuditEntry> {
+        self.audit
+            .lock()
+            .map(|entries| entries.clone())
+            .unwrap_or_default()
     }
 
     pub fn attach_lingxi_home(&self, lingxi_home: PathBuf) -> Result<(), PathBuf> {
@@ -712,15 +898,15 @@ impl LocalAppsMcpTransport {
     }
 
     fn tool(name: &str, description: &str, input_schema: Value) -> McpToolDto {
-        McpToolDto {
-            server_name: String::new(),
-            tool_name: name.into(),
-            description: description.into(),
-            input_schema,
-            full_name: String::new(),
-            search_hint: Some("local app".into()),
-            always_load: Some(true),
-        }
+        let mut definition = traits::McpToolDefinitionDto::new(name, input_schema);
+        definition.description = Some(description.into());
+        definition.execution = Some(traits::McpToolExecutionDto {
+            task_support: Some(traits::McpToolTaskSupportDto::Forbidden),
+        });
+        let mut tool = McpToolDto::new(String::new(), String::new(), definition);
+        tool.search_hint = Some("local app".into());
+        tool.always_load = Some(true);
+        tool
     }
 
     fn tool_catalog() -> Vec<McpToolDto> {
@@ -869,6 +1055,78 @@ impl LocalAppsMcpTransport {
                 "runtime_profiles",
                 "List the scaffoldable Local App runtime profiles this host knows about. Read this before choosing a non-default runtime_profile. The catalog is authoritative: do not infer profile availability from source code or package names.",
                 json!({"type":"object","properties":{},"additionalProperties":false}),
+            ),
+            Self::tool(
+                "template_catalog",
+                "Read the Host-verified semantic Local App template catalog. Only available templates are returned; family, revision, paths and digests stay Host-owned.",
+                json!({"type":"object","properties":{},"additionalProperties":false}),
+            ),
+            Self::tool(
+                "validate_template_selection",
+                "Submit a template-selector proposal. The Host re-reads the current catalog, rejects stale or unavailable ids, journals the app/run-bound selection and returns an opaque validated_selection_handle.",
+                json!({"type":"object","properties":{
+                    "app_id":app_id.clone(),
+                    "workflow_run_id":{"type":"string","pattern":"^[A-Za-z0-9_-]{1,128}$"},
+                    "catalog_digest":{"type":"string","minLength":1,"maxLength":128},
+                    "template_id":{"type":"string","minLength":1,"maxLength":128},
+                    "reason":{"type":"string","minLength":1,"maxLength":4000},
+                    "selector_capability":{"type":"string","pattern":"^sel_[A-Za-z0-9]{32}$"},
+                    "rejected":{"type":"array","maxItems":16,"items":{"type":"object","properties":{"template_id":{"type":"string","minLength":1,"maxLength":128},"reason":{"type":"string","minLength":1,"maxLength":1000}},"required":["template_id","reason"],"additionalProperties":false}}
+                },"required":["app_id","workflow_run_id","catalog_digest","template_id","reason","selector_capability"],"additionalProperties":false}),
+            ),
+            Self::tool(
+                "resolve_template_selection",
+                "Resolve an opaque Host-validated Local App template selection for a downstream designer, builder, tester or verifier. App, workflow run and current catalog are checked again.",
+                json!({"type":"object","properties":{
+                    "app_id":app_id.clone(),
+                    "workflow_run_id":{"type":"string","pattern":"^[A-Za-z0-9_-]{1,128}$"},
+                    "validated_selection_handle":{"type":"string","pattern":"^vsel_[A-Za-z0-9]{32}$"}
+                },"required":["app_id","workflow_run_id","validated_selection_handle"],"additionalProperties":false}),
+            ),
+            Self::tool(
+                "stage_create",
+                "Prepare isolated create staging from a Host-validated selection and return the install-before-build dependency_input_sha256. This operation never publishes a receipt or commits a Manifest.",
+                json!({"type":"object","properties":{
+                    "app_id":app_id.clone(),
+                    "workflow_run_id":{"type":"string","pattern":"^[A-Za-z0-9_-]{1,128}$"},
+                    "validated_selection_handle":{"type":"string","pattern":"^vsel_[A-Za-z0-9]{32}$"},
+                    "quality_level":{"enum":["fast","balanced","thorough"]}
+                },"required":["app_id","workflow_run_id","validated_selection_handle","quality_level"],"additionalProperties":false}),
+            ),
+            Self::tool(
+                "validate_mcp_proposal",
+                "Validate one agent-owned semantic Local App MCP proposal. The Host re-reads trusted Flow contexts, derives execution bindings and permission ceilings, persists the prepared candidate journal, and either reports approval_required or marks unchanged approval reusable.",
+                json!({"type":"object","properties":{
+                    "app_id":app_id.clone(),
+                    "workflow_run_id":{"type":"string","pattern":"^[A-Za-z0-9_-]{1,128}$"},
+                    "proposal":{"type":"object"}
+                },"required":["app_id","workflow_run_id","proposal"],"additionalProperties":false}),
+            ),
+            Self::tool(
+                "approve_mcp_proposal",
+                "Approve one prepared Local App MCP candidate and mint its one-shot promote receipt. Only the current app/run-bound prepared candidate can be approved.",
+                json!({"type":"object","properties":{
+                    "app_id":app_id.clone(),
+                    "workflow_run_id":{"type":"string","pattern":"^[A-Za-z0-9_-]{1,128}$"},
+                    "approval_contract_sha256":{"type":"string","pattern":"^[0-9a-f]{64}$"}
+                },"required":["app_id","workflow_run_id","approval_contract_sha256"],"additionalProperties":false}),
+            ),
+            Self::tool(
+                "qa_mcp_candidate",
+                "Run Host-side Local App MCP candidate QA on the approved candidate. This re-validates schemas, bindings, build identity and catalog budgets before promotion.",
+                json!({"type":"object","properties":{
+                    "app_id":app_id.clone(),
+                    "workflow_run_id":{"type":"string","pattern":"^[A-Za-z0-9_-]{1,128}$"}
+                },"required":["app_id","workflow_run_id"],"additionalProperties":false}),
+            ),
+            Self::tool(
+                "promote_mcp_candidate",
+                "Atomically promote one QA-verified Local App MCP candidate, consume its receipt, persist the immutable catalog and update the active build/catalog pair together.",
+                json!({"type":"object","properties":{
+                    "app_id":app_id.clone(),
+                    "workflow_run_id":{"type":"string","pattern":"^[A-Za-z0-9_-]{1,128}$"},
+                    "receipt_id":{"type":["string","null"],"minLength":1,"maxLength":128}
+                },"required":["app_id","workflow_run_id"],"additionalProperties":false}),
             ),
             Self::tool(
                 "confirm_runtime_profile",
@@ -1099,6 +1357,312 @@ impl LocalAppsMcpTransport {
 
     fn dynamic_tool_name(app_id: &str, operation: &str) -> String {
         format!("app_{app_id}__{operation}")
+    }
+
+    fn active_catalog_tools(
+        &self,
+        scope: &mcp::registry::ConversationExport,
+        manifest: &local_apps::AppManifest,
+        layout: &local_apps::AppLayout,
+    ) -> Result<Vec<McpToolDto>, McpError> {
+        let Some(active) = manifest.active_mcp_catalog.as_ref() else {
+            return Ok(Vec::new());
+        };
+        let catalog =
+            local_apps::load_mcp_catalog(layout, &active.catalog_sha256).map_err(|error| {
+                McpError::Internal(format!("active Local App catalog unavailable: {error}"))
+            })?;
+        let entries = catalog
+            .get("tools")
+            .and_then(Value::as_array)
+            .ok_or_else(|| {
+                McpError::Internal("active Local App catalog has no tools array".into())
+            })?;
+        let mut definitions = Vec::with_capacity(entries.len());
+        let mut tools = Vec::with_capacity(entries.len());
+        for entry in entries {
+            let definition_value = entry.get("definition").unwrap_or(entry);
+            let definition: traits::McpToolDefinitionDto =
+                serde_json::from_value(definition_value.clone()).map_err(|error| {
+                    McpError::Internal(format!(
+                        "active Local App tool definition is invalid: {error}"
+                    ))
+                })?;
+            definitions.push(definition.clone());
+            let full_name = scope.tool_full_name(&definition.name)?;
+            let mut tool = McpToolDto::new(scope.server_name(), full_name, definition);
+            tool.search_hint = Some("local app".into());
+            tool.effective_max_permission = entry
+                .get("ceiling")
+                .and_then(Value::as_str)
+                .and_then(traits::McpPermissionCeiling::from_policy_str);
+            tools.push(tool);
+        }
+        local_apps::validate_generated_mcp_catalog(&definitions).map_err(|issues| {
+            McpError::Internal(format!(
+                "active Local App catalog failed validation: {issues:?}"
+            ))
+        })?;
+        Ok(tools)
+    }
+
+    fn active_catalog_entry(
+        &self,
+        scope: &mcp::registry::ConversationExport,
+        manifest: &local_apps::AppManifest,
+        layout: &local_apps::AppLayout,
+        tool_name: &str,
+    ) -> Result<Option<Value>, McpError> {
+        let Some(active) = manifest.active_mcp_catalog.as_ref() else {
+            return Ok(None);
+        };
+        let catalog =
+            local_apps::load_mcp_catalog(layout, &active.catalog_sha256).map_err(|error| {
+                McpError::Internal(format!("active Local App catalog unavailable: {error}"))
+            })?;
+        let entries = catalog
+            .get("tools")
+            .and_then(Value::as_array)
+            .ok_or_else(|| {
+                McpError::Internal("active Local App catalog has no tools array".into())
+            })?;
+        for entry in entries {
+            let definition_value = entry.get("definition").unwrap_or(entry);
+            let definition: traits::McpToolDefinitionDto =
+                serde_json::from_value(definition_value.clone()).map_err(|error| {
+                    McpError::Internal(format!(
+                        "active Local App tool definition is invalid: {error}"
+                    ))
+                })?;
+            if definition.name == tool_name {
+                // Calling the identity helper also rejects a catalog tool whose
+                // name cannot be represented without a separator collision.
+                let _ = scope.tool_full_name(&definition.name)?;
+                return Ok(Some(entry.clone()));
+            }
+        }
+        Ok(None)
+    }
+
+    fn reserve_export_call(
+        &self,
+        app_id: &str,
+        tool_name: &str,
+        read_only: bool,
+    ) -> Result<LocalAppCallGuard, McpToolResultDto> {
+        let now = Instant::now();
+        let mut state = self
+            .local_app_calls
+            .lock()
+            .map_err(|_| Self::tool_error("local app call limiter unavailable"))?;
+        if state.inflight_total >= 8 || state.inflight_by_app.get(app_id).copied().unwrap_or(0) >= 4
+        {
+            return Err(rate_limited(1_000));
+        }
+        let cutoff = now.checked_sub(Duration::from_secs(60)).unwrap_or(now);
+        if read_only {
+            let calls = state.read_calls.entry(app_id.to_string()).or_default();
+            while calls.front().is_some_and(|started| *started < cutoff) {
+                calls.pop_front();
+            }
+            if calls.len() >= 60 {
+                let retry_after_ms = calls
+                    .front()
+                    .map(|started| started.saturating_duration_since(cutoff).as_millis() as u64)
+                    .unwrap_or(1_000)
+                    .max(1);
+                return Err(rate_limited(retry_after_ms));
+            }
+            calls.push_back(now);
+        } else {
+            let calls = state
+                .mutation_calls
+                .entry((app_id.to_string(), tool_name.to_string()))
+                .or_default();
+            while calls.front().is_some_and(|started| *started < cutoff) {
+                calls.pop_front();
+            }
+            if calls.len() >= 10 {
+                let retry_after_ms = calls
+                    .front()
+                    .map(|started| started.saturating_duration_since(cutoff).as_millis() as u64)
+                    .unwrap_or(1_000)
+                    .max(1);
+                return Err(rate_limited(retry_after_ms));
+            }
+            calls.push_back(now);
+        }
+        *state.inflight_by_app.entry(app_id.to_string()).or_default() += 1;
+        state.inflight_total += 1;
+        drop(state);
+        Ok(LocalAppCallGuard {
+            state: Arc::clone(&self.local_app_calls),
+            app_id: app_id.to_string(),
+        })
+    }
+
+    fn append_export_audit(&self, entry: LocalAppAuditEntry) {
+        if let Ok(mut audit) = self.audit.lock() {
+            if audit.len() >= 1_024 {
+                audit.remove(0);
+            }
+            audit.push(entry);
+        }
+    }
+
+    fn validate_export_input(
+        definition: &traits::McpToolDefinitionDto,
+        input: &Value,
+    ) -> Result<(), McpToolResultDto> {
+        let object = input
+            .as_object()
+            .ok_or_else(|| Self::tool_error("invalid_argument: tool input must be an object"))?;
+        let schema = definition
+            .input_schema
+            .as_object()
+            .ok_or_else(|| Self::tool_error("invalid_argument: input schema is invalid"))?;
+        if schema.get("additionalProperties") == Some(&Value::Bool(false)) {
+            let properties = schema.get("properties").and_then(Value::as_object);
+            if object
+                .keys()
+                .any(|key| properties.is_none_or(|properties| !properties.contains_key(key)))
+            {
+                return Err(Self::tool_error(
+                    "invalid_argument: unknown tool input field",
+                ));
+            }
+        }
+        if schema
+            .get("required")
+            .and_then(Value::as_array)
+            .is_some_and(|required| {
+                required
+                    .iter()
+                    .any(|key| key.as_str().is_none_or(|key| !object.contains_key(key)))
+            })
+        {
+            return Err(Self::tool_error(
+                "invalid_argument: required tool input is missing",
+            ));
+        }
+        if !local_apps::value_matches_schema(input, &definition.input_schema) {
+            return Err(Self::tool_error(
+                "invalid_argument: tool input does not satisfy its schema",
+            ));
+        }
+        Ok(())
+    }
+
+    async fn call_conversation_export(
+        &self,
+        conn: &McpRawConnection,
+        tool: &str,
+        input: Value,
+    ) -> Result<McpToolResultDto, McpError> {
+        self.ensure_connection(conn)?;
+        let Some(scope) = self.scope.export() else {
+            return Err(McpError::ToolNotFound(tool.into()));
+        };
+        if input.get("app_id").is_some() {
+            return Ok(Self::tool_error(
+                "app_id is connection-scoped and must not be supplied",
+            ));
+        }
+        let service = self.service()?;
+        service
+            .record(&scope.app_id)
+            .await
+            .map_err(|error| McpError::Internal(error.to_string()))?;
+        let layout = local_apps::AppLayout::new(self.root.clone(), scope.app_id.clone())
+            .map_err(|error| McpError::Internal(error.to_string()))?;
+        let manifest = local_apps::load_manifest(&layout)
+            .map_err(|error| McpError::Internal(error.to_string()))?;
+        let Some(active) = manifest.active_mcp_catalog.as_ref() else {
+            return Err(McpError::ToolNotFound(tool.into()));
+        };
+        if active.tool_surface_sha256 != scope.listed_tool_surface_sha256 {
+            return Ok(Self::tool_error(
+                "tool_surface_stale: refresh tools/list before calling this Local App",
+            ));
+        }
+        let raw_name = tool
+            .strip_prefix("mcp__")
+            .and_then(|value| value.strip_prefix(&format!("{}__", scope.server_name())))
+            .unwrap_or(tool);
+        let Some(entry) = self.active_catalog_entry(scope, &manifest, &layout, raw_name)? else {
+            return Err(McpError::ToolNotFound(tool.into()));
+        };
+        let definition_value = entry.get("definition").unwrap_or(&entry);
+        let definition: traits::McpToolDefinitionDto =
+            serde_json::from_value(definition_value.clone()).map_err(|error| {
+                McpError::Internal(format!(
+                    "active Local App tool definition is invalid: {error}"
+                ))
+            })?;
+        if let Err(error) = Self::validate_export_input(&definition, &input) {
+            return Ok(error);
+        }
+        let read_only = definition
+            .annotations
+            .as_ref()
+            .and_then(|annotations| annotations.read_only_hint)
+            .unwrap_or(false);
+        let _call_guard = match self.reserve_export_call(&scope.app_id, &definition.name, read_only)
+        {
+            Ok(guard) => guard,
+            Err(result) => return Ok(result),
+        };
+        let started = Instant::now();
+        let request = json!({
+            "app_id": scope.app_id,
+            "tool_name": definition.name,
+            "flow": entry.get("flow").cloned().unwrap_or(Value::Null),
+            "input": input,
+            "catalog_sha256": active.catalog_sha256,
+        });
+        let input_digest = format!(
+            "{:x}",
+            Sha256::digest(serde_json::to_vec(&request).unwrap_or_default())
+        );
+        let result = match tokio::time::timeout(
+            LOCAL_APP_CALL_TIMEOUT,
+            self.host()?.execute_mcp_flow(request),
+        )
+        .await
+        {
+            Ok(Ok(value)) => match local_apps::validate_generated_structured_result(&value) {
+                Ok(())
+                    if definition
+                        .output_schema
+                        .as_ref()
+                        .is_none_or(|schema| local_apps::value_matches_schema(&value, schema)) =>
+                {
+                    Self::result(value)
+                }
+                Ok(()) => Self::tool_error(
+                    "output_schema_mismatch: Host Flow result does not satisfy output schema",
+                ),
+                Err(issue) => {
+                    Self::tool_error(format!("output_schema_mismatch: {}", issue.message))
+                }
+            },
+            Ok(Err(message)) => Self::tool_error(format!("flow_failed: {message}")),
+            Err(_) => Self::tool_error("timeout: Local App MCP call exceeded 5 minutes"),
+        };
+        self.append_export_audit(LocalAppAuditEntry {
+            app_id: scope.app_id.clone(),
+            catalog_sha256: active.catalog_sha256.clone(),
+            tool_name: definition.name,
+            input_sha256: input_digest,
+            result_status: if result.is_error {
+                "error".into()
+            } else {
+                "ok".into()
+            },
+            latency_ms: started.elapsed().as_millis() as u64,
+            cancelled: false,
+        });
+        Ok(result)
     }
 
     /// Generate the logical MCP service for one v2 app. The physical server
@@ -1603,6 +2167,42 @@ impl LocalAppsMcpTransport {
                 Ok(value) => Self::result(value),
                 Err(message) => Self::tool_error(message),
             },
+            "template_catalog" => match self.host()?.template_catalog(input).await {
+                Ok(value) => Self::result(value),
+                Err(message) => Self::tool_error(message),
+            },
+            "validate_template_selection" => {
+                match self.host()?.validate_template_selection(input).await {
+                    Ok(value) => Self::result(value),
+                    Err(message) => Self::tool_error(message),
+                }
+            }
+            "resolve_template_selection" => {
+                match self.host()?.resolve_template_selection(input).await {
+                    Ok(value) => Self::result(value),
+                    Err(message) => Self::tool_error(message),
+                }
+            }
+            "stage_create" => match self.host()?.stage_create(input).await {
+                Ok(value) => Self::result(value),
+                Err(message) => Self::tool_error(message),
+            },
+            "validate_mcp_proposal" => match self.host()?.validate_mcp_proposal(input).await {
+                Ok(value) => Self::result(value),
+                Err(message) => Self::tool_error(message),
+            },
+            "approve_mcp_proposal" => match self.host()?.approve_mcp_proposal(input).await {
+                Ok(value) => Self::result(value),
+                Err(message) => Self::tool_error(message),
+            },
+            "qa_mcp_candidate" => match self.host()?.qa_mcp_candidate(input).await {
+                Ok(value) => Self::result(value),
+                Err(message) => Self::tool_error(message),
+            },
+            "promote_mcp_candidate" => match self.host()?.promote_mcp_candidate(input).await {
+                Ok(value) => Self::result(value),
+                Err(message) => Self::tool_error(message),
+            },
             "confirm_runtime_profile" => match self.host()?.confirm_runtime_profile(input).await {
                 Ok(value) => Self::result(value),
                 Err(message) => Self::tool_error(message),
@@ -1823,10 +2423,17 @@ impl LocalAppsMcpTransport {
 #[async_trait]
 impl McpTransport for LocalAppsMcpTransport {
     async fn connect(&self, spec: &McpTransportSpec) -> Result<McpRawConnection, McpError> {
-        match spec {
-            McpTransportSpec::InProcess { registry_key }
-                if registry_key == LOCAL_APPS_REGISTRY_KEY => {}
-            other => return Err(McpError::UnsupportedTransport(other.transport_kind())),
+        let valid_in_process_key = match (self.scope.export(), spec) {
+            (Some(scope), McpTransportSpec::InProcess { registry_key }) => {
+                registry_key == &scope.registry_key()
+            }
+            (None, McpTransportSpec::InProcess { registry_key }) => {
+                registry_key == LOCAL_APPS_REGISTRY_KEY
+            }
+            _ => false,
+        };
+        if !valid_in_process_key {
+            return Err(McpError::UnsupportedTransport(spec.transport_kind()));
         }
         let connection_id = McpConnectionId::new();
         self.connections
@@ -1843,12 +2450,31 @@ impl McpTransport for LocalAppsMcpTransport {
             resources: false,
             prompts: false,
             logging: false,
-            experimental: std::collections::HashMap::new(),
+            // `ServerCapabilitiesDto` is the legacy internal projection and
+            // does not yet expose a nested tools capability. Preserve the
+            // standard listChanged bit in the experimental map until the
+            // protocol DTO can grow that field without a major bump.
+            experimental: std::collections::HashMap::from([(
+                "tools.listChanged".into(),
+                Value::Bool(true),
+            )]),
         })
     }
 
     async fn list_tools(&self, conn: &McpRawConnection) -> Result<Vec<McpToolDto>, McpError> {
         self.ensure_connection(conn)?;
+        if let Some(scope) = self.scope.export() {
+            let service = self.service()?;
+            service
+                .record(&scope.app_id)
+                .await
+                .map_err(|error| McpError::Internal(error.to_string()))?;
+            let layout = local_apps::AppLayout::new(self.root.clone(), scope.app_id.clone())
+                .map_err(|error| McpError::Internal(error.to_string()))?;
+            let manifest = local_apps::load_manifest(&layout)
+                .map_err(|error| McpError::Internal(error.to_string()))?;
+            return self.active_catalog_tools(scope, &manifest, &layout);
+        }
         // The static host operations are BUILTIN tools (`LocalApp*`) now, so the
         // MCP surface advertises only the DYNAMIC per-app namespaces. Serving
         // them here too would leave one operation reachable under two names
@@ -1904,6 +2530,9 @@ impl McpTransport for LocalAppsMcpTransport {
         input: Value,
     ) -> Result<McpToolResultDto, McpError> {
         self.ensure_connection(conn)?;
+        if self.scope.export().is_some() {
+            return self.call_conversation_export(conn, tool, input).await;
+        }
         // MCP serves DYNAMIC per-app tools only. A static host operation
         // arriving here is the retired `mcp__local_apps__<op>` spelling;
         // refuse it rather than run it with the weaker semantics. The builtin
@@ -2092,6 +2721,56 @@ mod tests {
             .is_empty());
     }
 
+    #[test]
+    fn conversation_export_scope_preserves_raw_hyphens_and_rejects_bad_identity() {
+        let transport = LocalAppsMcpTransport::new(PathBuf::from("/tmp/local-apps"));
+        let export = transport
+            .conversation_export("abc--1", &"0".repeat(64))
+            .expect("hyphenated schema-v3 id is valid");
+        let scope = export.scope.export().expect("export scope");
+        assert_eq!(scope.server_name(), "local_app_abc--1");
+        assert_eq!(
+            scope.registry_key(),
+            "local_apps:conversation-export:abc--1"
+        );
+        assert_eq!(
+            scope.tool_full_name("read_value").unwrap(),
+            "mcp__local_app_abc--1__read_value"
+        );
+        assert!(transport
+            .conversation_export("abc_1", &"0".repeat(64))
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn conversation_export_initialize_advertises_list_changed_and_rejects_input_app_id() {
+        let transport = LocalAppsMcpTransport::new(PathBuf::from("/tmp/local-apps"));
+        let export = transport
+            .conversation_export("abc12345", &"0".repeat(64))
+            .expect("export scope");
+        let logical_key = export.scope.export().unwrap().registry_key();
+        let connection = export
+            .connect(&McpTransportSpec::InProcess {
+                registry_key: logical_key,
+            })
+            .await
+            .unwrap();
+        let caps = export.initialize(&connection).await.unwrap();
+        assert_eq!(
+            caps.experimental.get("tools.listChanged"),
+            Some(&Value::Bool(true))
+        );
+        let result = export
+            .call_tool(
+                &connection,
+                "mcp__local_app_abc12345__read_value",
+                json!({"app_id":"other"}),
+            )
+            .await
+            .unwrap();
+        assert!(result.is_error);
+    }
+
     #[tokio::test]
     async fn peek_and_after_seq_leave_the_cursor_alone() {
         let (root, transport, app_id) = transport_with_events(3).await;
@@ -2176,6 +2855,65 @@ mod tests {
         );
     }
 
+    #[test]
+    fn local_app_catalog_declares_task_support_forbidden() {
+        for tool in LocalAppsMcpTransport::tool_catalog() {
+            assert_eq!(
+                tool.definition
+                    .execution
+                    .as_ref()
+                    .and_then(|execution| execution.task_support),
+                Some(traits::McpToolTaskSupportDto::Forbidden),
+                "tool {} must explicitly opt out of MCP Tasks",
+                tool.tool_name()
+            );
+        }
+    }
+
+    #[test]
+    fn selector_validation_and_stage_create_catalogs_require_host_only_inputs() {
+        let tools = LocalAppsMcpTransport::tool_catalog();
+        let validate = tools
+            .iter()
+            .find(|tool| tool.tool_name() == "validate_template_selection")
+            .expect("validate_template_selection is declared");
+        assert!(
+            validate.input_schema()["properties"]
+                .get("caller_role")
+                .is_none(),
+            "caller_role must not remain in the public schema"
+        );
+        assert_eq!(
+            validate.input_schema()["required"],
+            json!([
+                "app_id",
+                "workflow_run_id",
+                "catalog_digest",
+                "template_id",
+                "reason",
+                "selector_capability"
+            ])
+        );
+
+        let stage = tools
+            .iter()
+            .find(|tool| tool.tool_name() == "stage_create")
+            .expect("stage_create is declared");
+        assert_eq!(
+            stage.input_schema()["properties"]["quality_level"]["enum"],
+            json!(["fast", "balanced", "thorough"])
+        );
+        assert_eq!(
+            stage.input_schema()["required"],
+            json!([
+                "app_id",
+                "workflow_run_id",
+                "validated_selection_handle",
+                "quality_level"
+            ])
+        );
+    }
+
     /// The static host operations moved to BUILTIN tools (`LocalApp*`). The
     /// MCP surface must stop advertising and stop serving them, or the same
     /// operation is reachable under two names with DIFFERENT permission
@@ -2195,7 +2933,7 @@ mod tests {
             .expect("connect");
 
         let advertised = transport.list_tools(&connection).await.expect("list tools");
-        let names: Vec<&str> = advertised.iter().map(|t| t.tool_name.as_str()).collect();
+        let names: Vec<&str> = advertised.iter().map(|t| t.tool_name()).collect();
         assert!(
             !names.contains(&"build"),
             "the MCP surface must not advertise a static host operation: {names:?}"
@@ -2218,7 +2956,7 @@ mod tests {
         assert!(
             LocalAppsMcpTransport::host_tool_catalog()
                 .iter()
-                .any(|t| t.tool_name == "build"),
+                .any(|t| t.tool_name() == "build"),
             "builtins still take their schema from the host catalog"
         );
     }
@@ -2235,10 +2973,10 @@ mod tests {
         let tools = LocalAppsMcpTransport::tool_catalog();
         let act = tools
             .iter()
-            .find(|tool| tool.tool_name == "act_on_ui")
+            .find(|tool| tool.tool_name() == "act_on_ui")
             .expect("act_on_ui in the fixed catalog");
 
-        let actions = act.input_schema["properties"]["action"]["enum"]
+        let actions = act.input_schema()["properties"]["action"]["enum"]
             .as_array()
             .expect("action enum")
             .iter()
@@ -2251,7 +2989,7 @@ mod tests {
             );
         }
 
-        let description = &act.description;
+        let description = act.description();
         assert!(
             description.contains("\"x,y\""),
             "the description must give the pointer value shape: {description}"
@@ -2267,13 +3005,17 @@ mod tests {
     #[test]
     fn catalog_is_fixed_and_exposes_no_arbitrary_execution_surface() {
         let tools = LocalAppsMcpTransport::tool_catalog();
-        let names: Vec<_> = tools.iter().map(|tool| tool.tool_name.as_str()).collect();
+        let names: Vec<_> = tools.iter().map(|tool| tool.tool_name()).collect();
         assert_eq!(
             names,
             [
                 "list",
                 "get",
                 "runtime_profiles",
+                "template_catalog",
+                "validate_template_selection",
+                "resolve_template_selection",
+                "stage_create",
                 "confirm_runtime_profile",
                 "create",
                 "scaffold",
@@ -2303,47 +3045,46 @@ mod tests {
         );
         let schemas = tools
             .iter()
-            .map(|tool| tool.input_schema.to_string())
+            .map(|tool| tool.input_schema().to_string())
             .collect::<String>()
             .to_lowercase();
         assert!(!schemas.contains("sql"));
         assert!(!schemas.contains("javascript"));
         assert!(schemas.contains("click"));
         assert!(schemas.contains("reload"));
-        // The four static template kinds were deleted from the codebase
-        // entirely in Task 5; the schema must not still promise a deleted
-        // enum to the model as a mandatory `create` argument.
-        assert!(!schemas.contains("template"));
+        // Template selection is now an explicit Host tool; the create schema
+        // itself still must not expose a caller-selected template enum.
+        assert!(schemas.contains("template_id"));
         assert!(!schemas.contains("dashboard"));
         assert!(!schemas.contains("crud_tracker"));
         assert!(!schemas.contains("content_showcase"));
         assert!(!schemas.contains("form_utility"));
         let create = tools
             .iter()
-            .find(|tool| tool.tool_name == "create")
+            .find(|tool| tool.tool_name() == "create")
             .expect("create is declared");
-        let create_schema = create.input_schema.to_string();
+        let create_schema = create.input_schema().to_string();
         assert!(
             create_schema.contains("brief"),
             "create takes a brief: {create_schema}"
         );
         assert!(
-            create.description.contains("empty workspace")
-                && create.description.contains("guided `LINGXI.md` contract"),
+            create.description().contains("empty workspace")
+                && create.description().contains("guided `LINGXI.md` contract"),
             "create must describe the shell workspace contract: {}",
-            create.description
+            create.description()
         );
         assert!(
-            create.description.contains("does not scaffold source")
+            create.description().contains("does not scaffold source")
                 && create
-                    .description
+                    .description()
                     .contains("native runtime-profile confirmation plus `scaffold`"),
             "create must describe the deferred scaffold contract: {}",
-            create.description
+            create.description()
         );
         let descriptions = tools
             .iter()
-            .map(|tool| tool.description.as_str())
+            .map(|tool| tool.description())
             .collect::<Vec<_>>()
             .join(" ")
             .to_lowercase();
@@ -2363,19 +3104,19 @@ mod tests {
         );
         let list = tools
             .iter()
-            .find(|tool| tool.tool_name == "list")
+            .find(|tool| tool.tool_name() == "list")
             .expect("list is declared");
         assert!(
-            list.description.contains("global conversation")
-                && list.description.contains("no app id is known"),
+            list.description().contains("global conversation")
+                && list.description().contains("no app id is known"),
             "list must be reserved for global discovery: {}",
-            list.description
+            list.description()
         );
         assert!(
-            list.description
+            list.description()
                 .contains("Never use from an app-scoped workspace"),
             "list must reject app-scoped rediscovery: {}",
-            list.description
+            list.description()
         );
         assert_eq!(
             list.always_load,
@@ -2384,22 +3125,22 @@ mod tests {
         );
         assert!(
             !list
-                .description
+                .description()
                 .contains("use before get or runtime actions"),
             "list must not be advertised as a generic prerequisite: {}",
-            list.description
+            list.description()
         );
         let query = tools
             .iter()
-            .find(|tool| tool.tool_name == "query_data")
+            .find(|tool| tool.tool_name() == "query_data")
             .expect("query_data is declared");
         assert_eq!(
-            query.input_schema["properties"]["offset"]["type"],
+            query.input_schema()["properties"]["offset"]["type"],
             "integer"
         );
-        assert_eq!(query.input_schema["properties"]["offset"]["minimum"], 0);
+        assert_eq!(query.input_schema()["properties"]["offset"]["minimum"], 0);
         assert!(
-            query.input_schema["properties"].get("cursor").is_none(),
+            query.input_schema()["properties"].get("cursor").is_none(),
             "the broken string cursor contract must not remain in the catalog"
         );
     }
@@ -2415,16 +3156,16 @@ mod tests {
         let tools = LocalAppsMcpTransport::dynamic_tool_catalog(&manifest);
         assert!(tools
             .iter()
-            .any(|tool| tool.tool_name == "app_abc12345__data_query"));
+            .any(|tool| tool.tool_name() == "app_abc12345__data_query"));
         assert!(tools
             .iter()
-            .any(|tool| tool.tool_name == "app_abc12345__agent_sessions_create"));
+            .any(|tool| tool.tool_name() == "app_abc12345__agent_sessions_create"));
         assert!(tools
             .iter()
-            .any(|tool| tool.tool_name == "app_abc12345__agent_events_read"));
+            .any(|tool| tool.tool_name() == "app_abc12345__agent_events_read"));
         assert!(tools
             .iter()
-            .any(|tool| tool.tool_name == "app_abc12345__flow_execute"));
+            .any(|tool| tool.tool_name() == "app_abc12345__flow_execute"));
         assert_eq!(
             LocalAppsMcpTransport::parse_dynamic_tool("app_abc12345__data_query"),
             Some(("abc12345", "data_query"))
@@ -2487,10 +3228,11 @@ mod tests {
         assert!(!tools.is_empty());
         assert!(tools
             .iter()
-            .all(|tool| { tool.tool_name.starts_with(&format!("app_{}__", first.id)) }));
-        assert!(!tools
-            .iter()
-            .any(|tool| { tool.tool_name.starts_with(&format!("app_{}__", second.id)) }));
+            .all(|tool| { tool.tool_name().starts_with(&format!("app_{}__", first.id)) }));
+        assert!(!tools.iter().any(|tool| {
+            tool.tool_name()
+                .starts_with(&format!("app_{}__", second.id))
+        }));
 
         let error = scoped
             .call_tool(
@@ -2588,9 +3330,9 @@ mod tests {
         let tools = LocalAppsMcpTransport::tool_catalog();
         let update = tools
             .iter()
-            .find(|tool| tool.tool_name == "update_manifest")
+            .find(|tool| tool.tool_name() == "update_manifest")
             .expect("update_manifest is declared");
-        let collection = &update.input_schema["properties"]["collections"]["items"];
+        let collection = &update.input_schema()["properties"]["collections"]["items"];
         assert_eq!(collection["type"], "object");
         assert_eq!(
             collection["properties"]["id"]["pattern"],
@@ -2621,9 +3363,10 @@ mod tests {
         assert_eq!(field["required"], json!(["id", "label", "kind"]));
         assert_eq!(field["additionalProperties"], false);
         assert!(
-            update.description.contains("recordId") && update.description.contains("createdAtMs"),
+            update.description().contains("recordId")
+                && update.description().contains("createdAtMs"),
             "host-owned record metadata must be called out: {}",
-            update.description
+            update.description()
         );
     }
 
@@ -2632,10 +3375,10 @@ mod tests {
         let tools = LocalAppsMcpTransport::tool_catalog();
         let update = tools
             .iter()
-            .find(|tool| tool.tool_name == "update_manifest")
+            .find(|tool| tool.tool_name() == "update_manifest")
             .expect("update_manifest is declared");
         assert_eq!(
-            update.input_schema["properties"]["capabilities"]["items"]["enum"],
+            update.input_schema()["properties"]["capabilities"]["items"]["enum"],
             json!([
                 "data_mutation",
                 "ui_control",
@@ -2664,13 +3407,13 @@ mod tests {
 
         let query = tools
             .iter()
-            .find(|tool| tool.tool_name == "query_data")
+            .find(|tool| tool.tool_name() == "query_data")
             .expect("query_data is declared");
         for filter_name in ["filter", "filters"] {
             let filter = if filter_name == "filter" {
-                &query.input_schema["properties"][filter_name]
+                &query.input_schema()["properties"][filter_name]
             } else {
-                &query.input_schema["properties"][filter_name]["items"]
+                &query.input_schema()["properties"][filter_name]["items"]
             };
             assert_eq!(filter["type"], "object");
             assert_eq!(filter["required"], json!(["fieldId", "operator", "value"]));
@@ -2696,9 +3439,9 @@ mod tests {
 
         let mutate = tools
             .iter()
-            .find(|tool| tool.tool_name == "mutate_data")
+            .find(|tool| tool.tool_name() == "mutate_data")
             .expect("mutate_data is declared");
-        let operations = &mutate.input_schema["properties"]["operations"];
+        let operations = &mutate.input_schema()["properties"]["operations"];
         assert_eq!(operations["maxItems"], local_apps::MAX_MUTATION_BATCH_SIZE);
         let variants = operations["items"]["oneOf"]
             .as_array()
@@ -2729,18 +3472,18 @@ mod tests {
         let tools = LocalAppsMcpTransport::tool_catalog();
         let update = tools
             .iter()
-            .find(|tool| tool.tool_name == "update_manifest")
+            .find(|tool| tool.tool_name() == "update_manifest")
             .expect("update_manifest is declared");
         assert!(
-            update.input_schema["properties"]
+            update.input_schema()["properties"]
                 .get("device_context")
                 .is_none(),
             "the host derives the device context: {}",
-            update.input_schema["properties"]
+            update.input_schema()["properties"]
         );
         // `additionalProperties:false` is what turns a re-introduction by an
         // older client into a rejected call rather than a silent override.
-        assert_eq!(update.input_schema["additionalProperties"], false);
+        assert_eq!(update.input_schema()["additionalProperties"], false);
     }
 
     #[test]
@@ -2748,11 +3491,11 @@ mod tests {
         let tools = LocalAppsMcpTransport::tool_catalog();
         let update = tools
             .iter()
-            .find(|tool| tool.tool_name == "update_manifest")
+            .find(|tool| tool.tool_name() == "update_manifest")
             .expect("update_manifest is declared");
-        let collection = &update.input_schema["properties"]["collections"]["items"];
+        let collection = &update.input_schema()["properties"]["collections"]["items"];
         assert_eq!(
-            update.input_schema["properties"]["collections"]["maxItems"],
+            update.input_schema()["properties"]["collections"]["maxItems"],
             local_apps::manifest::MAX_MANIFEST_COLLECTIONS
         );
         let fields = &collection["properties"]["fields"];
@@ -3581,6 +4324,12 @@ mod tests {
         }
         let mut manifest = load_manifest(&layout).expect("manifest");
         manifest.surface = Some(local_apps::AppSurface::Dom);
+        manifest.template_origin = Some(local_apps::AppTemplateOrigin {
+            plugin_id: local_apps::AppTemplateOrigin::BUILTIN_PLUGIN_ID.into(),
+            plugin_version: "builtin".into(),
+            template_id: "react-dom-r1".into(),
+            template_sha256: binding.contract_sha256.clone(),
+        });
         manifest.runtime_profile = Some(binding);
         manifest.dependency_snapshot = Some(snapshot.snapshot);
         save_manifest(&layout, &manifest).expect("save runtime manifest");

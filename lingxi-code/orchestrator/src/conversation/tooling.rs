@@ -345,6 +345,22 @@ impl ConversationOrchestrator {
                 updated_input.unwrap_or(input),
                 permission_updates,
             ),
+            traits::permission_gate::PermissionOutcome::AllowAuto { updated_input } => {
+                if let Err(error) = self.perms.set_permission_mode("auto").await {
+                    // The current call was explicitly approved. Keep the one-shot
+                    // allow, but never claim the live mode switched when the
+                    // session-owned transition failed.
+                    tracing::warn!(
+                        %error,
+                        "orphaned permission approved Auto mode but mode switch failed"
+                    );
+                }
+                (
+                    crate::test_support::PermissionDecision::Allow,
+                    updated_input.unwrap_or(input),
+                    Vec::new(),
+                )
+            }
             traits::permission_gate::PermissionOutcome::Deny { reason } => (
                 crate::test_support::PermissionDecision::Deny { reason },
                 input,

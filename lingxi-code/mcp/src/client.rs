@@ -6,6 +6,7 @@
 //! enum so the public surface in `lib.rs` resolves.
 
 use std::borrow::Cow;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use thiserror::Error;
@@ -13,8 +14,9 @@ use tokio::sync::RwLock;
 
 use serde::{Deserialize, Serialize};
 use traits::{
-    McpPromptDto, McpResourceContentDto, McpResourceDto, McpToolDto, McpToolResultDto,
-    McpTransportKind, ServerCapabilitiesDto,
+    McpConfiguredToolPolicyDto, McpPermissionCeiling, McpPromptDto, McpResourceContentDto,
+    McpResourceDto, McpToolAnnotationsDto, McpToolDefinitionDto, McpToolDto, McpToolExecutionDto,
+    McpToolResultDto, McpTransportKind, ServerCapabilitiesDto,
 };
 
 use crate::hook_dispatch::HookDispatcher;
@@ -255,6 +257,10 @@ pub struct McpClient {
     /// `true`, every tool this client lists is marked `always_load` so it is
     /// never deferred behind tool search.
     config_always_load: bool,
+    /// Optional config-side per-tool rule/ceiling declarations.
+    config_tools: Vec<McpConfiguredToolPolicyDto>,
+    /// Optional config-side per-tool effective ceilings keyed by upstream tool name.
+    config_tool_permissions: BTreeMap<String, McpPermissionCeiling>,
     /// Transport kind of the underlying connection, feeding the `GLd` idle-timeout
     /// resolver ([`mcp_tool_idle_timeout_for`]): stdio → 30 min default, remote →
     /// 5 min, in-process (IDE/SDK) → no idle timeout. Defaults to
@@ -364,6 +370,8 @@ impl McpClient {
             server_instructions: RwLock::new(None),
             config_timeout_ms: None,
             config_always_load: false,
+            config_tools: Vec::new(),
+            config_tool_permissions: BTreeMap::new(),
             transport_kind: McpTransportKind::Stdio,
         }
     }
@@ -376,9 +384,17 @@ impl McpClient {
     /// [`Self::list_tools`] time. Passing `(None, false)` is byte-identical to
     /// not calling this at all.
     #[must_use]
-    pub fn with_config_options(mut self, timeout_ms: Option<u64>, always_load: bool) -> Self {
+    pub fn with_config_options(
+        mut self,
+        timeout_ms: Option<u64>,
+        always_load: bool,
+        tools: Vec<McpConfiguredToolPolicyDto>,
+        tool_permissions: BTreeMap<String, McpPermissionCeiling>,
+    ) -> Self {
         self.config_timeout_ms = timeout_ms;
         self.config_always_load = always_load;
+        self.config_tools = tools;
+        self.config_tool_permissions = tool_permissions;
         self
     }
 
@@ -520,7 +536,7 @@ impl McpClient {
         let skip_prefix = self.skip_mcp_prefix();
 
         let normalized_server = crate::normalization::normalize_name_for_mcp(&self.server_name);
-        Ok(resp
+        let mut tools: Vec<McpToolDto> = resp
             .tools
             .into_iter()
             .map(|t| {
@@ -533,27 +549,77 @@ impl McpClient {
                 } else {
                     format!("mcp__{normalized_server}__{norm_tool}")
                 };
+                let projected_meta = ToolMeta::from_meta_value(t.meta.as_ref());
                 McpToolDto {
                     full_name,
                     server_name: self.server_name.clone(),
-                    description: truncate_description(&t.description).into_owned(),
-                    input_schema: t.input_schema,
-                    tool_name: t.name,
+                    definition: McpToolDefinitionDto {
+                        name: t.name,
+                        title: t.title,
+                        description: t
+                            .description
+                            .as_deref()
+                            .map(truncate_description)
+                            .map(Cow::into_owned),
+                        input_schema: t.input_schema,
+                        output_schema: t.output_schema,
+                        annotations: t.annotations,
+                        execution: t.execution,
+                        icons: t.icons,
+                        meta: t.meta,
+                    },
                     // Forward `_meta.anthropic/searchHint` + `alwaysLoad`
                     // from the wire (client.ts:1777-1780). Both default
                     // to `None` for servers that omit `_meta`. A server-level
                     // `alwaysLoad: true` config (parity 2.1.207 P2-01) forces
                     // ALL of this server's tools always-loaded, overriding an
                     // absent per-tool bit.
-                    search_hint: t.meta.search_hint,
+                    search_hint: projected_meta.search_hint,
                     always_load: if self.config_always_load {
                         Some(true)
                     } else {
-                        t.meta.always_load
+                        projected_meta.always_load
                     },
+                    effective_max_permission: None,
                 }
             })
-            .collect())
+            .collect();
+        self.apply_config_permission_ceilings(&mut tools);
+        Ok(tools)
+    }
+
+    fn apply_config_permission_ceilings(&self, tools: &mut [McpToolDto]) {
+        let mut org_ceilings = BTreeMap::<&str, McpPermissionCeiling>::new();
+        for tool in &self.config_tools {
+            let Some(ceiling) = tool.org_max_permission else {
+                continue;
+            };
+            org_ceilings
+                .entry(tool.name.as_str())
+                .and_modify(|current| *current = current.strictest(ceiling))
+                .or_insert(ceiling);
+        }
+
+        let mut matched_tool_permissions = BTreeSet::<String>::new();
+        for tool in tools {
+            let tool_name = tool.tool_name().to_string();
+            let mut effective = self.config_tool_permissions.get(&tool_name).copied();
+            if effective.is_some() {
+                matched_tool_permissions.insert(tool_name.clone());
+            }
+            if let Some(org) = org_ceilings.get(tool_name.as_str()).copied() {
+                effective = Some(effective.map_or(org, |current| current.strictest(org)));
+            }
+            tool.effective_max_permission = effective;
+        }
+
+        if !self.config_tool_permissions.is_empty() && matched_tool_permissions.is_empty() {
+            tracing::warn!(
+                server = %self.server_name,
+                "toolPermissions has {} entries but none matched upstream tool names — backend name drift?",
+                self.config_tool_permissions.len()
+            );
+        }
     }
 
     /// Returns `true` when the `CLAUDE_AGENT_SDK_MCP_NO_PREFIX` env var is set
@@ -1543,11 +1609,21 @@ struct ToolsListResponse {
 struct RawTool {
     name: String,
     #[serde(default)]
-    description: String,
+    title: Option<String>,
+    #[serde(default)]
+    description: Option<String>,
     #[serde(rename = "inputSchema", default)]
     input_schema: serde_json::Value,
+    #[serde(rename = "outputSchema", default)]
+    output_schema: Option<serde_json::Value>,
+    #[serde(default)]
+    annotations: Option<McpToolAnnotationsDto>,
+    #[serde(default)]
+    execution: Option<McpToolExecutionDto>,
+    #[serde(default)]
+    icons: Vec<traits::McpIconDto>,
     #[serde(default, rename = "_meta")]
-    meta: ToolMeta,
+    meta: Option<serde_json::Value>,
 }
 
 /// Optional `_meta` companion attached to each tool. All fields default to
@@ -1565,6 +1641,17 @@ pub struct ToolMeta {
     /// search hint doesn't match the current task.
     #[serde(default, rename = "anthropic/alwaysLoad")]
     pub always_load: Option<bool>,
+    /// `true` when the tool must still prompt even if an allow rule exists.
+    #[serde(default, rename = "anthropic/requiresUserInteraction")]
+    pub requires_user_interaction: Option<bool>,
+}
+
+impl ToolMeta {
+    fn from_meta_value(meta: Option<&serde_json::Value>) -> Self {
+        meta.cloned()
+            .and_then(|value| serde_json::from_value(value).ok())
+            .unwrap_or_default()
+    }
 }
 
 /// Wire-level shape of a `tools/call` response body.
@@ -2222,7 +2309,7 @@ mod constructor_tests {
         // one that carries no per-tool `_meta` at all.
         let client = McpClient::new("srv", std::path::PathBuf::from("/tmp/work"), conn)
             .await
-            .with_config_options(None, true);
+            .with_config_options(None, true, Vec::new(), BTreeMap::new());
         let tools = list_tools_with(
             client,
             peer_tx,
@@ -2258,6 +2345,77 @@ mod constructor_tests {
         .await;
         assert_eq!(tools[0].always_load, None);
         assert_eq!(tools[1].always_load, Some(true));
+    }
+
+    #[tokio::test]
+    async fn list_tools_preserves_standard_fields_and_attaches_effective_ceiling() {
+        let (conn, peer_tx, peer_rx) = paired_connection();
+        let client = McpClient::new("srv", std::path::PathBuf::from("/tmp/work"), conn)
+            .await
+            .with_config_options(
+                None,
+                false,
+                vec![McpConfiguredToolPolicyDto {
+                    name: "fetch".into(),
+                    permission_policy: None,
+                    org_max_permission: Some(McpPermissionCeiling::Ask),
+                }],
+                BTreeMap::from([("fetch".to_string(), McpPermissionCeiling::Allow)]),
+            );
+        let tools = list_tools_with(
+            client,
+            peer_tx,
+            peer_rx,
+            serde_json::json!([{
+                "name": "fetch",
+                "title": "Fetch",
+                "description": "Read data",
+                "inputSchema": {"type":"object","additionalProperties":false},
+                "outputSchema": {"type":"object","properties":{"ok":{"type":"boolean"}},"required":["ok"],"additionalProperties":false},
+                "annotations": {"title":"Fetch","readOnlyHint":true},
+                "execution": {"taskSupport":"forbidden"},
+                "icons": [{"src":"https://example.com/icon.png","mimeType":"image/png"}],
+                "_meta": {
+                    "anthropic/searchHint": "network",
+                    "anthropic/requiresUserInteraction": true,
+                    "custom": {"v": 1}
+                }
+            }]),
+        )
+        .await;
+        let tool = &tools[0];
+        assert_eq!(tool.definition.title.as_deref(), Some("Fetch"));
+        assert!(tool.output_schema().is_some());
+        assert_eq!(
+            tool.definition
+                .annotations
+                .as_ref()
+                .and_then(|annotations| annotations.read_only_hint),
+            Some(true)
+        );
+        assert_eq!(
+            tool.definition
+                .execution
+                .as_ref()
+                .and_then(|execution| execution.task_support),
+            Some(traits::McpToolTaskSupportDto::Forbidden)
+        );
+        assert_eq!(tool.definition.icons.len(), 1);
+        assert_eq!(tool.search_hint.as_deref(), Some("network"));
+        assert!(tool.requires_user_interaction());
+        assert_eq!(
+            tool.effective_max_permission,
+            Some(McpPermissionCeiling::Ask)
+        );
+        assert_eq!(
+            tool.definition
+                .meta
+                .as_ref()
+                .and_then(|meta| meta.get("custom"))
+                .and_then(|value| value.get("v"))
+                .and_then(serde_json::Value::as_i64),
+            Some(1)
+        );
     }
 }
 

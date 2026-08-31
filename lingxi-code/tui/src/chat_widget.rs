@@ -6758,6 +6758,8 @@ mod tests {
                 request,
                 resp_tx,
                 worker: None,
+                suppress_always_allow_rule: false,
+                auto_mode_prompt: None,
             },
             resp_rx,
         )
@@ -7560,6 +7562,8 @@ mod tests {
             },
             resp_tx: plan_tx,
             worker: None,
+            suppress_always_allow_rule: false,
+            auto_mode_prompt: None,
         };
         widget.open_permission(first);
         widget.open_permission(plan);

@@ -394,6 +394,8 @@ mod tests {
             disabled: false,
             timeout_ms: None,
             always_load: false,
+            tools: Vec::new(),
+            tool_permissions: std::collections::BTreeMap::new(),
             config_error: None,
         };
 
@@ -478,6 +480,8 @@ mod tests {
             disabled: false,
             timeout_ms: None,
             always_load: false,
+            tools: Vec::new(),
+            tool_permissions: std::collections::BTreeMap::new(),
             config_error: None,
         };
 
@@ -526,6 +530,8 @@ mod tests {
             disabled: false,
             timeout_ms: None,
             always_load: false,
+            tools: Vec::new(),
+            tool_permissions: std::collections::BTreeMap::new(),
             config_error: None,
         };
 
@@ -570,6 +576,8 @@ mod tests {
             disabled: false,
             timeout_ms: None,
             always_load: false,
+            tools: Vec::new(),
+            tool_permissions: std::collections::BTreeMap::new(),
             config_error: None,
         };
         assert_eq!(
@@ -592,6 +600,8 @@ mod tests {
             disabled: false,
             timeout_ms: None,
             always_load: false,
+            tools: Vec::new(),
+            tool_permissions: std::collections::BTreeMap::new(),
             config_error: None,
         };
         assert_eq!(

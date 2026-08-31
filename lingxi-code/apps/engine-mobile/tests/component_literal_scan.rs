@@ -9,9 +9,8 @@
 //! The needle set is derived from the LIVE registries at test time, never
 //! from a name list hand-typed into this file:
 //!
-//! - skill basenames come from [`engine_mobile::mobile_skill_registry`], which
-//!   delegates to `skill_api::register_mobile` (`apps/engine-mobile/src/
-//!   lib.rs:383`);
+//! - skill basenames come from the build-time verified Plugin inventory exposed
+//!   by [`engine_mobile::mobile_plugin_skill_names`];
 //! - Local App workflow basenames come from
 //!   `tool_workflow::BUILTIN_WORKFLOWS.local_app_build_workflow_names()`, which
 //!   answers "what are the Local App build workflow names" from a typed field
@@ -27,7 +26,7 @@
 //! Design doc `docs/local-apps/LOCAL-APP-PLUGIN-DESIGN-V2.md` §8.5/§19.3:
 //! "Phase -1 尚无 Plugin inventory，scanner 暂时读取现有 live builtin
 //! skill/workflow registries；两阶段都禁止在 scanner 内维护第二份名称数组。"
-//! Phase 2 will swap this needle-derivation seam for the verified Plugin
+//! Phase 2 swaps this needle-derivation seam for the verified Plugin
 //! inventory; this file must not grow a hardcoded name array in the
 //! meantime — see `scanner_needle_comes_from_discovery_not_from_a_static_array`
 //! below, which drives the WHOLE production pipeline
@@ -330,10 +329,14 @@ fn needle_set_from(reg: &skill_api::SkillRegistry) -> BTreeSet<String> {
     expand_with_namespace(&basenames)
 }
 
-/// The full needle set the production scan runs with: every live skill and
-/// Local App workflow basename, plus each one's namespaced FQN.
+/// The full needle set the production scan runs with: every verified Plugin
+/// skill and Local App workflow basename, plus each one's namespaced FQN.
 fn production_needle_set() -> BTreeSet<String> {
-    needle_set_from(&engine_mobile::mobile_skill_registry())
+    let mut basenames = engine_mobile::mobile_plugin_skill_names()
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+    basenames.extend(local_app_workflow_basenames());
+    expand_with_namespace(&basenames)
 }
 
 // ---------------------------------------------------------------------------
@@ -1467,11 +1470,11 @@ fn scanner_needle_comes_from_discovery_not_from_a_static_array() {
     );
 
     // Half 2, run first because it is the cheaper failure to read: whatever
-    // `needle_set_from` derives from a freshly-registered registry must survive
-    // into the set the REAL scan runs with.
-    let mut fresh = skill_api::SkillRegistry::new();
-    skill_api::register_mobile(&mut fresh);
-    let fresh_skills = skill_basenames(&fresh);
+    // the verified Plugin inventory derives must survive into the set the REAL
+    // scan runs with.
+    let fresh_skills: BTreeSet<String> = engine_mobile::mobile_plugin_skill_names()
+        .into_iter()
+        .collect();
     let workflows = local_app_workflow_basenames();
     let fresh_only_skills: Vec<&String> = fresh_skills
         .iter()
@@ -1479,12 +1482,14 @@ fn scanner_needle_comes_from_discovery_not_from_a_static_array() {
         .collect();
     assert!(
         !fresh_only_skills.is_empty(),
-        "`register_mobile` must contribute at least one skill basename that is \
+        "the verified Plugin inventory must contribute at least one skill basename that is \
          not also a workflow name, or the superset assertion below would be \
          satisfied by the workflow half alone and could not detect the skill \
          half being dropped"
     );
-    let fresh_needles = needle_set_from(&fresh);
+    let mut fresh_needles = fresh_skills.clone();
+    fresh_needles.extend(workflows);
+    let fresh_needles = expand_with_namespace(&fresh_needles);
     let missing: Vec<&String> = fresh_needles
         .iter()
         .filter(|n| !production_needles.contains(*n))
@@ -1501,7 +1506,6 @@ fn scanner_needle_comes_from_discovery_not_from_a_static_array() {
     );
 
     let mut grown = skill_api::SkillRegistry::new();
-    skill_api::register_mobile(&mut grown);
     grown.register(skill_api::Skill {
         name: new_skill_name.to_string(),
         description: "planted for scanner_needle_comes_from_discovery test".to_string(),
@@ -1530,7 +1534,7 @@ fn scanner_needle_comes_from_discovery_not_from_a_static_array() {
     assert_eq!(
         grown_hits.len(),
         1,
-        "a skill registered after `register_mobile` must propagate all the way \
+        "a skill registered into the discovery registry must propagate all the way \
          into the scan, got {grown_hits:?}"
     );
     assert_eq!(grown_hits[0].literal, new_skill_name);

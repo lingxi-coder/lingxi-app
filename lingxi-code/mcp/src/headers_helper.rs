@@ -317,6 +317,8 @@ mod tests {
             disabled: false,
             timeout_ms: None,
             always_load: false,
+            tools: Vec::new(),
+            tool_permissions: std::collections::BTreeMap::new(),
             config_error: None,
         };
         let resolved = resolve_headers_helper_in(&config, session.path(), Some(plugin.path()))
@@ -351,6 +353,8 @@ mod tests {
             disabled: false,
             timeout_ms: None,
             always_load: false,
+            tools: Vec::new(),
+            tool_permissions: std::collections::BTreeMap::new(),
             config_error: None,
         };
         let error = resolve_headers_helper_in(&config, session.path(), None)

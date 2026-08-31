@@ -4,9 +4,8 @@
 //! source provenance, declared components (commands / agents / skills /
 //! hooks / output styles / MCP servers / LSP servers / workflows), trust
 //! level, and optional user-config schema. Materialization into the engine
-//! registries is handled by [`crate::manager::PluginManager::load_plugin`]
-//! — except for `workflows`, which discovery populates but nothing
-//! materializes yet (see [`PluginComponents::workflows`]).
+//! registries is handled by [`crate::manager::PluginManager::load_plugin`],
+//! including the shared plugin-workflow registry.
 //!
 //! See spec §15.1.
 
@@ -76,11 +75,10 @@ pub struct PluginManifest {
     pub settings: HashMap<String, serde_json::Value>,
 }
 
-/// The 8 component slots a plugin can populate.
+/// The 8 component slots a plugin can populate, including workflows.
 ///
-/// The first seven are materialized into their matching engine registries by
-/// [`crate::manager::PluginManager::load_plugin`]; [`Self::workflows`] is
-/// discovered but not yet materialized.
+/// Every slot is materialized by [`crate::manager::PluginManager::load_plugin`]
+/// when its corresponding registry is wired by the composition root.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PluginComponents {
     /// Markdown slash-command files.
@@ -108,10 +106,8 @@ pub struct PluginComponents {
     /// `.mjs` / `.cjs` / `.ts` / extensionless files are near-misses and are
     /// deliberately excluded.
     ///
-    /// ⚠️ Populating this slot is all that happens today.
-    /// [`crate::manager::PluginManager::load_plugin`] does NOT yet materialize
-    /// it into the workflow registry — that wiring is a separate task, so a
-    /// discovered workflow is not yet invocable.
+    /// The manager validates the script's `meta.name`, namespaces it as
+    /// `{plugin}:{name}`, and registers it in the shared workflow registry.
     pub workflows: Vec<ComponentPath>,
 }
 

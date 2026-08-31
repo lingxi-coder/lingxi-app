@@ -11,6 +11,7 @@ tools:
   - LocalAppCaptureUi
   - LocalAppActOnUi
   - LocalAppQueryData
+  - LocalAppResolveTemplateSelection
   - LocalAppMutateData
   - LocalAppBackgroundList
   - LocalAppBackgroundStatus
@@ -29,7 +30,7 @@ skills:
 
 # Operate a Local App
 
-You are the execution step inside the (not yet built)
+You are the execution step inside the verified
 `lingxi-local-app:local-app-use-test` workflow. Per the plugin's frozen
 design (§7.3), the workflow drives you with `agent(prompt, {agentType:
 "lingxi-local-app:operator"})` for each scenario it needs to run against a

@@ -8,6 +8,8 @@ tools:
   - LocalAppBuild
   - LocalAppInstallDeps
   - LocalAppCheckpointCreate
+  - LocalAppResolveTemplateSelection
+  - LocalAppStageCreate
 skills:
   - device
 ---

@@ -448,7 +448,7 @@ impl Tool for ExitPlanModeTool {
 
     async fn call(
         &self,
-        input: Value,
+        mut input: Value,
         ctx: ToolUseContext,
         _progress: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
@@ -461,6 +461,52 @@ impl Tool for ExitPlanModeTool {
                 "ExitPlanMode: session not wired into ToolUseContext (M4-04 contract)".into(),
             )
         })?;
+
+        // Validate the live plan-mode state before opening an approval dialog.
+        // The second check below closes the small race where another operation
+        // exits plan mode while this approval is waiting for the user.
+        if !session.lock().await.plan_mode {
+            let dur = started_at.elapsed().as_millis() as u64;
+            self.emit_failed(&invocation_id, "not_in_plan_mode", dur)
+                .await;
+            return Err(ToolError::InvalidInput(
+                EXIT_PLAN_MODE_NOT_IN_PLAN_MODE_MSG.into(),
+            ));
+        }
+
+        // ExitPlanMode owns a user-facing approval round-trip.  The ordinary
+        // dispatcher permission check cannot carry the plan body (and this
+        // tool's policy result is AllowByDefault), so ask the live gate through
+        // its dedicated plan-approval seam before mutating session state.
+        if let Some(gate) = self.ctx.permission_gate.as_ref() {
+            let plan = input
+                .get("plan")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let permission_ctx = traits::permission_gate::PermissionCheckContext {
+                tool_use_id: ctx.tool_use_id.as_ref().map(ToString::to_string),
+                is_agent_context: ctx.agent_id.is_some(),
+                is_non_interactive_session: ctx.options.is_non_interactive_session,
+                suppress_always_allow_rule: ctx.agent_id.is_some(),
+                ..Default::default()
+            };
+            let outcome = gate.check_exit_plan_mode(plan, &permission_ctx).await;
+            match outcome {
+                traits::permission_gate::PermissionOutcome::Allow { updated_input, .. }
+                | traits::permission_gate::PermissionOutcome::AllowAuto { updated_input } => {
+                    if let Some(updated) = updated_input {
+                        input = updated;
+                    }
+                }
+                traits::permission_gate::PermissionOutcome::Deny { reason } => {
+                    let dur = started_at.elapsed().as_millis() as u64;
+                    self.emit_failed(&invocation_id, "permission_denied", dur)
+                        .await;
+                    return Err(ToolError::PermissionDenied(reason));
+                }
+            }
+        }
+
         {
             let mut guard = session.lock().await;
             if !guard.plan_mode {
@@ -529,9 +575,38 @@ mod tests {
     use engine::SessionState;
     use protocol::{AgentId, SessionId};
     use std::sync::Arc;
+    use std::sync::Mutex as StdMutex;
     use telemetry::{AnalyticsBus, InMemorySink};
     use tokio::sync::Mutex;
     use tool_api::test_support::{ctx_for_file_tools, fresh_ctx, fresh_tx, make_dummy_fs};
+
+    struct ScriptedExitGate {
+        seen: Arc<StdMutex<Vec<(String, traits::permission_gate::PermissionCheckContext)>>>,
+        outcome: traits::permission_gate::PermissionOutcome,
+    }
+
+    #[async_trait]
+    impl traits::permission_gate::PermissionGate for ScriptedExitGate {
+        async fn check(
+            &self,
+            _name: &str,
+            _input: &Value,
+        ) -> traits::permission_gate::PermissionDecision {
+            traits::permission_gate::PermissionDecision::Allow
+        }
+
+        async fn check_exit_plan_mode(
+            &self,
+            plan: &str,
+            ctx: &traits::permission_gate::PermissionCheckContext,
+        ) -> traits::permission_gate::PermissionOutcome {
+            self.seen
+                .lock()
+                .unwrap()
+                .push((plan.to_string(), ctx.clone()));
+            self.outcome.clone()
+        }
+    }
 
     fn make_ctx() -> (
         BuiltinToolContext,
@@ -812,5 +887,48 @@ mod tests {
             .await
             .expect("exit must succeed with whitespace plan");
         assert_eq!(res.data["model_content"], EXIT_PLAN_APPROVED_EMPTY_MSG);
+    }
+
+    #[tokio::test]
+    async fn exit_call_changes_plan_state_only_after_approved_auto_outcome() {
+        let (mut bctx, sink, session, use_ctx) = make_ctx();
+        bctx.bus.attach_sink(sink).await;
+        session.lock().await.plan_mode = true;
+        let seen = Arc::new(StdMutex::new(Vec::new()));
+        bctx.permission_gate = Some(Arc::new(ScriptedExitGate {
+            seen: seen.clone(),
+            outcome: traits::permission_gate::PermissionOutcome::AllowAuto {
+                updated_input: None,
+            },
+        }));
+        let tool = ExitPlanModeTool::new(bctx);
+        tool.call(json!({ "plan": "1. Ship it" }), use_ctx, fresh_tx())
+            .await
+            .expect("approved auto response exits plan mode");
+        assert!(!session.lock().await.plan_mode);
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0].0, "1. Ship it");
+        assert!(seen[0].1.auto_mode_prompt.is_none());
+    }
+
+    #[tokio::test]
+    async fn exit_call_keeps_plan_state_when_approval_is_denied() {
+        let (mut bctx, sink, session, use_ctx) = make_ctx();
+        bctx.bus.attach_sink(sink).await;
+        session.lock().await.plan_mode = true;
+        bctx.permission_gate = Some(Arc::new(ScriptedExitGate {
+            seen: Arc::new(StdMutex::new(Vec::new())),
+            outcome: traits::permission_gate::PermissionOutcome::Deny {
+                reason: "user denied".to_string(),
+            },
+        }));
+        let tool = ExitPlanModeTool::new(bctx);
+        let error = tool
+            .call(json!({ "plan": "1. Ship it" }), use_ctx, fresh_tx())
+            .await
+            .expect_err("denied approval must not exit plan mode");
+        assert!(matches!(error, ToolError::PermissionDenied(message) if message == "user denied"));
+        assert!(session.lock().await.plan_mode);
     }
 }

@@ -1,33 +1,12 @@
-//! Live version-facing identifier pins for the Claude Code 2.1.246 oracle.
+//! Historical version-facing identifiers captured from the Claude Code 2.1.246 oracle.
 //!
-//! Everything below derives from one constant so the advertised version, child
-//! process identity, and WebFetch user agent cannot drift independently.
-
-#[test]
-fn version_const_is_2_1_246() {
-    assert_eq!(traits::CLAUDE_CODE_VERSION, "2.1.246");
-}
-
-#[test]
-fn ai_agent_env_value_is_2_1_246() {
-    let derived = format!(
-        "claude-code_{}_agent",
-        traits::CLAUDE_CODE_VERSION.replace('.', "-")
-    );
-    assert_eq!(derived, "claude-code_2-1-246_agent");
-}
-
-#[test]
-fn web_fetch_user_agent_is_2_1_246() {
-    let derived = format!(
-        "Claude-User (claude-code/{}; +https://support.anthropic.com/)",
-        traits::CLAUDE_CODE_VERSION
-    );
-    assert_eq!(
-        derived,
-        "Claude-User (claude-code/2.1.246; +https://support.anthropic.com/)"
-    );
-}
+//! The LIVE pins moved to `parity_claude_2_1_251.rs` when the parity target
+//! advanced to 2.1.251. This file no longer asserts against the live version
+//! constant; pinning it to a superseded version would make a correct target
+//! bump fail.
+//!
+//! The derivation shape remains version-agnostic: the advertised version, the
+//! child-process identity and the WebFetch user agent must share one source.
 
 #[test]
 fn version_facing_identifiers_share_one_source() {

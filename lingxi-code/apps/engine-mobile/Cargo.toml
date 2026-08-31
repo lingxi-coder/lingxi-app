@@ -5,6 +5,13 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
+[build-dependencies]
+# Build the deterministic compiled-in Local App plugin archive once. Runtime
+# boot consumes the generated archive/descriptor directly and can take the
+# verified-root short circuit without restaging and repacking every file.
+local-apps = { path = "../../local-apps" }
+serde_json.workspace = true
+
 # M8-P11: the mobile composition root. Names the mobile capability set via Cargo
 # edges — the cross-platform tool subset (file/task/web/plan/meta/cron/ui/skill)
 # + the mobile-exclusive tools (camera/voice/share), the mobile skill set, and

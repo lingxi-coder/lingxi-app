@@ -63,6 +63,31 @@ mod tests {
         }
     }
 
+    struct PlanApprovalInner {
+        seen: Arc<std::sync::Mutex<Vec<(String, Value, Option<AutoModePrompt>)>>>,
+        response: PermissionOutcome,
+    }
+
+    #[async_trait]
+    impl PermissionGate for PlanApprovalInner {
+        async fn check(&self, _name: &str, _input: &Value) -> PermissionDecision {
+            PermissionDecision::Allow
+        }
+
+        async fn check_with_context(
+            &self,
+            name: &str,
+            input: &Value,
+            ctx: &PermissionCheckContext,
+        ) -> PermissionOutcome {
+            self.seen
+                .lock()
+                .unwrap()
+                .push((name.to_string(), input.clone(), ctx.auto_mode_prompt));
+            self.response.clone()
+        }
+    }
+
     struct PersistenceRecordingInner {
         enabled: AtomicBool,
         persisted: AtomicUsize,
@@ -1179,6 +1204,44 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn default_resolve_detailed_in_plan_mode_maps_check_in_plan_mode() {
+        let allow = RecordingInner::new(PermissionDecision::Allow);
+        assert_eq!(
+            allow
+                .resolve_detailed_in_plan_mode_or_abort(
+                    "Edit",
+                    &serde_json::json!({}),
+                    &PermissionCheckContext::default(),
+                )
+                .await
+                .expect("default impl never aborts"),
+            PermissionResolution::Allow { rule_source: None }
+        );
+
+        let deny = RecordingInner::new(PermissionDecision::Deny {
+            reason: "via-plan-check".into(),
+        });
+        assert_eq!(
+            deny.resolve_detailed_in_plan_mode_or_abort(
+                "Edit",
+                &serde_json::json!({}),
+                &PermissionCheckContext::default(),
+            )
+            .await
+            .expect("default impl never aborts"),
+            PermissionResolution::Deny {
+                reason: "via-plan-check".into(),
+                source: PermissionDecisionSource::Unspecified,
+                rule_source: None,
+                decision_reason_type: None,
+                decision_reason: None,
+                behavior_ask: false,
+                content_blocks: Vec::new(),
+            }
+        );
+    }
+
     // ── Deny-source substrate: resolve_detailed ──────────────────────────────
 
     #[tokio::test]
@@ -1297,6 +1360,32 @@ mod tests {
             inner.calls(),
             0,
             "resolve_detailed returns Ask, it does not delegate"
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_detailed_in_plan_mode_mutating_ask_is_source_first() {
+        let policy = policy_with(r#"{ "permissions": {} }"#, PermissionMode::Default);
+        let inner = RecordingInner::new(PermissionDecision::Allow);
+        let gate = PolicyPermissionGate::new(policy, inner.clone());
+        assert_eq!(
+            gate.resolve_detailed_in_plan_mode_or_abort(
+                "Edit",
+                &serde_json::json!({ "file_path": "/x.rs" }),
+                &PermissionCheckContext {
+                    tool_use_id: Some("toolu_plan_1".into()),
+                    is_non_interactive_session: true,
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("plan source-first ask never aborts outside auto mode"),
+            PermissionResolution::Ask
+        );
+        assert_eq!(
+            inner.calls(),
+            0,
+            "plan source-first resolution must not delegate to the inner transport"
         );
     }
 
@@ -2708,6 +2797,147 @@ agent's Bash use is clamped to a fixed set of command forms (per-spawn bashComma
     }
 
     #[tokio::test]
+    async fn consumed_auto_prompt_transitions_live_mode_before_returning() {
+        // The engine marks the prompt eligible, then the policy gate owns the
+        // live mode transition. This keeps transport responses from merely
+        // looking like Auto while leaving authorization in Default mode.
+        let policy = PermissionPolicy::from_rules(PermissionMode::Default, Vec::new());
+        let gate = PolicyPermissionGate::new(
+            Arc::new(policy),
+            RecordingInner::new(PermissionDecision::Allow),
+        );
+        let ctx = PermissionCheckContext {
+            auto_mode_prompt: Some(AutoModePrompt::WorkflowBash),
+            ..PermissionCheckContext::default()
+        };
+        let outcome = gate
+            .consume_auto_outcome(
+                PermissionOutcome::AllowAuto {
+                    updated_input: None,
+                },
+                &ctx,
+            )
+            .await;
+        assert!(matches!(outcome, PermissionOutcome::AllowAuto { .. }));
+        assert_eq!(gate.permission_mode().as_deref(), Some("auto"));
+    }
+
+    #[tokio::test]
+    async fn exit_plan_approval_computes_auto_eligibility_and_consumes_it() {
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let inner = Arc::new(PlanApprovalInner {
+            seen: seen.clone(),
+            response: PermissionOutcome::AllowAuto {
+                updated_input: None,
+            },
+        });
+        let gate = PolicyPermissionGate::new(
+            Arc::new(PermissionPolicy::from_rules(
+                PermissionMode::Default,
+                Vec::new(),
+            )),
+            inner,
+        );
+        let outcome = gate
+            .check_exit_plan_mode("1. Ship it", &PermissionCheckContext::default())
+            .await;
+        assert!(matches!(outcome, PermissionOutcome::AllowAuto { .. }));
+        assert_eq!(gate.permission_mode().as_deref(), Some("auto"));
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0].0, "ExitPlanMode");
+        assert_eq!(seen[0].1["plan"], "1. Ship it");
+        assert_eq!(seen[0].2, Some(AutoModePrompt::ExitPlanMode));
+    }
+
+    #[tokio::test]
+    async fn exit_plan_auto_action_is_hidden_when_context_cannot_switch_mode() {
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let inner = Arc::new(PlanApprovalInner {
+            seen: seen.clone(),
+            // Simulate a stale/fabricated Auto response from a transport.  The
+            // policy gate must not consume it because headless plan approval
+            // fails closed before touching the inner transport.
+            response: PermissionOutcome::AllowAuto {
+                updated_input: None,
+            },
+        });
+        let gate = PolicyPermissionGate::new(
+            Arc::new(PermissionPolicy::from_rules(
+                PermissionMode::Default,
+                Vec::new(),
+            )),
+            inner,
+        );
+        let ctx = PermissionCheckContext {
+            is_non_interactive_session: true,
+            ..PermissionCheckContext::default()
+        };
+        let outcome = gate.check_exit_plan_mode("plan", &ctx).await;
+        assert!(matches!(
+            outcome,
+            PermissionOutcome::Deny { ref reason }
+                if reason == &crate::headless_gate::headless_deny_message("ExitPlanMode")
+        ));
+        assert_eq!(gate.permission_mode().as_deref(), Some("default"));
+        assert!(seen.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn consumed_auto_prompt_rechecks_disabled_mode_and_rejects_stale_response() {
+        let policy = PermissionPolicy::from_rules(PermissionMode::Default, Vec::new());
+        let gate = PolicyPermissionGate::new(
+            Arc::new(policy),
+            RecordingInner::new(PermissionDecision::Allow),
+        );
+        let ctx = PermissionCheckContext {
+            auto_mode_prompt: Some(AutoModePrompt::WorkflowBash),
+            ..PermissionCheckContext::default()
+        };
+
+        // Simulate an administrator update winning immediately before the
+        // user response is consumed. The second availability check must deny
+        // the stale selection and leave the live mode at Default.
+        gate.update_auto_mode_disabled_from_settings(true);
+        let outcome = gate
+            .consume_auto_outcome(
+                PermissionOutcome::AllowAuto {
+                    updated_input: None,
+                },
+                &ctx,
+            )
+            .await;
+        assert!(matches!(outcome, PermissionOutcome::Deny { .. }));
+        assert_eq!(gate.permission_mode().as_deref(), Some("default"));
+    }
+
+    #[tokio::test]
+    async fn ineligible_auto_response_degrades_to_one_shot_without_switching_mode() {
+        let policy = PermissionPolicy::from_rules(PermissionMode::Default, Vec::new());
+        let gate = PolicyPermissionGate::new(
+            Arc::new(policy),
+            RecordingInner::new(PermissionDecision::Allow),
+        );
+        let outcome = gate
+            .consume_auto_outcome(
+                PermissionOutcome::AllowAuto {
+                    updated_input: Some(json!({"command": "echo hi"})),
+                },
+                &PermissionCheckContext::default(),
+            )
+            .await;
+        assert!(matches!(
+            outcome,
+            PermissionOutcome::Allow {
+                updated_input: Some(_),
+                permission_updates,
+                ..
+            } if permission_updates.is_empty()
+        ));
+        assert_eq!(gate.permission_mode().as_deref(), Some("default"));
+    }
+
+    #[tokio::test]
     async fn set_permission_mode_rejects_auto_on_unsupported_live_model() {
         // Killswitch off, breaker not tripped, but the LIVE session model is on
         // the `dUe` shared exclusion list → `One()` returns "model" (`Nle` rejects
@@ -3276,6 +3506,30 @@ agent's Bash use is clamped to a fixed set of command forms (per-spawn bashComma
         assert!(matches!(after, PermissionResult::Ask { .. }));
     }
 
+    #[test]
+    fn apply_permission_update_add_directories_rejects_nul_atomically() {
+        let policy = policy_with_roots(r#"{ "permissions": {} }"#, PermissionMode::AcceptEdits);
+        let gate =
+            PolicyPermissionGate::new(policy, RecordingInner::new(PermissionDecision::Allow));
+        let outside = json!({"file_path":"/extra/file.txt"});
+
+        // A valid entry next to a NUL-containing entry must not partially
+        // update the live session. The oracle rejects this union member before
+        // reducing any of its array entries.
+        gate.apply_permission_update(&json!({
+            "type": "addDirectories",
+            "directories": ["/extra", "bad\u{0000}path"],
+            "destination": "session"
+        }));
+        let (_, result) = gate.effective_authorize("Edit", &outside);
+        assert!(matches!(result, PermissionResult::Ask { .. }));
+
+        assert_eq!(
+            directory_update_null_byte_reason("addDirectories", "bad\0path"),
+            "addDirectories carries a directory containing a null byte: bad\0path"
+        );
+    }
+
     #[tokio::test]
     async fn per_call_mode_override_still_enforces_live_rules() {
         let policy = Arc::new(
@@ -3380,5 +3634,54 @@ agent's Bash use is clamped to a fixed set of command forms (per-spawn bashComma
             PermissionDecision::Allow,
             "invalid updates must not partially replace a valid rule bucket"
         );
+    }
+
+    #[tokio::test]
+    async fn managed_auto_disable_evicts_auto_and_clears_mcp_auto_pin() {
+        let policy = Arc::new(PermissionPolicy::from_rules(
+            PermissionMode::Auto,
+            Vec::new(),
+        ));
+        let gate =
+            PolicyPermissionGate::new(policy, RecordingInner::new(PermissionDecision::Allow));
+        gate.set_mcp_permission_mode_override("context7", Some("auto"))
+            .await
+            .expect("auto pin is initially available");
+        assert_eq!(
+            gate.effective_mode_for_tool("mcp__context7__lookup"),
+            PermissionMode::Auto
+        );
+
+        gate.update_auto_mode_disabled_from_settings(true);
+        assert_eq!(gate.permission_mode().as_deref(), Some("default"));
+        assert_eq!(
+            gate.effective_mode_for_tool("mcp__context7__lookup"),
+            PermissionMode::Default,
+            "managed disable must not leave a server-specific Auto escape hatch"
+        );
+        assert_eq!(
+            gate.set_permission_mode("auto").await.unwrap_err(),
+            "Cannot set permission mode to auto: auto mode disabled by settings"
+        );
+
+        // Clearing the managed setting re-opens availability for a later
+        // explicit request, but must not silently restore the old Auto mode.
+        gate.update_auto_mode_disabled_from_settings(false);
+        assert_eq!(gate.permission_mode().as_deref(), Some("default"));
+        gate.set_permission_mode("auto")
+            .await
+            .expect("an explicit request may re-enter after settings clear");
+    }
+
+    #[tokio::test]
+    async fn managed_auto_disable_does_not_change_non_auto_mode() {
+        let policy = Arc::new(PermissionPolicy::from_rules(
+            PermissionMode::Plan,
+            Vec::new(),
+        ));
+        let gate =
+            PolicyPermissionGate::new(policy, RecordingInner::new(PermissionDecision::Allow));
+        gate.update_auto_mode_disabled_from_settings(true);
+        assert_eq!(gate.permission_mode().as_deref(), Some("plan"));
     }
 }

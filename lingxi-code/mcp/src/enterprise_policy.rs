@@ -2156,6 +2156,8 @@ mod tests {
             disabled: false,
             timeout_ms: None,
             always_load: false,
+            tools: Vec::new(),
+            tool_permissions: std::collections::BTreeMap::new(),
             config_error: None,
         }
     }

@@ -13,7 +13,7 @@
 //! case: loads must fail closed with explicit "clear apps/ and recreate"
 //! guidance, instead of silently laundering an old store into the new schema.
 //!
-//! Positive coverage comes from a fresh v2 store driven through the real
+//! Positive coverage comes from a fresh v3 store driven through the real
 //! service path at test time. That store must load to the expected in-memory
 //! states and re-persist byte-for-byte through the real writers.
 
@@ -23,7 +23,7 @@ use local_apps::{
     save_manifest, save_permissions, AppDependencyRecord, AppDependencySnapshot,
     AppDependencyState, AppErrorCode, AppEventObserver, AppLayout, AppManifest, AppPermissions,
     AppRecord, AppRuntimeMode, AppRuntimeProfile, AppRuntimeProfileBinding, AppRuntimeRecord,
-    AppRuntimeState, AppService, AppState, AppSurface, AppWorkflowState, NoopAppEventObserver,
+    AppRuntimeState, AppService, AppState, AppSurface, AppTemplateOrigin, NoopAppEventObserver,
     APPS_SCHEMA_VERSION,
 };
 use std::path::{Path, PathBuf};
@@ -77,6 +77,12 @@ fn save_profiled_contract(root: &Path, app: &AppState) {
         contract_sha256,
     });
     manifest.dependency_snapshot = Some(snapshot.clone());
+    manifest.template_origin = Some(AppTemplateOrigin {
+        plugin_id: AppTemplateOrigin::BUILTIN_PLUGIN_ID.into(),
+        plugin_version: "builtin".into(),
+        template_id: "react-dom-r1".into(),
+        template_sha256: "a".repeat(64),
+    });
     let layout = AppLayout::new(root, &app.record.id).expect("profiled layout");
     save_manifest(&layout, &manifest).expect("save profiled manifest");
     storage::save_dependency_record(
@@ -170,10 +176,7 @@ async fn drive_canonical_store(root: &Path) {
         now = target;
     };
 
-    // ── aaaa1111: the host stamps it ready after a successful build… ────
-    advance_to(T0 + 100);
-    service.mark_ready("aaaa1111").await.expect("mark ready");
-    // …the distribution picks a runtime mode…
+    // ── aaaa1111: the distribution picks a runtime mode…
     advance_to(T0 + 200);
     service
         .set_runtime_mode("aaaa1111", AppRuntimeMode::StaticExport)
@@ -218,8 +221,7 @@ fn expected_states() -> Vec<AppState> {
             git_enabled: true,
             scaffolded: true,
             created_at_ms: T0,
-            updated_at_ms: T0 + 100,
-            workflow_state: AppWorkflowState::Ready,
+            updated_at_ms: T0,
             conversation_id: Some("conv-fixture-1".to_string()),
             init_session_id: None,
             workspace_rel: "apps/aaaa1111/workspace".to_string(),
@@ -246,7 +248,6 @@ fn expected_states() -> Vec<AppState> {
             scaffolded: true,
             created_at_ms: T0,
             updated_at_ms: T0,
-            workflow_state: AppWorkflowState::Draft,
             conversation_id: None,
             init_session_id: None,
             workspace_rel: "apps/bbbb2222/workspace".to_string(),
@@ -311,7 +312,7 @@ fn walk_files(root: &Path) -> Vec<PathBuf> {
 }
 
 #[test]
-fn checked_in_v2_profiled_manifest_round_trips_with_runtime_profile_and_snapshot() {
+fn checked_in_v2_profiled_manifest_is_rejected_without_migration() {
     let bytes =
         std::fs::read(profiled_manifest_fixture()).expect("read v2 profiled manifest fixture");
     let manifest: AppManifest =
@@ -345,8 +346,8 @@ fn checked_in_v2_profiled_manifest_round_trips_with_runtime_profile_and_snapshot
         bytes,
         "the checked-in v2 fixture must stay byte-for-byte stable"
     );
-    assert_eq!(manifest.runtime_contract_hash().unwrap().len(), 64);
-    assert_eq!(manifest.dependency_snapshot_hash().unwrap().len(), 64);
+    assert!(manifest.runtime_contract_hash().is_err());
+    assert!(manifest.dependency_snapshot_hash().is_err());
 }
 
 /// Negative direction: the checked-in v1 tree must fail closed with reset
@@ -364,7 +365,7 @@ fn fixture_v1_store_is_rejected_with_reset_guidance() {
     assert!(message.contains("清除应用开发数据"), "{message}");
 }
 
-/// Positive direction: a fresh v2 store must round-trip through the real load
+/// Positive direction: a fresh v3 store must round-trip through the real load
 /// and write paths without byte drift.
 #[tokio::test]
 async fn fresh_v2_store_round_trips_through_real_writers() {

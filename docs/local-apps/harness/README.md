@@ -19,7 +19,7 @@
 每一条都必须带着「为什么它红」进 baseline，否则后面任何一次「全绿」都无法区分
 「我没弄坏东西」和「我把别人的红一起洗掉了」。
 
-### 1. `local_app_runtime_profiles::tests::published_r1_contract_digests_are_immutable`
+### 1. `local_app_runtime_profiles::tests::published_r1_contract_digests_are_immutable`（已在发布前纠正）
 
 phaser-2d 实际算出 `7fd39e60…`，钉住的是 `38b5fed9…`。
 
@@ -28,10 +28,12 @@ phaser-2d 实际算出 `7fd39e60…`，钉住的是 `38b5fed9…`。
 和 profile 模块自 `391d89fff`（写下这个 pin 的那个 commit，2026-08-28）以来都没有再动过。
 连跑两次结果一致，所以是确定性的错值，不是 flake。
 
-⚠️ **不要「修」它。** 它守的是 Local App runtime contract 的不可变性，正是 Phase 1
-packer 要做 deterministic digest 的同一个面。把它改成实际值 = 让门去追认现实，
-和 `BLESS=1` 重新基线化 contract_index 是同一个失败形状。要动它，得先说清楚
-`391d89fff` 当时打算钉住的是什么。
+Phase 2 review 确认 Local App Plugin 尚未发布，因此旧值从未成为兼容承诺。这里做了
+一次明确的 **pre-release golden correction**：Phaser r1 从 `38b5fed9…` 修正为
+`7fd39e60…`，Babylon r1 从 `466838f2…` 修正为 `82827767…`，并把 catalog、Rust
+golden 与真实生产 contract 三向锁定。兼容性从这组新 r1 值开始；发布后不得再用同样
+方式追认漂移，任何变化都必须按版本化 contract 处理。Phase 2 gate 现在真实运行这组
+Rust contract 测试，并逐 family 注入错误 hash，证明五个 catalog 项都能把门变红。
 
 ### 2. `every_tool_with_output_calls_truncate_or_opts_out`
 

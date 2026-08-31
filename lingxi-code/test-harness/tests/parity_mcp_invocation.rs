@@ -44,6 +44,8 @@ fn mock_config() -> McpServerConfig {
         disabled: false,
         timeout_ms: None,
         always_load: false,
+        tools: vec![],
+        tool_permissions: Default::default(),
         config_error: None,
     }
 }

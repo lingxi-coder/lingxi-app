@@ -55,6 +55,30 @@ pub const LOCAL_APP_TOOLS: &[(&str, &str, bool)] = &[
     ("LocalAppList", "list", true),
     ("LocalAppGet", "get", true),
     ("LocalAppRuntimeProfiles", "runtime_profiles", true),
+    ("LocalAppTemplateCatalog", "template_catalog", true),
+    (
+        "LocalAppValidateTemplateSelection",
+        "validate_template_selection",
+        false,
+    ),
+    (
+        "LocalAppResolveTemplateSelection",
+        "resolve_template_selection",
+        true,
+    ),
+    ("LocalAppStageCreate", "stage_create", false),
+    (
+        "LocalAppValidateMcpProposal",
+        "validate_mcp_proposal",
+        false,
+    ),
+    ("LocalAppApproveMcpProposal", "approve_mcp_proposal", false),
+    ("LocalAppQaMcpCandidate", "qa_mcp_candidate", false),
+    (
+        "LocalAppPromoteMcpCandidate",
+        "promote_mcp_candidate",
+        false,
+    ),
     ("LocalAppLogs", "read_logs", true),
     ("LocalAppQueryData", "query_data", true),
     ("LocalAppCheckpointList", "list_checkpoints", true),
@@ -160,12 +184,12 @@ pub fn local_app_builtin_tools(
     LOCAL_APP_TOOLS
         .iter()
         .filter_map(|&(name, operation, read_only)| {
-            let entry = catalog.iter().find(|tool| tool.tool_name == operation)?;
+            let entry = catalog.iter().find(|tool| tool.tool_name() == operation)?;
             Some(Arc::new(LocalAppTool::new(
                 name,
                 operation,
-                entry.description.clone(),
-                entry.input_schema.clone(),
+                entry.description().to_string(),
+                entry.input_schema().clone(),
                 read_only,
                 session_app_id.clone(),
                 // Carry the catalog's OWN loading decision. Dropping it made
@@ -200,6 +224,8 @@ impl LocalAppTool {
                 | "LocalAppCheckpointList"
                 | "LocalAppBackgroundList"
                 | "LocalAppBackgroundStatus"
+                | "LocalAppResolveTemplateSelection"
+                | "LocalAppStageCreate"
                 | "LocalAppBuild"
                 | "LocalAppRuntime"
                 // Allow-by-default so the shell conversation's ONE way out
@@ -628,8 +654,7 @@ mod tests {
     #[test]
     fn every_declared_tool_maps_to_a_real_provider_operation() {
         let catalog = LocalAppsMcpTransport::host_tool_catalog();
-        let ops: std::collections::BTreeSet<&str> =
-            catalog.iter().map(|t| t.tool_name.as_str()).collect();
+        let ops: std::collections::BTreeSet<&str> = catalog.iter().map(|t| t.tool_name()).collect();
         for &(name, operation, _) in LOCAL_APP_TOOLS {
             assert!(
                 ops.contains(operation),
@@ -690,6 +715,9 @@ mod tests {
                 name,
                 "LocalAppList"
                     | "LocalAppGet"
+                    | "LocalAppTemplateCatalog"
+                    | "LocalAppResolveTemplateSelection"
+                    | "LocalAppStageCreate"
                     | "LocalAppLogs"
                     | "LocalAppCheckpointList"
                     | "LocalAppBackgroundList"

@@ -101,7 +101,7 @@ export function validatePermissionResponse(value: unknown): PermissionResponseDt
   if (value === undefined) return { type: 'allow_once' };
   const input = object(value);
   exactKeys(input, ['type']);
-  if (input['type'] !== 'allow_once' && input['type'] !== 'allow_always' && input['type'] !== 'deny') {
+  if (input['type'] !== 'allow_once' && input['type'] !== 'allow_always' && input['type'] !== 'allow_auto' && input['type'] !== 'deny') {
     throw new Error('invalid permission response');
   }
   return { type: input['type'] };

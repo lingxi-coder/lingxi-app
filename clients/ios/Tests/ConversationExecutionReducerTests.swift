@@ -44,6 +44,39 @@ import SwiftUI
             XCTAssertNil(bypass?.disabledReason)
         }
 
+        func testSuppressedPermissionRequestPropagatesToPendingModel() {
+            let request = PermissionRequest(
+                requestId: 123,
+                kind: .toolUseConfirm(
+                    toolName: "Bash",
+                    toolInputJson: #"{"command":"pwd"}"#,
+                    defaultAllow: false
+                ),
+                worker: nil,
+                owner: nil,
+                suppressAlwaysAllowRule: true
+            )
+
+            let pending = PendingPermission(request: request)
+
+            XCTAssertTrue(pending.suppressAlwaysAllowRule)
+        }
+
+        func testAutoModePromptPropagatesToPendingModel() {
+            let request = PermissionRequest(
+                requestId: 124,
+                kind: .exitPlanMode(plan: "step 1"),
+                worker: nil,
+                owner: nil,
+                suppressAlwaysAllowRule: false,
+                autoModePrompt: .exitPlanMode
+            )
+
+            let pending = PendingPermission(request: request)
+
+            XCTAssertEqual(pending.autoModePrompt, .exitPlanMode)
+        }
+
         func testBypassWarningIsSkippedOnlyAfterUserSuppressesIt() {
             XCTAssertTrue(ConversationControlsSheet.requiresRiskConfirmation(
                 for: "bypassPermissions",
@@ -630,7 +663,8 @@ import SwiftUI
                     defaultAllow: false
                 ),
                 worker: nil,
-                owner: nil
+                owner: nil,
+                suppressAlwaysAllowRule: false
             ))
             source.setCommandSubmitterForTesting { command in
                 if case .cancel = command { throw CancelFailure.rejected }
@@ -658,7 +692,8 @@ import SwiftUI
                     defaultAllow: false
                 ),
                 worker: WorkerInfoDto(name: "design", color: "design", team: nil),
-                owner: nil
+                owner: nil,
+                suppressAlwaysAllowRule: false
             ))
             var releaseCancellation: CheckedContinuation<Void, Never>?
             source.setCommandSubmitterForTesting { command in
@@ -691,7 +726,8 @@ import SwiftUI
                     defaultAllow: false
                 ),
                 worker: WorkerInfoDto(name: "review", color: "review", team: nil),
-                owner: nil
+                owner: nil,
+                suppressAlwaysAllowRule: false
             ))
             source.beginTurnForTesting(turnId: 48, sessionId: "session-a")
             source.model.pendingPermissions = [permission]
@@ -712,7 +748,8 @@ import SwiftUI
                     defaultAllow: false
                 ),
                 worker: WorkerInfoDto(name: "design", color: "design", team: nil),
-                owner: nil
+                owner: nil,
+                suppressAlwaysAllowRule: false
             ))
 
             let resumedSource = makeSource()
@@ -822,7 +859,8 @@ import SwiftUI
                     defaultAllow: false
                 ),
                 worker: WorkerInfoDto(name: "design", color: "design", team: nil),
-                owner: nil
+                owner: nil,
+                suppressAlwaysAllowRule: false
             )
 
             await EnginePermissionSink(source: source).onRequest(request: request)
@@ -841,7 +879,8 @@ import SwiftUI
                     defaultAllow: false
                 ),
                 worker: nil,
-                owner: nil
+                owner: nil,
+                suppressAlwaysAllowRule: false
             ))
             let second = PendingPermission(request: PermissionRequest(
                 requestId: 202,
@@ -851,7 +890,8 @@ import SwiftUI
                     defaultAllow: false
                 ),
                 worker: nil,
-                owner: nil
+                owner: nil,
+                suppressAlwaysAllowRule: false
             ))
             source.model.pendingPermissions = [first, second]
 
@@ -875,7 +915,8 @@ import SwiftUI
                     defaultAllow: false
                 ),
                 worker: WorkerInfoDto(name: "design", color: "design", team: nil),
-                owner: nil
+                owner: nil,
+                suppressAlwaysAllowRule: false
             ))
             source.setCommandSubmitterForTesting { _ in
                 throw SubmitFailure.rejected
@@ -890,6 +931,23 @@ import SwiftUI
             XCTAssertEqual(source.model.error?.kind, .host)
         }
 
+        func testAllowAutoPermissionResponseSubmitsApproveCommand() async {
+            let source = makeSource()
+            var submitted: [ClientCommand] = []
+            source.setCommandSubmitterForTesting { command in
+                await MainActor.run { submitted.append(command) }
+            }
+
+            source.approvePermission(55, .allowAuto)
+            await waitForSubmittedCommands(1, commands: submitted)
+
+            guard case let .approvePermission(requestId, response)? = submitted.first else {
+                return XCTFail("expected an approve permission command")
+            }
+            XCTAssertEqual(requestId, 55)
+            XCTAssertEqual(response, .allowAuto)
+        }
+
         func testTerminalTurnErrorKeepsBackgroundPermissionQueued() {
             let source = makeSource()
             let permission = PendingPermission(request: PermissionRequest(
@@ -900,7 +958,8 @@ import SwiftUI
                     defaultAllow: false
                 ),
                 worker: WorkerInfoDto(name: "review", color: "review", team: nil),
-                owner: nil
+                owner: nil,
+                suppressAlwaysAllowRule: false
             ))
             source.beginTurnForTesting(turnId: 49, sessionId: "session-a")
             source.model.pendingPermissions = [permission]
@@ -950,7 +1009,8 @@ import SwiftUI
                     defaultAllow: false
                 ),
                 worker: WorkerInfoDto(name: "design", color: "design", team: nil),
-                owner: nil
+                owner: nil,
+                suppressAlwaysAllowRule: false
             ))]
 
             // `DispatchQueue.main.async` retries need an actual run-loop turn;

@@ -60,8 +60,8 @@ pub const DEFAULT_ALLOW_LABELS: [&str; 17] = [
     r"Browser Trusted Navigation",
 ];
 
-/// Labels of the 67 shipped `soft_deny` rules.
-pub const DEFAULT_SOFT_DENY_LABELS: [&str; 67] = [
+/// Labels of the 68 shipped `soft_deny` rules.
+pub const DEFAULT_SOFT_DENY_LABELS: [&str; 68] = [
     r"Git Destructive",
     r"Code That Leaks When Run",
     r"Code from External",
@@ -103,6 +103,7 @@ pub const DEFAULT_SOFT_DENY_LABELS: [&str; 67] = [
     r"Out-of-Place Publication",
     r"Sensitive-Source Provenance",
     r"Excess Sensitive Detail",
+    r"Unrequested Artifact Publish",
     r"Live-Shared Artifact Sensitive Delta",
     r"Sandbox Network Callback",
     r"Create Public Surface",
@@ -139,4 +140,32 @@ pub const DEFAULT_HARD_DENY_LABELS: [&str; 1] = [r"Data Exfiltration"];
 pub fn default_rule_label(rule: &str) -> &str {
     let cut = rule.find([':', '[']).unwrap_or(rule.len());
     rule[..cut].trim_end()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{default_rule_label, DEFAULT_SOFT_DENY_LABELS};
+
+    #[test]
+    fn soft_deny_labels_include_2_1_251_artifact_publish_in_oracle_order() {
+        assert_eq!(DEFAULT_SOFT_DENY_LABELS.len(), 68);
+        let excess = DEFAULT_SOFT_DENY_LABELS
+            .iter()
+            .position(|label| *label == "Excess Sensitive Detail")
+            .expect("Excess Sensitive Detail label");
+        assert_eq!(
+            DEFAULT_SOFT_DENY_LABELS[excess + 1],
+            "Unrequested Artifact Publish"
+        );
+        assert_eq!(
+            DEFAULT_SOFT_DENY_LABELS[excess + 2],
+            "Live-Shared Artifact Sensitive Delta"
+        );
+        assert_eq!(
+            default_rule_label(
+                "Unrequested Artifact Publish [named+specifics — **must name:** the artifact going public]: details"
+            ),
+            "Unrequested Artifact Publish"
+        );
+    }
 }

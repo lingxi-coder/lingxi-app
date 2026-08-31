@@ -7,16 +7,17 @@ use traits::McpToolDto;
 /// whose content mirrors the tool's description.
 #[must_use]
 pub fn skill_from_mcp_tool(tool: &McpToolDto) -> Skill {
+    let description = tool.description().to_string();
     Skill {
         name: tool.full_name.clone(),
-        description: tool.description.clone(),
+        description: description.clone(),
         frontmatter: SkillFrontmatter {
             name: tool.full_name.clone(),
-            description: tool.description.clone(),
-            triggers: vec![tool.tool_name.to_lowercase()],
+            description: description.clone(),
+            triggers: vec![tool.tool_name().to_lowercase()],
             ..Default::default()
         },
-        content: tool.description.clone(),
+        content: description,
         source: SkillSource::Mcp {},
         loaded_from: LoadedFrom::Mcp,
         plugin_id: None,

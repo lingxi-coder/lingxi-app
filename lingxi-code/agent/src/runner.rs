@@ -1726,6 +1726,13 @@ async fn run_subagent_loop(
                         // mutations while reads stay frictionless). `None` = inherit
                         // the gate's live/boot mode.
                         mode_override: ctx.permission_mode_override.clone(),
+                        // Only the dedicated workflow-subagent definition has
+                        // this trusted provenance. All other agents remain
+                        // fail-closed for source-restricted prompt actions.
+                        request_source: (ctx.agent_definition.agent_type == "workflow-subagent")
+                            .then_some(
+                                traits::permission_gate::PermissionRequestSource::WorkflowAgent,
+                            ),
                         // Replay the fork-time command denies for every tool this subagent
                         // dispatches (claude `freezeCommandDenies`).
                         frozen_command_denies: ctx.frozen_command_denies.clone(),

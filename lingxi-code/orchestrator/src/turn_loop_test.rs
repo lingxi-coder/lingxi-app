@@ -443,6 +443,7 @@ mod read_file_state_tests {
     struct RecordingUpdateGate {
         applied: std::sync::Mutex<Vec<serde_json::Value>>,
         persisted: std::sync::Mutex<Vec<serde_json::Value>>,
+        mode_sets: std::sync::Mutex<Vec<String>>,
     }
 
     #[async_trait]
@@ -467,6 +468,14 @@ mod read_file_state_tests {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .extend_from_slice(updates);
+        }
+
+        async fn set_permission_mode(&self, mode: &str) -> Result<(), String> {
+            self.mode_sets
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(mode.to_string());
+            Ok(())
         }
     }
 
@@ -620,6 +629,51 @@ mod read_file_state_tests {
                 .unwrap_or_else(std::sync::PoisonError::into_inner),
             vec![update]
         );
+    }
+
+    #[tokio::test]
+    async fn orphaned_permission_allow_auto_switches_mode_and_executes() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        tokio::fs::write(dir.path().join("real.txt"), "RECOVERED")
+            .await
+            .unwrap();
+        let tool = Arc::new(StubFileTool {
+            name: "Read",
+            cwd: dir.path().to_path_buf(),
+        });
+        let gate = Arc::new(RecordingUpdateGate::default());
+        let orch = orch_with_tools_and_gate(dir.path().to_path_buf(), vec![tool], gate.clone());
+        let tool_use_id = ToolUseId::new();
+        orch.session()
+            .lock()
+            .await
+            .history
+            .push(assistant_with_tool_use(
+                &tool_use_id,
+                "Read",
+                json!({"file_path":"missing.txt"}),
+            ));
+
+        assert!(orch
+            .run_orphaned_permission(
+                &tool_use_id,
+                traits::permission_gate::PermissionOutcome::AllowAuto {
+                    updated_input: Some(json!({"file_path":"real.txt"})),
+                },
+            )
+            .await
+            .expect("recovery"));
+        assert_eq!(
+            *gate
+                .mode_sets
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            vec!["auto".to_string()],
+            "the session-owned orphan recovery path must perform the live auto-mode transition"
+        );
+        let (content, is_error) = last_tool_result(&orch.session().lock().await.history);
+        assert!(!is_error);
+        assert!(content.contains("RECOVERED"), "got {content}");
     }
 
     #[tokio::test]
@@ -3152,7 +3206,7 @@ mod pre_tool_hook_tests {
     /// Permission gate that returns a DISTINGUISHABLE denial from each entry
     /// point, so a test can assert WHICH method the turn loop routed to:
     /// `check` → "via-check", `check_after_hook_allow` → "via-hook-allow",
-    /// `check_in_plan_mode` → "via-plan-mode".
+    /// `resolve_detailed_in_plan_mode_or_abort` → "via-plan-mode".
     /// Gate that ALLOWS every call on every path (used by the #37 defer tests
     /// where an IGNORED defer must fall through to a gate that lets the tool
     /// run).
@@ -3188,10 +3242,21 @@ mod pre_tool_hook_tests {
                 reason: "via-hook-allow".into(),
             }
         }
-        async fn check_in_plan_mode(&self, _t: &str, _i: &serde_json::Value) -> PermissionDecision {
-            PermissionDecision::Deny {
+        async fn resolve_detailed_in_plan_mode_or_abort(
+            &self,
+            _t: &str,
+            _i: &serde_json::Value,
+            _ctx: &traits::permission_gate::PermissionCheckContext,
+        ) -> Result<PermissionResolution, traits::permission_gate::PermissionAbort> {
+            Ok(PermissionResolution::Deny {
                 reason: "via-plan-mode".into(),
-            }
+                source: PermissionDecisionSource::Unspecified,
+                rule_source: None,
+                decision_reason_type: None,
+                decision_reason: None,
+                behavior_ask: false,
+                content_blocks: Vec::new(),
+            })
         }
     }
 
@@ -3217,6 +3282,40 @@ mod pre_tool_hook_tests {
         }
         async fn resolve_detailed(&self, _t: &str, _i: &serde_json::Value) -> PermissionResolution {
             PermissionResolution::Ask
+        }
+    }
+
+    struct PlanAskProbeGate {
+        saw_ctx: std::sync::Mutex<Option<traits::permission_gate::PermissionCheckContext>>,
+        transport_calls: std::sync::atomic::AtomicUsize,
+        transport_outcome: traits::permission_gate::PermissionOutcome,
+    }
+
+    #[async_trait]
+    impl PermissionGate for PlanAskProbeGate {
+        async fn check(&self, _t: &str, _i: &serde_json::Value) -> PermissionDecision {
+            panic!("plan-mode path must not call legacy check()")
+        }
+
+        async fn check_with_context(
+            &self,
+            _name: &str,
+            _input: &serde_json::Value,
+            _ctx: &traits::permission_gate::PermissionCheckContext,
+        ) -> traits::permission_gate::PermissionOutcome {
+            self.transport_calls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.transport_outcome.clone()
+        }
+
+        async fn resolve_detailed_in_plan_mode_or_abort(
+            &self,
+            _name: &str,
+            _input: &serde_json::Value,
+            ctx: &traits::permission_gate::PermissionCheckContext,
+        ) -> Result<PermissionResolution, traits::permission_gate::PermissionAbort> {
+            *self.saw_ctx.lock().unwrap() = Some(ctx.clone());
+            Ok(PermissionResolution::Ask)
         }
     }
 
@@ -4573,10 +4672,12 @@ mod pre_tool_hook_tests {
     // ----- HOOK.4: plan-mode dynamic gate routing --------------------------
 
     #[tokio::test]
-    async fn hook4_plan_mode_routes_to_check_in_plan_mode() {
+    async fn hook4_plan_mode_routes_to_resolve_detailed_in_plan_mode() {
         // With the session in plan mode, the gate is consulted via
-        // check_in_plan_mode (the dynamic Plan-mode path) — NOT the boot-mode
-        // check — so a runtime EnterPlanMode activates the mutation backstop.
+        // resolve_detailed_in_plan_mode_or_abort (the dynamic source-first
+        // Plan-mode path) — NOT the boot-mode check — so a runtime
+        // EnterPlanMode activates the mutation backstop without skipping
+        // PermissionRequest ordering.
         let orch = orch_with(
             pre_hook_executor(HookResponse::default()),
             Arc::new(RouteProbeGate),
@@ -4590,7 +4691,7 @@ mod pre_tool_hook_tests {
         assert!(is_error);
         assert!(
             content.contains("via-plan-mode"),
-            "plan mode must route to check_in_plan_mode, got: {content}"
+            "plan mode must route to the source-first plan seam, got: {content}"
         );
     }
 
@@ -4598,8 +4699,8 @@ mod pre_tool_hook_tests {
     async fn hook4_plan_mode_binds_over_a_hook_allow() {
         // Plan mode binds OVER a PreToolUse hook 'allow': even when a hook
         // approved the call, an active plan mode still routes through
-        // check_in_plan_mode (a hook cannot push a mutation through during
-        // planning — same principle as HOOK.3 issue 1's deny-rule binding).
+        // the source-first plan seam (a hook cannot push a mutation through
+        // during planning before the plan gate has a chance to ask/deny).
         let resp = HookResponse {
             decision: Some(HookDecision::Approve),
             ..HookResponse::default()
@@ -4614,6 +4715,89 @@ mod pre_tool_hook_tests {
         assert!(
             content.contains("via-plan-mode"),
             "plan mode must override the hook-allow path, got: {content}"
+        );
+    }
+
+    #[tokio::test]
+    async fn hook4_plan_mode_headless_ask_fails_closed_without_transport() {
+        let gate = Arc::new(PlanAskProbeGate {
+            saw_ctx: std::sync::Mutex::new(None),
+            transport_calls: std::sync::atomic::AtomicUsize::new(0),
+            transport_outcome: traits::permission_gate::PermissionOutcome::Allow {
+                updated_input: None,
+                permission_updates: Vec::new(),
+                decision_classification: None,
+            },
+        });
+        let orch = orch_with(
+            pre_hook_executor(HookResponse::default()),
+            gate.clone(),
+            vec![],
+        );
+        orch.session.lock().await.plan_mode = true;
+
+        let (results, _, _, _) = dispatch_tool_uses_tracked(&orch, &uses(), None)
+            .await
+            .unwrap();
+        let (content, is_error) = tool_result(&results[0]);
+        assert!(is_error);
+        assert_eq!(
+            content,
+            permission::headless_gate::headless_deny_message("Echo")
+        );
+        let seen = gate
+            .saw_ctx
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("plan seam must receive context");
+        assert!(seen.is_non_interactive_session);
+        assert!(
+            seen.tool_use_id.is_some(),
+            "turn loop must thread the real tool_use_id into the plan seam"
+        );
+        assert_eq!(
+            gate.transport_calls
+                .load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "headless plan ask must fail closed before consulting the prompt transport"
+        );
+    }
+
+    #[tokio::test]
+    async fn hook4_plan_mode_permission_request_allow_rescues_headless_ask() {
+        let gate = Arc::new(PlanAskProbeGate {
+            saw_ctx: std::sync::Mutex::new(None),
+            transport_calls: std::sync::atomic::AtomicUsize::new(0),
+            transport_outcome: traits::permission_gate::PermissionOutcome::Deny {
+                reason: "transport should not be consulted".into(),
+            },
+        });
+        let resp = HookResponse {
+            decision: Some(HookDecision::Approve),
+            ..HookResponse::default()
+        };
+        let orch = orch_with(
+            event_hook_executor(HookEventType::PermissionRequest, resp),
+            gate.clone(),
+            vec![],
+        );
+        orch.session.lock().await.plan_mode = true;
+
+        let (results, _, _, _) = dispatch_tool_uses_tracked(&orch, &uses(), None)
+            .await
+            .unwrap();
+        let (content, is_error) = tool_result(&results[0]);
+        assert!(
+            !is_error,
+            "PermissionRequest allow must rescue the plan ask"
+        );
+        assert!(content.contains("ECHOED-OUTPUT"));
+        assert_eq!(
+            gate.transport_calls
+                .load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "hook rescue should resolve before the prompt transport is consulted"
         );
     }
 

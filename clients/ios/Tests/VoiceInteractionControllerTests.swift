@@ -474,6 +474,31 @@ final class VoiceInteractionControllerTests: XCTestCase {
         XCTAssertEqual(session.transcribeCalls, 0)
     }
 
+    func testUndeterminedPermissionsAreRequestedBeforeDictationStarts() async {
+        let session = ControllerVoiceSession(transcript: "permission granted")
+        let readiness = MutableVoiceReadiness(.permissionUndetermined)
+        var permissionRequestCount = 0
+        let controller = makeController(
+            sessions: [session],
+            readinessProvider: { readiness.value },
+            permissionRequester: {
+                permissionRequestCount += 1
+                readiness.value = .ready
+            }
+        )
+
+        controller.startDictation { _ in }
+        XCTAssertEqual(controller.phase, .requestingPermission)
+        XCTAssertEqual(session.transcribeCalls, 0)
+
+        await settle()
+
+        XCTAssertEqual(permissionRequestCount, 1)
+        XCTAssertEqual(controller.phase, .listening)
+        XCTAssertEqual(session.transcribeCalls, 1)
+        controller.close()
+    }
+
     func testBackgroundCancelsCaptureAndLateResultCannotResumeFlow() async {
         let session = ControllerVoiceSession(transcript: "late", ignoresCancellation: true)
         let source = ControllerConversationSource()
@@ -624,6 +649,7 @@ final class VoiceInteractionControllerTests: XCTestCase {
         bargeInRecognizer: (any VoiceBargeInRecognizing)? = nil,
         readiness: VoiceConfigurationReadiness? = nil,
         readinessProvider: (@MainActor () -> VoiceConfigurationReadiness)? = nil,
+        permissionRequester: (@MainActor () async -> Void)? = nil,
         autoPlay: Bool = false
     ) -> VoiceInteractionController {
         let factory = ControllerVoiceSessionFactory(sessions: sessions)
@@ -646,6 +672,7 @@ final class VoiceInteractionControllerTests: XCTestCase {
             speechPlayer: player ?? RecordingSpeechPlayer(),
             bargeInRecognizer: bargeInRecognizer,
             readinessOverride: readinessProvider ?? { ready },
+            permissionRequester: permissionRequester,
             loopDelay: .zero
         )
     }
@@ -1042,6 +1069,20 @@ private extension VoiceConfigurationReadiness {
         issues: [
             .init(component: .speech, kind: .unconfigured, message: "请配置 Speech"),
             .init(component: .tts, kind: .unconfigured, message: "请配置 TTS"),
+        ]
+    )
+
+    static let permissionUndetermined = VoiceConfigurationReadiness(
+        speechConfigured: true,
+        ttsConfigured: true,
+        speechReady: false,
+        ttsReady: true,
+        issues: [
+            .init(
+                component: .microphone,
+                kind: .permissionUndetermined,
+                message: "需要麦克风权限"
+            ),
         ]
     )
 }

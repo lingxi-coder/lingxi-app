@@ -16,8 +16,8 @@
 //! (`tool_input_json`), and `PromptDefault` is collapsed to `default_allow: bool`.
 
 use client_protocol::permission::{
-    PermissionKindDto, PermissionOwnerDto, PermissionRequest, PermissionResolved,
-    PermissionResponseDto, WorkerInfoDto,
+    AutoModePromptDto, PermissionKindDto, PermissionOwnerDto, PermissionRequest,
+    PermissionResolved, PermissionResponseDto, WorkerInfoDto,
 };
 
 #[test]
@@ -35,6 +35,8 @@ fn permission_request_carries_owner_scope() {
             turn_id: Some(7),
             worker_name: None,
         }),
+        suppress_always_allow_rule: false,
+        auto_mode_prompt: None,
     };
 
     let value = serde_json::to_value(request).expect("serialize permission request");
@@ -170,6 +172,8 @@ fn permission_request_round_trips() {
         },
         worker: None,
         owner: None,
+        suppress_always_allow_rule: false,
+        auto_mode_prompt: None,
     };
     let json = serde_json::to_value(&req).expect("serialize PermissionRequest");
     assert_eq!(json["request_id"], 42);
@@ -190,6 +194,8 @@ fn worker_is_optional_and_defaults_none() {
         kind: PermissionKindDto::BypassPermissionsMode,
         worker: None,
         owner: None,
+        suppress_always_allow_rule: false,
+        auto_mode_prompt: None,
     };
     let json = serde_json::to_value(&req).expect("serialize PermissionRequest no-worker");
     assert!(
@@ -218,6 +224,8 @@ fn worker_is_optional_and_defaults_none() {
             team: Some("alpha".to_string()),
         }),
         owner: None,
+        suppress_always_allow_rule: false,
+        auto_mode_prompt: None,
     };
     let json_w =
         serde_json::to_value(&req_with_worker).expect("serialize PermissionRequest worker");
@@ -253,6 +261,7 @@ fn permission_response_variants_round_trip() {
     let cases = [
         (PermissionResponseDto::AllowOnce, "allow_once"),
         (PermissionResponseDto::AllowAlways, "allow_always"),
+        (PermissionResponseDto::AllowAuto, "allow_auto"),
         (PermissionResponseDto::Deny, "deny"),
     ];
     for (resp, tag) in cases {
@@ -266,6 +275,26 @@ fn permission_response_variants_round_trip() {
             serde_json::from_value(json).expect("deserialize PermissionResponseDto");
         assert_eq!(back, resp);
     }
+}
+
+#[test]
+fn auto_prompt_metadata_round_trips_and_is_optional() {
+    let request = PermissionRequest {
+        request_id: 9,
+        kind: PermissionKindDto::ToolUseConfirm {
+            tool_name: "Bash".into(),
+            tool_input_json: r#"{"command":"echo hi"}"#.into(),
+            default_allow: false,
+        },
+        worker: None,
+        owner: None,
+        suppress_always_allow_rule: false,
+        auto_mode_prompt: Some(AutoModePromptDto::WorkflowBash),
+    };
+    let json = serde_json::to_value(&request).expect("serialize request");
+    assert_eq!(json["auto_mode_prompt"], "workflow_bash");
+    let back: PermissionRequest = serde_json::from_value(json).expect("deserialize request");
+    assert_eq!(back, request);
 }
 
 /// `PermissionResolved` — the resolution echoed back, correlated by

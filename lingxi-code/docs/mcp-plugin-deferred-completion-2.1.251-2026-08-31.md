@@ -5,7 +5,8 @@
 基线父提交：`c5c46f9707fe28840205e6d7144b735404e9d2ce`
 实现提交：`Close deferred MCP parity without provider-auth coupling`
 集成收口：`f11dbce16`（all-target DTO compatibility 与 scoped Clippy）
-审查收口：Sol xhigh 第一轮 5 项 P1/P2 finding 已全部修复并补回归；最终复审结果见第 14.3 节
+最终 main 合并基线：`bef351cd9e19ac8be0109058766ce62d285ddfd6`
+审查收口：Sol xhigh 六轮 13 项 P1/P2 finding 已全部修复并补回归；最终结论 `APPROVE — zero unresolved P0–P3`
 配套 alignment：[mcp-discovery-cache-production-alignment-2.1.251-2026-08-31.md](./mcp-discovery-cache-production-alignment-2.1.251-2026-08-31.md)
 
 ## 1. 摘要
@@ -26,7 +27,7 @@
 
 ### 2.1 代码基线
 
-本报告以 `8469d341c` 为主实现提交，并纳入 `f11dbce16` 的全 workspace 构造点兼容和 Clippy 收口。主实现提交明确记录了两条约束：
+本报告以 `8469d341c` 为主实现提交，并纳入 `f11dbce16` 的全 workspace 构造点兼容、后续审查修复，以及最终 `main@bef351cd9` 的 Local App plugin integration。主实现提交明确记录了两条约束：
 
 1. `MCP_DISCOVERY_CACHE` 与 automatic protocol negotiation 仍然默认关闭；
 2. MCP/plugin 代码不得读取 LLM provider credentials 或 account UUIDs。
@@ -49,7 +50,7 @@ binary 只作为可验证的 schema、literal、telemetry bucket 和行为 oracl
 | 3 | `role` 只有 JSON validation | ✅ 完成 | `role:"comms"` → config metadata → `MCPTool::mcp_role` → coordinator worker filter；generic `MCP`/`McpAuth` 绕过也被移除；Connected/Cached 都保留 | tool-mcp role rebuild；agent coordinator routing/dispatcher tests；plugin load→cache→refresh integration |
 | 4 | `cli-owned` / `env-placeholder` / `ambient-credential` 无 gate | ✅ 完成 | `cache_gate_with_metadata` 固定顺序；三者均只产生 live miss，不 purge | discovery-cache gate test；registry provenance test |
 | 5 | skills/channel/live post-hit 未实现 | ✅ 完成（cache safety 范围） | registry 先短路 live state；`decide_with_metadata` 执行 skills→channel→Fresh/Stale | 独立 skills flag/precedence test；live/cached registry tests |
-| 6 | mobile 无 remote MCP、无 production cache wiring | ✅ 完成（有明确 transport 支持集） | shared `RemoteMcpTransport` + mobile composite；mobile cache root；encrypted-storage preflight；后台 OAuth connect、导出 copy-URL getter、无副作用 reload | shared remote HTTP/SSE E2E 3/3；mobile composite 7/7；cache rebuild/reload/deep-link/secure-storage tests |
+| 6 | mobile 无 remote MCP、无 production cache wiring | ✅ 完成（有明确 transport 支持集） | shared `RemoteMcpTransport` + mobile composite；mobile cache root；encrypted-storage preflight；后台 OAuth connect、导出 copy-URL getter、generation/CAS reload | shared remote HTTP/SSE E2E 3/3；mobile composite 7/7；cache rebuild/reload/deep-link/secure-storage tests |
 
 ## 3. `McpServerMetadata` schema 与来源
 
@@ -114,16 +115,21 @@ Agent scope 若没有 `agent_source`，`discovery_cache_partition_for` 直接返
 只有 remote MCP 的 stored refresh token 参与稳定授权 identity：
 
 ```text
-no MCP token row:
+未声明 OAuth 的 remote MCP：
     grant_token = "grant:none"
 
-stored refresh token:
+声明 OAuth 且有 stored refresh token：
     grant_token = "grant:" + SHA256(refresh_token)[0..16]
+
+声明 OAuth 但 token row 缺少/含空 refresh token：
+    NoFingerprint（连接可继续，cache read/write fail closed）
 
 fingerprint = SHA256("acct:logged-out" + NUL + grant_token)
 ```
 
 `acct:logged-out` 是 oracle compatibility domain，不代表 LingXi 登录态。access token 改变不改变 grant；refresh token 改变改变 grant。refresh token 原文、access token、client secret 都不出现在 partition 文件名或日志。
+
+live discovery 使用的 grant provenance 与产生 bearer 的那次 OAuth resolve/refresh/step-up 绑定，而不是在握手后才读取“当前 storage”。write-through 前会重读 secure storage 并与这份不可变 fingerprint 比较；若 shared 与 agent-scoped 生命周期之间发生 refresh-token rotation，本次 catalog 不会写入新 grant partition。stale revalidation 也比较 hit partition 与 live grant partition；rotation 只淘汰旧 partition，不发布旧 bearer 取得的 catalog。
 
 ### 4.3 Era-aware partition
 
@@ -368,9 +374,9 @@ MobileRuntime
 - `disconnect`、未知 id、route map failure 都显式返回/清理；
 - WebSocket、stdio、IDE、SDK control 不在 mobile composite supported set 中。
 
-`apps/engine-mobile/src/host.rs` 使用同一个 MCP parser 读取 app-private settings 和 project `.mcp.json`，先 bootstrap Local Apps，再在后台连接配置的 HTTP/SSE；交互式 OAuth 或网络等待不会阻塞 engine handle 返回。catalog change receiver 在 cache/live replacement 后重建 mobile ToolRegistry。带 store 的 registry 连接 Local Apps 不会创建 cache directory，因为 InProcess 仍然 transport-ineligible。
+`apps/engine-mobile/src/host.rs` 使用同一个 MCP parser 读取 app-private settings 和 project `.mcp.json`，先 bootstrap Local Apps，再为每个 startup config 记录初始 desired intent，并通过与 reload 相同的 guarded background job 连接 HTTP/SSE；交互式 OAuth 或网络等待不会阻塞 engine handle 返回，且 boot-time A 不会在 reload 已改为 B 后继续发布。disabled startup/reload config 只 guarded-seed `Disconnected`，不拨 transport。catalog change receiver 在 cache/live replacement 后重建 mobile ToolRegistry。带 store 的 registry 连接 Local Apps 不会创建 cache directory，因为 InProcess 仍然 transport-ineligible。
 
-配置 reload 使用完整的 config snapshot 比较：未变化 server 不 dial、不 purge、不 revoke；修改/删除使用不撤销 OAuth grant 的 registry replacement 路径；新增和修改项合并为一个后台 `connect_all`。因此只读 listing 不再产生登录或 cache 生命周期副作用。
+配置 reload 使用完整的 config snapshot 比较：未变化 settled server 不 dial、不 purge、不 revoke；修改/删除变成 per-server 后台 generation/CAS job。每个 server 另存最新磁盘 desired snapshot；intent 从 `A→B→A` 或 `A→deleted→A` 时，即使 registry 可见 state 仍是 A，也会递增 generation 使旧 B/remove job 失效。若这个同 config state 仍处于 `Connecting`/`AwaitingOAuth`，只有磁盘 intent 确实发生变化时才为 latest generation 重新安排 A owner，避免旧 owner 被拒绝后留下空状态；重复读取完全相同的 intent 会保留当前 transitional owner，不排队同代 teardown/redial。reconciliation 名称集合包含 registry、tracked intent 与本轮磁盘配置三者并集，因此 remove→connect 的短暂无 state 窗口仍可被删除/恢复操作取消。guard 在 registry lifecycle lock 内再次检查，并在 cache hit、live discovery 发布和失败状态写入前复查。过期 live discovery 会断开而不发布；过期失败不会写入旧 `Disconnected`；exact `Connecting`/`AwaitingOAuth` cleanup 与 conditional remove 均复用完整 client/catalog/lazy-slot/cache-retire 路径，同时不撤销 OAuth grant。因此只读 listing 不等待 teardown、network 或交互式 OAuth，也不会由 startup/stale reload generation 覆盖最新配置意图。
 
 ## 12. OAuth encrypted-storage、deep-link 与 cache 安全边界
 
@@ -413,7 +419,7 @@ copyable slot 通过 UniFFI 可达的 `mcp_oauth_authorization_url` 暴露；URL
 | `mcp/src/connection.rs` | `McpServerMetadata`、Agent source、role、Cached/Connected state 与 negotiated metadata |
 | `mcp/src/discovery_cache.rs` | cache policy、gate、logical/partition key、fingerprint、post-hit、store hardening |
 | `mcp/src/protocol_negotiation.rs` | `MCP_PROTOCOL_NEGOTIATION`、feature/denylist 到 expected era 的纯决策 |
-| `mcp/src/registry.rs` | cache consult/read/write、grant rotation、lazy owner、exact strike、era compare、lifecycle purge、cleanup |
+| `mcp/src/registry.rs` | cache consult/read/write、immutable grant provenance、lazy owner、exact strike、era compare、guarded lifecycle CAS、cleanup |
 | `mcp/src/json_config.rs` | MCP transport schema、`discoveryCache`、`role`、raw transport metadata |
 | `mcp/src/oauth.rs` | MCP OAuth 2.1/PKCE、secure storage、refresh-grant fingerprint 输入 |
 | `mcp/src/client.rs` | live MCP client、catalog/tool/resource/prompt dispatch、negotiated protocol metadata |
@@ -439,25 +445,42 @@ copyable slot 通过 UniFFI 可达的 `mcp_oauth_authorization_url` 暴露；URL
 以下命令在主实现加全 targets 集成收口后的分支上直接运行；输出包含既有 warnings，但非测试失败：
 
 ```text
-cargo test -p jsonrpc -p mcp -p tool-mcp -p agent -p plugin --quiet
-jsonrpc 63、mcp 574、agent 358、tool-mcp 140 及 plugin 全部通过；0 failed；3 ignored
+cargo test -p jsonrpc -p mcp -p agent --lib --quiet
+jsonrpc 63、mcp 592、agent 358 全部通过
 
-cargo test -p tasks --lib --quiet -- --test-threads=1
-271 passed; 0 failed
+cargo test -p tool-mcp --quiet
+148 passed；0 failed
+
+cargo test -p plugin --quiet
+148 + 9 + 3 + 15 + 3 passed；0 failed
+
+cargo test -p tasks --lib --quiet
+291 passed；1 个 latest-main Local App grammar baseline failure，见 14.2
 
 cargo test -p platform-common -p platform-posix --quiet
 全部 unit/integration suites 通过；modern negotiation E2E 7/7
 
 cargo test -p engine-desktop --quiet
-228 lib + 其余 integration suites 全部通过
+181/235 lib passed；54 个 latest-main Local App workflow baseline failure，见 14.2
 
 cargo check --workspace --all-targets
 passed
+
+cargo check -p ios-framework -p android-aar --quiet
+passed
+
+cargo clippy -p jsonrpc -p mcp -p tool-mcp -p agent -p plugin \
+  -p platform-common -p platform-posix -p engine-desktop -p engine-mobile \
+  --all-targets --no-deps
+passed（保留 workspace 既有 warnings）
+
+cargo test -p engine-mobile --features uniffi --lib mobile_mcp_ --quiet
+13 passed；0 failed
 ```
 
 覆盖重点：
 
-- fixed logical/fingerprint/partition vectors、OAuth optional-field canonicalization、grant rotation；
+- fixed logical/fingerprint/partition vectors、OAuth optional-field canonicalization、grant rotation、无 refresh grant fail-closed 与 immutable grant write-through；
 - provenance gate 顺序及 non-purging；
 - fresh/stale/miss、single-flight foreground/background owner、panic/CAS cleanup；
 - exact stale strike 与 replacement generation 隔离；
@@ -468,24 +491,29 @@ passed
 - wrong response id compatibility fallback、caller probe cap、单次 negotiation snapshot 与 stale expected-mode drift purge；
 - shared HTTP/SSE tools/resources/prompts round trip；
 - mobile composite route、disconnect/unsupported、remember failure cleanup、Local Apps cache-ineligible；
-- mobile encrypted storage injection、plaintext OAuth preflight、nonblocking OAuth boot、deep-link/copy fallback、无副作用 reload 与跨 registry cache hit。
+- mobile encrypted storage injection、plaintext OAuth preflight、nonblocking OAuth boot、deep-link/copy fallback、generation/CAS reload 与跨 registry cache hit；
+- guarded reload 在 lifecycle wait 后失效、live publish 前失效、失败返回前失效，以及 newer config 不被 stale job 删除；
+- blocked startup `A→B`、真实 pending owner 的 `A→B→A` / `A→deleted→A`、重复 identical reload 一次 dial/零 teardown、exact `AwaitingOAuth` cleanup 与 disabled-no-dial。
 
-### 14.2 已知 mobile fixture 失败
+### 14.2 latest-main 基线红灯与归因
 
-`engine-mobile --features uniffi` 的完整测试面仍有一个与本 MCP 交付无关的既有 fixture digest failure：
+最终合并前，本分支曾在 `d053be447` 基线上得到 mobile **474/475**，唯一失败为历史 `phaser_2d` digest fixture。随后本地 `main` 前进到 `bef351cd9` 并合入完整 Local App plugin history；该基线改变了测试集合和失败面，所以最终报告以新基线实测为准，不继续把旧的单 fixture 结果冒充为当前状态。
+
+最终组合树上的完整结果是：
 
 ```text
-local_app_runtime_profiles::tests::published_r1_contract_digests_are_immutable
-phaser_2d: FAILED
-actual   7fd39e60eff9b7491062506f97a7b39f796f4d735e8716a7ed6d9fd7604695b1
-expected 38b5fed98a06e5784632e544e41ec663ff7bc55215d199e436bb53dfde7b1476
+engine-mobile --features uniffi: 472 passed / 65 failed / 537 total
+engine-desktop:                 181 passed / 54 failed / 235 lib tests
+tasks:                          291 passed / 1 failed / 292 lib tests
 ```
 
-这是 `phaser_2d` runtime fixture 的发布 digest 与当前 checked-in template bytes 不一致；在实现基线 `8469d341c` 及其基线父提交 `c5c46f970` 上均为同一失败。它不是 MCP remote/cache、OAuth preflight 或 mobile composite 测试失败；本轮不改 fixture、不改代码，并在交付判定中保留为明确风险。
+mobile 的同一命令在未合入本分支的 `main@bef351cd9` 上为 **449 passed / 65 failed / 514 total**，失败名称集合相同；本分支新增的 23 项测试全部通过。代表性 baseline 原因包括 Local App template `templateOrigin/dependencySnapshot` contract、builtin bundle `/var` 与 `/private/var` canonical path、device/runtime fixtures，以及 host-injected workflow value 的随机 capability 比较。这些失败不在 MCP remote/cache/OAuth/comms/protocol delta 中。
 
-补充回归加入后，主集成复核的计数是：`engine-mobile --features uniffi` 完整测试面 **465/466（465 passed、1 failed）**；该 1 个失败就是上面的 `phaser_2d` digest fixture。与此同时，`workspace/all-targets`、`core/platform/desktop` 以及 iOS framework/Android AAR framework checks 均通过。这里明确保留 mobile 的 465/466 结果，不将 mobile 描述为全绿。
+desktop 的代表性 `build_wires_one_plugin_workflow_registry_into_every_participant` 在 `main@bef351cd9` 上独立复现同一失败；其余多数 build tests由未注册 `Workflow` tool 与随后 poisoned lock 连锁失败。tasks 唯一失败位于本分支未修改的 `scope.rs`，是 64 字符 app id 在 tasks/local-apps 两套 grammar 间的基线分歧。
 
-新增 MCP/mobile 回归全部通过；本报告不把唯一既有 fixture failure 或 workspace 既有 warnings 隐去，也不将结果扩展成“全 workspace 100% 全绿”声明。
+为保证本次组合树至少可完整编译，集成收口只做了机械 test/API seam 修复：适配 `MCPTool::new_for_tool` 与 Agent scoped-config 新签名、恢复 main 已存在 `brand_normalize` 模块导出、把 plugin workflow 测试改为真实 script path，并删除一份完全重复的 TUI 同名测试。修复后 `cargo check --workspace --all-targets` 通过；MCP/plugin/mobile-MCP 定向回归全部通过。
+
+本报告不会把 latest-main 的 Local App baseline 红灯隐去，也不会把本次 MCP/plugin 完成声明扩张成“全 workspace 测试全绿”。
 
 ### 14.3 Sol xhigh 审查闭环
 
@@ -499,7 +527,24 @@ expected 38b5fed98a06e5784632e544e41ec663ff7bc55215d199e436bb53dfde7b1476
 | probe budget 丢失 | `probe_timeout_ms` 从 negotiation decision 传到 transport，并在 remote 再 clamp | cap unit + wrong-id/redial E2E |
 | expected era 在 attempt 内漂移 | immutable `NegotiationMode` 贯穿 consult/handshake/write/stale | expected-mode mismatch purge/no-write test |
 
-最终 Sol xhigh 复审在合入最新 `main` 后再次覆盖冲突解法；最终结论会在同一交付分支的提交记录与交付摘要中保留。
+第二轮复审在合入最新 `main` 后给出 2 项 P1，也已关闭：
+
+| finding | 修复 | 回归证据 |
+|---|---|---|
+| OAuth catalog 可能用旧 bearer、却写入重读到的新 grant partition | resolve/refresh/step-up 返回与成功 connect spec 同源的 immutable grant provenance；write-through 重读只用于 equality check；无 refresh grant fail closed | shared/agent-scoped same-grant + rotation、access-only OAuth no-partition/no-write |
+| mobile reload 等待持有 lifecycle lock 的 OAuth/connect | listing 只入队 generation/CAS job；remove/connect 在 lifecycle lock 内校验 guard；publish/error 前再校验，stale live connection 自动清理 | guarded remove/connect 4 项确定性交错测试；mobile changed/deleted pending-OAuth 4 项 reload tests |
+
+主集成复核还主动关闭了 direct transport cleanup 遗留 client/catalog 的风险、generation check-before-await TOCTOU，以及 stale network failure 写入旧状态的问题。
+
+第三轮 cross-check 发现 latest-intent 回滚仍可能保留旧 generation：可见 state 仍为 A 时，`A→B→A` 的第二次 reload 会被 equality fast-path 短路，旧 B job 之后仍可发布。修复后 generation state 同时保存独立 desired snapshot，并跟踪 pending name；`A→B→A` 与 `A→deleted→A` 的 lifecycle-lock 交错测试均验证旧 job 不再删除或替换最新 A。
+
+第四轮使用真实 blocked guarded connect 继续检查后关闭两条遗漏：一是 matching A 仍处于 `Connecting`/`AwaitingOAuth` 时必须为最新 generation 重新安排 owner，并在旧 guard reject 时清理 exact pending state；二是 startup config 也必须先 seed 同一个 intent map、再走 guarded job，不能保留独立的 unguarded `connect_all`。blocked startup `A→B`、`A→B→A`、`A→deleted→A`、changed-to-disabled 与 registry disabled-no-dial 回归均通过。
+
+第五轮发现相同配置的重复 listing 会因为仅判断 transitional state 而排队同 generation replacement：首个 startup/OAuth owner 成功后，后续排队 job 可能依次拆掉刚建立的连接再重拨。修复后 production fast-path 同时使用 `intent_changed`：配置相同时仅允许“新 intent + transitional owner”触发 replacement；重复相同 intent 与 settled Connected 都保持 read-only。确定性 blocked-startup 回归验证重复 reload 期间只有一次 dial、零 disconnect，并同时锁住配置变化仍会 replacement。
+
+第六轮在折入 `main@bef351cd9` 后发现两项 test-target P2：`MCPTool::new_for_tool` 的测试调用未适配 9 参数，以及 plugin role integration/oracle tests 未适配 scoped-config 新签名与 `brand_normalize` module export。两项均仅做必要兼容修复；tool-mcp 148 tests、plugin 全 suites、role parse→scope→connect/cache→refresh 指定测试和 workspace all-targets check 均通过。
+
+最终 Sol xhigh 对 clean 4-commit 分支复核了 tool-mcp、plugin role、mobile lifecycle/cache、provider-neutral credential boundary、brand-gate composition、工作树状态和 diff check，结论为：**APPROVE — zero unresolved P0–P3**。
 
 ## 15. Provider-neutral grep 说明
 
@@ -543,7 +588,7 @@ MCP scope 中保留 `MCP_CLIENT_WEBSITE_URL`、XAA/IdP 类型和 oracle compatib
 
 - mobile native Keychain/Keystore 由具体宿主注入；未注入时 OAuth remote 会在 dial 前明确拒绝，而不是明文降级；真实设备 secure-storage implementation 仍需平台级验收。
 - `MCP_DISCOVERY_CACHE` 与 auto negotiation 默认关闭；启用后应持续运行 fixed vectors、grant rotation、era fallback、stale strike、lifecycle purge 和 envelope tests。
-- `phaser_2d` fixture digest 需由 mobile fixture owner 单独修复/重新发布，不能由 MCP 交付隐式吸收。
+- `main@bef351cd9` 的 Local App mobile/desktop/tasks baseline failures 需由对应 owner 单独修复，不能由 MCP/plugin 交付隐式吸收。
 - 本报告覆盖已实现/已测试的 MCP surface，不对所有第三方 MCP server、所有 Claude Code feature flag 组合或所有产品 channel 行为做 100% parity 承诺。
 
 ## 17. 交付判定

@@ -27,6 +27,7 @@ struct SettingsPages: View {
         case .permissionMode:             PermissionModePage(store: store, host: host)
         case .skills:                     SkillsPage(store: store, host: host)
         case .skillDetail(let id):        SkillDetailPage(store: store, host: host, skillId: id)
+        case .localAppPlugin:             LocalAppPluginPage(host: host)
         case .mcpList:                    MCPListPage(store: store, host: host)
         case .mcpEdit(let id):            MCPEditPage(store: store, host: host, mcpId: id)
         case .dream:                      DreamPage(store: store)

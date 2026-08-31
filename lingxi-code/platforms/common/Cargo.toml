@@ -6,6 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+branding.workspace = true
 jsonrpc = { path = "../../jsonrpc" }
 llm-client = { path = "../../llm-client" }
 http-client = { path = "../../http-client" }

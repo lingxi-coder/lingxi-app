@@ -108,7 +108,9 @@
 //! also unwired for the same reason: it needs the LIVE discovered tool-name
 //! list, which only the registry has.
 
+use crate::result::{PermissionDecisionReason, PermissionPrompt, PermissionResult};
 use crate::rule::{PermissionBehavior, PermissionRule, PermissionRuleSource, PermissionRuleValue};
+use std::collections::BTreeMap;
 use std::collections::HashMap;
 
 /// `tools[].permission_policy` (oracle `cP`/`p()` schema). Declared per-tool on
@@ -121,6 +123,19 @@ pub enum McpToolPermissionPolicy {
     AlwaysAsk,
     /// Tool-wide deny.
     AlwaysDeny,
+}
+
+impl McpToolPermissionPolicy {
+    /// Return the stricter declaration (`always_deny` > `always_ask` >
+    /// `always_allow`) when several config records normalize to one FQN.
+    #[must_use]
+    pub const fn strictest(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::AlwaysDeny, _) | (_, Self::AlwaysDeny) => Self::AlwaysDeny,
+            (Self::AlwaysAsk, _) | (_, Self::AlwaysAsk) => Self::AlwaysAsk,
+            (Self::AlwaysAllow, Self::AlwaysAllow) => Self::AlwaysAllow,
+        }
+    }
 }
 
 /// `tools[].org_max_permission` / on-disk `toolPermissions` value (oracle
@@ -319,6 +334,189 @@ pub fn upstream_name_drift_warning(
     ))
 }
 
+/// Collapse config-side per-tool policy declarations into the existing
+/// `McpServerPolicy` rule bucket. This is the DTO-neutral equivalent of the
+/// host producer: callers can pass the already-resolved server tool records,
+/// while the registry/discovery cache remains untouched.
+pub trait McpPolicyTool {
+    /// Return the raw upstream tool name.
+    fn policy_tool_name(&self) -> &str;
+    /// Return this tool's optional declared permission policy.
+    fn policy_permission(&self) -> Option<McpToolPermissionPolicy>;
+}
+
+impl McpPolicyTool for McpServerToolDecl {
+    fn policy_tool_name(&self) -> &str {
+        &self.name
+    }
+
+    fn policy_permission(&self) -> Option<McpToolPermissionPolicy> {
+        self.permission_policy
+    }
+}
+
+impl McpPolicyTool for traits::McpConfiguredToolPolicyDto {
+    fn policy_tool_name(&self) -> &str {
+        &self.name
+    }
+
+    fn policy_permission(&self) -> Option<McpToolPermissionPolicy> {
+        self.permission_policy.map(|policy| match policy {
+            traits::McpToolPermissionPolicy::AlwaysAllow => McpToolPermissionPolicy::AlwaysAllow,
+            traits::McpToolPermissionPolicy::AlwaysAsk => McpToolPermissionPolicy::AlwaysAsk,
+            traits::McpToolPermissionPolicy::AlwaysDeny => McpToolPermissionPolicy::AlwaysDeny,
+        })
+    }
+}
+
+#[must_use]
+pub fn permission_rules_from_mcp_tool_policies<T: McpPolicyTool>(
+    server_name: &str,
+    tools: &[T],
+) -> Vec<PermissionRule> {
+    let normalized_server = protocol::normalize_name_for_mcp(server_name);
+    let mut collapsed = BTreeMap::<String, McpToolPermissionPolicy>::new();
+    for tool in tools {
+        let Some(policy) = tool.policy_permission() else {
+            continue;
+        };
+        let tool_name = format!(
+            "mcp__{normalized_server}__{}",
+            protocol::normalize_name_for_mcp(tool.policy_tool_name())
+        );
+        collapsed
+            .entry(tool_name)
+            .and_modify(|current| *current = current.strictest(policy))
+            .or_insert(policy);
+    }
+    collapsed
+        .into_iter()
+        .map(|(tool_name, policy)| PermissionRule {
+            value: PermissionRuleValue {
+                tool_name,
+                rule_content: None,
+            },
+            behavior: behavior_from_policy(policy),
+            source: PermissionRuleSource::McpServerPolicy,
+        })
+        .collect()
+}
+
+fn behavior_from_policy(policy: McpToolPermissionPolicy) -> PermissionBehavior {
+    match policy {
+        McpToolPermissionPolicy::AlwaysAllow => PermissionBehavior::Allow,
+        McpToolPermissionPolicy::AlwaysAsk => PermissionBehavior::Ask,
+        McpToolPermissionPolicy::AlwaysDeny => PermissionBehavior::Deny,
+    }
+}
+
+fn max_permission_severity(ceiling: McpToolMaxPermission) -> u8 {
+    match ceiling {
+        McpToolMaxPermission::Allow => 0,
+        McpToolMaxPermission::Ask => 1,
+        McpToolMaxPermission::Blocked => 2,
+    }
+}
+
+fn clamp_behavior(
+    base: PermissionBehavior,
+    local_ceiling: Option<McpToolMaxPermission>,
+    server_ceiling: Option<McpToolMaxPermission>,
+    requires_user_interaction: bool,
+    app_capability_authorized: bool,
+) -> PermissionBehavior {
+    let mut ceiling = local_ceiling.or(server_ceiling);
+    if let (Some(local), Some(server)) = (local_ceiling, server_ceiling) {
+        ceiling = Some(
+            if max_permission_severity(local) >= max_permission_severity(server) {
+                local
+            } else {
+                server
+            },
+        );
+    }
+    let mut out = match (base, ceiling) {
+        (PermissionBehavior::Deny, _) => PermissionBehavior::Deny,
+        (_, Some(McpToolMaxPermission::Blocked)) => PermissionBehavior::Deny,
+        (PermissionBehavior::Ask, _) => PermissionBehavior::Ask,
+        (_, Some(McpToolMaxPermission::Ask)) => PermissionBehavior::Ask,
+        (PermissionBehavior::Allow, _) => PermissionBehavior::Allow,
+    };
+    if out == PermissionBehavior::Allow && requires_user_interaction {
+        out = PermissionBehavior::Ask;
+    }
+    if out != PermissionBehavior::Deny && !app_capability_authorized {
+        out = PermissionBehavior::Deny;
+    }
+    out
+}
+
+/// Apply local/server MCP ceilings and tool-owned interaction requirements to
+/// an already-resolved permission result. Every transform is tighten-only:
+/// it never turns an ask/deny into an allow, and duplicate ceilings resolve to
+/// the strictest (`blocked` > `ask` > `allow`).
+#[must_use]
+pub fn clamp_mcp_permission_result(
+    result: PermissionResult,
+    tool_name: &str,
+    local_ceiling: Option<McpToolMaxPermission>,
+    server_ceiling: Option<McpToolMaxPermission>,
+    requires_user_interaction: bool,
+    app_capability_authorized: bool,
+) -> PermissionResult {
+    let metadata = match &result {
+        PermissionResult::Allow { metadata, .. }
+        | PermissionResult::Ask { metadata, .. }
+        | PermissionResult::Deny { metadata, .. } => metadata.clone(),
+    };
+    let base = match result {
+        PermissionResult::Allow { .. } => PermissionBehavior::Allow,
+        PermissionResult::Ask { .. } => PermissionBehavior::Ask,
+        PermissionResult::Deny { .. } => PermissionBehavior::Deny,
+    };
+    let final_behavior = clamp_behavior(
+        base,
+        local_ceiling,
+        server_ceiling,
+        requires_user_interaction,
+        app_capability_authorized,
+    );
+    if final_behavior == base {
+        return result;
+    }
+    let interaction_ask = final_behavior == PermissionBehavior::Ask
+        && base == PermissionBehavior::Allow
+        && requires_user_interaction;
+    match final_behavior {
+        PermissionBehavior::Allow => result,
+        PermissionBehavior::Ask => PermissionResult::Ask {
+            reason: if interaction_ask {
+                PermissionDecisionReason::PermissionPromptTool {
+                    tool_name: tool_name.to_string(),
+                }
+            } else {
+                PermissionDecisionReason::Other {
+                    reason: format!("MCP tool {tool_name} requires approval"),
+                }
+            },
+            prompt: PermissionPrompt {
+                title: "Permission required".into(),
+                message: format!("MCP tool {tool_name} requires approval"),
+                options: vec!["Allow once".into(), "Deny".into()],
+            },
+            pending_classifier_check: None,
+            metadata,
+        },
+        PermissionBehavior::Deny => PermissionResult::Deny {
+            reason: PermissionDecisionReason::Other {
+                reason: format!("MCP tool {tool_name} is blocked"),
+            },
+            explanation: Some(format!("MCP tool {tool_name} is blocked")),
+            metadata,
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -412,6 +610,27 @@ mod tests {
         )]);
         assert_eq!(rules.len(), 1, "both entries normalize to the same FQN");
         assert_eq!(rules[0].value.tool_name, "mcp__srv__my_tool");
+        assert_eq!(rules[0].behavior, PermissionBehavior::Deny);
+    }
+
+    #[test]
+    fn trait_config_dto_uses_the_same_strictest_producer() {
+        let rules = permission_rules_from_mcp_tool_policies(
+            "srv",
+            &[
+                traits::McpConfiguredToolPolicyDto {
+                    name: "write".into(),
+                    permission_policy: Some(traits::McpToolPermissionPolicy::AlwaysAllow),
+                    org_max_permission: None,
+                },
+                traits::McpConfiguredToolPolicyDto {
+                    name: "write".into(),
+                    permission_policy: Some(traits::McpToolPermissionPolicy::AlwaysDeny),
+                    org_max_permission: None,
+                },
+            ],
+        );
+        assert_eq!(rules.len(), 1);
         assert_eq!(rules[0].behavior, PermissionBehavior::Deny);
     }
 
@@ -540,5 +759,52 @@ mod tests {
             upstream_name_drift_warning("srv", &HashMap::new(), &[]),
             None
         );
+    }
+
+    #[test]
+    fn clamp_ceiling_and_interaction_only_tighten_an_allow() {
+        let allow = PermissionResult::Allow {
+            reason: PermissionDecisionReason::PermissionMode {
+                mode: PermissionMode::Default,
+            },
+            updated_input: None,
+            update_destination: None,
+            metadata: crate::result::PermissionMetadata::default(),
+        };
+        let ask = clamp_mcp_permission_result(
+            allow.clone(),
+            "mcp__srv__tool",
+            Some(McpToolMaxPermission::Ask),
+            Some(McpToolMaxPermission::Allow),
+            false,
+            true,
+        );
+        assert!(matches!(ask, PermissionResult::Ask { .. }));
+
+        let interaction = clamp_mcp_permission_result(
+            allow.clone(),
+            "mcp__srv__interactive",
+            None,
+            None,
+            true,
+            true,
+        );
+        assert!(matches!(
+            interaction,
+            PermissionResult::Ask {
+                reason: PermissionDecisionReason::PermissionPromptTool { ref tool_name },
+                ..
+            } if tool_name == "mcp__srv__interactive"
+        ));
+
+        let denied = clamp_mcp_permission_result(
+            allow,
+            "mcp__srv__blocked",
+            Some(McpToolMaxPermission::Ask),
+            Some(McpToolMaxPermission::Blocked),
+            false,
+            true,
+        );
+        assert!(matches!(denied, PermissionResult::Deny { .. }));
     }
 }

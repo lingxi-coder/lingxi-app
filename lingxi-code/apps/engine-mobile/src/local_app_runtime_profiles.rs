@@ -21,7 +21,7 @@ macro_rules! profile_file {
             $path,
             include_bytes!(concat!(
                 env!("CARGO_MANIFEST_DIR"),
-                "/../../local-apps/templates/runtime-profiles/",
+                "/../../plugins/lingxi-local-app/assets/templates/",
                 $family,
                 "/r1/",
                 $path
@@ -670,6 +670,9 @@ fn canonicalize(value: Value) -> Value {
 mod tests {
     use super::*;
 
+    // Pre-release r1 baseline. Phaser/Babylon were corrected before any Local
+    // App Plugin release; these values are the compatibility boundary from the
+    // first published build onward.
     const PUBLISHED_R1_CONTRACTS: &[(AppRuntimeProfile, &str)] = &[
         (
             AppRuntimeProfile::ReactDom,
@@ -685,28 +688,108 @@ mod tests {
         ),
         (
             AppRuntimeProfile::Phaser2d,
-            "38b5fed98a06e5784632e544e41ec663ff7bc55215d199e436bb53dfde7b1476",
+            "7fd39e60eff9b7491062506f97a7b39f796f4d735e8716a7ed6d9fd7604695b1",
         ),
         (
             AppRuntimeProfile::Babylon3d,
-            "466838f25910891567a2e9e2caab14f652937e7f078f55bb8776dcabb7454b3b",
+            "82827767bbc86238031a90bf8433eda71a7e111fb4468e726433328739fd4bb4",
         ),
     ];
+
+    fn contracts() -> [RuntimeProfileContract; 5] {
+        [
+            REACT_DOM_R1,
+            CANVAS_2D_R1,
+            THREE_3D_R1,
+            PHASER_2D_R1,
+            BABYLON_3D_R1,
+        ]
+    }
+
+    fn validate_catalog_contracts(catalog: &Value) -> Result<(), Vec<String>> {
+        let Some(templates) = catalog["templates"].as_array() else {
+            return Err(vec!["catalog templates must be an array".to_string()]);
+        };
+        let mut mismatches = Vec::new();
+        for contract in contracts() {
+            let Some(published) = templates
+                .iter()
+                .find(|entry| entry["family"].as_str() == Some(contract.family.as_str()))
+            else {
+                mismatches.push(format!("catalog entry missing for {}", contract.family));
+                continue;
+            };
+            if published["revision"].as_u64() != Some(contract.revision.into()) {
+                mismatches.push(format!(
+                    "{} revision: catalog={:?}, production={}",
+                    contract.family, published["revision"], contract.revision
+                ));
+            }
+            let actual = contract_sha256(&contract).unwrap();
+            if published["contractSha256"].as_str() != Some(actual.as_str()) {
+                mismatches.push(format!(
+                    "{} contractSha256: catalog={:?}, production={actual}",
+                    contract.family, published["contractSha256"]
+                ));
+            }
+        }
+        if mismatches.is_empty() {
+            Ok(())
+        } else {
+            Err(mismatches)
+        }
+    }
 
     #[test]
     fn published_r1_contract_digests_are_immutable() {
         for (family, expected) in PUBLISHED_R1_CONTRACTS {
-            let contract = [
-                REACT_DOM_R1,
-                CANVAS_2D_R1,
-                THREE_3D_R1,
-                PHASER_2D_R1,
-                BABYLON_3D_R1,
-            ]
-            .iter()
-            .find(|contract| contract.family == *family && contract.revision == 1)
-            .expect("published r1 contract");
-            assert_eq!(contract_sha256(contract).unwrap(), *expected, "{family}");
+            let contract = contracts()
+                .into_iter()
+                .find(|contract| contract.family == *family && contract.revision == 1)
+                .expect("published r1 contract");
+            assert_eq!(contract_sha256(&contract).unwrap(), *expected, "{family}");
+        }
+    }
+
+    #[test]
+    fn plugin_catalog_contract_digests_match_production_contracts() {
+        let catalog: Value = serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../plugins/lingxi-local-app/assets/templates/catalog.json"
+        )))
+        .expect("Plugin runtime profile catalog must be valid JSON");
+        if let Err(mismatches) = validate_catalog_contracts(&catalog) {
+            panic!(
+                "Plugin catalog differs from production contracts:\n{}",
+                mismatches.join("\n")
+            );
+        }
+    }
+
+    #[test]
+    fn every_catalog_contract_digest_is_part_of_the_gate() {
+        let catalog: Value = serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../plugins/lingxi-local-app/assets/templates/catalog.json"
+        )))
+        .expect("Plugin runtime profile catalog must be valid JSON");
+        for contract in contracts() {
+            let mut tampered = catalog.clone();
+            let entry = tampered["templates"]
+                .as_array_mut()
+                .expect("templates")
+                .iter_mut()
+                .find(|entry| entry["family"].as_str() == Some(contract.family.as_str()))
+                .expect("family entry");
+            entry["contractSha256"] = Value::String("0".repeat(64));
+            let errors = validate_catalog_contracts(&tampered)
+                .expect_err("tampering any family digest must fail the production gate");
+            assert!(
+                errors
+                    .iter()
+                    .any(|error| error.contains(contract.family.as_str())),
+                "failure must name the tampered family: {errors:?}"
+            );
         }
     }
 
@@ -799,7 +882,7 @@ mod tests {
     fn engine_templates_import_only_their_declared_runtime() {
         let phaser_source = include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../local-apps/templates/runtime-profiles/phaser-2d/r1/app/screens/game-screen.jsx"
+            "/../../plugins/lingxi-local-app/assets/templates/phaser-2d/r1/app/screens/game-screen.jsx"
         ));
         let phaser_runtime = String::from_utf8_lossy(
             managed_file_bytes(&PHASER_2D_R1, "lib/phaser-runtime.js")
@@ -835,7 +918,7 @@ mod tests {
 
         let babylon_source = include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../local-apps/templates/runtime-profiles/babylon-3d/r1/app/screens/game-screen.jsx"
+            "/../../plugins/lingxi-local-app/assets/templates/babylon-3d/r1/app/screens/game-screen.jsx"
         ));
         let babylon_runtime = String::from_utf8_lossy(
             managed_file_bytes(&BABYLON_3D_R1, "lib/babylon-runtime.js")

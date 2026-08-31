@@ -2652,6 +2652,8 @@ mod tests {
             timeout_ms: Some(10),
             discovery_cache: None,
             always_load: false,
+            tools: Vec::new(),
+            tool_permissions: std::collections::BTreeMap::new(),
             config_error: None,
             metadata: crate::connection::McpServerMetadata::default(),
         };
@@ -2697,6 +2699,8 @@ mod tests {
             timeout_ms: Some(10),
             discovery_cache: None,
             always_load: false,
+            tools: Vec::new(),
+            tool_permissions: std::collections::BTreeMap::new(),
             config_error: None,
             metadata: crate::connection::McpServerMetadata::default(),
         };
@@ -2732,6 +2736,8 @@ mod tests {
             timeout_ms: None,
             discovery_cache: None,
             always_load: false,
+            tools: Vec::new(),
+            tool_permissions: Default::default(),
             config_error: None,
             metadata: crate::connection::McpServerMetadata::default(),
         };

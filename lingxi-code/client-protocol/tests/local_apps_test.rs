@@ -11,13 +11,20 @@ use client_protocol::local_apps::{
     AppRuntimeStateDto, AppWorkflowStateDto,
 };
 
-/// `AppWorkflowStateDto` — both states round-trip as their bare `snake_case`
-/// strings (`"draft"` / `"ready"`).
+/// `AppWorkflowStateDto` — publication states round-trip as their bare
+/// `snake_case` strings.
 #[test]
 fn workflow_state_serializes_as_bare_string() {
     let cases = [
         (AppWorkflowStateDto::Draft, "\"draft\""),
-        (AppWorkflowStateDto::Ready, "\"ready\""),
+        (
+            AppWorkflowStateDto::PublishedUnverified,
+            "\"published_unverified\"",
+        ),
+        (
+            AppWorkflowStateDto::PublishedVerified,
+            "\"published_verified\"",
+        ),
     ];
     for (state, expected) in cases {
         let json = serde_json::to_string(&state).expect("serialize AppWorkflowStateDto");

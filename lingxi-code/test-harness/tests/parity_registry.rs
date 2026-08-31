@@ -1,6 +1,6 @@
 //! Registry parity driver — locks the Claude Code 2.1.238 base builtin surface.
 //!
-//! Asserts that the fixture `registry_42_tools.json` declares exactly 43
+//! Asserts that the fixture `registry_42_tools.json` declares exactly 42
 //! tools across 9 categories AND that each declared name is a known
 //! `*_TOOL_NAME` constant in production (`tools::builtin`).
 //!
@@ -31,14 +31,14 @@ fn fx() -> Fixture {
 #[test]
 fn registry_42_tools_fixture_totals_to_42() {
     let f = fx();
-    assert_eq!(f.total, 43, "fixture declares total=43");
+    assert_eq!(f.total, 42, "fixture declares total=42");
     let summed: usize = f.by_category.values().map(Vec::len).sum();
     assert_eq!(
-        summed, 43,
-        "sum of by_category lengths is 43 (got {summed})"
+        summed, 42,
+        "sum of by_category lengths is 42 (got {summed})"
     );
     let unique: BTreeSet<&String> = f.by_category.values().flat_map(|v| v.iter()).collect();
-    assert_eq!(unique.len(), 43, "by_category names are unique");
+    assert_eq!(unique.len(), 42, "by_category names are unique");
 }
 
 #[test]
@@ -65,11 +65,11 @@ fn registry_42_tools_fixture_categories_locked() {
     // 9 since 2.1.232 (56760bb1a): ListAgents joins the SendMessage it discovers.
     assert_eq!(lens["agent"], 9);
     assert_eq!(lens["team"], 2);
-    assert_eq!(lens["mcp_lsp"], 4);
+    assert_eq!(lens["mcp_lsp"], 3);
     assert_eq!(lens["system"], 11);
 }
 
-/// Cross-check the fixture's 43 names against the production
+/// Cross-check the fixture's 42 names against the production
 /// `*_TOOL_NAME` constants (when an explicit named constant exists) and
 /// the in-module `TOOL_NAME` constants (single-tool modules).
 #[test]
@@ -119,8 +119,9 @@ fn fixture_names_match_production_constants() {
         // Team (2)
         ("TeamCreate", tool_team::team::TEAM_CREATE_TOOL_NAME),
         ("TeamDelete", tool_team::team::TEAM_DELETE_TOOL_NAME),
-        // MCP + LSP (4). Resource tools are capability-driven, not base builtins.
-        ("MCP", tool_mcp::mcp_tool::MCP_TOOL_NAME),
+        // MCP + LSP (3). The generic dispatcher remains an internal
+        // compatibility constructor, not a production builtin. Resource tools
+        // are capability-driven, not base builtins.
         ("McpAuth", tool_mcp::mcp_tool::MCP_AUTH_TOOL_NAME),
         (
             "WaitForMcpServers",
@@ -156,7 +157,7 @@ fn fixture_names_match_production_constants() {
         ),
     ];
 
-    assert_eq!(pairs.len(), 43, "production-constant lock covers 43 tools");
+    assert_eq!(pairs.len(), 42, "production-constant lock covers 42 tools");
 
     for (fixture_name, production_const) in pairs {
         assert_eq!(

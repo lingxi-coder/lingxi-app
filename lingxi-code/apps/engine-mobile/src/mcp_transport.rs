@@ -713,6 +713,8 @@ mod tests {
                 disabled: false,
                 timeout_ms: None,
                 always_load: true,
+                tools: Vec::new(),
+                tool_permissions: Default::default(),
                 discovery_cache: None,
                 config_error: None,
                 metadata: Default::default(),
@@ -727,14 +729,14 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn mobile_discovery_cache_rebuild_hits_without_second_dial() {
-        if std::env::var_os("LINGXI_MOBILE_CACHE_CHILD").is_none() {
+        if std::env::var_os("MCP_MOBILE_CACHE_CHILD").is_none() {
             let output = tokio::process::Command::new(std::env::current_exe().unwrap())
                 .args([
                     "--exact",
                     "mcp_transport::tests::mobile_discovery_cache_rebuild_hits_without_second_dial",
                     "--nocapture",
                 ])
-                .env("LINGXI_MOBILE_CACHE_CHILD", "1")
+                .env("MCP_MOBILE_CACHE_CHILD", "1")
                 .env(mcp::discovery_cache::ENV_ENABLED, "true")
                 .output()
                 .await
@@ -757,6 +759,8 @@ mod tests {
             disabled: false,
             timeout_ms: None,
             always_load: false,
+            tools: Vec::new(),
+            tool_permissions: Default::default(),
             discovery_cache: Some(true),
             config_error: None,
             metadata: Default::default(),

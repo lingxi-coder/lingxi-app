@@ -3,7 +3,7 @@
 //!
 //! Plugins are the most cross-cutting subsystem in the engine: every
 //! component slot they declare (commands / agents / skills / hooks /
-//! output styles / MCP servers / LSP servers) eventually lands in a
+//! output styles / MCP servers / LSP servers / workflows) eventually lands in a
 //! dedicated registry built by Plans 03 / 04 / 09 / 12. This crate owns
 //! the lifecycle and the materialiser; Plan 16 wires the actual fetches.
 //!
@@ -12,6 +12,7 @@
 #![forbid(unsafe_code)]
 
 pub mod agent_validation;
+pub mod brand_normalize;
 pub mod dependency;
 pub mod discovery;
 mod git;
@@ -26,6 +27,7 @@ pub mod source;
 pub mod strict_policy;
 pub mod theme_registry;
 pub mod trust;
+pub mod workflow;
 /// `${user_config.KEY}` substitution + plugin-option env helpers.
 ///
 /// Re-exported from the `hooks` crate, which owns the single source of truth
@@ -35,6 +37,12 @@ pub mod trust;
 pub use hooks::user_config;
 
 pub use agent_validation::{validate_plugin_agent_frontmatter, AgentValidationError};
+/// §19.1 / P0a.7 — brand-token normalization layer for comparing Claude-oracle
+/// plugin fixtures against LingXi's plugin contract; see the module doc for
+/// the frozen-identity vs. known-pair distinction.
+pub use brand_normalize::{
+    known_pairs, load_frozen_identities, normalize, BrandPair, FrozenIdentity, NormalizeReport,
+};
 pub use dependency::{
     merge_dependency_requirements, parse_dependencies, version_satisfies_all, PluginDependency,
 };
@@ -65,3 +73,6 @@ pub use source::PluginSource;
 pub use strict_policy::{PluginComponent, StrictPluginOnlyPolicy};
 pub use theme_registry::{PluginThemeEntry, PluginThemeRegistry};
 pub use trust::{default_trust_for_source, PluginTrustLevel};
+/// Legacy discovery assertion helper. Production workflow registration uses
+/// the shared `workflow::PluginWorkflowRegistry` instead.
+pub use workflow::{build_plugin_workflow_inventory, extract_meta_name, WorkflowInventoryEntry};

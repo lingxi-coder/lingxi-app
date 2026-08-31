@@ -1,0 +1,162 @@
+{
+  "phase": "2",
+  "tasks": [
+    {
+      "id": "P2.0",
+      "title": "Unified Local App Plugin skill roster and branded manifest",
+      "gate": "§18 Phase 2 / §19.1-§19.2: the verified package contains exactly 27 file-backed skills, 7 agents, 3 workflows, 4 schemas, and one LingXi-branded manifest; mobile listing and invocation use the Plugin registry",
+      "owns": [
+        "lingxi-code/plugins/lingxi-local-app/.lingxi-plugin",
+        "lingxi-code/plugins/lingxi-local-app/skills",
+        "lingxi-code/plugins/lingxi-local-app/agents",
+        "lingxi-code/plugins/lingxi-local-app/workflows",
+        "lingxi-code/plugins/lingxi-local-app/schemas",
+        "lingxi-code/skill-api/src/builtin",
+        "lingxi-code/apps/engine-mobile/src/builtin_bundle.rs",
+        "lingxi-code/apps/engine-mobile/src/host.rs",
+        "lingxi-code/apps/engine-mobile/src/lib.rs"
+      ],
+      "crates": [
+        "engine-mobile",
+        "skill-api",
+        "plugin"
+      ],
+      "testPackages": [
+        "engine-mobile",
+        "skill-api",
+        "plugin"
+      ],
+      "exclusive": false,
+      "repeatRuns": 1,
+      "plantedFailure": {
+        "edit": "remove one of the 27 skill directories from the Plugin package or build inventory",
+        "mustNameInOutput": [
+          "27",
+          "skill"
+        ]
+      },
+      "addedTests": [
+        "mobile_listing_dispatcher_and_skill_tool_share_one_live_registry"
+      ],
+      "deps": [
+        "P1.10",
+        "P1.11"
+      ],
+      "notes": "The ten root skills are copied byte-for-byte with references and inert agents/openai.yaml metadata; the other seventeen Local App skills remain package-native. No second mobile bundled body/reference list is permitted."
+    },
+    {
+      "id": "P2.1",
+      "title": "Runtime profile migration manifest, inventories, and orphan exclusion",
+      "gate": "§6.1 / §7.2 / §19.1: the checked-in migration manifest and Plugin inventories agree byte-for-byte for exactly 112 profile_file! assets; exactly 12 tracked orphans remain excluded",
+      "owns": [
+        "docs/local-apps/harness/template-migration-manifest.json",
+        "lingxi-code/plugins/lingxi-local-app/assets/templates",
+        "lingxi-code/local-apps/templates/runtime-profiles",
+        "lingxi-code/apps/engine-mobile/src/local_app_runtime_profiles.rs",
+        "lingxi-code/apps/engine-mobile/src/local_apps_build.rs",
+        "lingxi-code/scripts/check-phase2-plugin.py",
+        "lingxi-code/scripts/check-phase2-plugin.sh"
+      ],
+      "crates": [
+        "engine-mobile",
+        "local-apps"
+      ],
+      "testPackages": [
+        "engine-mobile",
+        "local-apps"
+      ],
+      "exclusive": false,
+      "repeatRuns": 1,
+      "plantedFailure": {
+        "edit": "reintroduce one path named by orphanedTrackedFiles into its legacy family or Plugin inventory",
+        "mustNameInOutput": [
+          "orphan"
+        ]
+      },
+      "addedTests": [
+        "plugin_catalog_contract_digests_match_production_contracts"
+      ],
+      "deps": [
+        "P2.0"
+      ],
+      "notes": "The legacy source scaffold may remain during Host cutover, but only under the digest-equality gate; production profile includes point at Plugin assets. Because the Plugin had not shipped, the incorrect Phaser/Babylon r1 pins were explicitly corrected before release; compatibility starts at the corrected r1 values and the Phase2 gate now executes the real Rust contract tests."
+    },
+    {
+      "id": "P2.2",
+      "title": "Build-time Plugin archive and cross-checked package inventory",
+      "gate": "§7.1 / §7.2 / §19.2: build-time packing includes the manifest, 27 skills, 7 agents, 3 workflows, schemas, and all template inventories/assets; undeclared or missing package files fail closed",
+      "owns": [
+        "lingxi-code/apps/engine-mobile/build.rs",
+        "lingxi-code/apps/engine-mobile/builtin-plugin-inventory.txt",
+        "lingxi-code/apps/engine-mobile/src/builtin_bundle.rs",
+        "lingxi-code/plugins/lingxi-local-app/assets/templates/catalog.json",
+        "lingxi-code/scripts/check-phase2-plugin.py"
+      ],
+      "crates": [
+        "engine-mobile",
+        "local-apps"
+      ],
+      "testPackages": [
+        "engine-mobile",
+        "local-apps"
+      ],
+      "exclusive": false,
+      "repeatRuns": 1,
+      "plantedFailure": {
+        "edit": "add an undeclared file to the Plugin package without updating the explicit build inventory",
+        "mustNameInOutput": [
+          "inventory"
+        ]
+      },
+      "addedTests": [
+        "compiled_in_plugin_bundle_materializes_the_real_plugin_files",
+        "compiled_in_plugin_bundle_is_idempotent_across_calls"
+      ],
+      "deps": [
+        "P2.1"
+      ],
+      "notes": "The inventory is explicit and sorted, while the Phase2 gate independently reverse-walks the package. This prevents a build script and a generated list from agreeing while both omit a newly added component."
+    },
+    {
+      "id": "P2.3",
+      "title": "Permission asset ownership and Babylon fail-closed availability",
+      "gate": "§7.2 / §9.1 / §19.1: production settings.local.json bytes live under local-apps/assets and Babylon remains unavailable until real-device Babylon + glTF + Havok validation",
+      "owns": [
+        "lingxi-code/local-apps/assets",
+        "lingxi-code/local-apps/src/permissions.rs",
+        "lingxi-code/plugins/lingxi-local-app/assets/templates/catalog.json",
+        "lingxi-code/scripts/check-phase2-plugin.py",
+        "lingxi-code/plugins/lingxi-local-app/workflows",
+        "lingxi-code/workflow/tests/plugin_workflow_scripts.rs"
+      ],
+      "crates": [
+        "local-apps",
+        "engine-mobile",
+        "workflow"
+      ],
+      "testPackages": [
+        "local-apps",
+        "engine-mobile",
+        "workflow"
+      ],
+      "exclusive": false,
+      "repeatRuns": 1,
+      "plantedFailure": {
+        "edit": "remove the namespaced agent orchestration from a Phase4 Plugin workflow",
+        "mustNameInOutput": [
+          "agent",
+          "workflow"
+        ]
+      },
+      "addedTests": [
+        "new_workspace_gets_scoped_read_and_edit_rules",
+        "phase4_and_phase6_workflows_use_real_orchestration",
+        "unified_build_workflow_executes_create_identity_chain_with_hermetic_agents"
+      ],
+      "deps": [
+        "P2.2"
+      ],
+      "notes": "Phase4 build and use-test workflows execute the verified agent identity chain; the Phase6 MCP authoring workflow remains explicitly typed fail-closed until its Host proposal/catalog machinery exists."
+    }
+  ]
+}

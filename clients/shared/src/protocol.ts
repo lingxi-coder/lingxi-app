@@ -34,7 +34,7 @@
 export const BRIDGE_PROTOCOL_VERSION = '0.2.0';
 
 /** `client-protocol` DTO contract version this SDK speaks. */
-export const CLIENT_PROTOCOL_VERSION = '9.0.0';
+export const CLIENT_PROTOCOL_VERSION = '10.0.0';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // commands.rs
@@ -204,11 +204,6 @@ export type ClientCommand =
       decision: AppAuthorizationDecisionDto;
     }
   | {
-      type: 'resolve_app_runtime_profile_selection';
-      request_id: string;
-      selected_family?: AppRuntimeProfileDto;
-    }
-  | {
       type: 'resolve_app_dependency_change_confirmation';
       request_id: string;
       approved: boolean;
@@ -224,6 +219,13 @@ export type ClientCommand =
   | { type: 'list_app_checkpoints'; app_id: string }
   | { type: 'restore_app_checkpoint'; app_id: string; checkpoint_id: string }
   | { type: 'delete_app'; app_id: string }
+  // ── Plugins (§17.1, §19.2) ──────────────────────────────────────────────────
+  //
+  // A nested OBJECT under `command`, NOT flattened onto this envelope: the
+  // Rust side keeps §17.1's operations off `ClientCommand`'s 16 KiB UniFFI
+  // metadata budget, and future plugin operations extend `PluginCommandDto`
+  // rather than this union again.
+  | { type: 'plugin_command'; command: PluginCommandDto }
   // ── Lifecycle ───────────────────────────────────────────────────────────────
   | { type: 'request_exit' };
 
@@ -430,7 +432,13 @@ export interface PermissionRequest {
   kind: PermissionKindDto;
   worker?: WorkerInfoDto;
   owner?: PermissionOwnerDto;
+  /** True when the client must not offer or persist an always-allow rule. */
+  suppress_always_allow_rule?: boolean;
+  /** Engine-computed Auto action; clients must not infer eligibility. */
+  auto_mode_prompt?: AutoModePromptDto;
 }
+
+export type AutoModePromptDto = 'workflow_bash' | 'exit_plan_mode';
 
 /** Immutable owner scope for a parked permission request. */
 export interface PermissionOwnerDto {
@@ -443,6 +451,7 @@ export interface PermissionOwnerDto {
 export type PermissionResponseDto =
   | { type: 'allow_once' }
   | { type: 'allow_always' }
+  | { type: 'allow_auto' }
   | { type: 'deny' };
 
 /** Live session permission modes accepted by the engine. */
@@ -793,8 +802,13 @@ export interface TaskRowDto {
 // local-apps core enums' canonical values — the `AccessTierDto` precedent).
 // ─────────────────────────────────────────────────────────────────────────────
 
-/** Workflow state of an app (local_apps.rs `AppWorkflowStateDto`). */
-export type AppWorkflowStateDto = 'draft' | 'ready';
+/**
+ * Derived publication state of an app (local_apps.rs `AppWorkflowStateDto`).
+ *
+ * The wire carries the active build/catalog pair and its UI verification
+ * projection, not the retired single `ready` state.
+ */
+export type AppWorkflowStateDto = 'draft' | 'published_unverified' | 'published_verified';
 
 /** Runtime (dev-server) state (local_apps.rs `AppRuntimeStateDto`). */
 export type AppRuntimeStateDto = 'stopped' | 'starting' | 'running' | 'stopping' | 'failed';
@@ -1248,7 +1262,6 @@ export type AppCapabilityKindDto =
   | 'ui_control'
   | 'network_domain'
   | 'restore_checkpoint'
-  | 'runtime_profile_selection'
   | 'dependency_change'
   | 'camera'
   | 'photo_library'
@@ -1297,14 +1310,6 @@ export interface AppRuntimeProfileOptionDto {
   reason?: string;
 }
 
-export interface AppRuntimeProfileSelectionRequestDto {
-  requestId: string;
-  appId: string;
-  reason: string;
-  recommendedFamily?: AppRuntimeProfileDto;
-  options: AppRuntimeProfileOptionDto[];
-}
-
 export type AppDependencyChangeKindDto = 'add' | 'update' | 'remove';
 
 export interface AppDependencyChangeDto {
@@ -1335,6 +1340,208 @@ export type AppAuthorizationDecisionDto =
   | 'allow_always';
 
 /**
+ * Effective activation state of one builtin plugin, after the host resolved
+ * the bare-`enabledPlugins`-key three-way (local_apps.rs
+ * `PluginActivationStateDto`). Deliberately TWO values, not three: an absent
+ * key is resolved to one of these before the wire is touched, so a client
+ * never reasons about "missing" itself, and `disabled` never collapses into
+ * "not found".
+ *
+ * A bare wire STRING.
+ */
+export type PluginActivationStateDto = 'loaded' | 'disabled';
+
+/**
+ * Resolved status of one builtin plugin (local_apps.rs `PluginStatusDto`).
+ *
+ * `state` and `manifest_default_enabled` ride INDEPENDENTLY — neither is
+ * derived from the other; an explicit override beats the manifest default,
+ * and both are on the wire so a client can tell "using the default" from
+ * "explicitly set" without a second round trip.
+ */
+export interface PluginStatusDto {
+  /** Bare `enabledPlugins` key (e.g. `lingxi-local-app`) — no `@marketplace` suffix. */
+  plugin_id: string;
+  state: PluginActivationStateDto;
+  manifest_default_enabled: boolean;
+}
+
+/**
+ * Enable/disable/status operations for one builtin plugin (local_apps.rs
+ * `PluginCommandDto`), nested under the {@link ClientCommand}
+ * `plugin_command` envelope rather than flattened into top-level variants:
+ * flattening would bill these operations to `ClientCommand`'s 16 KiB UniFFI
+ * metadata budget. Internally tagged on `type`, `snake_case`.
+ */
+export type PluginCommandDto =
+  /** Write `enabledPlugins[plugin_id] = enabled`; confirmed by `plugin_status_changed`. */
+  | { type: 'set_enabled'; plugin_id: string; enabled: boolean }
+  /** Pure read; answered with `plugin_status_changed`. */
+  | { type: 'get_status'; plugin_id: string }
+  /** Read the host-verified builtin-plugin inventory row for native settings. */
+  | { type: 'get_inventory'; plugin_id: string }
+  /** Resolve one unified create-confirmation sheet. */
+  | { type: 'resolve_create_confirmation'; request_id: string; approved: boolean }
+  /** Resolve one MCP proposal diff/approval sheet. */
+  | { type: 'resolve_mcp_proposal_approval'; request_id: string; approved: boolean }
+  /** Read the managed Local App MCP inventory projection for native UI. */
+  | { type: 'get_managed_mcp_inventory' };
+
+/** Client-protocol-level Local App failure surfaced directly to native UI. */
+export type LocalAppPluginErrorCodeDto =
+  | 'plugin_disabled'
+  | 'builtin_bundle_unavailable'
+  | 'template_unavailable'
+  | 'proposal_invalid'
+  | 'catalog_stale'
+  | 'active_state_corrupt'
+  | 'mcp_authoring_required'
+  | 'repair_budget_exhausted'
+  | 'exposure_capacity_reached';
+
+export type LocalAppVerificationStatusDto =
+  | 'pending'
+  | 'passed'
+  | 'failed'
+  | 'unverified'
+  | 'unavailable';
+
+export interface LocalAppVerificationSummaryDto {
+  status: LocalAppVerificationStatusDto;
+  summary: string;
+  code?: string;
+}
+
+export interface LocalAppGateStatusDto {
+  gateId: string;
+  label: string;
+  status: LocalAppVerificationStatusDto;
+  available: boolean;
+  detail?: string;
+}
+
+export interface LocalAppPluginComponentCountsDto {
+  skills: number;
+  agents: number;
+  workflows: number;
+  templates: number;
+}
+
+export interface LocalAppPluginInventoryDto {
+  pluginId: string;
+  displayName: string;
+  source: string;
+  version: string;
+  bundleSha256: string;
+  state: PluginActivationStateDto;
+  manifestDefaultEnabled: boolean;
+  counts: LocalAppPluginComponentCountsDto;
+  validationError?: string;
+}
+
+export interface LocalAppRejectedCandidateDto {
+  templateId: string;
+  reason: string;
+}
+
+export interface LocalAppTemplateSummaryDto {
+  templateId: string;
+  surface: AppSurfaceDto;
+  summary: string;
+}
+
+export interface LocalAppMcpToolSurfaceDto {
+  name: string;
+  title?: string;
+  description?: string;
+  inputSchemaJson: string;
+  outputSchemaJson?: string;
+  annotationsJson?: string;
+  executionJson?: string;
+  visibleMetaJson?: string;
+  semanticFlowJson: string;
+  permissionCeiling: string;
+}
+
+export interface LocalAppReceiptStatusDto {
+  receiptId: string;
+  appId: string;
+  workflowRunId: string;
+  approvalContractSha256: string;
+  candidateDigest: string;
+  issuedAtMs: number;
+  expiresAtMs: number;
+  consumed: boolean;
+  superseded: boolean;
+}
+
+export interface LocalAppCreateConfirmationRequestDto {
+  requestId: string;
+  appId: string;
+  name: string;
+  brief: string;
+  selectedTemplate: LocalAppTemplateSummaryDto;
+  runtimeProfile: AppRuntimeProfileOptionDto;
+  reason: string;
+  rejected?: LocalAppRejectedCandidateDto[];
+  initialTools?: LocalAppMcpToolSurfaceDto[];
+  requiredGates?: LocalAppGateStatusDto[];
+  receipt?: LocalAppReceiptStatusDto;
+}
+
+export type LocalAppMcpToolFieldDto =
+  | 'name'
+  | 'title'
+  | 'description'
+  | 'input_schema'
+  | 'output_schema'
+  | 'annotations'
+  | 'execution'
+  | 'visible_meta'
+  | 'semantic_flow'
+  | 'permission_ceiling';
+
+export type LocalAppMcpToolChangeKindDto = 'added' | 'removed' | 'changed';
+
+export interface LocalAppMcpToolDiffDto {
+  kind: LocalAppMcpToolChangeKindDto;
+  name: string;
+  before?: LocalAppMcpToolSurfaceDto;
+  after?: LocalAppMcpToolSurfaceDto;
+  changedFields?: LocalAppMcpToolFieldDto[];
+}
+
+export interface LocalAppMcpProposalApprovalRequestDto {
+  requestId: string;
+  appId: string;
+  workflowRunId: string;
+  summary: string;
+  proposalSha256: string;
+  approvalContractSha256: string;
+  toolSurfaceSha256: string;
+  toolDiffs?: LocalAppMcpToolDiffDto[];
+  requiredFlowChanges?: string[];
+  excludedCapabilities?: string[];
+  pendingGates?: LocalAppGateStatusDto[];
+  receipt?: LocalAppReceiptStatusDto;
+}
+
+export interface ManagedLocalAppMcpServerDto {
+  serverName: string;
+  appId: string;
+  appName: string;
+  buildId: string;
+  catalogSha256: string;
+  toolSurfaceSha256: string;
+  toolCount: number;
+  authoringRevision: number;
+  publicationState: AppWorkflowStateDto;
+  mcpVerification: LocalAppVerificationSummaryDto;
+  uiVerification: LocalAppVerificationSummaryDto;
+  tools?: LocalAppMcpToolSurfaceDto[];
+}
+
+/**
  * The local-app payload carried by the single {@link ClientEvent} `app_event`
  * envelope (local_apps.rs `AppEventDto`) — one envelope keeps the generated
  * mobile enum metadata bounded. Internally tagged on `type`, `snake_case`.
@@ -1347,7 +1554,6 @@ export type AppEventDto =
   | { type: 'app_bridge_response'; response: AppBridgeResponseDto }
   | { type: 'app_ui_request'; request: AppUiRequestDto }
   | { type: 'app_capability_requested'; request: AppCapabilityRequestDto }
-  | { type: 'app_runtime_profile_selection_requested'; request: AppRuntimeProfileSelectionRequestDto }
   | { type: 'app_dependency_change_confirmation_requested'; request: AppDependencyChangeConfirmationRequestDto }
   | { type: 'app_checkpoints_changed'; app_id: string; checkpoints: AppCheckpointDto[] }
   /** An app-initiated `llm.chat` started/finished; drives the "calling AI" indicator. */
@@ -1363,7 +1569,32 @@ export type AppEventDto =
       error?: string;
       retryable: boolean;
     }
-  | { type: 'app_bridge_stream_frame'; frame: AppBridgeStreamFrameDto; frameJson: string };
+  | { type: 'app_bridge_stream_frame'; frame: AppBridgeStreamFrameDto; frameJson: string }
+  /**
+   * Resolved status for one builtin plugin — the READ half of the plugin
+   * enable/disable protocol. Answers a `plugin_command` / `get_status` and
+   * confirms a `set_enabled` write-back. Last in the union because it is last
+   * in the Rust enum, whose UniFFI ordinals are positional.
+   */
+  | { type: 'plugin_status_changed'; status: PluginStatusDto }
+  | { type: 'plugin_inventory_changed'; inventory: LocalAppPluginInventoryDto }
+  | { type: 'create_confirmation_requested'; request: LocalAppCreateConfirmationRequestDto }
+  | { type: 'mcp_proposal_approval_requested'; request: LocalAppMcpProposalApprovalRequestDto }
+  | { type: 'managed_mcp_inventory_changed'; servers: ManagedLocalAppMcpServerDto[] }
+  | {
+      type: 'verification_summary_changed';
+      app_id: string;
+      publication_state: AppWorkflowStateDto;
+      mcp_verification: LocalAppVerificationSummaryDto;
+      ui_verification: LocalAppVerificationSummaryDto;
+    }
+  | {
+      type: 'local_app_operation_failed';
+      app_id?: string;
+      code: LocalAppPluginErrorCodeDto;
+      message: string;
+      request_id?: string;
+    };
 
 // ─────────────────────────────────────────────────────────────────────────────
 // events.rs

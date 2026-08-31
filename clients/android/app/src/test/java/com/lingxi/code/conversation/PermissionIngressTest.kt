@@ -1,5 +1,6 @@
 package com.lingxi.code.conversation
 
+import com.lingxi.code.bindings.AutoModePromptDto
 import com.lingxi.code.bindings.PermissionKindDto
 import com.lingxi.code.bindings.PermissionRequest
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -16,6 +17,7 @@ class PermissionIngressTest {
         ),
         worker = null,
         owner = null,
+        suppressAlwaysAllowRule = false,
     )
 
     @Test
@@ -69,5 +71,23 @@ class PermissionIngressTest {
         ingress.resolve(99uL)
 
         assertEquals(permissionRequestToPrompt(current), permissions.value)
+    }
+
+    @Test
+    fun autoModePromptRequest_isPublishedVerbatim() {
+        val permissions = MutableStateFlow<PermissionPromptState?>(null)
+        val ingress = PermissionIngress(permissions)
+        val auto = PermissionRequest(
+            requestId = 7uL,
+            kind = PermissionKindDto.ExitPlanMode(plan = "step 1"),
+            worker = null,
+            owner = null,
+            suppressAlwaysAllowRule = false,
+            autoModePrompt = AutoModePromptDto.EXIT_PLAN_MODE,
+        )
+
+        ingress.publish(auto)
+
+        assertEquals(permissionRequestToPrompt(auto), permissions.value)
     }
 }

@@ -2,33 +2,32 @@ import SwiftUI
 
 // MARK: - First-run setup wizard
 //
-// Port of the prototype's `SetupWizard` (lingxi-iphone.html). A 5-step first-run
-// flow over the sci-fi orb backdrop: welcome → name the assistant →
-// your name → choose native speech behavior → finish. Provider/model setup stays
-// in the real Provider settings flow, so onboarding never presents mock models.
+// Port of the prototype's `SetupWizard` (lingxi-iphone.html). A 6-step first-run
+// flow over the sci-fi orb backdrop: welcome → name the assistant → configure
+// a Provider credential and model → review web capabilities → choose native
+// speech behavior → finish.
 // On finish it writes the chosen values to `AppState` and marks `setupDone`, so
 // it only runs once (re-triggerable from Settings → 关于 → 重新观看引导).
 
 struct SetupWizardView: View {
     @Environment(AppState.self) private var app
     @Environment(VoiceCapabilityModel.self) private var voiceCapability
-    /// Kept in the initializer for source compatibility with the existing root;
-    /// model selection now belongs to the real Provider settings flow.
-    @ObservedObject var convo: ConversationModel
-    /// Commit the chosen model to the engine (`SetModel`) when it is a real id.
-    var onSetModel: (String) -> Void = { _ in }
+    @Bindable var store: SettingsStore
+    /// Open the full settings flow without dismissing onboarding.
+    var onOpenSettings: (SettingsPage) -> Void = { _ in }
     /// Called once the wizard commits (or is finished) — RootView dismisses it
     /// by reading `app.setupDone`; this is the hook for any extra teardown.
     var onDone: () -> Void = {}
 
-    private static let total = 5
+    private static let total = 6
 
     @State private var step = 0
     @State private var seeded = false
+    @State private var providerRepository = ProviderRepository.shared
+    @State private var editingProviderDraft: ProviderEditorDraft?
 
-    // Editable copies, seeded from AppState on first appear.
+    // Editable copy, seeded from the current app state on first appear.
     @State private var assistantName = String(localized: "app_name")
-    @State private var userName = ""
 
     @FocusState private var fieldFocused: Bool
 
@@ -68,15 +67,24 @@ struct SetupWizardView: View {
             guard !seeded else { return }
             seeded = true
             assistantName = app.assistantName
-            userName = app.userName
             voiceCapability.reloadFromDefaults()
         }
         .onChange(of: step) { oldStep, newStep in
-            guard oldStep == 3, newStep != 3 else { return }
+            guard oldStep == 4, newStep != 4 else { return }
             Task { await voiceCapability.stopPreview() }
         }
         .onDisappear {
             Task { await voiceCapability.stopPreview() }
+        }
+        .sheet(item: $editingProviderDraft) { draft in
+            ProviderEditorSheet(draft: draft) {
+                editingProviderDraft = nil
+            }
+            .presentationDragIndicator(.visible)
+        }
+        .task {
+            await providerRepository.refreshCatalog()
+            await providerRepository.refreshCredentialStatus()
         }
     }
 
@@ -190,22 +198,24 @@ struct SetupWizardView: View {
                 .padding(.top, 18)
             }
         case 2:
-            VStack(spacing: 0) {
-                badge(.skill)
-                wizH(String(localized: "onboarding_user_title"))
-                wizSub(String(localized: "onboarding_user_subtitle"))
-                wizField(text: $userName, placeholder: String(localized: "onboarding_user_placeholder"))
-            }
+            modelStep
         case 3:
+            webStep
+        case 4:
             voiceCapabilityStep
         default:
             VStack(spacing: 0) {
                 badge(.brain)
                 wizH(String(localized: "onboarding_done_title"))
-                wizSub(String(localized: "onboarding_done_subtitle"))
                 VStack(alignment: .leading, spacing: 12) {
                     completionRow(String(localized: "onboarding_done_row_assistant"), assistantName)
-                    completionRow(String(localized: "onboarding_done_row_name"), userName)
+                    completionRow(
+                        String(localized: "composer_current_model"),
+                        providerRepository.settingsSummary.defaultModelID
+                            ?? String(localized: "settings_provider_unconfigured")
+                    )
+                    completionRow(String(localized: "settings_web_search"), webProviderSummary(.search))
+                    completionRow(String(localized: "settings_web_fetch"), webProviderSummary(.fetch))
                     completionRow(String(localized: "onboarding_done_row_voice"), voiceCapability.mode.title)
                     completionRow(String(localized: "settings_language_title"), voiceCapability.selectedLanguageLabel)
                     completionRow(String(localized: "onboarding_done_row_voiceover"), voiceCapability.effectiveVoiceLabel)
@@ -215,6 +225,151 @@ struct SetupWizardView: View {
                 .overlay(RoundedRectangle(cornerRadius: 15).stroke(Color.white.opacity(0.12), lineWidth: 0.5))
             }
         }
+    }
+
+    private var modelStep: some View {
+        VStack(spacing: 0) {
+            badge(.brain)
+                .accessibilityIdentifier("onboarding.model.step")
+            wizH(String(localized: "composer_setup_model"))
+            wizSub(String(localized: "provider_llm_blurb"))
+
+            if !providerRepository.profiles.isEmpty {
+                VStack(spacing: 10) {
+                    ForEach(providerRepository.profiles) { state in
+                        providerProfileRow(state)
+                    }
+                }
+                .padding(.bottom, 18)
+            }
+
+            VStack(alignment: .leading, spacing: 10) {
+                Text(String(localized: "settings_title_add_llm"))
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(Color(okl: 0.68, 0.04, 280))
+                    .frame(maxWidth: .infinity, alignment: .leading)
+
+                LazyVStack(spacing: 10) {
+                    ForEach(providerRepository.catalogPresets) { preset in
+                        providerPresetRow(preset)
+                    }
+                }
+            }
+        }
+    }
+
+    private func providerProfileRow(_ state: ProviderProfileState) -> some View {
+        setupLink(
+            icon: .sparkle,
+            title: state.profile.name,
+            detail: state.profile.modelID,
+            value: state.maskedCredentialSummary,
+            accessibilityIdentifier: "onboarding.model.provider.\(state.id)"
+        ) {
+            editingProviderDraft = providerRepository.makeDraft(for: state.id)
+        }
+    }
+
+    private func providerPresetRow(_ preset: ProviderPreset) -> some View {
+        setupLink(
+            icon: .plus,
+            title: preset.name,
+            detail: preset.sub,
+            value: credentialMethodLabel(for: preset),
+            accessibilityIdentifier: "onboarding.model.preset.\(preset.id)"
+        ) {
+            editingProviderDraft = providerRepository.makeNewDraft(presetID: preset.id)
+        }
+    }
+
+    private func credentialMethodLabel(for preset: ProviderPreset) -> String {
+        if preset.id == "openai-chatgpt" {
+            return "OAuth"
+        }
+        if providerRepository.oauthLoginAvailable(for: preset.id) {
+            return "API Key / OAuth"
+        }
+        return "API Key"
+    }
+
+    private var webStep: some View {
+        VStack(spacing: 0) {
+            badge(.search)
+                .accessibilityIdentifier("onboarding.web.step")
+            wizH(String(localized: "settings_web_search"))
+            wizSub(String(localized: "provider_search_blurb"))
+            VStack(spacing: 10) {
+                setupLink(
+                    icon: .search,
+                    title: String(localized: "settings_web_search"),
+                    detail: String(localized: "provider_search_blurb"),
+                    value: webProviderSummary(.search),
+                    accessibilityIdentifier: "onboarding.web.search"
+                ) {
+                    onOpenSettings(.providerList(.init(.search)))
+                }
+                setupLink(
+                    icon: .link,
+                    title: String(localized: "settings_web_fetch"),
+                    detail: String(localized: "provider_fetch_blurb"),
+                    value: webProviderSummary(.fetch),
+                    accessibilityIdentifier: "onboarding.web.fetch"
+                ) {
+                    onOpenSettings(.providerList(.init(.fetch)))
+                }
+            }
+        }
+    }
+
+    private func setupLink(
+        icon: LXIconName,
+        title: String,
+        detail: String,
+        value: String,
+        accessibilityIdentifier: String,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            HStack(spacing: 13) {
+                LXIcon(name: icon, size: 19, color: .white, stroke: 1.8)
+                    .frame(width: 40, height: 40)
+                    .background(Color(okl: 0.70, 0.18, 285, 0.18), in: RoundedRectangle(cornerRadius: 11))
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(title)
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundStyle(Color(okl: 0.95, 0.02, 285))
+                    Text(detail)
+                        .font(.system(size: 11.5))
+                        .foregroundStyle(Color(okl: 0.66, 0.03, 280))
+                        .lineLimit(2)
+                }
+                Spacer(minLength: 8)
+                VStack(alignment: .trailing, spacing: 5) {
+                    Text(value)
+                        .font(.system(size: 11.5, weight: .medium))
+                        .foregroundStyle(Color(okl: 0.78, 0.05, 280))
+                        .lineLimit(1)
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(.white.opacity(0.35))
+                }
+            }
+            .padding(14)
+            .background(.white.opacity(0.05), in: RoundedRectangle(cornerRadius: 15))
+            .overlay {
+                RoundedRectangle(cornerRadius: 15)
+                    .stroke(.white.opacity(0.12), lineWidth: 0.5)
+            }
+        }
+        .buttonStyle(.plain)
+        .accessibilityIdentifier(accessibilityIdentifier)
+    }
+
+    private func webProviderSummary(_ kind: ProviderKind) -> String {
+        let providers = store.providers(kind)
+        let provider = providers.first(where: { $0.isDefault && $0.enabled })
+            ?? providers.first(where: \.enabled)
+        return provider?.name ?? String(localized: "settings_provider_unconfigured")
     }
 
     private var voiceCapabilityStep: some View {
@@ -426,7 +581,7 @@ struct SetupWizardView: View {
     private var cta: String {
         switch step {
         case 0: return String(localized: "onboarding_cta_start")
-        case 3: return String(localized: "onboarding_cta_continue")
+        case 4: return String(localized: "onboarding_cta_continue")
         case Self.total - 1: return String(localized: "onboarding_cta_finish")
         default: return String(localized: "onboarding_cta_continue")
         }
@@ -434,7 +589,6 @@ struct SetupWizardView: View {
     private var ctaDisabled: Bool {
         switch step {
         case 1: return assistantName.trimmingCharacters(in: .whitespaces).isEmpty
-        case 2: return userName.trimmingCharacters(in: .whitespaces).isEmpty
         default: return false
         }
     }
@@ -451,7 +605,6 @@ struct SetupWizardView: View {
     }
     private func finish() {
         app.assistantName = assistantName.trimmingCharacters(in: .whitespaces)
-        app.userName = userName.trimmingCharacters(in: .whitespaces)
         app.setupDone = true
         onDone()
     }

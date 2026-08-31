@@ -1,0 +1,102 @@
+# component_literal_allowlist.txt — P-1.0
+#
+# One explicit `path:literal:expected_count` entry per PERMITTED (path,
+# literal) pair — an occurrence of a Local App component (skill / workflow)
+# name as a literal in PRODUCTION source. `path` is relative to the cargo
+# workspace root (`lingxi-code/`), matched by EXACT string equality; so is
+# `literal`. No globs, no directory entries, no prefixes.
+#
+# Scan surface (component_literal_scan.rs's SCAN_ROOTS):
+#   apps/engine-mobile/src, tasks/src, tools/workflow/src
+# — the latter two because design doc §19.3's last bullet and P-1.9's
+# completion condition are stated over exactly those directories, so a scanner
+# rooted only at engine-mobile could never gate them.
+#
+# Within those roots EVERY file type is scanned except the known-binary
+# extensions in SKIPPED_EXTENSIONS: the filter is a deny-list, so an unknown
+# extension is scanned rather than skipped. That is why `.txt` and `.json` under
+# tools/workflow/src (`workflow_description.txt`, the Workflow tool's own
+# model-facing description, and `workflow_input_schema.json` — both
+# `include_str!`ed into production) are in the scan surface. Neither contains a
+# component name today, so neither appears below; if a later phase moves
+# workflow-selection prose out of an allowlisted `.js` script and into the
+# description text, the arrival now shows up here as a LEAK rather than only the
+# departure showing up as a STALE ENTRY.
+#
+# ## Why entries are NOT keyed on line numbers
+#
+# They used to be, and that made every unrelated edit above an allowlisted
+# line produce a spurious "leak" whose cheapest fix is re-typing line numbers
+# with the count unchanged — the re-baseline reflex this gate exists to
+# prevent. P-1.2/P-1.4 edit local_apps_host.rs, P-1.3 edits
+# workflow_support.rs, P-1.5 edits lib.rs; all of them would have paid it.
+# The FAILURE OUTPUT is still line-numbered ("name the file and the line" is a
+# requirement on what the gate says, not on how the allowlist is keyed).
+#
+# ## Why every entry carries a COUNT, and why the count is EXACT
+#
+# - Without a count, ONE entry covers unlimited same-file occurrences of that
+#   literal — including new ones added later.
+# - Without exactness in the DOWNWARD direction, the allowlist is a permitted
+#   superset: deleting the code an entry points at, or dropping a file out of
+#   the directory walk, leaves the gate green with a standing pre-approved
+#   hole behind it. component_literal_scan.rs's
+#   `every_allowlist_entry_still_matches_a_real_occurrence` and its
+#   COUNT MISMATCH finding close both directions.
+#
+# The NUMBER OF ENTRIES is pinned separately by ALLOWLIST_BASELINE_COUNT
+# (`allowlist_entry_count_matches_the_committed_baseline`), so replacing
+# several precise lines with one broad one still has to explain, in the same
+# diff, why the committed count moved.
+#
+# Phase -1 deliberately KEEPS the two pre-existing Local App workflow
+# registrations (tools/workflow/src/builtins.rs plus the three .js files it
+# include_str!s) and the skill-name mirror `register_mobile_skill_commands`
+# duplicates into the slash-command catalog, so this file cannot be empty
+# today, by design — Phase 9 is expected to drive it to zero.
+#
+# `#[cfg(test)]` regions — inline blocks AND out-of-line test modules such as
+# `tasks/src/registry_test.rs` and `tasks/src/handlers/local_workflow_test.rs`
+# — are skipped by the scanner and therefore appear nowhere below.
+
+# --- apps/engine-mobile/src ------------------------------------------------
+
+# lib.rs — P-1.5 removed the second hardcoded ten-name array
+# `register_mobile_skill_commands` used to loop over. It now iterates
+# `skills.names()` on the live `mobile_skill_registry()` directly
+# (`register_mobile_skill_commands_from`), so none of the ten skill names
+# appear as source literals in this file any more; this file has no entries
+# here.
+
+# local_apps_host.rs — P-1.4 removed the Host's two prose sentences naming
+# which build workflow the app's surface requires (§19.3: the Host contract
+# carries no workflow/skill/agent names). The Host now selects and enforces
+# the build workflow itself via LocalAppPluginBinding::resolve/enforce
+# (local_app_plugin_binding.rs, below) instead of telling the model which one
+# to launch, so this file has no entries here any more.
+
+# local_app_plugin_binding.rs — the one place a build target maps to the
+# plugin-owned build workflow id. The Host never reads these literals itself:
+# it asks LocalAppPluginBinding::resolve/enforce, which is the composition
+# binding this scanner's own allowlist header describes.
+apps/engine-mobile/src/local_app_plugin_binding.rs:lingxi-local-app:local-app-build:1
+apps/engine-mobile/src/local_app_plugin_binding.rs:lingxi-local-app:local-app-mcp-authoring:1
+apps/engine-mobile/src/local_app_plugin_binding.rs:lingxi-local-app:local-app-use-test:1
+
+# --- tasks/src -------------------------------------------------------------
+
+# lib.rs — no entries here any more. P-1.9 deleted `tasks::LOCAL_APP_BUILD_WORKFLOWS`
+# for real: it was already unused by this crate's own lease/delete guards
+# (both read a task's typed `LocalAppWorkflowTaskScope` instead — see
+# `tasks/src/scope.rs`) and survived only for a twin-agreement test in
+# `engine-mobile` (`local_app_build_workflow_sets_agree`), which is also
+# deleted now that there is no second list left to twin against —
+# `tool_workflow` answers the same question from a typed field
+# (`BuiltinWorkflowDescriptor::is_local_app_build`) instead of its own array.
+
+# --- tools/workflow/src ----------------------------------------------------
+
+# No entries here any more. Phase 9 moved Local App workflows out of the
+# built-in workflow registry and into the verified plugin bundle; the remaining
+# built-in workflow surface is generic and must not carry Local App component
+# names.

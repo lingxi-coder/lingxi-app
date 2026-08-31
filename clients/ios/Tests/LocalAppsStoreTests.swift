@@ -57,6 +57,167 @@ final class LocalAppsStoreTests: XCTestCase {
         XCTAssertNil(relaunched.storedIdentifier(appID: "tracker"))
     }
 
+    func testPublishedWorkflowBadgesStayTextualAndActionable() {
+        let unverified = LocalAppWorkflow.publishedUnverified.statusBadge
+        XCTAssertEqual(unverified.systemImageName, "exclamationmark.triangle.fill")
+        XCTAssertEqual(unverified.accessibilityLabel, "local_apps_verification_published_unverified")
+        XCTAssertEqual(LocalAppWorkflow.publishedUnverified.isPublished, true)
+
+        let verified = LocalAppWorkflow.publishedVerified.statusBadge
+        XCTAssertEqual(verified.systemImageName, "checkmark.seal.fill")
+        XCTAssertEqual(verified.accessibilityLabel, "local_apps_verification_published_verified")
+        XCTAssertEqual(LocalAppWorkflow.publishedVerified.isPublished, true)
+
+        let draft = LocalAppWorkflow.draft.statusBadge
+        XCTAssertEqual(draft.systemImageName, "pencil.circle.fill")
+        XCTAssertEqual(LocalAppWorkflow.draft.isPublished, false)
+    }
+
+    func testPluginStatusEventUpdatesBuiltinPluginState() {
+        let store = LocalAppsStore()
+        store.handle(event: .appEvent(event: .pluginStatusChanged(status: PluginStatusDto(
+            pluginId: "lingxi-local-app",
+            state: .disabled,
+            manifestDefaultEnabled: true
+        ))))
+
+        XCTAssertEqual(store.builtinPluginStatus?.state, .disabled)
+        XCTAssertEqual(store.builtinPluginStatus?.manifestDefaultEnabled, true)
+        XCTAssertEqual(store.builtinPluginEffectiveEnabled, false)
+    }
+
+    func testPluginInventoryEventUpdatesBuiltinPluginMetadata() {
+        let store = LocalAppsStore()
+        store.handle(event: .appEvent(event: .pluginInventoryChanged(inventory: LocalAppPluginInventoryDto(
+            pluginId: "lingxi-local-app",
+            displayName: "LingXi Local App",
+            source: "builtin",
+            version: "2.0.1",
+            bundleSha256: String(repeating: "d", count: 64),
+            state: .disabled,
+            manifestDefaultEnabled: false,
+            counts: LocalAppPluginComponentCountsDto(skills: 9, agents: 4, workflows: 2, templates: 3),
+            validationError: "manifest mismatch"
+        ))))
+
+        XCTAssertEqual(store.builtinPluginDescriptor.version, "2.0.1")
+        XCTAssertEqual(store.builtinPluginDescriptor.archiveDigest, String(repeating: "d", count: 64))
+        XCTAssertEqual(store.builtinPluginDescriptor.skillCount, 9)
+        XCTAssertEqual(store.builtinPluginDescriptor.agentCount, 4)
+        XCTAssertEqual(store.builtinPluginStatus?.state, .disabled)
+        XCTAssertEqual(store.builtinPluginStatus?.validationError, "manifest mismatch")
+        XCTAssertFalse(store.builtinPluginEffectiveEnabled)
+    }
+
+    func testManagedInventoryReaderLoadsPublishedCatalogFromDisk() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let appID = "tracker"
+        let catalogDigest = String(repeating: "a", count: 64)
+        let toolDigest = String(repeating: "b", count: 64)
+        let verificationDigest = String(repeating: "c", count: 64)
+        let manifestURL = root
+            .appendingPathComponent("apps/\(appID)/workspace/.lingxi/manifest.json")
+        try FileManager.default.createDirectory(
+            at: manifestURL.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        let manifest = """
+        {
+          "activeMcpCatalog": {
+            "buildId": "build-42",
+            "catalogSha256": "\(catalogDigest)",
+            "toolSurfaceSha256": "\(toolDigest)",
+            "mcpVerificationSha256": "\(verificationDigest)",
+            "authoringRevision": 7
+          }
+        }
+        """
+        try manifest.write(to: manifestURL, atomically: true, encoding: .utf8)
+
+        let catalogURL = root
+            .appendingPathComponent("apps/\(appID)/mcp/catalogs/\(catalogDigest).json")
+        try FileManager.default.createDirectory(
+            at: catalogURL.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        let catalog = """
+        {
+          "tools": [
+            {
+              "definition": {
+                "name": "read_value",
+                "title": "Read Value",
+                "description": "Reads a value",
+                "inputSchema": {"type":"object","properties":{"id":{"type":"string"}}},
+                "outputSchema": {"type":"object"},
+                "annotations": {"readOnlyHint": true},
+                "_meta": {"visible": true}
+              },
+              "flow": {"steps":[{"type":"read"}]},
+              "ceiling": {"type":"allow"}
+            }
+          ]
+        }
+        """
+        try catalog.write(to: catalogURL, atomically: true, encoding: .utf8)
+
+        let reader = LocalAppManagedMcpInventoryReader(appSandboxRoot: root.path)
+        let inventory = reader.read(
+            serverName: "local_app_tracker",
+            apps: [
+                LocalAppSummary(
+                    id: appID,
+                    name: "Tracker",
+                    brief: "Reads values",
+                    updatedAt: .now,
+                    workflow: .publishedVerified,
+                    workspaceRelativePath: "apps/\(appID)/workspace"
+                )
+            ]
+        )
+
+        XCTAssertEqual(inventory?.appID, appID)
+        XCTAssertEqual(inventory?.buildID, "build-42")
+        XCTAssertEqual(inventory?.toolCount, 1)
+        XCTAssertEqual(inventory?.authoringRevision, 7)
+        XCTAssertEqual(inventory?.publicationState, .publishedVerified)
+        XCTAssertEqual(inventory?.uiVerification.status, .passed)
+        XCTAssertEqual(inventory?.mcpVerification.status, .passed)
+        XCTAssertEqual(inventory?.mcpVerification.code, verificationDigest)
+        XCTAssertEqual(inventory?.tools.first?.name, "read_value")
+    }
+
+    func testManagedInventoryRestrictionsStayReadOnly() {
+        let inventory = LocalAppManagedMcpInventory(
+            serverName: "local_app_tracker",
+            appID: "tracker",
+            appName: "Tracker",
+            buildID: "build-42",
+            catalogDigest: String(repeating: "a", count: 64),
+            toolSurfaceDigest: String(repeating: "b", count: 64),
+            authoringRevision: 7,
+            publicationState: .publishedVerified,
+            mcpVerification: LocalAppVerificationSummary(
+                status: .passed,
+                summary: "MCP verification passed",
+                code: String(repeating: "c", count: 64)
+            ),
+            uiVerification: LocalAppVerificationSummary(
+                status: .passed,
+                summary: "UI verification passed",
+                code: nil
+            ),
+            tools: []
+        )
+
+        XCTAssertFalse(allowsMcpConfigurationEditing(inventory))
+        XCTAssertTrue(allowsMcpConfigurationEditing(nil))
+    }
+
     func testFailedWebsiteDataCleanupKeepsJournalAndMappingForRetry() async throws {
         let suiteName = "LocalAppsStoreTests.website-cleanup-failure.\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
@@ -739,13 +900,18 @@ final class LocalAppsStoreTests: XCTestCase {
                 appRecord(id: "tracker", name: "Tracker", initSessionId: "11111111-1111-4111-8111-111111111111")
             )
             XCTAssertEqual(summary.initSessionId, "11111111-1111-4111-8111-111111111111")
-            XCTAssertEqual(summary.workflow, .ready)
+            XCTAssertEqual(summary.workflow, .publishedUnverified)
 
             let draft = LocalAppsProtocolAdapter.app(
                 appRecord(id: "draft-app", name: "Draft", workflowState: .draft)
             )
             XCTAssertEqual(draft.workflow, .draft)
             XCTAssertNil(draft.initSessionId)
+
+            let verified = LocalAppsProtocolAdapter.app(
+                appRecord(id: "verified-app", name: "Verified", workflowState: .publishedVerified)
+            )
+            XCTAssertEqual(verified.workflow, .publishedVerified)
         }
 
         /// The details snapshot's manifest is the only structured data-model
@@ -943,16 +1109,16 @@ final class LocalAppsStoreTests: XCTestCase {
             XCTAssertNil(store.pendingPermission)
         }
 
-        func testRuntimeProfilePromptOnlyAllowsOneShotAuthorization() async {
+        func testDependencyChangePromptOnlyAllowsOneShotAuthorization() async {
             let store = LocalAppsStore()
             var submitted: [ClientCommand] = []
             store.configure { command in submitted.append(command) }
             store.handle(event: .appEvent(event: .appCapabilityRequested(request: AppCapabilityRequestDto(
                 requestId: "permission-runtime-1",
                 appId: "tracker",
-                capability: .runtimeProfileSelection,
+                capability: .dependencyChange,
                 domain: nil,
-                reason: "Choose the runtime profile"
+                reason: "Review dependency change"
             ))))
 
             XCTAssertEqual(store.pendingPermission?.allowsPersistentGrant, false)
@@ -964,60 +1130,6 @@ final class LocalAppsStoreTests: XCTestCase {
             XCTAssertEqual(requestId, "permission-runtime-1")
             XCTAssertEqual(decision, .allowOnce)
             XCTAssertNil(store.pendingPermission)
-        }
-
-        func testRuntimeProfileSelectionRequestPresentsOptionsAndReturnsChosenFamily() async {
-            let store = LocalAppsStore()
-            var submitted: [ClientCommand] = []
-            store.configure { command in submitted.append(command) }
-            store.handle(event: .appEvent(event: .appRuntimeProfileSelectionRequested(request: AppRuntimeProfileSelectionRequestDto(
-                requestId: "runtime-select-1",
-                appId: "tracker",
-                reason: "Pick the runtime profile before scaffold",
-                recommendedFamily: .three3d,
-                options: [
-                    AppRuntimeProfileOptionDto(
-                        family: .three3d,
-                        revision: 1,
-                        contractSha256: "three-contract",
-                        surface: .canvas,
-                        corePackages: [
-                            AppRuntimeProfilePackageDto(name: "three", version: "0.185.1"),
-                        ],
-                        cacheStatus: "bundled",
-                        downloadStatus: "bundled",
-                        available: true,
-                        reason: nil
-                    ),
-                    AppRuntimeProfileOptionDto(
-                        family: .babylon3d,
-                        revision: 1,
-                        contractSha256: "babylon-contract",
-                        surface: .canvas,
-                        corePackages: [
-                            AppRuntimeProfilePackageDto(name: "@babylonjs/core", version: "9.22.1"),
-                        ],
-                        cacheStatus: "unavailable",
-                        downloadStatus: "gated",
-                        available: false,
-                        reason: "Pending device validation"
-                    ),
-                ]
-            ))))
-
-            XCTAssertEqual(store.pendingRuntimeProfileSelection?.id, "runtime-select-1")
-            XCTAssertEqual(store.pendingRuntimeProfileSelection?.recommendedFamily, .three3d)
-            XCTAssertEqual(store.pendingRuntimeProfileSelection?.options.count, 2)
-            XCTAssertEqual(store.pendingRuntimeProfileSelection?.options.last?.available, false)
-
-            await store.resolvePendingRuntimeProfileSelection(.three3d)
-
-            guard case let .resolveAppRuntimeProfileSelection(requestId, selectedFamily) = submitted.last else {
-                return XCTFail("Expected runtime profile selection resolution command")
-            }
-            XCTAssertEqual(requestId, "runtime-select-1")
-            XCTAssertEqual(selectedFamily, .three3d)
-            XCTAssertNil(store.pendingRuntimeProfileSelection)
         }
 
         func testDependencyChangeConfirmationShowsPolicyAndReturnsApproval() async {
@@ -2442,6 +2554,118 @@ final class LocalAppsStoreTests: XCTestCase {
                 "the second failure must reach the presenter too")
         }
 
+        func testCreateConfirmationSupersedesSameAppAndRejectsOldToken() async throws {
+            let store = LocalAppsStore()
+            var submitted: [ClientCommand] = []
+            store.configure { command in submitted.append(command) }
+
+            store.handle(event: .appEvent(event: .createConfirmationRequested(
+                request: createConfirmationRequest(requestId: "create-1", appId: "tracker", name: "Tracker")
+            )))
+            XCTAssertEqual(store.pendingCreateConfirmation?.requestID, "create-1")
+
+            store.handle(event: .appEvent(event: .createConfirmationRequested(
+                request: createConfirmationRequest(requestId: "create-2", appId: "tracker", name: "Tracker v2")
+            )))
+
+            XCTAssertEqual(store.pendingCreateConfirmation?.requestID, "create-2")
+            try await waitUntil {
+                submitted.contains { command in
+                    guard case let .pluginCommand(command: .resolveCreateConfirmation(requestId, approved)) = command
+                    else { return false }
+                    return requestId == "create-1" && approved == false
+                }
+            }
+        }
+
+        func testResolvingCreateConfirmationApprovesCurrentAndAdvancesQueue() async throws {
+            let store = LocalAppsStore()
+            var submitted: [ClientCommand] = []
+            store.configure { command in submitted.append(command) }
+
+            store.handle(event: .appEvent(event: .createConfirmationRequested(
+                request: createConfirmationRequest(requestId: "create-1", appId: "tracker", name: "Tracker")
+            )))
+            store.handle(event: .appEvent(event: .createConfirmationRequested(
+                request: createConfirmationRequest(requestId: "create-2", appId: "notes", name: "Notes")
+            )))
+
+            await store.resolvePendingCreateConfirmation(true)
+
+            XCTAssertEqual(store.pendingCreateConfirmation?.requestID, "create-2")
+            XCTAssertTrue(submitted.contains { command in
+                guard case let .pluginCommand(command: .resolveCreateConfirmation(requestId, approved)) = command
+                else { return false }
+                return requestId == "create-1" && approved
+            })
+        }
+
+        func testMcpProposalShowsAllDiffKindsRejectsExplicitlyAndFailsClosedWhenUnchanged() async throws {
+            let store = LocalAppsStore()
+            var submitted: [ClientCommand] = []
+            store.configure { command in submitted.append(command) }
+
+            store.handle(event: .appEvent(event: .mcpProposalApprovalRequested(
+                request: mcpProposalRequest(
+                    requestId: "proposal-1",
+                    appId: "tracker",
+                    diffs: [
+                        .init(
+                            kind: .added,
+                            name: "added_tool",
+                            before: nil,
+                            after: toolSurface(name: "added_tool", title: "Added"),
+                            changedFields: []
+                        ),
+                        .init(
+                            kind: .removed,
+                            name: "removed_tool",
+                            before: toolSurface(name: "removed_tool", title: "Removed"),
+                            after: nil,
+                            changedFields: []
+                        ),
+                        .init(
+                            kind: .changed,
+                            name: "changed_tool",
+                            before: toolSurface(name: "changed_tool", title: "Before"),
+                            after: toolSurface(name: "changed_tool", title: "After"),
+                            changedFields: [.name, .title, .description, .inputSchema, .outputSchema, .annotations, .execution, .visibleMeta, .semanticFlow, .permissionCeiling]
+                        ),
+                    ],
+                    requiredFlowChanges: ["Add audit step"],
+                    excludedCapabilities: ["delete_server"],
+                    pendingGates: [gateStatus(id: "runner", status: .pending, available: false)]
+                )
+            )))
+
+            let prompt = try XCTUnwrap(store.pendingMcpProposalApproval)
+            XCTAssertEqual(prompt.toolDiffs.map(\.kind), [.added, .removed, .changed])
+            XCTAssertEqual(prompt.toolDiffs.last?.changedFields.count, 10)
+            XCTAssertEqual(prompt.pendingGates.first?.status, .pending)
+
+            await store.resolvePendingMcpProposalApproval(false)
+
+            XCTAssertTrue(submitted.contains { command in
+                guard case let .pluginCommand(command: .resolveMcpProposalApproval(requestId, approved)) = command
+                else { return false }
+                return requestId == "proposal-1" && approved == false
+            })
+            XCTAssertNil(store.pendingMcpProposalApproval)
+
+            store.handle(event: .appEvent(event: .mcpProposalApprovalRequested(
+                request: mcpProposalRequest(requestId: "proposal-2", appId: "tracker", diffs: [])
+            )))
+
+            XCTAssertNil(store.pendingMcpProposalApproval)
+            try await waitUntil {
+                submitted.contains { command in
+                    guard case let .pluginCommand(command: .resolveMcpProposalApproval(requestId, approved)) = command
+                    else { return false }
+                    return requestId == "proposal-2" && approved == false
+                }
+            }
+        }
+
         /// The library's fallback landing is armed by a LIBRARY create and
         /// refused to a DRAWER one.
         ///
@@ -2754,6 +2978,123 @@ final class LocalAppsStoreTests: XCTestCase {
             wireRecord(
                 id: id, name: name, brief: brief, scaffolded: true,
                 initSessionId: initSessionId)
+        }
+
+        private func waitUntil(
+            timeout: Duration = .seconds(1),
+            condition: @escaping @MainActor () -> Bool
+        ) async throws {
+            let deadline = ContinuousClock.now + timeout
+            while ContinuousClock.now < deadline {
+                if condition() { return }
+                try await Task.sleep(for: .milliseconds(20))
+            }
+            XCTAssertTrue(condition(), "condition not satisfied before timeout")
+        }
+
+        private func createConfirmationRequest(
+            requestId: String,
+            appId: String,
+            name: String
+        ) -> LocalAppCreateConfirmationRequestDto {
+            LocalAppCreateConfirmationRequestDto(
+                requestId: requestId,
+                appId: appId,
+                name: name,
+                brief: "Summarize local data",
+                selectedTemplate: .init(
+                    templateId: "template.dom",
+                    surface: .dom,
+                    summary: "DOM template"
+                ),
+                runtimeProfile: runtimeProfileOption(),
+                reason: "Best match for the requested workflow",
+                rejected: [.init(templateId: "template.canvas", reason: "Needs multiple panes")],
+                initialTools: [toolSurface(name: "read_value", title: "Read Value")],
+                requiredGates: [gateStatus(id: "runner", status: .pending, available: false)],
+                receipt: receiptStatus(appId: appId)
+            )
+        }
+
+        private func mcpProposalRequest(
+            requestId: String,
+            appId: String,
+            diffs: [LocalAppMcpToolDiffDto],
+            requiredFlowChanges: [String] = [],
+            excludedCapabilities: [String] = [],
+            pendingGates: [LocalAppGateStatusDto] = []
+        ) -> LocalAppMcpProposalApprovalRequestDto {
+            LocalAppMcpProposalApprovalRequestDto(
+                requestId: requestId,
+                appId: appId,
+                workflowRunId: "wf-\(requestId)",
+                summary: "Proposal summary",
+                proposalSha256: String(repeating: "p", count: 64),
+                approvalContractSha256: String(repeating: "a", count: 64),
+                toolSurfaceSha256: String(repeating: "t", count: 64),
+                toolDiffs: diffs,
+                requiredFlowChanges: requiredFlowChanges,
+                excludedCapabilities: excludedCapabilities,
+                pendingGates: pendingGates,
+                receipt: receiptStatus(appId: appId)
+            )
+        }
+
+        private func runtimeProfileOption() -> AppRuntimeProfileOptionDto {
+            AppRuntimeProfileOptionDto(
+                family: .reactDom,
+                revision: 3,
+                contractSha256: String(repeating: "r", count: 64),
+                surface: .dom,
+                corePackages: [.init(name: "next", version: "15.0.0")],
+                cacheStatus: "cached",
+                downloadStatus: "ready",
+                available: true,
+                reason: nil
+            )
+        }
+
+        private func receiptStatus(appId: String) -> LocalAppReceiptStatusDto {
+            LocalAppReceiptStatusDto(
+                receiptId: "receipt-\(appId)",
+                appId: appId,
+                workflowRunId: "workflow-\(appId)",
+                approvalContractSha256: String(repeating: "c", count: 64),
+                candidateDigest: String(repeating: "d", count: 64),
+                issuedAtMs: 1,
+                expiresAtMs: 2,
+                consumed: false,
+                superseded: false
+            )
+        }
+
+        private func gateStatus(
+            id: String,
+            status: LocalAppVerificationStatusDto,
+            available: Bool
+        ) -> LocalAppGateStatusDto {
+            LocalAppGateStatusDto(
+                gateId: id,
+                label: "Runner availability",
+                status: status,
+                available: available,
+                detail: available ? "ready" : "runner unavailable"
+            )
+        }
+
+        private func toolSurface(name: String, title: String?) -> LocalAppMcpToolSurfaceDto {
+            LocalAppMcpToolSurfaceDto(
+                name: name,
+                title: title,
+                description: "Reads local state",
+                inputSchemaJson: #"{"type":"object"}"#,
+                outputSchemaJson: #"{"type":"object"}"#,
+                annotationsJson: #"{"readOnlyHint":true}"#,
+                executionJson: #"{"transport":"stdio"}"#,
+                visibleMetaJson: #"{"visible":true}"#,
+                semanticFlowJson: #"{"steps":[{"type":"read"}]}"#,
+                permissionCeiling: "read-only"
+            )
         }
     #endif
 

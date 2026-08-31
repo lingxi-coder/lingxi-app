@@ -138,6 +138,23 @@ pub struct HookResponse {
     pub block_command: Option<String>,
     /// Replacement input for the in-flight action (e.g. mutated tool input).
     pub updated_input: Option<Value>,
+    /// Raw `updatedPermissions` carried by a `PermissionRequest` allow.
+    ///
+    /// Permission updates intentionally remain untyped here. The permission
+    /// crate owns their schema and applies the same raw wire values that the
+    /// host supplied, including destination and rule metadata.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updated_permissions: Option<Vec<Value>>,
+    /// `interrupt` carried by a `PermissionRequest` deny. This is kept
+    /// separate from the generic hook `prevent_continuation` signal: the
+    /// former aborts the active turn, while the latter ends a hook loop.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interrupt: Option<bool>,
+    /// The event-specific `PermissionRequest` decision, retained alongside
+    /// the normalized [`Self::decision`] for callers that need the raw
+    /// allow/deny payload fields.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permission_request_result: Option<PermissionRequestResult>,
     /// Free-form `systemMessage` the hook returned (claude-code
     /// `result.systemMessage`). This is **user/transcript-facing only** — it is
     /// NOT sent to the model: claude-code routes it to a `hook_system_message`
@@ -314,6 +331,42 @@ pub struct HookResponse {
     pub async_backgrounded: bool,
 }
 
+/// The nested `hookSpecificOutput.decision` union for a `PermissionRequest`
+/// hook. This is deliberately distinct from PreToolUse's legacy top-level
+/// `decision` / `permissionDecision` strings.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "behavior")]
+pub enum PermissionRequestResult {
+    /// Approve the request, optionally rewriting input and permission rules.
+    #[serde(rename = "allow")]
+    Allow {
+        /// Raw `updatedInput`, if present.
+        #[serde(
+            rename = "updatedInput",
+            default,
+            skip_serializing_if = "Option::is_none"
+        )]
+        updated_input: Option<Value>,
+        /// Raw `updatedPermissions`, if present.
+        #[serde(
+            rename = "updatedPermissions",
+            default,
+            skip_serializing_if = "Option::is_none"
+        )]
+        updated_permissions: Option<Vec<Value>>,
+    },
+    /// Reject the request, optionally aborting the whole active turn.
+    #[serde(rename = "deny")]
+    Deny {
+        /// User-facing rejection message.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        message: Option<String>,
+        /// Whether the active turn should be interrupted.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        interrupt: Option<bool>,
+    },
+}
+
 /// Structured elicitation answer a hook can return, mirroring claude-code's
 /// `ElicitationResponse` (`{ action, content? }`). 1:1 with the
 /// `hookSpecificOutput.action` / `hookSpecificOutput.content` fields parsed by
@@ -433,6 +486,16 @@ pub struct AggregateHookResult {
     pub block_command: Option<String>,
     /// Most recent `updated_input` if any hook mutated the action's input.
     pub modified_input: Option<Value>,
+    /// The most recent event-specific `PermissionRequest` result. The generic
+    /// [`Self::decision`] remains the precedence-bearing normalized verdict;
+    /// this field preserves the allow/deny payload for downstream consumers.
+    pub permission_request_result: Option<PermissionRequestResult>,
+    /// Raw permission-rule updates from the winning/most-recent
+    /// `PermissionRequest` allow. Entries are intentionally not normalized in
+    /// the hooks crate so consumers can apply the original wire values.
+    pub permission_updates: Vec<Value>,
+    /// OR-folded `interrupt` signal from `PermissionRequest` deny results.
+    pub interrupt: bool,
     /// All `systemMessage`s emitted by hooks, in execution order. These are
     /// **user/transcript-facing only** and must NOT reach the model (claude-code
     /// `hook_system_message` → `normalizeAttachmentForAPI` returns `[]`,

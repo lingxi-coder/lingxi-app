@@ -207,6 +207,10 @@ struct ConversationTurnSpeechUpdate: Equatable, Sendable {
         let kind: PermissionKindDto
         /// Sub-agent identity, when present (always `None` in the foundation).
         let worker: WorkerInfoDto?
+        /// When true, the prompt must not offer or persist an AllowAlways rule.
+        let suppressAlwaysAllowRule: Bool
+        /// Engine-owned optional Auto action for the primary approval button.
+        let autoModePrompt: AutoModePromptDto?
 
         var id: UInt64 { requestId }
 
@@ -214,6 +218,8 @@ struct ConversationTurnSpeechUpdate: Equatable, Sendable {
             self.requestId = request.requestId
             self.kind = request.kind
             self.worker = request.worker
+            self.suppressAlwaysAllowRule = request.suppressAlwaysAllowRule
+            self.autoModePrompt = request.autoModePrompt
         }
 
         static func == (lhs: PendingPermission, rhs: PendingPermission) -> Bool {
@@ -1479,8 +1485,14 @@ final class MockConversationSource: ConversationSource {
 
     @discardableResult
     func send(_ text: String, images: [ImageRefDto]) -> ConversationTurnToken? {
-        // PR-4 item 1: gate overlapping turns on rapid taps.
-        guard !model.streaming, !model.isSelectedAgentReadOnly else { return nil }
+        guard !model.isSelectedAgentReadOnly else { return nil }
+        if model.streaming {
+            guard let activeTurnToken else { return nil }
+            let message = Message(role: .user, text: text, images: uiImages(from: images))
+            model.messages.append(message)
+            model.items.append(.message(message))
+            return activeTurnToken
+        }
         model.isNew = false
         model.notice = nil
         model.turnCompletion = nil
@@ -2596,11 +2608,7 @@ final class MockConversationSource: ConversationSource {
 
         @discardableResult
         func send(_ text: String, images: [ImageRefDto]) -> ConversationTurnToken? {
-            // PR-4 item 1: a turn is already in flight — ignore the tap so we
-            // never start an overlapping turn (which would corrupt appendDelta's
-            // single `streamingIndex`). The Stop button is how you interrupt.
             guard
-                !model.streaming,
                 !model.isCancelling,
                 !model.slashCommandPending,
                 !model.sessionTransitionPending,
@@ -2614,14 +2622,39 @@ final class MockConversationSource: ConversationSource {
             // to the model through non-Composer call sites.
             guard model.slashCommandsLoaded || !trimmed.hasPrefix("/") else { return nil }
 
+            let exactSlash = model.slashCommandsLoaded
+                && SlashCommandMatcher.exactCommand(
+                    in: trimmed,
+                    catalog: model.slashCommands
+                ) != nil
+            if model.streaming {
+                guard !exactSlash, let token = activeConversationTurnToken else { return nil }
+                model.isNew = false
+                model.notice = nil
+                appendMessage(Message(role: .user, text: text, images: uiImages(from: images)))
+                Task { [weak self] in
+                    guard let self else { return }
+                    do {
+                        try await self.submitCommand(.sendPrompt(
+                            text: text,
+                            promptMode: nil,
+                            images: images,
+                            turnId: nil))
+                    } catch {
+                        guard self.activeConversationTurnToken == token else { return }
+                        self.model.error = ConversationError(kind: .host, message: "\(error)")
+                    }
+                }
+                return token
+            }
+
             model.isNew = false
             model.notice = nil
             appendMessage(Message(role: .user, text: text, images: uiImages(from: images)))
 
             let turnId = nextTurnId
             nextTurnId &+= 1
-            if model.slashCommandsLoaded,
-               SlashCommandMatcher.exactCommand(in: trimmed, catalog: model.slashCommands) != nil {
+            if exactSlash {
                 return startSlashCommand(raw: trimmed, turnId: turnId)
             }
             return startPrompt(TurnPrompt(text: text, images: images, turnId: turnId))

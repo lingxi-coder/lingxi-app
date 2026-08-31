@@ -1726,6 +1726,7 @@ async fn run_subagent_loop(
                         // mutations while reads stay frictionless). `None` = inherit
                         // the gate's live/boot mode.
                         mode_override: ctx.permission_mode_override.clone(),
+                        request_source: None,
                         // Replay the fork-time command denies for every tool this subagent
                         // dispatches (claude `freezeCommandDenies`).
                         frozen_command_denies: ctx.frozen_command_denies.clone(),

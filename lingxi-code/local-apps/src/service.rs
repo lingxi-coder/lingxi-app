@@ -36,7 +36,7 @@ use crate::state::AppState;
 use crate::storage;
 use crate::types::{
     AppCheckpoint, AppCheckpointKind, AppDependencyRecord, AppDependencyState, AppRecord,
-    AppRuntimeMode, AppRuntimeRecord, AppRuntimeState, AppWorkflowState, APPS_SCHEMA_VERSION,
+    AppRuntimeMode, AppRuntimeRecord, AppRuntimeState, APPS_SCHEMA_VERSION,
 };
 use std::collections::{BTreeSet, HashMap};
 use std::future::Future;
@@ -850,29 +850,6 @@ impl AppService {
         .await
     }
 
-    /// Stamp the app `ready` — the host calls this after the first successful
-    /// offline build (v3: the objective "this app has runnable output"
-    /// signal; there is no preview-approval gate anymore). Idempotent: an
-    /// already-ready app is a no-op with no event.
-    pub async fn mark_ready(&self, app_id: &str) -> Result<(), AppError> {
-        self.with_app(app_id, |app, now| {
-            if app.record.workflow_state == AppWorkflowState::Ready {
-                return (Ok(()), Vec::new());
-            }
-            app.record.workflow_state = AppWorkflowState::Ready;
-            app.record.updated_at_ms = now;
-            (
-                Ok(()),
-                vec![AppEvent::WorkflowChanged {
-                    app_id: app.record.id.clone(),
-                    state: app.record.workflow_state,
-                    detail: None,
-                }],
-            )
-        })
-        .await
-    }
-
     /// Commit the current workspace as a retained Git checkpoint and emit its
     /// domain event after the durable reference has been written.
     pub async fn create_checkpoint(
@@ -1524,9 +1501,10 @@ mod tests {
     use super::*;
     use crate::error::AppErrorCode;
     use crate::events::{NoopAppEventObserver, RecordingAppEventObserver};
-    use crate::manifest::{save_manifest, AppLayout, AppManifest, AppRuntimeProfileBinding};
+    use crate::manifest::{
+        save_manifest, AppLayout, AppManifest, AppRuntimeProfileBinding, AppTemplateOrigin,
+    };
     use crate::test_support::FixedClock;
-    use crate::types::AppWorkflowState;
     use crate::types::{AppDependencyRecord, AppDependencyState};
     use crate::AppDependencySnapshot;
     use std::path::Path;
@@ -1624,6 +1602,16 @@ mod tests {
         manifest.runtime_profile = Some(binding.clone());
         manifest.surface = Some(binding.family.surface());
         manifest.dependency_snapshot = Some(snapshot.clone());
+        manifest.template_origin = Some(AppTemplateOrigin {
+            plugin_id: AppTemplateOrigin::BUILTIN_PLUGIN_ID.into(),
+            plugin_version: "builtin".into(),
+            template_id: format!(
+                "{}-r{}",
+                binding.family.as_str().replace('_', "-"),
+                binding.revision
+            ),
+            template_sha256: binding.contract_sha256.clone(),
+        });
         save_manifest(&layout, &manifest).expect("save manifest");
         storage::save_dependency_record(root, dependency).expect("save dependency record");
     }
@@ -1655,7 +1643,6 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(record.name, "Habit Tracker", "name is trimmed");
-        assert_eq!(record.workflow_state, AppWorkflowState::Draft);
         assert_eq!(
             record.workspace_rel,
             format!("apps/{}/workspace", record.id)
@@ -1732,10 +1719,6 @@ mod tests {
             AppErrorCode::NotFound
         );
         assert_eq!(
-            h.service.mark_ready(missing).await.unwrap_err().code(),
-            AppErrorCode::NotFound
-        );
-        assert_eq!(
             h.service
                 .update_runtime_record(missing, AppRuntimeState::Starting, None, None, None)
                 .await
@@ -1754,44 +1737,6 @@ mod tests {
                 .unwrap_err()
                 .code(),
             AppErrorCode::NotFound
-        );
-    }
-
-    #[tokio::test]
-    async fn mark_ready_stamps_ready_emits_once_and_is_idempotent() {
-        let dir = tempfile::tempdir().unwrap();
-        let h = harness(dir.path()).await;
-        let record = h
-            .service
-            .create_app(Some("Ready"), "a test app", None)
-            .await
-            .unwrap();
-        assert_eq!(record.workflow_state, AppWorkflowState::Draft);
-        let _ = h.take_events().await;
-
-        h.service.mark_ready(&record.id).await.unwrap();
-        assert_eq!(
-            h.service.record(&record.id).await.unwrap().workflow_state,
-            AppWorkflowState::Ready
-        );
-        assert_eq!(
-            h.take_events().await,
-            vec![AppEvent::WorkflowChanged {
-                app_id: record.id.clone(),
-                state: AppWorkflowState::Ready,
-                detail: None,
-            }]
-        );
-
-        // Idempotent: a second call is Ok with NO event.
-        h.service.mark_ready(&record.id).await.unwrap();
-        assert!(h.take_events().await.is_empty());
-
-        // The stamp is persisted: a fresh process still sees `ready`.
-        let reloaded = reload_service(&h.service).await;
-        assert_eq!(
-            reloaded.record(&record.id).await.unwrap().workflow_state,
-            AppWorkflowState::Ready
         );
     }
 
@@ -2197,7 +2142,7 @@ mod tests {
             .create_app(Some("Restorable"), "a test app", None)
             .await
             .unwrap();
-        // Checkpoint while the app is still `draft`…
+        // Checkpoint while the init session is still unset…
         let first = h
             .service
             .create_checkpoint(
@@ -2208,7 +2153,10 @@ mod tests {
             .await
             .unwrap();
         // …then advance the record past the checkpoint.
-        h.service.mark_ready(&record.id).await.unwrap();
+        h.service
+            .set_init_session(&record.id, "init-session-1")
+            .await
+            .unwrap();
 
         h.service
             .restore_checkpoint(&record.id, &first.id)
@@ -2218,8 +2166,13 @@ mod tests {
         drop(h);
         let h2 = harness(dir.path()).await;
         assert_eq!(
-            h2.service.record(&record.id).await.unwrap().workflow_state,
-            AppWorkflowState::Ready,
+            h2.service
+                .record(&record.id)
+                .await
+                .unwrap()
+                .init_session_id
+                .as_deref(),
+            Some("init-session-1"),
             "the restore must not rewind the record mirror to its checkpoint-era state"
         );
     }
@@ -2243,7 +2196,10 @@ mod tests {
         let workspace = dir.path().join(&record.workspace_rel);
         let legacy = crate::checkpoints::seed_legacy_checkpoint(&workspace, 1_000);
 
-        h.service.mark_ready(&record.id).await.unwrap();
+        h.service
+            .set_init_session(&record.id, "legacy-init")
+            .await
+            .unwrap();
 
         h.service
             .restore_checkpoint(&record.id, &legacy)
@@ -2253,8 +2209,13 @@ mod tests {
         drop(h);
         let h2 = harness(dir.path()).await;
         assert_eq!(
-            h2.service.record(&record.id).await.unwrap().workflow_state,
-            AppWorkflowState::Ready,
+            h2.service
+                .record(&record.id)
+                .await
+                .unwrap()
+                .init_session_id
+                .as_deref(),
+            Some("legacy-init"),
             "a legacy checkpoint's tracked .lingxi blobs must not rewind the mirror"
         );
     }
@@ -2662,7 +2623,6 @@ mod tests {
             !record.name.trim().is_empty(),
             "a placeholder name is always present"
         );
-        assert_eq!(record.workflow_state, AppWorkflowState::Draft);
     }
 
     /// The placeholder-name rule cuts at 24 CHARS, not 24 bytes — a byte
@@ -2792,6 +2752,16 @@ mod tests {
                         manifest.surface = Some(binding.family.surface());
                         manifest.runtime_profile = Some(binding.clone());
                         manifest.dependency_snapshot = Some(snapshot.clone());
+                        manifest.template_origin = Some(crate::manifest::AppTemplateOrigin {
+                            plugin_id: crate::manifest::AppTemplateOrigin::BUILTIN_PLUGIN_ID.into(),
+                            plugin_version: "builtin".into(),
+                            template_id: format!(
+                                "{}-r{}",
+                                binding.family.as_str().replace('_', "-"),
+                                binding.revision
+                            ),
+                            template_sha256: binding.contract_sha256.clone(),
+                        });
                         save_manifest(&layout, &manifest)?;
                         storage::save_dependency_record(
                             &root,
@@ -2866,6 +2836,17 @@ mod tests {
                             manifest.surface = Some(binding.family.surface());
                             manifest.runtime_profile = Some(binding.clone());
                             manifest.dependency_snapshot = Some(snapshot.clone());
+                            manifest.template_origin = Some(crate::manifest::AppTemplateOrigin {
+                                plugin_id: crate::manifest::AppTemplateOrigin::BUILTIN_PLUGIN_ID
+                                    .into(),
+                                plugin_version: "builtin".into(),
+                                template_id: format!(
+                                    "{}-r{}",
+                                    binding.family.as_str().replace('_', "-"),
+                                    binding.revision
+                                ),
+                                template_sha256: binding.contract_sha256.clone(),
+                            });
                             save_manifest(&layout, &manifest)?;
                             storage::save_dependency_record(
                                 &root,
@@ -3156,15 +3137,19 @@ mod tests {
             .join("workspace/.lingxi/app.json");
         let mirror_before = std::fs::read_to_string(&mirror_path).unwrap();
 
-        let err = h.service.mark_ready(&record.id).await.unwrap_err();
+        let err = h
+            .service
+            .set_init_session(&record.id, "init-session-1")
+            .await
+            .unwrap_err();
         // A squatted document path is store tampering, typed storage_corrupt
         // (the write-side twin of the load-side squat contract).
         assert_eq!(err.code(), AppErrorCode::StorageCorrupt, "{err}");
-        // Memory rolled back: the record still reads `draft`, and no success
+        // Memory rolled back: the record still reads unchanged, and no success
         // event leaked out.
         assert_eq!(
-            h.service.record(&record.id).await.unwrap().workflow_state,
-            AppWorkflowState::Draft
+            h.service.record(&record.id).await.unwrap().init_session_id,
+            None
         );
         assert!(
             h.take_events().await.is_empty(),
@@ -3181,17 +3166,25 @@ mod tests {
         unsquat_document(&index_path, &index_before);
 
         // Disk agrees with the reported failure: the reload does NOT
-        // resurrect the mark_ready, and the mutation succeeds when retried.
+        // resurrect the failed record write, and the mutation succeeds when retried.
         drop(h);
         let h2 = harness(dir.path()).await;
         assert_eq!(
-            h2.service.record(&record.id).await.unwrap().workflow_state,
-            AppWorkflowState::Draft
+            h2.service.record(&record.id).await.unwrap().init_session_id,
+            None
         );
-        h2.service.mark_ready(&record.id).await.unwrap();
+        h2.service
+            .set_init_session(&record.id, "init-session-1")
+            .await
+            .unwrap();
         assert_eq!(
-            h2.service.record(&record.id).await.unwrap().workflow_state,
-            AppWorkflowState::Ready
+            h2.service
+                .record(&record.id)
+                .await
+                .unwrap()
+                .init_session_id
+                .as_deref(),
+            Some("init-session-1")
         );
     }
 
@@ -3247,7 +3240,11 @@ mod tests {
 
         // Control probe: a mutation that DOES touch app.json fails, proving
         // the squat actually blocks that document.
-        let err = h.service.mark_ready(&record.id).await.unwrap_err();
+        let err = h
+            .service
+            .set_init_session(&record.id, "init-session-1")
+            .await
+            .unwrap_err();
         assert_eq!(err.code(), AppErrorCode::StorageCorrupt, "{err}");
 
         unsquat_document(&mirror_path, &mirror_before);

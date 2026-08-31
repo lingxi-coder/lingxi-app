@@ -13,8 +13,51 @@ struct LocalAppWidgetEntity: AppEntity, Hashable, Sendable {
     var displayRepresentation: DisplayRepresentation {
         DisplayRepresentation(
             title: LocalizedStringResource(stringLiteral: name),
-            subtitle: LocalizedStringResource(stringLiteral: workflow)
+            subtitle: LocalizedStringResource(
+                stringLiteral: LocalAppWidgetWorkflow(rawValue: workflow)?.label ?? "Needs attention"
+            )
         )
+    }
+}
+
+/// The widget receives the app workflow through the shared snapshot rather
+/// than the generated client-protocol enum. Keep the projection closed over
+/// the current publication states so the widget cannot resurrect the retired
+/// single `ready` state or treat an unknown future state as launchable.
+private enum LocalAppWidgetWorkflow: String {
+    case draft
+    case publishedUnverified = "published_unverified"
+    case publishedVerified = "published_verified"
+
+    var isPublished: Bool {
+        switch self {
+        case .draft:
+            false
+        case .publishedUnverified, .publishedVerified:
+            true
+        }
+    }
+
+    var label: String {
+        switch self {
+        case .draft:
+            "Draft"
+        case .publishedUnverified:
+            "Published (unverified)"
+        case .publishedVerified:
+            "Published"
+        }
+    }
+
+    var symbol: String {
+        switch self {
+        case .draft:
+            "pencil"
+        case .publishedUnverified:
+            "exclamationmark.triangle.fill"
+        case .publishedVerified:
+            "checkmark.seal.fill"
+        }
     }
 }
 
@@ -67,7 +110,7 @@ struct LocalAppWidgetProvider: AppIntentTimelineProvider {
                 id: "00000000",
                 name: "Local App",
                 brief: "Open your local app",
-                workflow: "ready",
+                workflow: LocalAppWidgetWorkflow.draft.rawValue,
                 runtimeState: "stopped",
                 updatedAtMs: 0
             )
@@ -153,48 +196,48 @@ struct LocalAppWidgetView: View {
     }
 
     private func statusLabel(workflow: String, runtimeState: String) -> String {
-        guard workflow == "ready" else {
-            switch workflow {
-            case "draft": return "Draft"
-            case "building": return "Building"
-            case "failed": return "Needs attention"
-            default: return workflow.capitalized
-            }
+        guard let state = LocalAppWidgetWorkflow(rawValue: workflow) else {
+            return "Needs attention"
         }
+        guard state.isPublished else {
+            return state.label
+        }
+        let publication = state.label
         switch runtimeState {
-        case "running": return "Running"
-        case "starting": return "Starting"
-        case "failed": return "Needs attention"
-        case "stopped": return "Ready to launch"
-        default: return runtimeState.capitalized
+        case "running": return "\(publication) · Running"
+        case "starting": return "\(publication) · Starting"
+        case "failed": return "\(publication) · Needs attention"
+        case "stopped": return "\(publication) · Ready to launch"
+        default: return "\(publication) · \(runtimeState.capitalized)"
         }
     }
 
     private func statusSymbol(workflow: String, runtimeState: String) -> String {
-        guard workflow == "ready" else {
-            switch workflow {
-            case "draft": return "pencil"
-            case "building": return "hammer"
-            case "failed": return "exclamationmark.triangle.fill"
-            default: return "questionmark.circle"
-            }
+        guard let state = LocalAppWidgetWorkflow(rawValue: workflow) else {
+            return "questionmark.circle"
+        }
+        guard state.isPublished else {
+            return state.symbol
         }
         switch runtimeState {
         case "running": return "play.circle.fill"
         case "starting": return "clock"
         case "failed": return "exclamationmark.triangle.fill"
-        default: return "bolt.fill"
+        default: return state.symbol
         }
     }
 
     private func statusColor(workflow: String, runtimeState: String) -> Color {
-        guard workflow == "ready" else {
-            return workflow == "failed" ? .orange : .secondary
+        guard let state = LocalAppWidgetWorkflow(rawValue: workflow) else {
+            return .orange
+        }
+        guard state.isPublished else {
+            return .secondary
         }
         switch runtimeState {
         case "running": return .green
         case "failed": return .orange
-        default: return .secondary
+        default: return state == .publishedUnverified ? .orange : .secondary
         }
     }
 }

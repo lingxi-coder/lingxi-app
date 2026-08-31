@@ -29,6 +29,9 @@ impl BuiltinHookHandler for BlockingBuiltin {
                 // no command to attribute the block to.
                 block_command: None,
                 updated_input: None,
+                updated_permissions: None,
+                interrupt: None,
+                permission_request_result: None,
                 system_message: None,
                 attachments: vec![],
                 suppress_output: false,

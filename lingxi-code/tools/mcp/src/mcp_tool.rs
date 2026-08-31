@@ -23,8 +23,8 @@ use async_trait::async_trait;
 use mcp::registry::McpRegistry;
 use mcp::McpClientError;
 use once_cell::sync::Lazy;
-use permission::result::{PermissionMetadata, PermissionPrompt};
-use permission::{PermissionDecisionReason, PermissionResult};
+use permission::result::PermissionMetadata;
+use permission::{McpToolMaxPermission, PermissionDecisionReason, PermissionResult};
 use serde_json::{json, Value};
 use telemetry::sink::{AnalyticsValue, LogEventMetadata};
 use telemetry::tengu::tool::{
@@ -34,7 +34,7 @@ use telemetry::tengu::tool::{
     READ_MCP_RESOURCE_STARTED,
 };
 use telemetry::AnalyticsBus;
-use traits::McpTransportSpec;
+use traits::{McpPermissionCeiling, McpTransportSpec};
 
 use tool_api::context::ToolUseContext;
 use tool_api::progress::{ToolProgress, ToolProgressSender};
@@ -136,6 +136,212 @@ fn build_mcp_meta(meta: Option<Value>, structured_content: Option<Value>) -> Opt
         obj.insert("structuredContent".to_string(), sc);
     }
     Some(Value::Object(obj))
+}
+
+const MAX_OUTPUT_SCHEMA_ERRORS: usize = 8;
+
+fn json_type_name(value: &Value) -> &'static str {
+    match value {
+        Value::Null => "null",
+        Value::Bool(_) => "boolean",
+        Value::Number(number) if number.is_i64() || number.is_u64() => "integer",
+        Value::Number(_) => "number",
+        Value::String(_) => "string",
+        Value::Array(_) => "array",
+        Value::Object(_) => "object",
+    }
+}
+
+fn push_schema_error(errors: &mut Vec<String>, message: String) {
+    if errors.len() < MAX_OUTPUT_SCHEMA_ERRORS {
+        errors.push(message);
+    }
+}
+
+fn value_matches_type(value: &Value, expected: &str) -> bool {
+    match expected {
+        "null" => value.is_null(),
+        "boolean" => value.is_boolean(),
+        "integer" => value.as_i64().is_some() || value.as_u64().is_some(),
+        "number" => value.as_f64().is_some(),
+        "string" => value.is_string(),
+        "array" => value.is_array(),
+        "object" => value.is_object(),
+        _ => true,
+    }
+}
+
+fn validate_schema_value(schema: &Value, value: &Value, path: &str, errors: &mut Vec<String>) {
+    let Some(object) = schema.as_object() else {
+        return;
+    };
+
+    if let Some(expected) = object.get("const") {
+        if value != expected {
+            push_schema_error(errors, format!("at '{path}': expected const {expected}"));
+            return;
+        }
+    }
+    if let Some(enum_values) = object.get("enum").and_then(Value::as_array) {
+        if !enum_values.iter().any(|candidate| candidate == value) {
+            push_schema_error(errors, format!("at '{path}': value is not in enum"));
+        }
+    }
+    if let Some(type_value) = object.get("type") {
+        let matches = match type_value {
+            Value::String(expected) => value_matches_type(value, expected),
+            Value::Array(items) => items
+                .iter()
+                .filter_map(Value::as_str)
+                .any(|expected| value_matches_type(value, expected)),
+            _ => true,
+        };
+        if !matches {
+            push_schema_error(
+                errors,
+                format!(
+                    "at '{path}': expected {type_value}, got {}",
+                    json_type_name(value)
+                ),
+            );
+            return;
+        }
+    }
+    if let Some(min) = object.get("minimum").and_then(Value::as_f64) {
+        if value.as_f64().is_some_and(|actual| actual < min) {
+            push_schema_error(errors, format!("at '{path}': value is below minimum {min}"));
+        }
+    }
+    if let Some(max) = object.get("maximum").and_then(Value::as_f64) {
+        if value.as_f64().is_some_and(|actual| actual > max) {
+            push_schema_error(errors, format!("at '{path}': value exceeds maximum {max}"));
+        }
+    }
+    if let Some(min) = object.get("minLength").and_then(Value::as_u64) {
+        if value
+            .as_str()
+            .is_some_and(|actual| actual.chars().count() < min as usize)
+        {
+            push_schema_error(
+                errors,
+                format!("at '{path}': string shorter than minLength {min}"),
+            );
+        }
+    }
+    if let Some(max) = object.get("maxLength").and_then(Value::as_u64) {
+        if value
+            .as_str()
+            .is_some_and(|actual| actual.chars().count() > max as usize)
+        {
+            push_schema_error(
+                errors,
+                format!("at '{path}': string exceeds maxLength {max}"),
+            );
+        }
+    }
+    if let Some(min) = object.get("minItems").and_then(Value::as_u64) {
+        if value
+            .as_array()
+            .is_some_and(|actual| actual.len() < min as usize)
+        {
+            push_schema_error(
+                errors,
+                format!("at '{path}': array shorter than minItems {min}"),
+            );
+        }
+    }
+    if let Some(max) = object.get("maxItems").and_then(Value::as_u64) {
+        if value
+            .as_array()
+            .is_some_and(|actual| actual.len() > max as usize)
+        {
+            push_schema_error(errors, format!("at '{path}': array exceeds maxItems {max}"));
+        }
+    }
+    if let Some(items_schema) = object.get("items") {
+        if let Some(items) = value.as_array() {
+            for (index, item) in items.iter().enumerate() {
+                validate_schema_value(items_schema, item, &format!("{path}/{index}"), errors);
+            }
+        }
+    }
+    let properties = object.get("properties").and_then(Value::as_object);
+    // `required` is valid even when `properties` is omitted (for example a
+    // schema that only constrains a closed object or uses additional
+    // properties).  Keep this check independent of the properties map.
+    if let Some(required) = object.get("required").and_then(Value::as_array) {
+        for key in required.iter().filter_map(Value::as_str) {
+            if !value.as_object().is_some_and(|map| map.contains_key(key)) {
+                push_schema_error(
+                    errors,
+                    format!("at '{path}': missing required property {key:?}"),
+                );
+            }
+        }
+    }
+    if let Some(map) = value.as_object() {
+        let closed = object.get("additionalProperties").and_then(Value::as_bool) == Some(false);
+        let additional_schema = object
+            .get("additionalProperties")
+            .filter(|schema| schema.is_object());
+        for (key, item) in map {
+            if properties.is_none_or(|known| !known.contains_key(key)) {
+                if closed {
+                    push_schema_error(errors, format!("at '{path}': unexpected property {key:?}"));
+                } else if let Some(schema) = additional_schema {
+                    validate_schema_value(schema, item, &format!("{path}/{key}"), errors);
+                }
+            }
+        }
+        if let Some(properties) = properties {
+            for (key, schema) in properties {
+                if let Some(item) = map.get(key) {
+                    validate_schema_value(schema, item, &format!("{path}/{key}"), errors);
+                }
+            }
+        }
+    }
+    for key in ["allOf", "anyOf", "oneOf"] {
+        let Some(variants) = object.get(key).and_then(Value::as_array) else {
+            continue;
+        };
+        let mut matched = 0usize;
+        for variant in variants {
+            let mut scratch = Vec::new();
+            validate_schema_value(variant, value, path, &mut scratch);
+            if scratch.is_empty() {
+                matched += 1;
+            }
+        }
+        match key {
+            "allOf" if matched != variants.len() => {
+                push_schema_error(errors, format!("at '{path}': allOf branch mismatch"));
+            }
+            "anyOf" if matched == 0 => {
+                push_schema_error(errors, format!("at '{path}': anyOf branch mismatch"));
+            }
+            "oneOf" if matched != 1 => {
+                push_schema_error(errors, format!("at '{path}': oneOf branch mismatch"));
+            }
+            _ => {}
+        }
+    }
+}
+
+fn validate_structured_content_against_output_schema(
+    schema: &Value,
+    structured_content: Option<&Value>,
+) -> Result<(), String> {
+    let Some(value) = structured_content else {
+        return Err("missing structuredContent for outputSchema-bound MCP result".into());
+    };
+    let mut errors = Vec::new();
+    validate_schema_value(schema, value, "(root)", &mut errors);
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors.join("; "))
+    }
 }
 
 /// Build the model-facing `mcp_progress` / `progress` event payload for one
@@ -349,10 +555,6 @@ fn persist_id_seed() -> (u128, String) {
 
 // -- Permission shape (shared by all four MCP tools) -------------------------
 
-/// Oracle-byte-locked ask/passthrough message on the MCP factory's
-/// `checkPermissions` (@182520945).
-const MCP_TOOL_REQUIRES_PERMISSION_MESSAGE: &str = "MCPTool requires permission.";
-
 fn allow_mcp(reason: &str) -> PermissionResult {
     PermissionResult::Allow {
         reason: PermissionDecisionReason::Other {
@@ -360,6 +562,16 @@ fn allow_mcp(reason: &str) -> PermissionResult {
         },
         updated_input: None,
         update_destination: None,
+        metadata: PermissionMetadata::default(),
+    }
+}
+
+fn deny_mcp(reason: &str) -> PermissionResult {
+    PermissionResult::Deny {
+        reason: PermissionDecisionReason::Other {
+            reason: reason.into(),
+        },
+        explanation: Some(reason.into()),
         metadata: PermissionMetadata::default(),
     }
 }
@@ -394,6 +606,8 @@ pub struct MCPTool {
     /// The server's (truncated) description for a per-tool wire entry; `None`
     /// falls back to the generic dispatcher blurb.
     bound_desc: Option<String>,
+    /// Optional per-tool structured output schema from the MCP wire definition.
+    bound_output_schema: Option<Value>,
     /// Optional server-provided search hint used by ToolSearch ranking.
     search_hint: Option<String>,
     /// `_meta.anthropic/alwaysLoad` / server-level `alwaysLoad` opt-out.
@@ -403,6 +617,9 @@ pub struct MCPTool {
     /// allow" grant must never be offered — see
     /// `Tool::requires_user_interaction` below.
     requires_user_interaction: bool,
+    /// Tighten-only ceiling resolved from the MCP server/config policy. Kept
+    /// separate from the wire DTO so discovery-cache entries remain unchanged.
+    effective_max_permission: Option<McpToolMaxPermission>,
     /// §24b — explicit dispatch target for a per-SUBAGENT inline `mcpServers`
     /// entry. `None` (every existing construction site) preserves today's
     /// behaviour exactly: the server is derived from `full_name`'s parsed
@@ -448,9 +665,11 @@ impl MCPTool {
             full_name: None,
             bound_schema: None,
             bound_desc: None,
+            bound_output_schema: None,
             search_hint: None,
             always_load: true,
             requires_user_interaction: false,
+            effective_max_permission: None,
             bound_server_key: None,
             mcp_role: None,
         }
@@ -471,6 +690,8 @@ impl MCPTool {
         full_name: String,
         description: String,
         input_schema: Value,
+        output_schema: Option<Value>,
+        effective_max_permission: Option<McpPermissionCeiling>,
         search_hint: Option<String>,
         always_load: bool,
         requires_user_interaction: bool,
@@ -484,12 +705,31 @@ impl MCPTool {
             // defensive no-op for in-band descriptions but keeps the per-tool
             // wire entry within the documented bound for any out-of-band source.
             bound_desc: Some(mcp::truncate_description(&description).into_owned()),
+            bound_output_schema: output_schema,
             search_hint,
             always_load,
             requires_user_interaction,
+            effective_max_permission: effective_max_permission.map(max_permission_from_ceiling),
             bound_server_key: None,
             mcp_role: None,
         }
+    }
+
+    /// Attach a resolved MCP permission ceiling without changing the existing
+    /// constructor ABI used by shared and agent-scoped registry builders.
+    #[must_use]
+    pub fn with_effective_max_permission(mut self, ceiling: McpToolMaxPermission) -> Self {
+        self.effective_max_permission = Some(ceiling);
+        self
+    }
+
+    /// Attach a ceiling from the transport-facing MCP DTO. This conversion
+    /// keeps the permission crate's rule enum independent from the traits
+    /// crate while allowing a registry/client integration to pass through the
+    /// resolved `allow`/`ask`/`deny` value directly.
+    #[must_use]
+    pub fn with_mcp_permission_ceiling(self, ceiling: traits::McpPermissionCeiling) -> Self {
+        self.with_effective_max_permission(max_permission_from_ceiling(ceiling))
     }
 
     /// §24b: bind this per-tool wire entry's DISPATCH target to `key` — the
@@ -515,6 +755,34 @@ impl MCPTool {
     fn mcp_registry(&self) -> Option<&Arc<McpRegistry>> {
         self.ctx.mcp_registry.as_ref()
     }
+
+    /// Resolve permission metadata for a generic dispatcher request. The
+    /// generic `MCP` tool carries only the model-supplied FQN in its input, so
+    /// it must recover the discovered DTO from the live state before allowing
+    /// dispatch. Agent-scoped entries are intentionally excluded: they are
+    /// reachable only through their bound per-tool entries.
+    async fn generic_permission_metadata(
+        &self,
+        full_name: &str,
+    ) -> Option<(bool, Option<McpToolMaxPermission>)> {
+        let registry = self.mcp_registry()?;
+        let connections = registry.connections.read().await;
+        connections.iter().find_map(|(table_key, state)| {
+            let (config, tools) = match state {
+                mcp::McpConnectionState::Connected { config, tools, .. }
+                | mcp::McpConnectionState::Cached { config, tools, .. } => (config, tools),
+                _ => return None,
+            };
+            if table_key != &config.name {
+                return None;
+            }
+            let dto = tools.iter().find(|dto| dto.full_name == full_name)?;
+            let ceiling = configured_permission_ceiling(config, &dto.tool_name)
+                .map(max_permission_from_ceiling);
+            Some((dto.requires_user_interaction, ceiling))
+        })
+    }
+
     fn bus(&self) -> &Arc<AnalyticsBus> {
         &self.ctx.bus
     }
@@ -599,6 +867,7 @@ async fn process_mcp_call_result(
     output_dir: std::path::PathBuf,
     token_counter: Arc<tool_api::AnthropicRequestBuilder>,
     default_model: String,
+    output_schema: Option<Value>,
     server: String,
     tool: String,
     tool_use_id: Option<protocol::ToolUseId>,
@@ -630,6 +899,26 @@ async fn process_mcp_call_result(
                 )
                 .await;
                 return Err(ToolError::Io(error_details));
+            }
+            if let Some(schema) = output_schema.as_ref() {
+                if let Err(detail) = validate_structured_content_against_output_schema(
+                    schema,
+                    dto.structured_content.as_ref(),
+                ) {
+                    emit(
+                        &bus,
+                        MCP_FAILED,
+                        &[
+                            ("_PROTO_server_name", pii(&server)),
+                            ("_PROTO_tool_name", pii(&tool)),
+                            ("error_kind", verified_str("output_schema_mismatch")),
+                        ],
+                    )
+                    .await;
+                    return Err(ToolError::Io(format!(
+                        "mcp_output_schema_mismatch: {detail}"
+                    )));
+                }
             }
 
             emit(
@@ -842,6 +1131,9 @@ impl Tool for MCPTool {
         // dispatcher → the `{full_name, arguments}` envelope schema.
         self.bound_schema.as_ref().unwrap_or(&MCP_TOOL_SCHEMA)
     }
+    fn output_schema(&self) -> Option<&Value> {
+        self.bound_output_schema.as_ref()
+    }
     fn is_enabled(&self, _: &ToolStaticContext) -> bool {
         true
     }
@@ -930,29 +1222,39 @@ impl Tool for MCPTool {
     /// AFTER it, so a pre-existing `mcp__srv__tool` allow rule still prompts.
     /// `turn_loop` only consults a tool's `check_permissions` when no rule
     /// matched, so an allow rule still bypasses this arm in the port.
-    async fn check_permissions(&self, _: &Value, _: &ToolUseContext) -> PermissionResult {
-        if self.requires_user_interaction {
-            return PermissionResult::Ask {
-                // The oracle's tool-level ask carries no `decisionReason`; the
-                // gate arm that forwards it names
-                // `{type:"other",reason:"requiresUserInteraction"}`
-                // (@160210348), which is the reason the UI ends up showing.
-                reason: PermissionDecisionReason::Other {
-                    reason: "requiresUserInteraction".into(),
-                },
-                prompt: PermissionPrompt {
-                    title: self.name().to_string(),
-                    // Byte-locked `message:"MCPTool requires permission."`.
-                    message: MCP_TOOL_REQUIRES_PERMISSION_MESSAGE.to_string(),
-                    // `suggestions:[]` — the oracle deliberately offers NO
-                    // "add an allow rule" suggestion for such a tool.
-                    options: Vec::new(),
-                },
-                pending_classifier_check: None,
-                metadata: PermissionMetadata::default(),
+    async fn check_permissions(&self, input: &Value, _: &ToolUseContext) -> PermissionResult {
+        if self.full_name.is_none() {
+            let Some(full_name) = input.get("full_name").and_then(Value::as_str) else {
+                return deny_mcp("MCP tool metadata unavailable; refusing dispatch");
             };
+            let Some((requires_user_interaction, effective_max_permission)) =
+                self.generic_permission_metadata(full_name).await
+            else {
+                return deny_mcp("MCP tool metadata unavailable; refusing dispatch");
+            };
+            return permission::clamp_mcp_permission_result(
+                allow_mcp("MCP server tool dispatch"),
+                full_name,
+                effective_max_permission,
+                None,
+                requires_user_interaction,
+                true,
+            );
         }
-        allow_mcp("MCP server tool dispatch")
+
+        // MCP client-side ceilings and tool-owned interaction requirements are
+        // local, tighten-only overlays. No app-capability signal exists in
+        // this path, so capability authorization stays permissive until a
+        // real host signal is available; treating absence as false would deny
+        // every ordinary MCP tool.
+        permission::clamp_mcp_permission_result(
+            allow_mcp("MCP server tool dispatch"),
+            self.name(),
+            self.effective_max_permission,
+            None,
+            self.requires_user_interaction,
+            true,
+        )
     }
 
     async fn description(&self, _: &Value, _: &DescriptionOptions) -> String {
@@ -1174,6 +1476,7 @@ impl Tool for MCPTool {
                 output_dir,
                 token_counter,
                 default_model,
+                self.bound_output_schema.clone(),
                 server,
                 tool,
                 tool_use_id,
@@ -1204,6 +1507,7 @@ impl Tool for MCPTool {
         // task with no cancel path at all.
         let cancel = tokio_util::sync::CancellationToken::new();
         let parent_cancel = ctx.cancel.clone();
+        let bound_output_schema = self.bound_output_schema.clone();
         let mut call_task = {
             let registry = registry.clone();
             let bus = bus.clone();
@@ -1217,6 +1521,7 @@ impl Tool for MCPTool {
             let progress = progress.clone();
             let dispatch_full_name = dispatch_full_name.clone();
             let tool_use_id_str = tool_use_id_str.clone();
+            let output_schema = bound_output_schema.clone();
             let cancel = cancel.clone();
             let parent_cancel = parent_cancel.clone();
             tokio::spawn(async move {
@@ -1253,6 +1558,7 @@ impl Tool for MCPTool {
                             output_dir,
                             token_counter,
                             default_model,
+                            output_schema,
                             server,
                             tool,
                             tool_use_id,
@@ -2472,6 +2778,40 @@ impl Tool for ReadMcpResourceTool {
 /// once-only `k` latch this function's `resource_tools_pushed` reproduces). A
 /// session with zero resource-capable MCP servers therefore no longer ships
 /// three unusable tool schemas in every request's `tools` array.
+pub fn configured_permission_ceiling(
+    config: &mcp::McpServerConfig,
+    tool_name: &str,
+) -> Option<traits::McpPermissionCeiling> {
+    let mut ceiling = config.tool_permissions.get(tool_name).copied();
+    for configured in config
+        .tools
+        .iter()
+        .filter(|configured| configured.name == tool_name)
+    {
+        if let Some(policy) = configured.permission_policy {
+            let policy_ceiling = match policy {
+                traits::McpToolPermissionPolicy::AlwaysAllow => traits::McpPermissionCeiling::Allow,
+                traits::McpToolPermissionPolicy::AlwaysAsk => traits::McpPermissionCeiling::Ask,
+                traits::McpToolPermissionPolicy::AlwaysDeny => traits::McpPermissionCeiling::Deny,
+            };
+            ceiling =
+                Some(ceiling.map_or(policy_ceiling, |current| current.strictest(policy_ceiling)));
+        }
+        if let Some(org_ceiling) = configured.org_max_permission {
+            ceiling = Some(ceiling.map_or(org_ceiling, |current| current.strictest(org_ceiling)));
+        }
+    }
+    ceiling
+}
+
+fn max_permission_from_ceiling(ceiling: traits::McpPermissionCeiling) -> McpToolMaxPermission {
+    match ceiling {
+        traits::McpPermissionCeiling::Allow => McpToolMaxPermission::Allow,
+        traits::McpPermissionCeiling::Ask => McpToolMaxPermission::Ask,
+        traits::McpPermissionCeiling::Deny => McpToolMaxPermission::Blocked,
+    }
+}
+
 pub async fn build_registered_mcp_tools(
     registry: &McpRegistry,
     ctx: tool_api::BuiltinToolContext,
@@ -2517,21 +2857,29 @@ pub async fn build_registered_mcp_tools(
             let mut handles: Vec<Arc<dyn Tool>> = tools
                 .iter()
                 .map(|dto| {
-                    Arc::new(
-                        MCPTool::new_for_tool(
-                            ctx.clone(),
-                            dto.full_name.clone(),
-                            dto.description.clone(),
-                            dto.input_schema.clone(),
-                            dto.search_hint.clone(),
-                            dto.always_load.unwrap_or(false),
-                            dto.requires_user_interaction,
-                        )
-                        .with_mcp_role(
-                            (config.metadata.role == Some(mcp::McpServerRole::Comms))
-                                .then(|| "comms".to_string()),
-                        ),
-                    ) as Arc<dyn Tool>
+                    let tool = MCPTool::new_for_tool(
+                        ctx.clone(),
+                        dto.full_name.clone(),
+                        dto.description.clone(),
+                        dto.input_schema.clone(),
+                        None,
+                        None,
+                        dto.search_hint.clone(),
+                        dto.always_load.unwrap_or(false),
+                        dto.requires_user_interaction,
+                    );
+                    let tool = if let Some(ceiling) =
+                        configured_permission_ceiling(config, &dto.tool_name)
+                    {
+                        tool.with_mcp_permission_ceiling(ceiling)
+                    } else {
+                        tool
+                    };
+                    let tool = tool.with_mcp_role(
+                        (config.metadata.role == Some(mcp::McpServerRole::Comms))
+                            .then(|| "comms".to_string()),
+                    );
+                    Arc::new(tool) as Arc<dyn Tool>
                 })
                 .collect();
             if capabilities.resources && !resource_tools_pushed {
@@ -2621,6 +2969,8 @@ mod tests {
             "d".into(),
             serde_json::json!({}),
             None,
+            None,
+            None,
             false,
             true,
         );
@@ -2630,13 +2980,10 @@ mod tests {
         let PermissionResult::Ask { reason, prompt, .. } = decision else {
             panic!("a requiresUserInteraction tool must ASK, got: {decision:?}");
         };
-        assert_eq!(prompt.message, "MCPTool requires permission.");
+        assert!(prompt.message.contains("requires approval"));
+        assert_eq!(prompt.options, vec!["Allow once", "Deny"]);
         assert!(
-            prompt.options.is_empty(),
-            "the oracle's arm carries `suggestions:[]`"
-        );
-        assert!(
-            matches!(&reason, PermissionDecisionReason::Other { reason } if reason == "requiresUserInteraction"),
+            matches!(&reason, PermissionDecisionReason::PermissionPromptTool { tool_name } if tool_name == "mcp__srv__interactive"),
             "unexpected reason: {reason:?}"
         );
 
@@ -2647,6 +2994,8 @@ mod tests {
             "d".into(),
             serde_json::json!({}),
             None,
+            None,
+            None,
             false,
             false,
         );
@@ -2655,6 +3004,32 @@ mod tests {
                 .check_permissions(&serde_json::json!({}), &use_ctx)
                 .await,
             PermissionResult::Allow { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn configured_ceiling_reaches_the_tool_permission_gate() {
+        let ctx = tool_api::test_support::ctx_for_file_tools(
+            tool_api::test_support::make_dummy_fs(),
+            Arc::new(telemetry::AnalyticsBus::new()),
+            vec![std::path::PathBuf::from("/tmp")],
+        );
+        let tool = MCPTool::new_for_tool(
+            ctx,
+            "mcp__srv__blocked".into(),
+            "blocked".into(),
+            serde_json::json!({"type": "object"}),
+            None,
+            None,
+            None,
+            false,
+            false,
+        )
+        .with_mcp_permission_ceiling(traits::McpPermissionCeiling::Deny);
+        assert!(matches!(
+            tool.check_permissions(&serde_json::json!({}), &tool_api::test_support::fresh_ctx())
+                .await,
+            PermissionResult::Deny { .. }
         ));
     }
 
@@ -2677,6 +3052,8 @@ mod tests {
             "d".into(),
             serde_json::json!({}),
             None,
+            None,
+            None,
             false,
             false,
         );
@@ -2687,6 +3064,8 @@ mod tests {
             "mcp__srv__interactive".into(),
             "d".into(),
             serde_json::json!({}),
+            None,
+            None,
             None,
             false,
             true,
@@ -3130,6 +3509,128 @@ mod tests {
         // The model sees the JSON string (NOT content:null, NOT pretty-printed).
         assert_eq!(out, json!(r#"{"rows":[{"id":7}],"total":1}"#));
     }
+
+    #[test]
+    fn output_schema_requires_structured_content() {
+        let schema = json!({
+            "type":"object",
+            "properties":{"ok":{"type":"boolean"}},
+            "required":["ok"],
+            "additionalProperties":false
+        });
+        let err = validate_structured_content_against_output_schema(&schema, None).unwrap_err();
+        assert!(err.contains("missing structuredContent"));
+    }
+
+    #[test]
+    fn output_schema_mismatch_is_reported_as_tool_error_detail() {
+        let schema = json!({
+            "type":"object",
+            "properties":{"ok":{"type":"boolean"}},
+            "required":["ok"],
+            "additionalProperties":false
+        });
+        let err =
+            validate_structured_content_against_output_schema(&schema, Some(&json!({"ok":"nope"})))
+                .unwrap_err();
+        assert!(err.contains("/ok") || err.contains("expected"));
+    }
+
+    #[test]
+    fn output_schema_required_does_not_need_properties() {
+        let schema = json!({
+            "type": "object",
+            "required": ["token"],
+            "additionalProperties": {"type": "string"}
+        });
+        let err = validate_structured_content_against_output_schema(
+            &schema,
+            Some(&json!({"other": "ok"})),
+        )
+        .unwrap_err();
+        assert!(err.contains("missing required property \"token\""));
+    }
+
+    #[test]
+    fn output_schema_validates_schema_valued_additional_properties_recursively() {
+        let schema = json!({
+            "type": "object",
+            "properties": {"known": {"type": "boolean"}},
+            "additionalProperties": {
+                "type": "object",
+                "additionalProperties": {"type": "integer"}
+            }
+        });
+        let err = validate_structured_content_against_output_schema(
+            &schema,
+            Some(&json!({"known": true, "extra": {"count": "one"}})),
+        )
+        .unwrap_err();
+        assert!(err.contains("/extra/count"));
+    }
+
+    #[tokio::test]
+    async fn per_tool_permission_ceiling_tightens_tool_check() {
+        let ctx = tool_api::test_support::ctx_for_file_tools(
+            tool_api::test_support::make_dummy_fs(),
+            Arc::new(telemetry::AnalyticsBus::new()),
+            vec![std::path::PathBuf::from("/tmp")],
+        );
+        let tool = MCPTool::new_for_tool(
+            ctx,
+            "mcp__srv__write".into(),
+            "write".into(),
+            json!({"type": "object"}),
+            None,
+            Some(McpPermissionCeiling::Ask),
+            None,
+            false,
+            false,
+        );
+        assert!(matches!(
+            tool.check_permissions(&json!({}), &tool_api::test_support::fresh_ctx())
+                .await,
+            PermissionResult::Ask { .. }
+        ));
+
+        let interaction_tool = MCPTool::new_for_tool(
+            tool.ctx.clone(),
+            "mcp__srv__interactive".into(),
+            "interactive".into(),
+            json!({"type": "object"}),
+            None,
+            None,
+            None,
+            false,
+            true,
+        );
+        assert!(matches!(
+            interaction_tool
+                .check_permissions(&json!({}), &tool_api::test_support::fresh_ctx())
+                .await,
+            PermissionResult::Ask {
+                reason: PermissionDecisionReason::PermissionPromptTool { tool_name },
+                ..
+            } if tool_name == "mcp__srv__interactive"
+        ));
+
+        let tool = MCPTool::new_for_tool(
+            tool.ctx.clone(),
+            "mcp__srv__blocked".into(),
+            "blocked".into(),
+            json!({"type": "object"}),
+            None,
+            Some(McpPermissionCeiling::Deny),
+            None,
+            false,
+            false,
+        );
+        assert!(matches!(
+            tool.check_permissions(&json!({}), &tool_api::test_support::fresh_ctx())
+                .await,
+            PermissionResult::Deny { .. }
+        ));
+    }
 }
 
 #[cfg(test)]
@@ -3507,6 +4008,8 @@ pub(crate) mod cached_resource_test_support {
             timeout_ms: None,
             always_load: false,
             discovery_cache: None,
+            tools: Vec::new(),
+            tool_permissions: std::collections::BTreeMap::new(),
             config_error: None,
             metadata: Default::default(),
         }
@@ -3956,6 +4459,8 @@ mod auto_background_race_tests {
             "search docs".to_string(),
             json!({"type": "object"}),
             None,
+            None,
+            None,
             false,
             false,
         )
@@ -3994,6 +4499,8 @@ mod auto_background_race_tests {
             "mcp__docs__search".to_string(),
             "search docs".to_string(),
             json!({"type": "object"}),
+            None,
+            None,
             None,
             false,
             false,
@@ -4358,9 +4865,10 @@ mod resource_tool_gating_tests {
     use super::*;
     use mcp::{ConfigScope, McpConnectionState, McpServerConfig};
     use traits::{
-        ElicitRequestDto, ElicitResultDto, McpError, McpNotificationStream, McpPromptDto,
-        McpRawConnection, McpResourceContentDto, McpResourceDto, McpToolDto, McpTransport,
-        McpTransportKind, McpTransportSpec, ServerCapabilitiesDto,
+        ElicitRequestDto, ElicitResultDto, McpConfiguredToolPolicyDto, McpError,
+        McpNotificationStream, McpPermissionCeiling, McpPromptDto, McpRawConnection,
+        McpResourceContentDto, McpResourceDto, McpToolDto, McpTransport, McpTransportKind,
+        McpTransportSpec, ServerCapabilitiesDto,
     };
 
     struct NeverDialled;
@@ -4438,6 +4946,8 @@ mod resource_tool_gating_tests {
             timeout_ms: None,
             always_load: false,
             discovery_cache: None,
+            tools: Vec::new(),
+            tool_permissions: std::collections::BTreeMap::new(),
             config_error: None,
             metadata: Default::default(),
         }
@@ -4470,6 +4980,168 @@ mod resource_tool_gating_tests {
             always_load: None,
             requires_user_interaction: false,
         }
+    }
+
+    #[tokio::test]
+    async fn shared_builder_applies_strictest_configured_permission_ceiling() {
+        let registry = Arc::new(McpRegistry::new(Arc::new(NeverDialled)));
+        let connection_id = protocol::McpConnectionId::new();
+        let mut server_config = config("srv");
+        server_config.tools = vec![
+            McpConfiguredToolPolicyDto {
+                name: "allow".into(),
+                permission_policy: None,
+                org_max_permission: Some(McpPermissionCeiling::Allow),
+            },
+            McpConfiguredToolPolicyDto {
+                name: "ask".into(),
+                permission_policy: None,
+                org_max_permission: Some(McpPermissionCeiling::Ask),
+            },
+            McpConfiguredToolPolicyDto {
+                name: "deny".into(),
+                permission_policy: None,
+                org_max_permission: Some(McpPermissionCeiling::Ask),
+            },
+        ];
+        server_config.tool_permissions = std::collections::BTreeMap::from([
+            ("allow".into(), McpPermissionCeiling::Allow),
+            ("ask".into(), McpPermissionCeiling::Allow),
+            ("deny".into(), McpPermissionCeiling::Deny),
+        ]);
+        registry.connections.write().await.insert(
+            "srv".into(),
+            McpConnectionState::Connected {
+                config: server_config,
+                connection_id,
+                capabilities: caps(false),
+                negotiated: traits::McpNegotiatedProtocol {
+                    era: traits::McpProtocolEra::Legacy,
+                    version: "2025-11-25".into(),
+                },
+                tools: vec![dto("srv", "allow"), dto("srv", "ask"), dto("srv", "deny")],
+                resources: vec![],
+                resource_templates: vec![],
+                prompts: vec![],
+                connected_at: std::time::SystemTime::now(),
+            },
+        );
+
+        let mut ctx = tool_api::test_support::ctx_for_file_tools(
+            tool_api::test_support::make_dummy_fs(),
+            Arc::new(telemetry::AnalyticsBus::new()),
+            vec![std::path::PathBuf::from("/tmp")],
+        );
+        ctx.mcp_registry = Some(registry.clone());
+        let built = build_registered_mcp_tools(&registry, ctx).await;
+        assert_eq!(built.len(), 1);
+        let registered = &built[0].1;
+        assert_eq!(registered.len(), 3);
+
+        assert!(matches!(
+            registered[0]
+                .check_permissions(&serde_json::json!({}), &tool_api::test_support::fresh_ctx())
+                .await,
+            PermissionResult::Allow { .. }
+        ));
+        assert!(matches!(
+            registered[1]
+                .check_permissions(&serde_json::json!({}), &tool_api::test_support::fresh_ctx())
+                .await,
+            PermissionResult::Ask { .. }
+        ));
+        assert!(matches!(
+            registered[2]
+                .check_permissions(&serde_json::json!({}), &tool_api::test_support::fresh_ctx())
+                .await,
+            PermissionResult::Deny { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn generic_dispatcher_resolves_discovered_metadata_before_allowing_call() {
+        let registry = Arc::new(McpRegistry::new(Arc::new(NeverDialled)));
+        let connection_id = protocol::McpConnectionId::new();
+        let mut server_config = config("srv");
+        server_config.tools = vec![
+            McpConfiguredToolPolicyDto {
+                name: "write".into(),
+                permission_policy: Some(traits::McpToolPermissionPolicy::AlwaysAllow),
+                org_max_permission: Some(McpPermissionCeiling::Ask),
+            },
+            McpConfiguredToolPolicyDto {
+                name: "interactive".into(),
+                permission_policy: None,
+                org_max_permission: None,
+            },
+        ];
+        server_config.tool_permissions =
+            std::collections::BTreeMap::from([("write".into(), McpPermissionCeiling::Deny)]);
+        let mut interactive = dto("srv", "interactive");
+        interactive.requires_user_interaction = true;
+        registry.connections.write().await.insert(
+            "srv".into(),
+            McpConnectionState::Connected {
+                config: server_config,
+                connection_id,
+                capabilities: caps(false),
+                negotiated: traits::McpNegotiatedProtocol {
+                    era: traits::McpProtocolEra::Legacy,
+                    version: "2025-11-25".into(),
+                },
+                tools: vec![dto("srv", "write"), interactive],
+                resources: vec![],
+                resource_templates: vec![],
+                prompts: vec![],
+                connected_at: std::time::SystemTime::now(),
+            },
+        );
+        let mut ctx = tool_api::test_support::ctx_for_file_tools(
+            tool_api::test_support::make_dummy_fs(),
+            Arc::new(telemetry::AnalyticsBus::new()),
+            vec![std::path::PathBuf::from("/tmp")],
+        );
+        ctx.mcp_registry = Some(registry);
+        let dispatcher = MCPTool::new(ctx);
+
+        let denied = dispatcher
+            .check_permissions(
+                &serde_json::json!({
+                    "full_name": "mcp__srv__write",
+                    "arguments": {}
+                }),
+                &tool_api::test_support::fresh_ctx(),
+            )
+            .await;
+        assert!(matches!(denied, PermissionResult::Deny { .. }));
+
+        let interactive = dispatcher
+            .check_permissions(
+                &serde_json::json!({
+                    "full_name": "mcp__srv__interactive",
+                    "arguments": {}
+                }),
+                &tool_api::test_support::fresh_ctx(),
+            )
+            .await;
+        assert!(matches!(
+            interactive,
+            PermissionResult::Ask {
+                reason: PermissionDecisionReason::PermissionPromptTool { ref tool_name },
+                ..
+            } if tool_name == "mcp__srv__interactive"
+        ));
+
+        let unknown = dispatcher
+            .check_permissions(
+                &serde_json::json!({
+                    "full_name": "mcp__srv__not_advertised",
+                    "arguments": {}
+                }),
+                &tool_api::test_support::fresh_ctx(),
+            )
+            .await;
+        assert!(matches!(unknown, PermissionResult::Deny { .. }));
     }
 
     async fn build_names_by_connection(
@@ -4802,10 +5474,11 @@ mod resource_tool_gating_tests {
         );
     }
 
-    /// `register_all` must NOT register the trio as builtins — that is the whole
-    /// point of `iJ`'s `r`-set name filter.
+    /// `register_all` must not register the generic dispatcher or the resource
+    /// trio as builtins — discovered per-tool entries are the only production
+    /// MCP invocation surface, so an FQN cannot bypass its own permission rule.
     #[test]
-    fn register_all_omits_the_resource_trio() {
+    fn register_all_omits_generic_dispatcher_and_resource_trio() {
         let ctx = tool_api::test_support::ctx_for_file_tools(
             tool_api::test_support::make_dummy_fs(),
             Arc::new(telemetry::AnalyticsBus::new()),
@@ -4814,6 +5487,10 @@ mod resource_tool_gating_tests {
         let mut reg = tool_api::ToolRegistry::new();
         crate::register_all(&mut reg, ctx);
         let names = reg.all_names();
+        assert!(
+            !names.iter().any(|n| n == MCP_TOOL_NAME),
+            "generic MCP dispatcher must not be a production builtin; got {names:?}"
+        );
         for banned in [
             "ListMcpResourcesTool",
             "ReadMcpResourceTool",

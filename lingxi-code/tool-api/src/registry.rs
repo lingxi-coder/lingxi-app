@@ -24,6 +24,20 @@ use crate::wire::locale_cmp;
 use protocol::{McpConnectionId, PluginId};
 use std::sync::{Arc, RwLock};
 
+/// Built-in tools that can execute commands/code, plus WebFetch's explicitly
+/// restricted network surface. Dynamic MCP/LSP/plugin tools are intentionally
+/// left alone; they have their own policy/provenance controls.
+pub const RESTRICTED_DEFAULT_BUILTIN_DENY: &[&str] = &[
+    "Agent",
+    "Bash",
+    "CronCreate",
+    "PowerShell",
+    "REPL",
+    "RemoteTrigger",
+    "WebFetch",
+    "Workflow",
+];
+
 /// Registry of all [`Tool`] instances available to the dispatcher.
 ///
 /// Cloning is not supported; share via `Arc<ToolRegistry>` instead.
@@ -49,6 +63,25 @@ pub struct ToolRegistry {
     /// registration and refreshed by [`Self::refresh_tool_search_view`] once the
     /// registry (including MCP tools) is fully assembled.
     tool_search_view: Arc<SharedToolSearchView>,
+    /// Optional session-scoped built-in filter. `None` preserves historical
+    /// behavior; restricted sessions install this before sharing the registry.
+    builtin_filter: Option<BuiltinToolFilter>,
+}
+
+#[derive(Clone, Debug)]
+struct BuiltinToolFilter {
+    /// `Some` is the complete explicit `--tools` allowlist. `None` uses the
+    /// restricted default deny set above.
+    explicit_allowlist: Option<std::collections::HashSet<String>>,
+}
+
+impl BuiltinToolFilter {
+    fn allows(&self, name: &str) -> bool {
+        match &self.explicit_allowlist {
+            Some(allowed) => allowed.contains(name),
+            None => !RESTRICTED_DEFAULT_BUILTIN_DENY.contains(&name),
+        }
+    }
 }
 
 impl ToolRegistry {
@@ -62,7 +95,34 @@ impl ToolRegistry {
             plugin_tools: Vec::new(),
             deferral: Arc::new(DeferralState::disabled()),
             tool_search_view: Arc::new(SharedToolSearchView::new()),
+            builtin_filter: None,
         }
+    }
+
+    /// Install the restricted-session built-in filter. Values are flattened by
+    /// comma/whitespace and legacy aliases are normalized by the permission
+    /// crate, keeping `--tools` compatible with its existing parser surface.
+    /// Calling this with `None` leaves the normal registry unchanged.
+    pub fn set_restricted_builtin_filter(&mut self, tools: Option<&[String]>) {
+        let explicit_allowlist = tools.map(|values| {
+            values
+                .iter()
+                // Clap already tokenizes space-separated `--tools` values;
+                // keep whitespace inside `Bash(git *)` intact and only split
+                // comma-separated entries here.
+                .flat_map(|value| value.split(','))
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(|value| permission::PermissionRuleValue::from_rule_string(value).tool_name)
+                .collect()
+        });
+        self.builtin_filter = Some(BuiltinToolFilter { explicit_allowlist });
+    }
+
+    fn builtin_allowed(&self, name: &str) -> bool {
+        self.builtin_filter
+            .as_ref()
+            .is_none_or(|filter| filter.allows(name))
     }
 
     /// The shared Tool Search deferral state.
@@ -168,7 +228,7 @@ impl ToolRegistry {
         let mut builtins: Vec<Arc<dyn Tool>> = self
             .builtin
             .iter()
-            .filter(|t| t.is_enabled(ctx))
+            .filter(|t| self.builtin_allowed(t.name()) && t.is_enabled(ctx))
             .cloned()
             .collect();
         builtins.sort_by(|a, b| locale_cmp(a.name(), b.name()));
@@ -205,11 +265,9 @@ impl ToolRegistry {
     /// matching tool in iteration order (builtin first).
     #[must_use]
     pub fn find_by_name(&self, name: &str) -> Option<Arc<dyn Tool>> {
-        if let Some(tool) = self
-            .builtin
-            .iter()
-            .find(|t| t.name() == name || t.aliases().contains(&name))
-        {
+        if let Some(tool) = self.builtin.iter().find(|t| {
+            self.builtin_allowed(t.name()) && (t.name() == name || t.aliases().contains(&name))
+        }) {
             return Some(tool.clone());
         }
         {
@@ -300,6 +358,7 @@ impl ToolRegistry {
         let mut names = self
             .builtin
             .iter()
+            .filter(|t| self.builtin_allowed(t.name()))
             .map(|t| t.name().to_string())
             .collect::<Vec<_>>();
         names.extend(
@@ -544,6 +603,38 @@ mod tests {
             .collect();
         // Builtin prefix (locale-sorted), then MCP (locale-sorted); no dup Bash.
         assert_eq!(names, vec!["Bash", "Write", "mcp__a", "mcp__b"]);
+    }
+
+    #[test]
+    fn restricted_filter_denies_code_running_builtins_but_preserves_dynamic_tools() {
+        let mut r = ToolRegistry::new();
+        for name in ["Bash", "PowerShell", "REPL", "WebFetch", "Read", "Edit"] {
+            r.register_builtin(Arc::new(NamedTool(name)));
+        }
+        let conn = McpConnectionId::new();
+        r.register_mcp_tools(
+            conn,
+            vec![Arc::new(NamedTool("mcp__srv__run")) as Arc<dyn Tool>],
+        );
+        r.set_restricted_builtin_filter(None);
+        let names: Vec<String> = r
+            .available_tools(&ToolStaticContext::default())
+            .iter()
+            .map(|tool| tool.name().to_string())
+            .collect();
+        assert_eq!(names, vec!["Edit", "Read", "mcp__srv__run"]);
+        assert!(r.find_by_name("Bash").is_none());
+        assert!(r.find_by_name("mcp__srv__run").is_some());
+
+        // `--tools` is a complete built-in allowlist, so an explicit restore
+        // brings back only the named built-ins without exposing the rest.
+        r.set_restricted_builtin_filter(Some(&["Bash".to_string(), " WebFetch,Read ".to_string()]));
+        let names: Vec<String> = r
+            .available_tools(&ToolStaticContext::default())
+            .iter()
+            .map(|tool| tool.name().to_string())
+            .collect();
+        assert_eq!(names, vec!["Bash", "Read", "WebFetch", "mcp__srv__run"]);
     }
 
     /// A stub tool with a configurable name + `should_defer` + `search_hint`,

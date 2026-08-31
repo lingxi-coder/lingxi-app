@@ -237,7 +237,7 @@ struct ProviderListPage: View {
 
 // MARK: - Draft editor sheet
 
-private struct ProviderEditorSheet: View {
+struct ProviderEditorSheet: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.theme) private var t
     @State private var repository = ProviderRepository.shared

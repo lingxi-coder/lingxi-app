@@ -341,6 +341,16 @@ class MainActivity : ComponentActivity() {
                             onPermissionModeChanged = { mode ->
                                 activeConversationSource?.setPermissionMode(mode)
                             },
+                            onSetLocalAppPluginEnabled = { pluginId, enabled ->
+                                activeConversationSource?.submitClientCommand(
+                                    com.lingxi.code.bindings.ClientCommand.PluginCommand(
+                                        com.lingxi.code.bindings.PluginCommandDto.SetEnabled(
+                                            pluginId = pluginId,
+                                            enabled = enabled,
+                                        ),
+                                    ),
+                                )
+                            },
                             initialRoute = settingsInitialRoute,
                             onClose = {
                                 settingsOpen = false

@@ -5634,7 +5634,7 @@ mod tests {
     fn shipped_default_slots_match_the_oracle_counts() {
         assert_eq!(crate::auto_mode_defaults::DEFAULT_ENVIRONMENT.len(), 20);
         assert_eq!(DEFAULT_ALLOW_LABELS.len(), 17);
-        assert_eq!(DEFAULT_SOFT_DENY_LABELS.len(), 67);
+        assert_eq!(DEFAULT_SOFT_DENY_LABELS.len(), 68);
         assert_eq!(crate::auto_mode_defaults::DEFAULT_HARD_DENY_LABELS.len(), 1);
         assert_eq!(
             crate::auto_mode_defaults::DEFAULT_HARD_DENY_LABELS[0],

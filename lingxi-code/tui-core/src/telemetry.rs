@@ -51,6 +51,7 @@ pub fn permission_dialog_resolved(
     let decision = match response {
         PermissionResponse::AllowOnce => "allow_once",
         PermissionResponse::AllowAlways => "allow_always",
+        PermissionResponse::AllowAuto => "allow_auto",
         PermissionResponse::Deny => "deny",
     };
     tracing::info!(

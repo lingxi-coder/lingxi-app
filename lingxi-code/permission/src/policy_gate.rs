@@ -41,10 +41,11 @@
 use crate::classifier::{reason_allows_classifier, AutoModeClassifierVerdict};
 use crate::defaults_per_tool::tool_default;
 use crate::gate::{
-    MatchedAskRule, PermissionAbort, PermissionCheckContext, PermissionDecision,
+    AutoModePrompt, MatchedAskRule, PermissionAbort, PermissionCheckContext, PermissionDecision,
     PermissionDecisionSource, PermissionGate, PermissionOutcome, PermissionResolution,
     PromptDefault,
 };
+use crate::headless_gate::headless_deny_message;
 use crate::layers::{
     apply_context_layers, fold_permission_layers, parse_permission_layers, FoldedPermissionContext,
     LayerFoldInputs, PermissionLayer,
@@ -60,6 +61,7 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use traits::permission_gate::PermissionRequestSource;
 
 /// Live model/provider inputs read by the auto-mode permission gate.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -93,6 +95,10 @@ struct LivePermissionState {
     deny_rules: HashMap<PermissionRuleSource, Vec<PermissionRule>>,
     ask_rules: HashMap<PermissionRuleSource, Vec<PermissionRule>>,
     additional_working_dirs: Vec<PathBuf>,
+}
+
+fn directory_update_null_byte_reason(update_type: &str, directory: &str) -> String {
+    format!("{update_type} carries a directory containing a null byte: {directory}")
 }
 
 impl LivePermissionState {
@@ -143,6 +149,10 @@ pub struct PolicyPermissionGate {
     /// permission state, then diverges only through
     /// [`Self::apply_permission_update`].
     live_state: std::sync::RwLock<LivePermissionState>,
+    /// LIVE administrator-managed `disableAutoMode` kill switch.  The boot
+    /// policy remains an immutable snapshot for rule evaluation; this atomic
+    /// is the narrow settings-reload seam used by the desktop watcher.
+    auto_mode_disabled_from_settings: std::sync::atomic::AtomicBool,
     /// MOBILE DIVERGENCE (guest/host coordinate split). `None` on every
     /// non-mobile composition root, which makes the whole feature unreachable
     /// from engine-desktop / tui / cli / bridge-server.
@@ -213,6 +223,7 @@ impl PolicyPermissionGate {
     #[must_use]
     pub fn new(policy: Arc<PermissionPolicy>, inner: Arc<dyn PermissionGate>) -> Self {
         inner.set_permission_persistence_enabled(!policy.allow_managed_permission_rules_only);
+        let auto_mode_disabled_from_settings = policy.auto_mode_disabled;
         Self {
             live_state: std::sync::RwLock::new(LivePermissionState::from_policy(&policy)),
             bypass_permissions_confirmed: std::sync::atomic::AtomicBool::new(
@@ -224,6 +235,9 @@ impl PolicyPermissionGate {
             mcp_mode_overrides: std::sync::RwLock::new(std::collections::HashMap::new()),
             live_model_provider: Arc::new(std::sync::OnceLock::new()),
             path_translator: None,
+            auto_mode_disabled_from_settings: std::sync::atomic::AtomicBool::new(
+                auto_mode_disabled_from_settings,
+            ),
         }
     }
 
@@ -246,6 +260,9 @@ impl PolicyPermissionGate {
     pub async fn restore_session_permission_mode(&self, mode: &str) -> Result<(), String> {
         if parse_settable_mode(mode) != Some(PermissionMode::BypassPermissions) {
             return PermissionGate::set_permission_mode(self, mode).await;
+        }
+        if self.policy.restricted {
+            return Err("bypassPermissions not supported in restricted mode".to_string());
         }
         if self.policy.bypass_killswitch_active {
             return Err(
@@ -270,6 +287,59 @@ impl PolicyPermissionGate {
         Arc::clone(&self.live_model_provider)
     }
 
+    /// Apply the effective managed-settings `disableAutoMode` value to the
+    /// current session.
+    ///
+    /// Tightening is ordered as one kill-switch update followed by one mode
+    /// write: a concurrent `set_permission_mode("auto")` either observes the
+    /// new kill switch and rejects, or wins the mode lock first and is then
+    /// evicted here.  Clearing the setting deliberately does not restore Auto
+    /// (nor any per-server Auto pin), matching the administrator's current
+    /// state without silently changing a user's mode choice.
+    pub fn update_auto_mode_disabled_from_settings(&self, disabled: bool) {
+        let was_disabled = self
+            .auto_mode_disabled_from_settings
+            .swap(disabled, std::sync::atomic::Ordering::AcqRel);
+
+        if disabled {
+            let mut mode = self
+                .mode_override
+                .write()
+                .unwrap_or_else(|error| error.into_inner());
+            let active_mode = mode.unwrap_or(self.policy.mode);
+            if active_mode == PermissionMode::Auto {
+                *mode = Some(PermissionMode::Default);
+                // There is no reliable transport-neutral system-message
+                // channel on PermissionGate. Keep the oracle's exact reason
+                // in the permission log for hosts to surface.
+                tracing::warn!(target: "permission", "auto mode disabled by settings");
+            }
+            drop(mode);
+
+            // A per-server Auto pin must not survive an administrative
+            // disable. Removing it is safe because an active session-wide
+            // Auto mode was downgraded above; after a later re-enable the
+            // session remains Default and cannot re-enter Auto implicitly.
+            self.mcp_mode_overrides
+                .write()
+                .unwrap_or_else(|error| error.into_inner())
+                .retain(|_, override_mode| *override_mode != PermissionMode::Auto);
+        } else {
+            // Keep this branch explicit: availability may reopen for a future
+            // user request, but the gate never promotes the current mode.
+            tracing::debug!(
+                target: "permission",
+                was_disabled,
+                "auto mode settings kill switch cleared; current mode unchanged"
+            );
+        }
+    }
+
+    /// Short alias for callers that already have the concrete policy gate.
+    pub fn update_auto_mode_disabled(&self, disabled: bool) {
+        self.update_auto_mode_disabled_from_settings(disabled);
+    }
+
     /// `dUe(wi())` at the LIVE `set_permission_mode` surface: does the model the
     /// session is CURRENTLY on FAIL the auto-mode model gate? Reads the live-model
     /// provider ([`Self::live_model_provider_handle`]) and returns `false`
@@ -289,7 +359,10 @@ impl PolicyPermissionGate {
     /// user-facing precedence. Shared by the session-wide mode switch and the
     /// per-MCP-server auto pin so neither control surface can bypass the other.
     fn auto_mode_denial_reason(&self) -> Option<crate::auto_gate::AutoGateDenialReason> {
-        if self.policy.auto_mode_disabled {
+        if self
+            .auto_mode_disabled_from_settings
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
             Some(crate::auto_gate::AutoGateDenialReason::Settings)
         } else if self
             .policy
@@ -303,6 +376,87 @@ impl PolicyPermissionGate {
             Some(crate::auto_gate::AutoGateDenialReason::Model)
         } else {
             None
+        }
+    }
+
+    fn auto_prompt_for_ask(
+        &self,
+        mode: PermissionMode,
+        name: &str,
+        input: &Value,
+        reason: &PermissionDecisionReason,
+        ctx: &PermissionCheckContext,
+    ) -> Option<AutoModePrompt> {
+        if !self.can_request_auto_mode()
+            || ctx.hook_ask_floor
+            || ctx.suppress_always_allow_rule
+            || ctx.matched_ask_rule.is_some()
+            || ctx.request_source != Some(PermissionRequestSource::WorkflowAgent)
+            || ctx.classifier_approvable != Some(true)
+            || !matches!(mode, PermissionMode::Default | PermissionMode::AcceptEdits)
+            || name != "Bash"
+            || !input.is_object()
+        {
+            return None;
+        }
+        let command = input.get("command").and_then(Value::as_str)?;
+        let command_lower = command.to_ascii_lowercase();
+        if command_lower.contains("powershell") || command_lower.contains("pwsh") {
+            return None;
+        }
+        // Keep the reason argument in the eligibility seam so future policy
+        // producers cannot accidentally bypass their classifier provenance.
+        matches!(classifier_approvable(reason), Some(true)).then_some(AutoModePrompt::WorkflowBash)
+    }
+
+    /// Compute the engine-owned Auto action for an ExitPlanMode approval.
+    ///
+    /// ExitPlanMode is a tool-owned approval flow rather than a policy `Ask`,
+    /// so it never reaches [`Self::auto_prompt_for_ask`].  Keep the same
+    /// fail-closed availability inputs here and explicitly reject contexts
+    /// that cannot safely transition the owning session.
+    fn auto_prompt_for_exit_plan(&self, ctx: &PermissionCheckContext) -> Option<AutoModePrompt> {
+        if !self.can_request_auto_mode()
+            || self.policy.restricted
+            || ctx.is_agent_context
+            || ctx.is_non_interactive_session
+            || ctx.suppress_always_allow_rule
+            || ctx.request_source.is_some()
+            || self.effective_mode_for_tool("ExitPlanMode") == PermissionMode::BypassPermissions
+        {
+            return None;
+        }
+        Some(AutoModePrompt::ExitPlanMode)
+    }
+
+    /// Consume an engine-authorized Auto response at the policy boundary.
+    ///
+    /// The prompt transport only reports the user's selection; this gate owns
+    /// the live permission mode. Keep the availability check and mode write
+    /// behind `set_permission_mode`, whose mode lock closes the settings race
+    /// before committing `Auto`. A stale or malicious Auto response is still a
+    /// one-shot approval, while an eligible response that cannot transition is
+    /// denied rather than pretending that Auto was enabled.
+    async fn consume_auto_outcome(
+        &self,
+        outcome: PermissionOutcome,
+        ctx: &PermissionCheckContext,
+    ) -> PermissionOutcome {
+        let PermissionOutcome::AllowAuto { updated_input } = outcome else {
+            return outcome;
+        };
+        if ctx.auto_mode_prompt.is_none() || ctx.suppress_always_allow_rule {
+            return PermissionOutcome::Allow {
+                updated_input,
+                permission_updates: Vec::new(),
+                decision_classification: Some(
+                    traits::permission_gate::ToolDecisionClassification::UserTemporary,
+                ),
+            };
+        }
+        match PermissionGate::set_permission_mode(self, "auto").await {
+            Ok(()) => PermissionOutcome::AllowAuto { updated_input },
+            Err(reason) => PermissionOutcome::Deny { reason },
         }
     }
 
@@ -448,7 +602,8 @@ impl PolicyPermissionGate {
                 if metadata.blocked_path.is_some() {
                     ctx2.blocked_path = metadata.blocked_path.clone();
                 }
-                match self.inner.check_with_context(name, input, &ctx2).await {
+                let outcome = self.inner.check_with_context(name, input, &ctx2).await;
+                match self.consume_auto_outcome(outcome, &ctx2).await {
                     PermissionOutcome::Allow {
                         updated_input,
                         permission_updates,
@@ -469,6 +624,9 @@ impl PolicyPermissionGate {
                             )),
                         }
                     }
+                    PermissionOutcome::AllowAuto { updated_input } => {
+                        PermissionOutcome::AllowAuto { updated_input }
+                    }
                     PermissionOutcome::Deny { reason } => PermissionOutcome::Deny { reason },
                 }
             }
@@ -485,7 +643,9 @@ impl PolicyPermissionGate {
 
     fn flatten_permission_outcome(outcome: PermissionOutcome) -> PermissionDecision {
         match outcome {
-            PermissionOutcome::Allow { .. } => PermissionDecision::Allow,
+            PermissionOutcome::Allow { .. } | PermissionOutcome::AllowAuto { .. } => {
+                PermissionDecision::Allow
+            }
             PermissionOutcome::Deny { reason } => PermissionDecision::Deny { reason },
         }
     }
@@ -881,6 +1041,27 @@ impl PolicyPermissionGate {
                 reason: explanation.unwrap_or_else(|| deny_reason_string(&reason, name)),
             },
             PermissionResult::Ask { ref reason, .. } => {
+                if self.policy.is_restricted_protected_mutation(name, input) {
+                    // Protected restricted writes must never enter the
+                    // classifier or an unsuppressed transport path. A TUI or
+                    // configured handler may still approve once, but it may
+                    // not persist an AllowAlways rule for this call.
+                    let ctx = PermissionCheckContext {
+                        worker: worker.clone(),
+                        suppress_always_allow_rule: true,
+                        ..PermissionCheckContext::default()
+                    };
+                    let decision = match self.inner.check_with_context(name, input, &ctx).await {
+                        PermissionOutcome::Allow { .. } | PermissionOutcome::AllowAuto { .. } => {
+                            PermissionDecision::Allow
+                        }
+                        PermissionOutcome::Deny { reason } => PermissionDecision::Deny { reason },
+                    };
+                    if matches!(decision, PermissionDecision::Allow) {
+                        self.record_auto_mode_non_deny(mode);
+                    }
+                    return decision;
+                }
                 match self.auto_mode_classifier_result(mode, reason, name, input, false) {
                     Ok(AutoModeClassifierResult::Classified(classified)) => {
                         return self.classified_result_to_decision(classified, name);
@@ -1061,6 +1242,8 @@ impl PolicyPermissionGate {
                     // for an unrelated Ask.
                     ctx2.classifier_approvable = classifier_approvable(reason);
                     ctx2.matched_ask_rule = matched_ask_rule(reason);
+                    ctx2.auto_mode_prompt =
+                        self.auto_prompt_for_ask(mode, name, input, reason, &ctx2);
                     // Tool-specific policy producers take precedence; retain an
                     // explicitly supplied transport context only when the
                     // permission result has no structured value.
@@ -1070,7 +1253,12 @@ impl PolicyPermissionGate {
                     if metadata.blocked_path.is_some() {
                         ctx2.blocked_path = metadata.blocked_path.clone();
                     }
-                    let outcome = self.inner.check_with_context(name, input, &ctx2).await;
+                    let outcome = self
+                        .consume_auto_outcome(
+                            self.inner.check_with_context(name, input, &ctx2).await,
+                            &ctx2,
+                        )
+                        .await;
                     if let PermissionOutcome::Allow {
                         permission_updates, ..
                     } = &outcome
@@ -1085,6 +1273,9 @@ impl PolicyPermissionGate {
                         if !permission_updates.is_empty() {
                             self.apply_permission_updates(permission_updates);
                         }
+                    }
+                    if matches!(&outcome, PermissionOutcome::AllowAuto { .. }) {
+                        self.record_auto_mode_non_deny(mode);
                     }
                     Ok(outcome)
                 }
@@ -1362,6 +1553,16 @@ impl PolicyPermissionGate {
                 let Some(mode_str) = update.get("mode").and_then(Value::as_str) else {
                     return;
                 };
+                if mode_str == "auto"
+                    && self
+                        .auto_mode_disabled_from_settings
+                        .load(std::sync::atomic::Ordering::Acquire)
+                {
+                    tracing::debug!(
+                        "Ignoring permission update: setMode 'auto' rejected — auto mode disabled by settings"
+                    );
+                    return;
+                }
                 let bypass_unavailable = self.policy.bypass_killswitch_active
                     || !self.policy.bypass_permissions_available;
                 if mode_str == "bypassPermissions" && bypass_unavailable {
@@ -1372,10 +1573,21 @@ impl PolicyPermissionGate {
                 }
                 tracing::debug!("Applying permission update: Setting mode to '{mode_str}'");
                 if let Some(parsed) = parse_settable_mode(mode_str) {
-                    *self
+                    let mut mode_override = self
                         .mode_override
                         .write()
-                        .unwrap_or_else(|e| e.into_inner()) = Some(parsed);
+                        .unwrap_or_else(|e| e.into_inner());
+                    if parsed == PermissionMode::Auto
+                        && self
+                            .auto_mode_disabled_from_settings
+                            .load(std::sync::atomic::Ordering::Acquire)
+                    {
+                        tracing::debug!(
+                            "Ignoring permission update: setMode 'auto' rejected — auto mode disabled by settings"
+                        );
+                        return;
+                    }
+                    *mode_override = Some(parsed);
                 }
             }
             Some("addRules") | Some("replaceRules") | Some("removeRules") => {
@@ -1437,6 +1649,22 @@ impl PolicyPermissionGate {
                 else {
                     return;
                 };
+                // `PathBuf::from` accepts an embedded NUL on Unix, but the
+                // resulting path cannot be passed to filesystem APIs. Claude
+                // rejects the entire union member before applying any entry;
+                // preflight the complete array so a valid prefix cannot leak
+                // into the live session.
+                if let Some(directory) = directories.iter().find(|dir| dir.contains('\0')) {
+                    let update_type = update
+                        .get("type")
+                        .and_then(Value::as_str)
+                        .unwrap_or("addDirectories");
+                    tracing::debug!(
+                        "{}",
+                        directory_update_null_byte_reason(update_type, directory)
+                    );
+                    return;
+                }
                 let mut live = self.live_state.write().unwrap_or_else(|e| e.into_inner());
                 match update.get("type").and_then(Value::as_str) {
                     Some("addDirectories") => {
@@ -1514,11 +1742,18 @@ fn read_only_default_auto_allows(
 
 #[async_trait]
 impl PermissionGate for PolicyPermissionGate {
+    fn can_request_auto_mode(&self) -> bool {
+        self.auto_mode_denial_reason().is_none()
+    }
+
     fn can_request_bypass_permissions(&self) -> bool {
-        !self.policy.bypass_killswitch_active
+        !self.policy.restricted && !self.policy.bypass_killswitch_active
     }
 
     fn confirm_bypass_permissions(&self) -> Result<(), String> {
+        if self.policy.restricted {
+            return Err("bypassPermissions not supported in restricted mode".to_string());
+        }
         if self.policy.bypass_killswitch_active {
             return Err(
                 "Cannot set permission mode to bypassPermissions because it is disabled by settings or configuration"
@@ -1637,6 +1872,39 @@ impl PermissionGate for PolicyPermissionGate {
         }
     }
 
+    async fn check_exit_plan_mode(
+        &self,
+        plan: &str,
+        ctx: &PermissionCheckContext,
+    ) -> PermissionOutcome {
+        // ExitPlanMode owns its approval UI and carries the plan body as a
+        // first-class request.  Do not route it through the ordinary policy
+        // authorize path: ExitPlanMode is AllowByDefault there, which would
+        // skip the approval dialog entirely.
+        if self.effective_mode_for_tool("ExitPlanMode") == PermissionMode::BypassPermissions {
+            return PermissionOutcome::Allow {
+                updated_input: None,
+                permission_updates: Vec::new(),
+                decision_classification: None,
+            };
+        }
+        if ctx.is_non_interactive_session {
+            return PermissionOutcome::Deny {
+                reason: headless_deny_message("ExitPlanMode"),
+            };
+        }
+        let input = serde_json::json!({ "plan": plan });
+        let mut ctx2 = ctx.clone();
+        ctx2.auto_mode_prompt = self.auto_prompt_for_exit_plan(ctx);
+        self.consume_auto_outcome(
+            self.inner
+                .check_with_context("ExitPlanMode", &input, &ctx2)
+                .await,
+            &ctx2,
+        )
+        .await
+    }
+
     /// BASH-10 substrate — resolve a TOOL-originated ask straight through the
     /// inner prompt transport.
     ///
@@ -1659,15 +1927,22 @@ impl PermissionGate for PolicyPermissionGate {
         input: &Value,
         ctx: &PermissionCheckContext,
     ) -> PermissionOutcome {
-        let outcome = self.inner.check_with_context(name, input, ctx).await;
-        if let PermissionOutcome::Allow {
-            permission_updates, ..
-        } = &outcome
-        {
-            self.record_auto_mode_non_deny(self.effective_mode_for_tool(name));
-            if !permission_updates.is_empty() {
-                PolicyPermissionGate::apply_permission_updates(self, permission_updates);
+        let outcome = self
+            .consume_auto_outcome(self.inner.check_with_context(name, input, ctx).await, ctx)
+            .await;
+        match &outcome {
+            PermissionOutcome::Allow {
+                permission_updates, ..
+            } => {
+                self.record_auto_mode_non_deny(self.effective_mode_for_tool(name));
+                if !permission_updates.is_empty() {
+                    PolicyPermissionGate::apply_permission_updates(self, permission_updates);
+                }
             }
+            PermissionOutcome::AllowAuto { .. } => {
+                self.record_auto_mode_non_deny(self.effective_mode_for_tool(name));
+            }
+            PermissionOutcome::Deny { .. } => {}
         }
         outcome
     }
@@ -1711,6 +1986,10 @@ impl PermissionGate for PolicyPermissionGate {
         self.inner.set_permission_persistence_enabled(
             enabled && !self.policy.allow_managed_permission_rules_only,
         );
+    }
+
+    fn is_restricted_protected_mutation(&self, name: &str, input: &Value) -> bool {
+        self.policy.is_restricted_protected_mutation(name, input)
     }
 
     /// GATE-SYSMSG-01: forward a deny notification to the inner transport (the
@@ -1838,7 +2117,12 @@ impl PermissionGate for PolicyPermissionGate {
     /// is safe. We keep only the mode-less auto-mode non-deny bookkeeping every
     /// allow arm records (reset of the classifier breaker's consecutive-denial
     /// counter), matching the pre-HOOKALLOW-01 behavior for this arm.
-    async fn honour_hook_allow(&self, name: &str, _input: &Value) -> PermissionDecision {
+    async fn honour_hook_allow(&self, name: &str, input: &Value) -> PermissionDecision {
+        if self.policy.is_restricted_protected_mutation(name, input) {
+            return PermissionDecision::Deny {
+                reason: "Restricted mode requires a person or configured permission handler to approve writes to settings, git, and tool-configuration files".to_string(),
+            };
+        }
         self.record_auto_mode_non_deny(self.effective_mode_for_tool(name));
         PermissionDecision::Allow
     }
@@ -1853,6 +2137,18 @@ impl PermissionGate for PolicyPermissionGate {
     /// inside `authorize_with_mode`. The `Ask` mapping is shared with
     /// [`Self::check`] via [`Self::decide`].
     async fn check_in_plan_mode(&self, name: &str, input: &Value) -> PermissionDecision {
+        if self.policy.is_restricted_protected_mutation(name, input) {
+            let ctx = PermissionCheckContext {
+                suppress_always_allow_rule: true,
+                ..PermissionCheckContext::default()
+            };
+            return match self.inner.check_with_context(name, input, &ctx).await {
+                PermissionOutcome::Allow { .. } | PermissionOutcome::AllowAuto { .. } => {
+                    PermissionDecision::Allow
+                }
+                PermissionOutcome::Deny { reason } => PermissionDecision::Deny { reason },
+            };
+        }
         self.decide(
             PermissionMode::Plan,
             self.authorize_with_live_state(name, input, PermissionMode::Plan, None),
@@ -1860,6 +2156,29 @@ impl PermissionGate for PolicyPermissionGate {
             input,
         )
         .await
+    }
+
+    async fn resolve_detailed_in_plan_mode_or_abort(
+        &self,
+        name: &str,
+        input: &Value,
+        ctx: &PermissionCheckContext,
+    ) -> Result<PermissionResolution, PermissionAbort> {
+        let folded = self.fold_call_context(ctx);
+        let result = self.authorize_with_layers(
+            name,
+            input,
+            PermissionMode::Plan,
+            ctx.workspace_lease_token,
+            &folded,
+        );
+        self.resolve_with_mode(
+            PermissionMode::Plan,
+            result,
+            name,
+            input,
+            ctx.is_non_interactive_session || folded.should_avoid_permission_prompts,
+        )
     }
 
     async fn resolve_detailed(&self, name: &str, input: &Value) -> PermissionResolution {
@@ -1971,6 +2290,9 @@ impl PermissionGate for PolicyPermissionGate {
             return Ok(());
         };
         if parsed == PermissionMode::BypassPermissions {
+            if self.policy.restricted {
+                return Err("bypassPermissions not supported in restricted mode".to_string());
+            }
             if self.policy.bypass_killswitch_active {
                 return Err("Cannot set permission mode to bypassPermissions because it is disabled by settings or configuration".to_string());
             }
@@ -1982,6 +2304,13 @@ impl PermissionGate for PolicyPermissionGate {
                 return Err("Cannot set permission mode to bypassPermissions because the session was not launched with --dangerously-skip-permissions".to_string());
             }
         }
+        // Hold the live-mode lock while checking Auto availability and writing
+        // the new mode. This makes the user-selected transition one atomic
+        // decision with the managed-settings eviction path.
+        let mut mode_override = self
+            .mode_override
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
         if parsed == PermissionMode::Auto {
             // `Nle`: reject `auto` when `!P0()`. Report `One()`'s reason in the
             // binary's precedence (settings → circuit-breaker → model), rendering
@@ -1990,11 +2319,26 @@ impl PermissionGate for PolicyPermissionGate {
                 return Err(crate::auto_gate::cannot_set_auto_message(reason));
             }
         }
-        *self
-            .mode_override
-            .write()
-            .unwrap_or_else(|e| e.into_inner()) = Some(parsed);
+        // Re-check the managed kill switch while holding the same mode lock
+        // used by `update_auto_mode_disabled_from_settings`. This closes the
+        // check-then-store race where a settings update could otherwise land
+        // between `auto_mode_denial_reason()` and this write and resurrect
+        // Auto after the eviction.
+        if parsed == PermissionMode::Auto
+            && self
+                .auto_mode_disabled_from_settings
+                .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return Err(crate::auto_gate::cannot_set_auto_message(
+                crate::auto_gate::AutoGateDenialReason::Settings,
+            ));
+        }
+        *mode_override = Some(parsed);
         Ok(())
+    }
+
+    fn update_auto_mode_disabled(&self, disabled: bool) {
+        self.update_auto_mode_disabled_from_settings(disabled);
     }
 
     async fn set_mcp_permission_mode_override(
@@ -2025,6 +2369,18 @@ impl PermissionGate for PolicyPermissionGate {
                     return Err(format!(
                         "Cannot pin MCP server '{server_name}' to auto: {}",
                         reason.message()
+                    ));
+                }
+                // The settings watcher and this control path synchronize via
+                // the atomic kill switch plus this override lock. Re-check
+                // after acquiring the lock so a concurrent managed disable
+                // cannot be followed by a stale Auto insertion.
+                if self
+                    .auto_mode_disabled_from_settings
+                    .load(std::sync::atomic::Ordering::Acquire)
+                {
+                    return Err(format!(
+                        "Cannot pin MCP server '{server_name}' to auto: auto mode disabled by settings"
                     ));
                 }
                 overrides.insert(normalized, PermissionMode::Auto);

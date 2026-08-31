@@ -23,7 +23,6 @@ use telemetry::tengu::tool::{
     FILE_READ_DEDUP, FILE_READ_LIMITS_OVERRIDE, FILE_READ_REREAD, READ_COMPLETED, READ_FAILED,
     READ_STARTED, SESSION_FILE_READ,
 };
-use tokio::io::AsyncReadExt;
 use tool_api::context::ToolUseContext;
 use tool_api::progress::ToolProgressSender;
 use tool_api::tool_trait::{
@@ -346,16 +345,13 @@ fn format_line_too_long(path: &Path, line: u64) -> String {
 }
 
 async fn read_text_range_streaming(
+    bytes: &[u8],
     canon: &Path,
     offset: u64,
     limit: u64,
     ext: Option<&str>,
     max_output_tokens: u64,
 ) -> Result<StreamedTextRange, ToolError> {
-    let mut file = tokio::fs::File::open(canon)
-        .await
-        .map_err(|e| ToolError::Io(e.to_string()))?;
-    let mut buf = [0_u8; STREAMING_READ_CHUNK_BYTES];
     let end_line = offset.saturating_add(limit);
     let max_line_bytes = MAX_FILE_READ_SIZE as usize;
     let bytes_per_token = bytes_per_token_for_file_type(ext);
@@ -372,15 +368,8 @@ async fn read_text_range_streaming(
     let mut nul_scan_remaining = NUL_SCAN_WINDOW;
     let mut utf8_tail: Vec<u8> = Vec::new();
 
-    loop {
-        let n = file
-            .read(&mut buf)
-            .await
-            .map_err(|e| ToolError::Io(e.to_string()))?;
-        if n == 0 {
-            break;
-        }
-        let chunk = &buf[..n];
+    for chunk in bytes.chunks(STREAMING_READ_CHUNK_BYTES) {
+        let n = chunk.len();
         total_bytes_read += n;
 
         let scan = nul_scan_remaining.min(n);
@@ -1101,6 +1090,25 @@ pub struct FileReadTool {
     /// post-`cd` directory; when absent (mobile/tests) they fall back to
     /// `ctx.workspace`.
     live_cwd: Option<tool_api::LiveCwdCell>,
+}
+
+fn read_rooted_snapshot(
+    requested: &std::path::Path,
+    approved: &std::path::Path,
+    trusted_dirs: &[std::path::PathBuf],
+) -> Result<traits::rooted_fs::RootedFileSnapshot, traits::rooted_fs::RootedFsError> {
+    let Some((root, relative)) = crate::shared::rooted_location(approved, trusted_dirs) else {
+        return Err(traits::rooted_fs::RootedFsError::Fs(
+            traits::FsError::OutsideWorkspace(approved.display().to_string()),
+        ));
+    };
+    traits::rooted_fs::read_file_after_permission(&root, &relative, requested, approved)
+}
+
+fn symlink_resolution_changed_message(path: &str) -> String {
+    format!(
+        "Refusing to read {path}: its symlink resolution changed after permission was checked. If a link in the working directory is being rewritten concurrently, stop that and retry."
+    )
 }
 
 impl FileReadTool {
@@ -1843,49 +1851,82 @@ impl Tool for FileReadTool {
             }
         };
 
-        let metadata = match tokio::fs::metadata(&canon).await {
-            Ok(m) => m,
-            Err(e) => {
+        // The permission check above approved `canon`; all bytes and metadata
+        // now come from a no-follow handle opened relative to the approved
+        // trusted root. This is deliberately not `tokio::fs::read(&canon)`:
+        // reopening the canonical pathname would reintroduce a parent/leaf
+        // symlink retarget window.
+        let snapshot = match read_rooted_snapshot(&path, &canon, &trusted_dirs) {
+            Ok(snapshot) => snapshot,
+            Err(traits::rooted_fs::RootedFsError::Fs(traits::FsError::NotFound(_))) => {
                 // Missing-file UX (`FileReadTool.ts:608-649`). On ENOENT TS first
                 // tries the macOS-screenshot AM/PM space variant (regular space ⇄
-                // thin space, U+202F) and re-runs the read against it; only if that
-                // alternate is ALSO missing does it surface the friendly message.
-                // A non-ENOENT error (e.g. EACCES) is rethrown verbatim.
-                if e.kind() == std::io::ErrorKind::NotFound {
-                    // (a) macOS screenshot space-swap retry (`getAlternateScreenshotPath`
-                    // + the `altPath` `callInner` retry, FileReadTool.ts:612-636). The
-                    // alternate must still validate under the trusted dirs (TS has no
-                    // sandbox, but the LingXi read path always re-validates). If the
-                    // alternate exists, swap `canon` to it and fall through to the
-                    // normal read — equivalent to TS retrying `callInner(altPath)`,
-                    // since existence was the only thing that failed.
-                    if let Some(alt) = get_alternate_screenshot_path(&canon) {
-                        if let Ok(alt_canon) = canonicalize_and_validate(&alt, &trusted_dirs) {
-                            if let Ok(m) = tokio::fs::metadata(&alt_canon).await {
+                // thin space, U+202F), then reports the friendly message if that
+                // variant is also absent.
+                if let Some(alt) = get_alternate_screenshot_path(&canon) {
+                    if let Ok(alt_canon) = canonicalize_and_validate(&alt, &trusted_dirs) {
+                        match read_rooted_snapshot(&alt, &alt_canon, &trusted_dirs) {
+                            Ok(snapshot) => {
                                 canon = alt_canon;
-                                m
-                            } else {
-                                // Alt also missing — fall through to the friendly error.
-                                return self.file_not_found(&invocation_id, &canon, &e).await;
+                                snapshot
                             }
-                        } else {
-                            return self.file_not_found(&invocation_id, &canon, &e).await;
+                            Err(traits::rooted_fs::RootedFsError::Fs(
+                                traits::FsError::NotFound(_),
+                            )) => {
+                                let not_found = std::io::Error::from(std::io::ErrorKind::NotFound);
+                                return self
+                                    .file_not_found(&invocation_id, &canon, &not_found)
+                                    .await;
+                            }
+                            Err(error) => {
+                                self.emit_failed(&invocation_id, "io_metadata").await;
+                                return Err(ToolError::Io(error.to_string()));
+                            }
                         }
                     } else {
-                        return self.file_not_found(&invocation_id, &canon, &e).await;
+                        let not_found = std::io::Error::from(std::io::ErrorKind::NotFound);
+                        return self
+                            .file_not_found(&invocation_id, &canon, &not_found)
+                            .await;
                     }
                 } else {
-                    self.emit_failed(&invocation_id, "io_metadata").await;
-                    return Err(ToolError::Io(e.to_string()));
+                    let not_found = std::io::Error::from(std::io::ErrorKind::NotFound);
+                    return self
+                        .file_not_found(&invocation_id, &canon, &not_found)
+                        .await;
                 }
             }
+            Err(traits::rooted_fs::RootedFsError::SymlinkResolutionChanged)
+            | Err(traits::rooted_fs::RootedFsError::ParentSymlinkResolutionChanged) => {
+                self.emit_failed(&invocation_id, "symlink_resolution_changed")
+                    .await;
+                return Err(ToolError::InvalidInput(symlink_resolution_changed_message(
+                    file_path,
+                )));
+            }
+            Err(traits::rooted_fs::RootedFsError::NotRegularFile)
+                if std::path::Path::new(file_path)
+                    .extension()
+                    .and_then(|extension| extension.to_str())
+                    .is_some_and(|extension| extension.eq_ignore_ascii_case("ipynb")) =>
+            {
+                self.emit_failed(&invocation_id, "notebook_not_regular_file")
+                    .await;
+                return Err(ToolError::Io(
+                    crate::notebook_read::NOTEBOOK_NOT_REGULAR_FILE.to_string(),
+                ));
+            }
+            Err(error) => {
+                self.emit_failed(&invocation_id, "io_metadata").await;
+                return Err(ToolError::Io(error.to_string()));
+            }
         };
-        let size = metadata.len();
+        let size = snapshot.size;
         // Floor-truncated mtime in ms, matching TS `Math.floor(mtimeMs)` for
         // the read-state registry (`readFileState.set`). A missing mtime
         // (rare; e.g. platforms without mtime) falls back to the epoch (`0`).
-        let mtime_ms = metadata
-            .modified()
+        let mtime_ms = snapshot
+            .modified
             .map(tool_api::read_file_state::mtime_ms_floor)
             .unwrap_or(0);
 
@@ -2064,13 +2105,6 @@ impl Tool for FileReadTool {
             .and_then(|e| e.to_str())
             .is_some_and(|e| e.eq_ignore_ascii_case("ipynb"))
         {
-            if !metadata.is_file() && !metadata.is_dir() {
-                self.emit_failed(&invocation_id, "notebook_not_regular_file")
-                    .await;
-                return Err(ToolError::Io(
-                    crate::notebook_read::NOTEBOOK_NOT_REGULAR_FILE.to_string(),
-                ));
-            }
             if size > crate::notebook_read::MAX_NOTEBOOK_READ_SIZE {
                 self.emit_failed(&invocation_id, "notebook_too_large").await;
                 return Err(ToolError::Io(
@@ -2103,6 +2137,7 @@ impl Tool for FileReadTool {
             && size > MAX_FILE_READ_SIZE
         {
             let streamed = match read_text_range_streaming(
+                &snapshot.bytes,
                 &canon,
                 offset,
                 input_limit.expect("checked is_some"),
@@ -2188,13 +2223,7 @@ impl Tool for FileReadTool {
             });
         }
 
-        let bytes = match tokio::fs::read(&canon).await {
-            Ok(b) => b,
-            Err(e) => {
-                self.emit_failed(&invocation_id, "io_read").await;
-                return Err(ToolError::Io(e.to_string()));
-            }
-        };
+        let bytes = snapshot.bytes;
 
         #[cfg(feature = "image-read")]
         if is_image {
@@ -2640,6 +2669,36 @@ mod tests {
         assert!(!is_device_file("/proc/123/foo/environ")); // too many segments
         assert!(!is_device_file("/proc/123/status")); // "status" != the "stat" name
         assert!(!is_device_file("/proc//environ")); // empty pid segment
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn stable_leaf_symlink_is_read_through_approved_target() {
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("target.txt");
+        let link = tmp.path().join("link.txt");
+        std::fs::write(&target, "approved").unwrap();
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let (ctx, _sink) = make_ctx(&tmp);
+        let tool = FileReadTool::new(ctx);
+
+        let result = tool
+            .call(
+                json!({ "file_path": link.to_string_lossy() }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.data["file"]["content"], "approved");
+    }
+
+    #[test]
+    fn symlink_resolution_changed_message_is_byte_exact() {
+        assert_eq!(
+            symlink_resolution_changed_message("/tmp/link.txt"),
+            "Refusing to read /tmp/link.txt: its symlink resolution changed after permission was checked. If a link in the working directory is being rewritten concurrently, stop that and retry."
+        );
     }
 
     fn make_ctx(tmp: &TempDir) -> (BuiltinToolContext, Arc<InMemorySink>) {

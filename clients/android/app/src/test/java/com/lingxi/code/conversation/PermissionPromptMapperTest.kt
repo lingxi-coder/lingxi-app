@@ -1,5 +1,6 @@
 package com.lingxi.code.conversation
 
+import com.lingxi.code.bindings.AutoModePromptDto
 import com.lingxi.code.bindings.PermissionKindDto
 import com.lingxi.code.bindings.PermissionOwnerDto
 import com.lingxi.code.bindings.PermissionRequest
@@ -28,7 +29,16 @@ class PermissionPromptMapperTest {
         requestId: ULong = 7uL,
         worker: WorkerInfoDto? = null,
         owner: PermissionOwnerDto? = null,
-    ) = PermissionRequest(requestId = requestId, kind = kind, worker = worker, owner = owner)
+        suppressAlwaysAllowRule: Boolean = false,
+        autoModePrompt: AutoModePromptDto? = null,
+    ) = PermissionRequest(
+        requestId = requestId,
+        kind = kind,
+        worker = worker,
+        owner = owner,
+        suppressAlwaysAllowRule = suppressAlwaysAllowRule,
+        autoModePrompt = autoModePrompt,
+    )
 
     // --- tool_use_confirm (the only live-sourced kind) --------------------
 
@@ -49,6 +59,38 @@ class PermissionPromptMapperTest {
         // The salient JSON field is surfaced as the detail preview.
         assertEquals("rm -rf build", prompt.detail)
         assertNull(prompt.worker)
+    }
+
+    @Test
+    fun suppressedRequest_isPropagatedToPromptState() {
+        val prompt = permissionRequestToPrompt(
+            request(
+                kind = PermissionKindDto.ToolUseConfirm(
+                    toolName = "Bash",
+                    toolInputJson = "{}",
+                    defaultAllow = false,
+                ),
+                suppressAlwaysAllowRule = true,
+            ),
+        )
+
+        assertTrue(prompt.suppressAlwaysAllowRule)
+    }
+
+    @Test
+    fun autoModePrompt_isPropagatedToPromptState() {
+        val prompt = permissionRequestToPrompt(
+            request(
+                kind = PermissionKindDto.ToolUseConfirm(
+                    toolName = "Bash",
+                    toolInputJson = "{}",
+                    defaultAllow = false,
+                ),
+                autoModePrompt = AutoModePromptDto.WORKFLOW_BASH,
+            ),
+        )
+
+        assertEquals(AutoModePromptDto.WORKFLOW_BASH, prompt.autoModePrompt)
     }
 
     @Test

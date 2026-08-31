@@ -170,6 +170,7 @@ if (hasSingleInstanceLock) void app.whenReady().then(() => {
       }
     },
     onModelChanged: (_ref, model) => { settings.update({ model }); },
+    onFirstPromptSent: (ref) => { settings.setActiveSession(ref); },
     sessionIdAvailable: async (ref) => {
       const catalog = await sessionCatalog.list(ref.projectPath);
       return !catalog.sessions.some((session) => session.uuid === ref.sessionId);

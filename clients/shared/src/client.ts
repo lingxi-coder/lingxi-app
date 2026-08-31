@@ -39,6 +39,7 @@ import {
   type PermissionResponseDto,
   type ServerHello,
 } from './protocol.js';
+import { validateClientEvent, validateServerHello } from './validation.js';
 import {
   discoverLatestLockfile,
   readLockfile,
@@ -220,9 +221,11 @@ export class BridgeClient extends EventEmitter {
     };
 
     const result = await this.request('hello', clientHello, this.opts.handshakeTimeoutMs ?? 10_000);
-    const hello = result as ServerHello;
-    if (!hello || typeof hello.protocol_version !== 'string') {
-      throw new Error('bridge handshake: malformed ServerHello');
+    let hello: ServerHello;
+    try {
+      hello = validateServerHello(result);
+    } catch (error) {
+      throw new Error(`bridge handshake: malformed ServerHello (${error instanceof Error ? error.message : String(error)})`);
     }
 
     if (!versionCompatible(BRIDGE_PROTOCOL_VERSION, hello.protocol_version)) {
@@ -364,8 +367,13 @@ export class BridgeClient extends EventEmitter {
 
     switch (frame.type) {
       case 'event':
-        this.pushEvent(frame.payload);
-        this.emit('event', frame.payload);
+        try {
+          const event = validateClientEvent(frame.payload);
+          this.pushEvent(event);
+          this.emit('event', event);
+        } catch (error) {
+          this.emit('error', new Error(`bridge: invalid inbound client event (${error instanceof Error ? error.message : String(error)})`));
+        }
         break;
       case 'permission_request':
         this.emit('permission', frame.payload);

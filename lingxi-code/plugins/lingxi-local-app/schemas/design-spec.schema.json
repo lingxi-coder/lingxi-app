@@ -1,0 +1,180 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://lingxi.local/local-app/design-spec.schema.json",
+  "title": "Local App design spec",
+  "$comment": "PHASE 2 CONTENT, transcription not invention. This schema is a byte-for-byte transcription of the TWO design-result schemas that already exist in the two SEPARATE builtin workflows this plugin's local-app-build.js is meant to eventually replace (design §18 Phase 4, §8.3 'only one build workflow'): DESIGN_RESULT_SCHEMA in lingxi-code/tools/workflow/src/local_app_build_workflow.js:59-143 (react_dom / routed branch) and DESIGN_RESULT_SCHEMA in lingxi-code/tools/workflow/src/local_app_canvas_workflow.js:63-149 (canvas_2d|three_3d|phaser_2d|babylon_3d / drawn-surface branch). Those two schemas diverge STRUCTURALLY, not just optionally (compare 'information_architecture' vs 'drawn_surface'/'runtime_family'), and the design doc does not specify how design §18 Phase 4 merges them into one unified schema for the unified build workflow. Rather than invent that merge, this file expresses the CURRENT, real contract as a discriminated union of the two existing shapes. Whoever implements Phase 4's unification should treat this file as a starting point to edit, not a settled answer. additionalProperties:false is added on each branch (not present in the source schemas, which are permissive by omission) so oneOf can actually discriminate between the two branches; this is a Phase 2 authoring choice, not something already enforced by the two source workflows.",
+  "oneOf": [
+    {
+      "title": "Routed (react_dom) design spec",
+      "$comment": "BUILT — lingxi-code/tools/workflow/src/local_app_build_workflow.js:59-143, DESIGN_RESULT_SCHEMA.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "targets": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "os": { "type": "string" },
+              "form_factor": { "type": "string" },
+              "presentation": { "type": "string" },
+              "navigation": { "type": "string" }
+            },
+            "required": ["os", "form_factor", "presentation", "navigation"]
+          }
+        },
+        "information_architecture": {
+          "type": "object",
+          "properties": {
+            "screens": { "type": "array", "items": { "type": "string" } },
+            "states": {
+              "type": "object",
+              "properties": {
+                "loading": { "type": "string" },
+                "empty": { "type": "string" },
+                "error": { "type": "string" },
+                "success": { "type": "string" },
+                "permission": { "type": "string" }
+              },
+              "required": ["loading", "empty", "error", "success", "permission"]
+            }
+          },
+          "required": ["screens", "states"]
+        },
+        "visual_system": {
+          "type": "object",
+          "properties": {
+            "design_direction": { "type": "string" },
+            "tokens": {
+              "type": "object",
+              "properties": {
+                "color": { "type": "array", "items": { "type": "string" } },
+                "typography": { "type": "array", "items": { "type": "string" } },
+                "spacing": { "type": "array", "items": { "type": "string" } },
+                "radius": { "type": "array", "items": { "type": "string" } },
+                "elevation": { "type": "array", "items": { "type": "string" } },
+                "motion": { "type": "array", "items": { "type": "string" } },
+                "safe_area": { "type": "array", "items": { "type": "string" } }
+              },
+              "required": ["color", "typography", "spacing", "radius", "elevation", "motion", "safe_area"]
+            }
+          },
+          "required": ["design_direction", "tokens"]
+        },
+        "interaction_model": {
+          "type": "object",
+          "properties": {
+            "pointer_touch": { "type": "array", "items": { "type": "string" } },
+            "keyboard_mouse": { "type": "array", "items": { "type": "string" } },
+            "back": { "type": "array", "items": { "type": "string" } },
+            "reduced_motion": { "type": "array", "items": { "type": "string" } }
+          },
+          "required": ["pointer_touch", "keyboard_mouse", "back", "reduced_motion"]
+        },
+        "adapter_boundary": {
+          "type": "object",
+          "properties": {
+            "shared_logic": { "type": "array", "items": { "type": "string" } },
+            "platform_specific_shell": { "type": "array", "items": { "type": "string" } }
+          },
+          "required": ["shared_logic", "platform_specific_shell"]
+        },
+        "acceptance_checks": { "type": "array", "items": { "type": "string" } },
+        "summary": { "type": "string" }
+      },
+      "required": [
+        "targets",
+        "information_architecture",
+        "visual_system",
+        "interaction_model",
+        "adapter_boundary",
+        "acceptance_checks",
+        "summary"
+      ]
+    },
+    {
+      "title": "Drawn-surface (canvas_2d | three_3d | phaser_2d | babylon_3d) design spec",
+      "$comment": "BUILT — lingxi-code/tools/workflow/src/local_app_canvas_workflow.js:63-149, DESIGN_RESULT_SCHEMA.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "targets": {
+          "type": "array",
+          "description": "Confirmed native targets as {os, form_factor} entries.",
+          "items": {
+            "type": "object",
+            "properties": {
+              "os": { "type": "string" },
+              "form_factor": { "type": "string" },
+              "presentation": { "type": "string" },
+              "navigation": { "type": "string" }
+            },
+            "required": ["os", "form_factor", "presentation", "navigation"]
+          }
+        },
+        "runtime_family": {
+          "type": "string",
+          "enum": ["canvas_2d", "three_3d", "phaser_2d", "babylon_3d"],
+          "description": "The persisted runtime profile family. Preserve it exactly; do not select a different runtime from prompt wording."
+        },
+        "drawn_surface": {
+          "type": "object",
+          "description": "Explicitly separates the primary drawn scene from its UI overlays.",
+          "properties": {
+            "scene": { "type": "string" },
+            "layers": { "type": "array", "items": { "type": "string" } },
+            "mechanics": { "type": "array", "items": { "type": "string" } }
+          },
+          "required": ["scene", "layers", "mechanics"]
+        },
+        "hud_overlay": {
+          "type": "object",
+          "description": "HUD/menu/overlay contract, including safe-area placement and phase relation.",
+          "properties": {
+            "placement_safe_area": { "type": "string" },
+            "phase_pause_relation": { "type": "string" },
+            "live_text": { "type": "array", "items": { "type": "string" } },
+            "reduced_motion": { "type": "string" },
+            "platform_treatment": { "type": "array", "items": { "type": "string" } }
+          },
+          "required": ["placement_safe_area", "phase_pause_relation", "live_text", "reduced_motion", "platform_treatment"]
+        },
+        "loop": {
+          "type": "string",
+          "description": "What advances every frame, in terms of dt: motion, spawning, collision, scoring. Name what is simulated, not how it is drawn."
+        },
+        "phases": {
+          "type": "array",
+          "description": "The phase machine, e.g. menu, playing, paused, over. Each entry names the phase and what leaves it.",
+          "items": { "type": "string" }
+        },
+        "inputs": {
+          "type": "array",
+          "description": "Every action the player can take, each with BOTH its pointer form and its key form.",
+          "items": { "type": "string" }
+        },
+        "end_conditions": {
+          "type": "string",
+          "description": "How a run ends and what carries over between runs."
+        },
+        "frame_budget": {
+          "type": "string",
+          "description": "Roughly what has to be drawn per frame and why it fits a phone GPU: entity counts, draw calls, texture sizes."
+        },
+        "summary": { "type": "string" }
+      },
+      "required": [
+        "targets",
+        "runtime_family",
+        "drawn_surface",
+        "hud_overlay",
+        "loop",
+        "phases",
+        "inputs",
+        "end_conditions",
+        "frame_budget",
+        "summary"
+      ]
+    }
+  ]
+}

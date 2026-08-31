@@ -1502,6 +1502,8 @@ mod tests {
             surface: None,
             runtime_profile: None,
             dependency_snapshot: None,
+            template_origin: None,
+            active_mcp_catalog: None,
         }
     }
 

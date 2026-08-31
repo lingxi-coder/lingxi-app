@@ -72,6 +72,10 @@ pub enum ChatOutcome {
     /// clipboard images, `/image`) so every Submit consumer receives them
     /// atomically with the prompt.
     Submit(String, Vec<std::path::PathBuf>, CancellationToken),
+    /// A prompt submitted while the current turn is active. The embedding host
+    /// places it in Rust's canonical `Next` queue instead of starting another
+    /// turn or replacing the current cancellation owner.
+    QueuePrompt(String, Vec<std::path::PathBuf>),
     /// Ctrl+V/Alt+V: read an IMAGE from the system clipboard. The read + PNG
     /// encode can take hundreds of ms, so the caller runs it OFF the render
     /// thread and feeds the result back via
@@ -4482,6 +4486,9 @@ impl ChatWidget {
             body: text.clone(),
             timestamp: 0,
         });
+        if self.current_turn.is_some() {
+            return ChatOutcome::QueuePrompt(text, self.take_pending_images());
+        }
         let token = CancellationToken::new();
         self.current_turn = Some(token.clone());
         self.accepts_turn_events = true;
@@ -6759,6 +6766,8 @@ mod tests {
                 request,
                 resp_tx,
                 worker: None,
+                suppress_always_allow_rule: false,
+                auto_mode_prompt: None,
             },
             resp_rx,
         )
@@ -7561,6 +7570,8 @@ mod tests {
             },
             resp_tx: plan_tx,
             worker: None,
+            suppress_always_allow_rule: false,
+            auto_mode_prompt: None,
         };
         widget.open_permission(first);
         widget.open_permission(plan);

@@ -272,7 +272,10 @@ struct RootView: View {
             // Onboarding owns the whole window, sidebar and navigation bars
             // included, so it sits outside the split view rather than in a column.
             if !app.setupDone {
-                SetupWizardView(convo: source.model, onSetModel: { source.setModel($0) })
+                SetupWizardView(
+                    store: settingsStore,
+                    onOpenSettings: { navigation.showSettings($0) }
+                )
                     .zIndex(100)
                     .transition(.opacity)
             }
@@ -395,6 +398,7 @@ struct RootView: View {
                 SettingsHost(
                     store: settingsStore,
                     convo: source.model,
+                    localAppsStore: localAppsStore,
                     projectCwd: projectStore.activeProject?.workspace.hostURL.path,
                     onRefreshMcp: { source.refreshMcpServers() },
                     onRefreshSkills: {
@@ -452,6 +456,12 @@ struct RootView: View {
             } message: {
                 Text(localAppsStore.errorMessage ?? String(localized: "common_unknown_error"))
             }
+            .sheet(item: localAppCreateConfirmationItem) { prompt in
+                LocalAppCreateConfirmationSheet(store: localAppsStore, prompt: prompt)
+            }
+            .sheet(item: localAppMcpProposalApprovalItem) { prompt in
+                LocalAppMcpProposalApprovalSheet(store: localAppsStore, prompt: prompt)
+            }
             // Same rehoming as the alert, for the same reason. The per-app MCP
             // tool `<app>_agent_profile_propose_update` returns
             // `approval_required: true` and the engine holds the approval token
@@ -506,7 +516,51 @@ struct RootView: View {
     /// the alert, the settings sheet, the permission sheet and the local-apps
     /// cover are all down.
     private var localAppProfileProposalPresenterIsFree: Bool {
-        localAppErrorPresenterIsFree && localAppsStore.errorMessage == nil
+        localAppErrorPresenterIsFree
+            && localAppsStore.errorMessage == nil
+            && localAppsStore.pendingCreateConfirmation == nil
+            && localAppsStore.pendingMcpProposalApproval == nil
+    }
+
+    /// Root-owned approval sheets must survive page-level Local App UI
+    /// lifetimes, so unlike the error alert / permission presenter they do not
+    /// yield to `presentedRoute`.
+    private var localAppApprovalPresenterIsFree: Bool {
+        !navigation.settingsOpen
+            && localAppsStore.pendingPermission == nil
+            && localAppsStore.errorMessage == nil
+    }
+
+    private var localAppCreateConfirmationItem: Binding<LocalAppCreateConfirmationPrompt?> {
+        Binding(
+            get: {
+                localAppApprovalPresenterIsFree
+                    ? localAppsStore.pendingCreateConfirmation
+                    : nil
+            },
+            set: { prompt in
+                guard prompt == nil, localAppApprovalPresenterIsFree else { return }
+                Task { await localAppsStore.resolvePendingCreateConfirmation(false) }
+            }
+        )
+    }
+
+    private var localAppMcpProposalApprovalItem: Binding<LocalAppMcpProposalApprovalPrompt?> {
+        Binding(
+            get: {
+                guard localAppApprovalPresenterIsFree,
+                      localAppsStore.pendingCreateConfirmation == nil
+                else { return nil }
+                return localAppsStore.pendingMcpProposalApproval
+            },
+            set: { prompt in
+                guard prompt == nil,
+                      localAppApprovalPresenterIsFree,
+                      localAppsStore.pendingCreateConfirmation == nil
+                else { return }
+                Task { await localAppsStore.resolvePendingMcpProposalApproval(false) }
+            }
+        )
     }
 
     /// The proposal to present from the root, or `nil` while another presenter
@@ -1307,10 +1361,10 @@ struct RootView: View {
             return
         }
         let launchDestination: LocalAppLaunchDestination =
-            app.workflow == .ready ? .preview : .details
+            app.workflow.isPublished ? .preview : .details
         localAppsStore.requestLaunch(appID: appID, destination: launchDestination)
         navigation.openLocalApps(appID: appID)
-        guard app.workflow == .ready, autostart else { return }
+        guard app.workflow.isPublished, autostart else { return }
         await localAppsStore.start(appID: appID)
     }
 }

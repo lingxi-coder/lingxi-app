@@ -725,8 +725,7 @@ def validate_create_skill(repo: pathlib.Path) -> None:
     required_tokens = {
         "LocalAppCreate",
         "LocalAppRuntimeProfiles",
-        "LocalAppConfirmRuntimeProfile",
-        "runtime_profile_receipt",
+        "LocalAppTemplateCatalog",
         "LocalAppManifest",
         "LocalAppBuild",
         "LocalAppRuntime",
@@ -746,6 +745,8 @@ def validate_create_skill(repo: pathlib.Path) -> None:
         "build/store/dist/",
         "recommended strategy",
         "task-local workflow",
+        "lingxi-local-app:local-app-build",
+        '"operation":"create"',
         "rescore",
         "revised confirmed specification",
         "For a `dom` surface",
@@ -756,9 +757,7 @@ def validate_create_skill(repo: pathlib.Path) -> None:
         "expected_writable_collections",
         "host reads the materialized manifest and overwrites it",
         "Do not supply `args.runtime_profile` as an authority",
-        # Runtime profile, not a model-authored surface/renderer, is the
-        # immutable scaffold choice.
-        '"runtime_profile_receipt":"<receipt id>"',
+        "reserve the bottom-leading",
         "Profile family CANNOT be changed afterwards",
         "`canvas` when the whole interface is one drawn surface",
         "LocalAppConfirmDependencyChange",
@@ -795,72 +794,73 @@ def validate_create_skill(repo: pathlib.Path) -> None:
         fail(f"missing local-apps host: {exc}")
     if "already bound to local app `{id}`" not in local_apps_host:
         fail("app-scoped LINGXI.md does not make its current app id authoritative")
-    # Read the workflows the way the BINARY assembles them: `builtins.rs`
-    # concatenates a shape file with the shared driver, so a token that moved
-    # into the driver is still present in the shipped script even though it left
-    # the shape file. Checking the shape file alone would have reported the
-    # shared strategy vocabulary as missing.
-    workflow_dir = repo / "lingxi-code" / "tools" / "workflow" / "src"
+    workflow_dir = repo / "lingxi-code" / "plugins" / "lingxi-local-app" / "workflows"
     try:
-        workflow_core = (workflow_dir / "local_app_workflow_core.js").read_text(encoding="utf-8")
-        workflow_dom = (workflow_dir / "local_app_build_workflow.js").read_text(encoding="utf-8")
-        workflow_canvas = (workflow_dir / "local_app_canvas_workflow.js").read_text(encoding="utf-8")
+        workflow = (workflow_dir / "local-app-build.js").read_text(encoding="utf-8")
+        mcp_authoring = (workflow_dir / "local-app-mcp-authoring.js").read_text(
+            encoding="utf-8"
+        )
     except OSError as exc:
-        fail(f"missing local-app build workflow: {exc}")
-    workflow = workflow_dom + workflow_core
-    canvas_workflow = workflow_canvas + workflow_core
+        fail(f"missing plugin-owned local-app workflow: {exc}")
     workflow_tokens = {
+        "const WORKFLOW_ID = 'lingxi-local-app:local-app-build';",
+        "HOST_CONTEXT_REQUIRED",
+        "HOST_INVOCATION_CAPABILITY_REQUIRED",
+        "PERSISTED_PROFILE_REQUIRED",
+        "quality_level must be fast, balanced, or thorough",
+        "validated_selection_handle",
+        "selector_capability",
+        "LocalAppResolveTemplateSelection",
+        "LocalAppStageCreate",
+        "Do not call LocalAppScaffold, LocalAppBuild or LocalAppRuntime yet",
+        "workflow('lingxi-local-app:local-app-mcp-authoring'",
+        "create_approved",
+        "create approval did not yield a unified scaffold receipt",
+        "LocalAppGet for app",
+        "LocalAppScaffold",
+        "Invoke exactly the matching runtime specialist",
         "LocalAppBuild",
-        "--outDir dist --emptyOutDir",
-        "build/store/dist/",
-        "strategy?: 'fast'|'balanced'|'thorough'",
+        "LocalAppRuntime",
+        "LocalAppQaMcpCandidate",
+        "LocalAppPromoteMcpCandidate",
+        "without a receipt_id",
+        "CANVAS_FAST_REJECTED",
         "'balanced'",
-        "maxRepairRounds",
-        "Selected workflow strategy",
-        "Complexity score",
         "agent_calls",
-        "verification_mode",
-        "args.expected_writable_collections",
-        "Host-materialized expected_writable_collections",
-        "Return not_applicable only when the host-materialized expected_writable_collections is empty",
-        "streamLlmChat",
-        "getClipboardText",
-        "setClipboardText",
-        "shareContent",
-        "synthesizeSpeech",
-        "readFile",
-        "writeFile",
-        "getDeviceStatus",
-        "triggerHaptics",
-        "openDeepLink",
-        "listCalendarEvents",
-        "searchContacts",
-        "getMedia",
-        "background_schedule",
+        "expected_writable_collections",
+        "webview_checked",
+        "render_check",
+        "motion_check",
+        "The host draws NO chrome around a running app",
+        "The host floats ONE control over the BOTTOM-LEADING corner",
+        "leading 80 CSS px by the bottom 80 CSS px",
     }
     missing_workflow = sorted(token for token in workflow_tokens if token not in workflow)
     if missing_workflow:
-        fail(f"local-app-build workflow is missing Vite CLI contract tokens: {missing_workflow}")
-    # The drawn-surface sibling shares the driver, so it inherits the tokens
-    # above; what it must additionally carry is the evidence contract that
-    # replaces `data_roundtrip` for an app that declares no collection.
-    canvas_tokens = {
-        "app/screens/game-screen.jsx",
-        "createFrameLoop in lib/frame-loop.js",
-        "Keep per-frame simulation state in a ref",
-        "There is no not_applicable: this app draws its whole interface",
-        "only a difference proves the loop is running",
-        "cannot be driven by the host automation path",
-        "NEVER from @ionic/core/components",
-        "locked `three@0.185.1` runtime",
+        fail(f"plugin local-app-build workflow is missing contract tokens: {missing_workflow}")
+    mcp_authoring_tokens = {
+        "const WORKFLOW_ID = 'lingxi-local-app:local-app-mcp-authoring';",
+        "HOST_CONTEXT_REQUIRED",
+        "HOST_INVOCATION_CAPABILITY_REQUIRED",
+        "LocalAppValidateMcpProposal",
+        "LocalAppApproveMcpProposal",
+        "LocalAppQaMcpCandidate",
+        "LocalAppPromoteMcpCandidate",
+        "mcp_authoring_required",
+        "approval_required",
+        "create_approved",
+        "proposal_sha256",
+        "approval_contract_sha256",
+        "tool_surface_sha256",
     }
-    missing_canvas = sorted(
-        token for token in workflow_tokens | canvas_tokens if token not in canvas_workflow
+    missing_mcp_authoring = sorted(
+        token for token in mcp_authoring_tokens if token not in mcp_authoring
     )
-    if missing_canvas:
-        fail(f"local-canvas-build workflow is missing contract tokens: {missing_canvas}")
-    if "allowedStrategies: ['balanced', 'thorough']" not in canvas_workflow:
-        fail("local-canvas-build must allow exactly balanced and thorough strategies")
+    if missing_mcp_authoring:
+        fail(
+            "plugin local-app-mcp-authoring workflow is missing contract tokens: "
+            f"{missing_mcp_authoring}"
+        )
 
     handoff_path = repo / "docs" / "local-apps" / "HANDOFF.md"
     try:
@@ -874,8 +874,8 @@ def validate_create_skill(repo: pathlib.Path) -> None:
         "DOM workflow shape",
         "Canvas workflow shape",
         "Shared workflow core",
-        "vite-react-static-v1",
-        "vite-react-canvas-v1",
+        "runtime-profiles/react-dom/r1",
+        "runtime-profiles/canvas-2d/r1",
         "@ionic/react",
         "LingXiBridgeProvider",
         "IonReactHashRouter",
@@ -889,26 +889,6 @@ def validate_create_skill(repo: pathlib.Path) -> None:
         fail(f"local-app handoff is missing scaffold/workflow contract tokens: {missing_handoff}")
     if "Template v2 bundles the JSX Vite/Tailwind foundation" in handoff:
         fail("local-app handoff still describes the retired Template v2 scaffold")
-    # The host-chrome contract, carried VERBATIM by both shapes: the run surface
-    # has no title bar and no back button, and the host paints one control over
-    # the bottom-leading corner. Without these two sentences a generated app can
-    # ship with zero bars and no way out, and nothing downstream notices — the
-    # build succeeds and the DOM snapshot of a bar-less page is perfectly valid.
-    # Only the two invariant clauses are pinned here; the keep-clear dimensions
-    # are derived from the clients' tap targets and are pinned once, in
-    # `builtins.rs`, so a legitimate re-derivation touches one gate and not two.
-    host_chrome_tokens = {
-        "The host draws NO chrome around a running app",
-        "The host floats ONE control over the running page in the BOTTOM-LEADING corner",
-    }
-    for label, script in (
-        ("local-app-build", workflow),
-        ("local-canvas-build", canvas_workflow),
-    ):
-        missing_chrome = sorted(token for token in host_chrome_tokens if token not in script)
-        if missing_chrome:
-            fail(f"{label} workflow is missing host-chrome contract tokens: {missing_chrome}")
-
 
 def validate_product_model_name_absence(repo: pathlib.Path) -> None:
     """Keep the task-only model name out of product routing and generation."""

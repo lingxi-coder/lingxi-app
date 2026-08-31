@@ -20,8 +20,8 @@ import com.lingxi.code.bindings.AppEventDto
 import com.lingxi.code.bindings.AppRecordDto
 import com.lingxi.code.bindings.AppRuntimeDetailsDto
 import com.lingxi.code.bindings.AppRuntimeModeDto
+import com.lingxi.code.bindings.AppRuntimeProfileOptionDto
 import com.lingxi.code.bindings.AppRuntimeProfileDto
-import com.lingxi.code.bindings.AppRuntimeProfileSelectionRequestDto
 import com.lingxi.code.bindings.AppRuntimeProfileStatusDto
 import com.lingxi.code.bindings.AppRuntimeStateDto
 import com.lingxi.code.bindings.AppSessionKindDto
@@ -32,6 +32,17 @@ import com.lingxi.code.bindings.AppUiRequestDto
 import com.lingxi.code.bindings.AppWorkflowStateDto
 import com.lingxi.code.bindings.ClientCommand
 import com.lingxi.code.bindings.ClientEvent
+import com.lingxi.code.bindings.LocalAppCreateConfirmationRequestDto
+import com.lingxi.code.bindings.LocalAppGateStatusDto
+import com.lingxi.code.bindings.LocalAppMcpProposalApprovalRequestDto
+import com.lingxi.code.bindings.LocalAppMcpToolDiffDto
+import com.lingxi.code.bindings.LocalAppMcpToolFieldDto
+import com.lingxi.code.bindings.LocalAppMcpToolSurfaceDto
+import com.lingxi.code.bindings.LocalAppPluginErrorCodeDto
+import com.lingxi.code.bindings.LocalAppReceiptStatusDto
+import com.lingxi.code.bindings.LocalAppVerificationStatusDto
+import com.lingxi.code.bindings.LocalAppVerificationSummaryDto
+import com.lingxi.code.bindings.PluginCommandDto
 import com.lingxi.code.conversation.ConversationSource
 import com.lingxi.code.localapps.widget.LocalAppWidgetSnapshotSync
 import com.lingxi.code.localapps.widget.NoopLocalAppWidgetSnapshotSync
@@ -185,8 +196,8 @@ class LocalAppsViewModel(
 
     private val pendingCapabilityKinds = mutableMapOf<String, AppCapabilityKindDto>()
     private val queuedAuthorizations = ArrayDeque<LocalAppAuthorizationRequest>()
-    private val queuedRuntimeProfileSelections = ArrayDeque<LocalAppRuntimeProfileSelectionRequest>()
     private val queuedDependencyChangeConfirmations = ArrayDeque<LocalAppDependencyChangeConfirmationRequest>()
+    private val queuedApprovalSheets = ArrayDeque<LocalAppApprovalSheet>()
     private val uiControlGrants = mutableMapOf<String, LocalAppAuthorizationDecision>()
     private val runtimeLastUsedAt = mutableMapOf<String, Long>()
     private val runtimeStartsInFlight = mutableSetOf<String>()
@@ -352,9 +363,8 @@ class LocalAppsViewModel(
                 )
             }
             is LocalAppsAction.ResolveAuthorization -> resolveAuthorization(action.decision)
-            is LocalAppsAction.ResolveRuntimeProfileSelection -> resolveRuntimeProfileSelection(action.family)
             is LocalAppsAction.ResolveDependencyChangeConfirmation -> resolveDependencyChangeConfirmation(action.approved)
-            is LocalAppsAction.ResolveProfileProposal -> resolveProfileProposal(action.approved)
+            is LocalAppsAction.ResolveApprovalSheet -> resolveApprovalSheet(action.approved)
             is LocalAppsAction.UiActionHandled -> resolveCompletedUiAction(action)
             is LocalAppsAction.SelectDetailsTab -> _uiState.update { state ->
                 val appId = state.selectedAppId ?: return@update state
@@ -611,7 +621,7 @@ class LocalAppsViewModel(
         }
         submit(ClientCommand.GetAppDetails(appId))
         requestSessions(appId, offset = null)
-        if (app.workflow != LocalAppWorkflow.Ready) {
+        if (!app.workflow.isPublished) {
             _uiState.update {
                 it.copy(
                     selectedAppId = appId,
@@ -658,13 +668,13 @@ class LocalAppsViewModel(
     /**
      * 「打开应用」 on the details page.
      *
-     * Refuses a app that is not [LocalAppWorkflow.Ready] with the same message
+     * Refuses a app that is not published with the same message
      * the widget path uses, rather than pushing a surface whose only content
      * would be the not-running placeholder.
      */
     private fun openRunSurface(appId: String) {
         val app = _uiState.value.apps.firstOrNull { it.id == appId } ?: return
-        if (app.workflow != LocalAppWorkflow.Ready) {
+        if (!app.workflow.isPublished) {
             error(strings.resolve(R.string.local_apps_preview_not_ready, "应用尚未准备好"))
             return
         }
@@ -848,26 +858,6 @@ class LocalAppsViewModel(
                 } else it.selectedDetailsTab,
             )
         }
-    }
-
-    private fun enqueueRuntimeProfileSelection(request: LocalAppRuntimeProfileSelectionRequest) {
-        if (_uiState.value.pendingRuntimeProfileSelection == null) {
-            _uiState.update { it.copy(pendingRuntimeProfileSelection = request) }
-            return
-        }
-        queuedRuntimeProfileSelections.addLast(request)
-    }
-
-    private fun resolveRuntimeProfileSelection(family: LocalAppRuntimeProfileFamily?) {
-        val request = _uiState.value.pendingRuntimeProfileSelection ?: return
-        submit(
-            ClientCommand.ResolveAppRuntimeProfileSelection(
-                request.requestId,
-                family?.toBindingRuntimeProfileFamily(),
-            ),
-        )
-        val nextSelection = queuedRuntimeProfileSelections.removeFirstOrNull()
-        _uiState.update { it.copy(pendingRuntimeProfileSelection = nextSelection) }
     }
 
     private fun enqueueDependencyChangeConfirmation(request: LocalAppDependencyChangeConfirmationRequest) {
@@ -1141,9 +1131,6 @@ class LocalAppsViewModel(
                     ),
                 )
             }
-            is AppEventDto.AppRuntimeProfileSelectionRequested -> {
-                enqueueRuntimeProfileSelection(event.request.toUiRuntimeProfileSelection())
-            }
             is AppEventDto.AppDependencyChangeConfirmationRequested -> {
                 enqueueDependencyChangeConfirmation(event.request.toUiDependencyChangeConfirmation())
             }
@@ -1203,31 +1190,152 @@ class LocalAppsViewModel(
                     )
                 }
             }
-            is AppEventDto.AppProfileProposal -> _uiState.update { state ->
-                state.copy(
-                    pendingProfileProposal = LocalAppProfileProposal(
-                        appId = event.proposal.appId,
-                        approvalToken = event.proposal.approvalToken,
-                        baseRevision = event.proposal.baseRevision,
-                        currentRevision = event.proposal.currentRevision,
-                        instructions = event.proposal.instructions,
-                        reason = event.proposal.reason,
-                    ),
-                )
+            is AppEventDto.PluginStatusChanged -> Unit
+            is AppEventDto.PluginInventoryChanged -> Unit
+            is AppEventDto.CreateConfirmationRequested -> enqueueApprovalSheet(
+                event.request.toUiCreateApprovalSheet(),
+            )
+            is AppEventDto.McpProposalApprovalRequested -> enqueueApprovalSheet(
+                event.request.toUiMcpProposalApprovalSheet(),
+            )
+            is AppEventDto.ManagedMcpInventoryChanged -> Unit
+            is AppEventDto.VerificationSummaryChanged -> reduceVerificationSummary(
+                appId = event.appId,
+                workflow = event.publicationState.toUiWorkflow(),
+                mcpVerification = event.mcpVerification.toUiVerificationSummary(),
+                uiVerification = event.uiVerification.toUiVerificationSummary(),
+            )
+            is AppEventDto.LocalAppOperationFailed -> {
+                error(event.code.localizedPluginError(strings, event.message))
+                val current = _uiState.value.pendingApprovalSheet
+                if (current != null && current.requestId == event.requestId) {
+                    shiftToNextApprovalSheet()
+                }
             }
+            is AppEventDto.AppProfileProposal -> enqueueApprovalSheet(
+                LocalAppProfileApprovalSheet(
+                    appId = event.proposal.appId,
+                    requestId = event.proposal.approvalToken,
+                    receiptId = event.proposal.approvalToken,
+                    baseRevision = event.proposal.baseRevision,
+                    currentRevision = event.proposal.currentRevision,
+                    instructions = event.proposal.instructions,
+                    reason = event.proposal.reason,
+                ),
+            )
         }
     }
 
-    private fun resolveProfileProposal(approved: Boolean) {
-        val proposal = _uiState.value.pendingProfileProposal ?: return
-        _uiState.update { it.copy(pendingProfileProposal = null) }
-        submit(
-            ClientCommand.ResolveAppProfileProposal(
-                appId = proposal.appId,
-                approvalToken = proposal.approvalToken,
-                approved = approved,
-            ),
-        )
+    private fun enqueueApprovalSheet(sheet: LocalAppApprovalSheet) {
+        val current = _uiState.value.pendingApprovalSheet
+        if (current == null) {
+            _uiState.update { it.copy(pendingApprovalSheet = sheet) }
+            return
+        }
+        if (current.requestId == sheet.requestId || current.receiptId == sheet.receiptId) return
+        if (current.appId == sheet.appId) {
+            rejectSupersededApprovalSheet(current)
+            _uiState.update { it.copy(pendingApprovalSheet = sheet) }
+            return
+        }
+        val queuedIndex = queuedApprovalSheets.indexOfFirst { queued ->
+            queued.appId == sheet.appId && queued.requestId != sheet.requestId
+        }
+        if (queuedIndex >= 0) {
+            rejectSupersededApprovalSheet(queuedApprovalSheets.removeAt(queuedIndex))
+        }
+        if (queuedApprovalSheets.any { it.requestId == sheet.requestId || it.receiptId == sheet.receiptId }) {
+            return
+        }
+        queuedApprovalSheets.addLast(sheet)
+    }
+
+    private fun rejectSupersededApprovalSheet(sheet: LocalAppApprovalSheet) {
+        when (sheet) {
+            is LocalAppProfileApprovalSheet -> submit(
+                ClientCommand.ResolveAppProfileProposal(
+                    appId = sheet.appId,
+                    approvalToken = sheet.receiptId,
+                    approved = false,
+                ),
+            )
+            is LocalAppCreateApprovalSheet -> submit(
+                ClientCommand.PluginCommand(
+                    PluginCommandDto.ResolveCreateConfirmation(
+                        requestId = sheet.requestId,
+                        approved = false,
+                    ),
+                ),
+            )
+            is LocalAppMcpProposalApprovalSheet -> submit(
+                ClientCommand.PluginCommand(
+                    PluginCommandDto.ResolveMcpProposalApproval(
+                        requestId = sheet.requestId,
+                        approved = false,
+                    ),
+                ),
+            )
+        }
+    }
+
+    private fun resolveApprovalSheet(approved: Boolean) {
+        val sheet = _uiState.value.pendingApprovalSheet ?: return
+        when (sheet) {
+            is LocalAppProfileApprovalSheet -> submit(
+                ClientCommand.ResolveAppProfileProposal(
+                    appId = sheet.appId,
+                    approvalToken = sheet.receiptId,
+                    approved = approved,
+                ),
+            )
+            is LocalAppCreateApprovalSheet -> submit(
+                ClientCommand.PluginCommand(
+                    PluginCommandDto.ResolveCreateConfirmation(
+                        requestId = sheet.requestId,
+                        approved = approved,
+                    ),
+                ),
+            )
+            is LocalAppMcpProposalApprovalSheet -> submit(
+                ClientCommand.PluginCommand(
+                    PluginCommandDto.ResolveMcpProposalApproval(
+                        requestId = sheet.requestId,
+                        approved = approved,
+                    ),
+                ),
+            )
+        }
+        shiftToNextApprovalSheet()
+    }
+
+    private fun shiftToNextApprovalSheet() {
+        _uiState.update { it.copy(pendingApprovalSheet = queuedApprovalSheets.removeFirstOrNull()) }
+    }
+
+    private fun reduceVerificationSummary(
+        appId: String,
+        workflow: LocalAppWorkflow,
+        mcpVerification: LocalAppVerificationSummary,
+        uiVerification: LocalAppVerificationSummary,
+    ) {
+        _uiState.update { state ->
+            val apps = state.apps.map { app ->
+                if (app.id != appId) app else app.copy(
+                    workflow = workflow,
+                    mcpVerification = mcpVerification,
+                    uiVerification = uiVerification,
+                )
+            }
+            val details = state.details[appId]?.let { detail ->
+                state.details + (
+                    appId to detail.copy(
+                        mcpVerification = mcpVerification,
+                        uiVerification = uiVerification,
+                    )
+                )
+            } ?: state.details
+            state.copy(apps = apps, details = details)
+        }
     }
 
     private fun reduceDetails(details: com.lingxi.code.bindings.AppDetailsDto) {
@@ -1237,6 +1345,8 @@ class LocalAppsViewModel(
             runtime = details.runtime.toUiRuntime(),
             fallbackRuntime = prior?.runtime,
             runtimeProfileStatus = runtimeProfileStatus,
+            mcpVerification = prior?.mcpVerification,
+            uiVerification = prior?.uiVerification,
         )
         _uiState.update { current ->
             val apps = if (current.apps.any { it.id == app.id }) {
@@ -1269,6 +1379,8 @@ class LocalAppsViewModel(
                         },
                         runtime = details.runtime.toUiRuntime(),
                         runtimeProfileStatus = runtimeProfileStatus,
+                        mcpVerification = prior?.mcpVerification,
+                        uiVerification = prior?.uiVerification,
                     )
                 ),
             )
@@ -1333,6 +1445,8 @@ class LocalAppsViewModel(
             record.toUiApp(
                 fallbackRuntime = prior?.runtime,
                 runtimeProfileStatus = prior?.runtimeProfileStatus,
+                mcpVerification = prior?.mcpVerification,
+                uiVerification = prior?.uiVerification,
             )
         }.sortedByDescending { it.updatedAtMs }
         val liveIds = apps.mapTo(hashSetOf()) { it.id }
@@ -1558,12 +1672,15 @@ private fun LocalAppsDestination.appIdOnScreen(): String? = when (this) {
 }
 
 /**
- * The v3 wire workflow is exactly `draft`/`ready`. Explicit branches, not an
- * `else`, so this `when` breaks the moment a state is added or renamed.
+ * The generated Android bindings may still expose the pre-Phase-8 `READY`
+ * enum name while the shared protocol branch converges on
+ * `PUBLISHED_UNVERIFIED` / `PUBLISHED_VERIFIED`. Match on the stable enum name
+ * string so this reducer accepts both shapes without a second UI refactor.
  */
 private fun AppWorkflowStateDto.toUiWorkflow(): LocalAppWorkflow = when (this) {
     AppWorkflowStateDto.DRAFT -> LocalAppWorkflow.Draft
-    AppWorkflowStateDto.READY -> LocalAppWorkflow.Ready
+    AppWorkflowStateDto.PUBLISHED_UNVERIFIED -> LocalAppWorkflow.PublishedUnverified
+    AppWorkflowStateDto.PUBLISHED_VERIFIED -> LocalAppWorkflow.PublishedVerified
 }
 
 private fun AppRuntimeStateDto.toUiRuntime(): LocalAppRuntimeState = when (this) {
@@ -1602,6 +1719,8 @@ private fun AppRecordDto.toUiApp(
     runtime: LocalAppRuntime? = null,
     fallbackRuntime: LocalAppRuntime? = null,
     runtimeProfileStatus: LocalAppRuntimeProfileStatus? = null,
+    mcpVerification: LocalAppVerificationSummary? = null,
+    uiVerification: LocalAppVerificationSummary? = null,
 ): LocalAppItem = LocalAppItem(
     id = id,
     name = name,
@@ -1617,6 +1736,8 @@ private fun AppRecordDto.toUiApp(
     // surface re-derives "is this a draft" by sniffing the name or the brief.
     scaffolded = scaffolded,
     runtimeProfileStatus = runtimeProfileStatus,
+    mcpVerification = mcpVerification,
+    uiVerification = uiVerification,
 )
 
 private fun AppCapabilityKindDto.authorizationTitle(
@@ -1631,8 +1752,6 @@ private fun AppCapabilityKindDto.authorizationTitle(
         strings.resolve(R.string.local_apps_permission_network_short, "允许应用联网？")
     AppCapabilityKindDto.RESTORE_CHECKPOINT ->
         strings.resolve(R.string.local_apps_permission_restore, "允许恢复代码检查点？")
-    AppCapabilityKindDto.RUNTIME_PROFILE_SELECTION ->
-        strings.resolve(R.string.local_apps_permission_runtime_profile_selection, "允许应用选择或确认运行时 Profile？")
     AppCapabilityKindDto.DEPENDENCY_CHANGE ->
         strings.resolve(R.string.local_apps_permission_dependency_change, "允许应用更新依赖吗？")
     AppCapabilityKindDto.CAMERA ->
@@ -1681,7 +1800,6 @@ private fun AppCapabilityKindDto.authorizationTitle(
 }
 
 private fun AppCapabilityKindDto.allowsPersistentGrant(): Boolean = when (this) {
-    AppCapabilityKindDto.RUNTIME_PROFILE_SELECTION,
     AppCapabilityKindDto.DEPENDENCY_CHANGE -> false
     else -> true
 }
@@ -1701,6 +1819,25 @@ private fun AppRuntimeProfileDto.toUiRuntimeProfileFamily(): LocalAppRuntimeProf
     AppRuntimeProfileDto.BABYLON3D -> LocalAppRuntimeProfileFamily.Babylon3d
 }
 
+private fun AppRuntimeProfileOptionDto.toUiRuntimeProfileOption(): LocalAppRuntimeProfileOption =
+    LocalAppRuntimeProfileOption(
+        family = family.toUiRuntimeProfileFamily(),
+        revision = revision.toUInt(),
+        contractSha256 = contractSha256,
+        surface = if (surface == AppSurfaceDto.DOM) {
+            LocalAppRuntimeProfileSurface.Dom
+        } else {
+            LocalAppRuntimeProfileSurface.Canvas
+        },
+        corePackages = corePackages.map { pkg ->
+            LocalAppRuntimeProfilePackage(pkg.name, pkg.version)
+        },
+        cacheStatus = cacheStatus,
+        downloadStatus = downloadStatus,
+        available = available,
+        reason = reason,
+    )
+
 private fun LocalAppRuntimeProfileFamily.toBindingRuntimeProfileFamily(): AppRuntimeProfileDto = when (this) {
     LocalAppRuntimeProfileFamily.ReactDom -> AppRuntimeProfileDto.REACT_DOM
     LocalAppRuntimeProfileFamily.Canvas2d -> AppRuntimeProfileDto.CANVAS2D
@@ -1709,32 +1846,153 @@ private fun LocalAppRuntimeProfileFamily.toBindingRuntimeProfileFamily(): AppRun
     LocalAppRuntimeProfileFamily.Babylon3d -> AppRuntimeProfileDto.BABYLON3D
 }
 
-private fun AppRuntimeProfileSelectionRequestDto.toUiRuntimeProfileSelection(): LocalAppRuntimeProfileSelectionRequest =
-    LocalAppRuntimeProfileSelectionRequest(
-        requestId = requestId,
+private fun LocalAppReceiptStatusDto.toUiApprovalState(): LocalAppApprovalReceiptState = when {
+    superseded -> LocalAppApprovalReceiptState.Superseded
+    expiresAtMs.toLong() <= System.currentTimeMillis() -> LocalAppApprovalReceiptState.Expired
+    else -> LocalAppApprovalReceiptState.Pending
+}
+
+private fun LocalAppVerificationStatusDto.toUiVerificationStatus(): LocalAppVerificationStatus = when (this) {
+    LocalAppVerificationStatusDto.PENDING -> LocalAppVerificationStatus.Pending
+    LocalAppVerificationStatusDto.PASSED -> LocalAppVerificationStatus.Passed
+    LocalAppVerificationStatusDto.FAILED -> LocalAppVerificationStatus.Failed
+    LocalAppVerificationStatusDto.UNVERIFIED -> LocalAppVerificationStatus.Unverified
+    LocalAppVerificationStatusDto.UNAVAILABLE -> LocalAppVerificationStatus.Unavailable
+}
+
+private fun LocalAppVerificationSummaryDto.toUiVerificationSummary(): LocalAppVerificationSummary =
+    LocalAppVerificationSummary(
+        status = status.toUiVerificationStatus(),
+        summary = summary,
+        code = code,
+    )
+
+private fun LocalAppGateStatusDto.toUiApprovalGate(): LocalAppApprovalGate =
+    LocalAppApprovalGate(
+        name = label,
+        status = status.toUiVerificationStatus(),
+        available = available,
+        detail = detail,
+    )
+
+private fun LocalAppMcpToolSurfaceDto.toUiApprovalToolSurface(): LocalAppApprovalToolSurface =
+    LocalAppApprovalToolSurface(
+        name = name,
+        title = title,
+        description = description,
+        inputSchemaJson = inputSchemaJson,
+        outputSchemaJson = outputSchemaJson,
+        annotationsJson = annotationsJson,
+        executionJson = executionJson,
+        visibleMetaJson = visibleMetaJson,
+        semanticFlowJson = semanticFlowJson,
+        permissionCeiling = permissionCeiling,
+    )
+
+private fun LocalAppMcpToolFieldDto.toUiApprovalToolField(): LocalAppApprovalToolField = when (this) {
+    LocalAppMcpToolFieldDto.NAME -> LocalAppApprovalToolField.Name
+    LocalAppMcpToolFieldDto.TITLE -> LocalAppApprovalToolField.Title
+    LocalAppMcpToolFieldDto.DESCRIPTION -> LocalAppApprovalToolField.Description
+    LocalAppMcpToolFieldDto.INPUT_SCHEMA -> LocalAppApprovalToolField.InputSchema
+    LocalAppMcpToolFieldDto.OUTPUT_SCHEMA -> LocalAppApprovalToolField.OutputSchema
+    LocalAppMcpToolFieldDto.ANNOTATIONS -> LocalAppApprovalToolField.Annotations
+    LocalAppMcpToolFieldDto.EXECUTION -> LocalAppApprovalToolField.Execution
+    LocalAppMcpToolFieldDto.VISIBLE_META -> LocalAppApprovalToolField.VisibleMeta
+    LocalAppMcpToolFieldDto.SEMANTIC_FLOW -> LocalAppApprovalToolField.SemanticFlow
+    LocalAppMcpToolFieldDto.PERMISSION_CEILING -> LocalAppApprovalToolField.PermissionCeiling
+}
+
+private fun LocalAppMcpToolDiffDto.toUiApprovalToolDiff(): LocalAppApprovalToolDiff =
+    LocalAppApprovalToolDiff(
+        name = name,
+        before = before?.toUiApprovalToolSurface(),
+        after = after?.toUiApprovalToolSurface(),
+        changedFields = changedFields.map(LocalAppMcpToolFieldDto::toUiApprovalToolField),
+    )
+
+private fun LocalAppCreateConfirmationRequestDto.toUiCreateApprovalSheet(): LocalAppCreateApprovalSheet {
+    val runtimeProfileOption = runtimeProfile.toUiRuntimeProfileOption()
+    val initialTools = initialTools.map { tool ->
+        LocalAppApprovalInitialTool(
+            name = tool.name,
+            summary = tool.title ?: tool.description ?: tool.name,
+            permissionCeiling = tool.permissionCeiling,
+        )
+    }
+    return LocalAppCreateApprovalSheet(
         appId = appId,
+        requestId = requestId,
+        receiptId = receipt?.receiptId ?: requestId,
+        state = receipt?.toUiApprovalState() ?: LocalAppApprovalReceiptState.Pending,
+        expiresAtMs = receipt?.expiresAtMs?.toLong(),
+        appName = name,
+        brief = brief,
+        templateName = selectedTemplate.summary,
+        runtimeProfile = runtimeProfileOption,
         reason = reason,
-        recommendedFamily = recommendedFamily?.toUiRuntimeProfileFamily(),
-        options = options.map { option ->
-            LocalAppRuntimeProfileOption(
-                family = option.family.toUiRuntimeProfileFamily(),
-                revision = option.revision.toUInt(),
-                contractSha256 = option.contractSha256,
-                surface = if (option.surface == AppSurfaceDto.DOM) {
-                    LocalAppRuntimeProfileSurface.Dom
-                } else {
-                    LocalAppRuntimeProfileSurface.Canvas
-                },
-                corePackages = option.corePackages.map { pkg ->
-                    LocalAppRuntimeProfilePackage(pkg.name, pkg.version)
-                },
-                cacheStatus = option.cacheStatus,
-                downloadStatus = option.downloadStatus,
-                available = option.available,
-                reason = option.reason,
+        rejectedCandidates = rejected.map { candidate -> "${candidate.templateId} · ${candidate.reason}" },
+        dependencies = runtimeProfileOption.corePackages.map { pkg ->
+            LocalAppApprovalDependency(
+                packageName = pkg.name,
+                version = pkg.version,
+                downloadStatus = listOf(
+                    runtimeProfileOption.cacheStatus.localizedTokenOrSelf(),
+                    runtimeProfileOption.downloadStatus.localizedTokenOrSelf(),
+                ).joinToString(" · "),
             )
         },
+        initialTools = initialTools,
+        permissionCeilings = initialTools.mapNotNull(LocalAppApprovalInitialTool::permissionCeiling).distinct(),
+        gates = requiredGates.map(LocalAppGateStatusDto::toUiApprovalGate),
     )
+}
+
+private fun LocalAppMcpProposalApprovalRequestDto.toUiMcpProposalApprovalSheet(): LocalAppMcpProposalApprovalSheet =
+    LocalAppMcpProposalApprovalSheet(
+        appId = appId,
+        requestId = requestId,
+        receiptId = receipt?.receiptId ?: requestId,
+        state = receipt?.toUiApprovalState() ?: LocalAppApprovalReceiptState.Pending,
+        expiresAtMs = receipt?.expiresAtMs?.toLong(),
+        summary = summary,
+        toolDiffs = toolDiffs.map(LocalAppMcpToolDiffDto::toUiApprovalToolDiff),
+        requiredChanges = requiredFlowChanges,
+        excludedCapabilities = excludedCapabilities,
+        pendingGates = pendingGates.map(LocalAppGateStatusDto::toUiApprovalGate),
+    )
+
+private fun LocalAppPluginErrorCodeDto.localizedPluginError(
+    strings: LocalAppsStrings,
+    fallback: String,
+): String = when (this) {
+    LocalAppPluginErrorCodeDto.PLUGIN_DISABLED ->
+        strings.resolve(R.string.local_apps_error_plugin_disabled, fallback)
+    LocalAppPluginErrorCodeDto.BUILTIN_BUNDLE_UNAVAILABLE ->
+        strings.resolve(R.string.local_apps_error_builtin_bundle_unavailable, fallback)
+    LocalAppPluginErrorCodeDto.TEMPLATE_UNAVAILABLE ->
+        strings.resolve(R.string.local_apps_error_template_unavailable, fallback)
+    LocalAppPluginErrorCodeDto.PROPOSAL_INVALID ->
+        strings.resolve(R.string.local_apps_error_proposal_invalid, fallback)
+    LocalAppPluginErrorCodeDto.CATALOG_STALE ->
+        strings.resolve(R.string.local_apps_error_catalog_stale, fallback)
+    LocalAppPluginErrorCodeDto.ACTIVE_STATE_CORRUPT ->
+        strings.resolve(R.string.local_apps_error_active_state_corrupt, fallback)
+    LocalAppPluginErrorCodeDto.MCP_AUTHORING_REQUIRED ->
+        strings.resolve(R.string.local_apps_error_mcp_authoring_required, fallback)
+    LocalAppPluginErrorCodeDto.REPAIR_BUDGET_EXHAUSTED ->
+        strings.resolve(R.string.local_apps_error_repair_budget_exhausted, fallback)
+    LocalAppPluginErrorCodeDto.EXPOSURE_CAPACITY_REACHED ->
+        strings.resolve(R.string.local_apps_error_exposure_capacity_reached, fallback)
+}
+
+private fun String.localizedTokenOrSelf(): String = when (this) {
+    "bundled" -> "bundled"
+    "cached" -> "cached"
+    "download_required" -> "download_required"
+    "unavailable" -> "unavailable"
+    "gated" -> "gated"
+    else -> this
+}
 
 private fun AppDependencyChangeKindDto.toUiDependencyChangeKind(): LocalAppDependencyChangeKind = when (this) {
     AppDependencyChangeKindDto.ADD -> LocalAppDependencyChangeKind.Add

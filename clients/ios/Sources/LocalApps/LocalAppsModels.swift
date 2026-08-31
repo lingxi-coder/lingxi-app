@@ -87,6 +87,10 @@ struct LocalAppSummary: Identifiable, Hashable, Sendable {
     /// whose details have not been loaded yet; the UI must not infer health
     /// from source files or the app's visual/runtime state.
     var runtimeProfileStatus: LocalAppRuntimeProfileStatus? = nil
+    /// Host-derived verification summaries remain distinct from publication
+    /// state so UI badges do not overload "published" with "verified".
+    var uiVerification: LocalAppVerificationSummary? = nil
+    var mcpVerification: LocalAppVerificationSummary? = nil
 
     /// `true` while this app is still an unscaffolded shell.
     ///
@@ -125,18 +129,354 @@ enum LocalAppLaunchDestination: String, Hashable, Sendable {
     case preview
 }
 
-/// Workflow state of an app — the v3 two-state model (protocol 5.0.0's
-/// `AppWorkflowStateDto`). The old 14-state designer/plan/generation pipeline
-/// is gone: apps are agent-driven conversations now, so an app is either a
-/// draft or ready.
+struct LocalAppStatusBadge: Hashable, Sendable {
+    let label: String
+    let accessibilityLabel: String
+    let systemImageName: String
+    let tintName: String
+}
+
+struct LocalAppBuiltinPluginDescriptor: Hashable, Sendable {
+    let pluginID: String
+    let displayName: String
+    let version: String
+    let archiveDigest: String
+    let skillCount: Int
+    let agentCount: Int
+    let workflowCount: Int
+    let templateCount: Int
+    let defaultEnabled: Bool
+
+    static let current = LocalAppBuiltinPluginDescriptor(
+        pluginID: "lingxi-local-app",
+        displayName: "LingXi Local App",
+        version: "1.0.0",
+        archiveDigest: "7d7bbbee751efdbebadfe8184f69d205bc93681d53870ae8442be16cee7fce34",
+        skillCount: 27,
+        agentCount: 7,
+        workflowCount: 3,
+        templateCount: 5,
+        defaultEnabled: true
+    )
+}
+
+struct LocalAppBuiltinPluginStatus: Hashable, Sendable {
+    let state: PluginActivationStateDto
+    let manifestDefaultEnabled: Bool
+    let validationError: String?
+
+    var isEnabled: Bool { state == .loaded }
+
+    var statusBadge: LocalAppStatusBadge {
+        if isEnabled {
+            return LocalAppStatusBadge(
+                label: String(localized: "settings_status_on"),
+                accessibilityLabel: String(localized: "local_apps_plugin_enabled"),
+                systemImageName: "checkmark.circle.fill",
+                tintName: "green"
+            )
+        }
+        return LocalAppStatusBadge(
+            label: String(localized: "settings_status_off"),
+            accessibilityLabel: String(localized: "local_apps_plugin_disabled"),
+            systemImageName: "pause.circle.fill",
+            tintName: "secondary"
+        )
+    }
+}
+
+extension PluginActivationStateDto: @unchecked Sendable {}
+
+struct LocalAppBuiltinPluginInventory: Hashable, Sendable {
+    let pluginID: String
+    let displayName: String
+    let source: String
+    let version: String
+    let bundleDigest: String
+    let manifestDefaultEnabled: Bool
+    let skillCount: Int
+    let agentCount: Int
+    let workflowCount: Int
+    let templateCount: Int
+    let validationError: String?
+}
+
+enum LocalAppVerificationStatus: String, CaseIterable, Hashable, Sendable {
+    case pending
+    case passed
+    case failed
+    case unverified
+    case unavailable
+
+    var badge: LocalAppStatusBadge {
+        switch self {
+        case .pending:
+            LocalAppStatusBadge(
+                label: String(localized: "local_apps_verification_status_pending"),
+                accessibilityLabel: String(localized: "local_apps_verification_status_pending"),
+                systemImageName: "clock.fill",
+                tintName: "orange"
+            )
+        case .passed:
+            LocalAppStatusBadge(
+                label: String(localized: "local_apps_verification_status_passed"),
+                accessibilityLabel: String(localized: "local_apps_verification_status_passed"),
+                systemImageName: "checkmark.circle.fill",
+                tintName: "green"
+            )
+        case .failed:
+            LocalAppStatusBadge(
+                label: String(localized: "local_apps_verification_status_failed"),
+                accessibilityLabel: String(localized: "local_apps_verification_status_failed"),
+                systemImageName: "xmark.octagon.fill",
+                tintName: "orange"
+            )
+        case .unverified:
+            LocalAppStatusBadge(
+                label: String(localized: "local_apps_verification_status_unverified"),
+                accessibilityLabel: String(localized: "local_apps_verification_status_unverified"),
+                systemImageName: "questionmark.circle.fill",
+                tintName: "secondary"
+            )
+        case .unavailable:
+            LocalAppStatusBadge(
+                label: String(localized: "local_apps_verification_status_unavailable"),
+                accessibilityLabel: String(localized: "local_apps_verification_status_unavailable"),
+                systemImageName: "slash.circle.fill",
+                tintName: "secondary"
+            )
+        }
+    }
+}
+
+struct LocalAppVerificationSummary: Hashable, Sendable {
+    let status: LocalAppVerificationStatus
+    let summary: String
+    let code: String?
+
+    var badge: LocalAppStatusBadge { status.badge }
+}
+
+struct LocalAppGateStatus: Identifiable, Hashable, Sendable {
+    let gateID: String
+    let label: String
+    let status: LocalAppVerificationStatus
+    let available: Bool
+    let detail: String?
+
+    var id: String { gateID }
+    var badge: LocalAppStatusBadge { status.badge }
+}
+
+struct LocalAppTemplateSummary: Hashable, Sendable {
+    let templateID: String
+    let surface: LocalAppRuntimeProfileSurface
+    let summary: String
+}
+
+struct LocalAppRejectedCandidate: Identifiable, Hashable, Sendable {
+    let templateID: String
+    let reason: String
+
+    var id: String { templateID }
+}
+
+struct LocalAppReceiptStatus: Hashable, Sendable {
+    let receiptID: String
+    let appID: String
+    let workflowRunID: String
+    let approvalContractSHA256: String
+    let candidateDigest: String
+    let issuedAt: Date
+    let expiresAt: Date
+    let consumed: Bool
+    let superseded: Bool
+}
+
+struct LocalAppMcpToolSurface: Identifiable, Hashable, Sendable {
+    let name: String
+    let title: String?
+    let description: String?
+    let inputSchemaSummary: String
+    let outputSchemaSummary: String?
+    let annotationsSummary: String?
+    let executionSummary: String?
+    let visibleMetaSummary: String?
+    let semanticFlowSummary: String
+    let ceilingSummary: String
+
+    var id: String { name }
+}
+
+typealias LocalAppManagedMcpTool = LocalAppMcpToolSurface
+
+enum LocalAppMcpToolField: String, CaseIterable, Hashable, Sendable {
+    case name
+    case title
+    case description
+    case inputSchema
+    case outputSchema
+    case annotations
+    case execution
+    case visibleMeta
+    case semanticFlow
+    case permissionCeiling
+
+    var label: String {
+        switch self {
+        case .name:
+            String(localized: "settings_display_name")
+        case .title:
+            "Title"
+        case .description:
+            "Description"
+        case .inputSchema:
+            String(localized: "local_apps_mcp_proposal_field_input_schema")
+        case .outputSchema:
+            String(localized: "local_apps_mcp_proposal_field_output_schema")
+        case .annotations:
+            String(localized: "local_apps_mcp_proposal_field_annotations")
+        case .execution:
+            String(localized: "local_apps_mcp_proposal_field_execution")
+        case .visibleMeta:
+            String(localized: "local_apps_mcp_proposal_field_visible_meta")
+        case .semanticFlow:
+            String(localized: "local_apps_mcp_proposal_field_semantic_flow")
+        case .permissionCeiling:
+            String(localized: "local_apps_mcp_proposal_field_permission_ceiling")
+        }
+    }
+}
+
+enum LocalAppMcpToolChangeKind: String, CaseIterable, Hashable, Sendable {
+    case added
+    case removed
+    case changed
+
+    var label: String {
+        switch self {
+        case .added:
+            String(localized: "local_apps_mcp_proposal_added")
+        case .removed:
+            String(localized: "local_apps_mcp_proposal_removed")
+        case .changed:
+            String(localized: "local_apps_mcp_proposal_changed")
+        }
+    }
+}
+
+struct LocalAppMcpToolDiff: Identifiable, Hashable, Sendable {
+    let kind: LocalAppMcpToolChangeKind
+    let name: String
+    let before: LocalAppMcpToolSurface?
+    let after: LocalAppMcpToolSurface?
+    let changedFields: [LocalAppMcpToolField]
+
+    var id: String { "\(kind.rawValue)-\(name)" }
+}
+
+struct LocalAppCreateConfirmationPrompt: Identifiable, Hashable, Sendable {
+    let requestID: String
+    let appID: String
+    let name: String
+    let brief: String
+    let selectedTemplate: LocalAppTemplateSummary
+    let runtimeProfile: LocalAppRuntimeProfileOption
+    let reason: String
+    let rejected: [LocalAppRejectedCandidate]
+    let initialTools: [LocalAppMcpToolSurface]
+    let requiredGates: [LocalAppGateStatus]
+    let receipt: LocalAppReceiptStatus?
+
+    var id: String { requestID }
+}
+
+struct LocalAppMcpProposalApprovalPrompt: Identifiable, Hashable, Sendable {
+    let requestID: String
+    let appID: String
+    let workflowRunID: String
+    let summary: String
+    let proposalSHA256: String
+    let approvalContractSHA256: String
+    let toolSurfaceSHA256: String
+    let toolDiffs: [LocalAppMcpToolDiff]
+    let requiredFlowChanges: [String]
+    let excludedCapabilities: [String]
+    let pendingGates: [LocalAppGateStatus]
+    let receipt: LocalAppReceiptStatus?
+
+    var id: String { requestID }
+    var hasVisibleChanges: Bool {
+        !toolDiffs.isEmpty || !requiredFlowChanges.isEmpty || !excludedCapabilities.isEmpty || !pendingGates.isEmpty
+    }
+}
+
+struct LocalAppManagedMcpInventory: Identifiable, Hashable, Sendable {
+    let serverName: String
+    let appID: String
+    let appName: String
+    let buildID: String
+    let catalogDigest: String
+    let toolSurfaceDigest: String
+    let authoringRevision: UInt64
+    let publicationState: LocalAppWorkflow
+    let mcpVerification: LocalAppVerificationSummary
+    let uiVerification: LocalAppVerificationSummary
+    let tools: [LocalAppManagedMcpTool]
+
+    var id: String { serverName }
+    var toolCount: Int { tools.count }
+    var publicationBadge: LocalAppStatusBadge { publicationState.statusBadge }
+}
+
+/// Workflow state of an app — the v3 publication projection. The old
+/// designer/plan/generation pipeline is gone; clients render the trusted
+/// publication pair plus verification state instead.
 enum LocalAppWorkflow: String, CaseIterable, Hashable, Sendable {
     case draft
-    case ready
+    case publishedUnverified = "published_unverified"
+    case publishedVerified = "published_verified"
 
     var label: String {
         switch self {
         case .draft: String(localized: "local_apps_state_draft")
-        case .ready: String(localized: "local_apps_state_ready")
+        case .publishedUnverified: String(localized: "local_apps_verification_published_unverified")
+        case .publishedVerified: String(localized: "local_apps_verification_published_verified")
+        }
+    }
+
+    var isPublished: Bool {
+        switch self {
+        case .draft:
+            false
+        case .publishedUnverified, .publishedVerified:
+            true
+        }
+    }
+
+    var statusBadge: LocalAppStatusBadge {
+        switch self {
+        case .draft:
+            LocalAppStatusBadge(
+                label: String(localized: "local_apps_state_draft"),
+                accessibilityLabel: String(localized: "local_apps_verification_draft"),
+                systemImageName: "pencil.circle.fill",
+                tintName: "secondary"
+            )
+        case .publishedUnverified:
+            LocalAppStatusBadge(
+                label: String(localized: "local_apps_verification_published_unverified"),
+                accessibilityLabel: String(localized: "local_apps_verification_published_unverified"),
+                systemImageName: "exclamationmark.triangle.fill",
+                tintName: "orange"
+            )
+        case .publishedVerified:
+            LocalAppStatusBadge(
+                label: String(localized: "local_apps_verification_published_verified"),
+                accessibilityLabel: String(localized: "local_apps_verification_published_verified"),
+                systemImageName: "checkmark.seal.fill",
+                tintName: "green"
+            )
         }
     }
 }
@@ -291,7 +631,6 @@ struct LocalAppPermissionPrompt: Identifiable, Hashable, Sendable {
         case uiControl
         case networkDomain
         case restoreCheckpoint
-        case runtimeProfileSelection
         case dependencyChange
         case camera
         case photoLibrary
@@ -324,7 +663,7 @@ struct LocalAppPermissionPrompt: Identifiable, Hashable, Sendable {
 
     var allowsPersistentGrant: Bool {
         switch kind {
-        case .runtimeProfileSelection, .dependencyChange:
+        case .dependencyChange:
             false
         default:
             true
@@ -337,7 +676,6 @@ struct LocalAppPermissionPrompt: Identifiable, Hashable, Sendable {
         case .uiControl: String(localized: "local_apps_permission_ui_control")
         case .networkDomain: String(localized: "local_apps_permission_network")
         case .restoreCheckpoint: String(localized: "local_apps_permission_restore")
-        case .runtimeProfileSelection: String(localized: "local_apps_permission_runtime_profile_selection")
         case .dependencyChange: String(localized: "local_apps_permission_dependency_change")
         case .camera: String(localized: "local_apps_permission_camera")
         case .photoLibrary: String(localized: "local_apps_permission_photo_library")
@@ -458,14 +796,6 @@ struct LocalAppRuntimeProfileOption: Identifiable, Hashable, Sendable {
     let reason: String?
 
     var id: String { family.rawValue }
-}
-
-struct LocalAppRuntimeProfileSelectionPrompt: Identifiable, Hashable, Sendable {
-    let id: String
-    let appID: String
-    let reason: String
-    let recommendedFamily: LocalAppRuntimeProfileFamily?
-    let options: [LocalAppRuntimeProfileOption]
 }
 
 enum LocalAppDependencyChangeKind: String, Hashable, Sendable {

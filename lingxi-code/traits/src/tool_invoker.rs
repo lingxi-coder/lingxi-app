@@ -103,6 +103,9 @@ pub struct SubagentInvocationContext {
     /// mode override — byte-identical to before). Mapped straight into
     /// [`crate::permission_gate::PermissionCheckContext::mode_override`].
     pub mode_override: Option<String>,
+    /// Trusted source metadata for source-restricted permission prompt actions.
+    /// `None` is fail-closed and must not be inferred by the receiver.
+    pub request_source: Option<crate::permission_gate::PermissionRequestSource>,
     /// Command-deny rules FROZEN when a background fork launched, replayed for
     /// every tool call this subagent makes (claude `freezeCommandDenies`).
     ///

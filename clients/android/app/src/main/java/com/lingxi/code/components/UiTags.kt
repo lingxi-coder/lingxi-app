@@ -75,6 +75,9 @@ object UiTags {
     /** The permission prompt's Allow-always action. */
     const val PERMISSION_ALLOW_ALWAYS = "tag.permissionAllowAlways"
 
+    /** The permission prompt's Allow-auto action. */
+    const val PERMISSION_ALLOW_AUTO = "tag.permissionAllowAuto"
+
     /** The permission prompt's Deny action. */
     const val PERMISSION_DENY = "tag.permissionDeny"
 

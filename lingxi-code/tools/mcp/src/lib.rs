@@ -27,7 +27,8 @@ pub use large_output::{
     process_mcp_result, process_mcp_result_with_exact_count, ExactCountOutcome,
 };
 pub use mcp_tool::{
-    build_registered_mcp_tools, ListMcpResourcesTool, MCPTool, McpAuthTool, ReadMcpResourceTool,
+    build_registered_mcp_tools, configured_permission_ceiling, ListMcpResourcesTool, MCPTool,
+    McpAuthTool, ReadMcpResourceTool,
 };
 pub use read_mcp_resource_dir::ReadMcpResourceDirTool;
 pub use transform_result::transform_result_content;
@@ -63,7 +64,9 @@ pub use wait_for_mcp_servers::WaitForMcpServersTool;
 /// `wait_for_mcp_servers::WaitForMcpServersTool`.
 pub fn register_all(reg: &mut tool_api::ToolRegistry, ctx: tool_api::BuiltinToolContext) {
     use std::sync::Arc;
-    reg.register_builtin(Arc::new(MCPTool::new(ctx.clone())));
+    // Generic `MCP` dispatch is kept for internal compatibility tests only.
+    // Production registration uses discovered per-tool entries so an FQN
+    // cannot bypass its server/tool-specific permission rule.
     reg.register_builtin(Arc::new(McpAuthTool::new(ctx.clone())));
     reg.register_builtin(Arc::new(WaitForMcpServersTool::new(ctx)));
 }

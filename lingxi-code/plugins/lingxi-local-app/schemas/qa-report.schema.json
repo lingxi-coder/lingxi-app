@@ -1,0 +1,85 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://lingxi.local/local-app/qa-report.schema.json",
+  "title": "Local App QA report (frontend-qa / verifier verification result)",
+  "$comment": "PHASE 2 CONTENT, transcription not invention. VERIFICATION_RESULT_SCHEMA is near-identical across the two builtin workflows this plugin's local-app-build.js is meant to eventually replace: lingxi-code/tools/workflow/src/local_app_build_workflow.js:145-237 (react_dom) and local_app_canvas_workflow.js:166-239 (canvas/three/phaser/babylon). The two differ in exactly the way design §11.2's Profile verification policy already documents in prose: DOM's render_check.status allows 'not_applicable' ('无 canvas 时 render_check.status=not_applicable 合法') and DOM has no motion_check property at all; the canvas family's render_check.status has no not_applicable branch and REQUIRES motion_check ('motion_check.frames_compared >= 2'). This file expresses that as one schema — render_check.status keeps the not_applicable option, motion_check is present but not in the top-level required list — with an documented profile-conditional requirement below, rather than inventing a merged shape design §18 Phase 4 has not settled. Every property below is lifted verbatim from the two source schemas; only the reconciliation of which fields are unconditionally required is new, and it transcribes §11.2's prose rather than adding anything §11.2 does not already say.",
+  "type": "object",
+  "properties": {
+    "ok": { "type": "boolean" },
+    "findings": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Unresolved defects that still need a source change, each with its evidence and the file to change. NOT a record of what was checked and NOT a summary — an entry here sends the app into a repair round. Empty when verification found nothing wrong."
+    },
+    "checked_matrix": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Targets actually exercised."
+    },
+    "browser_available": { "type": "boolean" },
+    "webview_checked": { "type": "boolean" },
+    "degraded_verification": { "type": "boolean" },
+    "data_roundtrip": {
+      "type": "object",
+      "description": "Native persistence check. For a drawn surface that declares no collection this answers not_applicable, which is why render_check (not this field) is the canvas family's hard render gate — design §11.2.",
+      "properties": {
+        "status": { "type": "string", "enum": ["passed", "not_applicable", "failed"] },
+        "collections": { "type": "array", "items": { "type": "string" } },
+        "evidence": { "type": "string" }
+      },
+      "required": ["status", "collections", "evidence"]
+    },
+    "render_check": {
+      "type": "object",
+      "description": "canvas_surfaces keys on the PRESENCE of a canvas, not an empty DOM element list, per the note at local_app_build_workflow.js:186-203. status=not_applicable is legal only for a DOM app with zero canvas_surfaces (design §11.2 DOM policy); the canvas family (§11.2 Canvas2D/Three/Phaser/Babylon policy) must never answer not_applicable and requires canvas_surfaces >= 1 and frames_captured >= 1.",
+      "properties": {
+        "status": { "type": "string", "enum": ["passed", "not_applicable", "failed"] },
+        "canvas_surfaces": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "canvasCount from the last inspect-view call. Non-zero means the DOM path cannot see part of this app."
+        },
+        "frames_captured": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Frames actually returned by a capture-view call."
+        },
+        "interactions_driven": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Pointer/key actions actually driven, e.g. [\"pointer 120,300 tap\", \"key ArrowLeft down\"]."
+        },
+        "evidence": {
+          "type": "string",
+          "description": "What was SEEN in the captured frames, in concrete visual terms. Naming the app or restating the spec is not evidence that it rendered."
+        }
+      },
+      "required": ["status", "canvas_surfaces", "frames_captured", "interactions_driven", "evidence"]
+    },
+    "motion_check": {
+      "type": "object",
+      "description": "Proof the frame loop is actually running, which a single still frame cannot show. REQUIRED (design §11.2: 'motion_check.frames_compared >= 2') for canvas_2d/three_3d/phaser_2d/babylon_3d verification policy; absent for a DOM (react_dom) verification that has no embedded canvas. This property is intentionally NOT in this schema's top-level `required` list because that requirement is profile-conditional, not universal — see local_app_canvas_workflow.js:212-224 for the source shape.",
+      "properties": {
+        "status": { "type": "string", "enum": ["passed", "failed"] },
+        "frames_compared": { "type": "integer", "minimum": 0 },
+        "difference": {
+          "type": "string",
+          "description": "What changed between two frames captured at different times, and after which input. \"Nothing changed\" is a FAILED motion check unless the app was deliberately paused."
+        }
+      },
+      "required": ["status", "frames_compared", "difference"]
+    },
+    "summary": { "type": "string" }
+  },
+  "required": [
+    "ok",
+    "findings",
+    "checked_matrix",
+    "browser_available",
+    "webview_checked",
+    "degraded_verification",
+    "data_roundtrip",
+    "render_check",
+    "summary"
+  ]
+}

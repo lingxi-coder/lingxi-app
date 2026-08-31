@@ -395,6 +395,8 @@ fn http_cfg(name: &str, oauth: Option<McpOAuthConfigDto>) -> McpServerConfig {
         timeout_ms: None,
         always_load: false,
         discovery_cache: None,
+        tools: Vec::new(),
+        tool_permissions: std::collections::BTreeMap::new(),
         config_error: None,
         metadata: Default::default(),
     }
@@ -574,6 +576,8 @@ async fn static_token_server_spec_is_unchanged() {
         timeout_ms: None,
         always_load: false,
         discovery_cache: None,
+        tools: Vec::new(),
+        tool_permissions: std::collections::BTreeMap::new(),
         config_error: None,
         metadata: Default::default(),
     };
@@ -944,6 +948,8 @@ async fn static_authorization_header_survives_oauth_bearer() {
         timeout_ms: None,
         always_load: false,
         discovery_cache: None,
+        tools: Vec::new(),
+        tool_permissions: std::collections::BTreeMap::new(),
         config_error: None,
         metadata: Default::default(),
     };
@@ -997,6 +1003,8 @@ async fn static_authorization_header_rejection_is_classified() {
         timeout_ms: None,
         always_load: false,
         discovery_cache: None,
+        tools: Vec::new(),
+        tool_permissions: std::collections::BTreeMap::new(),
         config_error: None,
         metadata: Default::default(),
     };
@@ -1041,6 +1049,8 @@ async fn headers_helper_minted_authorization_survives_oauth_bearer() {
         timeout_ms: None,
         always_load: false,
         discovery_cache: None,
+        tools: Vec::new(),
+        tool_permissions: std::collections::BTreeMap::new(),
         config_error: None,
         metadata: Default::default(),
     };
@@ -1107,6 +1117,8 @@ async fn headers_helper_minted_authorization_rejection_is_classified() {
         timeout_ms: None,
         always_load: false,
         discovery_cache: None,
+        tools: Vec::new(),
+        tool_permissions: std::collections::BTreeMap::new(),
         config_error: None,
         metadata: Default::default(),
     };
@@ -1156,6 +1168,8 @@ async fn headers_helper_minting_other_header_does_not_suppress_oauth() {
         timeout_ms: None,
         always_load: false,
         discovery_cache: None,
+        tools: Vec::new(),
+        tool_permissions: std::collections::BTreeMap::new(),
         config_error: None,
         metadata: Default::default(),
     };

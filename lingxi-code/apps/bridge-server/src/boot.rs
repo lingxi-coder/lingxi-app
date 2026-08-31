@@ -468,6 +468,8 @@ pub fn resolve_desktop_config(args: &BridgeArgs) -> DesktopConfig {
         // MCP configs stay eligible (trust gating above still applies) and
         // agent-frontmatter servers are never strict-skipped.
         strict_mcp_config: false,
+        restricted: false,
+        restricted_tools: None,
         // The Electron bridge has no --exclude-dynamic-system-prompt-sections flag.
         exclude_dynamic_system_prompt_sections: false,
         // The bridge has no `--setting-sources` flag; load all tiers.
@@ -1406,6 +1408,8 @@ mod tests {
             add_dir: Vec::new(),
             cli_mcp_servers: Vec::new(),
             strict_mcp_config: false,
+            restricted: false,
+            restricted_tools: None,
             exclude_dynamic_system_prompt_sections: false,
             setting_source_scope: (true, true),
             customization_gates: engine_desktop::CustomizationGates::default(),

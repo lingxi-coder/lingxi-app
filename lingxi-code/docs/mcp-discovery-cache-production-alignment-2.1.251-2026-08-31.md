@@ -141,7 +141,7 @@ post-hit capability 具体为：`tengu_mcp_skills` 开启且 entry 同时有 res
 
 ## 7. Write-through、grant rotation 与持久化安全
 
-live discovery 在认证 transport 建立后捕获 partition，在 catalog RPC 完成后重新读取 MCP grant 并重算 partition；两者不一致就跳过写入，避免旧 grant 的 catalog 落入新 grant。写入 entry 同时记录实际 `negotiatedEra`。
+OAuth resolve/refresh/step-up 在生成实际 `connect_spec` 时一并返回不可变 grant provenance；live discovery 用它计算 partition，而不是在认证 transport 建立后才把“当前 storage”误当成这条连接的 grant。catalog RPC 完成后重读 MCP secure storage只做 equality check；若 shared/agent-scoped 并发导致 refresh-token rotation，本次 write-through 直接跳过，stale revalidation 也只淘汰旧 partition，不会让旧 bearer 的 catalog 落入新 grant partition。OAuth token row 存在但没有稳定 refresh grant 时 cache read/write fail closed。写入 entry 同时记录实际 `negotiatedEra`。
 
 持久化边界：
 
@@ -201,43 +201,46 @@ mobile 只在 `Platform::secure_storage()` 返回 `is_encrypted() == true` 时�
 
 授权 URL 回调先写入 host-owned 的 copyable slot，再尝试 `DeepLinkOpener::open`；opener 不可用或失败只留下可复制 URL并记录 warning，不暴露 access token 或 PKCE verifier。该 slot 通过 UniFFI getter 暴露，configured remote connect 在后台运行，因此 loopback callback 等待不会阻塞 engine build。MCP OAuth token 仍只进入 `mcp-oauth` secure-storage service；cache 只保存 refresh-grant 的短哈希 fingerprint，并在 write-through 做 secret reflection refusal。
 
-mobile listing reload 先比较完整 config snapshot：未变 server 不 dial、不 purge、不 revoke；新增/修改项统一后台连接，修改/删除使用不撤销 OAuth 的 replacement 路径。
+mobile startup 在 spawn 前把初始配置写入同一 desired-intent map，并通过 guarded job 连接；boot A 因此不能在 reload 到 B 后发布。listing reload 比较完整 config snapshot：未变 settled server 不 dial、不 purge、不 revoke；修改/删除进入 per-server 后台 generation/CAS reconciliation。每个 server 的 generation state 另存 latest desired snapshot，且 reconciliation 包含 registry、tracked intent、磁盘配置三者的名称并集，所以 `A→B→A`、`A→deleted→A` 以及 remove→connect 的无 state 窗口都会失效旧 job；matching config 若仍为 `Connecting`/`AwaitingOAuth`，latest generation 会重建 owner。guard 在 lifecycle lock 内和 cache/live/error publish 前复查，stale discovery 会断开而不发布，exact pending cleanup/conditional remove 复用完整 client/catalog/lazy/cache retire 且不撤销 OAuth。disabled config 只 seed `Disconnected`、不拨号。因此 listing 不等待 pending OAuth/connect，过期 startup/reload generation 也不能覆盖最新配置意图。
 
 ## 11. 验证结果与已知风险
 
 本轮直接复核的结果：
 
 ```text
-cargo test -p jsonrpc -p mcp -p tool-mcp -p agent -p plugin --quiet
-jsonrpc 63、mcp 574、agent 358、tool-mcp 140 及 plugin 全部通过；0 failed；3 ignored
+cargo test -p jsonrpc -p mcp -p agent --lib --quiet
+jsonrpc 63、mcp 592、agent 358 全部通过
 
-cargo test -p tasks --lib --quiet -- --test-threads=1
-271 passed; 0 failed
+cargo test -p tool-mcp -p plugin --quiet
+tool-mcp 148 及 plugin 全 suites 通过
+
+cargo test -p tasks --lib --quiet
+291 passed；1 个 latest-main Local App grammar baseline failure
 
 cargo test -p platform-common -p platform-posix --quiet
 全部 unit/integration suites 通过；modern negotiation E2E 7/7
 
 cargo test -p engine-desktop --quiet
-228 lib + 其余 integration suites 全部通过
+181/235 lib passed；54 个 latest-main Local App workflow baseline failure
 
 cargo check --workspace --all-targets
 passed
 ```
 
-`engine-mobile --features uniffi` 的已知 fixture 风险可稳定复现：
+最终组合树的 `engine-mobile --features uniffi` 结果为 472/537；同一命令在未合入本分支的 `main@bef351cd9` 上为 449/514，二者有相同的 65 个 Local App baseline failure。本分支增加的 23 项测试全部通过，mobile MCP 定向集为 13/13。代表性 baseline failure 可稳定复现：
 
 ```text
-local_app_runtime_profiles::tests::published_r1_contract_digests_are_immutable
-phaser_2d: FAILED
-actual   7fd39e60eff9b7491062506f97a7b39f796f4d735e8716a7ed6d9fd7604695b1
-expected 38b5fed98a06e5784632e544e41ec663ff7bc55215d199e436bb53dfde7b1476
+local_apps_build::tests::a_failed_build_cleans_up_its_staging_directory
+InvalidRequest("templateOrigin/dependencySnapshot requires a matching surface and runtimeProfile")
 ```
 
-该失败在实现基线 `8469d341c` 及其基线父提交 `c5c46f970` 上均为同一既有 mobile `phaser_2d` fixture digest 不一致，不是 MCP/cache 行为失败；本轮不改 fixture、不改代码。基线 commit 还记录了 engine-desktop coordinator、iOS framework、Android AAR 与相关 package checks；本报告不把上述 mobile fixture 风险或既有 warnings 伪装成 workspace-wide 全绿。
+该失败在 `main@bef351cd9` 上独立复现，不是 MCP/cache 行为失败。desktop 的代表性 plugin-workflow registry failure 也在该 main 上复现；tasks 另有一个未修改 `scope.rs` 的 app-id grammar baseline failure。本报告不把这些 Local App 风险或既有 warnings 伪装成 workspace-wide 全绿。
 
-补充回归加入后，集成复核确认：`workspace/all-targets`、`core/platform/desktop` 与 iOS framework/Android AAR framework checks 均通过；`engine-mobile --features uniffi` 完整测试面为 **465/466（465 passed、1 failed）**，唯一失败就是上面的 `phaser_2d` digest fixture。该数字不应被概括为 mobile 全绿。
+补充并发与 latest-main API seam 回归后，集成复核确认：`workspace/all-targets`、core MCP/plugin、platform、iOS framework/Android AAR checks 均通过；mobile/desktop/tasks 的上述 baseline tests 仍红。新增回归验证了 blocked startup 期间重复相同 reload 只拨号一次且不 teardown 当前 owner。该结果不应被概括为 workspace 全绿。
 
 `git diff --check` 与文档结构检查在本次文档修改后执行；最终状态见详细交付报告第 14 节。
+
+Sol xhigh 最终只读复审结论：**APPROVE — zero unresolved P0–P3**。
 
 ## 12. 六项完成矩阵（替代历史残余列表）
 
@@ -248,7 +251,7 @@ expected 38b5fed98a06e5784632e544e41ec663ff7bc55215d199e436bb53dfde7b1476
 | 3 | `role` runtime consumer | ✅ 已完成 | parser 识别 `role:"comms"`；MCPTool 保留 `mcp_role`；coordinator worker 过滤 shared/inline comms 以及 generic `MCP`/`McpAuth`，普通 worker 保留；Cached/Connected rebuild 一致 | tool-mcp role rebuild；agent dispatcher/routing；plugin load→cache→refresh integration |
 | 4 | `cli-owned` / `env-placeholder` / `ambient-credential` gate | ✅ 已完成 | provenance gate 按固定顺序执行；三者均 non-purging live miss；opt-out/helper 仍是唯一 gate purge | `discovery_cache::provenance_gates_are_ordered_and_non_purging`；registry provenance read/purge test |
 | 5 | skills/channel/live post-hit | ✅ 已完成（cache gate 范围） | live state 在 cache 前短路；entry post-hit 依次检查 skills→channel→Fresh/Stale；独立 skills flag；channel marker safety gate | `skills_flag_is_independent_and_skills_miss_precedes_channel_miss`；live/cached registry tests |
-| 6 | Mobile remote MCP 与 production wiring | ✅ 已完成（支持集有边界） | shared `platform-common::RemoteMcpTransport`；mobile Local Apps + remote composite；cache root/store；后台 OAuth、exported copy URL、无副作用 reload | shared remote E2E 3/3；mobile composite 7/7；cache rebuild/reload/deep-link/encrypted-store tests；fixture 风险见第 11 节 |
+| 6 | Mobile remote MCP 与 production wiring | ✅ 已完成（支持集有边界） | shared `platform-common::RemoteMcpTransport`；mobile Local Apps + remote composite；cache root/store；后台 OAuth、exported copy URL、generation/CAS reload | shared remote E2E 3/3；mobile composite 7/7；cache rebuild/reload/deep-link/encrypted-store/guarded-interleaving tests；fixture 风险见第 11 节 |
 
 ## 13. 文件职责摘要
 
@@ -257,7 +260,7 @@ expected 38b5fed98a06e5784632e544e41ec663ff7bc55215d199e436bb53dfde7b1476
 | `mcp/src/connection.rs` | `McpServerMetadata`、Agent source、role、Cached/Connected state schema |
 | `mcp/src/discovery_cache.rs` | gate、logical/partition key、fingerprint、fresh/stale/miss、post-hit、store hardening |
 | `mcp/src/protocol_negotiation.rs` | env/flag/denylist 到 expected era 的纯决策 |
-| `mcp/src/registry.rs` | consult/read/write、grant rotation、single-flight、exact strike、lazy dial、lifecycle purge、error cleanup |
+| `mcp/src/registry.rs` | consult/read/write、immutable grant provenance、single-flight、exact strike、lazy dial、guarded lifecycle CAS、error cleanup |
 | `mcp/src/json_config.rs` | transport/schema、`discoveryCache`、`role` 与 metadata 来源 |
 | `mcp/src/oauth.rs` | MCP OAuth secure storage、refresh-grant token 派生、PKCE/token lifecycle |
 | `mcp/src/client.rs` | live client、tool/prompt/resource dispatch 与 negotiated protocol metadata |

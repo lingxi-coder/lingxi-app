@@ -50,6 +50,16 @@ function listSnapshots(category: string): string[] {
     .sort();
 }
 
+function assertSnapshotCoverage(category: string, files: string[], forbidden: string[] = []): void {
+  assert.ok(files.length > 0, `expected ${category} snapshots to be non-empty`);
+  for (const name of forbidden) {
+    assert.ok(
+      !files.includes(name),
+      `${category} snapshot ${name} still exists after its protocol variant was removed`,
+    );
+  }
+}
+
 // ── Generic structural helpers ───────────────────────────────────────────────
 
 const isString = (v: unknown): v is string => typeof v === 'string';
@@ -60,6 +70,22 @@ function rec(v: unknown): Record<string, unknown> {
   assert.equal(typeof v, 'object');
   assert.notEqual(v, null);
   return v as Record<string, unknown>;
+}
+
+function exactObjectKeys(
+  value: Record<string, unknown>,
+  required: readonly string[],
+  optional: readonly string[] = [],
+  label = 'object',
+): void {
+  const keys = Object.keys(value).sort();
+  const allowed = new Set([...required, ...optional]);
+  for (const key of required) {
+    assert.ok(key in value, `${label} is missing required key ${key}`);
+  }
+  for (const key of keys) {
+    assert.ok(allowed.has(key), `${label} carries unknown key ${key}`);
+  }
 }
 
 /** Assert an internally-tagged value carries exactly the expected `type` tag. */
@@ -374,7 +400,7 @@ function validateConversationControls(v: unknown): void {
 // ── local_apps.rs validators (bare-string enums + kind/op-tagged DTOs) ────────
 
 function validateAppWorkflowState(v: unknown): void {
-  assert.ok(['draft', 'ready'].includes(v as string));
+  assert.ok(['draft', 'published_unverified', 'published_verified'].includes(v as string));
 }
 
 function validateAppRuntimeState(v: unknown): void {
@@ -391,6 +417,310 @@ function validateAppSurface(v: unknown): void {
 
 function validateAppCreateMode(v: unknown): void {
   assert.ok(['shell', 'scaffolded'].includes(v as string));
+}
+
+function validatePluginInventory(v: unknown): void {
+  const o = rec(v);
+  exactObjectKeys(
+    o,
+    [
+      'pluginId',
+      'displayName',
+      'source',
+      'version',
+      'bundleSha256',
+      'state',
+      'manifestDefaultEnabled',
+      'counts',
+    ],
+    ['validationError'],
+    'plugin inventory',
+  );
+  assert.ok(
+    isString(o['pluginId']) &&
+      isString(o['displayName']) &&
+      isString(o['source']) &&
+      isString(o['version']) &&
+      isString(o['bundleSha256']) &&
+      ['loaded', 'disabled'].includes(String(o['state'])) &&
+      isBool(o['manifestDefaultEnabled']),
+  );
+  const counts = rec(o['counts']);
+  exactObjectKeys(counts, ['skills', 'agents', 'workflows', 'templates'], [], 'plugin counts');
+  assert.ok(
+    isNumber(counts['skills']) &&
+      isNumber(counts['agents']) &&
+      isNumber(counts['workflows']) &&
+      isNumber(counts['templates']),
+  );
+  if ('validationError' in o) assert.ok(isString(o['validationError']));
+}
+
+function validateVerificationSummary(v: unknown): void {
+  const o = rec(v);
+  exactObjectKeys(o, ['status', 'summary'], ['code'], 'verification summary');
+  assert.ok(
+    ['pending', 'passed', 'failed', 'unverified', 'unavailable'].includes(String(o['status'])) &&
+      isString(o['summary']),
+  );
+  if ('code' in o) assert.ok(isString(o['code']));
+}
+
+function validateGateStatus(v: unknown): void {
+  const o = rec(v);
+  exactObjectKeys(o, ['gateId', 'label', 'status', 'available'], ['detail'], 'gate status');
+  assert.ok(isString(o['gateId']) && isString(o['label']) && isBool(o['available']));
+  validateVerificationSummary({ status: o['status'], summary: '', ...(o['detail'] === undefined ? {} : { code: '' }) });
+  if ('detail' in o) assert.ok(isString(o['detail']));
+}
+
+function validateMcpToolSurface(v: unknown): void {
+  const o = rec(v);
+  exactObjectKeys(
+    o,
+    ['name', 'inputSchemaJson', 'semanticFlowJson', 'permissionCeiling'],
+    [
+      'title',
+      'description',
+      'outputSchemaJson',
+      'annotationsJson',
+      'executionJson',
+      'visibleMetaJson',
+    ],
+    'MCP tool surface',
+  );
+  assert.ok(
+    isString(o['name']) &&
+      isString(o['inputSchemaJson']) &&
+      isString(o['semanticFlowJson']) &&
+      isString(o['permissionCeiling']),
+  );
+  for (const key of [
+    'title',
+    'description',
+    'outputSchemaJson',
+    'annotationsJson',
+    'executionJson',
+    'visibleMetaJson',
+  ]) {
+    if (key in o) assert.ok(isString(o[key]));
+  }
+}
+
+function validateReceiptStatus(v: unknown): void {
+  const o = rec(v);
+  exactObjectKeys(
+    o,
+    [
+      'receiptId',
+      'appId',
+      'workflowRunId',
+      'approvalContractSha256',
+      'candidateDigest',
+      'issuedAtMs',
+      'expiresAtMs',
+      'consumed',
+      'superseded',
+    ],
+    [],
+    'receipt status',
+  );
+  assert.ok(
+    isString(o['receiptId']) &&
+      isString(o['appId']) &&
+      isString(o['workflowRunId']) &&
+      isString(o['approvalContractSha256']) &&
+      isString(o['candidateDigest']) &&
+      isNumber(o['issuedAtMs']) &&
+      isNumber(o['expiresAtMs']) &&
+      isBool(o['consumed']) &&
+      isBool(o['superseded']),
+  );
+}
+
+function validateRuntimeProfileOption(v: unknown): void {
+  const o = rec(v);
+  exactObjectKeys(
+    o,
+    [
+      'family',
+      'revision',
+      'contractSha256',
+      'surface',
+      'corePackages',
+      'cacheStatus',
+      'downloadStatus',
+      'available',
+    ],
+    ['reason'],
+    'runtime profile option',
+  );
+  assert.ok(
+    ['react_dom', 'canvas_2d', 'three_3d', 'phaser_2d', 'babylon_3d'].includes(
+      String(o['family']),
+    ) &&
+      isNumber(o['revision']) &&
+      isString(o['contractSha256']) &&
+      isString(o['cacheStatus']) &&
+      isString(o['downloadStatus']) &&
+      isBool(o['available']),
+  );
+  validateAppSurface(o['surface']);
+  assert.ok(Array.isArray(o['corePackages']));
+  for (const value of o['corePackages'] as unknown[]) {
+    const pkg = rec(value);
+    exactObjectKeys(pkg, ['name', 'version'], [], 'runtime profile package');
+    assert.ok(isString(pkg['name']) && isString(pkg['version']));
+  }
+  if ('reason' in o) assert.ok(isString(o['reason']));
+}
+
+function validateCreateConfirmationRequest(v: unknown): void {
+  const o = rec(v);
+  exactObjectKeys(
+    o,
+    ['requestId', 'appId', 'name', 'brief', 'selectedTemplate', 'runtimeProfile', 'reason'],
+    ['rejected', 'initialTools', 'requiredGates', 'receipt'],
+    'create confirmation request',
+  );
+  assert.ok(
+    isString(o['requestId']) &&
+      isString(o['appId']) &&
+      isString(o['name']) &&
+      isString(o['brief']) &&
+      isString(o['reason']),
+  );
+  const selected = rec(o['selectedTemplate']);
+  exactObjectKeys(selected, ['templateId', 'surface', 'summary'], [], 'selected template');
+  assert.ok(isString(selected['templateId']) && isString(selected['summary']));
+  validateAppSurface(selected['surface']);
+  validateRuntimeProfileOption(o['runtimeProfile']);
+  if ('rejected' in o) {
+    assert.ok(Array.isArray(o['rejected']));
+    for (const value of o['rejected'] as unknown[]) {
+      const rejected = rec(value);
+      exactObjectKeys(rejected, ['templateId', 'reason'], [], 'rejected template');
+      assert.ok(isString(rejected['templateId']) && isString(rejected['reason']));
+    }
+  }
+  if ('initialTools' in o) {
+    assert.ok(Array.isArray(o['initialTools']));
+    for (const tool of o['initialTools'] as unknown[]) validateMcpToolSurface(tool);
+  }
+  if ('requiredGates' in o) {
+    assert.ok(Array.isArray(o['requiredGates']));
+    for (const gate of o['requiredGates'] as unknown[]) validateGateStatus(gate);
+  }
+  if ('receipt' in o) validateReceiptStatus(o['receipt']);
+}
+
+function validateProposalApprovalRequest(v: unknown): void {
+  const o = rec(v);
+  exactObjectKeys(
+    o,
+    [
+      'requestId',
+      'appId',
+      'workflowRunId',
+      'summary',
+      'proposalSha256',
+      'approvalContractSha256',
+      'toolSurfaceSha256',
+    ],
+    [
+      'toolDiffs',
+      'requiredFlowChanges',
+      'excludedCapabilities',
+      'pendingGates',
+      'receipt',
+    ],
+    'MCP proposal approval request',
+  );
+  assert.ok(
+    isString(o['requestId']) &&
+      isString(o['appId']) &&
+      isString(o['workflowRunId']) &&
+      isString(o['summary']) &&
+      isString(o['proposalSha256']) &&
+      isString(o['approvalContractSha256']) &&
+      isString(o['toolSurfaceSha256']),
+  );
+  if ('toolDiffs' in o) {
+    assert.ok(Array.isArray(o['toolDiffs']));
+    for (const value of o['toolDiffs'] as unknown[]) {
+      const diff = rec(value);
+      exactObjectKeys(diff, ['kind', 'name'], ['before', 'after', 'changedFields'], 'MCP tool diff');
+      assert.ok(['added', 'removed', 'changed'].includes(String(diff['kind'])) && isString(diff['name']));
+      if ('before' in diff) validateMcpToolSurface(diff['before']);
+      if ('after' in diff) validateMcpToolSurface(diff['after']);
+      if ('changedFields' in diff) {
+        assert.ok(Array.isArray(diff['changedFields']));
+        const fields = [
+          'name',
+          'title',
+          'description',
+          'input_schema',
+          'output_schema',
+          'annotations',
+          'execution',
+          'visible_meta',
+          'semantic_flow',
+          'permission_ceiling',
+        ];
+        for (const field of diff['changedFields'] as unknown[]) assert.ok(fields.includes(String(field)));
+      }
+    }
+  }
+  for (const key of ['requiredFlowChanges', 'excludedCapabilities']) {
+    if (key in o) {
+      assert.ok(Array.isArray(o[key]));
+      for (const value of o[key] as unknown[]) assert.ok(isString(value));
+    }
+  }
+  if ('pendingGates' in o) {
+    assert.ok(Array.isArray(o['pendingGates']));
+    for (const gate of o['pendingGates'] as unknown[]) validateGateStatus(gate);
+  }
+  if ('receipt' in o) validateReceiptStatus(o['receipt']);
+}
+
+function validateManagedMcpServer(v: unknown): void {
+  const o = rec(v);
+  exactObjectKeys(
+    o,
+    [
+      'serverName',
+      'appId',
+      'appName',
+      'buildId',
+      'catalogSha256',
+      'toolSurfaceSha256',
+      'toolCount',
+      'authoringRevision',
+      'publicationState',
+      'mcpVerification',
+      'uiVerification',
+    ],
+    ['tools'],
+    'managed MCP server',
+  );
+  assert.ok(
+    isString(o['serverName']) &&
+      isString(o['appId']) &&
+      isString(o['appName']) &&
+      isString(o['buildId']) &&
+      isString(o['catalogSha256']) &&
+      isString(o['toolSurfaceSha256']) &&
+      isNumber(o['toolCount']) &&
+      isNumber(o['authoringRevision']),
+  );
+  validateAppWorkflowState(o['publicationState']);
+  validateVerificationSummary(o['mcpVerification']);
+  validateVerificationSummary(o['uiVerification']);
+  if ('tools' in o) {
+    assert.ok(Array.isArray(o['tools']));
+    for (const tool of o['tools'] as unknown[]) validateMcpToolSurface(tool);
+  }
 }
 
 function validateAppErrorCode(v: unknown): void {
@@ -629,31 +959,6 @@ function validateAppCapabilityRequest(v: unknown): void {
   if ('domain' in o) assert.ok(isString(o['domain']));
 }
 
-function validateRuntimeProfileSelectionRequest(v: unknown): void {
-  const o = rec(v);
-  assert.ok(isString(o['requestId']) && isString(o['appId']) && isString(o['reason']));
-  if ('recommendedFamily' in o) assert.ok(isString(o['recommendedFamily']));
-  assert.ok(Array.isArray(o['options']));
-  for (const rawOption of o['options'] as unknown[]) {
-    const option = rec(rawOption);
-    assert.ok(
-      isString(option['family']) &&
-        isNumber(option['revision']) &&
-        isString(option['surface']) &&
-        Array.isArray(option['corePackages']) &&
-        isString(option['cacheStatus']) &&
-        isString(option['downloadStatus']) &&
-        isBool(option['available']),
-    );
-    assert.ok(isString(option['contractSha256']));
-    for (const rawPackage of option['corePackages'] as unknown[]) {
-      const pkg = rec(rawPackage);
-      assert.ok(isString(pkg['name']) && isString(pkg['version']));
-    }
-    if ('reason' in option) assert.ok(isString(option['reason']));
-  }
-}
-
 function validateDependencyChangeConfirmationRequest(v: unknown): void {
   const o = rec(v);
   assert.ok(
@@ -764,9 +1069,6 @@ function validateAppEvent(v: unknown): void {
     case 'app_capability_requested':
       validateAppCapabilityRequest(o['request']);
       break;
-    case 'app_runtime_profile_selection_requested':
-      validateRuntimeProfileSelectionRequest(o['request']);
-      break;
     case 'app_dependency_change_confirmation_requested':
       validateDependencyChangeConfirmationRequest(o['request']);
       break;
@@ -794,6 +1096,68 @@ function validateAppEvent(v: unknown): void {
       );
       if ('result_json' in o) assert.ok(isString(o['result_json']));
       if ('error' in o) assert.ok(isString(o['error']));
+      break;
+    case 'plugin_status_changed': {
+      const st = o['status'];
+      const status = rec(st);
+      const keys = Object.keys(status).sort().join(',');
+      assert.equal(keys, 'manifest_default_enabled,plugin_id,state',
+        `plugin status must carry exactly {plugin_id, state, manifest_default_enabled}, got {${keys}}`);
+      assert.ok(isString(status['plugin_id']) && isString(status['state'])
+        && isBool(status['manifest_default_enabled']));
+      break;
+    }
+    case 'plugin_inventory_changed':
+      exactObjectKeys(o, ['type', 'inventory'], [], 'plugin_inventory_changed event');
+      validatePluginInventory(o['inventory']);
+      break;
+    case 'create_confirmation_requested':
+      exactObjectKeys(o, ['type', 'request'], [], 'create_confirmation_requested event');
+      validateCreateConfirmationRequest(o['request']);
+      break;
+    case 'mcp_proposal_approval_requested':
+      exactObjectKeys(o, ['type', 'request'], [], 'mcp_proposal_approval_requested event');
+      validateProposalApprovalRequest(o['request']);
+      break;
+    case 'managed_mcp_inventory_changed':
+      exactObjectKeys(o, ['type', 'servers'], [], 'managed_mcp_inventory_changed event');
+      assert.ok(Array.isArray(o['servers']));
+      for (const server of o['servers'] as unknown[]) validateManagedMcpServer(server);
+      break;
+    case 'verification_summary_changed':
+      exactObjectKeys(
+        o,
+        ['type', 'app_id', 'publication_state', 'mcp_verification', 'ui_verification'],
+        [],
+        'verification_summary_changed event',
+      );
+      assert.ok(isString(o['app_id']));
+      validateAppWorkflowState(o['publication_state']);
+      validateVerificationSummary(o['mcp_verification']);
+      validateVerificationSummary(o['ui_verification']);
+      break;
+    case 'local_app_operation_failed':
+      exactObjectKeys(
+        o,
+        ['type', 'code', 'message'],
+        ['app_id', 'request_id'],
+        'local_app_operation_failed event',
+      );
+      assert.ok(
+        [
+          'plugin_disabled',
+          'builtin_bundle_unavailable',
+          'template_unavailable',
+          'proposal_invalid',
+          'catalog_stale',
+          'active_state_corrupt',
+          'mcp_authoring_required',
+          'repair_budget_exhausted',
+          'exposure_capacity_reached',
+        ].includes(String(o['code'])) && isString(o['message']),
+      );
+      if ('app_id' in o) assert.ok(isString(o['app_id']));
+      if ('request_id' in o) assert.ok(isString(o['request_id']));
       break;
     default:
       assert.fail(`unknown AppEventDto type: ${String(o['type'])}`);
@@ -997,10 +1361,6 @@ function validateCommand(name: string, v: unknown): void {
       assert.ok(isString(o['request_id']));
       validateAppAuthorizationDecision(o['decision']);
       break;
-    case 'resolve_app_runtime_profile_selection':
-      assert.ok(isString(o['request_id']));
-      if ('selected_family' in o) assert.ok(isString(o['selected_family']));
-      break;
     case 'resolve_app_dependency_change_confirmation':
       assert.ok(isString(o['request_id']) && isBool(o['approved']));
       break;
@@ -1014,6 +1374,67 @@ function validateCommand(name: string, v: unknown): void {
     case 'restore_app_checkpoint':
       assert.ok(isString(o['app_id']) && isString(o['checkpoint_id']));
       break;
+    case 'plugin_command': {
+      // Exact key sets. The Rust goldens contract "carries exactly
+      // {plugin_id, enabled}" / "{plugin_id}" — a fourth key is a contract
+      // change, not a detail, so assert the SET rather than the presence of
+      // the fields we happen to expect.
+      const c = o['command'];
+      const cmd = rec(c);
+      const keys = Object.keys(cmd).sort().join(',');
+      switch (cmd['type']) {
+        case 'set_enabled':
+          assert.equal(
+            keys,
+            'enabled,plugin_id,type',
+            `snapshot ${name}: set_enabled must carry exactly {plugin_id, enabled}, got {${keys}}`,
+          );
+          assert.ok(isString(cmd['plugin_id']) && isBool(cmd['enabled']));
+          break;
+        case 'get_status':
+          assert.equal(
+            keys,
+            'plugin_id,type',
+            `snapshot ${name}: get_status must carry exactly {plugin_id}, got {${keys}}`,
+          );
+          assert.ok(isString(cmd['plugin_id']));
+          break;
+        case 'get_inventory':
+          assert.equal(
+            keys,
+            'plugin_id,type',
+            `snapshot ${name}: get_inventory must carry exactly {plugin_id}, got {${keys}}`,
+          );
+          assert.ok(isString(cmd['plugin_id']));
+          break;
+        case 'resolve_create_confirmation':
+          assert.equal(
+            keys,
+            'approved,request_id,type',
+            `snapshot ${name}: resolve_create_confirmation must carry exactly {request_id, approved}, got {${keys}}`,
+          );
+          assert.ok(isString(cmd['request_id']) && isBool(cmd['approved']));
+          break;
+        case 'resolve_mcp_proposal_approval':
+          assert.equal(
+            keys,
+            'approved,request_id,type',
+            `snapshot ${name}: resolve_mcp_proposal_approval must carry exactly {request_id, approved}, got {${keys}}`,
+          );
+          assert.ok(isString(cmd['request_id']) && isBool(cmd['approved']));
+          break;
+        case 'get_managed_mcp_inventory':
+          assert.equal(
+            keys,
+            'type',
+            `snapshot ${name}: get_managed_mcp_inventory must carry no fields, got {${keys}}`,
+          );
+          break;
+        default:
+          assert.fail(`snapshot ${name}: unknown PluginCommandDto type "${String(cmd['type'])}"`);
+      }
+      break;
+    }
     default:
       assert.fail(`snapshot ${name}: unknown ClientCommand type "${String(o['type'])}"`);
   }
@@ -1431,7 +1852,7 @@ function validateError(v: unknown): void {
 
 test('every command snapshot parses as ClientCommand', () => {
   const files = listSnapshots('command');
-  assert.equal(files.length, 50, `expected 50 command snapshots, found ${files.length}`);
+  assertSnapshotCoverage('command', files, ['resolve_app_runtime_profile_selection.json']);
   for (const file of files) {
     validateCommand(file, loadSnapshot('command', file));
   }
@@ -1469,7 +1890,7 @@ test('workflow model metadata and paused task status pass the wire guards', () =
 
 test('every event snapshot parses as ClientEvent', () => {
   const files = listSnapshots('event');
-  assert.equal(files.length, 65, `expected 65 event snapshots, found ${files.length}`);
+  assertSnapshotCoverage('event', files, ['app_runtime_profile_selection_requested.json']);
   for (const file of files) {
     validateEvent(file, loadSnapshot('event', file));
   }

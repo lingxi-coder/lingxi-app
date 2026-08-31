@@ -70,7 +70,7 @@ pub use prompt_executor::{
 pub use registry::{HookContext, HookRegistry};
 pub use response::{
     truncate_utf16, AggregateHookResult, ClassifierHostContext, ElicitationHookResponse,
-    HookDecision, HookOutcome, HookResponse, HookResult, PairedRewrite,
+    HookDecision, HookOutcome, HookResponse, HookResult, PairedRewrite, PermissionRequestResult,
     CLASSIFIER_CONTEXT_CAP_UTF16,
 };
 pub use ssrf_guard::{DnsResolver, IpRange, SsrfError, SsrfGuard};

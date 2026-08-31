@@ -31,18 +31,21 @@ fn default_git_version_control() -> bool {
     true
 }
 
-/// Workflow state of an app — mirrors the core `AppWorkflowState`. A bare
-/// wire STRING (`"draft"` / `"ready"`). `#[non_exhaustive]` so a future state
-/// is additive.
+/// Derived publication state of an app. A bare wire STRING
+/// (`"draft"` / `"published_unverified"` / `"published_verified"`).
+/// `#[non_exhaustive]` so a future state is additive.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum AppWorkflowStateDto {
-    /// The app exists but has not been built/approved yet.
+    /// No active build/catalog pair is published.
     Draft,
-    /// The app is built and usable.
-    Ready,
+    /// The app has an active build/catalog pair but no UI verification
+    /// evidence.
+    PublishedUnverified,
+    /// The app has an active build/catalog pair and UI verification evidence.
+    PublishedVerified,
 }
 
 /// Runtime (dev-server) state of an app — mirrors the core `AppRuntimeState`
@@ -259,7 +262,7 @@ pub struct AppRecordDto {
     pub created_at_ms: u64,
     /// Last mutation time, epoch milliseconds.
     pub updated_at_ms: u64,
-    /// Current workflow state (`draft` / `ready`).
+    /// Current derived publication state.
     pub workflow_state: AppWorkflowStateDto,
     /// Conversation the app was created from (`origin: chat`), if any. Skipped
     /// from the wire when `None`.
@@ -864,9 +867,6 @@ pub enum AppCapabilityKindDto {
     UiControl,
     NetworkDomain,
     RestoreCheckpoint,
-    /// One-shot host approval for selecting or confirming a runtime profile.
-    /// This is an operational prompt, not a manifest-declared app capability.
-    RuntimeProfileSelection,
     /// One-shot host approval for dependency add/update operations. This is an
     /// operational prompt, not a manifest-declared app capability.
     DependencyChange,
@@ -932,19 +932,6 @@ pub struct AppRuntimeProfileOptionDto {
     pub reason: Option<String>,
 }
 
-/// Native one-shot runtime profile selection request for one unscaffolded app.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
-#[serde(rename_all = "camelCase")]
-pub struct AppRuntimeProfileSelectionRequestDto {
-    pub request_id: String,
-    pub app_id: String,
-    pub reason: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub recommended_family: Option<AppRuntimeProfileDto>,
-    pub options: Vec<AppRuntimeProfileOptionDto>,
-}
-
 /// The kind of one requested dependency change.  Removal is represented on
 /// the wire even though the host does not require an approval prompt for a
 /// removal-only batch.
@@ -1007,6 +994,398 @@ pub enum AppAuthorizationDecisionDto {
     AllowOnce,
     AllowSession,
     AllowAlways,
+}
+
+// ── Builtin plugin enable/disable/status (§17.1, §19.2) ────────────────────
+//
+// The bare-key three-way (`enabledPlugins["lingxi-local-app"]` explicit
+// `true` / explicit `false` / key absent) is RESOLVED host-side, in the
+// `lingxi-code/plugin` crate. That crate is not a `client-protocol`
+// dependency (decision: this crate is pure wire DTOs, the engine lowers
+// core ⇄ DTO at the dispatch boundary — see the module doc at the top of
+// this file), so the resolution ALGORITHM and its persistence across a
+// restart are out of scope here. What belongs in this crate is only the WIRE
+// SHAPE the resolved outcome travels over, and that shape is designed so it
+// CANNOT collapse "explicitly disabled" into "absent": [`PluginStatusDto`]
+// is never optional on the wire and its `state` field has exactly two
+// values, neither of which can be left unstated.
+//
+// ⚠️ HOST GAP — verified 2026-08-30, NOT closable from this crate.
+// `PluginActivationStateDto::Disabled` currently has no producer for the
+// cold-start case, because the host does not yet keep an explicitly-disabled
+// plugin in its registry:
+//
+//   * `plugin::discovery::discover_effective_plugins`
+//     (`plugin/src/discovery.rs:481`) resolves the three-way correctly
+//     — `enabled.get(&identifier).copied().unwrap_or(manifest.default_enabled)`
+//     — but then only PUSHES the entry when `active` is true. An explicitly
+//     disabled plugin is dropped from the returned vec entirely.
+//   * The boot path (`engine-desktop::discover_plugin_set`,
+//     `apps/engine-desktop/src/lib.rs:4854`) feeds exactly that vec to
+//     `PluginManager::enable`, so a plugin resolved to `false` is never
+//     inserted into the manager's map at all.
+//   * `PluginState::Disabled` is constructed at exactly ONE site,
+//     `PluginManager::disable` (`plugin/src/manager.rs:606`), which requires
+//     the plugin to be `Loaded` FIRST and otherwise returns
+//     `PluginManagerError::NotFound`.
+//
+// Net effect, which is precisely the confusion §19.2 exists to forbid: after
+// a restart with `enabledPlugins["lingxi-local-app"] = false` on disk, the
+// plugin is ABSENT from the registry rather than present-and-`Disabled`. A
+// later "is it installed?" answers no, and a native toggle back to `true`
+// has no registry entry to flip — `disable()`/`enable()` keyed on the
+// existing id both fail with `NotFound`. Closing this needs a change in
+// `plugin/src/discovery.rs` + the boot path (return the inactive entries and
+// register them as `Disabled`), neither of which is a file this task owns.
+// The DTOs below are deliberately shaped so that, once the host is fixed, no
+// wire change is needed to express the correct answer.
+
+/// Effective activation state of one builtin plugin, after the host has
+/// resolved the bare-key three-way (§19.2). Deliberately two variants, not
+/// three: an absent `enabledPlugins` key is resolved to one of these before
+/// the wire is touched, so a client never reasons about "missing" itself.
+/// `#[non_exhaustive]` in case a future lifecycle state becomes client-visible.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum PluginActivationStateDto {
+    /// Loaded — components are live in the engine registries.
+    Loaded,
+    /// Explicitly disabled, or never enabled — PRESENT in the registry, not
+    /// dropped. A registry that drops a disabled plugin is indistinguishable
+    /// from one that never found it; this variant is why that never happens
+    /// on the wire.
+    Disabled,
+}
+
+/// Resolved status of one builtin plugin. Always present for a known
+/// builtin: the engine-compiled-in door (§19.1) means the host always knows
+/// `lingxi-local-app`, so there is no "not found" wire state to confuse with
+/// [`PluginActivationStateDto::Disabled`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct PluginStatusDto {
+    /// Bare `enabledPlugins` key (e.g. `"lingxi-local-app"`) — no
+    /// `@marketplace` suffix. The same identifier
+    /// [`PluginCommandDto::SetEnabled`] writes back: there is only ONE name
+    /// for this plugin on the wire, read or write.
+    pub plugin_id: String,
+    /// The resolved three-way outcome.
+    pub state: PluginActivationStateDto,
+    /// The manifest's `defaultEnabled` value, surfaced so a client can
+    /// distinguish "using the default" from an explicit override without a
+    /// second round trip.
+    pub manifest_default_enabled: bool,
+}
+
+/// Enable/disable/status operations for one builtin plugin. Nested under
+/// [`crate::commands::ClientCommand::PluginCommand`] instead of flat
+/// top-level `ClientCommand` variants: `uniffi_macros::create_metadata_items`
+/// bills a nested enum's variants to ITS OWN 16 KiB metadata buffer, not
+/// `ClientCommand`'s (see `CLIENT_COMMAND_METADATA_BUDGET` in `commands.rs`).
+/// Future §17.1 additions (builtin inventory, template catalog, MCP proposal
+/// diff, …) extend this enum, not `ClientCommand` again.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
+#[serde(tag = "type", rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum PluginCommandDto {
+    /// Write `enabledPlugins[plugin_id] = enabled`. This is the ONLY way a
+    /// client turns a plugin on or off — there is no second "override" or
+    /// "use default" flag alongside it. Confirmed by a
+    /// `PluginStatusChanged` event carrying the new resolved status.
+    SetEnabled {
+        /// Bare `enabledPlugins` key.
+        plugin_id: String,
+        /// The value written back verbatim.
+        enabled: bool,
+    },
+    /// Request the resolved status for one plugin. Replied with
+    /// [`AppEventDto::PluginStatusChanged`].
+    GetStatus {
+        /// Bare `enabledPlugins` key.
+        plugin_id: String,
+    },
+    /// Read the host-verified builtin-plugin inventory row for native settings.
+    GetInventory {
+        /// Bare `enabledPlugins` key.
+        plugin_id: String,
+    },
+    /// Resolve one unified create-confirmation sheet.
+    ResolveCreateConfirmation {
+        /// Pending native confirmation correlator.
+        request_id: String,
+        /// Whether the user approved the exact reviewed surface.
+        approved: bool,
+    },
+    /// Resolve one MCP proposal diff/approval sheet.
+    ResolveMcpProposalApproval {
+        /// Pending native confirmation correlator.
+        request_id: String,
+        /// Whether the user approved the exact reviewed surface.
+        approved: bool,
+    },
+    /// Read the managed Local App MCP inventory projection for native UI.
+    GetManagedMcpInventory,
+}
+
+/// Client-protocol-level Local App failure code surfaced directly to native UI.
+///
+/// This is intentionally SEPARATE from [`AppErrorCodeDto`]: these failures come
+/// from the Local App Plugin/native-control plane rather than the core app
+/// runtime operations already covered by `AppOperationFailed`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum LocalAppPluginErrorCodeDto {
+    PluginDisabled,
+    BuiltinBundleUnavailable,
+    TemplateUnavailable,
+    ProposalInvalid,
+    CatalogStale,
+    ActiveStateCorrupt,
+    McpAuthoringRequired,
+    RepairBudgetExhausted,
+    ExposureCapacityReached,
+}
+
+/// Verification badge state shown in native Local App surfaces.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum LocalAppVerificationStatusDto {
+    Pending,
+    Passed,
+    Failed,
+    Unverified,
+    Unavailable,
+}
+
+/// One verification badge or status line.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+#[serde(rename_all = "camelCase")]
+pub struct LocalAppVerificationSummaryDto {
+    pub status: LocalAppVerificationStatusDto,
+    pub summary: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub code: Option<String>,
+}
+
+/// One named gate shown in a native approval or verification surface.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+#[serde(rename_all = "camelCase")]
+pub struct LocalAppGateStatusDto {
+    pub gate_id: String,
+    pub label: String,
+    pub status: LocalAppVerificationStatusDto,
+    pub available: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
+/// Count summary for the builtin Local App Plugin inventory row.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+#[serde(rename_all = "camelCase")]
+pub struct LocalAppPluginComponentCountsDto {
+    pub skills: u32,
+    pub agents: u32,
+    pub workflows: u32,
+    pub templates: u32,
+}
+
+/// Native settings/inventory projection for the builtin Local App Plugin.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+#[serde(rename_all = "camelCase")]
+pub struct LocalAppPluginInventoryDto {
+    pub plugin_id: String,
+    pub display_name: String,
+    pub source: String,
+    pub version: String,
+    pub bundle_sha256: String,
+    pub state: PluginActivationStateDto,
+    pub manifest_default_enabled: bool,
+    pub counts: LocalAppPluginComponentCountsDto,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub validation_error: Option<String>,
+}
+
+/// One rejected selector candidate shown only in trusted native UI.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+#[serde(rename_all = "camelCase")]
+pub struct LocalAppRejectedCandidateDto {
+    pub template_id: String,
+    pub reason: String,
+}
+
+/// Display-only summary of the selected template on the create sheet.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+#[serde(rename_all = "camelCase")]
+pub struct LocalAppTemplateSummaryDto {
+    pub template_id: String,
+    pub surface: AppSurfaceDto,
+    pub summary: String,
+}
+
+/// One reviewable MCP tool surface carried through Local App native UI.
+///
+/// Complex JSON-valued MCP fields stay as STRINGS here, matching the broader
+/// client-protocol rule that structured payloads crossing the wire remain
+/// UniFFI-flat strings instead of `serde_json::Value`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+#[serde(rename_all = "camelCase")]
+pub struct LocalAppMcpToolSurfaceDto {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    pub input_schema_json: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_schema_json: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub annotations_json: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_json: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub visible_meta_json: Option<String>,
+    pub semantic_flow_json: String,
+    pub permission_ceiling: String,
+}
+
+/// One shared receipt status used by create confirmation and MCP proposal approval.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+#[serde(rename_all = "camelCase")]
+pub struct LocalAppReceiptStatusDto {
+    pub receipt_id: String,
+    pub app_id: String,
+    pub workflow_run_id: String,
+    pub approval_contract_sha256: String,
+    pub candidate_digest: String,
+    pub issued_at_ms: u64,
+    pub expires_at_ms: u64,
+    pub consumed: bool,
+    pub superseded: bool,
+}
+
+/// Native request for one unified create confirmation sheet.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+#[serde(rename_all = "camelCase")]
+pub struct LocalAppCreateConfirmationRequestDto {
+    pub request_id: String,
+    pub app_id: String,
+    pub name: String,
+    pub brief: String,
+    pub selected_template: LocalAppTemplateSummaryDto,
+    pub runtime_profile: AppRuntimeProfileOptionDto,
+    pub reason: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rejected: Vec<LocalAppRejectedCandidateDto>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub initial_tools: Vec<LocalAppMcpToolSurfaceDto>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub required_gates: Vec<LocalAppGateStatusDto>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub receipt: Option<LocalAppReceiptStatusDto>,
+}
+
+/// One review-surface dimension whose before/after changed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum LocalAppMcpToolFieldDto {
+    Name,
+    Title,
+    Description,
+    InputSchema,
+    OutputSchema,
+    Annotations,
+    Execution,
+    VisibleMeta,
+    SemanticFlow,
+    PermissionCeiling,
+}
+
+/// Coarse kind of one MCP proposal diff row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum LocalAppMcpToolChangeKindDto {
+    Added,
+    Removed,
+    Changed,
+}
+
+/// One tool row in the native MCP proposal diff sheet.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+#[serde(rename_all = "camelCase")]
+pub struct LocalAppMcpToolDiffDto {
+    pub kind: LocalAppMcpToolChangeKindDto,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub before: Option<LocalAppMcpToolSurfaceDto>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after: Option<LocalAppMcpToolSurfaceDto>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub changed_fields: Vec<LocalAppMcpToolFieldDto>,
+}
+
+/// Native request for one Local App MCP proposal diff/approval sheet.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+#[serde(rename_all = "camelCase")]
+pub struct LocalAppMcpProposalApprovalRequestDto {
+    pub request_id: String,
+    pub app_id: String,
+    pub workflow_run_id: String,
+    pub summary: String,
+    pub proposal_sha256: String,
+    pub approval_contract_sha256: String,
+    pub tool_surface_sha256: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tool_diffs: Vec<LocalAppMcpToolDiffDto>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub required_flow_changes: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub excluded_capabilities: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pending_gates: Vec<LocalAppGateStatusDto>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub receipt: Option<LocalAppReceiptStatusDto>,
+}
+
+/// One managed Local App MCP logical-server row for native inventory UIs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+#[serde(rename_all = "camelCase")]
+pub struct ManagedLocalAppMcpServerDto {
+    pub server_name: String,
+    pub app_id: String,
+    pub app_name: String,
+    pub build_id: String,
+    pub catalog_sha256: String,
+    pub tool_surface_sha256: String,
+    pub tool_count: u32,
+    pub authoring_revision: u64,
+    pub publication_state: AppWorkflowStateDto,
+    pub mcp_verification: LocalAppVerificationSummaryDto,
+    pub ui_verification: LocalAppVerificationSummaryDto,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tools: Vec<LocalAppMcpToolSurfaceDto>,
 }
 
 /// Extensible local-app event payload carried by the single top-level
@@ -1103,19 +1482,51 @@ pub enum AppEventDto {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         request_id: Option<String>,
     },
-    /// A native one-shot runtime profile selector must resolve this request
-    /// with one chosen family or an explicit cancel.
-    ///
-    /// Appended at the END to preserve UniFFI enum ordinals for older clients.
-    AppRuntimeProfileSelectionRequested {
-        request: AppRuntimeProfileSelectionRequestDto,
-    },
     /// A native one-shot dependency review must resolve with approval or
     /// cancellation before the host may resolve/install any package.
     ///
     /// Appended at the END to preserve UniFFI enum ordinals for older clients.
     AppDependencyChangeConfirmationRequested {
         request: AppDependencyChangeConfirmationRequestDto,
+    },
+    /// Resolved status for one builtin plugin, in reply to
+    /// `PluginCommandDto::GetStatus` and confirming a `SetEnabled` write-back.
+    ///
+    /// Appended at the END to preserve UniFFI enum ordinals for older clients.
+    PluginStatusChanged {
+        status: PluginStatusDto,
+    },
+    /// Host-verified inventory row for the builtin Local App Plugin.
+    PluginInventoryChanged {
+        inventory: LocalAppPluginInventoryDto,
+    },
+    /// One trusted native create-confirmation sheet is waiting for a decision.
+    CreateConfirmationRequested {
+        request: LocalAppCreateConfirmationRequestDto,
+    },
+    /// One trusted native MCP proposal diff/approval sheet is waiting for a decision.
+    McpProposalApprovalRequested {
+        request: LocalAppMcpProposalApprovalRequestDto,
+    },
+    /// Managed Local App MCP inventory changed.
+    ManagedMcpInventoryChanged {
+        servers: Vec<ManagedLocalAppMcpServerDto>,
+    },
+    /// Derived publication plus UI/MCP verification summary for one app.
+    VerificationSummaryChanged {
+        app_id: String,
+        publication_state: AppWorkflowStateDto,
+        mcp_verification: LocalAppVerificationSummaryDto,
+        ui_verification: LocalAppVerificationSummaryDto,
+    },
+    /// Local App Plugin/native-control-plane failure surfaced directly to clients.
+    LocalAppOperationFailed {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        app_id: Option<String>,
+        code: LocalAppPluginErrorCodeDto,
+        message: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
     },
 }
 
@@ -1138,5 +1549,562 @@ mod tests {
         assert_eq!(value["streamId"], "stream-1");
         assert_eq!(value["dataJson"], "{}");
         assert!(value.get("app_id").is_none());
+    }
+
+    // ── Plugin enable/disable/status wire contract (§17.1, §19.2) ──────────
+    //
+    // `client-protocol` has no dependency on the `plugin` crate and no
+    // persistence layer of its own, so two of P1.9's five required test
+    // names are NOT reachable from this file and are deliberately NOT
+    // reproduced here under those names:
+    //
+    // - `missing_key_uses_the_manifest_default` — this is the bare-key
+    //   THREE-WAY RESOLUTION ALGORITHM's behavior on an absent
+    //   `enabledPlugins` entry. That algorithm is
+    //   `plugin::discovery::discover_effective_plugins`
+    //   (`enabled.get(id).copied().unwrap_or(manifest.default_enabled)`,
+    //   `lingxi-code/plugin/src/discovery.rs`) — a crate this one does not
+    //   depend on. `PluginStatusDto` has no "missing" wire state to begin
+    //   with (by design: the host resolves before the wire is touched), so
+    //   there is nothing about "missing key" for a DTO-only test to assert.
+    // - `state_survives_restart` — persistence-across-restart is
+    //   `plugin::manager::PluginManager` + `installed_plugins.json`
+    //   durability, entirely outside a wire-DTO crate with no disk I/O.
+    //
+    // Note also that `explicit_false_is_disabled_not_absent`'s BEHAVIOURAL
+    // claim is currently FALSE at the host on a cold start — see the
+    // "HOST GAP" block above `PluginActivationStateDto`. Naming a passing
+    // wire-shape test after it would read as evidence that the behaviour
+    // holds, which is exactly backwards.
+    //
+    // Reproducing either under its exact required name here, with content
+    // that could only ever assert something about THIS crate's own trivial
+    // plumbing, would be the reviewed-against "weaker thing under the
+    // stronger name" — so instead: the WIRE-SHAPE properties that ARE this
+    // crate's job are pinned below under their own honest names, and
+    // `native_toggle_writes_back_the_same_bare_key` (fully reachable here)
+    // keeps its required name.
+    use super::{
+        AppEventDto, AppRuntimeProfileDto, AppRuntimeProfileOptionDto, AppRuntimeProfilePackageDto,
+        AppSurfaceDto, AppWorkflowStateDto, LocalAppCreateConfirmationRequestDto,
+        LocalAppGateStatusDto, LocalAppMcpProposalApprovalRequestDto, LocalAppMcpToolChangeKindDto,
+        LocalAppMcpToolDiffDto, LocalAppMcpToolFieldDto, LocalAppMcpToolSurfaceDto,
+        LocalAppPluginComponentCountsDto, LocalAppPluginErrorCodeDto, LocalAppPluginInventoryDto,
+        LocalAppReceiptStatusDto, LocalAppRejectedCandidateDto, LocalAppTemplateSummaryDto,
+        LocalAppVerificationStatusDto, LocalAppVerificationSummaryDto, ManagedLocalAppMcpServerDto,
+        PluginActivationStateDto, PluginCommandDto, PluginStatusDto,
+    };
+
+    fn canonical_profile_option() -> AppRuntimeProfileOptionDto {
+        AppRuntimeProfileOptionDto {
+            family: AppRuntimeProfileDto::ReactDom,
+            revision: 1,
+            contract_sha256: "8".repeat(64),
+            surface: AppSurfaceDto::Dom,
+            core_packages: vec![
+                AppRuntimeProfilePackageDto {
+                    name: "react".into(),
+                    version: "19.0.0".into(),
+                },
+                AppRuntimeProfilePackageDto {
+                    name: "@ionic/react".into(),
+                    version: "9.0.0".into(),
+                },
+            ],
+            cache_status: "bundled".into(),
+            download_status: "bundled".into(),
+            available: true,
+            reason: None,
+        }
+    }
+
+    fn canonical_tool_surface(name: &str) -> LocalAppMcpToolSurfaceDto {
+        LocalAppMcpToolSurfaceDto {
+            name: name.into(),
+            title: Some("Track habits".into()),
+            description: Some("Create one completed-habits entry.".into()),
+            input_schema_json:
+                r#"{"type":"object","properties":{"date":{"type":"string"}},"required":["date"]}"#
+                    .into(),
+            output_schema_json: Some(
+                r#"{"type":"object","properties":{"ok":{"type":"boolean"}},"required":["ok"]}"#
+                    .into(),
+            ),
+            annotations_json: Some(r#"{"readOnlyHint":false}"#.into()),
+            execution_json: Some(r#"{"taskSupport":"optional"}"#.into()),
+            visible_meta_json: Some(r#"{"anthropic/requiresUserInteraction":true}"#.into()),
+            semantic_flow_json: r#"{"flowId":"local-app-save","source":"active"}"#.into(),
+            permission_ceiling: "ask".into(),
+        }
+    }
+
+    fn canonical_receipt() -> LocalAppReceiptStatusDto {
+        LocalAppReceiptStatusDto {
+            receipt_id: "receipt-0001".into(),
+            app_id: "habits-1a2b".into(),
+            workflow_run_id: "wf-0001".into(),
+            approval_contract_sha256: "1".repeat(64),
+            candidate_digest: "2".repeat(64),
+            issued_at_ms: 1_750_000_000_000,
+            expires_at_ms: 1_750_000_030_000,
+            consumed: false,
+            superseded: false,
+        }
+    }
+
+    fn canonical_gate() -> LocalAppGateStatusDto {
+        LocalAppGateStatusDto {
+            gate_id: "ui_runner".into(),
+            label: "UI runner available".into(),
+            status: LocalAppVerificationStatusDto::Pending,
+            available: true,
+            detail: Some("Will run after approval.".into()),
+        }
+    }
+
+    /// The wire-shape half of "explicit `false` is Disabled, not absent"
+    /// (§19.2): a Disabled status serializes to a concrete, present JSON
+    /// object with its own distinct `state` tag — never `null`, never an
+    /// omitted field, never the same value `Loaded` serializes to. Whether
+    /// an explicit `false` setting actually RESOLVES to `Disabled` is
+    /// `plugin::discovery`'s job, not this crate's.
+    #[test]
+    fn plugin_status_disabled_state_is_present_and_distinct_from_loaded() {
+        let disabled = serde_json::to_value(PluginStatusDto {
+            plugin_id: "lingxi-local-app".into(),
+            state: PluginActivationStateDto::Disabled,
+            manifest_default_enabled: true,
+        })
+        .expect("serialize disabled status");
+        assert_eq!(disabled["state"], "disabled");
+        assert_eq!(disabled["plugin_id"], "lingxi-local-app");
+
+        let loaded = serde_json::to_value(PluginStatusDto {
+            plugin_id: "lingxi-local-app".into(),
+            state: PluginActivationStateDto::Loaded,
+            manifest_default_enabled: true,
+        })
+        .expect("serialize loaded status");
+        assert_ne!(
+            disabled["state"], loaded["state"],
+            "Disabled must not serialize the same as Loaded"
+        );
+
+        // The load-bearing half. "Disabled, not absent" is a claim about what
+        // the wire CANNOT say, so it is asserted as UN-REPRESENTABILITY: no
+        // payload may name a plugin while leaving its activation unstated.
+        //
+        // An `assert!(json.is_object())` does NOT test this. Every
+        // `derive(Serialize)` struct serializes to an object, so that
+        // assertion is vacuously true here — and it stays true for a
+        // `#[serde(default)] state: Option<_>` field, i.e. for exactly the
+        // design this test exists to forbid. It was removed for that reason.
+        //
+        // POSITIVE CONTROL first, so a rejection below cannot be credited to
+        // an unrelated malformed input rather than to the missing `state`.
+        let complete = serde_json::json!({
+            "plugin_id": "lingxi-local-app",
+            "state": "disabled",
+            "manifest_default_enabled": true,
+        });
+        let control: PluginStatusDto = serde_json::from_value(complete.clone())
+            .expect("positive control: a complete status payload must parse");
+        assert_eq!(
+            control.state,
+            PluginActivationStateDto::Disabled,
+            "positive control must actually reach the Disabled state"
+        );
+
+        for (label, tampered) in [
+            ("an omitted", {
+                let mut v = complete.clone();
+                v.as_object_mut().expect("object").remove("state");
+                v
+            }),
+            ("a null", {
+                let mut v = complete.clone();
+                v["state"] = serde_json::Value::Null;
+                v
+            }),
+        ] {
+            let parsed = serde_json::from_value::<PluginStatusDto>(tampered);
+            assert!(
+                parsed.is_err(),
+                "a status with {label} `state` must be REJECTED, got {parsed:?}: \
+                 if unstated activation were representable, \"explicitly \
+                 disabled\" and \"not found\" would collapse into one payload \
+                 again — the exact confusion PluginActivationStateDto exists \
+                 to prevent"
+            );
+        }
+    }
+
+    /// The wire-shape half of "explicit `true` overrides a `false` manifest
+    /// default": the two fields ride independently, so `Loaded` alongside
+    /// `manifest_default_enabled: false` is representable and round-trips
+    /// without either field being silently derived from the other. Whether
+    /// an explicit `true` actually RESOLVES to `Loaded` when the manifest
+    /// defaults to `false` is `plugin::discovery`'s job, not this crate's.
+    #[test]
+    fn plugin_status_can_represent_loaded_alongside_a_false_manifest_default() {
+        let status = PluginStatusDto {
+            plugin_id: "lingxi-local-app".into(),
+            state: PluginActivationStateDto::Loaded,
+            manifest_default_enabled: false,
+        };
+        let json = serde_json::to_value(&status).expect("serialize");
+        assert_eq!(json["state"], "loaded");
+        assert_eq!(json["manifest_default_enabled"], false);
+
+        let back: PluginStatusDto = serde_json::from_value(json).expect("deserialize back");
+        assert_eq!(back, status, "round trip must preserve both fields exactly");
+    }
+
+    /// The `PluginStatusChanged` event round-trips under its own wire tag.
+    ///
+    /// This variant is otherwise COMPLETELY uncovered:
+    /// `snapshot_test::every_variant_has_a_golden` enumerates the tags
+    /// declared by `ClientCommand` and `ClientEvent` only — it never looks at
+    /// `AppEventDto`, so a new payload variant carries no golden and nothing
+    /// in the repo complains. Without this test the only reply channel the
+    /// enable/disable protocol has would ship unexercised.
+    #[test]
+    fn plugin_status_changed_event_round_trips_under_its_wire_tag() {
+        let status = PluginStatusDto {
+            plugin_id: "lingxi-local-app".into(),
+            state: PluginActivationStateDto::Disabled,
+            manifest_default_enabled: false,
+        };
+        let event = AppEventDto::PluginStatusChanged {
+            status: status.clone(),
+        };
+        let json = serde_json::to_value(&event).expect("serialize event");
+        assert_eq!(json["type"], "plugin_status_changed");
+        assert_eq!(json["status"]["plugin_id"], "lingxi-local-app");
+        assert_eq!(json["status"]["state"], "disabled");
+        assert_eq!(json["status"]["manifest_default_enabled"], false);
+
+        let back: AppEventDto = serde_json::from_value(json).expect("deserialize event");
+        assert_eq!(
+            back, event,
+            "the reply envelope must carry the resolved status through unchanged"
+        );
+    }
+
+    /// `PluginActivationStateDto`'s two wire tags, pinned so a future rename
+    /// (or a third variant reusing one of these strings) is a visible diff.
+    #[test]
+    fn plugin_activation_state_wire_values_are_stable() {
+        assert_eq!(
+            serde_json::to_value(PluginActivationStateDto::Loaded).unwrap(),
+            "loaded"
+        );
+        assert_eq!(
+            serde_json::to_value(PluginActivationStateDto::Disabled).unwrap(),
+            "disabled"
+        );
+    }
+
+    /// A native toggle writes back the SAME bare key it reads — there is no
+    /// second enable flag (§19.2). `SetEnabled`'s JSON carries exactly
+    /// `{type, plugin_id, enabled}`: nothing else could silently diverge
+    /// from `enabled`, and `plugin_id` is spelled identically to
+    /// `GetStatus`/`PluginStatusDto` — this is the regression guard against
+    /// a future accidental rename on just one side of the read/write pair.
+    #[test]
+    fn native_toggle_writes_back_the_same_bare_key() {
+        let set = serde_json::to_value(PluginCommandDto::SetEnabled {
+            plugin_id: "lingxi-local-app".into(),
+            enabled: false,
+        })
+        .expect("serialize SetEnabled");
+        let mut keys: Vec<&str> = set
+            .as_object()
+            .expect("SetEnabled must serialize to a JSON object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            vec!["enabled", "plugin_id", "type"],
+            "SetEnabled must carry exactly one enable-controlling field \
+             alongside its tag and the bare key — no second override flag"
+        );
+        assert_eq!(set["type"], "set_enabled");
+        assert_eq!(set["plugin_id"], "lingxi-local-app");
+        assert_eq!(set["enabled"], false);
+
+        let status = serde_json::to_value(PluginCommandDto::GetStatus {
+            plugin_id: "lingxi-local-app".into(),
+        })
+        .expect("serialize GetStatus");
+        assert_eq!(
+            status["plugin_id"], set["plugin_id"],
+            "GetStatus and SetEnabled must name the plugin with the SAME bare key"
+        );
+    }
+
+    #[test]
+    fn plugin_inventory_and_new_plugin_commands_round_trip_under_exact_keys() {
+        let inventory = LocalAppPluginInventoryDto {
+            plugin_id: "lingxi-local-app".into(),
+            display_name: "Local App Plugin".into(),
+            source: "builtin".into(),
+            version: "2.0.0-dev".into(),
+            bundle_sha256: "a".repeat(64),
+            state: PluginActivationStateDto::Loaded,
+            manifest_default_enabled: true,
+            counts: LocalAppPluginComponentCountsDto {
+                skills: 27,
+                agents: 1,
+                workflows: 6,
+                templates: 4,
+            },
+            validation_error: Some("missing verified root".into()),
+        };
+        let event = AppEventDto::PluginInventoryChanged {
+            inventory: inventory.clone(),
+        };
+        let json = serde_json::to_value(&event).expect("serialize plugin inventory event");
+        assert_eq!(json["type"], "plugin_inventory_changed");
+        assert_eq!(json["inventory"]["pluginId"], "lingxi-local-app");
+        assert_eq!(json["inventory"]["counts"]["templates"], 4_u64);
+        assert_eq!(
+            serde_json::from_value::<AppEventDto>(json)
+                .expect("deserialize plugin inventory event"),
+            event
+        );
+
+        for command in [
+            PluginCommandDto::GetInventory {
+                plugin_id: "lingxi-local-app".into(),
+            },
+            PluginCommandDto::ResolveCreateConfirmation {
+                request_id: "create-0001".into(),
+                approved: true,
+            },
+            PluginCommandDto::ResolveMcpProposalApproval {
+                request_id: "proposal-0001".into(),
+                approved: false,
+            },
+            PluginCommandDto::GetManagedMcpInventory,
+        ] {
+            let json = serde_json::to_value(&command).expect("serialize plugin command");
+            assert_eq!(
+                serde_json::from_value::<PluginCommandDto>(json.clone())
+                    .expect("deserialize plugin command"),
+                command
+            );
+            match command {
+                PluginCommandDto::GetInventory { .. } => assert_eq!(json["type"], "get_inventory"),
+                PluginCommandDto::ResolveCreateConfirmation { .. } => {
+                    assert_eq!(json["type"], "resolve_create_confirmation")
+                }
+                PluginCommandDto::ResolveMcpProposalApproval { .. } => {
+                    assert_eq!(json["type"], "resolve_mcp_proposal_approval")
+                }
+                PluginCommandDto::GetManagedMcpInventory => {
+                    assert_eq!(json["type"], "get_managed_mcp_inventory")
+                }
+                _ => unreachable!("covered above"),
+            }
+        }
+    }
+
+    #[test]
+    fn create_confirmation_and_receipt_status_preserve_exact_wire_keys() {
+        let request = LocalAppCreateConfirmationRequestDto {
+            request_id: "create-0001".into(),
+            app_id: "habits-1a2b".into(),
+            name: "Habits".into(),
+            brief: "Track streaks and notes".into(),
+            selected_template: LocalAppTemplateSummaryDto {
+                template_id: "react-dom-r1".into(),
+                surface: AppSurfaceDto::Dom,
+                summary: "Best for forms and lists".into(),
+            },
+            runtime_profile: canonical_profile_option(),
+            reason: "The user asked for a compact list app.".into(),
+            rejected: vec![LocalAppRejectedCandidateDto {
+                template_id: "three-3d-r1".into(),
+                reason: "3D would add unnecessary runtime weight.".into(),
+            }],
+            initial_tools: vec![canonical_tool_surface("save_habit")],
+            required_gates: vec![canonical_gate()],
+            receipt: Some(canonical_receipt()),
+        };
+        let event = AppEventDto::CreateConfirmationRequested {
+            request: request.clone(),
+        };
+        let json = serde_json::to_value(&event).expect("serialize create confirmation");
+        assert_eq!(json["type"], "create_confirmation_requested");
+        assert_eq!(
+            json["request"]["selectedTemplate"]["templateId"],
+            "react-dom-r1"
+        );
+        assert_eq!(
+            json["request"]["runtimeProfile"]["contractSha256"],
+            "8".repeat(64)
+        );
+        assert_eq!(
+            json["request"]["receipt"]["expiresAtMs"],
+            1_750_000_030_000_u64
+        );
+        assert_eq!(
+            serde_json::from_value::<AppEventDto>(json.clone())
+                .expect("deserialize create confirmation"),
+            event
+        );
+
+        let missing_receipt_state = {
+            let mut value = json;
+            value["request"]["receipt"]
+                .as_object_mut()
+                .expect("receipt object")
+                .remove("superseded");
+            value
+        };
+        let error = serde_json::from_value::<AppEventDto>(missing_receipt_state)
+            .expect_err("receipt state is required when a receipt object is present");
+        assert!(
+            error.to_string().contains("superseded"),
+            "decode error must name the missing field, got: {error}"
+        );
+    }
+
+    #[test]
+    fn mcp_proposal_diff_and_managed_inventory_round_trip_with_receipt_states() {
+        let request = LocalAppMcpProposalApprovalRequestDto {
+            request_id: "proposal-0001".into(),
+            app_id: "habits-1a2b".into(),
+            workflow_run_id: "wf-0002".into(),
+            summary: "Expose one habit-save tool and retire the summary tool.".into(),
+            proposal_sha256: "3".repeat(64),
+            approval_contract_sha256: "4".repeat(64),
+            tool_surface_sha256: "5".repeat(64),
+            tool_diffs: vec![
+                LocalAppMcpToolDiffDto {
+                    kind: LocalAppMcpToolChangeKindDto::Removed,
+                    name: "summarize_habits".into(),
+                    before: Some(canonical_tool_surface("summarize_habits")),
+                    after: None,
+                    changed_fields: Vec::new(),
+                },
+                LocalAppMcpToolDiffDto {
+                    kind: LocalAppMcpToolChangeKindDto::Changed,
+                    name: "save_habit".into(),
+                    before: Some(canonical_tool_surface("save_habit")),
+                    after: Some(LocalAppMcpToolSurfaceDto {
+                        description: Some("Create or update one completed-habits entry.".into()),
+                        ..canonical_tool_surface("save_habit")
+                    }),
+                    changed_fields: vec![
+                        LocalAppMcpToolFieldDto::Description,
+                        LocalAppMcpToolFieldDto::InputSchema,
+                        LocalAppMcpToolFieldDto::PermissionCeiling,
+                    ],
+                },
+            ],
+            required_flow_changes: vec!["Add a save step for notes.".into()],
+            excluded_capabilities: vec!["calendar".into()],
+            pending_gates: vec![canonical_gate()],
+            receipt: Some(LocalAppReceiptStatusDto {
+                expires_at_ms: 1_750_000_000_010,
+                superseded: true,
+                ..canonical_receipt()
+            }),
+        };
+        let event = AppEventDto::McpProposalApprovalRequested {
+            request: request.clone(),
+        };
+        let json = serde_json::to_value(&event).expect("serialize proposal approval");
+        assert_eq!(json["type"], "mcp_proposal_approval_requested");
+        assert_eq!(json["request"]["toolDiffs"][0]["kind"], "removed");
+        assert_eq!(json["request"]["toolDiffs"][0]["name"], "summarize_habits");
+        assert_eq!(json["request"]["receipt"]["superseded"], true);
+        assert_eq!(
+            serde_json::from_value::<AppEventDto>(json).expect("deserialize proposal approval"),
+            event
+        );
+
+        let inventory_event = AppEventDto::ManagedMcpInventoryChanged {
+            servers: vec![ManagedLocalAppMcpServerDto {
+                server_name: "local_app_habits-1a2b".into(),
+                app_id: "habits-1a2b".into(),
+                app_name: "Habits".into(),
+                build_id: "build-0001".into(),
+                catalog_sha256: "6".repeat(64),
+                tool_surface_sha256: "7".repeat(64),
+                tool_count: 2,
+                authoring_revision: 3,
+                publication_state: AppWorkflowStateDto::PublishedUnverified,
+                mcp_verification: LocalAppVerificationSummaryDto {
+                    status: LocalAppVerificationStatusDto::Passed,
+                    summary: "MCP schema, binding and isolation checks passed.".into(),
+                    code: None,
+                },
+                ui_verification: LocalAppVerificationSummaryDto {
+                    status: LocalAppVerificationStatusDto::Unavailable,
+                    summary: "No UI runner is available on this device.".into(),
+                    code: Some("verification_unavailable".into()),
+                },
+                tools: vec![canonical_tool_surface("save_habit")],
+            }],
+        };
+        let inventory_json =
+            serde_json::to_value(&inventory_event).expect("serialize managed inventory");
+        assert_eq!(inventory_json["type"], "managed_mcp_inventory_changed");
+        assert_eq!(inventory_json["servers"][0]["toolCount"], 2_u64);
+        assert_eq!(
+            inventory_json["servers"][0]["uiVerification"]["status"],
+            "unavailable"
+        );
+        assert_eq!(
+            serde_json::from_value::<AppEventDto>(inventory_json)
+                .expect("deserialize managed inventory"),
+            inventory_event
+        );
+    }
+
+    #[test]
+    fn verification_and_error_events_keep_status_and_error_layers_separate() {
+        let summary = AppEventDto::VerificationSummaryChanged {
+            app_id: "habits-1a2b".into(),
+            publication_state: AppWorkflowStateDto::PublishedVerified,
+            mcp_verification: LocalAppVerificationSummaryDto {
+                status: LocalAppVerificationStatusDto::Passed,
+                summary: "Catalog and MCP verification are current.".into(),
+                code: None,
+            },
+            ui_verification: LocalAppVerificationSummaryDto {
+                status: LocalAppVerificationStatusDto::Unverified,
+                summary: "UI verification has not run on this build.".into(),
+                code: None,
+            },
+        };
+        let json = serde_json::to_value(&summary).expect("serialize summary");
+        assert_eq!(json["type"], "verification_summary_changed");
+        assert_eq!(json["mcp_verification"]["status"], "passed");
+        assert_eq!(json["ui_verification"]["status"], "unverified");
+        assert_eq!(
+            serde_json::from_value::<AppEventDto>(json).expect("deserialize summary"),
+            summary
+        );
+
+        let failure = AppEventDto::LocalAppOperationFailed {
+            app_id: None,
+            code: LocalAppPluginErrorCodeDto::BuiltinBundleUnavailable,
+            message: "The verified builtin bundle root is missing.".into(),
+            request_id: Some("plugin-read-1".into()),
+        };
+        let json = serde_json::to_value(&failure).expect("serialize local app failure");
+        assert_eq!(json["type"], "local_app_operation_failed");
+        assert_eq!(json["code"], "builtin_bundle_unavailable");
+        assert_eq!(json["request_id"], "plugin-read-1");
+        assert_eq!(
+            serde_json::from_value::<AppEventDto>(json).expect("deserialize local app failure"),
+            failure
+        );
     }
 }

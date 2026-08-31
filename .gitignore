@@ -41,6 +41,7 @@ claw-code-graphify-orchestrator/
 # Generated code-intel indexes + tool output (rebuildable; any level)
 # ---------------------------------------------------------------
 .codegraph/
+codegraph-out/
 .understand-anything/
 # Gradle build cache (android-aar)
 .gradle/

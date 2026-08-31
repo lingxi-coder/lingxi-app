@@ -4,6 +4,8 @@ import com.lingxi.code.bindings.ClientEvent
 import com.lingxi.code.bindings.CostDto
 import com.lingxi.code.bindings.ErrorKindDto
 import com.lingxi.code.bindings.TurnOutcomeDto
+import com.lingxi.code.model.Message
+import com.lingxi.code.model.Role
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.take
@@ -171,6 +173,35 @@ class EngineReplyStreamTest {
                 ReplyEvent.Thinking,
                 ReplyEvent.Usage(AgentRunUsage(1, 2, 0, 0)),
                 ReplyEvent.Delta("hi"),
+                ReplyEvent.End,
+            ),
+            stream.toList(),
+        )
+    }
+
+    @Test
+    fun messageCompleteDoesNotTerminateBeforeTurnEnded() = runTest {
+        val events = MutableSharedFlow<ClientEvent>(replay = 0, extraBufferCapacity = 8)
+        val message = com.lingxi.code.bindings.MessageDto(
+            role = "assistant",
+            blocks = listOf(com.lingxi.code.bindings.MessageBlockDto.Text("first")),
+            images = emptyList(),
+        )
+        val stream = mapReplyStream(
+            events.onSubscription {
+                emit(ClientEvent.TextDelta("first"))
+                emit(ClientEvent.MessageComplete(stopReason = "end_turn", message = message))
+                emit(ClientEvent.TextDelta("second"))
+                emit(ClientEvent.TurnEnded(outcome = TurnOutcomeDto.END_TURN, stopReason = "end_turn", cost = cost))
+            },
+        )
+
+        assertEquals(
+            listOf(
+                ReplyEvent.Thinking,
+                ReplyEvent.Delta("first"),
+                ReplyEvent.MessageComplete(Message(role = Role.Ai, text = "first")),
+                ReplyEvent.Delta("second"),
                 ReplyEvent.End,
             ),
             stream.toList(),

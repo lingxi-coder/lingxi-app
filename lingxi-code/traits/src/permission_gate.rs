@@ -122,6 +122,28 @@ pub struct PermissionCheckContext {
     /// the stdio transport emits the key only when this is `true`, matching the
     /// upstream `requiresUserInteraction?.() || undefined` shape.
     pub requires_user_interaction: bool,
+    /// Whether this request originates from an agent context rather than the
+    /// session's main thread.  Plan approval is a main-session operation, so
+    /// policy-backed gates use this to withhold the session-wide Auto action
+    /// from nested agent calls.  Defaults to `false` for existing callers.
+    pub is_agent_context: bool,
+    /// Whether this prompt must not offer or persist an "allow always" rule.
+    ///
+    /// This is set for tools whose own permission result requires a human at
+    /// every invocation (for example an MCP tool with
+    /// `requiresUserInteraction: true`).  It is deliberately separate from
+    /// [`Self::requires_user_interaction`]: the latter is tool metadata sent to
+    /// transports, while this flag is the end-to-end persistence guard.  The
+    /// default is `false` so ordinary permission asks retain their existing
+    /// AllowAlways behavior.
+    pub suppress_always_allow_rule: bool,
+    /// Engine-computed eligibility for offering the one-shot "switch to Auto"
+    /// action. Transports must render this value but must not infer eligibility
+    /// from tool names, modes, or request payloads. `None` is fail-closed.
+    pub auto_mode_prompt: Option<AutoModePrompt>,
+    /// Explicit engine provenance for this permission request. Unknown or
+    /// absent provenance must not enable source-restricted prompt actions.
+    pub request_source: Option<PermissionRequestSource>,
     /// The explicit Ask rule that matched this call, if the policy result
     /// retains one.  Kept transport-neutral here because this crate sits below
     /// the permission rule implementation.
@@ -220,6 +242,83 @@ pub struct MatchedAskRule {
     pub rule_content: Option<String>,
 }
 
+/// A transport-neutral description of the Auto action available on a prompt.
+/// The engine is responsible for setting this only after all source, mode,
+/// policy, and payload-renderability checks have passed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AutoModePrompt {
+    /// A workflow-agent Bash call may approve this call and enter Auto mode.
+    WorkflowBash,
+    /// ExitPlanMode may approve the plan and continue in Auto mode.
+    ExitPlanMode,
+}
+
+/// Provenance used by engine-side prompt eligibility. This is intentionally
+/// explicit rather than inferred from a tool name or payload.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PermissionRequestSource {
+    /// A Bash call made by a workflow's spawned agent.
+    WorkflowAgent,
+    /// A remote execution source; never eligible for this local Auto row.
+    Remote,
+    /// A plugin-provided source; never eligible for this local Auto row.
+    Plugin,
+    /// The engine could not establish a trusted source.
+    Unknown,
+}
+
+impl AutoModePrompt {
+    /// Exact row label used by the TUI and compatible clients.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::WorkflowBash => "Yes, and switch to auto mode",
+            Self::ExitPlanMode => "Yes, and use auto mode",
+        }
+    }
+
+    /// Stable wire token used by client transports.
+    #[must_use]
+    pub const fn as_wire(self) -> &'static str {
+        match self {
+            Self::WorkflowBash => "workflow_bash",
+            Self::ExitPlanMode => "exit_plan_mode",
+        }
+    }
+
+    /// Parse a wire token, failing closed for unknown values.
+    #[must_use]
+    pub fn from_wire(value: &str) -> Option<Self> {
+        match value {
+            "workflow_bash" => Some(Self::WorkflowBash),
+            "exit_plan_mode" => Some(Self::ExitPlanMode),
+            _ => None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod auto_mode_prompt_tests {
+    use super::AutoModePrompt;
+
+    #[test]
+    fn auto_prompt_tokens_and_labels_are_wire_locked() {
+        assert_eq!(
+            AutoModePrompt::WorkflowBash.label(),
+            "Yes, and switch to auto mode"
+        );
+        assert_eq!(
+            AutoModePrompt::ExitPlanMode.label(),
+            "Yes, and use auto mode"
+        );
+        assert_eq!(
+            AutoModePrompt::from_wire("workflow_bash"),
+            Some(AutoModePrompt::WorkflowBash)
+        );
+        assert_eq!(AutoModePrompt::from_wire("unknown"), None);
+    }
+}
+
 /// Host-provided classification for a resolved interactive tool decision.
 ///
 /// This is telemetry metadata only: it never changes whether the tool runs.
@@ -274,6 +373,12 @@ pub enum PermissionOutcome {
         permission_updates: Vec<Value>,
         /// Optional host classification for telemetry attribution.
         decision_classification: Option<ToolDecisionClassification>,
+    },
+    /// Permitted for this invocation and requests an atomic session transition
+    /// to Auto mode. This never carries/persists an AllowAlways rule.
+    AllowAuto {
+        /// Host/policy-rewritten tool input, or `None` to keep the original.
+        updated_input: Option<Value>,
     },
     /// Rejected, with the reason surfaced to the model as the `tool_result`.
     Deny {
@@ -505,6 +610,22 @@ pub trait PermissionGate: Send + Sync {
         }
     }
 
+    /// Request approval for an `ExitPlanMode` call while preserving the plan
+    /// payload for transports that render a plan-specific dialog.  This is a
+    /// dedicated seam because a generic permission check would lose the plan
+    /// body and incorrectly construct a `ToolUseConfirm` request.  The default
+    /// keeps prompt-only gates source-compatible; a policy-backed gate
+    /// overrides it to compute the engine-owned Auto eligibility and consume a
+    /// selected `AllowAuto` response.
+    async fn check_exit_plan_mode(
+        &self,
+        plan: &str,
+        ctx: &PermissionCheckContext,
+    ) -> PermissionOutcome {
+        self.check_with_context("ExitPlanMode", &serde_json::json!({ "plan": plan }), ctx)
+            .await
+    }
+
     /// Like [`Self::check_with_context`], but preserves a terminal
     /// [`PermissionAbort`] instead of folding every failure into a recoverable
     /// [`PermissionOutcome::Deny`].
@@ -537,6 +658,15 @@ pub trait PermissionGate: Send + Sync {
     /// Managed policy calls this with `false` when only centrally managed rules
     /// are permitted. The default is a no-op for transports without persistence.
     fn set_permission_persistence_enabled(&self, _enabled: bool) {}
+
+    /// Whether this call is a restricted-mode protected mutation. Policy-backed
+    /// gates override this using their existing path/mutation provenance so the
+    /// turn loop can suppress persistent "allow always" approvals. The default
+    /// is false for prompt-only transports and preserves the frozen trait ABI.
+    fn is_restricted_protected_mutation(&self, name: &str, input: &Value) -> bool {
+        let _ = (name, input);
+        false
+    }
 
     /// GATE-SYSMSG-01: notify the transport that a tool call was DENIED by the
     /// local policy pre-check, so a stdio/SDK transport can emit a
@@ -700,6 +830,36 @@ pub trait PermissionGate: Send + Sync {
         self.check(name, input).await
     }
 
+    /// Source-first twin of [`Self::check_in_plan_mode`] carrying dispatch
+    /// context and preserving a terminal [`PermissionAbort`].
+    ///
+    /// The turn loop uses this richer seam so plan-mode asks can keep the same
+    /// `PermissionRequest` hook ordering and headless fail-closed behavior as
+    /// the ordinary source-first path, while still authorizing under the live
+    /// Plan mode overlay. The default preserves the frozen trait ABI by
+    /// projecting the legacy 2-valued [`Self::check_in_plan_mode`] result into a
+    /// sourced [`PermissionResolution`], and therefore never aborts.
+    async fn resolve_detailed_in_plan_mode_or_abort(
+        &self,
+        name: &str,
+        input: &Value,
+        ctx: &PermissionCheckContext,
+    ) -> Result<PermissionResolution, PermissionAbort> {
+        let _ = ctx;
+        Ok(match self.check_in_plan_mode(name, input).await {
+            PermissionDecision::Allow => PermissionResolution::Allow { rule_source: None },
+            PermissionDecision::Deny { reason } => PermissionResolution::Deny {
+                reason,
+                source: PermissionDecisionSource::Unspecified,
+                rule_source: None,
+                decision_reason_type: None,
+                decision_reason: None,
+                behavior_ask: false,
+                content_blocks: Vec::new(),
+            },
+        })
+    }
+
     /// Resolve a tool call to a SOURCED [`PermissionResolution`] WITHOUT yet
     /// consulting the inner prompt transport.
     ///
@@ -829,6 +989,18 @@ pub trait PermissionGate: Send + Sync {
         Ok(())
     }
 
+    /// Apply a live administrator-managed `disableAutoMode` setting.
+    ///
+    /// The settings watcher calls this after firing the `ConfigChange` hook
+    /// for a managed-settings file.  Rule-free prompt transports have no
+    /// local auto-mode state, so the default is deliberately a no-op.  A
+    /// policy-backed gate updates its thread-safe kill switch and evicts an
+    /// active Auto mode; clearing the setting only re-opens future requests
+    /// and never silently enters Auto again.
+    fn update_auto_mode_disabled(&self, disabled: bool) {
+        let _ = disabled;
+    }
+
     /// Whether the host may present `bypassPermissions` as a selectable mode.
     /// A policy gate keeps this false when an administrator/settings killswitch
     /// disables the mode; a host-side risk acknowledgement can still be needed
@@ -837,6 +1009,13 @@ pub trait PermissionGate: Send + Sync {
     /// The default is `false` so prompt-only gates never advertise a bypass
     /// control they cannot enforce.
     fn can_request_bypass_permissions(&self) -> bool {
+        false
+    }
+
+    /// Whether the engine may offer a per-prompt transition to Auto mode.
+    /// Prompt transports must not derive this from local mode/tool heuristics;
+    /// policy-backed gates override it with their live availability checks.
+    fn can_request_auto_mode(&self) -> bool {
         false
     }
 

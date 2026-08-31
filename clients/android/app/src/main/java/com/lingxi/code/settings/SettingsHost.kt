@@ -37,6 +37,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
+import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.navigation.NavHostController
 import androidx.navigation.compose.NavHost
@@ -50,6 +51,7 @@ import com.lingxi.code.model.ProviderKind
 import com.lingxi.code.theme.AppearanceStore
 import com.lingxi.code.theme.LingXiTheme
 import com.lingxi.code.voice.offline.VoiceModelDownloader
+import kotlinx.coroutines.launch
 
 /**
  * Settings surface host.
@@ -82,6 +84,7 @@ fun SettingsHost(
     onReconnectEngine: () -> Unit = {},
     onOpenTerminal: (LinuxRuntimeTerminalLaunchRequest) -> Unit = {},
     onPermissionModeChanged: suspend (String) -> Unit = {},
+    onSetLocalAppPluginEnabled: suspend (String, Boolean) -> Unit = { _, _ -> },
 ) {
     val context = LocalContext.current
     val resolvedStore: SettingsStore =
@@ -224,6 +227,11 @@ fun SettingsHost(
                     SkillsPage(
                         state = state,
                         store = resolvedStore,
+                        onSetLocalAppPluginEnabled = { pluginId, enabled ->
+                            resolvedStore.viewModelScope.launch {
+                                onSetLocalAppPluginEnabled(pluginId, enabled)
+                            }
+                        },
                         onDetail = { id -> navController.navigate(SettingsRoutes.skillDetail(id)) },
                     )
                 }

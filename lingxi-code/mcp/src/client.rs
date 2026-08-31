@@ -6,6 +6,7 @@
 //! enum so the public surface in `lib.rs` resolves.
 
 use std::borrow::Cow;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use thiserror::Error;
@@ -13,8 +14,9 @@ use tokio::sync::RwLock;
 
 use serde::{Deserialize, Serialize};
 use traits::{
-    McpNegotiatedProtocol, McpPromptDto, McpProtocolEra, McpResourceContentDto, McpResourceDto,
-    McpToolDto, McpToolResultDto, McpTransportKind, ServerCapabilitiesDto,
+    McpConfiguredToolPolicyDto, McpNegotiatedProtocol, McpPermissionCeiling, McpPromptDto,
+    McpProtocolEra, McpResourceContentDto, McpResourceDto, McpToolDto, McpToolResultDto,
+    McpTransportKind, ServerCapabilitiesDto,
 };
 
 use crate::hook_dispatch::HookDispatcher;
@@ -302,6 +304,13 @@ pub struct McpClient {
     /// `true`, every tool this client lists is marked `always_load` so it is
     /// never deferred behind tool search.
     config_always_load: bool,
+    /// Config-side per-tool declarations used to resolve permission policy.
+    config_tools: Vec<McpConfiguredToolPolicyDto>,
+    /// Effective host/org ceilings keyed by raw upstream tool name.
+    config_tool_permissions: BTreeMap<String, McpPermissionCeiling>,
+    /// Strictest ceiling computed for the most recent tools/list response.
+    /// Kept out of `McpToolDto` to preserve the discovery-cache wire shape.
+    effective_permission_ceilings: std::sync::RwLock<BTreeMap<String, McpPermissionCeiling>>,
     /// Transport kind of the underlying connection, feeding the `GLd` idle-timeout
     /// resolver ([`mcp_tool_idle_timeout_for`]): stdio → 30 min default, remote →
     /// 5 min, in-process (IDE/SDK) → no idle timeout. Defaults to
@@ -422,6 +431,9 @@ impl McpClient {
             server_instructions: RwLock::new(None),
             config_timeout_ms: None,
             config_always_load: false,
+            config_tools: Vec::new(),
+            config_tool_permissions: BTreeMap::new(),
+            effective_permission_ceilings: std::sync::RwLock::new(BTreeMap::new()),
             transport_kind: McpTransportKind::Stdio,
             server_url: None,
             negotiated: McpNegotiatedProtocol {
@@ -436,12 +448,20 @@ impl McpClient {
     /// `request_timeout_ms`) and [`crate::McpServerConfig::always_load`]. The
     /// timeout feeds the `BHs` per-call resolver ([`mcp_tool_timeout_for`]) and
     /// the `always_load` flag is OR'd into every tool's `always_load` bit at
-    /// [`Self::list_tools`] time. Passing `(None, false)` is byte-identical to
+    /// [`Self::list_tools`] time. Passing empty policy collections is byte-identical to
     /// not calling this at all.
     #[must_use]
-    pub fn with_config_options(mut self, timeout_ms: Option<u64>, always_load: bool) -> Self {
+    pub fn with_config_options(
+        mut self,
+        timeout_ms: Option<u64>,
+        always_load: bool,
+        tools: Vec<McpConfiguredToolPolicyDto>,
+        tool_permissions: BTreeMap<String, McpPermissionCeiling>,
+    ) -> Self {
         self.config_timeout_ms = timeout_ms;
         self.config_always_load = always_load;
+        self.config_tools = tools;
+        self.config_tool_permissions = tool_permissions;
         self
     }
 
@@ -660,7 +680,7 @@ impl McpClient {
         let skip_prefix = self.skip_mcp_prefix();
 
         let normalized_server = crate::normalization::normalize_name_for_mcp(&self.server_name);
-        Ok(resp
+        let mut tools: Vec<McpToolDto> = resp
             .tools
             .into_iter()
             .filter_map(|t| {
@@ -726,7 +746,79 @@ impl McpClient {
                     requires_user_interaction: t.meta.requires_user_interaction,
                 })
             })
-            .collect())
+            .collect();
+        self.apply_config_permission_ceilings(&mut tools);
+        Ok(tools)
+    }
+
+    /// Resolve config-side ceilings against the raw names returned by
+    /// `tools/list`. The effective result is kept in a side map so existing
+    /// `McpToolDto` and discovery-cache payloads remain byte-compatible.
+    fn apply_config_permission_ceilings(&self, tools: &mut [McpToolDto]) {
+        let mut org_ceilings = BTreeMap::<&str, McpPermissionCeiling>::new();
+        for tool in &self.config_tools {
+            if let Some(ceiling) = tool.org_max_permission {
+                org_ceilings
+                    .entry(tool.name.as_str())
+                    .and_modify(|current| *current = current.strictest(ceiling))
+                    .or_insert(ceiling);
+            }
+            // A server-declared always-ask/deny policy is also a tighten-only
+            // ceiling for this side-map. `always_allow` contributes the
+            // neutral `allow` value, preserving strictest-wins semantics when
+            // an org ceiling is present for the same raw tool name.
+            if let Some(policy) = tool.permission_policy {
+                let policy_ceiling = match policy {
+                    traits::McpToolPermissionPolicy::AlwaysAllow => McpPermissionCeiling::Allow,
+                    traits::McpToolPermissionPolicy::AlwaysAsk => McpPermissionCeiling::Ask,
+                    traits::McpToolPermissionPolicy::AlwaysDeny => McpPermissionCeiling::Deny,
+                };
+                org_ceilings
+                    .entry(tool.name.as_str())
+                    .and_modify(|current| *current = current.strictest(policy_ceiling))
+                    .or_insert(policy_ceiling);
+            }
+        }
+
+        let mut effective = BTreeMap::new();
+        let mut matched_tool_permissions = BTreeSet::new();
+        for tool in tools {
+            let tool_name = tool.tool_name.clone();
+            let mut ceiling = self.config_tool_permissions.get(&tool_name).copied();
+            if ceiling.is_some() {
+                matched_tool_permissions.insert(tool_name.clone());
+            }
+            if let Some(org) = org_ceilings.get(tool_name.as_str()).copied() {
+                ceiling = Some(ceiling.map_or(org, |current| current.strictest(org)));
+            }
+            if let Some(ceiling) = ceiling {
+                effective.insert(tool_name, ceiling);
+            }
+        }
+        *self
+            .effective_permission_ceilings
+            .write()
+            .unwrap_or_else(|error| error.into_inner()) = effective;
+
+        if !self.config_tool_permissions.is_empty() && matched_tool_permissions.is_empty() {
+            tracing::warn!(
+                server = %self.server_name,
+                "toolPermissions has {} entries but none matched upstream tool names — backend name drift?",
+                self.config_tool_permissions.len()
+            );
+        }
+    }
+
+    /// Read the strictest config ceiling for a raw upstream tool name after
+    /// `list_tools` has run. `None` means no ceiling was configured or the
+    /// tool was not advertised by the server.
+    #[must_use]
+    pub fn effective_max_permission(&self, tool_name: &str) -> Option<McpPermissionCeiling> {
+        self.effective_permission_ceilings
+            .read()
+            .unwrap_or_else(|error| error.into_inner())
+            .get(tool_name)
+            .copied()
     }
 
     /// Returns `true` when the `CLAUDE_AGENT_SDK_MCP_NO_PREFIX` env var is set
@@ -2503,7 +2595,7 @@ mod constructor_tests {
         // one that carries no per-tool `_meta` at all.
         let client = McpClient::new("srv", std::path::PathBuf::from("/tmp/work"), conn)
             .await
-            .with_config_options(None, true);
+            .with_config_options(None, true, Vec::new(), BTreeMap::new());
         let tools = list_tools_with(
             client,
             peer_tx,
@@ -2564,6 +2656,45 @@ mod constructor_tests {
         assert!(!tools[0].requires_user_interaction);
         // `_meta.anthropic/requiresUserInteraction: true` ⇒ forwarded as-is.
         assert!(tools[1].requires_user_interaction);
+    }
+
+    #[tokio::test]
+    async fn config_permission_ceilings_collapse_to_strictest_side_map() {
+        let (conn, _peer_tx, _peer_rx) = paired_connection();
+        let client = McpClient::new("srv", std::path::PathBuf::from("/tmp/work"), conn)
+            .await
+            .with_config_options(
+                None,
+                false,
+                vec![
+                    McpConfiguredToolPolicyDto {
+                        name: "write".into(),
+                        permission_policy: None,
+                        org_max_permission: Some(McpPermissionCeiling::Ask),
+                    },
+                    McpConfiguredToolPolicyDto {
+                        name: "write".into(),
+                        permission_policy: None,
+                        org_max_permission: Some(McpPermissionCeiling::Deny),
+                    },
+                ],
+                BTreeMap::from([(String::from("write"), McpPermissionCeiling::Ask)]),
+            );
+        let mut tools = vec![McpToolDto {
+            server_name: "srv".into(),
+            tool_name: "write".into(),
+            description: "write".into(),
+            input_schema: serde_json::json!({}),
+            full_name: "mcp__srv__write".into(),
+            search_hint: None,
+            always_load: None,
+            requires_user_interaction: false,
+        }];
+        client.apply_config_permission_ceilings(&mut tools);
+        assert_eq!(
+            client.effective_max_permission("write"),
+            Some(McpPermissionCeiling::Deny)
+        );
     }
 }
 

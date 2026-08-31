@@ -8,6 +8,7 @@ import com.lingxi.code.R
 import com.lingxi.code.model.ConnStatus
 import com.lingxi.code.model.DreamConfig
 import com.lingxi.code.model.GenericProvider
+import com.lingxi.code.model.LocalAppPluginStatus
 import com.lingxi.code.model.MCPServer
 import com.lingxi.code.model.NotifConfig
 import com.lingxi.code.model.ProviderKind
@@ -45,6 +46,7 @@ data class SettingsUiState(
     val voiceCapability: VoiceCapabilitySnapshot = VoiceCapabilitySnapshot(),
     val linuxRuntime: LinuxRuntimeUiState = LinuxRuntimeUiState(),
     val skills: List<Skill> = SettingsMock.bundledSkills(),
+    val localAppPlugin: LocalAppPluginStatus = SettingsMock.localAppPlugin(),
     val mcpServers: List<MCPServer> = SettingsMock.mcpServers(),
     val dream: DreamConfig = DreamConfig(),
     val language: String = "zh-CN",
@@ -114,6 +116,7 @@ class SettingsStore(
                 effectivePermissionMode = initialPermissionMode,
                 voice = voiceRepo?.load() ?: VoiceConfig(),
                 skills = SettingsMock.bundledSkills(::resolveWithFallback),
+                localAppPlugin = SettingsMock.localAppPlugin(),
                 mcpServers = SettingsMock.mcpServers(::resolveWithFallback),
                 dream = DreamConfig(
                     lastRun = resolveWithFallback(
@@ -128,6 +131,7 @@ class SettingsStore(
             permissionMode = initialPermissionMode,
             effectivePermissionMode = initialPermissionMode,
             skills = SettingsMock.bundledSkills(::resolveWithFallback),
+            localAppPlugin = SettingsMock.localAppPlugin(),
             mcpServers = SettingsMock.mcpServers(::resolveWithFallback),
             dream = DreamConfig(
                 lastRun = resolveWithFallback(
@@ -592,15 +596,83 @@ class SettingsStore(
     fun setSkillEnabled(id: String, on: Boolean) =
         _state.update { s -> s.copy(skills = s.skills.map { if (it.id == id) it.copy(enabled = on) else it }) }
 
+    fun setLocalAppPluginEnabled(enabled: Boolean) =
+        _state.update { s -> s.copy(localAppPlugin = s.localAppPlugin.copy(enabled = enabled)) }
+
+    fun setLocalAppPluginStatus(status: LocalAppPluginStatus) =
+        _state.update { it.copy(localAppPlugin = status) }
+
+    fun setManagedLocalAppInventory(sources: List<com.lingxi.code.model.ManagedLocalAppMcpSource>) =
+        _state.update { state ->
+            val managedByServer = sources.associateBy { it.stableServerName }
+            val merged = state.mcpServers.map { server ->
+                val managed = managedByServer[server.id] ?: managedByServer[server.name]
+                when {
+                    managed != null -> server.copy(
+                        id = managed.stableServerName,
+                        name = managed.stableServerName,
+                        tools = managed.toolCount,
+                        transport = "managed",
+                        managedLocalApp = managed,
+                    )
+                    server.managedLocalApp != null -> server.copy(managedLocalApp = null)
+                    else -> server
+                }
+            }
+            val existingIds = merged.mapTo(hashSetOf()) { it.id }
+            state.copy(
+                mcpServers = merged + sources
+                    .filterNot { it.stableServerName in existingIds }
+                    .map { managed ->
+                        MCPServer(
+                            id = managed.stableServerName,
+                            name = managed.stableServerName,
+                            url = "",
+                            tools = managed.toolCount,
+                            status = ConnStatus.Idle,
+                            enabled = true,
+                            transport = "managed",
+                            managedLocalApp = managed,
+                        )
+                    },
+            )
+        }
+
     fun updateMcp(id: String, mutate: (MCPServer) -> MCPServer) =
-        _state.update { s -> s.copy(mcpServers = s.mcpServers.map { if (it.id == id) mutate(it) else it }) }
+        _state.update { s ->
+            s.copy(
+                mcpServers = s.mcpServers.map { server ->
+                    if (server.id != id || server.managedLocalApp != null) server else mutate(server)
+                },
+            )
+        }
 
     fun setMcpStatus(id: String, status: ConnStatus) = updateMcp(id) { it.copy(status = status) }
     /** Replace the whole MCP list — used to mirror the engine's REAL listing in. */
-    fun setMcpServers(servers: List<MCPServer>) = _state.update { it.copy(mcpServers = servers) }
+    fun setMcpServers(servers: List<MCPServer>) = _state.update { state ->
+        val existing = state.mcpServers.associateBy { it.id }
+        state.copy(
+            mcpServers = servers.map { incoming ->
+                existing[incoming.id]?.let { prior ->
+                    incoming.copy(
+                        url = incoming.url.ifBlank { prior.url },
+                        tools = if (incoming.tools == 0) prior.tools else incoming.tools,
+                        auth = incoming.auth ?: prior.auth,
+                        managedLocalApp = prior.managedLocalApp,
+                    )
+                } ?: incoming
+            },
+        )
+    }
 
     fun removeMcp(id: String) =
-        _state.update { s -> s.copy(mcpServers = s.mcpServers.filter { it.id != id }) }
+        _state.update { s ->
+            s.copy(
+                mcpServers = s.mcpServers.filterNot {
+                    it.id == id && it.managedLocalApp == null
+                },
+            )
+        }
 
     fun setDream(dream: DreamConfig) = _state.update { it.copy(dream = dream) }
 

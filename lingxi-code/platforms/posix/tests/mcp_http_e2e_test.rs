@@ -110,7 +110,7 @@ async fn full_mcp_surface_roundtrips_over_http() {
         .expect("list_tools timed out")
         .expect("list_tools failed");
     assert_eq!(tools.len(), 1, "mock exposes exactly one tool");
-    assert_eq!(tools[0].tool_name, "echo");
+    assert_eq!(tools[0].tool_name(), "echo");
     // No logical server name is threaded through `connect`, so `full_name` is
     // the unprefixed `mcp____<tool>` form (the lingxi-mcp layer rewrites it).
     assert_eq!(tools[0].full_name, "mcp____echo");

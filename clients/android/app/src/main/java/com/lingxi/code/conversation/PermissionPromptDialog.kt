@@ -32,6 +32,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.lingxi.code.R
+import com.lingxi.code.bindings.AutoModePromptDto
 import com.lingxi.code.bindings.PermissionResponseDto
 import com.lingxi.code.components.UiTags
 import com.lingxi.code.theme.LingXiTheme
@@ -40,9 +41,12 @@ import com.lingxi.code.theme.LingXiTheme
  * The Android permission-prompt modal — the allow/deny surface for an
  * engine-parked tool request (SHIP-BLOCKER #3). Mirrors the Electron
  * `PermissionPrompt`: a scrim-backed card with the request title + a tool-input
- * preview and three actions — 拒绝 / 始终允许 / 允许一次 — wired to
- * [onApprove] ([PermissionResponseDto.ALLOW_ONCE] / [PermissionResponseDto.ALLOW_ALWAYS])
- * and [onDeny]. Renders nothing when [state] is `null`.
+ * preview and actions — 拒绝 / 始终允许 / 自动模式 / 允许一次 — wired to
+ * [onApprove] ([PermissionResponseDto.ALLOW_ONCE] /
+ * [PermissionResponseDto.ALLOW_ALWAYS] / [PermissionResponseDto.ALLOW_AUTO])
+ * and [onDeny]. When the engine marks a request as requiring a fresh human
+ * decision, the persistent actions are omitted. Renders nothing when [state]
+ * is `null`.
  *
  * The state shape + the request→prompt mapping ([permissionRequestToPrompt]) are
  * the unit-tested seam; this composable is the thin render layer (covered by the
@@ -133,15 +137,28 @@ fun PermissionPromptDialog(
                     onClick = { onDeny(state.requestId) },
                     modifier = Modifier.weight(1f),
                 )
-                PromptButton(
-                    label = stringResource(R.string.permission_allow_always),
-                    fg = t.text2,
-                    bg = Color.Transparent,
-                    borderColor = t.border,
-                    tag = UiTags.PERMISSION_ALLOW_ALWAYS,
-                    onClick = { onApprove(state.requestId, PermissionResponseDto.ALLOW_ALWAYS) },
-                    modifier = Modifier.weight(1f),
-                )
+                if (!state.suppressAlwaysAllowRule && state.autoModePrompt == null) {
+                    PromptButton(
+                        label = stringResource(R.string.permission_allow_always),
+                        fg = t.text2,
+                        bg = Color.Transparent,
+                        borderColor = t.border,
+                        tag = UiTags.PERMISSION_ALLOW_ALWAYS,
+                        onClick = { onApprove(state.requestId, PermissionResponseDto.ALLOW_ALWAYS) },
+                        modifier = Modifier.weight(1f),
+                    )
+                }
+                if (!state.suppressAlwaysAllowRule && state.autoModePrompt != null) {
+                    PromptButton(
+                        label = autoModeApprovalLabel(state.autoModePrompt),
+                        fg = Color.White,
+                        bg = t.accent,
+                        borderColor = t.borderStrong,
+                        tag = UiTags.PERMISSION_ALLOW_AUTO,
+                        onClick = { onApprove(state.requestId, PermissionResponseDto.ALLOW_AUTO) },
+                        modifier = Modifier.weight(1f),
+                    )
+                }
                 PromptButton(
                     label = stringResource(R.string.permission_allow_once),
                     fg = Color.White,
@@ -185,3 +202,9 @@ private fun PromptButton(
         )
     }
 }
+
+private fun autoModeApprovalLabel(prompt: AutoModePromptDto): String =
+    when (prompt) {
+        AutoModePromptDto.WORKFLOW_BASH -> "Yes, and switch to auto mode"
+        AutoModePromptDto.EXIT_PLAN_MODE -> "Yes, and use auto mode"
+    }

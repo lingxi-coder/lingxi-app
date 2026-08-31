@@ -2,6 +2,7 @@ package com.lingxi.code.conversation
 
 import androidx.lifecycle.SavedStateHandle
 import com.lingxi.code.bindings.ClientEvent
+import com.lingxi.code.bindings.ClientCommand
 import com.lingxi.code.bindings.CostDto
 import com.lingxi.code.bindings.HeadlineKindDto
 import com.lingxi.code.bindings.MessageBlockDto
@@ -81,12 +82,16 @@ class ChatViewModelReducerTest {
      */
     private class RecordingSource : ConversationSource {
         val submitted = mutableListOf<String>()
+        val pending = mutableListOf<String>()
         var cancelCount = 0
         private val never = MutableSharedFlow<ReplyEvent>()
         override fun initialMessages(): List<Message> = emptyList()
         override fun submit(text: String): Flow<ReplyEvent> {
             submitted += text
             return never.asSharedFlow() // a turn that streams forever until cancelled
+        }
+        override suspend fun submitClientCommand(command: ClientCommand) {
+            if (command is ClientCommand.SendPrompt) pending += command.text
         }
         override suspend fun cancel() { cancelCount++ }
     }
@@ -641,7 +646,7 @@ class ChatViewModelReducerTest {
         assertNull("statusLine cleared on newChat", ChatViewModel(StubSource()).state.value.statusLine)
     }
 
-    // --- streaming gate / overlapping-submit guard ------------------------
+    // --- streaming + pending-message submission ----------------------------
 
     @Test
     fun send_setsStreaming_andIsStreaming() = runTest(dispatcher) {
@@ -655,15 +660,17 @@ class ChatViewModelReducerTest {
     }
 
     @Test
-    fun send_whileStreaming_isIgnored_noSecondSubmit() = runTest(dispatcher) {
+    fun send_whileStreaming_submitsPendingMessageWithoutReplacingCollector() = runTest(dispatcher) {
         val src = RecordingSource()
         val vm = ChatViewModel(src)
         vm.send("first")
-        // Overlapping submit while the first turn is still streaming: ignored.
         vm.send("second")
-        assertEquals("only the first turn submitted", listOf("first"), src.submitted)
-        // The user message for the ignored turn must NOT be appended either.
-        assertEquals(1, vm.state.value.messages.count { it.role == Role.User })
+        runCurrent()
+
+        assertEquals("only the first turn owns a reply collector", listOf("first"), src.submitted)
+        assertEquals(listOf("second"), src.pending)
+        assertEquals(2, vm.state.value.messages.count { it.role == Role.User })
+        assertTrue(vm.state.value.streaming)
     }
 
     @Test

@@ -35,9 +35,9 @@ final class LocalAppsWidgetTests: XCTestCase {
             .appendingPathExtension("json")
         let payload = #"""
         {"version":1,"apps":[
-            {"id":"tracker-1","name":"First","brief":"","workflow":"ready","runtimeState":"stopped","updatedAtMs":1},
-            {"id":"tracker-1","name":"Duplicate","brief":"","workflow":"ready","runtimeState":"stopped","updatedAtMs":2},
-            {"id":"../unsafe","name":"Unsafe","brief":"","workflow":"ready","runtimeState":"stopped","updatedAtMs":3}
+            {"id":"tracker-1","name":"First","brief":"","workflow":"published_verified","runtimeState":"stopped","updatedAtMs":1},
+            {"id":"tracker-1","name":"Duplicate","brief":"","workflow":"published_verified","runtimeState":"stopped","updatedAtMs":2},
+            {"id":"../unsafe","name":"Unsafe","brief":"","workflow":"published_unverified","runtimeState":"stopped","updatedAtMs":3}
         ]}
         """#.data(using: .utf8)!
         try payload.write(to: fileURL)
@@ -46,6 +46,46 @@ final class LocalAppsWidgetTests: XCTestCase {
 
         XCTAssertEqual(snapshot.apps.map(\.id), ["tracker-1"])
         XCTAssertEqual(snapshot.apps.first?.name, "First")
+    }
+
+    func testWidgetUsesPublicationStatesInsteadOfLegacyReady() throws {
+        let source = try clientSource("Sources/LocalAppsWidget/LocalAppWidget.swift")
+
+        XCTAssertFalse(source.contains("workflow == \"ready\""))
+        XCTAssertTrue(source.contains("publishedUnverified"))
+        XCTAssertTrue(source.contains("publishedVerified"))
+        XCTAssertTrue(source.contains("state.isPublished"))
+    }
+
+    func testRootViewHostsPhase8ApprovalSheetsAtTheRootLevel() throws {
+        let source = try clientSource("Sources/App/RootView.swift")
+
+        XCTAssertTrue(source.contains(".sheet(item: localAppCreateConfirmationItem)"))
+        XCTAssertTrue(source.contains("LocalAppCreateConfirmationSheet(store: localAppsStore, prompt: prompt)"))
+        XCTAssertTrue(source.contains(".sheet(item: localAppMcpProposalApprovalItem)"))
+        XCTAssertTrue(source.contains("LocalAppMcpProposalApprovalSheet(store: localAppsStore, prompt: prompt)"))
+        XCTAssertTrue(source.contains("localAppsStore.pendingCreateConfirmation == nil"))
+    }
+
+    func testApprovalSheetsStayScrollableAndDetentedForLargeTextAndKeyboard() throws {
+        let source = try clientSource("Sources/LocalApps/LocalAppApprovalSheets.swift")
+
+        XCTAssertTrue(source.contains("NavigationStack"))
+        XCTAssertTrue(source.contains("ScrollView"))
+        XCTAssertTrue(source.contains(".presentationDetents([.medium, .large])"))
+        XCTAssertTrue(source.contains(".interactiveDismissDisabled()"))
+        XCTAssertTrue(source.contains("accessibilityIdentifier(\"local-apps.create-confirm."))
+        XCTAssertTrue(source.contains("accessibilityIdentifier(\"local-apps.mcp-proposal."))
+    }
+
+    func testMcpPagesKeepsGenericEditorAlongsideManagedLocalAppRestrictions() throws {
+        let source = try clientSource("Sources/Settings/MCPPages.swift")
+
+        XCTAssertTrue(source.contains("struct MCPListPage"))
+        XCTAssertTrue(source.contains("struct MCPEditPage"))
+        XCTAssertTrue(source.contains("struct ManagedLocalAppMCPEditPage"))
+        XCTAssertTrue(source.contains("allowsMcpConfigurationEditing"))
+        XCTAssertTrue(source.contains("managedServerRow(server:"))
     }
 
     func testSnapshotWriteFailsClosedWhenAppGroupIsMissing() {

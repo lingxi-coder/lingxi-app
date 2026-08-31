@@ -127,29 +127,7 @@ impl MsgQueueMidTurnInput {
 #[async_trait]
 impl orchestrator::prompt::mid_turn_input::MidTurnInputSource for MsgQueueMidTurnInput {
     async fn take_mid_turn_input(&self) -> Option<String> {
-        // Snapshot the highest-priority main-thread, non-slash prompts for
-        // mid-turn injection, preserving priority+FIFO order. SCOPE TO `Next`
-        // ONLY: a `Now`-priority command must NOT be consumed here — it has
-        // already aborted the in-flight turn (via the queue's now-abort hook
-        // firing the registered cancel token) and must remain in the queue so
-        // the between-turn drain runs it as its own interrupting turn. The
-        // `Next` threshold already excludes `Later`; the equality predicate
-        // additionally excludes `Now` (since `Later < Next < Now`).
-        let batch = self
-            .queue
-            .get_by_max_priority(msgqueue::QueuePriority::Next, |c| {
-                c.is_main_thread()
-                    && !c.is_slash_command()
-                    && c.priority == msgqueue::QueuePriority::Next
-            })
-            .await;
-        let (joined, consumed) = msgqueue::join_prompt_values(&batch)?;
-        // Consume-once: 2.1.245 `messageQueue.consume` so the between-turn
-        // drain never re-runs the folded commands.
-        self.queue
-            .consume(&consumed, "drained mid-turn into running turn")
-            .await;
-        Some(joined)
+        self.queue.take_mid_turn_prompt().await
     }
 }
 

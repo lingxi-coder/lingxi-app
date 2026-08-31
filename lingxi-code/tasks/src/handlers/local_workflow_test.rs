@@ -18,6 +18,27 @@ use traits::{BudgetError, SubagentUsage};
 
 static ENV_LOCK: StdMutex<()> = StdMutex::new(());
 
+#[tokio::test]
+async fn nested_name_resolves_plugin_snapshot_after_saved_miss() {
+    let fs: Arc<dyn FileSystem> = Arc::new(InMemoryFs::new());
+    let registry = workflow::PluginWorkflowRegistry::new();
+    let script_dir = tempdir().unwrap();
+    let script_path = script_dir.path().join("nested.js");
+    let script =
+        "export const meta = { name: 'nested', description: 'nested plugin' };\nreturn 7;\n";
+    std::fs::write(&script_path, script).expect("seed plugin script");
+    registry.register(vec![workflow::PluginWorkflowEntry {
+        name: "acme:nested".to_string(),
+        script_path,
+    }]);
+
+    let resolved =
+        resolve_nested_script(&json!({"name": "acme:nested"}), Some(&fs), Some(&registry))
+            .await
+            .expect("nested plugin workflow");
+    assert_eq!(resolved, script);
+}
+
 #[test]
 fn terminal_metrics_distinguish_done_error_skipped_and_empty_results() {
     assert!(workflow_result_value_is_empty(&json!("")));
@@ -84,18 +105,45 @@ fn local_app_workflow_lease_root_is_derived_from_the_requested_app() {
 }
 
 /// The lease is what stops a build from borrowing the session cwd or another
-/// app's workspace. A canvas build needs it for the same reason a routed build
-/// does, and keying the branch on `"local-app-build"` alone left canvas builds
-/// running with NO lease at all.
+/// app's workspace. `requires_workspace_lease` now reads a task's typed
+/// `LocalAppWorkflowTaskScope` (design §18 Phase -1 step 8 / §8.1) instead of
+/// a `workflow_id` name check, so a `Build`-purpose scope requires the lease
+/// regardless of which app it names, and any other purpose never does.
 #[test]
-fn both_local_app_build_workflows_require_a_workspace_lease() {
-    assert!(requires_workspace_lease("local-app-build"));
+fn only_a_build_purpose_scope_requires_a_workspace_lease() {
+    let build = crate::scope::LocalAppWorkflowTaskScope::for_build("app-a").expect("valid");
+    let canvas_build =
+        crate::scope::LocalAppWorkflowTaskScope::for_build("canvas-app").expect("valid");
     assert!(
-        requires_workspace_lease("local-canvas-build"),
+        requires_workspace_lease(Some(&build)),
+        "a Build scope always requires the lease, whatever app it names"
+    );
+    assert!(
+        requires_workspace_lease(Some(&canvas_build)),
         "the drawn-surface build writes the same workspace and needs the same lease"
     );
-    assert!(!requires_workspace_lease("some-other-workflow"));
-    assert!(!requires_workspace_lease(""));
+
+    let use_test = crate::scope::LocalAppWorkflowTaskScope::for_use_test("app-a").expect("valid");
+    let mcp = crate::scope::LocalAppWorkflowTaskScope::for_mcp_authoring("app-a").expect("valid");
+    assert!(!requires_workspace_lease(Some(&use_test)));
+    assert!(!requires_workspace_lease(Some(&mcp)));
+}
+
+/// §8.1 / hazard (d): a custom workflow that merely reuses a real build
+/// workflow's `workflow_id` string carries no authority any more -- there is
+/// no `workflow_id` parameter for it to reuse in the first place.
+/// `requires_workspace_lease` takes only `Option<&LocalAppWorkflowTaskScope>`,
+/// and a `None` -- which is what every workflow gets today, since nothing
+/// yet threads a Host-minted scope through `spawn()` (see
+/// `crate::state::LocalWorkflowTaskState::scope`'s doc comment) -- never
+/// requires the lease, independent of any name.
+#[test]
+fn a_same_named_custom_workflow_gets_no_workspace_lease() {
+    assert!(
+        !requires_workspace_lease(None),
+        "no scope at all must never grant the workspace lease, no matter what \
+         workflow_id/args a caller attached to the task"
+    );
 }
 
 // ---- Echo SubagentSpawner: `agent(p)` → "echo:p" (records prompts) ------
@@ -754,6 +802,7 @@ fn workflow_input(script: &str) -> TaskSpawnInput {
         creator_teammate_name: None,
         creator_team_name: None,
         creator_agent_id: None,
+        scope: None,
     }
 }
 
@@ -2189,6 +2238,7 @@ async fn workflow_transcript_root_stays_pinned_across_retarget() {
                 creator_teammate_name: None,
                 creator_team_name: None,
                 creator_agent_id: None,
+                scope: None,
             },
             make_ctx(fs),
         )
@@ -2243,6 +2293,7 @@ async fn workflow_transcript_dir_matches_child_transcript_location() {
                 creator_teammate_name: None,
                 creator_team_name: None,
                 creator_agent_id: None,
+                scope: None,
             },
             make_ctx(fs),
         )
@@ -2323,6 +2374,7 @@ async fn resume_replays_journaled_agent_results_without_respawning() {
         creator_teammate_name: None,
         creator_team_name: None,
         creator_agent_id: None,
+        scope: None,
     };
     let handle2 = h2.spawn(input2, make_ctx(fs.clone())).await.unwrap();
     assert_eq!(await_terminal(&sink2).await, TaskStatus::Completed);
@@ -2381,6 +2433,7 @@ async fn transcript_journal_appends_started_and_result_before_resume() {
                 creator_teammate_name: None,
                 creator_team_name: None,
                 creator_agent_id: None,
+                scope: None,
             },
             make_ctx(fs_trait.clone()),
         )
@@ -2429,6 +2482,7 @@ async fn transcript_journal_appends_started_and_result_before_resume() {
                 creator_teammate_name: None,
                 creator_team_name: None,
                 creator_agent_id: None,
+                scope: None,
             },
             make_ctx(fs_trait),
         )
@@ -2511,6 +2565,7 @@ async fn resume_with_a_changed_prefix_reruns_from_the_edit_onward() {
         creator_teammate_name: None,
         creator_team_name: None,
         creator_agent_id: None,
+        scope: None,
     };
     h2.spawn(input2, make_ctx(fs.clone())).await.unwrap();
     assert_eq!(await_terminal(&sink2).await, TaskStatus::Completed);

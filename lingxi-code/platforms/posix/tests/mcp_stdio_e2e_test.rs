@@ -101,11 +101,11 @@ async fn full_mcp_surface_roundtrips_over_stdio() {
         .expect("list_tools timed out")
         .expect("list_tools failed");
     assert_eq!(tools.len(), 1, "fixture exposes exactly one tool");
-    assert_eq!(tools[0].tool_name, "echo");
-    assert_eq!(tools[0].description, "Echo the provided text back.");
+    assert_eq!(tools[0].tool_name(), "echo");
+    assert_eq!(tools[0].description(), "Echo the provided text back.");
     assert_eq!(
         tools[0]
-            .input_schema
+            .input_schema()
             .pointer("/type")
             .and_then(|v| v.as_str()),
         Some("object"),

@@ -108,6 +108,24 @@ const INITIAL_BACKOFF: Duration = Duration::from_millis(1000);
 /// Ceiling on reconnect backoff (claude-code `MAX_BACKOFF_MS = 30000`).
 const MAX_BACKOFF: Duration = Duration::from_secs(30);
 
+/// Host-owned, provider-neutral guard used by asynchronous reconciliation.
+///
+/// The callback is intentionally synchronous: registry operations invoke it
+/// only after acquiring the per-server lifecycle lock, immediately before a
+/// state mutation. This lets a host invalidate an in-flight operation without
+/// exposing registry internals or retaining a transport handle.
+pub type McpOperationGuard = dyn Fn() -> bool + Send + Sync;
+
+const OPERATION_GUARD_REJECTED: &str = "MCP operation superseded";
+
+fn operation_guard_rejected() -> McpError {
+    McpError::Internal(OPERATION_GUARD_REJECTED.to_string())
+}
+
+fn is_operation_guard_rejected(error: &McpError) -> bool {
+    matches!(error, McpError::Internal(message) if message == OPERATION_GUARD_REJECTED)
+}
+
 /// MCP server catalog affected by an inbound `notifications/*/list_changed`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum McpCatalogKind {
@@ -134,9 +152,211 @@ pub struct McpCatalogChanged {
     pub kind: McpCatalogKind,
 }
 
+/// Scope for a Local App conversation-export connection. The scope is bound
+/// when the Host creates the connection; it is never taken from a tool input.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConversationExport {
+    /// Stable Local App identity.
+    pub app_id: String,
+    /// Digest of the tool surface last exposed to the conversation.
+    pub listed_tool_surface_sha256: String,
+}
+
+impl ConversationExport {
+    /// Validate the schema-v3 App ID and the connection's last-listed surface.
+    pub fn new(
+        app_id: impl Into<String>,
+        listed_tool_surface_sha256: impl Into<String>,
+    ) -> Result<Self, McpError> {
+        let app_id = app_id.into();
+        let digest = listed_tool_surface_sha256.into();
+        if !is_local_app_id(&app_id) {
+            return Err(McpError::Internal("invalid Local App identity".into()));
+        }
+        if !is_sha256(&digest) {
+            return Err(McpError::Internal(
+                "invalid Local App tool surface identity".into(),
+            ));
+        }
+        Ok(Self {
+            app_id,
+            listed_tool_surface_sha256: digest,
+        })
+    }
+
+    /// Logical MCP server name for this app.
+    #[must_use]
+    pub fn server_name(&self) -> String {
+        format!("local_app_{}", self.app_id)
+    }
+
+    /// Registry key for this logical server.
+    #[must_use]
+    pub fn registry_key(&self) -> String {
+        format!("local_apps:conversation-export:{}", self.app_id)
+    }
+
+    /// Build the transport registry key for one conversation-scoped export.
+    pub fn scoped_registry_key(&self, conversation_id: &str) -> Result<String, McpError> {
+        if !is_conversation_scope_id(conversation_id) {
+            return Err(McpError::Internal(
+                "invalid Local App conversation scope".into(),
+            ));
+        }
+        Ok(format!(
+            "local_apps:conversation-export:{conversation_id}:{}:{}",
+            self.app_id, self.listed_tool_surface_sha256
+        ))
+    }
+
+    /// Parse a conversation-scoped Local App transport registry key.
+    pub fn parse_scoped_registry_key(
+        key: &str,
+    ) -> Result<Option<(String, ConversationExport)>, McpError> {
+        let Some(rest) = key.strip_prefix("local_apps:conversation-export:") else {
+            return Ok(None);
+        };
+        let mut parts = rest.splitn(3, ':');
+        let (Some(conversation_id), Some(app_id), Some(surface)) =
+            (parts.next(), parts.next(), parts.next())
+        else {
+            return Ok(None);
+        };
+        if !is_conversation_scope_id(conversation_id) {
+            return Err(McpError::Internal(
+                "invalid Local App conversation scope".into(),
+            ));
+        }
+        Ok(Some((
+            conversation_id.to_string(),
+            Self::new(app_id.to_string(), surface.to_string())?,
+        )))
+    }
+
+    /// Stable wire identity shared by every logical Local App server.
+    #[must_use]
+    pub const fn server_info_name(&self) -> &'static str {
+        "lingxi-local-app"
+    }
+
+    /// Build and validate one model-facing tool name.
+    pub fn tool_full_name(&self, tool_name: &str) -> Result<String, McpError> {
+        if tool_name.is_empty()
+            || tool_name.len() > 64
+            || !tool_name.bytes().enumerate().all(|(index, byte)| {
+                byte.is_ascii_lowercase() || byte.is_ascii_digit() || (byte == b'_' && index > 0)
+            })
+            || tool_name.starts_with('_')
+            || tool_name.ends_with('_')
+            || tool_name.contains("__")
+        {
+            return Err(McpError::ToolNotFound(tool_name.into()));
+        }
+        Ok(format!("mcp__{}__{}", self.server_name(), tool_name))
+    }
+}
+
+fn is_local_app_id(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    !bytes.is_empty()
+        && bytes.len() <= 54
+        && (bytes[0].is_ascii_lowercase() || bytes[0].is_ascii_digit())
+        && bytes[1..]
+            .iter()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || *byte == b'-')
+}
+
+fn is_sha256(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+}
+
+fn is_conversation_scope_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+}
+
+/// Host-managed logical Local App server metadata.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ManagedLocalAppServer {
+    /// Conversation-export scope.
+    pub scope: ConversationExport,
+    /// Digest of the currently active catalog.
+    pub catalog_sha256: String,
+    /// Generation of the exposed tool surface.
+    pub surface_generation: u64,
+}
+
+/// One lazily exposed Local App in a conversation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocalAppExposure {
+    /// Stable Local App identity.
+    pub app_id: String,
+    /// Whether the conversation has explicitly pinned the app.
+    pub pinned: bool,
+    /// Number of calls currently in flight.
+    pub in_flight: usize,
+    /// Monotonic recency sequence.
+    pub last_used: u64,
+    /// Generation of the exposure metadata.
+    pub exposure_generation: u64,
+}
+
+#[derive(Debug, Default)]
+struct ConversationExposureState {
+    entries: HashMap<String, LocalAppExposure>,
+    next_sequence: u64,
+    next_generation: u64,
+}
+
+const LOCAL_APP_MAX_EXPOSED: usize = 8;
+const LOCAL_APP_MAX_IN_FLIGHT_PER_APP: usize = 4;
+const LOCAL_APP_MAX_IN_FLIGHT_PER_CONVERSATION: usize = 8;
+
 struct RegisteredClient {
     connection_id: Option<McpConnectionId>,
     client: Arc<McpClient>,
+}
+
+/// Immutable identity of the grant that supplied a live connection's bearer.
+/// The value is a provider-neutral hash of the MCP refresh grant, never the
+/// access/refresh secret itself. `verify_current` is false for static bearer
+/// and non-OAuth connections, where secure storage cannot prove provenance.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct GrantProvenance {
+    fingerprint: String,
+    verify_current: bool,
+}
+
+impl GrantProvenance {
+    fn unbound() -> Self {
+        Self {
+            fingerprint: crate::discovery_cache::fingerprint("grant:none"),
+            verify_current: false,
+        }
+    }
+
+    fn from_grant_token(grant_token: &str, verify_current: bool) -> Self {
+        Self {
+            fingerprint: crate::discovery_cache::fingerprint(grant_token),
+            verify_current,
+        }
+    }
+
+    fn from_tokens(tokens: &oauth::Tokens) -> Option<Self> {
+        let refresh_token = tokens
+            .refresh_token
+            .as_ref()
+            .map(|token| token.expose_secret())
+            .filter(|token| !token.is_empty())?;
+        let grant_token = oauth::discovery_cache_refresh_grant_token(refresh_token);
+        Some(Self::from_grant_token(&grant_token, true))
+    }
 }
 
 #[derive(Clone)]
@@ -245,6 +465,9 @@ struct LiveDiscovery {
     connection_id: McpConnectionId,
     /// Immutable resolver result used for this entire connect attempt.
     negotiation_mode: crate::protocol_negotiation::NegotiationMode,
+    /// Immutable grant identity captured alongside the successful connect
+    /// spec; write-through revalidates it before persisting any catalog.
+    grant_provenance: Option<GrantProvenance>,
     negotiated: traits::McpNegotiatedProtocol,
     capabilities: ServerCapabilitiesDto,
     tools: Vec<traits::McpToolDto>,
@@ -310,6 +533,11 @@ pub struct McpRegistry {
     /// `Disconnected` entries read from `.mcp.json` before the engine
     /// connects, and so engine-side tests can seed states directly.
     pub connections: Arc<RwLock<HashMap<String, McpConnectionState>>>,
+    /// Host-managed Local App logical servers. This is metadata only; all
+    /// entries share the registry's physical transport substrate.
+    managed_local_apps: Arc<RwLock<HashMap<String, ManagedLocalAppServer>>>,
+    /// Per-conversation bounded, lazy Local App exposure state.
+    local_app_exposures: Arc<RwLock<HashMap<String, ConversationExposureState>>>,
     /// Synchronous mirror of claude-code 2.1.238's `eZf()`
     /// (`bdl(b7e()??[]).length>0`, `cc-238.js @229641619`) — "at least one MCP
     /// client is `type === "pending"`".
@@ -518,6 +746,8 @@ impl McpRegistry {
     fn clone_for_background(&self) -> Self {
         Self {
             connections: Arc::clone(&self.connections),
+            managed_local_apps: Arc::clone(&self.managed_local_apps),
+            local_app_exposures: Arc::clone(&self.local_app_exposures),
             pending_servers: Arc::clone(&self.pending_servers),
             lifecycle_locks: Arc::clone(&self.lifecycle_locks),
             xaa_refresh_locks: Arc::clone(&self.xaa_refresh_locks),
@@ -554,6 +784,8 @@ impl McpRegistry {
         let (catalog_changes, _unused_rx) = broadcast::channel(64);
         Self {
             connections: Arc::new(RwLock::new(HashMap::new())),
+            managed_local_apps: Arc::new(RwLock::new(HashMap::new())),
+            local_app_exposures: Arc::new(RwLock::new(HashMap::new())),
             pending_servers: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             lifecycle_locks: Arc::new(StdMutex::new(HashMap::new())),
             xaa_refresh_locks: Arc::new(StdMutex::new(HashMap::new())),
@@ -670,6 +902,280 @@ impl McpRegistry {
     #[must_use]
     pub fn subscribe_catalog_changes(&self) -> broadcast::Receiver<McpCatalogChanged> {
         self.catalog_changes.subscribe()
+    }
+
+    /// Register or refresh one published Local App logical server. Only a
+    /// changed tool surface advances the logical generation and emits the
+    /// shared tools/list_changed notification; build/execution-only changes
+    /// update the catalog pointer without invalidating connections.
+    pub async fn register_managed_local_app(
+        &self,
+        scope: ConversationExport,
+        catalog_sha256: String,
+        _surface_changed: bool,
+    ) -> Result<ManagedLocalAppServer, McpError> {
+        if !is_sha256(&catalog_sha256) {
+            return Err(McpError::Internal(
+                "invalid Local App catalog identity".into(),
+            ));
+        }
+        let mut apps = self.managed_local_apps.write().await;
+        // The catalog commit is the authority for whether the exposed tool
+        // surface changed. Do not trust a caller-supplied boolean: a stale or
+        // forged hint must not produce duplicate listChanged notifications,
+        // nor suppress one when a new surface is actually committed.
+        let actual_surface_changed = apps.get(&scope.app_id).is_none_or(|server| {
+            server.scope.listed_tool_surface_sha256 != scope.listed_tool_surface_sha256
+        });
+        let generation = apps
+            .get(&scope.app_id)
+            .map(|server| server.surface_generation + u64::from(actual_surface_changed))
+            .unwrap_or(1);
+        let server = ManagedLocalAppServer {
+            scope: scope.clone(),
+            catalog_sha256,
+            surface_generation: generation,
+        };
+        apps.insert(scope.app_id.clone(), server.clone());
+        drop(apps);
+        if actual_surface_changed {
+            let _ = self.catalog_changes.send(McpCatalogChanged {
+                server_name: scope.server_name(),
+                connection_id: McpConnectionId::new(),
+                retired_connection_id: None,
+                kind: McpCatalogKind::Tools,
+            });
+        }
+        Ok(server)
+    }
+
+    /// Remove a published Local App logical server after Host has stopped new
+    /// calls. The notification tells consumers to evict its exposed tools.
+    pub async fn unregister_managed_local_app(&self, app_id: &str) -> Result<bool, McpError> {
+        if !is_local_app_id(app_id) {
+            return Err(McpError::Internal("invalid Local App identity".into()));
+        }
+        let removed = self.managed_local_apps.write().await.remove(app_id);
+        if removed.is_some() {
+            // A deleted app can no longer be selected or called. Remove its
+            // logical exposure from every conversation in the same commit
+            // boundary; no stale FQN survives deletion.
+            let mut conversations = self.local_app_exposures.write().await;
+            for state in conversations.values_mut() {
+                if state.entries.remove(app_id).is_some() {
+                    state.next_generation = state.next_generation.saturating_add(1);
+                }
+            }
+            let _ = self.catalog_changes.send(McpCatalogChanged {
+                server_name: format!("local_app_{app_id}"),
+                connection_id: McpConnectionId::new(),
+                retired_connection_id: None,
+                kind: McpCatalogKind::Tools,
+            });
+        }
+        Ok(removed.is_some())
+    }
+
+    /// Lightweight logical-server count; all entries continue to use this
+    /// registry's one physical transport substrate.
+    pub async fn managed_local_app_count(&self) -> usize {
+        self.managed_local_apps.read().await.len()
+    }
+
+    /// There is exactly one physical transport owned by this registry.
+    #[must_use]
+    pub fn physical_transport_count(&self) -> usize {
+        1
+    }
+
+    pub async fn managed_local_app(&self, app_id: &str) -> Option<ManagedLocalAppServer> {
+        self.managed_local_apps.read().await.get(app_id).cloned()
+    }
+
+    /// Expose a published Local App in one conversation. Exposure is lazy and
+    /// bounded: at most eight logical apps are retained, with unpinned,
+    /// idle least-recently-used entries evicted first. A pinned entry is the
+    /// only hard pin; merely listing or calling an app keeps it recent but
+    /// does not make it ineligible for eviction.
+    pub async fn expose_managed_local_app(
+        &self,
+        conversation_id: &str,
+        app_id: &str,
+        pin: bool,
+    ) -> Result<LocalAppExposure, McpError> {
+        if conversation_id.is_empty() || !is_local_app_id(app_id) {
+            return Err(McpError::Internal(
+                "invalid Local App exposure scope".into(),
+            ));
+        }
+        if self.managed_local_app(app_id).await.is_none() {
+            return Err(McpError::ToolNotFound(app_id.into()));
+        }
+
+        let mut conversations = self.local_app_exposures.write().await;
+        let state = conversations
+            .entry(conversation_id.to_string())
+            .or_default();
+        state.next_sequence = state.next_sequence.saturating_add(1);
+        if let Some(entry) = state.entries.get_mut(app_id) {
+            entry.last_used = state.next_sequence;
+            if pin && !entry.pinned {
+                state.next_generation = state.next_generation.saturating_add(1);
+                entry.pinned = true;
+                entry.exposure_generation = state.next_generation;
+            }
+            return Ok(entry.clone());
+        }
+
+        if state.entries.len() >= LOCAL_APP_MAX_EXPOSED {
+            let evict = state
+                .entries
+                .iter()
+                .filter(|(_, entry)| !entry.pinned && entry.in_flight == 0)
+                .min_by_key(|(_, entry)| entry.last_used)
+                .map(|(id, _)| id.clone());
+            let Some(evict) = evict else {
+                let mut pinned: Vec<&str> = state
+                    .entries
+                    .values()
+                    .filter(|entry| entry.pinned)
+                    .map(|entry| entry.app_id.as_str())
+                    .collect();
+                pinned.sort_unstable();
+                return Err(McpError::Internal(format!(
+                    "exposure_capacity_reached: pinned apps [{}]",
+                    pinned.join(",")
+                )));
+            };
+            state.entries.remove(&evict);
+        }
+
+        state.next_generation = state.next_generation.saturating_add(1);
+        let entry = LocalAppExposure {
+            app_id: app_id.to_string(),
+            pinned: pin,
+            in_flight: 0,
+            last_used: state.next_sequence,
+            exposure_generation: state.next_generation,
+        };
+        state.entries.insert(app_id.to_string(), entry.clone());
+        Ok(entry)
+    }
+
+    /// Mark an already exposed app as recently used without hard-pinning it.
+    pub async fn touch_local_app_exposure(
+        &self,
+        conversation_id: &str,
+        app_id: &str,
+    ) -> Result<LocalAppExposure, McpError> {
+        if conversation_id.is_empty() || !is_local_app_id(app_id) {
+            return Err(McpError::Internal(
+                "invalid Local App exposure scope".into(),
+            ));
+        }
+        let mut conversations = self.local_app_exposures.write().await;
+        let state = conversations
+            .get_mut(conversation_id)
+            .ok_or_else(|| McpError::ToolNotFound(app_id.into()))?;
+        state.next_sequence = state.next_sequence.saturating_add(1);
+        let entry = state
+            .entries
+            .get_mut(app_id)
+            .ok_or_else(|| McpError::ToolNotFound(app_id.into()))?;
+        entry.last_used = state.next_sequence;
+        Ok(entry.clone())
+    }
+
+    /// Change the hard-pin bit for one exposed app. Pin state is explicit and
+    /// therefore advances the exposure generation independently of catalog or
+    /// authoring revisions.
+    pub async fn pin_local_app_exposure(
+        &self,
+        conversation_id: &str,
+        app_id: &str,
+        pinned: bool,
+    ) -> Result<LocalAppExposure, McpError> {
+        if conversation_id.is_empty() || !is_local_app_id(app_id) {
+            return Err(McpError::Internal(
+                "invalid Local App exposure scope".into(),
+            ));
+        }
+        let mut conversations = self.local_app_exposures.write().await;
+        let state = conversations
+            .get_mut(conversation_id)
+            .ok_or_else(|| McpError::ToolNotFound(app_id.into()))?;
+        let changed = state
+            .entries
+            .get(app_id)
+            .map(|entry| entry.pinned != pinned)
+            .ok_or_else(|| McpError::ToolNotFound(app_id.into()))?;
+        if changed {
+            state.next_generation = state.next_generation.saturating_add(1);
+        }
+        let entry = state.entries.get_mut(app_id).expect("checked above");
+        if changed {
+            entry.exposure_generation = state.next_generation;
+        }
+        entry.pinned = pinned;
+        Ok(entry.clone())
+    }
+
+    /// Begin one call through an exposed app. The registry rejects calls
+    /// instead of queueing them without bound; callers must release the lease
+    /// with [`Self::end_local_app_call`] on completion/cancellation.
+    pub async fn begin_local_app_call(
+        &self,
+        conversation_id: &str,
+        app_id: &str,
+    ) -> Result<LocalAppExposure, McpError> {
+        if conversation_id.is_empty() || !is_local_app_id(app_id) {
+            return Err(McpError::Internal(
+                "invalid Local App exposure scope".into(),
+            ));
+        }
+        let mut conversations = self.local_app_exposures.write().await;
+        let state = conversations
+            .get_mut(conversation_id)
+            .ok_or_else(|| McpError::ToolNotFound(app_id.into()))?;
+        let total_in_flight: usize = state.entries.values().map(|entry| entry.in_flight).sum();
+        let entry = state
+            .entries
+            .get_mut(app_id)
+            .ok_or_else(|| McpError::ToolNotFound(app_id.into()))?;
+        if entry.in_flight >= LOCAL_APP_MAX_IN_FLIGHT_PER_APP
+            || total_in_flight >= LOCAL_APP_MAX_IN_FLIGHT_PER_CONVERSATION
+        {
+            return Err(McpError::Internal(
+                "rate_limited: retry after 1000ms".into(),
+            ));
+        }
+        entry.in_flight += 1;
+        state.next_sequence = state.next_sequence.saturating_add(1);
+        entry.last_used = state.next_sequence;
+        Ok(entry.clone())
+    }
+
+    /// Release a call lease. Releasing an unknown lease is intentionally
+    /// idempotent so timeout/cancel cleanup cannot turn into a second error.
+    pub async fn end_local_app_call(&self, conversation_id: &str, app_id: &str) {
+        let mut conversations = self.local_app_exposures.write().await;
+        if let Some(state) = conversations.get_mut(conversation_id) {
+            if let Some(entry) = state.entries.get_mut(app_id) {
+                entry.in_flight = entry.in_flight.saturating_sub(1);
+            }
+        }
+    }
+
+    /// Snapshot the logical exposure metadata for one conversation in recency
+    /// order. Tool DTOs are intentionally not part of this API.
+    pub async fn local_app_exposures(&self, conversation_id: &str) -> Vec<LocalAppExposure> {
+        let conversations = self.local_app_exposures.read().await;
+        let Some(state) = conversations.get(conversation_id) else {
+            return Vec::new();
+        };
+        let mut entries: Vec<LocalAppExposure> = state.entries.values().cloned().collect();
+        entries.sort_by_key(|entry| std::cmp::Reverse(entry.last_used));
+        entries
     }
 
     /// Return one refresh request for every catalog currently advertised by
@@ -1412,6 +1918,135 @@ impl McpRegistry {
         self.connect_locked(config, None).await
     }
 
+    /// Connect a server only while a host-owned reconciliation generation is
+    /// current. The guard is checked after the server lifecycle lock is
+    /// acquired and again immediately before cache/live state publication.
+    /// `None` means that the operation was superseded, or that another config
+    /// is already installed for this name; in either case the registry is
+    /// left untouched.
+    pub async fn connect_if_current(
+        &self,
+        config: McpServerConfig,
+        guard: Arc<McpOperationGuard>,
+    ) -> Result<Option<McpConnectionId>, McpError> {
+        self.freeze_configuration();
+        if is_unconfigured_remote(&config.spec) {
+            return Err(McpError::Connection(UNCONFIGURED_MESSAGE.to_string()));
+        }
+        let key = config.name.clone();
+        let lifecycle = self.lifecycle_lock(&key);
+        let _guard = lifecycle.lock().await;
+        if !guard() {
+            return Ok(None);
+        }
+        if config.disabled {
+            let mut connections = self.connections.write().await;
+            if !guard() {
+                return Ok(None);
+            }
+            match connections.get(&key) {
+                Some(McpConnectionState::Connected { .. })
+                | Some(McpConnectionState::Cached { .. })
+                | Some(McpConnectionState::HealthChecking { .. })
+                | Some(McpConnectionState::Connecting { .. })
+                | Some(McpConnectionState::AwaitingOAuth { .. })
+                | Some(McpConnectionState::Reconnecting { .. }) => {}
+                _ => {
+                    connections.insert(
+                        key.clone(),
+                        McpConnectionState::Disconnected {
+                            config,
+                            last_error: None,
+                        },
+                    );
+                }
+            }
+            return Ok(None);
+        }
+        {
+            let conns = self.connections.read().await;
+            match conns.get(&key) {
+                Some(McpConnectionState::Connected {
+                    connection_id,
+                    config: current,
+                    ..
+                })
+                | Some(McpConnectionState::Cached {
+                    connection_id,
+                    config: current,
+                    ..
+                }) => {
+                    return Ok(
+                        Self::same_config_snapshot(current, &config).then_some(*connection_id)
+                    );
+                }
+                _ => {}
+            }
+        }
+
+        self.kick_pending_transport_cleanups().await;
+        let result = self
+            .connect_locked_inner_with_guard(config.clone(), None, Some(&*guard))
+            .await;
+        match result {
+            Ok(connection_id) => Ok(Some(connection_id)),
+            Err(error) if is_operation_guard_rejected(&error) => {
+                // A live discovery can become stale after the Connecting
+                // marker is published but before its result is installed.
+                // Retire that marker through the normal lifecycle cleanup so
+                // clients, lazy slots, catalog partitions, and cache family
+                // state cannot be stranded behind an expired generation.
+                self.cleanup_owned_pending_state(&key, &config).await?;
+                Ok(None)
+            }
+            Err(error) => {
+                if !guard() {
+                    // The operation failed after a newer reload invalidated
+                    // this generation. Never publish its stale failure state;
+                    // only retire a Connecting marker that still carries this
+                    // operation's exact config through normal registry cleanup.
+                    let _ = self.cleanup_owned_pending_state(&key, &config).await;
+                    return Ok(None);
+                }
+                let mut connections = self.connections.write().await;
+                if !guard() {
+                    drop(connections);
+                    let _ = self.cleanup_owned_pending_state(&key, &config).await;
+                    return Ok(None);
+                }
+                connections.insert(
+                    key.clone(),
+                    McpConnectionState::Disconnected {
+                        config,
+                        last_error: Some(error.to_string()),
+                    },
+                );
+                drop(connections);
+                self.clear_prompt_predecessors_for_key(&key).await;
+                Err(error)
+            }
+        }
+    }
+
+    async fn cleanup_owned_pending_state(
+        &self,
+        key: &str,
+        expected_config: &McpServerConfig,
+    ) -> Result<(), McpError> {
+        let own_connecting_state = self.connections.read().await.get(key).is_some_and(|state| {
+            matches!(
+                state,
+                McpConnectionState::Connecting { config: current, .. }
+                    | McpConnectionState::AwaitingOAuth { config: current, .. }
+                    if Self::same_config_snapshot(current, expected_config)
+            )
+        });
+        if own_connecting_state {
+            self.disconnect_locked_inner(key, false, true).await?;
+        }
+        Ok(())
+    }
+
     /// §24b: connect a per-SUBAGENT inline `mcpServers` entry (claude `Agr`'s
     /// `connectToServer(name, config, ...)`, invoked once per subagent
     /// spawn). Registers the connection under a table key namespaced by
@@ -1510,8 +2145,21 @@ impl McpRegistry {
         config: McpServerConfig,
         table_key: Option<String>,
     ) -> Result<McpConnectionId, McpError> {
+        self.connect_locked_inner_with_guard(config, table_key, None)
+            .await
+    }
+
+    async fn connect_locked_inner_with_guard(
+        &self,
+        config: McpServerConfig,
+        table_key: Option<String>,
+        operation_guard: Option<&McpOperationGuard>,
+    ) -> Result<McpConnectionId, McpError> {
         let key = table_key.clone().unwrap_or_else(|| config.name.clone());
         Self::validate_connectable_config(&config)?;
+        if operation_guard.is_some_and(|guard| !guard()) {
+            return Err(operation_guard_rejected());
+        }
         {
             let conns = self.connections.read().await;
             match conns.get(&key) {
@@ -1542,8 +2190,15 @@ impl McpRegistry {
             match decision {
                 crate::discovery_cache::Decision::Fresh { entry, age_ms } => {
                     return Ok(self
-                        .serve_discovery_cache_hit(&config, &key, entry, age_ms, true)
-                        .await);
+                        .serve_discovery_cache_hit(
+                            &config,
+                            &key,
+                            entry,
+                            age_ms,
+                            true,
+                            operation_guard,
+                        )
+                        .await?);
                 }
                 crate::discovery_cache::Decision::Stale { entry, age_ms } => {
                     let entry_era = entry
@@ -1551,8 +2206,15 @@ impl McpRegistry {
                         .clone()
                         .unwrap_or_else(|| "legacy".into());
                     let connection_id = self
-                        .serve_discovery_cache_hit(&config, &key, entry, age_ms, false)
-                        .await;
+                        .serve_discovery_cache_hit(
+                            &config,
+                            &key,
+                            entry,
+                            age_ms,
+                            false,
+                            operation_guard,
+                        )
+                        .await?;
                     if let LazyUpgradePreparation::Wait(slot, true) = self
                         .prepare_lazy_upgrade_slot_locked(
                             &key,
@@ -1587,19 +2249,23 @@ impl McpRegistry {
             }
         }
 
-        self.connections.write().await.insert(
+        let mut connections = self.connections.write().await;
+        if operation_guard.is_some_and(|guard| !guard()) {
+            return Err(operation_guard_rejected());
+        }
+        connections.insert(
             key.clone(),
             McpConnectionState::Connecting {
                 config: config.clone(),
                 started_at: SystemTime::now(),
             },
         );
+        drop(connections);
         let discovery = self
             .discover_live_connection(&config, negotiation_mode)
             .await?;
-        Ok(self
-            .install_live_discovery(key, config, discovery, None)
-            .await)
+        self.install_live_discovery(key, config, discovery, None, operation_guard)
+            .await
     }
 
     fn validate_connectable_config(config: &McpServerConfig) -> Result<(), McpError> {
@@ -1790,11 +2456,27 @@ impl McpRegistry {
         discovery: &LiveDiscovery,
         retired_connection_id: Option<McpConnectionId>,
     ) {
+        let _ = self
+            .publish_connected_state_with_guard(key, config, discovery, retired_connection_id, None)
+            .await;
+    }
+
+    async fn publish_connected_state_with_guard(
+        &self,
+        key: &str,
+        config: &McpServerConfig,
+        discovery: &LiveDiscovery,
+        retired_connection_id: Option<McpConnectionId>,
+        operation_guard: Option<&McpOperationGuard>,
+    ) -> Result<(), McpError> {
         let mut conns = self.connections.write().await;
         #[cfg(test)]
         self.maybe_pause_before_client_publish().await;
         let mut clients = self.clients.write().await;
         let mut prompt_predecessors = self.prompt_predecessors.write().await;
+        if operation_guard.is_some_and(|guard| !guard()) {
+            return Err(operation_guard_rejected());
+        }
         conns.insert(
             key.to_string(),
             McpConnectionState::Connected {
@@ -1829,6 +2511,7 @@ impl McpRegistry {
                 },
             );
         }
+        Ok(())
     }
 
     async fn discover_live_connection(
@@ -1854,11 +2537,16 @@ impl McpRegistry {
             )
             .await?;
         resolved_config.spec = helper_spec;
-        let (connect_spec, oauth_key) = if has_user_auth_header || helper_minted_authorization {
-            (resolved_config.spec.clone(), None)
-        } else {
-            self.resolve_oauth_spec(&resolved_config).await?
-        };
+        let (connect_spec, oauth_key, mut grant_provenance) =
+            if has_user_auth_header || helper_minted_authorization {
+                (
+                    resolved_config.spec.clone(),
+                    None,
+                    Some(GrantProvenance::unbound()),
+                )
+            } else {
+                self.resolve_oauth_spec(&resolved_config).await?
+            };
 
         tracing::debug!(
             server = %config.name,
@@ -1875,13 +2563,14 @@ impl McpRegistry {
             Err(e) if oauth_key.is_some() => {
                 let resource_metadata_url = error_resource_metadata_url(&e);
                 if let Some(scope) = error_is_403_insufficient_scope(&e) {
-                    let stepped = self
+                    let (stepped, stepped_grant) = self
                         .step_up_oauth_spec(
                             &resolved_config,
                             &scope,
                             resource_metadata_url.as_deref(),
                         )
                         .await?;
+                    grant_provenance = stepped_grant;
                     attempt(stepped).await.map_err(|e| {
                         crate::negotiation::classify_auth_failure(
                             e,
@@ -1890,9 +2579,10 @@ impl McpRegistry {
                         )
                     })?
                 } else if error_is_401(&e) {
-                    let refreshed = self
+                    let (refreshed, refreshed_grant) = self
                         .reauth_oauth_spec(&resolved_config, resource_metadata_url.as_deref())
                         .await?;
+                    grant_provenance = refreshed_grant;
                     attempt(refreshed).await.map_err(|e| {
                         crate::negotiation::classify_auth_failure(
                             e,
@@ -1946,9 +2636,13 @@ impl McpRegistry {
             )
             .is_none()
         {
-            self.discovery_cache_partition_for(config, negotiation_mode)
-                .await
-                .ok()
+            self.discovery_cache_partition_for_grant(
+                config,
+                negotiation_mode,
+                grant_provenance.as_ref(),
+            )
+            .await
+            .ok()
         } else {
             None
         };
@@ -2099,7 +2793,12 @@ impl McpRegistry {
                             self.hook_dispatcher.clone(),
                         )
                         .await
-                        .with_config_options(config.timeout_ms, config.always_load)
+                        .with_config_options(
+                            config.timeout_ms,
+                            config.always_load,
+                            config.tools.clone(),
+                            config.tool_permissions.clone(),
+                        )
                         .with_transport_kind(config.spec.transport_kind())
                         .with_negotiated_protocol(negotiated.clone())
                         .with_server_url(gate_url.clone()),
@@ -2118,6 +2817,7 @@ impl McpRegistry {
                 connection_id,
                 negotiated,
                 negotiation_mode,
+                grant_provenance,
                 capabilities: caps,
                 tools,
                 resources,
@@ -2218,7 +2918,8 @@ impl McpRegistry {
         config: McpServerConfig,
         discovery: LiveDiscovery,
         retired_connection_id: Option<McpConnectionId>,
-    ) -> McpConnectionId {
+        operation_guard: Option<&McpOperationGuard>,
+    ) -> Result<McpConnectionId, McpError> {
         let server_name = config.name.clone();
         let connection_id = discovery.connection_id;
         let shared_server = key == server_name;
@@ -2228,8 +2929,19 @@ impl McpRegistry {
         let resource_templates = discovery.resource_templates.clone();
         let prompts = discovery.prompts.clone();
         let listener_connection = discovery.listener_connection.clone();
-        self.publish_connected_state(&key, &config, &discovery, retired_connection_id)
-            .await;
+        if let Err(error) = self
+            .publish_connected_state_with_guard(
+                &key,
+                &config,
+                &discovery,
+                retired_connection_id,
+                operation_guard,
+            )
+            .await
+        {
+            self.discard_live_discovery(discovery).await;
+            return Err(error);
+        }
         self.persist_or_purge_discovery_cache(
             &config,
             discovery.discovery_cache_partition.as_ref(),
@@ -2239,6 +2951,7 @@ impl McpRegistry {
             &resource_templates,
             &prompts,
             discovery.negotiation_mode,
+            discovery.grant_provenance.as_ref(),
             Some(&discovery.negotiated),
         )
         .await;
@@ -2256,7 +2969,7 @@ impl McpRegistry {
             })
             .await;
         }
-        connection_id
+        Ok(connection_id)
     }
 
     async fn install_lazy_upgrade_live_discovery_if_current(
@@ -2305,11 +3018,17 @@ impl McpRegistry {
                             partition.negotiation_mode != slot.negotiation_mode
                                 || partition.expected_era != expected_era
                         }) || discovery.negotiation_mode != slot.negotiation_mode;
+                    let grant_changed = slot.refresh_partition.as_ref().is_some_and(|partition| {
+                        discovery
+                            .discovery_cache_partition
+                            .as_ref()
+                            .is_none_or(|live| live.partition_key != partition.partition_key)
+                    });
                     let era_changed = slot.mode == LazyUpgradeMode::Background
                         && slot.refresh_partition.is_some()
                         && slot.refresh_entry_era.as_deref().unwrap_or("legacy")
                             != negotiated_era_label(discovery.negotiated.era);
-                    if expected_changed || era_changed {
+                    if expected_changed || grant_changed || era_changed {
                         if let (Some(store), Some(partition)) =
                             (&self.discovery_cache_store, slot.refresh_partition.as_ref())
                         {
@@ -2350,6 +3069,7 @@ impl McpRegistry {
             &resource_templates,
             &prompts,
             slot.negotiation_mode,
+            discovery.grant_provenance.as_ref(),
             Some(&discovery.negotiated),
         )
         .await;
@@ -2581,46 +3301,71 @@ impl McpRegistry {
         config: &McpServerConfig,
         negotiation_mode: crate::protocol_negotiation::NegotiationMode,
     ) -> Result<DiscoveryCachePartition, crate::discovery_cache::MissReason> {
+        let grant_provenance = self.current_grant_provenance(config).await?;
+        self.discovery_cache_partition_for_grant(
+            config,
+            negotiation_mode,
+            grant_provenance.as_ref(),
+        )
+        .await
+    }
+
+    async fn discovery_cache_partition_for_grant(
+        &self,
+        config: &McpServerConfig,
+        negotiation_mode: crate::protocol_negotiation::NegotiationMode,
+        grant_provenance: Option<&GrantProvenance>,
+    ) -> Result<DiscoveryCachePartition, crate::discovery_cache::MissReason> {
         // Agent catalogs are safe to cache only when their stable source is
         // present.  A missing source fails closed rather than sharing an
         // agent-scoped catalog under the plain server name/spec.
         if config.scope == ConfigScope::Agent && config.metadata.agent_source.is_none() {
             return Err(crate::discovery_cache::MissReason::NoFingerprint);
         }
-        let logical_key = crate::discovery_cache::logical_cache_key(config);
-        let grant_token = match &config.spec {
-            McpTransportSpec::Sse { oauth, .. } | McpTransportSpec::Http { oauth, .. } => {
-                match &self.oauth {
-                    Some(deps) => {
-                        let server_key = oauth::server_key(&config.name, &config.spec);
-                        match oauth::discovery_cache_grant_token(&deps.storage, &server_key).await {
-                            Ok(Some(token)) => token,
-                            Ok(None) | Err(_) => {
-                                return Err(crate::discovery_cache::MissReason::NoFingerprint);
-                            }
-                        }
-                    }
-                    None if oauth.is_some() => {
-                        return Err(crate::discovery_cache::MissReason::NoFingerprint);
-                    }
-                    None => "grant:none".to_string(),
-                }
-            }
-            _ => "grant:none".to_string(),
+        let Some(grant_provenance) = grant_provenance else {
+            return Err(crate::discovery_cache::MissReason::NoFingerprint);
         };
-        let fingerprint = crate::discovery_cache::fingerprint(&grant_token);
+        let logical_key = crate::discovery_cache::logical_cache_key(config);
         let expected_era = match negotiation_mode {
             crate::protocol_negotiation::NegotiationMode::Auto { .. } => "modern",
             crate::protocol_negotiation::NegotiationMode::Legacy => "legacy",
         };
-        let partition_key =
-            crate::discovery_cache::partition_key_for_era(&logical_key, &fingerprint, expected_era);
+        let partition_key = crate::discovery_cache::partition_key_for_era(
+            &logical_key,
+            &grant_provenance.fingerprint,
+            expected_era,
+        );
         Ok(DiscoveryCachePartition {
             logical_key,
             partition_key,
             expected_era,
             negotiation_mode,
         })
+    }
+
+    async fn current_grant_provenance(
+        &self,
+        config: &McpServerConfig,
+    ) -> Result<Option<GrantProvenance>, crate::discovery_cache::MissReason> {
+        let has_oauth = matches!(
+            &config.spec,
+            McpTransportSpec::Sse { oauth: Some(_), .. }
+                | McpTransportSpec::Http { oauth: Some(_), .. }
+        );
+        if !has_oauth {
+            return Ok(Some(GrantProvenance::unbound()));
+        }
+        let Some(deps) = &self.oauth else {
+            return Ok(None);
+        };
+        let key = oauth::server_key(&config.name, &config.spec);
+        let grant_token = oauth::discovery_cache_grant_token(&deps.storage, &key)
+            .await
+            .map_err(|_| crate::discovery_cache::MissReason::NoFingerprint)?;
+        let Some(grant_token) = grant_token else {
+            return Ok(None);
+        };
+        Ok(Some(GrantProvenance::from_grant_token(&grant_token, true)))
     }
 
     async fn discovery_cache_secret_candidates_for(
@@ -2897,13 +3642,24 @@ impl McpRegistry {
         entry: crate::discovery_cache::DiscoveryCacheEntry,
         age_ms: u64,
         is_fresh: bool,
-    ) -> McpConnectionId {
+        operation_guard: Option<&McpOperationGuard>,
+    ) -> Result<McpConnectionId, McpError> {
+        if operation_guard.is_some_and(|guard| !guard()) {
+            return Err(operation_guard_rejected());
+        }
         let connection_id = McpConnectionId::new();
         let negotiated = negotiated_protocol_from_cache_entry(&entry);
         let invalidated_slot = self.invalidate_lazy_upgrade_slot(key).await;
         Self::finish_invalidated_lazy_upgrade_slot(invalidated_slot.as_ref());
+        if operation_guard.is_some_and(|guard| !guard()) {
+            return Err(operation_guard_rejected());
+        }
         self.clear_prompt_predecessors_for_key(key).await;
-        self.connections.write().await.insert(
+        let mut connections = self.connections.write().await;
+        if operation_guard.is_some_and(|guard| !guard()) {
+            return Err(operation_guard_rejected());
+        }
+        connections.insert(
             key.to_string(),
             McpConnectionState::Cached {
                 config: config.clone(),
@@ -2945,7 +3701,7 @@ impl McpRegistry {
             })
             .await;
         }
-        connection_id
+        Ok(connection_id)
     }
 
     /// §11 write-through: after a LIVE discovery round completes
@@ -2974,6 +3730,7 @@ impl McpRegistry {
         resource_templates: &[traits::McpResourceTemplateDto],
         prompts: &[traits::McpPromptDto],
         negotiation_mode: crate::protocol_negotiation::NegotiationMode,
+        grant_provenance: Option<&GrantProvenance>,
         negotiated: Option<&traits::McpNegotiatedProtocol>,
     ) {
         let Some(store) = &self.discovery_cache_store else {
@@ -2992,8 +3749,31 @@ impl McpRegistry {
                 let Some(captured_partition) = captured_partition else {
                     return;
                 };
+                let Some(captured_grant) = grant_provenance else {
+                    return;
+                };
+                let current_grant = if captured_grant.verify_current {
+                    let Ok(Some(current_grant)) = self.current_grant_provenance(config).await
+                    else {
+                        return;
+                    };
+                    current_grant
+                } else {
+                    captured_grant.clone()
+                };
+                if current_grant != *captured_grant {
+                    tracing::warn!(
+                        server = %config.name,
+                        "Discovery cache write-through skipped because the OAuth grant rotated during discovery"
+                    );
+                    return;
+                }
                 let Ok(partition) = self
-                    .discovery_cache_partition_for(config, negotiation_mode)
+                    .discovery_cache_partition_for_grant(
+                        config,
+                        negotiation_mode,
+                        Some(&current_grant),
+                    )
                     .await
                 else {
                     return;
@@ -3157,12 +3937,12 @@ impl McpRegistry {
     async fn resolve_oauth_spec(
         &self,
         config: &McpServerConfig,
-    ) -> Result<(McpTransportSpec, Option<String>), McpError> {
-        let Some(deps) = &self.oauth else {
-            return Ok((config.spec.clone(), None));
-        };
+    ) -> Result<(McpTransportSpec, Option<String>, Option<GrantProvenance>), McpError> {
         let Some(oauth_cfg) = spec_oauth(&config.spec) else {
-            return Ok((config.spec.clone(), None));
+            return Ok((config.spec.clone(), None, Some(GrantProvenance::unbound())));
+        };
+        let Some(deps) = &self.oauth else {
+            return Ok((config.spec.clone(), None, None));
         };
         let key = oauth::server_key(&config.name, &config.spec);
 
@@ -3175,6 +3955,7 @@ impl McpRegistry {
             return Ok((
                 inject_bearer(&config.spec, token.access_token.expose_secret()),
                 Some(key),
+                GrantProvenance::from_tokens(&token),
             ));
         }
 
@@ -3233,6 +4014,7 @@ impl McpRegistry {
         Ok((
             inject_bearer(&config.spec, token.access_token.expose_secret()),
             Some(key),
+            GrantProvenance::from_tokens(&token),
         ))
     }
 
@@ -3246,7 +4028,7 @@ impl McpRegistry {
         &self,
         config: &McpServerConfig,
         resource_metadata_url: Option<&str>,
-    ) -> Result<McpTransportSpec, McpError> {
+    ) -> Result<(McpTransportSpec, Option<GrantProvenance>), McpError> {
         let deps = self
             .oauth
             .as_ref()
@@ -3267,9 +4049,9 @@ impl McpRegistry {
             let token = self
                 .resolve_xaa_token_inner(config, &key, deps, true, resource_metadata_url)
                 .await?;
-            return Ok(inject_bearer(
-                &config.spec,
-                token.access_token.expose_secret(),
+            return Ok((
+                inject_bearer(&config.spec, token.access_token.expose_secret()),
+                GrantProvenance::from_tokens(&token),
             ));
         }
 
@@ -3332,9 +4114,9 @@ impl McpRegistry {
             }
         };
 
-        Ok(inject_bearer(
-            &config.spec,
-            token.access_token.expose_secret(),
+        Ok((
+            inject_bearer(&config.spec, token.access_token.expose_secret()),
+            GrantProvenance::from_tokens(&token),
         ))
     }
 
@@ -3352,7 +4134,7 @@ impl McpRegistry {
         config: &McpServerConfig,
         scope: &str,
         resource_metadata_url: Option<&str>,
-    ) -> Result<McpTransportSpec, McpError> {
+    ) -> Result<(McpTransportSpec, Option<GrantProvenance>), McpError> {
         let deps = self
             .oauth
             .as_ref()
@@ -3377,9 +4159,9 @@ impl McpRegistry {
             let token = self
                 .resolve_xaa_token_inner(config, &key, deps, true, resource_metadata_url)
                 .await?;
-            return Ok(inject_bearer(
-                &config.spec,
-                token.access_token.expose_secret(),
+            return Ok((
+                inject_bearer(&config.spec, token.access_token.expose_secret()),
+                GrantProvenance::from_tokens(&token),
             ));
         }
 
@@ -3401,9 +4183,9 @@ impl McpRegistry {
                 resource_metadata_url,
             )
             .await?;
-        Ok(inject_bearer(
-            &config.spec,
-            token.access_token.expose_secret(),
+        Ok((
+            inject_bearer(&config.spec, token.access_token.expose_secret()),
+            GrantProvenance::from_tokens(&token),
         ))
     }
 
@@ -3978,7 +4760,9 @@ impl McpRegistry {
                     config,
                     ..
                 }) => Some((config.clone(), Some((*connection_id, false)))),
-                Some(McpConnectionState::Connecting { config, .. }) if slot_owned_connecting => {
+                Some(McpConnectionState::Connecting { config, .. })
+                    if slot_owned_connecting || remove_state =>
+                {
                     Some((config.clone(), None))
                 }
                 Some(
@@ -4121,6 +4905,59 @@ impl McpRegistry {
         let lifecycle = self.lifecycle_lock(name);
         let _guard = lifecycle.lock().await;
         self.disconnect_locked_inner(name, false, true).await
+    }
+
+    /// Remove a configured server only when its current serialized config still
+    /// matches `expected`. The comparison happens while holding the per-server
+    /// lifecycle lock, so an asynchronous settings reload cannot retire a
+    /// newer generation after waiting behind a pending connect or OAuth flow.
+    /// This preserves the full client/catalog/lazy-slot/cache-retire cleanup
+    /// while intentionally retaining the OAuth grant.
+    pub async fn remove_without_revoking_auth_if_config(
+        &self,
+        name: &str,
+        expected: &McpServerConfig,
+    ) -> Result<bool, McpError> {
+        self.remove_without_revoking_auth_if_config_with_guard(name, expected, None)
+            .await
+    }
+
+    /// Conditional non-revoking removal with a host-owned reconciliation
+    /// guard. The guard is evaluated after the lifecycle lock is acquired and
+    /// before comparing/removing state, closing the check-before-await window
+    /// for a stale reload job.
+    pub async fn remove_without_revoking_auth_if_config_guarded(
+        &self,
+        name: &str,
+        expected: &McpServerConfig,
+        guard: Arc<McpOperationGuard>,
+    ) -> Result<bool, McpError> {
+        self.remove_without_revoking_auth_if_config_with_guard(name, expected, Some(&*guard))
+            .await
+    }
+
+    async fn remove_without_revoking_auth_if_config_with_guard(
+        &self,
+        name: &str,
+        expected: &McpServerConfig,
+        operation_guard: Option<&McpOperationGuard>,
+    ) -> Result<bool, McpError> {
+        let lifecycle = self.lifecycle_lock(name);
+        let _guard = lifecycle.lock().await;
+        if operation_guard.is_some_and(|guard| !guard()) {
+            return Ok(false);
+        }
+        let matches = self
+            .connections
+            .read()
+            .await
+            .get(name)
+            .is_some_and(|state| Self::same_config_snapshot(state.config(), expected));
+        if !matches {
+            return Ok(false);
+        }
+        self.disconnect_locked_inner(name, false, true).await?;
+        Ok(true)
     }
 
     /// Toggle one registered server immediately and retain the updated config
@@ -6065,6 +6902,8 @@ mod tests {
             timeout_ms: None,
             always_load: false,
             discovery_cache: None,
+            tools: Vec::new(),
+            tool_permissions: std::collections::BTreeMap::new(),
             config_error: None,
             metadata: Default::default(),
         }
@@ -6101,6 +6940,202 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn conditional_remove_requires_the_expected_config_snapshot() {
+        let mock = Arc::new(BridgeMock::new(&[]));
+        let registry = McpRegistry::new(mock as Arc<dyn McpTransport>);
+        let expected = http_cfg("srv", "https://mcp.example.com/old");
+        let newer = http_cfg("srv", "https://mcp.example.com/new");
+        registry.connections.write().await.insert(
+            "srv".into(),
+            McpConnectionState::Disconnected {
+                config: newer.clone(),
+                last_error: None,
+            },
+        );
+
+        assert!(!registry
+            .remove_without_revoking_auth_if_config("srv", &expected)
+            .await
+            .expect("conditional removal mismatch must be observable"));
+        assert!(registry.connections.read().await.contains_key("srv"));
+
+        assert!(registry
+            .remove_without_revoking_auth_if_config("srv", &newer)
+            .await
+            .expect("matching conditional removal must succeed"));
+        assert!(!registry.connections.read().await.contains_key("srv"));
+    }
+
+    #[tokio::test]
+    async fn guarded_conditional_remove_rechecks_generation_after_lifecycle_wait() {
+        let mock = Arc::new(BridgeMock::new(&[]));
+        let registry = Arc::new(McpRegistry::new(mock as Arc<dyn McpTransport>));
+        let expected = http_cfg("srv", "https://mcp.example.com/v1");
+        registry.connections.write().await.insert(
+            "srv".into(),
+            McpConnectionState::Disconnected {
+                config: expected.clone(),
+                last_error: None,
+            },
+        );
+
+        let lifecycle = registry.lifecycle_lock("srv");
+        let held = lifecycle.lock().await;
+        let current = Arc::new(AtomicBool::new(true));
+        let guard_calls = Arc::new(AtomicUsize::new(0));
+        let guard = {
+            let current = current.clone();
+            let guard_calls = guard_calls.clone();
+            Arc::new(move || {
+                guard_calls.fetch_add(1, Ordering::SeqCst);
+                current.load(Ordering::SeqCst)
+            }) as Arc<McpOperationGuard>
+        };
+        let removal = {
+            let registry = registry.clone();
+            let guard = guard.clone();
+            tokio::spawn(async move {
+                registry
+                    .remove_without_revoking_auth_if_config_guarded("srv", &expected, guard)
+                    .await
+            })
+        };
+
+        // The job is queued behind the lifecycle lock. Invalidate its
+        // generation before releasing that lock; the registry callback must
+        // run after lock acquisition and prevent the stale removal.
+        tokio::task::yield_now().await;
+        current.store(false, Ordering::SeqCst);
+        drop(held);
+        assert!(!removal
+            .await
+            .expect("guarded removal task")
+            .expect("guarded removal result"));
+        assert_eq!(guard_calls.load(Ordering::SeqCst), 1);
+        assert!(registry.connections.read().await.contains_key("srv"));
+    }
+
+    #[tokio::test]
+    async fn guarded_connect_rejects_before_live_publish_and_disconnects_discovery() {
+        let publish_hook = Arc::new(TestPauseHook::default());
+        let mock = Arc::new(BridgeMock::new(&[]));
+        let registry = Arc::new(
+            McpRegistry::new(mock.clone() as Arc<dyn McpTransport>)
+                .with_pause_before_client_publish(publish_hook.clone()),
+        );
+        let current = Arc::new(AtomicBool::new(true));
+        let guard = {
+            let current = current.clone();
+            Arc::new(move || current.load(Ordering::SeqCst)) as Arc<McpOperationGuard>
+        };
+
+        let connect = {
+            let registry = registry.clone();
+            tokio::spawn(async move { registry.connect_if_current(cfg("srv"), guard).await })
+        };
+        tokio::time::timeout(Duration::from_secs(2), mock.connect_started.notified())
+            .await
+            .expect("guarded connect reaches transport");
+        tokio::time::timeout(Duration::from_secs(2), publish_hook.entered.notified())
+            .await
+            .expect("guarded connect reaches the publish gate");
+        current.store(false, Ordering::SeqCst);
+        publish_hook.release.notify_one();
+
+        assert!(connect
+            .await
+            .expect("guarded connect task")
+            .expect("guarded connect result")
+            .is_none());
+        assert!(registry.connections.read().await.is_empty());
+        assert!(mock.conns.lock().unwrap().is_empty());
+        assert_eq!(mock.disconnect_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn rejected_guarded_connect_does_not_remove_a_newer_disconnected_config() {
+        let mock = Arc::new(BridgeMock::new(&[]));
+        let registry = McpRegistry::new(mock as Arc<dyn McpTransport>);
+        let desired = cfg("srv");
+        let newer = http_cfg("srv", "https://mcp.example.com/newer");
+        registry.connections.write().await.insert(
+            "srv".into(),
+            McpConnectionState::Disconnected {
+                config: newer.clone(),
+                last_error: None,
+            },
+        );
+        let guard = Arc::new(|| false) as Arc<McpOperationGuard>;
+
+        assert!(registry
+            .connect_if_current(desired, guard)
+            .await
+            .expect("rejected connect result")
+            .is_none());
+        assert!(matches!(
+            registry.connections.read().await.get("srv"),
+            Some(McpConnectionState::Disconnected { config, .. })
+                if McpRegistry::same_config_snapshot(config, &newer)
+        ));
+    }
+
+    #[tokio::test]
+    async fn stale_guarded_connect_error_does_not_publish_disconnected_state() {
+        let mock = Arc::new(BridgeMock::new(&[]));
+        mock.block_connect.store(true, Ordering::SeqCst);
+        let registry = Arc::new(McpRegistry::new(mock.clone() as Arc<dyn McpTransport>));
+        let current = Arc::new(AtomicBool::new(true));
+        let guard = {
+            let current = current.clone();
+            Arc::new(move || current.load(Ordering::SeqCst)) as Arc<McpOperationGuard>
+        };
+        let connect = {
+            let registry = registry.clone();
+            tokio::spawn(async move { registry.connect_if_current(cfg("srv"), guard).await })
+        };
+        tokio::time::timeout(Duration::from_secs(2), mock.connect_started.notified())
+            .await
+            .expect("blocked connect reaches transport");
+
+        // The transport fails only after this generation is superseded. The
+        // stale error path must clean its own Connecting marker, not publish
+        // a Disconnected state carrying the old config.
+        current.store(false, Ordering::SeqCst);
+        mock.list_tools_fails.store(true, Ordering::SeqCst);
+        mock.block_connect.store(false, Ordering::SeqCst);
+        mock.connect_release.notify_one();
+
+        assert!(connect
+            .await
+            .expect("stale connect task")
+            .expect("stale connect result")
+            .is_none());
+        assert!(registry.connections.read().await.is_empty());
+        assert!(mock.conns.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn guarded_disabled_connect_seeds_disconnected_without_dialing() {
+        let mock = Arc::new(BridgeMock::new(&[]));
+        let registry = McpRegistry::new(mock.clone() as Arc<dyn McpTransport>);
+        let mut disabled = cfg("srv");
+        disabled.disabled = true;
+        let guard = Arc::new(|| true) as Arc<McpOperationGuard>;
+
+        assert!(registry
+            .connect_if_current(disabled.clone(), guard)
+            .await
+            .expect("disabled guarded connect")
+            .is_none());
+        assert_eq!(mock.connect_calls.load(Ordering::SeqCst), 0);
+        assert!(matches!(
+            registry.connections.read().await.get("srv"),
+            Some(McpConnectionState::Disconnected { config, last_error: None })
+                if config.disabled && McpRegistry::same_config_snapshot(config, &disabled)
+        ));
+    }
+
+    #[tokio::test]
     async fn inprocess_server_dispatches_directly_without_jsonrpc_client() {
         let transport = Arc::new(DirectInProcessMock::new());
         let registry = McpRegistry::new(transport.clone());
@@ -6115,6 +7150,8 @@ mod tests {
                 timeout_ms: None,
                 always_load: true,
                 discovery_cache: None,
+                tools: Vec::new(),
+                tool_permissions: std::collections::BTreeMap::new(),
                 config_error: None,
                 metadata: Default::default(),
             })
@@ -8152,6 +9189,277 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn oauth_grant_provenance_writes_same_grant_and_rejects_rotation_for_each_scope() {
+        let _guard = crate::discovery_cache::tests_env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let env = DiscoveryCacheEnvGuard::new();
+        env.set(crate::discovery_cache::ENV_ENABLED, "true");
+
+        for (name, scope, source) in [
+            ("shared-grant", ConfigScope::User, None),
+            (
+                "agent-grant",
+                ConfigScope::Agent,
+                Some(crate::connection::McpAgentSource::BuiltIn),
+            ),
+        ] {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let store = crate::discovery_cache::DiscoveryCacheStore::new(dir.path());
+            let mut cfg = http_cfg(name, "https://mcp.example.com/v1");
+            cfg.scope = scope;
+            cfg.metadata.agent_source = source;
+            let McpTransportSpec::Http {
+                oauth: oauth_config,
+                ..
+            } = &mut cfg.spec
+            else {
+                unreachable!()
+            };
+            *oauth_config = Some(traits::McpOAuthConfigDto {
+                client_id: None,
+                callback_port: None,
+                auth_server_metadata_url: None,
+                scopes: None,
+                xaa: None,
+            });
+
+            let storage = Arc::new(XaaMemStorage::default());
+            let storage_dyn = storage.clone() as Arc<dyn traits::SecureStorage>;
+            let clock = Arc::new(FixedClock(std::time::UNIX_EPOCH)) as Arc<dyn traits::Clock>;
+            let server_key = oauth::server_key(&cfg.name, &cfg.spec);
+            let store_token = |access: &str, refresh: &str| {
+                let storage = storage_dyn.clone();
+                let clock = clock.clone();
+                let server_key = server_key.clone();
+                let access = access.to_string();
+                let refresh = refresh.to_string();
+                async move {
+                    oauth::store_tokens(
+                        &storage,
+                        &clock,
+                        &server_key,
+                        &oauth::StoredTokens {
+                            access_token: access,
+                            refresh_token: Some(refresh),
+                            expires_at_unix: u64::MAX,
+                            client_id: None,
+                            client_secret: None,
+                            step_up_scope: None,
+                        },
+                    )
+                    .await
+                    .expect("store test grant");
+                }
+            };
+            store_token("access-a", "refresh-a").await;
+
+            let mock = Arc::new(BridgeMock::new(&[]));
+            let registry = McpRegistry::with_raw_conn(
+                mock.clone() as Arc<dyn McpTransport>,
+                mock.clone() as Arc<dyn RawConnectionProvider>,
+            )
+            .with_oauth(OAuthDeps {
+                http: GatedXaaHttp::new() as Arc<dyn traits::HttpTransport>,
+                clock: clock.clone(),
+                storage: storage_dyn.clone(),
+                on_authorization_url: Arc::new(|_| {}),
+                xaa_config: None,
+            })
+            .with_discovery_cache_store(
+                crate::discovery_cache::DiscoveryCacheStore::new(dir.path()),
+            );
+            let grant = registry
+                .current_grant_provenance(&cfg)
+                .await
+                .expect("current grant")
+                .expect("OAuth storage grant");
+            let partition = registry
+                .discovery_cache_partition_for_grant(
+                    &cfg,
+                    crate::protocol_negotiation::NegotiationMode::Legacy,
+                    Some(&grant),
+                )
+                .await
+                .expect("grant partition");
+            let caps = ServerCapabilitiesDto {
+                tools: true,
+                ..ServerCapabilitiesDto::default()
+            };
+            let protocol = traits::McpNegotiatedProtocol {
+                era: traits::McpProtocolEra::Legacy,
+                version: "2025-11-25".into(),
+            };
+            let tool = |name: &str| McpToolDto {
+                server_name: cfg.name.clone(),
+                tool_name: name.into(),
+                description: name.into(),
+                input_schema: serde_json::json!({"type": "object"}),
+                full_name: format!("mcp__{}__{name}", cfg.name),
+                search_hint: None,
+                always_load: None,
+                requires_user_interaction: false,
+            };
+            registry
+                .persist_or_purge_discovery_cache(
+                    &cfg,
+                    Some(&partition),
+                    &caps,
+                    &[tool("alpha")],
+                    &[],
+                    &[],
+                    &[],
+                    crate::protocol_negotiation::NegotiationMode::Legacy,
+                    Some(&grant),
+                    Some(&protocol),
+                )
+                .await;
+            let cache_key = crate::discovery_cache::logical_cache_key(&cfg);
+            let saved = store.load_partitioned(&cache_key, &partition.partition_key);
+            assert!(matches!(
+                saved,
+                crate::discovery_cache::EntryLookup::Found(_)
+            ));
+
+            store_token("access-b", "refresh-b").await;
+            registry
+                .persist_or_purge_discovery_cache(
+                    &cfg,
+                    Some(&partition),
+                    &caps,
+                    &[tool("beta")],
+                    &[],
+                    &[],
+                    &[],
+                    crate::protocol_negotiation::NegotiationMode::Legacy,
+                    Some(&grant),
+                    Some(&protocol),
+                )
+                .await;
+            let saved = store.load_partitioned(&cache_key, &partition.partition_key);
+            assert!(matches!(
+                saved,
+                crate::discovery_cache::EntryLookup::Found(entry)
+                    if entry.tools.iter().any(|tool| tool.tool_name == "alpha")
+                        && entry.tools.iter().all(|tool| tool.tool_name != "beta")
+            ));
+            let rotated = registry
+                .current_grant_provenance(&cfg)
+                .await
+                .expect("rotated grant")
+                .expect("rotated OAuth storage grant");
+            let rotated_partition = registry
+                .discovery_cache_partition_for_grant(
+                    &cfg,
+                    crate::protocol_negotiation::NegotiationMode::Legacy,
+                    Some(&rotated),
+                )
+                .await
+                .expect("rotated partition");
+            assert_ne!(partition.partition_key, rotated_partition.partition_key);
+            assert!(matches!(
+                store.load_partitioned(&cache_key, &rotated_partition.partition_key),
+                crate::discovery_cache::EntryLookup::Absent
+            ));
+        }
+        drop(env);
+    }
+
+    #[tokio::test]
+    async fn oauth_without_refresh_grant_is_not_partition_or_write_eligible() {
+        let _guard = crate::discovery_cache::tests_env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let env = DiscoveryCacheEnvGuard::new();
+        env.set(crate::discovery_cache::ENV_ENABLED, "true");
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut cfg = http_cfg("access-only", "https://mcp.example.com/v1");
+        let McpTransportSpec::Http {
+            oauth: oauth_config,
+            ..
+        } = &mut cfg.spec
+        else {
+            unreachable!()
+        };
+        *oauth_config = Some(traits::McpOAuthConfigDto {
+            client_id: None,
+            callback_port: None,
+            auth_server_metadata_url: None,
+            scopes: None,
+            xaa: None,
+        });
+        let storage = Arc::new(XaaMemStorage::default());
+        let storage_dyn = storage.clone() as Arc<dyn traits::SecureStorage>;
+        let clock = Arc::new(FixedClock(std::time::UNIX_EPOCH)) as Arc<dyn traits::Clock>;
+        let key = oauth::server_key(&cfg.name, &cfg.spec);
+        oauth::store_tokens(
+            &storage_dyn,
+            &clock,
+            &key,
+            &oauth::StoredTokens {
+                access_token: "access-only".into(),
+                refresh_token: None,
+                expires_at_unix: u64::MAX,
+                client_id: None,
+                client_secret: None,
+                step_up_scope: None,
+            },
+        )
+        .await
+        .expect("store access-only token");
+        let mock = Arc::new(BridgeMock::new(&[]));
+        let registry = McpRegistry::with_raw_conn(
+            mock.clone() as Arc<dyn McpTransport>,
+            mock.clone() as Arc<dyn RawConnectionProvider>,
+        )
+        .with_oauth(OAuthDeps {
+            http: GatedXaaHttp::new() as Arc<dyn traits::HttpTransport>,
+            clock,
+            storage: storage_dyn,
+            on_authorization_url: Arc::new(|_| {}),
+            xaa_config: None,
+        })
+        .with_discovery_cache_store(crate::discovery_cache::DiscoveryCacheStore::new(dir.path()));
+
+        assert!(registry
+            .current_grant_provenance(&cfg)
+            .await
+            .expect("current grant")
+            .is_none());
+        assert!(matches!(
+            registry
+                .discovery_cache_partition_for(
+                    &cfg,
+                    crate::protocol_negotiation::NegotiationMode::Legacy,
+                )
+                .await,
+            Err(crate::discovery_cache::MissReason::NoFingerprint)
+        ));
+        registry
+            .persist_or_purge_discovery_cache(
+                &cfg,
+                None,
+                &ServerCapabilitiesDto::default(),
+                &[],
+                &[],
+                &[],
+                &[],
+                crate::protocol_negotiation::NegotiationMode::Legacy,
+                None,
+                None,
+            )
+            .await;
+        assert!(
+            std::fs::read_dir(dir.path())
+                .map(|mut entries| entries.next().is_none())
+                .unwrap_or(true),
+            "access-only OAuth must never create a discovery-cache partition"
+        );
+        drop(env);
+    }
+
     /// A `None` `discovery_cache_store` (every registry not built with
     /// [`McpRegistry::with_discovery_cache_store`]) must leave every §11
     /// helper a total no-op: no store, no write, no purge, no strike, no
@@ -8321,6 +9629,7 @@ mod tests {
                 &[],
                 &[],
                 crate::protocol_negotiation::NegotiationMode::Legacy,
+                None,
                 None,
             )
             .await;
@@ -8620,8 +9929,9 @@ mod tests {
         )
         .with_discovery_cache_store(crate::discovery_cache::DiscoveryCacheStore::new(dir.path()));
         let cached_connection_id = registry
-            .serve_discovery_cache_hit(&cfg, "srv", entry, 1_000_000, false)
-            .await;
+            .serve_discovery_cache_hit(&cfg, "srv", entry, 1_000_000, false, None)
+            .await
+            .expect("cache hit");
         let slot = Arc::new(LazyUpgradeSlot::new(
             "srv".into(),
             cached_connection_id,
@@ -8639,6 +9949,7 @@ mod tests {
 
         let discovery = LiveDiscovery {
             connection_id: McpConnectionId::new(),
+            grant_provenance: Some(GrantProvenance::unbound()),
             negotiation_mode: crate::protocol_negotiation::NegotiationMode::Legacy,
             negotiated: traits::McpNegotiatedProtocol {
                 era: traits::McpProtocolEra::Modern,
@@ -8711,8 +10022,9 @@ mod tests {
         )
         .with_discovery_cache_store(crate::discovery_cache::DiscoveryCacheStore::new(dir.path()));
         let cached_connection_id = registry
-            .serve_discovery_cache_hit(&cfg, "srv", entry, 1_000_000, false)
-            .await;
+            .serve_discovery_cache_hit(&cfg, "srv", entry, 1_000_000, false, None)
+            .await
+            .expect("cache hit");
         let slot = Arc::new(LazyUpgradeSlot::new(
             "srv".into(),
             cached_connection_id,
@@ -8730,6 +10042,7 @@ mod tests {
 
         let discovery = LiveDiscovery {
             connection_id: McpConnectionId::new(),
+            grant_provenance: Some(GrantProvenance::unbound()),
             // The live handshake actually stayed legacy, but its immutable
             // resolver mode changed. That is enough to reject the stale hit.
             negotiation_mode: crate::protocol_negotiation::NegotiationMode::Auto {
@@ -12425,6 +13738,8 @@ mod tests {
             timeout_ms: None,
             always_load: false,
             discovery_cache: None,
+            tools: Vec::new(),
+            tool_permissions: std::collections::BTreeMap::new(),
             config_error: None,
             metadata: Default::default(),
         }
@@ -12577,6 +13892,8 @@ mod snapshot_tests {
             timeout_ms: None,
             always_load: false,
             discovery_cache: None,
+            tools: Vec::new(),
+            tool_permissions: std::collections::BTreeMap::new(),
             config_error: None,
             metadata: Default::default(),
         }
@@ -12776,5 +14093,249 @@ mod snapshot_tests {
         assert_eq!(snap.len(), 2);
         assert_eq!(snap[0].name, "filesystem");
         assert_eq!(snap[1].name, "memory");
+    }
+
+    #[test]
+    fn conversation_export_identity_preserves_hyphens_and_split_boundaries() {
+        let scope = ConversationExport::new("abc--1", "0".repeat(64)).unwrap();
+        assert_eq!(scope.server_name(), "local_app_abc--1");
+        assert_eq!(scope.server_info_name(), "lingxi-local-app");
+        assert_eq!(
+            scope.registry_key(),
+            "local_apps:conversation-export:abc--1"
+        );
+        assert_eq!(
+            scope.tool_full_name("read_value").unwrap(),
+            "mcp__local_app_abc--1__read_value"
+        );
+        assert!(ConversationExport::new("abc_1", "0".repeat(64)).is_err());
+        assert!(scope.tool_full_name("bad__name").is_err());
+    }
+
+    #[test]
+    fn conversation_export_uses_schema_v3_app_id_boundaries() {
+        let id_54 = format!("a{}", "b".repeat(53));
+        let id_55 = format!("a{}", "b".repeat(54));
+        assert!(ConversationExport::new(id_54, "0".repeat(64)).is_ok());
+        assert!(ConversationExport::new(id_55, "0".repeat(64)).is_err());
+        assert!(ConversationExport::new("A123", "0".repeat(64)).is_err());
+        assert!(ConversationExport::new("-leading", "0".repeat(64)).is_err());
+    }
+
+    #[tokio::test]
+    async fn managed_local_apps_share_one_physical_hub_and_only_surface_changes_notify() {
+        let registry = McpRegistry::new(Arc::new(StubTransport));
+        let mut events = registry.subscribe_catalog_changes();
+        for index in 0..100 {
+            let scope = ConversationExport::new(format!("app-{index}"), "0".repeat(64)).unwrap();
+            registry
+                .register_managed_local_app(scope, "1".repeat(64), true)
+                .await
+                .unwrap();
+            let change = events.recv().await.unwrap();
+            assert_eq!(change.server_name, format!("local_app_app-{index}"));
+        }
+        assert_eq!(registry.managed_local_app_count().await, 100);
+        assert_eq!(registry.physical_transport_count(), 1);
+        let scope = ConversationExport::new("app-0", "0".repeat(64)).unwrap();
+        registry
+            .register_managed_local_app(scope, "2".repeat(64), false)
+            .await
+            .unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(10), events.recv())
+                .await
+                .is_err()
+        );
+        // A bad `surface_changed=true` hint cannot duplicate the event when
+        // the committed surface digest is unchanged.
+        let same_surface = ConversationExport::new("app-0", "0".repeat(64)).unwrap();
+        let refreshed = registry
+            .register_managed_local_app(same_surface, "3".repeat(64), true)
+            .await
+            .unwrap();
+        assert_eq!(refreshed.surface_generation, 1);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(10), events.recv())
+                .await
+                .is_err()
+        );
+        let changed_surface = ConversationExport::new("app-0", "f".repeat(64)).unwrap();
+        let changed = registry
+            .register_managed_local_app(changed_surface, "4".repeat(64), false)
+            .await
+            .unwrap();
+        assert_eq!(changed.surface_generation, 2);
+        assert_eq!(events.recv().await.unwrap().server_name, "local_app_app-0");
+        assert!(registry
+            .unregister_managed_local_app("app-0")
+            .await
+            .unwrap());
+    }
+
+    #[tokio::test]
+    async fn local_app_exposure_is_bounded_lru_and_pin_aware() {
+        let registry = McpRegistry::new(Arc::new(StubTransport));
+        for index in 0..10 {
+            let scope = ConversationExport::new(format!("app-{index}"), "0".repeat(64)).unwrap();
+            registry
+                .register_managed_local_app(scope, "1".repeat(64), false)
+                .await
+                .unwrap();
+        }
+
+        assert!(registry
+            .local_app_exposures("conversation")
+            .await
+            .is_empty());
+        for index in 0..8 {
+            registry
+                .expose_managed_local_app("conversation", &format!("app-{index}"), false)
+                .await
+                .unwrap();
+        }
+        assert_eq!(registry.local_app_exposures("conversation").await.len(), 8);
+
+        // app-0 is the oldest unpinned entry and is the only one evicted.
+        registry
+            .expose_managed_local_app("conversation", "app-8", false)
+            .await
+            .unwrap();
+        let ids: Vec<String> = registry
+            .local_app_exposures("conversation")
+            .await
+            .into_iter()
+            .map(|entry| entry.app_id)
+            .collect();
+        assert!(!ids.iter().any(|id| id == "app-0"));
+        assert!(ids.iter().any(|id| id == "app-8"));
+
+        // Pinning is explicit. The next eviction skips app-1 even though it
+        // is older than the unpinned entries.
+        registry
+            .pin_local_app_exposure("conversation", "app-1", true)
+            .await
+            .unwrap();
+        registry
+            .expose_managed_local_app("conversation", "app-9", false)
+            .await
+            .unwrap();
+        let ids: Vec<String> = registry
+            .local_app_exposures("conversation")
+            .await
+            .into_iter()
+            .map(|entry| entry.app_id)
+            .collect();
+        assert!(ids.iter().any(|id| id == "app-1"));
+        assert!(ids.iter().any(|id| id == "app-9"));
+    }
+
+    #[tokio::test]
+    async fn local_app_exposure_rejects_ninth_when_all_are_pinned_and_tracks_calls() {
+        let registry = McpRegistry::new(Arc::new(StubTransport));
+        for index in 0..9 {
+            let scope = ConversationExport::new(format!("pin-{index}"), "0".repeat(64)).unwrap();
+            registry
+                .register_managed_local_app(scope, "1".repeat(64), false)
+                .await
+                .unwrap();
+        }
+        for index in 0..8 {
+            registry
+                .expose_managed_local_app("conversation", &format!("pin-{index}"), true)
+                .await
+                .unwrap();
+        }
+        let err = registry
+            .expose_managed_local_app("conversation", "pin-8", false)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("exposure_capacity_reached"));
+        assert!(err.to_string().contains("pin-0"));
+
+        for _ in 0..4 {
+            registry
+                .begin_local_app_call("conversation", "pin-0")
+                .await
+                .unwrap();
+        }
+        let err = registry
+            .begin_local_app_call("conversation", "pin-0")
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("rate_limited"));
+        for _ in 0..5 {
+            registry.end_local_app_call("conversation", "pin-0").await;
+        }
+        assert_eq!(
+            registry
+                .local_app_exposures("conversation")
+                .await
+                .iter()
+                .find(|entry| entry.app_id == "pin-0")
+                .unwrap()
+                .in_flight,
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn local_app_exposure_never_evicts_an_inflight_entry() {
+        let registry = McpRegistry::new(Arc::new(StubTransport));
+        for index in 0..9 {
+            let scope = ConversationExport::new(format!("busy-{index}"), "0".repeat(64)).unwrap();
+            registry
+                .register_managed_local_app(scope, "1".repeat(64), false)
+                .await
+                .unwrap();
+        }
+        for index in 0..8 {
+            registry
+                .expose_managed_local_app("conversation", &format!("busy-{index}"), false)
+                .await
+                .unwrap();
+        }
+        registry
+            .begin_local_app_call("conversation", "busy-0")
+            .await
+            .unwrap();
+        registry
+            .expose_managed_local_app("conversation", "busy-8", false)
+            .await
+            .unwrap();
+        let exposed = registry.local_app_exposures("conversation").await;
+        assert!(exposed.iter().any(|entry| entry.app_id == "busy-0"));
+        assert!(exposed.iter().any(|entry| entry.app_id == "busy-8"));
+        assert_eq!(
+            exposed
+                .iter()
+                .find(|entry| entry.app_id == "busy-0")
+                .unwrap()
+                .in_flight,
+            1
+        );
+        registry.end_local_app_call("conversation", "busy-0").await;
+    }
+
+    #[tokio::test]
+    async fn deleting_managed_local_app_removes_all_conversation_exposure() {
+        let registry = McpRegistry::new(Arc::new(StubTransport));
+        let scope = ConversationExport::new("delete-me", "0".repeat(64)).unwrap();
+        registry
+            .register_managed_local_app(scope, "1".repeat(64), false)
+            .await
+            .unwrap();
+        registry
+            .expose_managed_local_app("conversation", "delete-me", true)
+            .await
+            .unwrap();
+        assert!(registry
+            .unregister_managed_local_app("delete-me")
+            .await
+            .unwrap());
+        assert!(registry
+            .local_app_exposures("conversation")
+            .await
+            .is_empty());
     }
 }

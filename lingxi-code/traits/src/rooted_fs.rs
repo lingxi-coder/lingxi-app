@@ -7,6 +7,7 @@
 use fs2::FileExt;
 use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
+use std::time::SystemTime;
 
 use crate::{FlockGuard, FsError};
 
@@ -45,6 +46,121 @@ pub struct AtomicWriteOptions {
     pub dir_mode: u32,
     /// Unix mode applied to the newly-created file.
     pub file_mode: u32,
+}
+
+/// Bytes and metadata read through the same no-follow handle that was opened
+/// after the caller's permission check.
+///
+/// File tools must use this instead of reopening the canonical pathname.  The
+/// pathname supplied by a model may contain a symlink, and a canonicalize-then-
+/// read sequence otherwise leaves a retarget window between the two syscalls.
+#[derive(Debug)]
+pub struct RootedFileSnapshot {
+    /// The bytes read from the opened regular-file handle.
+    pub bytes: Vec<u8>,
+    /// Size reported by that same handle.
+    pub size: u64,
+    /// Modification time reported by that same handle, when available.
+    pub modified: Option<SystemTime>,
+    /// Unix mode reported by that same handle, when the platform exposes one.
+    pub mode: Option<u32>,
+}
+
+/// Metadata returned by a direct rooted write, without reopening its pathname.
+#[derive(Debug, Default)]
+pub struct RootedWriteResult {
+    /// Modification time reported by the opened write handle, when available.
+    pub modified: Option<SystemTime>,
+}
+
+/// Failures that need operation-specific model-facing messages in file tools.
+#[derive(Debug, thiserror::Error)]
+pub enum RootedFsError {
+    /// A normal rooted filesystem failure.
+    #[error(transparent)]
+    Fs(#[from] FsError),
+    /// The requested path no longer resolves to the approved target.
+    #[error("requested symlink resolution changed")]
+    SymlinkResolutionChanged,
+    /// A requested parent no longer resolves to the approved directory.
+    #[error("requested parent-directory symlink resolution changed")]
+    ParentSymlinkResolutionChanged,
+    /// The final component is a symlink and must be addressed by its target.
+    #[error("requested final path component is a symbolic link")]
+    LeafSymlink,
+    /// The final component is not a regular file (for example, a FIFO).
+    #[error("requested final path component is not a regular file")]
+    NotRegularFile,
+}
+
+fn resolution_changed(requested: &Path, approved: &Path) -> RootedFsError {
+    // A leaf link's target can have a different parent from the approved
+    // target. Treat that as target-resolution drift, not parent-directory
+    // drift; the caller can then preserve the Read-vs-Write error wording.
+    if std::fs::symlink_metadata(requested)
+        .map(|metadata| metadata.file_type().is_symlink())
+        .unwrap_or(false)
+    {
+        return RootedFsError::SymlinkResolutionChanged;
+    }
+    let requested_parent = requested.parent().unwrap_or_else(|| Path::new("."));
+    let approved_parent = approved.parent().unwrap_or_else(|| Path::new("."));
+    match std::fs::canonicalize(requested_parent) {
+        Ok(parent) if parent == approved_parent => RootedFsError::SymlinkResolutionChanged,
+        _ => RootedFsError::ParentSymlinkResolutionChanged,
+    }
+}
+
+fn verify_resolution(requested: &Path, approved: &Path) -> Result<(), RootedFsError> {
+    match std::fs::canonicalize(requested) {
+        Ok(current) if current == approved => Ok(()),
+        Ok(_) | Err(_) => Err(resolution_changed(requested, approved)),
+    }
+}
+
+fn verify_parent_resolution(requested: &Path, approved: &Path) -> Result<(), RootedFsError> {
+    let requested_parent = requested.parent().unwrap_or_else(|| Path::new("."));
+    let approved_parent = approved.parent().unwrap_or_else(|| Path::new("."));
+    match std::fs::canonicalize(requested_parent) {
+        Ok(current) if current == approved_parent => Ok(()),
+        Ok(_) => Err(RootedFsError::ParentSymlinkResolutionChanged),
+        Err(_) => {
+            // A write may legitimately create missing parent components. In
+            // that case the full parent cannot be canonicalized until the
+            // rooted mkdirat/handle chain materializes it. Compare the nearest
+            // existing ancestors instead, so a retargeted symlink is still
+            // rejected before any directory is created.
+            fn nearest_existing(path: &Path) -> Option<PathBuf> {
+                let mut candidate = path;
+                loop {
+                    if let Ok(canonical) = std::fs::canonicalize(candidate) {
+                        return Some(canonical);
+                    }
+                    candidate = candidate.parent()?;
+                }
+            }
+
+            match (
+                nearest_existing(requested_parent),
+                nearest_existing(approved_parent),
+            ) {
+                (Some(current), Some(approved)) if current == approved => Ok(()),
+                _ => Err(RootedFsError::ParentSymlinkResolutionChanged),
+            }
+        }
+    }
+}
+
+fn verify_leaf_not_symlink(requested: &Path) -> Result<(), RootedFsError> {
+    match std::fs::symlink_metadata(requested) {
+        Ok(metadata) if metadata.file_type().is_symlink() => Err(RootedFsError::LeafSymlink),
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(RootedFsError::Fs(FsError::Io(format!(
+            "{}: {error}",
+            requested.display()
+        )))),
+    }
 }
 
 #[cfg(windows)]
@@ -136,6 +252,7 @@ mod imp {
     const FILE_OPEN: u32 = 1;
     const FILE_CREATE: u32 = 2;
     const FILE_OPEN_IF: u32 = 3;
+    const FILE_OVERWRITE_IF: u32 = 5;
     const FILE_DIRECTORY_FILE: u32 = 0x0000_0001;
     const FILE_SYNCHRONOUS_IO_NONALERT: u32 = 0x0000_0020;
     const FILE_NON_DIRECTORY_FILE: u32 = 0x0000_0040;
@@ -657,6 +774,220 @@ mod imp {
         atomic_write_inner(root, relative, bytes, options, || {})
     }
 
+    fn read_file_after_permission_inner<F>(
+        root: &Path,
+        relative: &Path,
+        requested: &Path,
+        approved: &Path,
+        after_permission: F,
+    ) -> Result<RootedFileSnapshot, RootedFsError>
+    where
+        F: FnOnce(),
+    {
+        let target_exists = std::fs::symlink_metadata(requested).is_ok();
+        if target_exists {
+            verify_resolution(requested, approved)?;
+        } else {
+            verify_parent_resolution(requested, approved)?;
+        }
+        after_permission();
+        // Re-check before opening the handle. The handle-relative NT open below
+        // is what prevents a subsequent parent reparse-point swap from
+        // redirecting the actual I/O.
+        if target_exists {
+            verify_resolution(requested, approved)?;
+        } else {
+            verify_parent_resolution(requested, approved)?;
+        }
+        let (parent, file_name) = open_parent(root, relative, false).map_err(RootedFsError::Fs)?;
+        let mut file = open_regular(
+            &parent,
+            &file_name,
+            relative,
+            GENERIC_READ | SYNCHRONIZE,
+            SHARE_ALL,
+            FILE_OPEN,
+            FILE_ATTRIBUTE_NORMAL,
+        )
+        .map_err(|error| match error {
+            FsError::OutsideWorkspace(_) => RootedFsError::NotRegularFile,
+            error => RootedFsError::Fs(error),
+        })?;
+        // Validate the requested path after opening, before consuming bytes.
+        // A stable leaf symlink is intentionally supported for Read: `relative`
+        // addresses its already-approved resolved target.
+        if target_exists {
+            verify_resolution(requested, approved)?;
+        } else {
+            verify_parent_resolution(requested, approved)?;
+        }
+        let metadata = file
+            .metadata()
+            .map_err(|error| RootedFsError::Fs(map_io(relative, error)))?;
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes)
+            .map_err(|error| RootedFsError::Fs(map_io(relative, error)))?;
+        Ok(RootedFileSnapshot {
+            size: metadata.len(),
+            modified: metadata.modified().ok(),
+            mode: None,
+            bytes,
+        })
+    }
+
+    pub(super) fn read_file_after_permission(
+        root: &Path,
+        relative: &Path,
+        requested: &Path,
+        approved: &Path,
+    ) -> Result<RootedFileSnapshot, RootedFsError> {
+        read_file_after_permission_inner(root, relative, requested, approved, || {})
+    }
+
+    pub(super) fn open_file_after_permission(
+        root: &Path,
+        relative: &Path,
+        requested: &Path,
+        approved: &Path,
+    ) -> Result<std::fs::File, RootedFsError> {
+        let target_exists = std::fs::symlink_metadata(requested).is_ok();
+        if target_exists {
+            verify_resolution(requested, approved)?;
+        } else {
+            verify_parent_resolution(requested, approved)?;
+        }
+        let (parent, file_name) = open_parent(root, relative, false).map_err(RootedFsError::Fs)?;
+        let file = open_regular(
+            &parent,
+            &file_name,
+            relative,
+            GENERIC_READ | SYNCHRONIZE,
+            SHARE_ALL,
+            FILE_OPEN,
+            FILE_ATTRIBUTE_NORMAL,
+        )
+        .map_err(|error| match error {
+            FsError::OutsideWorkspace(_) => RootedFsError::NotRegularFile,
+            error => RootedFsError::Fs(error),
+        })?;
+        if target_exists {
+            verify_resolution(requested, approved)?;
+        } else {
+            verify_parent_resolution(requested, approved)?;
+        }
+        Ok(file)
+    }
+
+    #[cfg(test)]
+    pub(super) fn read_file_after_permission_for_test<F>(
+        root: &Path,
+        relative: &Path,
+        requested: &Path,
+        approved: &Path,
+        after_permission: F,
+    ) -> Result<RootedFileSnapshot, RootedFsError>
+    where
+        F: FnOnce(),
+    {
+        read_file_after_permission_inner(root, relative, requested, approved, after_permission)
+    }
+
+    fn write_file_after_permission_inner<F>(
+        root: &Path,
+        relative: &Path,
+        requested: &Path,
+        approved: &Path,
+        bytes: &[u8],
+        after_permission: F,
+    ) -> Result<RootedWriteResult, RootedFsError>
+    where
+        F: FnOnce(),
+    {
+        let target_exists = std::fs::symlink_metadata(requested).is_ok();
+        if target_exists {
+            verify_resolution(requested, approved)?;
+            verify_leaf_not_symlink(requested)?;
+        } else {
+            verify_parent_resolution(requested, approved)?;
+        }
+        after_permission();
+        // Missing parents are materialized by the fixed no-follow directory
+        // handle chain. Never create them through the requested pathname:
+        // doing so would reopen a retargetable ancestor before rooted I/O.
+        let (parent, file_name) = open_parent(root, relative, true).map_err(RootedFsError::Fs)?;
+        verify_parent_resolution(requested, approved)?;
+        verify_leaf_not_symlink(requested)?;
+        let mut file = open_regular(
+            &parent,
+            &file_name,
+            relative,
+            GENERIC_WRITE | SYNCHRONIZE,
+            SHARE_ALL,
+            FILE_OVERWRITE_IF,
+            FILE_ATTRIBUTE_NORMAL,
+        )
+        .map_err(|error| {
+            if matches!(error, FsError::OutsideWorkspace(_))
+                && std::fs::symlink_metadata(requested)
+                    .map(|metadata| metadata.file_type().is_symlink())
+                    .unwrap_or(false)
+            {
+                RootedFsError::LeafSymlink
+            } else {
+                RootedFsError::Fs(error)
+            }
+        })?;
+        if target_exists {
+            verify_resolution(requested, approved)?;
+        } else {
+            verify_parent_resolution(requested, approved)?;
+        }
+        file.write_all(bytes)
+            .map_err(|error| RootedFsError::Fs(map_io(relative, error)))?;
+        verify_parent_resolution(requested, approved)?;
+        if target_exists {
+            verify_resolution(requested, approved)?;
+        }
+        Ok(RootedWriteResult {
+            modified: file
+                .metadata()
+                .ok()
+                .and_then(|metadata| metadata.modified().ok()),
+        })
+    }
+
+    pub(super) fn write_file_after_permission(
+        root: &Path,
+        relative: &Path,
+        requested: &Path,
+        approved: &Path,
+        bytes: &[u8],
+    ) -> Result<RootedWriteResult, RootedFsError> {
+        write_file_after_permission_inner(root, relative, requested, approved, bytes, || {})
+    }
+
+    #[cfg(test)]
+    pub(super) fn write_file_after_permission_for_test<F>(
+        root: &Path,
+        relative: &Path,
+        requested: &Path,
+        approved: &Path,
+        bytes: &[u8],
+        after_permission: F,
+    ) -> Result<RootedWriteResult, RootedFsError>
+    where
+        F: FnOnce(),
+    {
+        write_file_after_permission_inner(
+            root,
+            relative,
+            requested,
+            approved,
+            bytes,
+            after_permission,
+        )
+    }
+
     #[cfg(test)]
     pub(super) fn atomic_write_after_parent_open_for_test<F>(
         root: &Path,
@@ -754,6 +1085,44 @@ pub fn read_to_string_limited(
     imp::read_to_string_limited(root, relative, max_bytes)
 }
 
+/// Read bytes and metadata after checking that `requested` still resolves to
+/// `approved`. The approved path is opened relative to a fixed, no-follow
+/// directory-handle chain, so a concurrent parent swap cannot redirect I/O.
+pub fn read_file_after_permission(
+    root: &Path,
+    relative: &Path,
+    requested: &Path,
+    approved: &Path,
+) -> Result<RootedFileSnapshot, RootedFsError> {
+    imp::read_file_after_permission(root, relative, requested, approved)
+}
+
+/// Open a regular file after checking that `requested` still resolves to
+/// `approved`. The returned handle is opened through a fixed, no-follow
+/// directory-handle chain, so callers can safely read it without reopening a
+/// pathname after a concurrent parent or leaf swap.
+pub fn open_file_after_permission(
+    root: &Path,
+    relative: &Path,
+    requested: &Path,
+    approved: &Path,
+) -> Result<std::fs::File, RootedFsError> {
+    imp::open_file_after_permission(root, relative, requested, approved)
+}
+
+/// Write bytes after checking the approved resolution and rejecting a final
+/// symlink. The write is performed through a fixed parent directory handle;
+/// unlike [`atomic_write`], this preserves direct truncate/write semantics.
+pub fn write_file_after_permission(
+    root: &Path,
+    relative: &Path,
+    requested: &Path,
+    approved: &Path,
+    bytes: &[u8],
+) -> Result<RootedWriteResult, RootedFsError> {
+    imp::write_file_after_permission(root, relative, requested, approved, bytes)
+}
+
 /// Atomically write bytes without following any component below `root`.
 pub fn atomic_write(
     root: &Path,
@@ -767,6 +1136,42 @@ pub fn atomic_write(
 /// Remove a file without following any component below `root`.
 pub fn remove_file(root: &Path, relative: &Path) -> Result<(), FsError> {
     imp::remove_file(root, relative)
+}
+
+#[cfg(test)]
+fn read_file_after_permission_for_test<F>(
+    root: &Path,
+    relative: &Path,
+    requested: &Path,
+    approved: &Path,
+    after_permission: F,
+) -> Result<RootedFileSnapshot, RootedFsError>
+where
+    F: FnOnce(),
+{
+    imp::read_file_after_permission_for_test(root, relative, requested, approved, after_permission)
+}
+
+#[cfg(test)]
+fn write_file_after_permission_for_test<F>(
+    root: &Path,
+    relative: &Path,
+    requested: &Path,
+    approved: &Path,
+    bytes: &[u8],
+    after_permission: F,
+) -> Result<RootedWriteResult, RootedFsError>
+where
+    F: FnOnce(),
+{
+    imp::write_file_after_permission_for_test(
+        root,
+        relative,
+        requested,
+        approved,
+        bytes,
+        after_permission,
+    )
 }
 
 #[allow(clippy::needless_pass_by_value)]
@@ -985,6 +1390,252 @@ mod imp {
         result
     }
 
+    fn read_file_after_permission_inner<F>(
+        root: &Path,
+        relative: &Path,
+        requested: &Path,
+        approved: &Path,
+        after_permission: F,
+    ) -> Result<RootedFileSnapshot, RootedFsError>
+    where
+        F: FnOnce(),
+    {
+        let target_exists = std::fs::symlink_metadata(requested).is_ok();
+        if target_exists {
+            verify_resolution(requested, approved)?;
+        } else {
+            verify_parent_resolution(requested, approved)?;
+        }
+        after_permission();
+        // Re-check before resolving the fixed parent fd, then again after the
+        // leaf fd is open. The latter closes the permission-check → read gap.
+        if target_exists {
+            verify_resolution(requested, approved)?;
+        } else {
+            verify_parent_resolution(requested, approved)?;
+        }
+        let (parent, file_name) =
+            open_parent(root, relative, false, PRIVATE_DIR_MODE).map_err(RootedFsError::Fs)?;
+        // Stat without following the final component before opening. Besides
+        // rejecting non-regular files, this keeps a FIFO from blocking the
+        // synchronous `openat(O_RDONLY)` below while waiting for a writer.
+        ensure_read_regular(&parent, &file_name, relative)?;
+        let fd = fs::openat(
+            &parent,
+            &file_name,
+            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .map_err(|error| RootedFsError::Fs(map_unix_io(relative, error)))?;
+        ensure_opened_regular(&fd, relative).map_err(RootedFsError::Fs)?;
+        if target_exists {
+            verify_resolution(requested, approved)?;
+        } else {
+            verify_parent_resolution(requested, approved)?;
+        }
+        let file = std::fs::File::from(fd);
+        let metadata = file
+            .metadata()
+            .map_err(|error| RootedFsError::Fs(map_io(relative, error)))?;
+        let mut bytes = Vec::new();
+        let mut reader = file;
+        reader
+            .read_to_end(&mut bytes)
+            .map_err(|error| RootedFsError::Fs(map_io(relative, error)))?;
+        Ok(RootedFileSnapshot {
+            size: metadata.len(),
+            modified: metadata.modified().ok(),
+            mode: Some({
+                use std::os::unix::fs::MetadataExt;
+                metadata.mode()
+            }),
+            bytes,
+        })
+    }
+
+    pub(super) fn read_file_after_permission(
+        root: &Path,
+        relative: &Path,
+        requested: &Path,
+        approved: &Path,
+    ) -> Result<RootedFileSnapshot, RootedFsError> {
+        read_file_after_permission_inner(root, relative, requested, approved, || {})
+    }
+
+    pub(super) fn open_file_after_permission(
+        root: &Path,
+        relative: &Path,
+        requested: &Path,
+        approved: &Path,
+    ) -> Result<std::fs::File, RootedFsError> {
+        let target_exists = std::fs::symlink_metadata(requested).is_ok();
+        if target_exists {
+            verify_resolution(requested, approved)?;
+        } else {
+            verify_parent_resolution(requested, approved)?;
+        }
+        let (parent, file_name) =
+            open_parent(root, relative, false, PRIVATE_DIR_MODE).map_err(RootedFsError::Fs)?;
+        ensure_read_regular(&parent, &file_name, relative)?;
+        let fd = fs::openat(
+            &parent,
+            &file_name,
+            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .map_err(|error| RootedFsError::Fs(map_unix_io(relative, error)))?;
+        ensure_opened_regular(&fd, relative).map_err(RootedFsError::Fs)?;
+        if target_exists {
+            verify_resolution(requested, approved)?;
+        } else {
+            verify_parent_resolution(requested, approved)?;
+        }
+        Ok(std::fs::File::from(fd))
+    }
+
+    #[cfg(test)]
+    pub(super) fn read_file_after_permission_for_test<F>(
+        root: &Path,
+        relative: &Path,
+        requested: &Path,
+        approved: &Path,
+        after_permission: F,
+    ) -> Result<RootedFileSnapshot, RootedFsError>
+    where
+        F: FnOnce(),
+    {
+        read_file_after_permission_inner(root, relative, requested, approved, after_permission)
+    }
+
+    fn verify_leaf_at(
+        parent: &OwnedFd,
+        file_name: &OsStr,
+        relative: &Path,
+    ) -> Result<(), RootedFsError> {
+        match fs::statat(parent, file_name, AtFlags::SYMLINK_NOFOLLOW) {
+            Ok(stat) if FileType::from_raw_mode(stat.st_mode) == FileType::Symlink => {
+                Err(RootedFsError::LeafSymlink)
+            }
+            Ok(stat) if FileType::from_raw_mode(stat.st_mode) == FileType::RegularFile => Ok(()),
+            Ok(_) => Err(RootedFsError::NotRegularFile),
+            Err(rustix::io::Errno::NOENT) => Ok(()),
+            Err(error) => Err(RootedFsError::Fs(map_unix_io(relative, error))),
+        }
+    }
+
+    fn ensure_read_regular(
+        parent: &OwnedFd,
+        file_name: &OsStr,
+        relative: &Path,
+    ) -> Result<(), RootedFsError> {
+        match fs::statat(parent, file_name, AtFlags::SYMLINK_NOFOLLOW) {
+            Ok(stat) if FileType::from_raw_mode(stat.st_mode) == FileType::RegularFile => Ok(()),
+            Ok(_) => Err(RootedFsError::NotRegularFile),
+            Err(rustix::io::Errno::NOENT) => Err(RootedFsError::Fs(FsError::NotFound(
+                relative.display().to_string(),
+            ))),
+            Err(error) => Err(RootedFsError::Fs(map_unix_io(relative, error))),
+        }
+    }
+
+    fn write_file_after_permission_inner<F>(
+        root: &Path,
+        relative: &Path,
+        requested: &Path,
+        approved: &Path,
+        bytes: &[u8],
+        after_permission: F,
+    ) -> Result<RootedWriteResult, RootedFsError>
+    where
+        F: FnOnce(),
+    {
+        let target_exists = std::fs::symlink_metadata(requested).is_ok();
+        if target_exists {
+            verify_resolution(requested, approved)?;
+            verify_leaf_not_symlink(requested)?;
+        } else {
+            verify_parent_resolution(requested, approved)?;
+        }
+        after_permission();
+        // Missing parents are materialized by the fixed no-follow directory
+        // handle chain. Never create them through the requested pathname:
+        // doing so would reopen a retargetable ancestor before rooted I/O.
+        // `create_dir_all` used by FileWriteTool applies the process umask to
+        // 0777, so retain that mode while changing only the resolution
+        // primitive to rooted mkdirat.
+        let (parent, file_name) =
+            open_parent(root, relative, true, 0o777).map_err(RootedFsError::Fs)?;
+        verify_parent_resolution(requested, approved)?;
+        verify_leaf_at(&parent, &file_name, relative)?;
+        let fd = fs::openat(
+            &parent,
+            &file_name,
+            OFlags::WRONLY | OFlags::CREATE | OFlags::TRUNC | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::from_bits_retain(0o666),
+        )
+        .map_err(|error| {
+            if error == rustix::io::Errno::LOOP {
+                RootedFsError::LeafSymlink
+            } else {
+                RootedFsError::Fs(map_unix_io(relative, error))
+            }
+        })?;
+        ensure_opened_regular(&fd, relative).map_err(RootedFsError::Fs)?;
+        if target_exists {
+            verify_resolution(requested, approved)?;
+        } else {
+            verify_parent_resolution(requested, approved)?;
+        }
+        let mut file = std::fs::File::from(fd);
+        file.write_all(bytes)
+            .map_err(|error| RootedFsError::Fs(map_io(relative, error)))?;
+        // A parent swap after the fixed dirfd was opened cannot redirect this
+        // write, but still fails closed so callers never report success for a
+        // path whose approved resolution changed during the operation.
+        verify_parent_resolution(requested, approved)?;
+        if target_exists {
+            verify_resolution(requested, approved)?;
+        }
+        Ok(RootedWriteResult {
+            modified: file
+                .metadata()
+                .ok()
+                .and_then(|metadata| metadata.modified().ok()),
+        })
+    }
+
+    pub(super) fn write_file_after_permission(
+        root: &Path,
+        relative: &Path,
+        requested: &Path,
+        approved: &Path,
+        bytes: &[u8],
+    ) -> Result<RootedWriteResult, RootedFsError> {
+        write_file_after_permission_inner(root, relative, requested, approved, bytes, || {})
+    }
+
+    #[cfg(test)]
+    pub(super) fn write_file_after_permission_for_test<F>(
+        root: &Path,
+        relative: &Path,
+        requested: &Path,
+        approved: &Path,
+        bytes: &[u8],
+        after_permission: F,
+    ) -> Result<RootedWriteResult, RootedFsError>
+    where
+        F: FnOnce(),
+    {
+        write_file_after_permission_inner(
+            root,
+            relative,
+            requested,
+            approved,
+            bytes,
+            after_permission,
+        )
+    }
+
     pub(super) fn remove_file(root: &Path, relative: &Path) -> Result<(), FsError> {
         let (parent, file_name) = open_parent(root, relative, false, PRIVATE_DIR_MODE)?;
         fs::unlinkat(&parent, &file_name, AtFlags::empty())
@@ -1009,6 +1660,38 @@ mod imp {
         Err(unsupported())
     }
 
+    pub(super) fn read_file_after_permission(
+        _root: &Path,
+        _relative: &Path,
+        _requested: &Path,
+        _approved: &Path,
+    ) -> Result<RootedFileSnapshot, RootedFsError> {
+        Err(RootedFsError::Fs(unsupported()))
+    }
+
+    pub(super) fn open_file_after_permission(
+        _root: &Path,
+        _relative: &Path,
+        _requested: &Path,
+        _approved: &Path,
+    ) -> Result<std::fs::File, RootedFsError> {
+        Err(RootedFsError::Fs(unsupported()))
+    }
+
+    #[cfg(test)]
+    pub(super) fn read_file_after_permission_for_test<F>(
+        _root: &Path,
+        _relative: &Path,
+        _requested: &Path,
+        _approved: &Path,
+        _after_permission: F,
+    ) -> Result<RootedFileSnapshot, RootedFsError>
+    where
+        F: FnOnce(),
+    {
+        Err(RootedFsError::Fs(unsupported()))
+    }
+
     pub(super) fn read_to_string(_root: &Path, _relative: &Path) -> Result<String, FsError> {
         Err(unsupported())
     }
@@ -1028,6 +1711,31 @@ mod imp {
         _options: AtomicWriteOptions,
     ) -> Result<(), FsError> {
         Err(unsupported())
+    }
+
+    pub(super) fn write_file_after_permission(
+        _root: &Path,
+        _relative: &Path,
+        _requested: &Path,
+        _approved: &Path,
+        _bytes: &[u8],
+    ) -> Result<RootedWriteResult, RootedFsError> {
+        Err(RootedFsError::Fs(unsupported()))
+    }
+
+    #[cfg(test)]
+    pub(super) fn write_file_after_permission_for_test<F>(
+        _root: &Path,
+        _relative: &Path,
+        _requested: &Path,
+        _approved: &Path,
+        _bytes: &[u8],
+        _after_permission: F,
+    ) -> Result<RootedWriteResult, RootedFsError>
+    where
+        F: FnOnce(),
+    {
+        Err(RootedFsError::Fs(unsupported()))
     }
 
     pub(super) fn remove_file(_root: &Path, _relative: &Path) -> Result<(), FsError> {
@@ -1084,6 +1792,178 @@ mod tests {
             .unwrap()
             .file_type()
             .is_symlink());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stable_leaf_symlink_read_uses_approved_target() {
+        let root = tempfile::tempdir().unwrap();
+        let root_path = std::fs::canonicalize(root.path()).unwrap();
+        let real = root.path().join("real");
+        std::fs::create_dir(&real).unwrap();
+        let target = real.join("state.txt");
+        std::fs::write(&target, "approved").unwrap();
+        let requested = root.path().join("state-link.txt");
+        std::os::unix::fs::symlink(&target, &requested).unwrap();
+        let approved = std::fs::canonicalize(&requested).unwrap();
+        let relative = approved.strip_prefix(&root_path).unwrap();
+
+        let snapshot = read_file_after_permission(root.path(), relative, &requested, &approved)
+            .expect("a stable, in-root leaf symlink remains readable");
+        assert_eq!(snapshot.bytes, b"approved");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn read_fails_closed_when_leaf_symlink_is_retargeted_after_permission() {
+        let root = tempfile::tempdir().unwrap();
+        let root_path = std::fs::canonicalize(root.path()).unwrap();
+        let real = root.path().join("real");
+        let victim = tempfile::tempdir().unwrap();
+        std::fs::create_dir(&real).unwrap();
+        std::fs::write(real.join("state.txt"), "approved").unwrap();
+        std::fs::write(victim.path().join("state.txt"), "victim").unwrap();
+        let requested = root.path().join("state-link.txt");
+        std::os::unix::fs::symlink(real.join("state.txt"), &requested).unwrap();
+        let approved = std::fs::canonicalize(&requested).unwrap();
+        let relative = approved.strip_prefix(&root_path).unwrap();
+
+        let result = read_file_after_permission_for_test(
+            root.path(),
+            relative,
+            &requested,
+            &approved,
+            || {
+                std::fs::remove_file(&requested).unwrap();
+                std::os::unix::fs::symlink(victim.path().join("state.txt"), &requested).unwrap();
+            },
+        );
+        assert!(matches!(
+            result,
+            Err(RootedFsError::SymlinkResolutionChanged)
+        ));
+        assert_eq!(
+            std::fs::read_to_string(victim.path().join("state.txt")).unwrap(),
+            "victim"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_fails_closed_when_parent_symlink_is_retargeted_after_permission() {
+        let root = tempfile::tempdir().unwrap();
+        let root_path = std::fs::canonicalize(root.path()).unwrap();
+        let real = root.path().join("real");
+        let victim = tempfile::tempdir().unwrap();
+        std::fs::create_dir(&real).unwrap();
+        std::fs::write(real.join("state.txt"), "approved").unwrap();
+        let parent = root.path().join("active");
+        std::os::unix::fs::symlink(&real, &parent).unwrap();
+        let requested = parent.join("state.txt");
+        let approved = std::fs::canonicalize(&requested).unwrap();
+        let relative = approved.strip_prefix(&root_path).unwrap();
+
+        let result = write_file_after_permission_for_test(
+            root.path(),
+            relative,
+            &requested,
+            &approved,
+            b"attacker-controlled",
+            || {
+                std::fs::remove_file(&parent).unwrap();
+                std::os::unix::fs::symlink(victim.path(), &parent).unwrap();
+            },
+        );
+        assert!(matches!(
+            result,
+            Err(RootedFsError::ParentSymlinkResolutionChanged)
+        ));
+        assert_eq!(
+            std::fs::read_to_string(real.join("state.txt")).unwrap(),
+            "approved"
+        );
+        assert!(!victim.path().join("state.txt").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_missing_parent_swap_is_refused_before_rooted_mkdir() {
+        let root = tempfile::tempdir().unwrap();
+        let root_path = std::fs::canonicalize(root.path()).unwrap();
+        let approved_dir = root.path().join("approved");
+        let victim = tempfile::tempdir().unwrap();
+        std::fs::create_dir(&approved_dir).unwrap();
+        let parent = root.path().join("active");
+        std::os::unix::fs::symlink(&approved_dir, &parent).unwrap();
+        let requested = parent.join("new").join("state.txt");
+        let approved = std::fs::canonicalize(&approved_dir)
+            .unwrap()
+            .join("new")
+            .join("state.txt");
+        let relative = approved.strip_prefix(&root_path).unwrap();
+
+        let result = write_file_after_permission_for_test(
+            root.path(),
+            relative,
+            &requested,
+            &approved,
+            b"attacker-controlled",
+            || {
+                std::fs::remove_file(&parent).unwrap();
+                std::os::unix::fs::symlink(victim.path(), &parent).unwrap();
+            },
+        );
+        assert!(matches!(
+            result,
+            Err(RootedFsError::ParentSymlinkResolutionChanged)
+        ));
+        assert!(!victim.path().join("new").join("state.txt").exists());
+        assert!(!approved_dir.join("new").join("state.txt").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_missing_parent_through_stable_symlink_succeeds() {
+        let root = tempfile::tempdir().unwrap();
+        let root_path = std::fs::canonicalize(root.path()).unwrap();
+        let approved_dir = root.path().join("approved");
+        std::fs::create_dir(&approved_dir).unwrap();
+        let parent = root.path().join("active");
+        std::os::unix::fs::symlink(&approved_dir, &parent).unwrap();
+        let requested = parent.join("new").join("state.txt");
+        let approved = std::fs::canonicalize(&approved_dir)
+            .unwrap()
+            .join("new")
+            .join("state.txt");
+        let relative = approved.strip_prefix(&root_path).unwrap();
+
+        write_file_after_permission(root.path(), relative, &requested, &approved, b"confined")
+            .expect("stable parent symlink should preserve the approved target");
+        assert_eq!(
+            std::fs::read_to_string(approved_dir.join("new").join("state.txt")).unwrap(),
+            "confined"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_rejects_stable_leaf_symlink_without_touching_victim() {
+        let root = tempfile::tempdir().unwrap();
+        let root_path = std::fs::canonicalize(root.path()).unwrap();
+        let real = root.path().join("real.txt");
+        let victim = root.path().join("victim.txt");
+        std::fs::write(&real, "approved").unwrap();
+        std::fs::write(&victim, "victim").unwrap();
+        let requested = root.path().join("state-link.txt");
+        std::os::unix::fs::symlink(&real, &requested).unwrap();
+        let approved = std::fs::canonicalize(&requested).unwrap();
+        let relative = approved.strip_prefix(&root_path).unwrap();
+
+        let result =
+            write_file_after_permission(root.path(), relative, &requested, &approved, b"new");
+        assert!(matches!(result, Err(RootedFsError::LeafSymlink)));
+        assert_eq!(std::fs::read_to_string(&real).unwrap(), "approved");
+        assert_eq!(std::fs::read_to_string(&victim).unwrap(), "victim");
     }
 
     #[cfg(windows)]

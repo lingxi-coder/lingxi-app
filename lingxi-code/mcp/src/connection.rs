@@ -6,10 +6,11 @@
 
 use protocol::McpConnectionId;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::time::SystemTime;
 use traits::{
-    McpPromptDto, McpResourceDto, McpResourceTemplateDto, McpToolDto, McpTransportSpec,
-    ServerCapabilitiesDto,
+    McpConfiguredToolPolicyDto, McpPermissionCeiling, McpPromptDto, McpResourceDto,
+    McpResourceTemplateDto, McpToolDto, McpTransportSpec, ServerCapabilitiesDto,
 };
 
 /// Stable source identity and cache provenance attached to a configured MCP
@@ -102,6 +103,16 @@ pub struct McpServerConfig {
     /// on the API"). OR'd into each tool's `always_load` bit at list time.
     #[serde(default, skip_serializing_if = "is_false")]
     pub always_load: bool,
+    /// Optional per-tool rule producer declarations from config/UI state.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tools: Vec<McpConfiguredToolPolicyDto>,
+    /// Optional tighten-only per-tool ceilings from config/UI state.
+    #[serde(
+        default,
+        skip_serializing_if = "BTreeMap::is_empty",
+        rename = "toolPermissions"
+    )]
+    pub tool_permissions: BTreeMap<String, McpPermissionCeiling>,
     /// Config-level error that makes the server unconnectable (claude
     /// `configError`, reason `url_invalid`): set at parse time when a remote
     /// entry's `url` expanded to an empty string. The server is KEPT in the
@@ -442,6 +453,8 @@ mod tests {
             timeout_ms: None,
             discovery_cache: None,
             always_load: false,
+            tools: Vec::new(),
+            tool_permissions: BTreeMap::new(),
             config_error: config_error.map(str::to_string),
             metadata: McpServerMetadata::default(),
         }

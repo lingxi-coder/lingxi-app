@@ -55,6 +55,30 @@ pub const LOCAL_APP_TOOLS: &[(&str, &str, bool)] = &[
     ("LocalAppList", "list", true),
     ("LocalAppGet", "get", true),
     ("LocalAppRuntimeProfiles", "runtime_profiles", true),
+    ("LocalAppTemplateCatalog", "template_catalog", true),
+    (
+        "LocalAppValidateTemplateSelection",
+        "validate_template_selection",
+        false,
+    ),
+    (
+        "LocalAppResolveTemplateSelection",
+        "resolve_template_selection",
+        true,
+    ),
+    ("LocalAppStageCreate", "stage_create", false),
+    (
+        "LocalAppValidateMcpProposal",
+        "validate_mcp_proposal",
+        false,
+    ),
+    ("LocalAppApproveMcpProposal", "approve_mcp_proposal", false),
+    ("LocalAppQaMcpCandidate", "qa_mcp_candidate", false),
+    (
+        "LocalAppPromoteMcpCandidate",
+        "promote_mcp_candidate",
+        false,
+    ),
     ("LocalAppLogs", "read_logs", true),
     ("LocalAppQueryData", "query_data", true),
     ("LocalAppCheckpointList", "list_checkpoints", true),
@@ -200,6 +224,8 @@ impl LocalAppTool {
                 | "LocalAppCheckpointList"
                 | "LocalAppBackgroundList"
                 | "LocalAppBackgroundStatus"
+                | "LocalAppResolveTemplateSelection"
+                | "LocalAppStageCreate"
                 | "LocalAppBuild"
                 | "LocalAppRuntime"
                 // Allow-by-default so the shell conversation's ONE way out
@@ -628,8 +654,7 @@ mod tests {
     #[test]
     fn every_declared_tool_maps_to_a_real_provider_operation() {
         let catalog = LocalAppsMcpTransport::host_tool_catalog();
-        let ops: std::collections::BTreeSet<&str> =
-            catalog.iter().map(|t| t.tool_name.as_str()).collect();
+        let ops: std::collections::BTreeSet<&str> = catalog.iter().map(|t| t.tool_name()).collect();
         for &(name, operation, _) in LOCAL_APP_TOOLS {
             assert!(
                 ops.contains(operation),
@@ -690,6 +715,9 @@ mod tests {
                 name,
                 "LocalAppList"
                     | "LocalAppGet"
+                    | "LocalAppTemplateCatalog"
+                    | "LocalAppResolveTemplateSelection"
+                    | "LocalAppStageCreate"
                     | "LocalAppLogs"
                     | "LocalAppCheckpointList"
                     | "LocalAppBackgroundList"
@@ -914,7 +942,13 @@ mod tests {
             .expect("LocalAppScaffold");
         let decision = scaffold
             .check_permissions(
-                &serde_json::json!({"app_id": "app-a", "name": "N", "brief": "b", "runtime_profile_receipt": "receipt-a"}),
+                &serde_json::json!({
+                    "app_id": "app-a",
+                    "name": "N",
+                    "brief": "b",
+                    "workflow_run_id": "wf_scaffold_permission",
+                    "receipt_id": "mcp-create-receipt"
+                }),
                 &tool_api::test_support::fresh_ctx(),
             )
             .await;
@@ -1004,7 +1038,7 @@ mod tests {
         assert!(scaffold.input_schema()["properties"]["runtime_profile"].is_null());
         assert_eq!(
             scaffold.input_schema()["required"],
-            serde_json::json!(["app_id", "name", "brief", "runtime_profile_receipt"])
+            serde_json::json!(["app_id", "name", "brief", "workflow_run_id", "receipt_id"])
         );
     }
 }

@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 
 /// Schema version stamped on every persisted local-apps file.
-pub const APPS_SCHEMA_VERSION: u32 = 2;
+pub const APPS_SCHEMA_VERSION: u32 = 3;
 
 /// New apps use Git-backed source version control unless the user opts out
 /// during creation. Missing values on older records deserialize as enabled.
@@ -18,51 +18,6 @@ pub const DEFAULT_GIT_VERSION_CONTROL: bool = true;
 
 fn default_git_version_control() -> bool {
     DEFAULT_GIT_VERSION_CONTROL
-}
-
-/// Two-state workflow of an app (v3): the conversation agent drives app
-/// creation, so the record only tracks whether a runnable output exists yet.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum AppWorkflowState {
-    /// Being worked on by the agent (v3). Every legacy pipeline stage maps
-    /// here on load — the pipeline is gone, so "somewhere mid-pipeline" can
-    /// only mean "not ready yet".
-    #[serde(
-        alias = "authoring_questionnaire",
-        alias = "questionnaire_failed",
-        alias = "collecting_spec",
-        alias = "planning",
-        alias = "plan_failed",
-        alias = "awaiting_spec_confirmation",
-        alias = "generating",
-        alias = "validating",
-        alias = "awaiting_preview_confirmation",
-        alias = "revising",
-        alias = "generation_failed",
-        alias = "validation_failed"
-    )]
-    Draft,
-    /// Has a successfully built, runnable output (host stamps this after a
-    /// successful offline build).
-    Ready,
-}
-
-impl AppWorkflowState {
-    /// Canonical `snake_case` name (the persisted/wire value).
-    #[must_use]
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Draft => "draft",
-            Self::Ready => "ready",
-        }
-    }
-}
-
-impl fmt::Display for AppWorkflowState {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_str())
-    }
 }
 
 /// Runtime (dev-server) state of an app (spec §C).
@@ -194,7 +149,7 @@ impl fmt::Display for AppRuntimeProfile {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AppRecord {
-    /// Stable app id matching `^[a-z0-9][a-z0-9-]{0,63}$`.
+    /// Stable app id matching `^[a-z0-9][a-z0-9-]{0,53}$`.
     pub id: String,
     /// User-facing display name.
     pub name: String,
@@ -213,8 +168,6 @@ pub struct AppRecord {
     pub created_at_ms: u64,
     /// Last mutation time, epoch milliseconds.
     pub updated_at_ms: u64,
-    /// Current workflow state.
-    pub workflow_state: AppWorkflowState,
     /// Conversation the app was created from (`origin: chat`), if any —
     /// the SOURCE link only; the app's own conversations live in its
     /// workspace-scoped session catalog.
@@ -348,14 +301,6 @@ mod tests {
     #[test]
     fn enums_serialize_to_spec_snake_case_strings() {
         assert_eq!(
-            serde_json::to_string(&AppWorkflowState::Draft).unwrap(),
-            "\"draft\""
-        );
-        assert_eq!(
-            serde_json::to_string(&AppWorkflowState::Ready).unwrap(),
-            "\"ready\""
-        );
-        assert_eq!(
             serde_json::to_string(&AppRuntimeState::Stopped).unwrap(),
             "\"stopped\""
         );
@@ -374,31 +319,6 @@ mod tests {
     }
 
     #[test]
-    fn every_legacy_pipeline_state_deserializes_to_draft() {
-        for legacy in [
-            "authoring_questionnaire",
-            "questionnaire_failed",
-            "collecting_spec",
-            "planning",
-            "plan_failed",
-            "awaiting_spec_confirmation",
-            "generating",
-            "validating",
-            "awaiting_preview_confirmation",
-            "revising",
-            "generation_failed",
-            "validation_failed",
-            // The canonical v3 spelling parses too, of course.
-            "draft",
-        ] {
-            let parsed: AppWorkflowState = serde_json::from_str(&format!("\"{legacy}\"")).unwrap();
-            assert_eq!(parsed, AppWorkflowState::Draft, "{legacy}");
-        }
-        let parsed: AppWorkflowState = serde_json::from_str("\"ready\"").unwrap();
-        assert_eq!(parsed, AppWorkflowState::Ready);
-    }
-
-    #[test]
     fn record_serializes_camel_case_and_omits_absent_conversation() {
         let record = AppRecord {
             id: "abc123".into(),
@@ -409,14 +329,12 @@ mod tests {
             scaffolded: true,
             created_at_ms: 1_700_000_000_000,
             updated_at_ms: 1_700_000_000_001,
-            workflow_state: AppWorkflowState::Draft,
             conversation_id: None,
             init_session_id: None,
             workspace_rel: "apps/abc123/workspace".into(),
         };
         let json = serde_json::to_string(&record).unwrap();
         assert!(json.contains("\"createdAtMs\":1700000000000"));
-        assert!(json.contains("\"workflowState\":\"draft\""));
         assert!(json.contains("\"workspaceRel\":\"apps/abc123/workspace\""));
         assert!(json.contains("\"brief\":\"Track daily habits\""));
         assert!(json.contains("\"gitEnabled\":true"));
@@ -427,7 +345,7 @@ mod tests {
     }
 
     #[test]
-    fn a_legacy_record_with_a_pipeline_state_loads_as_draft() {
+    fn a_legacy_record_without_git_enabled_still_defaults_true() {
         let json = r#"{
             "id": "abc123",
             "name": "Habits",
@@ -435,11 +353,9 @@ mod tests {
             "scaffolded": true,
             "createdAtMs": 1,
             "updatedAtMs": 2,
-            "workflowState": "awaiting_preview_confirmation",
             "workspaceRel": "apps/abc123/workspace"
         }"#;
         let record: AppRecord = serde_json::from_str(json).unwrap();
-        assert_eq!(record.workflow_state, AppWorkflowState::Draft);
         assert!(record.git_enabled, "missing gitEnabled defaults to true");
     }
 }

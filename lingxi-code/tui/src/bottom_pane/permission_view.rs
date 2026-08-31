@@ -57,21 +57,19 @@ const BYPASS_BODY_2: &str = "By proceeding, you accept all responsibility for ac
 
 /// The variant-specific interaction model behind the shared response channel.
 enum Prompt {
-    /// `ToolUseConfirm` / `ExitPlanMode`: a select dialog whose row order is
-    /// always allow-once / allow-always / deny — UNLESS
-    /// `always_allow_offered` is `false`, in which case the middle row is
-    /// omitted (§27b: a tool that requires fresh interaction on every call
-    /// must never offer a persistent "always allow" grant, since the tool
-    /// would ignore a stored rule anyway).
+    /// `ToolUseConfirm` / `ExitPlanMode`: a select dialog whose tool option
+    /// order is allow-once / (allow-always or auto) / deny. The persistent
+    /// option is omitted when the request carries the suppression flag.
     Select {
         dialog: DialogView,
         /// `Some(rows)` pins the locked `ToolUseConfirm` viewport height;
         /// `None` sizes to the dialog content (plan approval).
         fixed_height: Option<u16>,
         /// `false` ⇒ the dialog was built with 2 rows (allow-once / deny),
-        /// so a `Selected(1)` outcome means Deny, not AllowAlways. Always
-        /// `true` for `ExitPlanMode` (no suppression concept there).
+        /// so a `Selected(1)` outcome means Deny, not AllowAlways.
         always_allow_offered: bool,
+        /// Engine-computed optional Auto action; clients must not infer it.
+        auto_mode_prompt: Option<permission::gate::AutoModePrompt>,
     },
     /// `BypassPermissionsMode`: type `yes` + Enter to enable (`AllowOnce`);
     /// `Esc`/`n` deny. The buffer keeps typos visible for Backspace editing.
@@ -101,14 +99,17 @@ impl PermissionView {
             PermissionRequest::ToolUseConfirm {
                 tool_name,
                 tool_input,
-                suppress_always_allow_rule,
+                suppress_always_allow_rule: request_suppression,
                 ..
             } => {
+                let suppress_always_allow_rule =
+                    exchange.suppress_always_allow_rule || *request_suppression;
+                let auto_mode_prompt = exchange.auto_mode_prompt;
                 let mut input = tool_input.to_string();
                 if input.chars().count() > 68 {
                     input = format!("{}…", input.chars().take(67).collect::<String>());
                 }
-                let always_allow_offered = !*suppress_always_allow_rule;
+                let always_allow_offered = !suppress_always_allow_rule;
                 let deny_row = format!(
                     "No, and tell {} what to do differently (esc)",
                     branding::PRODUCT_NAME
@@ -138,10 +139,16 @@ impl PermissionView {
                 // `showAlwaysAllow:...&&e.tool.suppressesAlwaysAllowRule?.(e.input)!==!0&&...`)
                 // — a persisted rule would be written but then ignored by a
                 // tool that needs fresh interaction on every call.
-                let rows = if always_allow_offered {
-                    vec!["Yes".to_string(), "Yes, allow always".to_string(), deny_row]
-                } else {
+                let rows = if !always_allow_offered {
                     vec!["Yes".to_string(), deny_row]
+                } else if let Some(auto_mode_prompt) = auto_mode_prompt {
+                    vec![
+                        "Yes".to_string(),
+                        auto_mode_prompt.label().to_string(),
+                        deny_row,
+                    ]
+                } else {
+                    vec!["Yes".to_string(), "Yes, allow always".to_string(), deny_row]
                 };
                 Prompt::Select {
                     dialog: DialogView::new(
@@ -151,9 +158,12 @@ impl PermissionView {
                     ),
                     fixed_height: Some(VIEWPORT_HEIGHT),
                     always_allow_offered,
+                    auto_mode_prompt,
                 }
             }
             PermissionRequest::ExitPlanMode { plan } => {
+                let auto_mode_prompt = exchange.auto_mode_prompt;
+                let suppress_always_allow_rule = exchange.suppress_always_allow_rule;
                 let mut body = Vec::new();
                 if exchange.worker.is_some() {
                     body.push(format!("{who} wants to exit plan mode:"));
@@ -168,21 +178,29 @@ impl PermissionView {
                         lines.len() - MAX_PLAN_LINES
                     ));
                 }
+                let rows = if suppress_always_allow_rule {
+                    vec![
+                        "Yes, manually approve edits".to_string(),
+                        "No, keep planning".to_string(),
+                    ]
+                } else {
+                    vec![
+                        "Yes, manually approve edits".to_string(),
+                        auto_mode_prompt.map_or_else(
+                            || "Yes, auto-accept edits".to_string(),
+                            |prompt| prompt.label().to_string(),
+                        ),
+                        "No, keep planning".to_string(),
+                    ]
+                };
                 Prompt::Select {
                     // claude-code `ExitPlanMode` grammar: AllowOnce proceeds
                     // with manual edit approval, AllowAlways auto-accepts
                     // edits, Deny stays in plan mode.
-                    dialog: DialogView::new(
-                        "Ready to code?",
-                        body,
-                        vec![
-                            "Yes, manually approve edits".to_string(),
-                            "Yes, auto-accept edits".to_string(),
-                            "No, keep planning".to_string(),
-                        ],
-                    ),
+                    dialog: DialogView::new("Ready to code?", body, rows),
                     fixed_height: None,
-                    always_allow_offered: true,
+                    always_allow_offered: !suppress_always_allow_rule,
+                    auto_mode_prompt,
                 }
             }
             PermissionRequest::BypassPermissionsMode => Prompt::TypedConfirm {
@@ -284,6 +302,7 @@ impl BottomPaneView for PermissionView {
             Prompt::Select {
                 dialog,
                 always_allow_offered,
+                auto_mode_prompt,
                 ..
             } => {
                 // `n`/`N` denies (iocraft dialog parity); Ctrl chords stay
@@ -296,9 +315,12 @@ impl BottomPaneView for PermissionView {
                         DialogOutcome::Selected(idx) => Some(match idx {
                             0 => PermissionResponse::AllowOnce,
                             // §27b: row 1 is "Yes, allow always" only when
-                            // `always_allow_offered` — a suppressed dialog has
-                            // only 2 rows (allow-once / deny), so idx 1 there
-                            // IS the deny row and must fall through to `_`.
+                            // `always_allow_offered` and no Auto action is
+                            // present. A suppressed dialog has only 2 rows,
+                            // so idx 1 there is the deny row.
+                            1 if *always_allow_offered && auto_mode_prompt.is_some() => {
+                                PermissionResponse::AllowAuto
+                            }
                             1 if *always_allow_offered => PermissionResponse::AllowAlways,
                             _ => PermissionResponse::Deny,
                         }),
@@ -351,6 +373,8 @@ mod tests {
                 request,
                 resp_tx,
                 worker: None,
+                suppress_always_allow_rule: false,
+                auto_mode_prompt: None,
             },
             resp_rx,
         )
@@ -368,12 +392,38 @@ mod tests {
     /// §27b: a request from a tool marked `requiresUserInteraction` — the
     /// dialog must omit "Yes, allow always".
     fn suppressed_tool_exchange() -> (PermissionExchange, oneshot::Receiver<PermissionResponse>) {
-        exchange_for(PermissionRequest::ToolUseConfirm {
+        let (mut exchange, resp_rx) = exchange_for(PermissionRequest::ToolUseConfirm {
             tool_name: "mcp__server__tool".to_string(),
             tool_input: serde_json::json!({}),
             default_decision: permission::gate::PromptDefault::DenyByDefault,
             suppress_always_allow_rule: true,
-        })
+        });
+        exchange.suppress_always_allow_rule = true;
+        (exchange, resp_rx)
+    }
+
+    fn auto_tool_exchange() -> (PermissionExchange, oneshot::Receiver<PermissionResponse>) {
+        let (mut exchange, resp_rx) = tool_exchange();
+        exchange.auto_mode_prompt = Some(permission::gate::AutoModePrompt::WorkflowBash);
+        (exchange, resp_rx)
+    }
+
+    fn auto_plan_exchange(
+        plan: &str,
+    ) -> (PermissionExchange, oneshot::Receiver<PermissionResponse>) {
+        let (resp_tx, resp_rx) = oneshot::channel();
+        (
+            PermissionExchange {
+                request: PermissionRequest::ExitPlanMode {
+                    plan: plan.to_string(),
+                },
+                resp_tx,
+                worker: None,
+                suppress_always_allow_rule: false,
+                auto_mode_prompt: Some(permission::gate::AutoModePrompt::ExitPlanMode),
+            },
+            resp_rx,
+        )
     }
 
     fn plan_exchange(plan: &str) -> (PermissionExchange, oneshot::Receiver<PermissionResponse>) {
@@ -448,6 +498,38 @@ mod tests {
             resp_rx.blocking_recv().unwrap(),
             PermissionResponse::AllowAlways
         );
+    }
+
+    #[test]
+    fn eligible_workflow_bash_renders_exact_auto_row_and_response() {
+        let (exchange, resp_rx) = auto_tool_exchange();
+        let mut view = PermissionView::new(exchange);
+        let text = buffer_text(&view, Rect::new(0, 0, 80, 9));
+        assert!(text.contains("Yes, and switch to auto mode"), "{text}");
+        assert!(!text.contains("allow always"), "{text}");
+        assert!(matches!(
+            view.handle_key(press(KeyCode::Char('2'))),
+            ViewOutcome::PermissionResponse(PermissionResponse::AllowAuto)
+        ));
+        assert_eq!(
+            resp_rx.blocking_recv().unwrap(),
+            PermissionResponse::AllowAuto
+        );
+    }
+
+    #[test]
+    fn suppressed_prompt_hides_allow_always_and_remaps_keys() {
+        let (mut exchange, resp_rx) = tool_exchange();
+        exchange.suppress_always_allow_rule = true;
+        let mut view = PermissionView::new(exchange);
+
+        // The second visible row is now Deny, and there is no third row for
+        // the old AllowAlways shortcut.
+        assert!(matches!(
+            view.handle_key(press(KeyCode::Char('2'))),
+            ViewOutcome::PermissionResponse(PermissionResponse::Deny)
+        ));
+        assert_eq!(resp_rx.blocking_recv().unwrap(), PermissionResponse::Deny);
     }
 
     #[test]
@@ -670,6 +752,23 @@ mod tests {
             ));
             assert_eq!(resp_rx.blocking_recv().unwrap(), PermissionResponse::Deny);
         }
+    }
+
+    #[test]
+    fn eligible_exit_plan_renders_exact_auto_row_and_selects_allow_auto() {
+        let (exchange, resp_rx) = auto_plan_exchange("plan");
+        let mut view = PermissionView::new(exchange);
+        let text = buffer_text(&view, Rect::new(0, 0, 80, 15));
+        assert!(text.contains("Yes, and use auto mode"), "{text}");
+        assert!(!text.contains("Yes, auto-accept edits"), "{text}");
+        assert!(matches!(
+            view.handle_key(press(KeyCode::Char('2'))),
+            ViewOutcome::PermissionResponse(PermissionResponse::AllowAuto)
+        ));
+        assert_eq!(
+            resp_rx.blocking_recv().unwrap(),
+            PermissionResponse::AllowAuto
+        );
     }
 
     #[test]

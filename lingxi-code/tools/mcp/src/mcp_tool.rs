@@ -3486,6 +3486,7 @@ pub(crate) mod cached_resource_test_support {
             disabled: false,
             timeout_ms: None,
             always_load: false,
+            discovery_cache: None,
             config_error: None,
         }
     }
@@ -4410,6 +4411,7 @@ mod resource_tool_gating_tests {
             disabled: false,
             timeout_ms: None,
             always_load: false,
+            discovery_cache: None,
             config_error: None,
         }
     }

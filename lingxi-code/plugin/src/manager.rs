@@ -1689,6 +1689,7 @@ mod unload_tests {
                         disabled: false,
                         timeout_ms: None,
                         always_load: false,
+                        discovery_cache: None,
                         config_error: None,
                     },
                     connection_id: McpConnectionId::new(),

@@ -393,6 +393,7 @@ fn http_cfg(name: &str, oauth: Option<McpOAuthConfigDto>) -> McpServerConfig {
         disabled: false,
         timeout_ms: None,
         always_load: false,
+        discovery_cache: None,
         config_error: None,
     }
 }
@@ -570,6 +571,7 @@ async fn static_token_server_spec_is_unchanged() {
         disabled: false,
         timeout_ms: None,
         always_load: false,
+        discovery_cache: None,
         config_error: None,
     };
 
@@ -938,6 +940,7 @@ async fn static_authorization_header_survives_oauth_bearer() {
         disabled: false,
         timeout_ms: None,
         always_load: false,
+        discovery_cache: None,
         config_error: None,
     };
     let key = oauth::server_key("static-with-oauth", &config.spec);
@@ -989,6 +992,7 @@ async fn static_authorization_header_rejection_is_classified() {
         disabled: false,
         timeout_ms: None,
         always_load: false,
+        discovery_cache: None,
         config_error: None,
     };
 
@@ -1031,6 +1035,7 @@ async fn headers_helper_minted_authorization_survives_oauth_bearer() {
         disabled: false,
         timeout_ms: None,
         always_load: false,
+        discovery_cache: None,
         config_error: None,
     };
     // `oauth::server_key` hashes `{type, url, headers}`, so a stored-token
@@ -1095,6 +1100,7 @@ async fn headers_helper_minted_authorization_rejection_is_classified() {
         disabled: false,
         timeout_ms: None,
         always_load: false,
+        discovery_cache: None,
         config_error: None,
     };
 
@@ -1142,6 +1148,7 @@ async fn headers_helper_minting_other_header_does_not_suppress_oauth() {
         disabled: false,
         timeout_ms: None,
         always_load: false,
+        discovery_cache: None,
         config_error: None,
     };
     // The helper mints only `X-Api-Key`, so the post-helper spec's headers

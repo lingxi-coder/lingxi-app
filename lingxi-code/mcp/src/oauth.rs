@@ -1369,6 +1369,28 @@ pub async fn load_tokens(
     Ok(Some(parsed))
 }
 
+#[must_use]
+pub(crate) fn discovery_cache_refresh_grant_token(refresh_token: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(refresh_token.as_bytes());
+    let hex = format!("{:x}", hasher.finalize());
+    format!("grant:{}", &hex[..16])
+}
+
+pub(crate) async fn discovery_cache_grant_token(
+    storage: &Arc<dyn traits::SecureStorage>,
+    key: &str,
+) -> Result<Option<String>, OAuthError> {
+    let Some(stored) = load_tokens(storage, key).await? else {
+        return Ok(Some("grant:none".to_string()));
+    };
+    Ok(stored
+        .refresh_token
+        .as_deref()
+        .filter(|refresh| !refresh.is_empty())
+        .map(discovery_cache_refresh_grant_token))
+}
+
 /// Persist an already-built [`StoredTokens`] blob for `key` (used to update
 /// side fields like `step_up_scope` without minting fresh [`Tokens`]).
 ///
@@ -2041,6 +2063,235 @@ mod tests {
             Some("the-client"),
             "client_id from a grant must persist so refresh re-sends it (not empty)"
         );
+    }
+
+    #[derive(Default)]
+    struct DiscoveryCacheTestStorage {
+        rows: std::sync::Mutex<
+            std::collections::HashMap<(String, String), protocol::SecureStorageData>,
+        >,
+        fail_retrieve: std::sync::atomic::AtomicBool,
+    }
+
+    #[async_trait::async_trait]
+    impl traits::SecureStorage for DiscoveryCacheTestStorage {
+        async fn store(
+            &self,
+            service: &str,
+            account: &str,
+            data: protocol::SecureStorageData,
+        ) -> Result<(), traits::SecureStorageError> {
+            self.rows
+                .lock()
+                .unwrap()
+                .insert((service.to_string(), account.to_string()), data);
+            Ok(())
+        }
+
+        async fn retrieve(
+            &self,
+            service: &str,
+            account: &str,
+        ) -> Result<Option<protocol::SecureStorageData>, traits::SecureStorageError> {
+            if self
+                .fail_retrieve
+                .load(std::sync::atomic::Ordering::SeqCst)
+            {
+                return Err(traits::SecureStorageError::BackendUnavailable(
+                    "storage failed".to_string(),
+                ));
+            }
+            Ok(self
+                .rows
+                .lock()
+                .unwrap()
+                .get(&(service.to_string(), account.to_string()))
+                .cloned())
+        }
+
+        async fn delete(
+            &self,
+            service: &str,
+            account: &str,
+        ) -> Result<(), traits::SecureStorageError> {
+            self.rows
+                .lock()
+                .unwrap()
+                .remove(&(service.to_string(), account.to_string()));
+            Ok(())
+        }
+
+        async fn list(&self, service: &str) -> Result<Vec<String>, traits::SecureStorageError> {
+            Ok(self
+                .rows
+                .lock()
+                .unwrap()
+                .keys()
+                .filter(|(stored_service, _)| stored_service == service)
+                .map(|(_, account)| account.clone())
+                .collect())
+        }
+
+        fn is_encrypted(&self) -> bool {
+            false
+        }
+
+        fn backend(&self) -> traits::SecureStorageBackend {
+            traits::SecureStorageBackend::PlainText
+        }
+    }
+
+    #[tokio::test]
+    async fn discovery_cache_grant_token_matches_fixed_vector_and_ignores_access_token() {
+        let storage = Arc::new(DiscoveryCacheTestStorage::default());
+        let clock: Arc<dyn Clock> = Arc::new(TestClock::new(1_000));
+        store_tokens(
+            &(storage.clone() as Arc<dyn traits::SecureStorage>),
+            &clock,
+            "key",
+            &StoredTokens {
+                access_token: "at-1".into(),
+                refresh_token: Some("refresh-token".into()),
+                expires_at_unix: 10,
+                client_id: None,
+                client_secret: None,
+                step_up_scope: None,
+            },
+        )
+        .await
+        .expect("store tokens");
+        assert_eq!(
+            discovery_cache_refresh_grant_token("refresh-token"),
+            "grant:0eb17643d4e92611"
+        );
+        let first = discovery_cache_grant_token(
+            &(storage.clone() as Arc<dyn traits::SecureStorage>),
+            "key",
+        )
+        .await
+        .expect("grant token")
+        .expect("grant token present");
+        assert_eq!(first, "grant:0eb17643d4e92611");
+
+        store_tokens(
+            &(storage.clone() as Arc<dyn traits::SecureStorage>),
+            &clock,
+            "key",
+            &StoredTokens {
+                access_token: "at-2".into(),
+                refresh_token: Some("refresh-token".into()),
+                expires_at_unix: 11,
+                client_id: None,
+                client_secret: None,
+                step_up_scope: None,
+            },
+        )
+        .await
+        .expect("overwrite tokens");
+        let second = discovery_cache_grant_token(
+            &(storage.clone() as Arc<dyn traits::SecureStorage>),
+            "key",
+        )
+        .await
+        .expect("grant token")
+        .expect("grant token present");
+        assert_eq!(second, first);
+    }
+
+    #[tokio::test]
+    async fn discovery_cache_grant_token_changes_when_refresh_rotates() {
+        let storage = Arc::new(DiscoveryCacheTestStorage::default());
+        let clock: Arc<dyn Clock> = Arc::new(TestClock::new(1_000));
+        store_tokens(
+            &(storage.clone() as Arc<dyn traits::SecureStorage>),
+            &clock,
+            "key",
+            &StoredTokens {
+                access_token: "at".into(),
+                refresh_token: Some("refresh-token".into()),
+                expires_at_unix: 10,
+                client_id: None,
+                client_secret: None,
+                step_up_scope: None,
+            },
+        )
+        .await
+        .expect("store tokens");
+        let first = discovery_cache_grant_token(
+            &(storage.clone() as Arc<dyn traits::SecureStorage>),
+            "key",
+        )
+        .await
+        .expect("grant token")
+        .expect("grant token present");
+
+        store_tokens(
+            &(storage.clone() as Arc<dyn traits::SecureStorage>),
+            &clock,
+            "key",
+            &StoredTokens {
+                access_token: "at".into(),
+                refresh_token: Some("rotated-refresh-token".into()),
+                expires_at_unix: 10,
+                client_id: None,
+                client_secret: None,
+                step_up_scope: None,
+            },
+        )
+        .await
+        .expect("rotate refresh");
+        let second = discovery_cache_grant_token(
+            &(storage.clone() as Arc<dyn traits::SecureStorage>),
+            "key",
+        )
+        .await
+        .expect("grant token")
+        .expect("grant token present");
+        assert_ne!(second, first);
+    }
+
+    #[tokio::test]
+    async fn discovery_cache_grant_token_none_and_errors_follow_rules() {
+        let storage = Arc::new(DiscoveryCacheTestStorage::default());
+        let clock: Arc<dyn Clock> = Arc::new(TestClock::new(1_000));
+        assert_eq!(
+            discovery_cache_grant_token(&(storage.clone() as Arc<dyn traits::SecureStorage>), "key")
+                .await
+                .expect("no row"),
+            Some("grant:none".to_string())
+        );
+
+        store_tokens(
+            &(storage.clone() as Arc<dyn traits::SecureStorage>),
+            &clock,
+            "key",
+            &StoredTokens {
+                access_token: "access-only".into(),
+                refresh_token: None,
+                expires_at_unix: 10,
+                client_id: None,
+                client_secret: None,
+                step_up_scope: None,
+            },
+        )
+        .await
+        .expect("store access-only");
+        assert_eq!(
+            discovery_cache_grant_token(&(storage.clone() as Arc<dyn traits::SecureStorage>), "key")
+                .await
+                .expect("access-only"),
+            None
+        );
+
+        storage
+            .fail_retrieve
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        assert!(discovery_cache_grant_token(
+            &(storage.clone() as Arc<dyn traits::SecureStorage>),
+            "key"
+        )
+        .await
+        .is_err());
     }
 
     // -------------------------------------------------------------------

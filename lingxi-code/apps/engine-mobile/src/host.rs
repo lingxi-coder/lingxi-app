@@ -620,6 +620,7 @@ impl MobileAppAgentExecutor {
                 disabled: false,
                 timeout_ms: Some(LOCAL_APPS_MCP_TIMEOUT_MS),
                 always_load: true,
+                discovery_cache: None,
                 config_error: None,
             })
             .await
@@ -2477,6 +2478,7 @@ async fn build_mobile_inner_with_ask(
             disabled: false,
             timeout_ms: Some(LOCAL_APPS_MCP_TIMEOUT_MS),
             always_load: true,
+            discovery_cache: None,
             config_error: None,
         })
         .await

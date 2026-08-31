@@ -6,7 +6,7 @@
 //! ([`McpRegistry::run_reconnect_loop`]) implement the "Plan 13" wiring.
 
 use crate::client::McpClient;
-use crate::connection::{McpConnectionState, McpServerConfig};
+use crate::connection::{ConfigScope, McpConnectionState, McpServerConfig};
 use crate::hook_dispatch::HookDispatcher;
 use crate::normalization::normalize_name_for_mcp;
 use crate::oauth::{self, OnAuthorizationUrl};
@@ -235,6 +235,7 @@ struct LiveDiscovery {
     resources: Vec<traits::McpResourceDto>,
     resource_templates: Vec<traits::McpResourceTemplateDto>,
     prompts: Vec<traits::McpPromptDto>,
+    discovery_cache_partition: Option<DiscoveryCachePartition>,
     client: Option<Arc<McpClient>>,
     listener_connection: Option<Arc<jsonrpc::Connection>>,
 }
@@ -254,6 +255,12 @@ struct PromptPredecessor {
     key: String,
     config: McpServerConfig,
     live_connection_id: McpConnectionId,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct DiscoveryCachePartition {
+    logical_key: String,
+    partition_key: String,
 }
 
 enum LazyUpgradePreparation {
@@ -1382,7 +1389,7 @@ impl McpRegistry {
         if let Err(error) = &result {
             // §11 strike accounting — see `record_discovery_cache_connect_failure`'s
             // doc. Best-effort, before `config` moves into `Disconnected` below.
-            self.record_discovery_cache_connect_failure(&config);
+            self.record_discovery_cache_connect_failure(&config).await;
             // A failed public connect must never strand the registry in
             // `Connecting`. Reconnect scheduling only considers disconnected
             // states, and `/mcp` should expose the actual last failure.
@@ -1418,7 +1425,7 @@ impl McpRegistry {
         let invalidated_slot = self.invalidate_lazy_upgrade_slot(&key).await;
         Self::finish_invalidated_lazy_upgrade_slot(invalidated_slot.as_ref());
 
-        if let Some(decision) = self.discovery_cache_decision_for(&config) {
+        if let Some(decision) = self.discovery_cache_decision_for(&config).await {
             match decision {
                 crate::discovery_cache::Decision::Fresh { entry, age_ms } => {
                     return Ok(self
@@ -1795,6 +1802,23 @@ impl McpRegistry {
                 ))
             }
         };
+        // Capture the grant-bound partition immediately after the authenticated
+        // transport is established and before any catalog RPC. The write path
+        // re-resolves it and refuses a mismatch, so a concurrent refresh-token
+        // rotation cannot bind results fetched under the old grant to the new
+        // cache partition.
+        let discovery_cache_partition = if self.discovery_cache_store.is_some()
+            && crate::discovery_cache::cache_gate(
+                &config.spec,
+                config.discovery_cache,
+                crate::discovery_cache::feature_enabled(),
+            )
+            .is_none()
+        {
+            self.discovery_cache_partition_for(config).await.ok()
+        } else {
+            None
+        };
         match std::panic::AssertUnwindSafe(async {
             let mut tools_list_elapsed = std::time::Duration::ZERO;
             let catalog = async {
@@ -1813,7 +1837,7 @@ impl McpRegistry {
                 };
                 let templates_eligible = crate::discovery_cache::cache_gate(
                     &config.spec,
-                    None,
+                    config.discovery_cache,
                     crate::discovery_cache::feature_enabled(),
                 )
                 .is_none();
@@ -1956,6 +1980,7 @@ impl McpRegistry {
                 resources,
                 resource_templates,
                 prompts,
+                discovery_cache_partition,
                 client,
                 listener_connection,
             })
@@ -2061,12 +2086,14 @@ impl McpRegistry {
             .await;
         self.persist_or_purge_discovery_cache(
             &config,
+            discovery.discovery_cache_partition.as_ref(),
             &capabilities,
             &tools,
             &resources,
             &resource_templates,
             &prompts,
-        );
+        )
+        .await;
         if let Some(connection) = listener_connection {
             if shared_server {
                 self.spawn_catalog_change_listener(server_name.clone(), connection_id, connection);
@@ -2139,12 +2166,14 @@ impl McpRegistry {
         }
         self.persist_or_purge_discovery_cache(
             &slot.expected_config,
+            discovery.discovery_cache_partition.as_ref(),
             &capabilities,
             &tools,
             &resources,
             &resource_templates,
             &prompts,
-        );
+        )
+        .await;
         if let Some(connection) = listener_connection {
             if shared_server {
                 self.spawn_catalog_change_listener(
@@ -2184,7 +2213,7 @@ impl McpRegistry {
                             if Self::same_config_snapshot(config, &slot.expected_config)
                     );
                     if current_connecting {
-                        self.record_discovery_cache_connect_failure(&slot.expected_config);
+                        self.record_discovery_cache_connect_failure(&slot.expected_config).await;
                         self.connections.write().await.insert(
                             key.to_string(),
                             McpConnectionState::Disconnected {
@@ -2361,7 +2390,188 @@ impl McpRegistry {
         if !still_current {
             return;
         }
-        self.record_discovery_cache_connect_failure(config);
+        self.record_discovery_cache_connect_failure(config).await;
+    }
+
+    async fn discovery_cache_partition_for(
+        &self,
+        config: &McpServerConfig,
+    ) -> Result<DiscoveryCachePartition, crate::discovery_cache::MissReason> {
+        // Claude's key retains a stable `agentSource`. The Rust config model
+        // does not carry that source yet; fail closed rather than sharing an
+        // agent-scoped catalog under the plain server name/spec.
+        if config.scope == ConfigScope::Agent {
+            return Err(crate::discovery_cache::MissReason::NoFingerprint);
+        }
+        let logical_key = crate::discovery_cache::logical_cache_key(config);
+        let grant_token = match &config.spec {
+            McpTransportSpec::Sse { oauth, .. } | McpTransportSpec::Http { oauth, .. } => {
+                match &self.oauth {
+                    Some(deps) => {
+                        let server_key = oauth::server_key(&config.name, &config.spec);
+                        match oauth::discovery_cache_grant_token(&deps.storage, &server_key).await {
+                            Ok(Some(token)) => token,
+                            Ok(None) | Err(_) => {
+                                return Err(crate::discovery_cache::MissReason::NoFingerprint);
+                            }
+                        }
+                    }
+                    None if oauth.is_some() => {
+                        return Err(crate::discovery_cache::MissReason::NoFingerprint);
+                    }
+                    None => "grant:none".to_string(),
+                }
+            }
+            _ => "grant:none".to_string(),
+        };
+        let fingerprint = crate::discovery_cache::fingerprint(&grant_token);
+        let partition_key = crate::discovery_cache::partition_key(&logical_key, &fingerprint);
+        Ok(DiscoveryCachePartition {
+            logical_key,
+            partition_key,
+        })
+    }
+
+    async fn discovery_cache_secret_candidates_for(
+        &self,
+        config: &McpServerConfig,
+    ) -> Result<Vec<String>, ()> {
+        let mut candidates = Self::config_secret_candidates(config);
+        if let Some(deps) = &self.oauth {
+            if matches!(config.spec, McpTransportSpec::Sse { .. } | McpTransportSpec::Http { .. }) {
+                let server_key = oauth::server_key(&config.name, &config.spec);
+                let stored = oauth::load_tokens(&deps.storage, &server_key)
+                    .await
+                    .map_err(|_| ())?;
+                if let Some(stored) = stored {
+                    candidates.push(stored.access_token);
+                    if let Some(refresh) = stored.refresh_token {
+                        candidates.push(refresh);
+                    }
+                    if let Some(client_secret) = stored.client_secret {
+                        candidates.push(client_secret);
+                    }
+                }
+            }
+        }
+        candidates.sort();
+        candidates.dedup();
+        Ok(candidates)
+    }
+
+    fn config_secret_candidates(config: &McpServerConfig) -> Vec<String> {
+        let mut candidates = Vec::new();
+        let push_secret = |candidates: &mut Vec<String>, value: &str| {
+            let value = value.trim();
+            if value.len() >= 8 {
+                candidates.push(value.to_string());
+            }
+        };
+        let maybe_push_url_credentials = |candidates: &mut Vec<String>, url: &str| {
+            if let Ok(parsed) = url::Url::parse(url) {
+                if !parsed.username().is_empty() {
+                    push_secret(candidates, parsed.username());
+                }
+                if let Some(password) = parsed.password() {
+                    push_secret(candidates, password);
+                }
+                for (name, value) in parsed.query_pairs() {
+                    let lower_name = name.to_ascii_lowercase();
+                    let suspicious_name = [
+                        "auth", "token", "key", "secret", "cookie", "session", "sig",
+                        "pass", "cred", "bearer",
+                    ]
+                    .iter()
+                    .any(|needle| lower_name.contains(needle));
+                    let selector_like = value.len() <= 32
+                        && value
+                            .bytes()
+                            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"-_".contains(&b));
+                    if suspicious_name || !selector_like {
+                        push_secret(candidates, &value);
+                    }
+                }
+                for segment in parsed.path_segments().into_iter().flatten() {
+                    let high_entropy = segment.len() >= 24
+                        && segment.bytes().all(|b| {
+                            b.is_ascii_alphanumeric() || b"._~+/=%-".contains(&b)
+                        })
+                        && segment.bytes().any(|b| b.is_ascii_alphabetic())
+                        && (segment.bytes().any(|b| b.is_ascii_digit())
+                            || (segment.bytes().any(|b| b.is_ascii_lowercase())
+                                && segment.bytes().any(|b| b.is_ascii_uppercase())));
+                    if high_entropy {
+                        push_secret(candidates, segment);
+                    }
+                }
+            }
+        };
+        let maybe_push_headers =
+            |candidates: &mut Vec<String>, headers: &traits::McpHeaders| {
+                for (name, value) in headers {
+                    let lower_name = name.to_ascii_lowercase();
+                    let lower_value = value.trim().to_ascii_lowercase();
+                    let suspicious_name = [
+                        "auth", "token", "key", "secret", "cookie", "session", "sig", "pass",
+                        "cred", "bearer",
+                    ]
+                    .iter()
+                    .any(|needle| lower_name.contains(needle));
+                    let suspicious_value =
+                        lower_value.starts_with("bearer ") || lower_value.starts_with("basic ");
+                    let exempt_name = matches!(
+                        lower_name.as_str(),
+                        "origin" | "referer" | "host" | "user-agent"
+                    ) || lower_name.ends_with("-id")
+                        || lower_name.ends_with("-version")
+                        || lower_name.ends_with("-name");
+                    if suspicious_name || suspicious_value || !exempt_name {
+                        push_secret(candidates, value);
+                        if let Some((_, suffix)) = value.split_once(' ') {
+                            push_secret(candidates, suffix);
+                        }
+                    }
+                }
+            };
+        match &config.spec {
+            McpTransportSpec::Sse { url, headers, .. }
+            | McpTransportSpec::Http { url, headers, .. }
+            | McpTransportSpec::WebSocket { url, headers, .. } => {
+                maybe_push_url_credentials(&mut candidates, url);
+                maybe_push_headers(&mut candidates, headers);
+            }
+            McpTransportSpec::WsIde { url, auth_token, .. } => {
+                maybe_push_url_credentials(&mut candidates, url);
+                if let Some(auth_token) = auth_token {
+                    push_secret(&mut candidates, auth_token);
+                }
+            }
+            McpTransportSpec::SseIde { url, .. } => {
+                maybe_push_url_credentials(&mut candidates, url);
+            }
+            McpTransportSpec::Stdio { env, .. } => {
+                for value in env.values() {
+                    push_secret(&mut candidates, value);
+                }
+            }
+            McpTransportSpec::InProcess { .. } | McpTransportSpec::SdkControl { .. } => {}
+        }
+        candidates
+    }
+
+    fn discovery_cache_entry_reflects_secret(serialized: &str, candidates: &[String]) -> bool {
+        candidates.iter().any(|candidate| {
+            if candidate.is_empty() {
+                return false;
+            }
+            if serialized.contains(candidate) {
+                return true;
+            }
+            serde_json::to_string(candidate)
+                .ok()
+                .and_then(|escaped| escaped.strip_prefix('"').and_then(|s| s.strip_suffix('"')).map(str::to_string))
+                .is_some_and(|escaped| serialized.contains(&escaped))
+        })
     }
 
     /// §11 — before dialing, compute what the discovery cache decides for
@@ -2371,27 +2581,43 @@ impl McpRegistry {
     /// including a `Miss` — the caller decides what to do with each variant
     /// (Stage 2: serve `Fresh`/`Stale` without dialing; emit telemetry for a
     /// `Miss` the oracle's `Ko` gate reports, then dial live).
-    fn discovery_cache_decision_for(
+    async fn discovery_cache_decision_for(
         &self,
         config: &McpServerConfig,
     ) -> Option<crate::discovery_cache::Decision> {
         let store = self.discovery_cache_store.as_ref()?;
         let feature_enabled = crate::discovery_cache::feature_enabled();
-        let decision = match crate::discovery_cache::cache_gate(&config.spec, None, feature_enabled)
-        {
-            Some(reason) => crate::discovery_cache::Decision::Miss {
-                reason: reason.miss_reason(),
-            },
+        let logical_key = crate::discovery_cache::logical_cache_key(config);
+        let decision = match crate::discovery_cache::cache_gate(
+            &config.spec,
+            config.discovery_cache,
+            feature_enabled,
+        ) {
+            Some(reason) => {
+                if reason.purges_existing_entry() {
+                    let _ = store.purge_server_family(&config.name);
+                }
+                crate::discovery_cache::Decision::Miss {
+                    reason: reason.miss_reason(),
+                }
+            }
             None => {
-                let cache_key = crate::discovery_cache::DiscoveryCacheStore::cache_key(
-                    &config.name,
-                    &config.spec,
-                );
-                let lookup = store.load(&cache_key);
+                let partition = match self.discovery_cache_partition_for(config).await {
+                    Ok(partition) => partition,
+                    Err(reason) => return Some(crate::discovery_cache::Decision::Miss { reason }),
+                };
+                let lookup =
+                    store.load_partitioned(&partition.logical_key, &partition.partition_key);
                 let policy = crate::discovery_cache::DiscoveryCachePolicy::from_env(
                     crate::discovery_cache::now_ms(),
                 );
-                crate::discovery_cache::decide(&config.spec, None, feature_enabled, lookup, policy)
+                crate::discovery_cache::decide(
+                    &config.spec,
+                    config.discovery_cache,
+                    feature_enabled,
+                    lookup,
+                    policy,
+                )
             }
         };
         Some(decision)
@@ -2486,9 +2712,10 @@ impl McpRegistry {
     /// swallowed, matching the oracle's `catch(r){Z(e.name, \`Discovery
     /// cache write-through skipped: ${l(r)}\`)}` around `Wo`.
     #[allow(clippy::too_many_arguments)]
-    fn persist_or_purge_discovery_cache(
+    async fn persist_or_purge_discovery_cache(
         &self,
         config: &McpServerConfig,
+        captured_partition: Option<&DiscoveryCachePartition>,
         caps: &ServerCapabilitiesDto,
         tools: &[traits::McpToolDto],
         resources: &[traits::McpResourceDto],
@@ -2499,11 +2726,23 @@ impl McpRegistry {
             return;
         };
         let feature_enabled = crate::discovery_cache::feature_enabled();
-        let gate = crate::discovery_cache::cache_gate(&config.spec, None, feature_enabled);
-        let cache_key =
-            crate::discovery_cache::DiscoveryCacheStore::cache_key(&config.name, &config.spec);
+        let gate = crate::discovery_cache::cache_gate(
+            &config.spec,
+            config.discovery_cache,
+            feature_enabled,
+        );
+        let cache_key = crate::discovery_cache::logical_cache_key(config);
         match gate {
             None => {
+                let Some(captured_partition) = captured_partition else {
+                    return;
+                };
+                let Ok(partition) = self.discovery_cache_partition_for(config).await else {
+                    return;
+                };
+                if &partition != captured_partition {
+                    return;
+                }
                 let entry = crate::discovery_cache::DiscoveryCacheEntry::new(
                     cache_key,
                     crate::discovery_cache::now_ms(),
@@ -2513,7 +2752,21 @@ impl McpRegistry {
                     resource_templates.to_vec(),
                     prompts.to_vec(),
                 );
-                if let Err(error) = store.store(&entry) {
+                let Ok(serialized) = serde_json::to_string(&entry) else {
+                    return;
+                };
+                let Ok(secret_candidates) = self.discovery_cache_secret_candidates_for(config).await
+                else {
+                    return;
+                };
+                if Self::discovery_cache_entry_reflects_secret(&serialized, &secret_candidates) {
+                    tracing::warn!(
+                        server = %config.name,
+                        "Discovery cache write-through skipped because the serialized catalog reflected secret material"
+                    );
+                    return;
+                }
+                if let Err(error) = store.store_partitioned(&entry, &partition.partition_key) {
                     tracing::warn!(
                         server = %config.name,
                         %error,
@@ -2522,7 +2775,7 @@ impl McpRegistry {
                 }
             }
             Some(reason) if reason.purges_existing_entry() => {
-                if let Err(error) = store.purge(&cache_key) {
+                if let Err(error) = store.purge_server_family(&config.name) {
                     tracing::warn!(
                         server = %config.name,
                         %error,
@@ -2546,25 +2799,28 @@ impl McpRegistry {
     /// there when a stale hit revalidation fails, and still uses an ordinary
     /// failed connect as a conservative fallback signal against whatever entry
     /// already exists.
-    fn record_discovery_cache_connect_failure(&self, config: &McpServerConfig) {
+    async fn record_discovery_cache_connect_failure(&self, config: &McpServerConfig) {
         let Some(store) = &self.discovery_cache_store else {
             return;
         };
         if crate::discovery_cache::cache_gate(
             &config.spec,
-            None,
+            config.discovery_cache,
             crate::discovery_cache::feature_enabled(),
         )
         .is_some()
         {
             return;
         }
-        let cache_key =
-            crate::discovery_cache::DiscoveryCacheStore::cache_key(&config.name, &config.spec);
-        if let crate::discovery_cache::EntryLookup::Found(mut entry) = store.load(&cache_key) {
+        let Ok(partition) = self.discovery_cache_partition_for(config).await else {
+            return;
+        };
+        if let crate::discovery_cache::EntryLookup::Found(mut entry) =
+            store.load_partitioned(&partition.logical_key, &partition.partition_key)
+        {
             entry.consecutive_refresh_failures =
                 entry.consecutive_refresh_failures.saturating_add(1);
-            if let Err(error) = store.store(&entry) {
+            if let Err(error) = store.store_partitioned(&entry, &partition.partition_key) {
                 tracing::warn!(
                     server = %config.name,
                     %error,
@@ -3542,6 +3798,19 @@ impl McpRegistry {
         if let Some((connection_id, _)) = generation {
             self.emit_retire_event_if_shared(&config, name, connection_id)
                 .await;
+        }
+
+        // A lifecycle removal must not let the same config/grant immediately
+        // resurrect a retired catalog. Plugin unload uses the same purge while
+        // deliberately retaining its OAuth row (`revoke_oauth == false`).
+        if let Some(store) = &self.discovery_cache_store {
+            if let Err(error) = store.purge_server_family(&config.name) {
+                tracing::warn!(
+                    server = %config.name,
+                    %error,
+                    "Discovery cache lifecycle purge skipped"
+                );
+            }
         }
 
         // Token revocation (RFC 7009) is best-effort and intentionally runs
@@ -5521,6 +5790,7 @@ mod tests {
             disabled: false,
             timeout_ms: None,
             always_load: false,
+            discovery_cache: None,
             config_error: None,
         }
     }
@@ -5569,6 +5839,7 @@ mod tests {
                 disabled: false,
                 timeout_ms: None,
                 always_load: true,
+                discovery_cache: None,
                 config_error: None,
             })
             .await
@@ -5670,7 +5941,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = crate::discovery_cache::DiscoveryCacheStore::new(dir.path());
         let cfg = http_cfg("srv", "https://mcp.example.com/v1");
-        let cache_key = crate::discovery_cache::DiscoveryCacheStore::cache_key("srv", &cfg.spec);
+        let cache_key = crate::discovery_cache::logical_cache_key(&cfg);
         seed_entry(&store, &cache_key, 0);
 
         let mock = Arc::new(BridgeMock::new(&["alpha"]));
@@ -5733,7 +6004,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = crate::discovery_cache::DiscoveryCacheStore::new(dir.path());
         let cfg = http_cfg("srv", "https://mcp.example.com/v1");
-        let cache_key = crate::discovery_cache::DiscoveryCacheStore::cache_key("srv", &cfg.spec);
+        let cache_key = crate::discovery_cache::logical_cache_key(&cfg);
         seed_entry(&store, &cache_key, 0);
 
         let mock = Arc::new(BridgeMock::new(&["alpha"]));
@@ -5779,7 +6050,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = crate::discovery_cache::DiscoveryCacheStore::new(dir.path());
         let cfg = http_cfg("srv", "https://mcp.example.com/v1");
-        let cache_key = crate::discovery_cache::DiscoveryCacheStore::cache_key("srv", &cfg.spec);
+        let cache_key = crate::discovery_cache::logical_cache_key(&cfg);
         seed_entry(&store, &cache_key, 0);
 
         let mock = Arc::new(BridgeMock::new(&["alpha"]));
@@ -5856,7 +6127,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = crate::discovery_cache::DiscoveryCacheStore::new(dir.path());
         let cfg = http_cfg("srv", "https://mcp.example.com/v1");
-        let cache_key = crate::discovery_cache::DiscoveryCacheStore::cache_key("srv", &cfg.spec);
+        let cache_key = crate::discovery_cache::logical_cache_key(&cfg);
         seed_entry(&store, &cache_key, 0);
 
         let mock = Arc::new(BridgeMock::new(&["alpha"]));
@@ -5928,7 +6199,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = crate::discovery_cache::DiscoveryCacheStore::new(dir.path());
         let cfg = http_cfg("srv", "https://mcp.example.com/v1");
-        let cache_key = crate::discovery_cache::DiscoveryCacheStore::cache_key("srv", &cfg.spec);
+        let cache_key = crate::discovery_cache::logical_cache_key(&cfg);
         seed_entry(&store, &cache_key, 0);
 
         let mock = Arc::new(BridgeMock::new(&["alpha"]));
@@ -6001,7 +6272,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = crate::discovery_cache::DiscoveryCacheStore::new(dir.path());
         let cfg = http_cfg("srv", "https://mcp.example.com/v1");
-        let cache_key = crate::discovery_cache::DiscoveryCacheStore::cache_key("srv", &cfg.spec);
+        let cache_key = crate::discovery_cache::logical_cache_key(&cfg);
         seed_entry(&store, &cache_key, 0);
 
         let mock = Arc::new(BridgeMock::new(&["alpha"]));
@@ -6134,7 +6405,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = crate::discovery_cache::DiscoveryCacheStore::new(dir.path());
         let cfg = http_cfg("srv", "https://mcp.example.com/v1");
-        let cache_key = crate::discovery_cache::DiscoveryCacheStore::cache_key("srv", &cfg.spec);
+        let cache_key = crate::discovery_cache::logical_cache_key(&cfg);
         seed_entry(&store, &cache_key, 0);
 
         let mock = Arc::new(BridgeMock::new(&["alpha"]));
@@ -6198,7 +6469,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = crate::discovery_cache::DiscoveryCacheStore::new(dir.path());
         let cfg = http_cfg("srv", "https://mcp.example.com/v1");
-        let cache_key = crate::discovery_cache::DiscoveryCacheStore::cache_key("srv", &cfg.spec);
+        let cache_key = crate::discovery_cache::logical_cache_key(&cfg);
         seed_entry(&store, &cache_key, 0);
 
         let mock = Arc::new(BridgeMock::new(&["alpha"]));
@@ -6275,7 +6546,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = crate::discovery_cache::DiscoveryCacheStore::new(dir.path());
         let cfg = http_cfg("srv", "https://mcp.example.com/v1");
-        let cache_key = crate::discovery_cache::DiscoveryCacheStore::cache_key("srv", &cfg.spec);
+        let cache_key = crate::discovery_cache::logical_cache_key(&cfg);
         seed_entry(&store, &cache_key, 1_000_000);
 
         let mock = Arc::new(BridgeMock::new(&["alpha"]));
@@ -6343,7 +6614,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = crate::discovery_cache::DiscoveryCacheStore::new(dir.path());
         let cfg = http_cfg("srv", "https://mcp.example.com/v1");
-        let cache_key = crate::discovery_cache::DiscoveryCacheStore::cache_key("srv", &cfg.spec);
+        let cache_key = crate::discovery_cache::logical_cache_key(&cfg);
         seed_entry(&store, &cache_key, 0);
 
         let mock = Arc::new(BridgeMock::new(&["alpha"]));
@@ -6787,7 +7058,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = crate::discovery_cache::DiscoveryCacheStore::new(dir.path());
         let cfg = http_cfg("srv", "https://mcp.example.com/v1");
-        let cache_key = crate::discovery_cache::DiscoveryCacheStore::cache_key("srv", &cfg.spec);
+        let cache_key = crate::discovery_cache::logical_cache_key(&cfg);
         seed_entry_with_catalog(
             &store,
             &cache_key,
@@ -6958,7 +7229,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = crate::discovery_cache::DiscoveryCacheStore::new(dir.path());
         let cfg = http_cfg("srv", "https://mcp.example.com/v1");
-        let cache_key = crate::discovery_cache::DiscoveryCacheStore::cache_key("srv", &cfg.spec);
+        let cache_key = crate::discovery_cache::logical_cache_key(&cfg);
         seed_entry_with_catalog(
             &store,
             &cache_key,
@@ -7082,7 +7353,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = crate::discovery_cache::DiscoveryCacheStore::new(dir.path());
         let cfg = http_cfg("srv", "https://mcp.example.com/v1");
-        let cache_key = crate::discovery_cache::DiscoveryCacheStore::cache_key("srv", &cfg.spec);
+        let cache_key = crate::discovery_cache::logical_cache_key(&cfg);
         seed_entry_with_catalog(
             &store,
             &cache_key,
@@ -7187,7 +7458,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = crate::discovery_cache::DiscoveryCacheStore::new(dir.path());
         let cfg = http_cfg("srv", "https://mcp.example.com/v1");
-        let cache_key = crate::discovery_cache::DiscoveryCacheStore::cache_key("srv", &cfg.spec);
+        let cache_key = crate::discovery_cache::logical_cache_key(&cfg);
         seed_entry_with_catalog(
             &store,
             &cache_key,
@@ -7539,7 +7810,7 @@ mod tests {
         .with_discovery_cache_store(crate::discovery_cache::DiscoveryCacheStore::new(dir.path()));
 
         let cfg = http_cfg("srv", "https://mcp.example.com/v1");
-        let cache_key = crate::discovery_cache::DiscoveryCacheStore::cache_key("srv", &cfg.spec);
+        let cache_key = crate::discovery_cache::logical_cache_key(&cfg);
         registry.connect(cfg).await.unwrap();
         drop(env);
 
@@ -7630,7 +7901,7 @@ mod tests {
             unreachable!()
         };
         *headers_helper = Some("./helper".to_string());
-        let cache_key = crate::discovery_cache::DiscoveryCacheStore::cache_key("srv", &cfg.spec);
+        let cache_key = crate::discovery_cache::logical_cache_key(&cfg);
 
         // Pre-seed an entry as if it were written before `headersHelper` got
         // configured on this server.
@@ -7652,12 +7923,14 @@ mod tests {
 
         registry.persist_or_purge_discovery_cache(
             &cfg,
+            None,
             &ServerCapabilitiesDto::default(),
             &[],
             &[],
             &[],
             &[],
-        );
+        )
+        .await;
         drop(env);
 
         assert_eq!(
@@ -7687,7 +7960,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = crate::discovery_cache::DiscoveryCacheStore::new(dir.path());
         let cfg = http_cfg("srv", "https://mcp.example.com/v1");
-        let cache_key = crate::discovery_cache::DiscoveryCacheStore::cache_key("srv", &cfg.spec);
+        let cache_key = crate::discovery_cache::logical_cache_key(&cfg);
         store
             .store(&crate::discovery_cache::DiscoveryCacheEntry::new(
                 cache_key.clone(),
@@ -7835,7 +8108,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = crate::discovery_cache::DiscoveryCacheStore::new(dir.path());
         let cfg = http_cfg("srv", "https://mcp.example.com/v1");
-        let cache_key = crate::discovery_cache::DiscoveryCacheStore::cache_key("srv", &cfg.spec);
+        let cache_key = crate::discovery_cache::logical_cache_key(&cfg);
         seed_entry(&store, &cache_key, 0); // saved "now" — well inside the TTL.
 
         // The mock's OWN tools deliberately differ from the cached ones, so a
@@ -7897,7 +8170,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = crate::discovery_cache::DiscoveryCacheStore::new(dir.path());
         let cfg = http_cfg("srv", "https://mcp.example.com/v1");
-        let cache_key = crate::discovery_cache::DiscoveryCacheStore::cache_key("srv", &cfg.spec);
+        let cache_key = crate::discovery_cache::logical_cache_key(&cfg);
         // 1_000_000ms (~16.7min) > the 900_000ms default TTL, but well under
         // the 14_400_000ms default max-stale.
         seed_entry(&store, &cache_key, 1_000_000);
@@ -7965,7 +8238,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = crate::discovery_cache::DiscoveryCacheStore::new(dir.path());
         let cfg = http_cfg("srv", "https://mcp.example.com/v1");
-        let cache_key = crate::discovery_cache::DiscoveryCacheStore::cache_key("srv", &cfg.spec);
+        let cache_key = crate::discovery_cache::logical_cache_key(&cfg);
         seed_entry(&store, &cache_key, 1_000_000);
 
         let mock = Arc::new(BridgeMock::new(&["fresh_live"]));
@@ -8053,7 +8326,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = crate::discovery_cache::DiscoveryCacheStore::new(dir.path());
         let cfg = http_cfg("srv", "https://mcp.example.com/v1");
-        let cache_key = crate::discovery_cache::DiscoveryCacheStore::cache_key("srv", &cfg.spec);
+        let cache_key = crate::discovery_cache::logical_cache_key(&cfg);
         seed_entry(&store, &cache_key, 1_000_000);
 
         let mock = Arc::new(BridgeMock::new(&["alpha"]));
@@ -8110,7 +8383,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = crate::discovery_cache::DiscoveryCacheStore::new(dir.path());
         let cfg = http_cfg("srv", "https://mcp.example.com/v1");
-        let cache_key = crate::discovery_cache::DiscoveryCacheStore::cache_key("srv", &cfg.spec);
+        let cache_key = crate::discovery_cache::logical_cache_key(&cfg);
         seed_entry(&store, &cache_key, 1_000_000);
 
         let mock = Arc::new(BridgeMock::new(&["fresh_live"]));
@@ -8173,7 +8446,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = crate::discovery_cache::DiscoveryCacheStore::new(dir.path());
         let cfg = http_cfg("srv", "https://mcp.example.com/v1");
-        let cache_key = crate::discovery_cache::DiscoveryCacheStore::cache_key("srv", &cfg.spec);
+        let cache_key = crate::discovery_cache::logical_cache_key(&cfg);
         seed_entry(&store, &cache_key, 0);
 
         let mock = Arc::new(BridgeMock::new(&["alpha"]));
@@ -8228,7 +8501,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = crate::discovery_cache::DiscoveryCacheStore::new(dir.path());
         let cfg = http_cfg("srv", "https://mcp.example.com/v1");
-        let cache_key = crate::discovery_cache::DiscoveryCacheStore::cache_key("srv", &cfg.spec);
+        let cache_key = crate::discovery_cache::logical_cache_key(&cfg);
         seed_entry(&store, &cache_key, 0);
 
         let mock = Arc::new(BridgeMock::new(&["alpha"]));
@@ -8283,7 +8556,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = crate::discovery_cache::DiscoveryCacheStore::new(dir.path());
         let cfg = http_cfg("srv", "https://mcp.example.com/v1");
-        let cache_key = crate::discovery_cache::DiscoveryCacheStore::cache_key("srv", &cfg.spec);
+        let cache_key = crate::discovery_cache::logical_cache_key(&cfg);
         seed_entry(&store, &cache_key, 0);
 
         let mock = Arc::new(BridgeMock::new(&["alpha"]));
@@ -8345,7 +8618,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = crate::discovery_cache::DiscoveryCacheStore::new(dir.path());
         let cfg = http_cfg("srv", "https://mcp.example.com/v1");
-        let cache_key = crate::discovery_cache::DiscoveryCacheStore::cache_key("srv", &cfg.spec);
+        let cache_key = crate::discovery_cache::logical_cache_key(&cfg);
         seed_entry(&store, &cache_key, 1_000_000);
 
         let mock = Arc::new(BridgeMock::new(&["alpha"]));
@@ -8399,7 +8672,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = crate::discovery_cache::DiscoveryCacheStore::new(dir.path());
         let cfg = http_cfg("srv", "https://mcp.example.com/v1");
-        let cache_key = crate::discovery_cache::DiscoveryCacheStore::cache_key("srv", &cfg.spec);
+        let cache_key = crate::discovery_cache::logical_cache_key(&cfg);
         seed_entry(&store, &cache_key, 1_000_000);
 
         let mock = Arc::new(BridgeMock::new(&["alpha"]));
@@ -8457,7 +8730,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = crate::discovery_cache::DiscoveryCacheStore::new(dir.path());
         let cfg = http_cfg("srv", "https://mcp.example.com/v1");
-        let cache_key = crate::discovery_cache::DiscoveryCacheStore::cache_key("srv", &cfg.spec);
+        let cache_key = crate::discovery_cache::logical_cache_key(&cfg);
         seed_entry(&store, &cache_key, 1_000_000);
 
         let mock = Arc::new(BridgeMock::new(&["alpha"]));
@@ -8578,7 +8851,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = crate::discovery_cache::DiscoveryCacheStore::new(dir.path());
         let cfg = http_cfg("srv", "https://mcp.example.com/v1");
-        let cache_key = crate::discovery_cache::DiscoveryCacheStore::cache_key("srv", &cfg.spec);
+        let cache_key = crate::discovery_cache::logical_cache_key(&cfg);
         seed_entry(&store, &cache_key, 1_000_000);
 
         let mock = Arc::new(BridgeMock::new(&["fresh_live"]));
@@ -8647,7 +8920,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = crate::discovery_cache::DiscoveryCacheStore::new(dir.path());
         let cfg = http_cfg("srv", "https://mcp.example.com/v1");
-        let cache_key = crate::discovery_cache::DiscoveryCacheStore::cache_key("srv", &cfg.spec);
+        let cache_key = crate::discovery_cache::logical_cache_key(&cfg);
         seed_entry(&store, &cache_key, 1_000_000);
 
         let mock = Arc::new(BridgeMock::new(&["alpha"]));
@@ -8725,7 +8998,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = crate::discovery_cache::DiscoveryCacheStore::new(dir.path());
         let cfg = http_cfg("srv", "https://mcp.example.com/v1");
-        let cache_key = crate::discovery_cache::DiscoveryCacheStore::cache_key("srv", &cfg.spec);
+        let cache_key = crate::discovery_cache::logical_cache_key(&cfg);
         seed_entry(&store, &cache_key, 0);
 
         let mock = Arc::new(BridgeMock::new(&["live"]));
@@ -8756,7 +9029,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = crate::discovery_cache::DiscoveryCacheStore::new(dir.path());
         let cfg = http_cfg("srv", "https://mcp.example.com/v1");
-        let cache_key = crate::discovery_cache::DiscoveryCacheStore::cache_key("srv", &cfg.spec);
+        let cache_key = crate::discovery_cache::logical_cache_key(&cfg);
         seed_entry(&store, &cache_key, 0);
 
         let mock = Arc::new(BridgeMock::new(&["live"]));
@@ -8819,7 +9092,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = crate::discovery_cache::DiscoveryCacheStore::new(dir.path());
         let cfg = http_cfg("srv", "https://mcp.example.com/v1");
-        let cache_key = crate::discovery_cache::DiscoveryCacheStore::cache_key("srv", &cfg.spec);
+        let cache_key = crate::discovery_cache::logical_cache_key(&cfg);
         seed_entry(&store, &cache_key, 0);
 
         let mock = Arc::new(BridgeMock::new(&["live"]));
@@ -8868,7 +9141,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = crate::discovery_cache::DiscoveryCacheStore::new(dir.path());
         let cfg = http_cfg("srv", "https://mcp.example.com/v1");
-        let cache_key = crate::discovery_cache::DiscoveryCacheStore::cache_key("srv", &cfg.spec);
+        let cache_key = crate::discovery_cache::logical_cache_key(&cfg);
         seed_entry(&store, &cache_key, 0);
 
         let mock = Arc::new(BridgeMock::new(&["live"]));
@@ -8907,7 +9180,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = crate::discovery_cache::DiscoveryCacheStore::new(dir.path());
         let cfg = http_cfg("srv", "https://mcp.example.com/v1");
-        let cache_key = crate::discovery_cache::DiscoveryCacheStore::cache_key("srv", &cfg.spec);
+        let cache_key = crate::discovery_cache::logical_cache_key(&cfg);
         seed_entry(&store, &cache_key, 1_000_000);
 
         let mock = Arc::new(BridgeMock::new(&["fresh_live"]));
@@ -8966,7 +9239,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = crate::discovery_cache::DiscoveryCacheStore::new(dir.path());
         let cfg = http_cfg("srv", "https://mcp.example.com/v1");
-        let cache_key = crate::discovery_cache::DiscoveryCacheStore::cache_key("srv", &cfg.spec);
+        let cache_key = crate::discovery_cache::logical_cache_key(&cfg);
         seed_entry(&store, &cache_key, 1_000_000);
 
         let mock = Arc::new(BridgeMock::new(&["fresh_live"]));
@@ -9074,7 +9347,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = crate::discovery_cache::DiscoveryCacheStore::new(dir.path());
         let cfg = http_cfg("srv", "https://mcp.example.com/v1");
-        let cache_key = crate::discovery_cache::DiscoveryCacheStore::cache_key("srv", &cfg.spec);
+        let cache_key = crate::discovery_cache::logical_cache_key(&cfg);
         seed_entry(&store, &cache_key, 1_000_000);
 
         let mock = Arc::new(BridgeMock::new(&["fresh_live"]));
@@ -9193,7 +9466,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = crate::discovery_cache::DiscoveryCacheStore::new(dir.path());
         let cfg = http_cfg("srv", "https://mcp.example.com/v1");
-        let cache_key = crate::discovery_cache::DiscoveryCacheStore::cache_key("srv", &cfg.spec);
+        let cache_key = crate::discovery_cache::logical_cache_key(&cfg);
         seed_entry(&store, &cache_key, 1_000_000);
 
         let mock = Arc::new(BridgeMock::new(&["fresh_live"]));
@@ -9452,7 +9725,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = crate::discovery_cache::DiscoveryCacheStore::new(dir.path());
         let cfg = http_cfg("srv", "https://mcp.example.com/v1");
-        let cache_key = crate::discovery_cache::DiscoveryCacheStore::cache_key("srv", &cfg.spec);
+        let cache_key = crate::discovery_cache::logical_cache_key(&cfg);
         seed_entry(&store, &cache_key, 0);
 
         let mock = Arc::new(BridgeMock::new(&["should_never_be_dialed"]));
@@ -9595,7 +9868,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = crate::discovery_cache::DiscoveryCacheStore::new(dir.path());
         let cfg = http_cfg("srv", "https://mcp.example.com/v1");
-        let cache_key = crate::discovery_cache::DiscoveryCacheStore::cache_key("srv", &cfg.spec);
+        let cache_key = crate::discovery_cache::logical_cache_key(&cfg);
         seed_entry(&store, &cache_key, 0);
 
         let mock = Arc::new(BridgeMock::new(&["live"]));
@@ -9640,7 +9913,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = crate::discovery_cache::DiscoveryCacheStore::new(dir.path());
         let cfg = http_cfg("srv", "https://mcp.example.com/v1");
-        let cache_key = crate::discovery_cache::DiscoveryCacheStore::cache_key("srv", &cfg.spec);
+        let cache_key = crate::discovery_cache::logical_cache_key(&cfg);
         seed_entry(&store, &cache_key, 0);
 
         let mock = Arc::new(BridgeMock::new(&["alpha"]));
@@ -9690,7 +9963,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = crate::discovery_cache::DiscoveryCacheStore::new(dir.path());
         let cfg = http_cfg("srv", "https://mcp.example.com/v1");
-        let cache_key = crate::discovery_cache::DiscoveryCacheStore::cache_key("srv", &cfg.spec);
+        let cache_key = crate::discovery_cache::logical_cache_key(&cfg);
         seed_entry(&store, &cache_key, 0);
 
         let miss_hook = Arc::new(TestPauseHook::default());
@@ -9782,7 +10055,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = crate::discovery_cache::DiscoveryCacheStore::new(dir.path());
         let cfg = http_cfg("srv", "https://mcp.example.com/v1");
-        let cache_key = crate::discovery_cache::DiscoveryCacheStore::cache_key("srv", &cfg.spec);
+        let cache_key = crate::discovery_cache::logical_cache_key(&cfg);
         seed_entry(&store, &cache_key, 0);
 
         let miss_hook = Arc::new(TestPauseHook::default());
@@ -9880,7 +10153,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = crate::discovery_cache::DiscoveryCacheStore::new(dir.path());
         let cfg = http_cfg("srv", "https://mcp.example.com/v1");
-        let cache_key = crate::discovery_cache::DiscoveryCacheStore::cache_key("srv", &cfg.spec);
+        let cache_key = crate::discovery_cache::logical_cache_key(&cfg);
         seed_entry(&store, &cache_key, 0);
 
         let miss_hook = Arc::new(TestPauseHook::default());
@@ -9984,7 +10257,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = crate::discovery_cache::DiscoveryCacheStore::new(dir.path());
         let cfg = http_cfg("srv", "https://mcp.example.com/v1");
-        let cache_key = crate::discovery_cache::DiscoveryCacheStore::cache_key("srv", &cfg.spec);
+        let cache_key = crate::discovery_cache::logical_cache_key(&cfg);
         seed_entry(&store, &cache_key, 0);
 
         let mock = Arc::new(BridgeMock::with_drivable_calls(&["alpha"]));
@@ -10042,7 +10315,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = crate::discovery_cache::DiscoveryCacheStore::new(dir.path());
         let cfg = http_cfg("srv", "https://mcp.example.com/v1");
-        let cache_key = crate::discovery_cache::DiscoveryCacheStore::cache_key("srv", &cfg.spec);
+        let cache_key = crate::discovery_cache::logical_cache_key(&cfg);
         seed_entry(&store, &cache_key, 0);
 
         let mock = Arc::new(BridgeMock::new(&["alpha"]));
@@ -10119,7 +10392,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = crate::discovery_cache::DiscoveryCacheStore::new(dir.path());
         let cfg = http_cfg("srv", "https://mcp.example.com/v1");
-        let cache_key = crate::discovery_cache::DiscoveryCacheStore::cache_key("srv", &cfg.spec);
+        let cache_key = crate::discovery_cache::logical_cache_key(&cfg);
         seed_entry(&store, &cache_key, 0);
 
         let mock = Arc::new(BridgeMock::new(&["alpha"]));
@@ -10167,7 +10440,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = crate::discovery_cache::DiscoveryCacheStore::new(dir.path());
         let cfg = http_cfg("srv", "https://mcp.example.com/v1");
-        let cache_key = crate::discovery_cache::DiscoveryCacheStore::cache_key("srv", &cfg.spec);
+        let cache_key = crate::discovery_cache::logical_cache_key(&cfg);
         seed_entry(&store, &cache_key, 0);
 
         let mock = Arc::new(BridgeMock::new(&["should_never_be_dialed"]));
@@ -11311,6 +11584,7 @@ mod tests {
             disabled: false,
             timeout_ms: None,
             always_load: false,
+            discovery_cache: None,
             config_error: None,
         }
     }
@@ -11461,6 +11735,7 @@ mod snapshot_tests {
             disabled: false,
             timeout_ms: None,
             always_load: false,
+            discovery_cache: None,
             config_error: None,
         }
     }

@@ -1374,6 +1374,7 @@ mod tests {
                     disabled: false,
                     timeout_ms: None,
                     always_load: false,
+                    discovery_cache: None,
                     config_error: None,
                 },
                 error: "connection refused".into(),

@@ -388,14 +388,9 @@ fn validate_oauth_child(oauth: Option<McpOAuthConfigDto>) -> Option<Option<McpOA
 
 // ── §11 — `discoveryCache` / `role` recognition ─────────────────────────────
 //
-// Both keys are recognized here at the raw-JSON level but are DELIBERATELY
-// NOT threaded onto `McpServerConfig`/`McpTransportSpec` — doing so would add
-// a field to types constructed as exhaustive struct literals (no `..`) in
-// `apps/cli/src/commands/mcp.rs`, which this batch must not edit (owned by
-// the parallel telemetry agent), plus several more files outside this
-// batch's ownership. See `crate::discovery_cache`'s module docs for the full
-// account and for the pure, parameter-based decision logic that consumes
-// these two recognized values once a future wave can wire them through.
+// `discoveryCache` is recognized here and threaded onto `McpServerConfig`
+// as a plain `Option<bool>` consumed by discovery-cache gating. `role`
+// remains validation-only and is still not threaded further.
 
 /// §11 — is `discoveryCache` a declared schema key for `type`? Oracle `OAn`/
 /// `sGt` (2.1.251 Mach-O @154584436/@154585104 — `sse` and `http`/
@@ -776,13 +771,16 @@ fn build_entry(
         // rejects, so it needs no analogous check here — see
         // [`role_flag`]/[`discovery_cache_flag`]'s doc comments for why
         // neither value is threaded any further than this validation.
-        if discovery_cache_flag(ty, raw_entry.as_ref()).is_err() {
-            tracing::warn!(
-                server = %name,
-                "mcp.json: invalid \"discoveryCache\" (must be a boolean); skipping entry"
-            );
-            return None;
-        }
+        let discovery_cache = match discovery_cache_flag(ty, raw_entry.as_ref()) {
+            Ok(value) => value,
+            Err(InvalidDiscoveryCacheFlag) => {
+                tracing::warn!(
+                    server = %name,
+                    "mcp.json: invalid \"discoveryCache\" (must be a boolean); skipping entry"
+                );
+                return None;
+            }
+        };
         let is_stdio = matches!(ty, None | Some("stdio"));
         let spec = if ty == Some("sdk") {
             // Oracle `MAn` @154585319 (v2.1.251 Mach-O, minified `mcp-sdk.js`
@@ -1097,6 +1095,7 @@ fn build_entry(
             scope,
             disabled: entry.disabled,
             timeout_ms,
+            discovery_cache,
             always_load,
             config_error,
         })
@@ -3077,6 +3076,45 @@ mod tests {
         let cfgs = parse_mcp_json_string(raw, ConfigScope::Project).unwrap();
         assert_eq!(cfgs.len(), 1);
         assert_eq!(cfgs[0].name, "srv");
+        assert_eq!(cfgs[0].discovery_cache, None);
+    }
+
+    #[test]
+    fn build_entry_threads_discovery_cache_true_false_and_absent() {
+        let false_cfg = build_server_from_json_entry(
+            "falsey",
+            &serde_json::json!({
+                "type": "http",
+                "url": "https://false.example",
+                "discoveryCache": false
+            }),
+            ConfigScope::Project,
+        )
+        .expect("http entry with false discoveryCache loads");
+        assert_eq!(false_cfg.discovery_cache, Some(false));
+
+        let true_cfg = build_server_from_json_entry(
+            "truthy",
+            &serde_json::json!({
+                "type": "sse",
+                "url": "https://true.example",
+                "discoveryCache": true
+            }),
+            ConfigScope::Project,
+        )
+        .expect("sse entry with true discoveryCache loads");
+        assert_eq!(true_cfg.discovery_cache, Some(true));
+
+        let absent_cfg = build_server_from_json_entry(
+            "absent",
+            &serde_json::json!({
+                "type": "http",
+                "url": "https://absent.example"
+            }),
+            ConfigScope::Project,
+        )
+        .expect("http entry without discoveryCache loads");
+        assert_eq!(absent_cfg.discovery_cache, None);
     }
 
     #[test]

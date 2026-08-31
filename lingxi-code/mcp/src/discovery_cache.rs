@@ -11,9 +11,9 @@
 //!
 //! * the two new config keys, `discoveryCache` (sse/http only) and `role`
 //!   (see [`crate::json_config::discovery_cache_flag`] /
-//!   [`crate::json_config::role_flag`] — recognized but NOT yet threaded onto
-//!   [`crate::connection::McpServerConfig`]/[`traits::McpTransportSpec`]; see
-//!   the module-end note for why);
+//!   [`crate::json_config::role_flag`]); `discoveryCache` is threaded onto
+//!   [`crate::connection::McpServerConfig`] for runtime gating, while `role`
+//!   remains validation-only and is still deferred;
 //! * the miss-reason vocabulary and the fresh/stale/miss decision oracle
 //!   `cot` implements (2.1.251 Mach-O @176266197), recovered byte-exact from
 //!   the binary:
@@ -59,25 +59,10 @@
 //!
 //! ## What is DEFERRED (named, not built — see the batch report)
 //!
-//! * **The real fingerprint.** Oracle `we`/`Be` (@176263300-ish) bind the
-//!   cache key to a SHA-256 of `{sdkVersion, grantToken}` where `grantToken`
-//!   is derived from the server's OAuth **refresh token** — so a token
-//!   rotation invalidates the cache. [`DiscoveryCacheStore::cache_key`] hashes
-//!   only `{name, transport kind, url, headers}`; wiring in the OAuth grant
-//!   token is real work (`mcp::oauth`) left for the wave that also does the
-//!   live registry integration. [`MissReason::NoFingerprint`] is therefore
-//!   never constructed today — kept for vocabulary completeness.
-//! * **`identity-changed` / `cli-owned` / `env-placeholder` /
-//!   `ambient-credential`.** Oracle guards between the feature gate and the
-//!   transport gate (`identity-changed`) and between the transport gate and
-//!   the opt-out/headers-helper table (the other three) — see `me`'s source
-//!   above. All four collapse to [`MissReason::Disabled`] like every other
-//!   non-transport reason, so [`cache_gate`] omitting them changes no
-//!   OBSERVABLE decision except in the narrow case where one of them alone
-//!   would have disabled a server that is otherwise feature-enabled and
-//!   sse/http — i.e. today's [`cache_gate`] is a strict SUBSET of disable
-//!   reasons, never a superset (never permits caching the oracle would
-//!   refuse).
+//! * **`cli-owned` / `env-placeholder` / `ambient-credential`.** Oracle guards
+//!   between the transport gate and the opt-out/headers-helper table (see
+//!   `me`'s source above). This port still has no surface for those three, so
+//!   they remain deferred.
 //! * **`skills-capable` / `channel-capable` / `live-connection`.** Round-3
 //!   of the batch audit misfiled these as a separate "MCP skills" feature;
 //!   round-4 (§24e) corrected that — they are discovery-cache MISS REASONS
@@ -90,19 +75,12 @@
 //!   correction warns against — not built. `live-connection` similarly ties
 //!   to an in-flight-connection check at the plugin-discovery call site this
 //!   port doesn't have; also not built.
-//! * **`discoveryCache`/`role` config threading.** `McpServerConfig` still has
-//!   no `discovery_cache_opt_out` field for the same reason as before: `apps/
-//!   cli/src/commands/mcp.rs` and ~7 sibling files (see git blame on this
-//!   paragraph) construct `McpServerConfig`/every `McpTransportSpec` variant
-//!   as exhaustive struct literals with no `..`, so adding a field to either
-//!   breaks their compile and remains out of scope here. [`cache_gate`]/
-//!   [`decide`] therefore keep accepting `discovery_cache_opt_out` as an
-//!   explicit `Option<bool>` parameter; every production call site in
-//!   `mcp::registry` passes `None` (nothing can ever produce
-//!   [`CacheGateReason::OptOut`] in practice today — only direct unit tests
-//!   of [`cache_gate`] exercise that arm). [`CacheGateReason::HeadersHelper`]
-//!   IS reachable in production (`McpTransportSpec::Http`/`Sse` already carry
-//!   `headers_helper`).
+//! * **`role` config threading.** `role` still is not carried onto
+//!   [`crate::connection::McpServerConfig`] or [`traits::McpTransportSpec`];
+//!   this port has no runtime consumer for it yet. `discoveryCache` is now
+//!   threaded as `McpServerConfig::discovery_cache`, and production
+//!   [`mcp::registry`] call sites pass that value into [`cache_gate`] /
+//!   [`decide`], making [`CacheGateReason::OptOut`] reachable in practice.
 //!
 //! ## What §11 Stage 1 wires in (this revision)
 //!
@@ -193,6 +171,202 @@ use traits::{
     McpPromptDto, McpResourceDto, McpResourceTemplateDto, McpToolDto, McpTransportSpec,
     ServerCapabilitiesDto,
 };
+use sha2::{Digest, Sha256};
+
+/// Fixed byte-level compatibility domain used when reproducing Claude Code's
+/// discovery-cache fingerprint. This is not LingXi login state and must never
+/// be replaced with an LLM-provider credential, profile id, or account UUID.
+/// The only variable authentication input is the remote MCP server's grant.
+pub const PROVIDER_NEUTRAL_IDENTITY_DOMAIN: &str = "acct:logged-out";
+
+fn sha256_hex(input: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(input);
+    format!("{:x}", hasher.finalize())
+}
+
+#[must_use]
+pub(crate) fn fingerprint(grant_token: &str) -> String {
+    sha256_hex(format!("{PROVIDER_NEUTRAL_IDENTITY_DOMAIN}\0{grant_token}").as_bytes())
+}
+
+#[must_use]
+pub(crate) fn partition_key(logical_cache_key: &str, fingerprint: &str) -> String {
+    let material = format!(
+        "{logical_cache_key}\0{fingerprint}\0era:legacy\0{}",
+        traits::CLAUDE_CODE_VERSION
+    );
+    sha256_hex(material.as_bytes())[..32].to_string()
+}
+
+fn canonicalize_logical_key_value(value: serde_json::Value) -> serde_json::Value {
+    match value {
+        serde_json::Value::Object(map) => {
+            let mut entries: Vec<_> = map.into_iter().collect();
+            entries.sort_by(|(left, _), (right, _)| left.cmp(right));
+            let mut canonical = serde_json::Map::with_capacity(entries.len());
+            for (key, value) in entries {
+                canonical.insert(key, canonicalize_logical_key_value(value));
+            }
+            serde_json::Value::Object(canonical)
+        }
+        serde_json::Value::Array(values) => serde_json::Value::Array(
+            values
+                .into_iter()
+                .map(canonicalize_logical_key_value)
+                .collect(),
+        ),
+        other => other,
+    }
+}
+
+fn spec_logical_key_config(spec: &McpTransportSpec) -> serde_json::Value {
+    let mut value = match spec {
+        McpTransportSpec::Stdio { command, args, env } => serde_json::json!({
+            "type": "stdio",
+            "command": command,
+            "args": args,
+            "env": env,
+        }),
+        McpTransportSpec::Sse { url, headers, .. } => serde_json::json!({
+            "type": "sse",
+            "url": url,
+            "headers": headers,
+        }),
+        McpTransportSpec::Http { url, headers, .. } => serde_json::json!({
+            "type": "http",
+            "url": url,
+            "headers": headers,
+        }),
+        McpTransportSpec::WebSocket { url, headers, .. } => serde_json::json!({
+            "type": "ws",
+            "url": url,
+            "headers": headers,
+        }),
+        McpTransportSpec::InProcess { registry_key } => serde_json::json!({
+            "type": "inProcess",
+            "registryKey": registry_key,
+        }),
+        McpTransportSpec::SseIde { url, ide_name, .. } => serde_json::json!({
+            "type": "sse-ide",
+            "url": url,
+            "ideName": ide_name,
+        }),
+        McpTransportSpec::WsIde { url, ide_name, .. } => serde_json::json!({
+            "type": "ws-ide",
+            "url": url,
+            "ideName": ide_name,
+        }),
+        McpTransportSpec::SdkControl { control_channel_id } => serde_json::json!({
+            "type": "sdk",
+            "name": control_channel_id,
+        }),
+    };
+    let serde_json::Value::Object(map) = &mut value else {
+        unreachable!("all MCP logical-key configs are JSON objects")
+    };
+    match spec {
+        McpTransportSpec::Sse {
+            url,
+            headers_helper,
+            oauth,
+            ..
+        }
+        | McpTransportSpec::Http {
+            url,
+            headers_helper,
+            oauth,
+            ..
+        } => {
+            if let Some(helper) = headers_helper {
+                map.insert("headersHelper".into(), helper.clone().into());
+            }
+            if let Some(oauth) = oauth {
+                map.insert(
+                    "oauth".into(),
+                    serde_json::to_value(oauth).expect("OAuth config is serializable"),
+                );
+            }
+            if url.trim().is_empty() {
+                map.insert("unconfigured".into(), true.into());
+            }
+        }
+        McpTransportSpec::WebSocket {
+            url,
+            headers_helper,
+            ..
+        } => {
+            if let Some(helper) = headers_helper {
+                map.insert("headersHelper".into(), helper.clone().into());
+            }
+            if url.trim().is_empty() {
+                map.insert("unconfigured".into(), true.into());
+            }
+        }
+        McpTransportSpec::SseIde {
+            url,
+            ide_running_in_windows,
+            ..
+        } => {
+            if *ide_running_in_windows {
+                map.insert("ideRunningInWindows".into(), true.into());
+            }
+            if url.trim().is_empty() {
+                map.insert("unconfigured".into(), true.into());
+            }
+        }
+        McpTransportSpec::WsIde {
+            url,
+            auth_token,
+            ide_running_in_windows,
+            ..
+        } => {
+            if let Some(token) = auth_token {
+                map.insert("authToken".into(), token.clone().into());
+            }
+            if *ide_running_in_windows {
+                map.insert("ideRunningInWindows".into(), true.into());
+            }
+            if url.trim().is_empty() {
+                map.insert("unconfigured".into(), true.into());
+            }
+        }
+        McpTransportSpec::Stdio { .. }
+        | McpTransportSpec::InProcess { .. }
+        | McpTransportSpec::SdkControl { .. } => {}
+    }
+    value
+}
+
+/// Provider-facing logical discovery-cache key. This follows the recovered
+/// oracle shape more closely than the legacy transport hash by hashing a
+/// canonicalized config object (closest Rust equivalent of the source config,
+/// with unavailable source-only fields omitted) and prefixing it with the
+/// server name.
+#[must_use]
+pub(crate) fn logical_cache_key(config: &crate::connection::McpServerConfig) -> String {
+    let mut raw = spec_logical_key_config(&config.spec);
+    let serde_json::Value::Object(map) = &mut raw else {
+        unreachable!("all MCP logical-key configs are JSON objects")
+    };
+    // The parsed Rust model collapses absent and explicit false for these two
+    // booleans. Omitting false is the closest oracle representation and keeps
+    // the distinction honest rather than inventing an explicit source value.
+    if config.disabled {
+        map.insert("disabled".into(), true.into());
+    }
+    if config.always_load {
+        map.insert("alwaysLoad".into(), true.into());
+    }
+    if let Some(timeout) = config.timeout_ms {
+        map.insert("timeout".into(), timeout.into());
+    }
+    let canonical = canonicalize_logical_key_value(raw);
+    let canonical_json =
+        serde_json::to_string(&canonical).expect("canonical discovery-cache key config is serializable");
+    let hash = sha256_hex(canonical_json.as_bytes());
+    format!("{}-{}", config.name, &hash[..16])
+}
 
 // ── config-independent constants (oracle `Pe`/`Me`/`Ae`/`xe`) ──────────────
 
@@ -833,11 +1007,9 @@ pub fn decide(
 
 // ── persisted store ──────────────────────────────────────────────────────
 
-/// Oversize guard. LingXi-original: the oracle's is 8 MiB, tuned for a much
-/// richer payload (full tool/resource/prompt bodies) this format doesn't
-/// carry; 1 MiB is generous for the slim [`DiscoveryCacheEntry`] shape above
-/// and is not meant to byte-match anything.
-const MAX_ENTRY_BYTES: u64 = 1 << 20;
+/// Oversize guard. Matches the oracle's 8 MiB ceiling so large but legitimate
+/// MCP catalogs are not treated as corrupt misses.
+const MAX_ENTRY_BYTES: u64 = 8 * 1024 * 1024;
 
 /// A directory of one-file-per-server discovery-cache entries. The root is
 /// caller-supplied (see the module-level DEFERRED note on wiring the real
@@ -849,6 +1021,10 @@ pub struct DiscoveryCacheStore {
 }
 
 impl DiscoveryCacheStore {
+    fn valid_partition_key(key: &str) -> bool {
+        key.len() == 32 && key.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    }
+
     fn staging_path(&self, key: &str, nonce: u64) -> std::path::PathBuf {
         self.root
             .join(format!("{key}.tmp-{}-{nonce}", std::process::id()))
@@ -861,13 +1037,9 @@ impl DiscoveryCacheStore {
         Self { root: root.into() }
     }
 
-    /// Oracle `A(e,t)=ur(e,ge(t))` restricted to what this port has: a
-    /// SHA-256 over `{name, transport kind, url, headers}` (NOT the oracle's
-    /// OAuth-grant-token-bound fingerprint — see the module-level DEFERRED
-    /// note). Non-remote specs (no `url`/`headers`) still get a stable key
-    /// from `{name, kind}` alone, so [`Self::load`]/[`Self::store`] never
-    /// panic on them even though [`cache_gate`] already refuses anything but
-    /// sse/http.
+    /// Legacy helper for older tests: a stable SHA-256 over `{name, transport
+    /// kind, url, headers}`. Production discovery-cache partitioning now uses
+    /// [`logical_cache_key`] instead.
     #[must_use]
     pub fn cache_key(name: &str, spec: &McpTransportSpec) -> String {
         use sha2::{Digest, Sha256};
@@ -890,29 +1062,57 @@ impl DiscoveryCacheStore {
         self.root.join(format!("{key}.json"))
     }
 
-    /// Fail-safe read. A missing file is [`EntryLookup::Absent`]; a symlink,
-    /// a non-regular file, an oversize file, invalid JSON, a schema-version
-    /// mismatch, or a stored `cache_key` that doesn't match `expected_key`
-    /// are ALL [`EntryLookup::Corrupt`] — this store never surfaces a raw
-    /// I/O error and never trusts a garbled/mismatched entry, matching the
-    /// oracle's fail-safe posture (`miss_corrupt` exists for exactly this).
-    #[must_use]
-    pub fn load(&self, expected_key: &str) -> EntryLookup {
-        let path = self.entry_path(expected_key);
-        let meta = match std::fs::symlink_metadata(&path) {
-            Ok(m) => m,
+    fn partitioned_entry_path(&self, partition_key: &str) -> std::path::PathBuf {
+        self.root.join(format!("{partition_key}.json"))
+    }
+
+    fn open_readonly_no_follow(path: &std::path::Path) -> std::io::Result<std::fs::File> {
+        let mut options = std::fs::OpenOptions::new();
+        options.read(true);
+        // `O_NOFOLLOW` closes the check/open race on the production Unix
+        // targets without adding a platform dependency. Unsupported targets
+        // still retain the post-open regular-file check below.
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            options.custom_flags(0x20_000);
+        }
+        #[cfg(any(target_os = "macos", target_os = "ios"))]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            options.custom_flags(0x100);
+        }
+        options.open(path)
+    }
+
+    fn load_path(&self, path: &std::path::Path, expected_key: &str) -> EntryLookup {
+        use std::io::Read as _;
+
+        let file = match Self::open_readonly_no_follow(path) {
+            Ok(file) => file,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return EntryLookup::Absent,
             Err(_) => return EntryLookup::Corrupt,
         };
-        if meta.file_type().is_symlink() || !meta.is_file() {
+        let Ok(meta) = file.metadata() else {
+            return EntryLookup::Corrupt;
+        };
+        if !meta.is_file() {
             return EntryLookup::Corrupt;
         }
         if meta.len() > MAX_ENTRY_BYTES {
             return EntryLookup::Corrupt;
         }
-        let Ok(raw) = std::fs::read_to_string(&path) else {
+        let mut raw = String::new();
+        if file
+            .take(MAX_ENTRY_BYTES.saturating_add(1))
+            .read_to_string(&mut raw)
+            .is_err()
+        {
             return EntryLookup::Corrupt;
-        };
+        }
+        if raw.len() as u64 > MAX_ENTRY_BYTES {
+            return EntryLookup::Corrupt;
+        }
         let Ok(entry) = serde_json::from_str::<DiscoveryCacheEntry>(&raw) else {
             return EntryLookup::Corrupt;
         };
@@ -922,27 +1122,36 @@ impl DiscoveryCacheStore {
         EntryLookup::Found(entry)
     }
 
-    /// Atomic write: serialize to a sibling temp file with an exclusive
-    /// per-attempt nonce, then rename into place. A crash mid-write leaves
-    /// only an orphaned `.tmp-*` file behind — the real path is untouched
-    /// until the rename commits.
-    ///
-    /// # Errors
-    /// Any I/O failure creating the directory, writing the temp file, or
-    /// renaming it into place.
-    pub fn store(&self, entry: &DiscoveryCacheEntry) -> std::io::Result<()> {
+    fn store_path(
+        &self,
+        entry: &DiscoveryCacheEntry,
+        path: std::path::PathBuf,
+        staging_key: &str,
+    ) -> std::io::Result<()> {
         use std::io::Write as _;
 
         static NEXT_STAGE_NONCE: std::sync::atomic::AtomicU64 =
             std::sync::atomic::AtomicU64::new(1);
 
         std::fs::create_dir_all(&self.root)?;
-        let path = self.entry_path(&entry.cache_key);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+
+            let perms = std::fs::Permissions::from_mode(0o700);
+            std::fs::set_permissions(&self.root, perms)?;
+        }
         let bytes = serde_json::to_vec(entry)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        if u64::try_from(bytes.len()).ok().is_some_and(|len| len > MAX_ENTRY_BYTES) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "discovery cache entry exceeds max size",
+            ));
+        }
         loop {
             let nonce = NEXT_STAGE_NONCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            let tmp_path = self.staging_path(&entry.cache_key, nonce);
+            let tmp_path = self.staging_path(staging_key, nonce);
             #[cfg(test)]
             notify_stage_path_observer(&tmp_path);
             let mut file = match std::fs::OpenOptions::new()
@@ -954,6 +1163,13 @@ impl DiscoveryCacheStore {
                 Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
                 Err(error) => return Err(error),
             };
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt as _;
+
+                let perms = std::fs::Permissions::from_mode(0o600);
+                std::fs::set_permissions(&tmp_path, perms)?;
+            }
 
             let write_result = file.write_all(&bytes);
             drop(file);
@@ -972,6 +1188,55 @@ impl DiscoveryCacheStore {
         }
     }
 
+    /// Fail-safe read. A missing file is [`EntryLookup::Absent`]; a symlink,
+    /// a non-regular file, an oversize file, invalid JSON, a schema-version
+    /// mismatch, or a stored `cache_key` that doesn't match `expected_key`
+    /// are ALL [`EntryLookup::Corrupt`] — this store never surfaces a raw
+    /// I/O error and never trusts a garbled/mismatched entry, matching the
+    /// oracle's fail-safe posture (`miss_corrupt` exists for exactly this).
+    #[must_use]
+    pub fn load(&self, expected_key: &str) -> EntryLookup {
+        self.load_path(&self.entry_path(expected_key), expected_key)
+    }
+
+    #[must_use]
+    pub(crate) fn load_partitioned(&self, logical_key: &str, partition_key: &str) -> EntryLookup {
+        if !Self::valid_partition_key(partition_key) {
+            return EntryLookup::Corrupt;
+        }
+        self.load_path(&self.partitioned_entry_path(partition_key), logical_key)
+    }
+
+    /// Atomic write: serialize to a sibling temp file with an exclusive
+    /// per-attempt nonce, then rename into place. A crash mid-write leaves
+    /// only an orphaned `.tmp-*` file behind — the real path is untouched
+    /// until the rename commits.
+    ///
+    /// # Errors
+    /// Any I/O failure creating the directory, writing the temp file, or
+    /// renaming it into place.
+    pub fn store(&self, entry: &DiscoveryCacheEntry) -> std::io::Result<()> {
+        self.store_path(entry, self.entry_path(&entry.cache_key), &entry.cache_key)
+    }
+
+    pub(crate) fn store_partitioned(
+        &self,
+        entry: &DiscoveryCacheEntry,
+        partition_key: &str,
+    ) -> std::io::Result<()> {
+        if !Self::valid_partition_key(partition_key) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "invalid discovery cache partition key",
+            ));
+        }
+        self.store_path(
+            entry,
+            self.partitioned_entry_path(partition_key),
+            partition_key,
+        )
+    }
+
     /// Delete the entry for `key`. A missing file is not an error (mirrors
     /// the oracle's best-effort purge on `opt-out`/`headers-helper` —
     /// [`CacheGateReason::purges_existing_entry`]).
@@ -984,6 +1249,81 @@ impl DiscoveryCacheStore {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
             Err(e) => Err(e),
         }
+    }
+
+    pub(crate) fn purge_family(&self, logical_key: &str) -> std::io::Result<()> {
+        let Ok(entries) = std::fs::read_dir(&self.root) else {
+            return Ok(());
+        };
+        for entry in entries {
+            let entry = entry?;
+            let file_type = entry.file_type()?;
+            if file_type.is_symlink() || !file_type.is_file() {
+                continue;
+            }
+            let file_name = entry.file_name();
+            let file_name = file_name.to_string_lossy();
+            let matches_legacy = file_name == format!("{logical_key}.json");
+            if matches_legacy {
+                std::fs::remove_file(entry.path())?;
+                continue;
+            }
+            if !file_name.ends_with(".json") {
+                continue;
+            }
+            let Some(cache_entry) = Self::read_entry_for_purge(&entry.path()) else {
+                continue;
+            };
+            if cache_entry.cache_key == logical_key {
+                std::fs::remove_file(entry.path())?;
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn purge_server_family(&self, server_name: &str) -> std::io::Result<()> {
+        let Ok(entries) = std::fs::read_dir(&self.root) else {
+            return Ok(());
+        };
+        let prefix = format!("{server_name}-");
+        for entry in entries {
+            let entry = entry?;
+            let file_type = entry.file_type()?;
+            if file_type.is_symlink() || !file_type.is_file() {
+                continue;
+            }
+            let Some(cache_entry) = Self::read_entry_for_purge(&entry.path()) else {
+                continue;
+            };
+            let matches = cache_entry
+                .cache_key
+                .strip_prefix(&prefix)
+                .is_some_and(|suffix| {
+                    suffix.len() == 16 && suffix.bytes().all(|byte| byte.is_ascii_hexdigit())
+                });
+            if matches {
+                std::fs::remove_file(entry.path())?;
+            }
+        }
+        Ok(())
+    }
+
+    fn read_entry_for_purge(path: &std::path::Path) -> Option<DiscoveryCacheEntry> {
+        use std::io::Read as _;
+
+        let file = Self::open_readonly_no_follow(path).ok()?;
+        let meta = file.metadata().ok()?;
+        if !meta.is_file() || meta.len() > MAX_ENTRY_BYTES {
+            return None;
+        }
+        let mut raw = String::new();
+        file.take(MAX_ENTRY_BYTES.saturating_add(1))
+            .read_to_string(&mut raw)
+            .ok()?;
+        if raw.len() as u64 > MAX_ENTRY_BYTES {
+            return None;
+        }
+        serde_json::from_str(&raw).ok()
     }
 }
 
@@ -1418,6 +1758,29 @@ mod tests {
         assert_eq!(d, Decision::Fresh { entry, age_ms: 500 });
     }
 
+    #[test]
+    fn logged_out_fingerprint_and_partition_hashes_match_fixed_vectors() {
+        assert_eq!(PROVIDER_NEUTRAL_IDENTITY_DOMAIN, "acct:logged-out");
+        assert_eq!(
+            fingerprint("grant:none"),
+            "856f0d2375be22a510e79662f22d30c51c14dc3394b9d610af33a7116d81cda6"
+        );
+        assert_eq!(
+            partition_key(
+                "logical-cache-key",
+                "856f0d2375be22a510e79662f22d30c51c14dc3394b9d610af33a7116d81cda6"
+            ),
+            "a6fad12e13235da65ecc9b068d2c62b6"
+        );
+        assert_eq!(
+            partition_key(
+                "logical-cache-key",
+                "991e0dadd79d2d72abf31cf52d2cbd1d4f1e0c49b62b4d5e820b2e78cd12f971"
+            ),
+            "f0217af2d59565e3f4f52e2625ecab10"
+        );
+    }
+
     // ── env parsing ───────────────────────────────────────────────────────
 
     #[test]
@@ -1673,6 +2036,30 @@ mod tests {
         assert_eq!(store.load("k"), EntryLookup::Corrupt);
     }
 
+    #[test]
+    fn partitioned_load_rejects_a_logical_cache_key_mismatch() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = DiscoveryCacheStore::new(dir.path());
+        let entry = DiscoveryCacheEntry::new(
+            "other".into(),
+            1,
+            caps_tools(false),
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+        );
+        let partition = "5f8c808fb644f988305edbe6275249d1";
+        store
+            .store_partitioned(&entry, partition)
+            .expect("store partitioned");
+        assert_eq!(store.load_partitioned("k", partition), EntryLookup::Corrupt);
+        assert_eq!(
+            store.load_partitioned("other", partition),
+            EntryLookup::Found(entry)
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn store_load_symlink_is_corrupt() {
@@ -1716,6 +2103,73 @@ mod tests {
         store.store(&entry).expect("store");
         store.purge("abc").expect("purge");
         assert_eq!(store.load("abc"), EntryLookup::Absent);
+    }
+
+    #[test]
+    fn purge_family_removes_all_identity_partitions_without_following_symlinks() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = DiscoveryCacheStore::new(dir.path());
+        let entry = DiscoveryCacheEntry::new(
+            "family".into(),
+            1,
+            caps_tools(false),
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+        );
+        store
+            .store_partitioned(&entry, "6decc52ef8fe06ece487830919fa7647")
+            .expect("store partition 1");
+        store
+            .store_partitioned(&entry, "b1a568969e63c74880dad66366c53bde")
+            .expect("store partition 2");
+        store
+            .store(&DiscoveryCacheEntry::new(
+                "family".into(),
+                2,
+                caps_tools(false),
+                vec![],
+                vec![],
+                vec![],
+                vec![],
+            ))
+            .expect("store legacy");
+        store
+            .store(&DiscoveryCacheEntry::new(
+                "other".into(),
+                3,
+                caps_tools(false),
+                vec![],
+                vec![],
+                vec![],
+                vec![],
+            ))
+            .expect("store other");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(
+            dir.path().join("other.json"),
+            dir.path().join("family.symlink.json"),
+        )
+        .expect("symlink");
+
+        store.purge_family("family").expect("purge family");
+
+        assert_eq!(store.load("family"), EntryLookup::Absent);
+        assert_eq!(
+            store.load_partitioned("family", "6decc52ef8fe06ece487830919fa7647"),
+            EntryLookup::Absent
+        );
+        assert_eq!(
+            store.load_partitioned("family", "b1a568969e63c74880dad66366c53bde"),
+            EntryLookup::Absent
+        );
+        assert!(matches!(store.load("other"), EntryLookup::Found(_)));
+        #[cfg(unix)]
+        assert!(
+            dir.path().join("family.symlink.json").exists(),
+            "purge_family must not follow or delete symlink entries"
+        );
     }
 
     #[test]
@@ -1790,6 +2244,37 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn store_sets_owner_only_permissions_on_root_and_entry_files() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().join("cache");
+        let store = DiscoveryCacheStore::new(&root);
+        let entry = DiscoveryCacheEntry::new(
+            "abc".into(),
+            1,
+            caps_tools(false),
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+        );
+
+        store.store(&entry).expect("store");
+
+        let root_mode = std::fs::metadata(&root).expect("root metadata").permissions().mode() & 0o777;
+        let entry_mode = std::fs::metadata(root.join("abc.json"))
+            .expect("entry metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+
+        assert_eq!(root_mode, 0o700);
+        assert_eq!(entry_mode, 0o600);
+    }
+
     #[test]
     fn cache_key_is_stable_and_distinguishes_url() {
         let a = DiscoveryCacheStore::cache_key("srv", &http_spec("https://a.example", None));
@@ -1797,5 +2282,48 @@ mod tests {
         let a_again = DiscoveryCacheStore::cache_key("srv", &http_spec("https://a.example", None));
         assert_eq!(a, a_again);
         assert_ne!(a, b);
+    }
+
+    #[test]
+    fn logical_cache_key_ignores_scope_config_error_and_discovery_cache_but_tracks_timeout_and_always_load() {
+        let mut base = crate::connection::McpServerConfig {
+            name: "srv".into(),
+            spec: http_spec("https://a.example", None),
+            scope: crate::connection::ConfigScope::User,
+            disabled: false,
+            timeout_ms: Some(10),
+            discovery_cache: None,
+            always_load: false,
+            config_error: None,
+        };
+        let same = crate::connection::McpServerConfig {
+            scope: crate::connection::ConfigScope::Managed,
+            config_error: Some("ignored".into()),
+            ..base.clone()
+        };
+        let different_discovery_cache = crate::connection::McpServerConfig {
+            discovery_cache: Some(false),
+            ..base.clone()
+        };
+        let different_timeout = crate::connection::McpServerConfig {
+            timeout_ms: Some(20),
+            ..base.clone()
+        };
+        let different_always_load = crate::connection::McpServerConfig {
+            always_load: true,
+            discovery_cache: None,
+            ..base.clone()
+        };
+
+        let base_key = logical_cache_key(&base);
+        assert_eq!(base_key, logical_cache_key(&same));
+        assert_eq!(base_key, logical_cache_key(&different_discovery_cache));
+        assert_ne!(base_key, logical_cache_key(&different_timeout));
+        assert_ne!(base_key, logical_cache_key(&different_always_load));
+
+        if let McpTransportSpec::Http { headers_helper, .. } = &mut base.spec {
+            *headers_helper = Some("./helper".into());
+        }
+        assert_ne!(base_key, logical_cache_key(&base));
     }
 }

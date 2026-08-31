@@ -33,6 +33,17 @@ pub struct McpServerConfig {
     /// `getServerKey`/`oauth::server_key` config hash.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_ms: Option<u64>,
+    /// Per-server discovery-cache preference from the parsed
+    /// `discoveryCache` config key. `None` means the key was absent or the
+    /// transport does not declare it; `Some(false)` is an explicit opt-out
+    /// that purges any existing cache family and suppresses future reads and
+    /// writes; `Some(true)` is an explicit opt-in that remains otherwise
+    /// subject to the normal feature/transport/headers-helper gates.
+    ///
+    /// Kept OFF [`McpTransportSpec`] on purpose so it never perturbs the
+    /// `getServerKey`/`oauth::server_key` config hash.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub discovery_cache: Option<bool>,
     /// `alwaysLoad`: force every tool from this server into the prompt, never
     /// deferred behind tool search ("Equivalent to setting defer_loading:false
     /// on the API"). OR'd into each tool's `always_load` bit at list time.
@@ -358,6 +369,7 @@ mod tests {
             scope: ConfigScope::User,
             disabled: false,
             timeout_ms: None,
+            discovery_cache: None,
             always_load: false,
             config_error: config_error.map(str::to_string),
         }

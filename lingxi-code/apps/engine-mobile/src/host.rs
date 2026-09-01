@@ -4348,6 +4348,7 @@ async fn build_mobile_inner_with_ask(
         ),
         mailbox_router: None,
         budget_enforcer: Some(budget_enforcer.clone()),
+        main_loop_model_profile_provider: None,
         // Mobile has no coordinator runtime; fork-subagent gate sees non-coordinator.
         coordinator_mode: None,
         // (3b) Share the enforcing mobile `PolicyPermissionGate` with tools

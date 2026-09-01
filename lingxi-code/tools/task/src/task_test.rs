@@ -117,7 +117,8 @@ mod tests {
                 "monitor_mcp",
                 "monitor_ws",
                 "mcp_task",
-                "dream"
+                "dream",
+                "local_fusion"
             ]
         );
     }

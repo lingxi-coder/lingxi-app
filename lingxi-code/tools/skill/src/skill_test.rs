@@ -1366,7 +1366,7 @@ mod fork_dispatch_tests {
     use platform_api::process::ProcessOutput;
     use platform_api::subagent_spawn::{
         AsyncLaunch, SubagentInheritance, SubagentListingEntry, SubagentResult, SubagentSpawnError,
-        SubagentSpawnRequest, SubagentSpawner,
+        SubagentSpawnRequest, SubagentSpawner, SubagentUsage,
     };
     use platform_api::task_registry::{
         TaskCreateInput, TaskListFilter, TaskRecord, TaskRegistryError, TaskRegistryHandle,

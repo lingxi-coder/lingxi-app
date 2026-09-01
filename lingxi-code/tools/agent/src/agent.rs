@@ -680,6 +680,7 @@ fn parse_fusion_models(raw: &[String]) -> Result<Vec<FusionModelRef>, ToolError>
 }
 
 fn fusion_request_from_agent(
+    fallback_profile: Option<&tool_api::MainLoopModelProfileProvider>,
     parsed: &AgentToolInput,
     ctx: &ToolUseContext,
     surface: FusionAgentSurface,
@@ -696,6 +697,11 @@ fn fusion_request_from_agent(
     let dimensions = parsed.dimensions.clone().unwrap_or_default();
     let parent_model =
         main_loop_model_parent(ctx).unwrap_or_else(|| ctx.options.main_loop_model.clone());
+    let parent_profile = ctx
+        .options
+        .model_profile
+        .clone()
+        .or_else(|| fallback_profile.and_then(|resolve| resolve(&ctx.options.main_loop_model)));
     Ok(FusionRequest {
         schema_version: platform_api::FUSION_SCHEMA_VERSION,
         origin: FusionOrigin::Agent,
@@ -706,7 +712,7 @@ fn fusion_request_from_agent(
         partial_ok: parsed.partial_ok.unwrap_or(surface.default_partial_ok),
         max_panel: parsed.max_panel,
         cross_provider: parsed.cross_provider == Some(true) && surface.allow_cross_provider,
-        parent_profile: ctx.options.model_profile.clone().unwrap_or_default(),
+        parent_profile: parent_profile.unwrap_or_default(),
         parent_model,
         conversation_id: None,
         workflow_run_id: None,
@@ -983,7 +989,12 @@ impl AgentTool {
             });
         }
 
-        let request = fusion_request_from_agent(&parsed, &ctx, surface)?;
+        let request = fusion_request_from_agent(
+            self.ctx.main_loop_model_profile_provider.as_ref(),
+            &parsed,
+            &ctx,
+            surface,
+        )?;
         let panel_n = u64::from(fusion_panel_count(&parsed, surface));
         let cap = max_subagents_per_session();
         if let Some(registry) = &self.ctx.task_registry {

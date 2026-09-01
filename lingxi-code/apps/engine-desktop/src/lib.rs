@@ -9955,6 +9955,21 @@ pub async fn build(
         ),
         mailbox_router: coordinator_mailbox,
         budget_enforcer: Some(budget_enforcer.clone()),
+        main_loop_model_profile_provider: Some(Arc::new({
+            let model_providers = model_providers.clone();
+            move |model: &str| {
+                model_providers
+                    .get(model)
+                    .map(|(profile, _)| profile.clone())
+                    .or_else(|| {
+                        model.split_once('/').and_then(|(profile, bare)| {
+                            let is_bare_claude_ref = profile.starts_with("claude-");
+                            (!profile.is_empty() && !bare.is_empty() && !is_bare_claude_ref)
+                                .then(|| profile.to_string())
+                        })
+                    })
+            }
+        })),
         coordinator_mode: Some(coordinator_mode.clone()
             as Arc<dyn platform_api::coordinator_mode::CoordinatorModeHandle>),
         // (3b) AgentTool threads this into the subagent's RegistryToolInvoker so

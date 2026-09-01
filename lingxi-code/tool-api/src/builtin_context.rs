@@ -53,6 +53,14 @@ use telemetry::AnalyticsBus;
 /// — byte-identical to the pre-cell behavior.
 pub type LiveCwdCell = Arc<std::sync::Mutex<PathBuf>>;
 
+/// Fallback provider-profile resolver for the current main-loop model.
+///
+/// Some live sessions can carry a bare `session.model` while the resolved
+/// provider survives only in engine-owned routing state. Tools that need
+/// provider-aware behavior can consult this when
+/// [`crate::context::ToolUseOptions::model_profile`] is absent.
+pub type MainLoopModelProfileProvider = Arc<dyn Fn(&str) -> Option<String> + Send + Sync>;
+
 /// Static surface every builtin tool needs at construction time.
 ///
 /// Cloning is cheap — every field is `Arc` or a small owned vec.
@@ -172,6 +180,10 @@ pub struct BuiltinToolContext {
     /// Budget enforcer — `AgentTool` gates spawn calls through this seam.
     /// Production wires `cost::BudgetEnforcer`.
     pub budget_enforcer: Option<Arc<dyn BudgetEnforcerHandle>>,
+    /// Optional fallback provider-profile resolver for the current
+    /// `main_loop_model`. Desktop wires the same model-routing map used by
+    /// `/fusion`; tests and mobile leave this `None`.
+    pub main_loop_model_profile_provider: Option<MainLoopModelProfileProvider>,
     /// Coordinator-mode seam — `AgentTool` consults this LIVE to gate the
     /// fork-subagent path (mutually exclusive with coordinator mode) and to
     /// select the slim coordinator tool prompt. `None` ⇒ not coordinator (the

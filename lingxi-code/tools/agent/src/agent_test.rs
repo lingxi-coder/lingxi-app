@@ -654,6 +654,36 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
         }
     }
 
+    struct CapturingFusion {
+        requests: std::sync::Mutex<Vec<platform_api::FusionRequest>>,
+    }
+
+    #[async_trait::async_trait]
+    impl platform_api::FusionExecutor for CapturingFusion {
+        async fn run(
+            &self,
+            request: platform_api::FusionRequest,
+            _inherit: platform_api::FusionInheritance,
+            _progress: Option<tokio::sync::mpsc::Sender<platform_api::FusionProgress>>,
+        ) -> Result<platform_api::FusionResult, platform_api::FusionError> {
+            self.requests
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(request);
+            Ok(sample_fusion_result(platform_api::FusionStatus::Completed))
+        }
+
+        fn agent_surface(&self) -> platform_api::FusionAgentSurface {
+            platform_api::FusionAgentSurface {
+                enabled: true,
+                quality_panel_count: 3,
+                fast_panel_count: 2,
+                max_panel: 8,
+                ..platform_api::FusionAgentSurface::default()
+            }
+        }
+    }
+
     #[test]
     fn fusion_input_fields_are_optional_on_legacy_payloads() {
         let parsed: AgentToolInput = serde_json::from_value(serde_json::json!({
@@ -774,6 +804,47 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
             "one fusion call reserves 3 panel slots, not a wrapper slot"
         );
         assert_eq!(fusion.runs.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn fusion_uses_injected_model_profile_fallback_when_context_profile_is_absent() {
+        let spawner = arc_mock_spawner();
+        let mut bctx = wired_ctx(
+            spawner,
+            arc_mock_task_registry(),
+            arc_mock_mailbox(),
+            arc_mock_budget(u64::MAX),
+        );
+        bctx.main_loop_model_profile_provider = Some(Arc::new(|model| {
+            (model == "gpt-5.6-sol").then(|| "openai".to_string())
+        }));
+        let fusion = Arc::new(CapturingFusion {
+            requests: std::sync::Mutex::new(Vec::new()),
+        });
+        let tool = AgentTool::new(bctx).with_fusion(fusion.clone());
+        let mut ctx = fresh_ctx_with_registry(Arc::new(ToolRegistry::new()));
+        ctx.options.main_loop_model = "gpt-5.6-sol".into();
+        ctx.options.model_profile = None;
+
+        tool.call(
+            serde_json::json!({
+                "description": "deliberate",
+                "prompt": "review this",
+                "subagent_type": "fusion"
+            }),
+            ctx,
+            fresh_tx(),
+        )
+        .await
+        .expect("fusion call");
+
+        let seen = fusion
+            .requests
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0].parent_model, "gpt-5.6-sol");
+        assert_eq!(seen[0].parent_profile, "openai");
     }
 
     #[test]

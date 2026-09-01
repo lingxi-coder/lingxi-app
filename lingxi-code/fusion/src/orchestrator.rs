@@ -11,9 +11,10 @@ use crate::synthesizer::{synthesize, SynthError};
 use async_trait::async_trait;
 use platform_api::subagent_spawn::SubagentSpawner;
 use platform_api::{
-    normalize_dimensions, FusionDecision, FusionError, FusionExecutor, FusionInheritance,
-    FusionNeedsParentReason, FusionProgress, FusionRequest, FusionResult, FusionStage,
-    FusionStatus, FusionTiming, FusionUsage, PanelOutcome, PanelRunStatus, FUSION_MIN_PANEL,
+    normalize_dimensions, FusionAgentSurface, FusionDecision, FusionError, FusionExecutor,
+    FusionInheritance, FusionNeedsParentReason, FusionProgress, FusionRequest, FusionResult,
+    FusionStage, FusionStatus, FusionTiming, FusionUsage, PanelOutcome, PanelRunStatus,
+    FUSION_MIN_PANEL,
 };
 use sidequery::SideQueryClient;
 use std::sync::Arc;
@@ -296,6 +297,18 @@ impl FusionExecutor for FusionOrchestrator {
         match tokio::time::timeout(total, self.run_inner(request, inherit, progress)).await {
             Ok(result) => result,
             Err(_) => Err(FusionError::TimedOutEmpty),
+        }
+    }
+
+    fn agent_surface(&self) -> FusionAgentSurface {
+        FusionAgentSurface {
+            enabled: self.config.enabled,
+            allow_cross_provider: self.config.allow_cross_provider_for_agent,
+            default_preset: platform_api::FusionPreset::Quality,
+            default_partial_ok: self.config.partial_ok,
+            quality_panel_count: self.config.quality_panel_count,
+            fast_panel_count: self.config.fast_panel_count,
+            max_panel: self.config.max_panel,
         }
     }
 }

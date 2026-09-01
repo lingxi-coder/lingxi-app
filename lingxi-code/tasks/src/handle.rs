@@ -14,11 +14,11 @@ use crate::registry::TaskRegistry;
 use crate::state::{TaskState, TaskStatus};
 use crate::task_trait::{TaskError, TaskSpawnInput};
 use async_trait::async_trait;
-use std::path::PathBuf;
 use platform_api::task_registry::{
     MonitorRegistration, TaskCreateInput, TaskListFilter, TaskOutputChunk, TaskRecord,
     TaskRegistryError, TaskRegistryHandle, TaskUpdatePatch, WorkflowRecord,
 };
+use std::path::PathBuf;
 
 fn task_type_from_wire(s: &str) -> Result<TaskType, TaskRegistryError> {
     Ok(match s {
@@ -301,6 +301,14 @@ impl TaskRegistryHandle for TaskRegistry {
 
     fn release_total_agent_spawn_reservation(&self) {
         TaskRegistry::release_total_agent_spawn_reservation(self);
+    }
+
+    fn try_reserve_total_agent_spawns(&self, n: u64, cap: u64) -> Result<u64, u64> {
+        TaskRegistry::try_reserve_total_agent_spawns(self, n, cap)
+    }
+
+    fn release_total_agent_spawn_reservations(&self, n: u64) {
+        TaskRegistry::release_total_agent_spawn_reservations(self, n);
     }
 
     async fn create(&self, input: TaskCreateInput) -> Result<TaskRecord, TaskRegistryError> {
@@ -653,11 +661,11 @@ mod tests {
     use super::*;
     use crate::output_manager::TaskOutputManager;
     use async_trait::async_trait;
+    use platform_api::filesystem::{FileContent, FileEvent, FileSystem, FlockGuard, FsError};
     use std::path::PathBuf;
     use std::sync::Arc;
     use tempfile::tempdir;
     use test_harness::mocks::MockRuntimeSpawner;
-    use platform_api::filesystem::{FileContent, FileEvent, FileSystem, FlockGuard, FsError};
 
     use std::collections::HashMap;
     use tokio::sync::Mutex as TokioMutex;

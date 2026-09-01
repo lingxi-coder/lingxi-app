@@ -26,6 +26,19 @@ pub mod agent_test_support;
 
 /// Register the agent (subagent dispatch) tools against `reg`.
 pub fn register_all(reg: &mut tool_api::ToolRegistry, ctx: tool_api::BuiltinToolContext) {
+    register_with_fusion(reg, ctx, None);
+}
+
+/// Register `AgentTool`, optionally injecting a Fusion executor.
+pub fn register_with_fusion(
+    reg: &mut tool_api::ToolRegistry,
+    ctx: tool_api::BuiltinToolContext,
+    fusion: Option<std::sync::Arc<dyn platform_api::FusionExecutor>>,
+) {
     use std::sync::Arc;
-    reg.register_builtin(Arc::new(AgentTool::new(ctx)));
+    let mut tool = AgentTool::new(ctx);
+    if let Some(executor) = fusion {
+        tool = tool.with_fusion(executor);
+    }
+    reg.register_builtin(Arc::new(tool));
 }

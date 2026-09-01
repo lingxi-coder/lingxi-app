@@ -23,6 +23,15 @@ use async_trait::async_trait;
 use once_cell::sync::Lazy;
 use permission::result::PermissionMetadata;
 use permission::{PermissionDecisionReason, PermissionResult};
+use platform_api::budget::BudgetError;
+use platform_api::fusion::{
+    FusionAgentSurface, FusionExecutor, FusionInheritance, FusionModelRef, FusionOrigin,
+    FusionPreset, FusionProgress, FusionRequest, FusionStage, FusionStatus, FUSION_MAX_PANEL,
+    FUSION_MIN_PANEL,
+};
+use platform_api::subagent_spawn::{
+    SubagentInheritance, SubagentListingEntry, SubagentResult, SubagentSpawnRequest,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use telemetry::pii::{PiiTagged, Verified};
@@ -32,8 +41,6 @@ use telemetry::tengu::agent::{
 };
 use telemetry::tengu::tool::{AGENT_COMPLETED_M4_05, AGENT_FAILED, AGENT_STARTED};
 use telemetry::AnalyticsBus;
-use platform_api::budget::BudgetError;
-use platform_api::subagent_spawn::{SubagentInheritance, SubagentResult, SubagentSpawnRequest};
 
 use tool_api::context::ToolUseContext;
 use tool_api::progress::ToolProgressSender;
@@ -89,6 +96,11 @@ const AGENT_MAX_RESULT_SIZE_CHARS: usize = 100_000;
 /// AgentTool.tsx:322).
 const GENERAL_PURPOSE_AGENT_TYPE: &str = "general-purpose";
 
+/// Public Fusion agent type (not `fusion-panel`).
+const FUSION_AGENT_TYPE: &str = "fusion";
+
+const FUSION_WHEN_TO_USE: &str = "Parallel multi-model deliberation for complex code, task, plan, or review work. About 4–5× the cost of a single agent.";
+
 /// 2.1.238 `Gri` (@285270080), NEW in 2.1.238 (0 hits in 2.1.220):
 /// the message head used both by the Agent-tool prompt (as the tail of the
 /// `subagent_type` sentence when the general-purpose agent is unavailable) and
@@ -122,7 +134,9 @@ const EXAMPLE_MIGRATION_REVIEW_PROMPT: &str = "Review migration 0042_user_schema
 ///
 /// `t` (`allowedAgentTypes`, the `att()` wildcard-rule allowlist) has no port
 /// seam, so `o(...)` is the JS `?? !0` default — always true.
-fn general_purpose_is_available(agents: &[platform_api::subagent_spawn::SubagentListingEntry]) -> bool {
+fn general_purpose_is_available(
+    agents: &[platform_api::subagent_spawn::SubagentListingEntry],
+) -> bool {
     let target = normalize_agent_type(GENERAL_PURPOSE_AGENT_TYPE);
     let matches = agents
         .iter()
@@ -192,6 +206,25 @@ pub struct AgentToolInput {
     /// context files keep working; defaults to empty so the model never sees it.
     #[serde(default)]
     pub context_paths: Vec<PathBuf>,
+    /// Fusion preset: `"quality"` or `"fast"`. Ignored unless
+    /// `subagent_type` is `"fusion"`.
+    #[serde(default)]
+    pub preset: Option<String>,
+    /// Explicit Fusion panel models (`"profile:model"` or `"model"`).
+    #[serde(default)]
+    pub models: Option<Vec<String>>,
+    /// Fusion scoring dimensions.
+    #[serde(default)]
+    pub dimensions: Option<Vec<String>>,
+    /// Fusion panel cap override.
+    #[serde(default)]
+    pub max_panel: Option<u8>,
+    /// Continue Fusion analysis when some panels fail.
+    #[serde(default)]
+    pub partial_ok: Option<bool>,
+    /// Request cross-provider Fusion (Agent default is same-provider).
+    #[serde(default)]
+    pub cross_provider: Option<bool>,
 }
 
 /// claude `Agt()` (`AgentTool.tsx`): normalize a subagent-type candidate for the
@@ -403,6 +436,35 @@ static AGENT_INPUT_SCHEMA: Lazy<Value> = Lazy::new(|| {
             "cwd": {
                 "type": "string",
                 "description": "Absolute path to run the agent in. Overrides the working directory for all filesystem and shell operations within this agent. Mutually exclusive with isolation: \"worktree\"."
+            },
+            "preset": {
+                "type": "string",
+                "enum": ["quality", "fast"],
+                "description": "Fusion preset when subagent_type is \"fusion\". Ignored for other agent types."
+            },
+            "models": {
+                "type": "array",
+                "items": { "type": "string" },
+                "description": "Explicit Fusion panel models (\"profile:model\" or \"model\") when subagent_type is \"fusion\"."
+            },
+            "dimensions": {
+                "type": "array",
+                "items": { "type": "string" },
+                "description": "Fusion scoring dimensions when subagent_type is \"fusion\"."
+            },
+            "max_panel": {
+                "type": "integer",
+                "minimum": 2,
+                "maximum": 8,
+                "description": "Fusion panel cap when subagent_type is \"fusion\"."
+            },
+            "partial_ok": {
+                "type": "boolean",
+                "description": "Continue Fusion analysis when some panels fail."
+            },
+            "cross_provider": {
+                "type": "boolean",
+                "description": "Allow Fusion panels to leave the parent provider. Agent default is same-provider."
             }
         },
         "required": ["description", "prompt"]
@@ -556,6 +618,8 @@ pub struct AgentTool {
     /// `nul` @292883815 — see [`AgentTool::new`]). Schema-only: the async
     /// DISPATCH gate is `!WA()` alone and is evaluated inline in `call`.
     advertise_run_in_background: bool,
+    /// Injected Fusion orchestrator. `None` on mobile and in `register_all`.
+    fusion: Option<Arc<dyn FusionExecutor>>,
 }
 
 /// Normalize a subagent `description` the way the binary does — `replace(/\s+/g,
@@ -564,6 +628,149 @@ pub struct AgentTool {
 /// JS `\s` for the typical ASCII description.)
 fn normalize_description_ws(s: &str) -> String {
     s.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn fusion_panel_count(parsed: &AgentToolInput, surface: FusionAgentSurface) -> u8 {
+    let cap = parsed
+        .max_panel
+        .unwrap_or(surface.max_panel)
+        .clamp(FUSION_MIN_PANEL, surface.max_panel.min(FUSION_MAX_PANEL));
+    if let Some(models) = parsed.models.as_ref() {
+        return u8::try_from(models.len())
+            .unwrap_or(cap)
+            .clamp(FUSION_MIN_PANEL, cap);
+    }
+    let preset = parse_fusion_preset(parsed.preset.as_deref()).unwrap_or(surface.default_preset);
+    let n = match preset {
+        FusionPreset::Quality => surface.quality_panel_count,
+        FusionPreset::Fast => surface.fast_panel_count,
+    };
+    n.clamp(FUSION_MIN_PANEL, cap)
+}
+
+fn parse_fusion_preset(raw: Option<&str>) -> Result<FusionPreset, ToolError> {
+    match raw {
+        None => Err(ToolError::InvalidInput("missing fusion preset".into())),
+        Some("quality") => Ok(FusionPreset::Quality),
+        Some("fast") => Ok(FusionPreset::Fast),
+        Some(other) => Err(ToolError::InvalidInput(format!(
+            "fusion preset `{other}` must be quality or fast"
+        ))),
+    }
+}
+
+fn parse_fusion_models(raw: &[String]) -> Result<Vec<FusionModelRef>, ToolError> {
+    let mut out = Vec::with_capacity(raw.len());
+    for item in raw {
+        let item = item.trim();
+        if item.is_empty() {
+            return Err(ToolError::InvalidInput(
+                "fusion models entries must be non-empty".into(),
+            ));
+        }
+        let (profile, model) = match item.split_once(':') {
+            Some((profile, model)) if !profile.is_empty() && !model.is_empty() => {
+                (Some(profile.to_string()), model.to_string())
+            }
+            _ => (None, item.to_string()),
+        };
+        out.push(FusionModelRef { profile, model });
+    }
+    Ok(out)
+}
+
+fn fusion_request_from_agent(
+    parsed: &AgentToolInput,
+    ctx: &ToolUseContext,
+    surface: FusionAgentSurface,
+) -> Result<FusionRequest, ToolError> {
+    let preset = match parsed.preset.as_deref() {
+        None => surface.default_preset,
+        Some(raw) => parse_fusion_preset(Some(raw))?,
+    };
+    let models = parsed
+        .models
+        .as_ref()
+        .map(|m| parse_fusion_models(m))
+        .transpose()?;
+    let dimensions = parsed.dimensions.clone().unwrap_or_default();
+    let parent_model =
+        main_loop_model_parent(ctx).unwrap_or_else(|| ctx.options.main_loop_model.clone());
+    Ok(FusionRequest {
+        schema_version: platform_api::FUSION_SCHEMA_VERSION,
+        origin: FusionOrigin::Agent,
+        prompt: parsed.prompt.clone(),
+        preset,
+        models,
+        dimensions,
+        partial_ok: parsed.partial_ok.unwrap_or(surface.default_partial_ok),
+        max_panel: parsed.max_panel,
+        cross_provider: parsed.cross_provider == Some(true) && surface.allow_cross_provider,
+        parent_profile: ctx.options.model_profile.clone().unwrap_or_default(),
+        parent_model,
+        conversation_id: None,
+        workflow_run_id: None,
+    })
+}
+
+fn fusion_stage_name(stage: &FusionStage) -> &'static str {
+    match stage {
+        FusionStage::ResolvingModels => "resolving_models",
+        FusionStage::ReservingBudget => "reserving_budget",
+        FusionStage::RunningPanels { .. } => "running_panels",
+        FusionStage::Analyzing => "analyzing",
+        FusionStage::Selecting => "selecting",
+        FusionStage::Synthesizing => "synthesizing",
+        FusionStage::Completed => "completed",
+        FusionStage::NeedsParent => "needs_parent",
+        FusionStage::Failed => "failed",
+        FusionStage::Cancelled => "cancelled",
+    }
+}
+
+fn fusion_tool_result(result: platform_api::FusionResult) -> ToolCallResult {
+    let status = match result.status {
+        FusionStatus::Completed => "completed",
+        FusionStatus::NeedsParent => "needs_parent",
+    };
+    let decision = serde_json::to_value(&result.decision).unwrap_or(Value::Null);
+    let panels: Vec<Value> = result
+        .panels
+        .iter()
+        .map(|p| {
+            json!({
+                "panel_id": p.panel_id,
+                "status": p.status,
+                "duration_ms": p.duration_ms,
+                "error_category": p.error_category,
+            })
+        })
+        .collect();
+    ToolCallResult {
+        data: json!({
+            "runId": result.run_id,
+            "status": status,
+            "decision": decision,
+            "panels": panels,
+            "usage": result.usage,
+            "timing": result.timing,
+            "egress": result.egress_profiles,
+        }),
+        model_content: Some(result.final_text),
+        new_messages: vec![],
+        context_modifier: None,
+        mcp_meta: None,
+        is_error: false,
+    }
+}
+
+fn fusion_tool_error(err: platform_api::FusionError) -> ToolError {
+    match err {
+        platform_api::FusionError::InvalidRequest(msg)
+        | platform_api::FusionError::InvalidConfiguration(msg)
+        | platform_api::FusionError::InvalidCustomModels(msg) => ToolError::InvalidInput(msg),
+        other => ToolError::InvalidInput(other.to_string()),
+    }
 }
 
 /// Default per-session subagent spawn cap (claude 2.1.212 `ofg = 200`).
@@ -674,11 +881,189 @@ impl AgentTool {
         Self {
             ctx,
             advertise_run_in_background,
+            fusion: None,
         }
+    }
+
+    /// Attach a Fusion executor. Listing and `subagent_type: "fusion"` stay
+    /// inert until [`FusionExecutor::agent_surface`] reports enabled.
+    #[must_use]
+    pub fn with_fusion(mut self, executor: Arc<dyn FusionExecutor>) -> Self {
+        self.fusion = Some(executor);
+        self
     }
 
     fn fresh_invocation_id() -> String {
         tool_api::util::ids::ulid_or_uuid()
+    }
+
+    fn fusion_surface(&self) -> FusionAgentSurface {
+        self.fusion
+            .as_ref()
+            .map_or_else(FusionAgentSurface::default, |ex| ex.agent_surface())
+    }
+
+    fn append_fusion_listing(&self, agents: &mut Vec<SubagentListingEntry>) {
+        if !self.fusion_surface().enabled {
+            return;
+        }
+        if agents.iter().any(|a| a.agent_type == FUSION_AGENT_TYPE) {
+            return;
+        }
+        agents.push(SubagentListingEntry {
+            agent_type: FUSION_AGENT_TYPE.to_string(),
+            when_to_use: FUSION_WHEN_TO_USE.to_string(),
+            tools_description: "Fusion deliberation (read-mostly panel)".to_string(),
+        });
+    }
+
+    async fn fusion_available_agents_display(&self, is_coordinator: bool) -> String {
+        let mut listing = match &self.ctx.subagent_spawner {
+            Some(s) => s.agent_listing().await,
+            None => Vec::new(),
+        };
+        drop_coordinator_hidden_builtins(&mut listing, is_coordinator);
+        self.append_fusion_listing(&mut listing);
+        render_available_agents(
+            &listing
+                .iter()
+                .map(|a| a.agent_type.clone())
+                .collect::<Vec<_>>(),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn call_fusion(
+        &self,
+        parsed: AgentToolInput,
+        ctx: ToolUseContext,
+        progress: ToolProgressSender,
+        bus: &Arc<AnalyticsBus>,
+        invocation_id: &str,
+        started: Instant,
+        is_coordinator: bool,
+    ) -> Result<ToolCallResult, ToolError> {
+        let surface = self.fusion_surface();
+        let executor = match (self.fusion.as_ref(), surface.enabled) {
+            (Some(ex), true) => Arc::clone(ex),
+            _ => {
+                let available = self.fusion_available_agents_display(is_coordinator).await;
+                Self::emit_failed(
+                    bus,
+                    invocation_id,
+                    "agent_type_not_found",
+                    started.elapsed().as_millis() as u64,
+                )
+                .await;
+                return Err(ToolError::InvalidInput(format!(
+                    "Agent type '{FUSION_AGENT_TYPE}' not found. Available agents: {available}"
+                )));
+            }
+        };
+
+        let budget = self.ctx.budget_enforcer.clone().ok_or_else(|| {
+            ToolError::Internal(
+                "AgentTool: BudgetEnforcerHandle not wired into BuiltinToolContext".into(),
+            )
+        })?;
+        if let Err(BudgetError::Exceeded { current_nano_usd }) = budget.check_and_charge(0).await {
+            Self::emit_failed(
+                bus,
+                invocation_id,
+                "budget_exceeded",
+                started.elapsed().as_millis() as u64,
+            )
+            .await;
+            return Err(match budget.max_session_nano_usd() {
+                Some(limit_nano_usd) => ToolError::InvalidInput(budget_limit_reached_error(
+                    current_nano_usd,
+                    limit_nano_usd,
+                )),
+                None => ToolError::Internal(format_budget_denied(current_nano_usd)),
+            });
+        }
+
+        let request = fusion_request_from_agent(&parsed, &ctx, surface)?;
+        let panel_n = u64::from(fusion_panel_count(&parsed, surface));
+        let cap = max_subagents_per_session();
+        if let Some(registry) = &self.ctx.task_registry {
+            if let Err(spawned) = registry.try_reserve_total_agent_spawns(panel_n, cap) {
+                Self::emit_failed(
+                    bus,
+                    invocation_id,
+                    "subagent_count_cap",
+                    started.elapsed().as_millis() as u64,
+                )
+                .await;
+                return Err(ToolError::InvalidInput(format!(
+                    "Subagent spawn limit reached ({spawned} of {cap} agents spawned). \
+Complete the remaining work directly with your tools instead of spawning more agents. \
+If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION."
+                )));
+            }
+        }
+
+        let parent_registry = ctx
+            .subagent_registry
+            .clone()
+            .unwrap_or_else(|| Arc::new(tool_api::ToolRegistry::new()));
+        let mut invoker_impl =
+            tool_api::tool_invoker_impl::RegistryToolInvoker::new(parent_registry);
+        if let Some(gate) = self.ctx.permission_gate.clone() {
+            invoker_impl = invoker_impl.with_gate(gate);
+        }
+        let inherit = FusionInheritance::new(
+            SubagentInheritance {
+                tool_invoker: Arc::new(invoker_impl),
+                budget,
+            },
+            ctx.cancel.clone().unwrap_or_default(),
+        );
+
+        let (prog_tx, mut prog_rx) = tokio::sync::mpsc::channel::<FusionProgress>(32);
+        let forward_progress = progress.clone();
+        let forwarder = tokio::spawn(async move {
+            while let Some(event) = prog_rx.recv().await {
+                let _ = forward_progress
+                    .send(tool_api::progress::ToolProgress {
+                        tool_use_id: protocol::ToolUseId::new(),
+                        data: serde_json::json!({
+                            "fusion_stage": fusion_stage_name(&event.stage),
+                            "message": event.message,
+                            "panel_id": event.panel_id,
+                        }),
+                    })
+                    .await;
+            }
+        });
+
+        let outcome = executor.run(request, inherit, Some(prog_tx)).await;
+        let _ = forwarder.await;
+        match outcome {
+            Ok(result) => {
+                Self::emit_completed(
+                    bus,
+                    invocation_id,
+                    started.elapsed().as_millis() as u64,
+                    FUSION_AGENT_TYPE,
+                )
+                .await;
+                Ok(fusion_tool_result(result))
+            }
+            Err(err) => {
+                if let Some(registry) = &self.ctx.task_registry {
+                    registry.release_total_agent_spawn_reservations(panel_n);
+                }
+                Self::emit_failed(
+                    bus,
+                    invocation_id,
+                    "fusion_failed",
+                    started.elapsed().as_millis() as u64,
+                )
+                .await;
+                Err(fusion_tool_error(err))
+            }
+        }
     }
 
     /// Format one agent catalog line for the tool prompt, matching claude-code's
@@ -792,17 +1177,18 @@ impl AgentTool {
         // description carries only the static pointer line. A LEGACY inline body is
         // retained behind an explicit `LINGXI_AGENT_LIST_IN_MESSAGES=false`
         // opt-out (gate OFF) — not a 2.1.193 form, but a usable escape hatch.
-        let agent_list_section = if platform_api::subagent_spawn::should_inject_agent_list_in_messages() {
-            "Available agent types are listed in <system-reminder> messages in the conversation."
+        let agent_list_section =
+            if platform_api::subagent_spawn::should_inject_agent_list_in_messages() {
+                "Available agent types are listed in <system-reminder> messages in the conversation."
                 .to_string()
-        } else {
-            let agent_lines = agents
-                .iter()
-                .map(Self::format_agent_line)
-                .collect::<Vec<_>>()
-                .join("\n");
-            format!("Available agent types and the tools they have access to:\n{agent_lines}")
-        };
+            } else {
+                let agent_lines = agents
+                    .iter()
+                    .map(Self::format_agent_line)
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                format!("Available agent types and the tools they have access to:\n{agent_lines}")
+            };
 
         // Pro-plan gate `d` (binary `d=vi()==="pro"?<block>:""`): on the `pro`
         // plan, discourage spawning. Read from the process-global subscription
@@ -1847,6 +2233,7 @@ impl Tool for AgentTool {
         // claude `Agi()==="coordinator"` — `vyt()` never registers the built-in
         // web-fetch agent for a coordinator session.
         drop_coordinator_hidden_builtins(&mut agents, is_coordinator);
+        self.append_fusion_listing(&mut agents);
         Self::build_prompt(
             &agents,
             &mcp_server_names,
@@ -1974,6 +2361,24 @@ impl Tool for AgentTool {
         // sole guard. It relies on the `<fork-boilerplate>` tag being present in
         // the child's inherited transcript, which `build_child_message`
         // guarantees. (FLAG: faithful but narrower than claude's dual check.)
+        if parsed
+            .subagent_type
+            .as_deref()
+            .is_some_and(|t| normalize_agent_type(t) == FUSION_AGENT_TYPE)
+        {
+            return self
+                .call_fusion(
+                    parsed,
+                    ctx,
+                    progress,
+                    &bus,
+                    &invocation_id,
+                    started,
+                    is_coordinator,
+                )
+                .await;
+        }
+
         if is_fork && platform_api::fork_subagent::is_in_fork_child(&ctx.messages) {
             Self::emit_failed(
                 &bus,
@@ -2747,7 +3152,8 @@ Use /mcp to configure and authenticate the required MCP servers.",
         // outcome so a worktree never leaks on a failed/killed agent.
         let worktree_result: Option<(String, String)> = match &agent_worktree {
             Some(handle) => {
-                platform_api::worktree::agent_worktree_result(self.ctx.worktree.as_ref(), handle).await
+                platform_api::worktree::agent_worktree_result(self.ctx.worktree.as_ref(), handle)
+                    .await
             }
             None => None,
         };
@@ -2803,7 +3209,8 @@ Use /mcp to configure and authenticate the required MCP servers.",
                 // reportable matched) prepend a warning block. The sanitized
                 // blocks feed BOTH the result `content` array and the model-facing
                 // string, and a `tengu_subagent_output_flagged` event is emitted.
-                let sanitized = platform_api::subagent_output_guard::sanitize_blocks(&raw_content_texts);
+                let sanitized =
+                    platform_api::subagent_output_guard::sanitize_blocks(&raw_content_texts);
                 if sanitized.any_reportable() {
                     Self::emit_subagent_output_flagged(&bus, &agent_id_str, &sanitized).await;
                 }

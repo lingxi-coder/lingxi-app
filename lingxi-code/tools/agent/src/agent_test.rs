@@ -152,13 +152,13 @@ mod tests {
         assert!(!without.contains("worktreePath"));
         assert!(without.contains("to continue this agent)\n<usage>"));
     }
+    use platform_api::budget::BudgetEnforcerHandle;
+    use platform_api::subagent_spawn::SubagentSpawner;
     use std::path::PathBuf;
     use telemetry::AnalyticsBus;
     use tool_api::context::{ToolUseContext, ToolUseOptions};
     use tool_api::test_support::{ctx_for_file_tools, fresh_tx, make_dummy_fs};
     use tool_api::ToolRegistry;
-    use platform_api::budget::BudgetEnforcerHandle;
-    use platform_api::subagent_spawn::SubagentSpawner;
 
     /// `LINGXI_AGENT_LIST_IN_MESSAGES` is process-global; serialize the
     /// tests whose `build_prompt`/`prompt` output depends on the
@@ -180,7 +180,8 @@ mod tests {
             vec![PathBuf::from("/tmp")],
         );
         bctx.subagent_spawner = Some(spawner.clone() as Arc<dyn SubagentSpawner>);
-        bctx.task_registry = Some(registry as Arc<dyn platform_api::task_registry::TaskRegistryHandle>);
+        bctx.task_registry =
+            Some(registry as Arc<dyn platform_api::task_registry::TaskRegistryHandle>);
         bctx.mailbox_router = Some(mailbox as Arc<dyn platform_api::mailbox::MailboxRouterHandle>);
         bctx.budget_enforcer = Some(budget.clone() as Arc<dyn BudgetEnforcerHandle>);
         bctx
@@ -289,7 +290,8 @@ mod tests {
         );
         bctx.subagent_spawner = Some(spawner.clone() as Arc<dyn SubagentSpawner>);
         bctx.task_registry =
-            Some(arc_mock_task_registry() as Arc<dyn platform_api::task_registry::TaskRegistryHandle>);
+            Some(arc_mock_task_registry()
+                as Arc<dyn platform_api::task_registry::TaskRegistryHandle>);
         bctx.mailbox_router =
             Some(arc_mock_mailbox() as Arc<dyn platform_api::mailbox::MailboxRouterHandle>);
         bctx.budget_enforcer = Some(parent_budget.clone());
@@ -358,7 +360,9 @@ mod tests {
             "spawner must not be invoked once budget gate trips"
         );
         assert_eq!(
-            platform_api::task_registry::TaskRegistryHandle::get_total_agent_spawns(registry.as_ref()),
+            platform_api::task_registry::TaskRegistryHandle::get_total_agent_spawns(
+                registry.as_ref()
+            ),
             0,
             "budget rejection must not consume a lifetime spawn slot"
         );
@@ -599,6 +603,179 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
         assert_eq!(BUILTIN_SUBAGENT_TYPES.len(), 4);
     }
 
+    fn sample_fusion_result(status: platform_api::FusionStatus) -> platform_api::FusionResult {
+        use platform_api::{FusionDecision, FusionNeedsParentReason};
+        let decision = match status {
+            platform_api::FusionStatus::Completed => FusionDecision::Merged,
+            platform_api::FusionStatus::NeedsParent => FusionDecision::NeedsParent {
+                reason: FusionNeedsParentReason::LowConfidence,
+            },
+        };
+        platform_api::FusionResult {
+            schema_version: 1,
+            run_id: "fu_test".into(),
+            status,
+            decision,
+            final_text: "FUSION_FINAL".into(),
+            analysis: None,
+            panels: vec![],
+            usage: platform_api::FusionUsage::default(),
+            timing: platform_api::FusionTiming::default(),
+            egress_profiles: vec!["anthropic".into()],
+        }
+    }
+
+    struct ScriptedFusion {
+        enabled: bool,
+        result: platform_api::FusionResult,
+        runs: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl platform_api::FusionExecutor for ScriptedFusion {
+        async fn run(
+            &self,
+            _request: platform_api::FusionRequest,
+            _inherit: platform_api::FusionInheritance,
+            _progress: Option<tokio::sync::mpsc::Sender<platform_api::FusionProgress>>,
+        ) -> Result<platform_api::FusionResult, platform_api::FusionError> {
+            self.runs.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(self.result.clone())
+        }
+
+        fn agent_surface(&self) -> platform_api::FusionAgentSurface {
+            platform_api::FusionAgentSurface {
+                enabled: self.enabled,
+                quality_panel_count: 3,
+                fast_panel_count: 2,
+                max_panel: 8,
+                ..platform_api::FusionAgentSurface::default()
+            }
+        }
+    }
+
+    #[test]
+    fn fusion_input_fields_are_optional_on_legacy_payloads() {
+        let parsed: AgentToolInput = serde_json::from_value(serde_json::json!({
+            "description": "do work",
+            "prompt": "go"
+        }))
+        .unwrap();
+        assert!(parsed.preset.is_none());
+        assert!(parsed.models.is_none());
+        assert!(parsed.dimensions.is_none());
+        assert!(parsed.max_panel.is_none());
+        assert!(parsed.partial_ok.is_none());
+        assert!(parsed.cross_provider.is_none());
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn fusion_disabled_is_not_listed_and_explicit_call_is_not_found() {
+        let _g = AGENT_LIST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        std::env::set_var("LINGXI_AGENT_LIST_IN_MESSAGES", "false");
+        let spawner = arc_mock_spawner();
+        let bctx = wired_ctx(
+            spawner,
+            arc_mock_task_registry(),
+            arc_mock_mailbox(),
+            arc_mock_budget(u64::MAX),
+        );
+        let tool = AgentTool::new(bctx).with_fusion(Arc::new(ScriptedFusion {
+            enabled: false,
+            result: sample_fusion_result(platform_api::FusionStatus::Completed),
+            runs: std::sync::atomic::AtomicUsize::new(0),
+        }));
+        let prompt = tool
+            .prompt(&tool_api::tool_trait::PromptOptions {
+                include_examples: false,
+                model: LEAN_MODEL.map(str::to_string),
+                model_profile: None,
+            })
+            .await;
+        std::env::remove_var("LINGXI_AGENT_LIST_IN_MESSAGES");
+        assert!(
+            !prompt.contains("- fusion:"),
+            "disabled fusion must not appear in the listing"
+        );
+        let err = tool
+            .call(
+                serde_json::json!({
+                    "description": "deliberate",
+                    "prompt": "review this",
+                    "subagent_type": "fusion"
+                }),
+                fresh_ctx_with_registry(Arc::new(ToolRegistry::new())),
+                fresh_tx(),
+            )
+            .await
+            .unwrap_err();
+        match err {
+            ToolError::InvalidInput(msg) => {
+                assert!(msg.contains("Agent type 'fusion' not found"), "{msg}");
+            }
+            other => panic!("expected not found, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn fusion_enabled_lists_and_returns_ok_including_needs_parent() {
+        use platform_api::task_registry::TaskRegistryHandle;
+        let _g = AGENT_LIST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        std::env::set_var("LINGXI_AGENT_LIST_IN_MESSAGES", "false");
+        let spawner = arc_mock_spawner();
+        let registry = arc_mock_task_registry();
+        let bctx = wired_ctx(
+            spawner,
+            registry.clone(),
+            arc_mock_mailbox(),
+            arc_mock_budget(u64::MAX),
+        );
+        let fusion = Arc::new(ScriptedFusion {
+            enabled: true,
+            result: sample_fusion_result(platform_api::FusionStatus::NeedsParent),
+            runs: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let tool = AgentTool::new(bctx).with_fusion(fusion.clone());
+        let prompt = tool
+            .prompt(&tool_api::tool_trait::PromptOptions {
+                include_examples: false,
+                model: LEAN_MODEL.map(str::to_string),
+                model_profile: None,
+            })
+            .await;
+        std::env::remove_var("LINGXI_AGENT_LIST_IN_MESSAGES");
+        assert!(prompt.contains("- fusion:"), "{prompt}");
+        assert!(!prompt.contains("fusion-panel"));
+        let result = tool
+            .call(
+                serde_json::json!({
+                    "description": "deliberate",
+                    "prompt": "review this",
+                    "subagent_type": "fusion"
+                }),
+                fresh_ctx_with_registry(Arc::new(ToolRegistry::new())),
+                fresh_tx(),
+            )
+            .await
+            .expect("NeedsParent is Ok");
+        assert_eq!(result.model_content.as_deref(), Some("FUSION_FINAL"));
+        assert_eq!(result.data["status"], "needs_parent");
+        assert_eq!(result.data["runId"], "fu_test");
+        assert!(!result.is_error);
+        assert_eq!(
+            registry.get_total_agent_spawns(),
+            3,
+            "one fusion call reserves 3 panel slots, not a wrapper slot"
+        );
+        assert_eq!(fusion.runs.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
     #[test]
     fn budget_exceeded_format_matches_m3_05_lock() {
         // M3-05 byte-locked string format.
@@ -701,6 +878,12 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
             "mode",
             "isolation",
             "cwd",
+            "preset",
+            "models",
+            "dimensions",
+            "max_panel",
+            "partial_ok",
+            "cross_provider",
         ] {
             assert!(props.contains_key(k), "schema exposes {k}");
         }
@@ -799,6 +982,12 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
             "team_name",
             "mode",
             "isolation",
+            "preset",
+            "models",
+            "dimensions",
+            "max_panel",
+            "partial_ok",
+            "cross_provider",
         ] {
             assert!(model_props.contains_key(k), "model schema keeps {k}");
         }
@@ -2722,9 +2911,10 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
         // Unset env: interactive defaults ON, headless defaults OFF (2.1.232).
         std::env::remove_var("LINGXI_FORK_SUBAGENT");
 
-        let interactive = platform_api::session_flags::scope_non_interactive_session(false, async {
-            AgentTool::build_prompt(&agents, &[], false, LEAN_MODEL, true)
-        });
+        let interactive =
+            platform_api::session_flags::scope_non_interactive_session(false, async {
+                AgentTool::build_prompt(&agents, &[], false, LEAN_MODEL, true)
+            });
         let headless = platform_api::session_flags::scope_non_interactive_session(true, async {
             AgentTool::build_prompt(&agents, &[], false, LEAN_MODEL, true)
         });
@@ -3323,7 +3513,8 @@ If more agents are genuinely needed, ask the user to raise CLAUDE_CODE_MAX_SUBAG
         let mut bctx = ctx_for_file_tools(make_dummy_fs(), bus, vec![PathBuf::from("/tmp")]);
         bctx.subagent_spawner = Some(spawner as Arc<dyn SubagentSpawner>);
         bctx.task_registry =
-            Some(arc_mock_task_registry() as Arc<dyn platform_api::task_registry::TaskRegistryHandle>);
+            Some(arc_mock_task_registry()
+                as Arc<dyn platform_api::task_registry::TaskRegistryHandle>);
         bctx.mailbox_router =
             Some(arc_mock_mailbox() as Arc<dyn platform_api::mailbox::MailboxRouterHandle>);
         bctx.budget_enforcer = Some(arc_mock_budget(u64::MAX) as Arc<dyn BudgetEnforcerHandle>);

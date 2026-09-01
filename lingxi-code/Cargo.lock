@@ -1804,6 +1804,7 @@ dependencies = [
  "cost",
  "cron",
  "dirs",
+ "fusion",
  "futures",
  "futures-core",
  "hooks",
@@ -7220,6 +7221,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-util",
  "tool-api",
  "tracing",
 ]

@@ -13,16 +13,16 @@ use crate::state::{TaskState, TaskStateBase, TaskStatus};
 use crate::task_trait::{Task, TaskContext, TaskError, TaskSpawnInput};
 use agent::{StateMachinePool, SubagentApiClient};
 use async_trait::async_trait;
-use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
-use std::time::SystemTime;
-use tokio::sync::RwLock;
 use platform_api::team_spawn::{TeamSpawnError, TeamSpawnSeam};
 use platform_api::{
     BackgroundTaskHandle, BudgetEnforcerHandle, FileSystem, ProcessRunner, RuntimeSpawner, Sandbox,
     SubagentSpawner, ToolInvoker,
 };
+use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+use std::time::SystemTime;
+use tokio::sync::RwLock;
 
 /// Tracks running tasks and dispatches lifecycle operations to handlers.
 pub struct TaskRegistry {
@@ -74,7 +74,9 @@ pub struct TaskRegistry {
     pending_rest: Arc<RwLock<std::collections::HashMap<String, RestPayload>>>,
     /// Bounded live `monitor_ws` stdout events waiting for the next turn.
     pending_monitor_events: Arc<
-        tokio::sync::Mutex<std::collections::VecDeque<platform_api::task_registry::TaskNotification>>,
+        tokio::sync::Mutex<
+            std::collections::VecDeque<platform_api::task_registry::TaskNotification>,
+        >,
     >,
     /// Per-session running total of subagents spawned through the `Agent` tool
     /// (claude 2.1.212 `taskRegistry` `getTotalAgentSpawns` /
@@ -301,10 +303,30 @@ impl TaskRegistry {
 
     /// Roll back a reservation for a launch rejected before pool allocation.
     pub fn release_total_agent_spawn_reservation(&self) {
+        self.release_total_agent_spawn_reservations(1);
+    }
+
+    /// Reserve `n` lifetime spawn slots atomically.
+    pub fn try_reserve_total_agent_spawns(&self, n: u64, cap: u64) -> Result<u64, u64> {
+        if n == 0 {
+            return Ok(self.total_agent_spawns());
+        }
+        self.total_agent_spawns
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |current| {
+                current.checked_add(n).filter(|&next| next <= cap)
+            })
+            .map(|previous| previous + n)
+    }
+
+    /// Release `n` previously reserved lifetime spawn slots.
+    pub fn release_total_agent_spawn_reservations(&self, n: u64) {
+        if n == 0 {
+            return;
+        }
         let _ =
             self.total_agent_spawns
                 .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |current| {
-                    current.checked_sub(1)
+                    Some(current.saturating_sub(n))
                 });
     }
 

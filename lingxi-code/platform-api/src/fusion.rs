@@ -604,6 +604,41 @@ pub enum FusionCostClass {
     Unknown,
 }
 
+/// Snapshot the Agent tool needs to list / authorize Fusion without depending
+/// on the `fusion` crate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FusionAgentSurface {
+    /// When true, `fusion` is in the Agent listing and `subagent_type: "fusion"`
+    /// is accepted.
+    pub enabled: bool,
+    /// Agent may request `cross_provider: true`.
+    pub allow_cross_provider: bool,
+    /// Default preset when the tool input omits `preset`.
+    pub default_preset: FusionPreset,
+    /// Default `partial_ok` when omitted.
+    pub default_partial_ok: bool,
+    /// Quality preset panel count.
+    pub quality_panel_count: u8,
+    /// Fast preset panel count.
+    pub fast_panel_count: u8,
+    /// Hard panel cap.
+    pub max_panel: u8,
+}
+
+impl Default for FusionAgentSurface {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            allow_cross_provider: false,
+            default_preset: FusionPreset::Quality,
+            default_partial_ok: true,
+            quality_panel_count: 3,
+            fast_panel_count: 2,
+            max_panel: FUSION_MAX_PANEL,
+        }
+    }
+}
+
 /// Executor implemented by the `fusion` crate and injected at the composition root.
 #[async_trait]
 pub trait FusionExecutor: Send + Sync {
@@ -616,6 +651,11 @@ pub trait FusionExecutor: Send + Sync {
         inherit: FusionInheritance,
         progress: Option<tokio::sync::mpsc::Sender<FusionProgress>>,
     ) -> Result<FusionResult, FusionError>;
+
+    /// Agent listing / intercept gate. Default is disabled (inert).
+    fn agent_surface(&self) -> FusionAgentSurface {
+        FusionAgentSurface::default()
+    }
 }
 
 /// Normalize and validate dimension names.

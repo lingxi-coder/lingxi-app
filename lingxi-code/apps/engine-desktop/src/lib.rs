@@ -1822,6 +1822,7 @@ pub fn desktop_tool_registry(
         None,
         None,
         None,
+        None,
     );
     reg
 }
@@ -2273,6 +2274,63 @@ impl tool_api::WorktreeStatePersister for JsonlWorktreeStatePersister {
     }
 }
 
+fn desktop_fusion_catalog() -> Vec<fusion::CatalogModel> {
+    let mut out = Vec::new();
+    for model in llm_client::anthropic_model_profiles() {
+        out.push(desktop_fusion_catalog_row("anthropic", &model));
+    }
+    for provider in llm_client::builtin_presets().providers {
+        for model in provider.models {
+            out.push(desktop_fusion_catalog_row(&provider.profile_name, &model));
+        }
+    }
+    out
+}
+
+fn desktop_fusion_catalog_row(
+    profile: &str,
+    model: &llm_client::ModelProfile,
+) -> fusion::CatalogModel {
+    fusion::CatalogModel {
+        profile: profile.to_string(),
+        model: model.request_model.clone(),
+        hints: llm_client::hints_for(profile, &model.request_model).unwrap_or_default(),
+        structured_output: model.capabilities.structured_output,
+    }
+}
+
+fn desktop_fusion_runtime_config(project_dir: &Path) -> fusion::FusionRuntimeConfig {
+    match load_merged_settings(project_dir).and_then(|eff| eff.settings.fusion) {
+        Some(settings) => match fusion::FusionRuntimeConfig::from_settings(&settings) {
+            Ok(config) => config,
+            Err(err) => {
+                tracing::warn!(error = %err, "invalid fusion settings; using defaults");
+                fusion::FusionRuntimeConfig::defaults()
+            }
+        },
+        None => fusion::FusionRuntimeConfig::defaults(),
+    }
+}
+
+fn desktop_fusion_executor(
+    spawner: Arc<dyn platform_api::subagent_spawn::SubagentSpawner>,
+    side_query: Arc<dyn sidequery::SideQueryClient>,
+    project_dir: &Path,
+) -> Arc<dyn platform_api::FusionExecutor> {
+    Arc::new(fusion::FusionOrchestrator::new(
+        spawner,
+        side_query,
+        desktop_fusion_runtime_config(project_dir),
+        Arc::new(desktop_fusion_catalog()),
+    ))
+}
+
+/// Assemble the desktop builtin tool set.
+///
+/// `fusion` is the live Fusion orchestrator. The offline snapshot path passes
+/// `None` so the Agent listing stays inert and the locked tool-name snapshot
+/// is unchanged. Mobile never reaches this function.
+#[allow(clippy::too_many_arguments)]
 pub fn register_desktop_tools(
     reg: &mut ToolRegistry,
     ctx: BuiltinToolContext,
@@ -2288,6 +2346,7 @@ pub fn register_desktop_tools(
     web_side_query: Option<Arc<dyn sidequery::SideQueryClient>>,
     live_cwd: Option<tool_api::LiveCwdCell>,
     worktree_state_persister: Option<Arc<dyn tool_api::WorktreeStatePersister>>,
+    fusion: Option<Arc<dyn platform_api::FusionExecutor>>,
 ) -> tool_cron::WakeupSchedulerCell {
     // ----- cross-platform tool crates (also linked by engine-mobile, P11) ---
     // (P2-08) The shared live-cwd cell (`getCwd()`/`Ct()`): the desktop `BashTool`
@@ -2396,7 +2455,9 @@ pub fn register_desktop_tools(
     }
     tool_task::register_all(reg, ctx.clone());
     // ----- desktop-only tool crates ----------------------------------------
-    tool_agent::register_all(reg, ctx.clone());
+    // Fusion is injected here (not inside `tool_agent::register_all`) so mobile
+    // and snapshot tests keep an inert Agent tool.
+    tool_agent::register_with_fusion(reg, ctx.clone(), fusion);
     match coordinator {
         // Coordinator-capable session: register the coordinator `TeamCreate` /
         // `TeamDelete` IN PLACE OF `tool_team`'s pair. `tool_team::register_all`
@@ -9843,6 +9904,13 @@ pub async fn build(
         Arc::new(tool_computer_use::TuiBridgeResolver::new(tx))
             as Arc<dyn tool_computer_use::ComputerAccessResolver>
     });
+    let fusion_executor = Some(desktop_fusion_executor(
+        subagent_spawner.clone(),
+        Arc::new(sidequery::ProviderSideQueryClient::from_service(
+            api_service.clone(),
+        )),
+        &cwd,
+    ));
     let wakeup_scheduler_cell = register_desktop_tools(
         &mut tools_inner,
         tool_ctx,
@@ -9859,6 +9927,7 @@ pub async fn build(
         // the single writer of the live cwd Read/Glob/Grep + LSP read.
         Some(current_cwd_cell.clone()),
         worktree_state_persister,
+        fusion_executor,
     );
     // Workflow tool (desktop-only — it fans out subagents). Registered here,
     // after `register_desktop_tools`, because its launcher needs `task_registry`

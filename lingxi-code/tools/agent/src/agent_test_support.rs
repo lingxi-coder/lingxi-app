@@ -6,11 +6,6 @@
 //! spawner and asserting the trait-object Arcs match the originals.
 
 use async_trait::async_trait;
-use serde_json::json;
-use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
-use std::time::SystemTime;
 use platform_api::budget::{BudgetEnforcerHandle, BudgetError};
 use platform_api::mailbox::{MailboxError, MailboxMessage, MailboxRouterHandle, RouteAck};
 use platform_api::subagent_spawn::{
@@ -21,6 +16,11 @@ use platform_api::task_registry::{
     TaskCreateInput, TaskListFilter, TaskOutputChunk, TaskRecord, TaskRegistryError,
     TaskRegistryHandle, TaskUpdatePatch,
 };
+use serde_json::json;
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::SystemTime;
 
 // =========================================================================
 // MockSubagentSpawner — records every spawn + exposes captured inheritance.
@@ -470,10 +470,28 @@ impl TaskRegistryHandle for MockTaskRegistryHandle {
     }
 
     fn release_total_agent_spawn_reservation(&self) {
+        self.release_total_agent_spawn_reservations(1);
+    }
+
+    fn try_reserve_total_agent_spawns(&self, n: u64, cap: u64) -> Result<u64, u64> {
+        if n == 0 {
+            return Ok(self.spawns.load(Ordering::SeqCst));
+        }
+        self.spawns
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |current| {
+                current.checked_add(n).filter(|&next| next <= cap)
+            })
+            .map(|previous| previous + n)
+    }
+
+    fn release_total_agent_spawn_reservations(&self, n: u64) {
+        if n == 0 {
+            return;
+        }
         let _ = self
             .spawns
             .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |current| {
-                current.checked_sub(1)
+                Some(current.saturating_sub(n))
             });
     }
 

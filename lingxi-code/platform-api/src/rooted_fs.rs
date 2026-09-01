@@ -5,7 +5,7 @@
 //! descriptors and `*at` syscalls. Windows uses handle-relative NT file APIs.
 
 use fs2::FileExt;
-use std::io::{Read, Write};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Component, Path, PathBuf};
 use std::time::SystemTime;
 
@@ -33,6 +33,34 @@ fn read_opened_to_string_limited(
 pub const PRIVATE_DIR_MODE: u32 = 0o700;
 /// Owner-only defaults used for `.lingxi` state files.
 pub const PRIVATE_FILE_MODE: u32 = 0o600;
+
+/// Stable identity of an opened root directory. Values are derived from the
+/// directory handle itself (device/inode on Unix, volume/file id on Windows),
+/// never from a canonical pathname, so replacing a directory at the same path
+/// is observable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RootIdentity {
+    volume: u64,
+    file: u64,
+}
+
+fn read_opened_tail_bytes(
+    mut file: std::fs::File,
+    relative: &Path,
+    max_bytes: u64,
+) -> Result<Vec<u8>, FsError> {
+    let length = file
+        .metadata()
+        .map_err(|error| map_io(relative, error))?
+        .len();
+    let start = length.saturating_sub(max_bytes);
+    file.seek(SeekFrom::Start(start))
+        .map_err(|error| map_io(relative, error))?;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)
+        .map_err(|error| map_io(relative, error))?;
+    Ok(bytes)
+}
 
 /// Options for an atomic root-confined write.
 #[derive(Debug, Clone, Copy)]
@@ -199,6 +227,23 @@ mod imp {
         information: usize,
     }
 
+    #[repr(C)]
+    struct ByHandleFileInformation {
+        file_attributes: u32,
+        creation_time_low: u32,
+        creation_time_high: u32,
+        last_access_time_low: u32,
+        last_access_time_high: u32,
+        last_write_time_low: u32,
+        last_write_time_high: u32,
+        volume_serial_number: u32,
+        file_size_high: u32,
+        file_size_low: u32,
+        number_of_links: u32,
+        file_index_high: u32,
+        file_index_low: u32,
+    }
+
     #[link(name = "ntdll")]
     extern "system" {
         fn NtCreateFile(
@@ -236,6 +281,10 @@ mod imp {
 
     #[link(name = "kernel32")]
     extern "system" {
+        fn GetFileInformationByHandle(
+            file: Handle,
+            information: *mut ByHandleFileInformation,
+        ) -> i32;
         fn LocalFree(memory: *mut c_void) -> *mut c_void;
     }
 
@@ -440,7 +489,28 @@ mod imp {
         }
     }
 
-    fn open_root(root: &Path) -> Result<std::fs::File, FsError> {
+    fn root_identity_from_file(file: &std::fs::File, path: &Path) -> Result<RootIdentity, FsError> {
+        let mut information = std::mem::MaybeUninit::<ByHandleFileInformation>::uninit();
+        // SAFETY: `file` owns a live handle and the API initializes the output
+        // structure before returning success.
+        let ok =
+            unsafe { GetFileInformationByHandle(file.as_raw_handle(), information.as_mut_ptr()) };
+        if ok == 0 {
+            return Err(map_io(path, std::io::Error::last_os_error()));
+        }
+        // SAFETY: success above guarantees complete initialization.
+        let information = unsafe { information.assume_init() };
+        Ok(RootIdentity {
+            volume: u64::from(information.volume_serial_number),
+            file: (u64::from(information.file_index_high) << 32)
+                | u64::from(information.file_index_low),
+        })
+    }
+
+    fn open_root_checked(
+        root: &Path,
+        expected: Option<&RootIdentity>,
+    ) -> Result<std::fs::File, FsError> {
         let canonical = std::fs::canonicalize(root).map_err(|error| map_io(root, error))?;
         let mut options = std::fs::OpenOptions::new();
         options
@@ -451,7 +521,28 @@ mod imp {
             .open(&canonical)
             .map_err(|error| map_io(&canonical, error))?;
         ensure_directory(&file, &canonical)?;
+        if let Some(expected) = expected {
+            if root_identity_from_file(&file, root)? != *expected {
+                return Err(FsError::OutsideWorkspace(format!(
+                    "root directory identity changed: {}",
+                    root.display()
+                )));
+            }
+        }
         Ok(file)
+    }
+
+    fn open_root(root: &Path) -> Result<std::fs::File, FsError> {
+        open_root_checked(root, None)
+    }
+
+    pub(super) fn root_identity(root: &Path) -> Result<RootIdentity, FsError> {
+        let metadata = std::fs::symlink_metadata(root).map_err(|error| map_io(root, error))?;
+        if !metadata.is_dir() || is_reparse(&metadata) {
+            return Err(FsError::OutsideWorkspace(root.display().to_string()));
+        }
+        let root_file = open_root(root)?;
+        root_identity_from_file(&root_file, root)
     }
 
     fn open_parent(
@@ -459,8 +550,17 @@ mod imp {
         relative: &Path,
         create: bool,
     ) -> Result<(std::fs::File, OsString), FsError> {
+        open_parent_checked(root, relative, create, None)
+    }
+
+    fn open_parent_checked(
+        root: &Path,
+        relative: &Path,
+        create: bool,
+        expected: Option<&RootIdentity>,
+    ) -> Result<(std::fs::File, OsString), FsError> {
         let (parents, file_name) = split(relative)?;
-        let mut directory = open_root(root)?;
+        let mut directory = open_root_checked(root, expected)?;
         for component in parents {
             let next = nt_create_relative(
                 &directory,
@@ -736,6 +836,114 @@ mod imp {
             FILE_ATTRIBUTE_NORMAL,
         )?;
         read_opened_to_string_limited(file, relative, max_bytes)
+    }
+
+    pub(super) fn read_tail_bytes(
+        root: &Path,
+        relative: &Path,
+        max_bytes: u64,
+    ) -> Result<Vec<u8>, FsError> {
+        let (parent, file_name) = open_parent(root, relative, false)?;
+        let file = open_regular(
+            &parent,
+            &file_name,
+            relative,
+            GENERIC_READ | SYNCHRONIZE,
+            SHARE_ALL,
+            FILE_OPEN,
+            FILE_ATTRIBUTE_NORMAL,
+        )?;
+        read_opened_tail_bytes(file, relative, max_bytes)
+    }
+
+    pub(super) fn create_new_file(root: &Path, relative: &Path) -> Result<(), FsError> {
+        create_new_file_pinned(root, relative, None)
+    }
+
+    pub(super) fn create_new_file_pinned(
+        root: &Path,
+        relative: &Path,
+        expected: Option<&RootIdentity>,
+    ) -> Result<(), FsError> {
+        let (parent, file_name) = open_parent_checked(root, relative, false, expected)?;
+        let file = open_regular(
+            &parent,
+            &file_name,
+            relative,
+            GENERIC_WRITE | SYNCHRONIZE,
+            SHARE_ALL,
+            FILE_CREATE,
+            FILE_ATTRIBUTE_NORMAL,
+        )?;
+        drop(file);
+        Ok(())
+    }
+
+    pub(super) fn append_file(root: &Path, relative: &Path, content: &str) -> Result<(), FsError> {
+        append_file_bytes_pinned(root, relative, content.as_bytes(), None)
+    }
+
+    pub(super) fn append_file_bytes(
+        root: &Path,
+        relative: &Path,
+        content: &[u8],
+    ) -> Result<(), FsError> {
+        append_file_bytes_pinned(root, relative, content, None)
+    }
+
+    pub(super) fn append_file_pinned(
+        root: &Path,
+        relative: &Path,
+        content: &str,
+        expected: Option<&RootIdentity>,
+    ) -> Result<(), FsError> {
+        append_file_bytes_pinned(root, relative, content.as_bytes(), expected)
+    }
+
+    fn append_file_bytes_pinned(
+        root: &Path,
+        relative: &Path,
+        content: &[u8],
+        expected: Option<&RootIdentity>,
+    ) -> Result<(), FsError> {
+        // FILE_APPEND_DATA makes each write append at the filesystem level;
+        // unlike a seek-to-end followed by a write, concurrent workers cannot
+        // overwrite one another's chunks.
+        const FILE_APPEND_DATA: u32 = 0x0004;
+        let (parent, file_name) = open_parent_checked(root, relative, false, expected)?;
+        let mut file = open_regular(
+            &parent,
+            &file_name,
+            relative,
+            FILE_APPEND_DATA | SYNCHRONIZE,
+            SHARE_ALL,
+            FILE_OPEN_IF,
+            FILE_ATTRIBUTE_NORMAL,
+        )?;
+        file.write_all(content)
+            .map_err(|error| map_io(relative, error))?;
+        file.flush().map_err(|error| map_io(relative, error))
+    }
+
+    pub(super) fn read_to_string_pinned(
+        root: &Path,
+        relative: &Path,
+        expected: Option<&RootIdentity>,
+    ) -> Result<String, FsError> {
+        let (parent, file_name) = open_parent_checked(root, relative, false, expected)?;
+        let mut file = open_regular(
+            &parent,
+            &file_name,
+            relative,
+            GENERIC_READ | SYNCHRONIZE,
+            SHARE_ALL,
+            FILE_OPEN,
+            FILE_ATTRIBUTE_NORMAL,
+        )?;
+        let mut body = String::new();
+        file.read_to_string(&mut body)
+            .map_err(|error| map_io(relative, error))?;
+        Ok(body)
     }
 
     fn atomic_write_inner<F>(
@@ -1059,6 +1267,12 @@ pub fn checked_join(root: &Path, relative: &Path) -> Result<PathBuf, FsError> {
     Ok(root.join(relative))
 }
 
+/// Capture the stable identity of `root` from an opened no-follow directory
+/// handle.
+pub fn root_identity(root: &Path) -> Result<RootIdentity, FsError> {
+    imp::root_identity(root)
+}
+
 /// Acquire an exclusive lock without following any component below `root`.
 pub fn lock_exclusive(
     root: &Path,
@@ -1083,6 +1297,58 @@ pub fn read_to_string_limited(
     max_bytes: u64,
 ) -> Result<String, FsError> {
     imp::read_to_string_limited(root, relative, max_bytes)
+}
+
+/// Read the final `max_bytes` from a regular file through a rooted no-follow
+/// handle. This is intended for bounded log tails; unlike
+/// [`read_to_string_limited`], a large file is not an error.
+pub fn read_tail_bytes(root: &Path, relative: &Path, max_bytes: u64) -> Result<Vec<u8>, FsError> {
+    imp::read_tail_bytes(root, relative, max_bytes)
+}
+
+/// Exclusively create a regular file without following any component below
+/// `root`.
+pub fn create_new_file(root: &Path, relative: &Path) -> Result<(), FsError> {
+    imp::create_new_file(root, relative)
+}
+
+/// Exclusively create a file only if the opened root still has `expected`
+/// identity.
+pub fn create_new_file_pinned(
+    root: &Path,
+    relative: &Path,
+    expected: Option<&RootIdentity>,
+) -> Result<(), FsError> {
+    imp::create_new_file_pinned(root, relative, expected)
+}
+
+/// Append to a regular file without following any component below `root`.
+pub fn append_file(root: &Path, relative: &Path, content: &str) -> Result<(), FsError> {
+    imp::append_file(root, relative, content)
+}
+
+/// Append raw bytes through a rooted no-follow handle.
+pub fn append_file_bytes(root: &Path, relative: &Path, content: &[u8]) -> Result<(), FsError> {
+    imp::append_file_bytes(root, relative, content)
+}
+
+/// Append UTF-8 only if the opened root still has `expected` identity.
+pub fn append_file_pinned(
+    root: &Path,
+    relative: &Path,
+    content: &str,
+    expected: Option<&RootIdentity>,
+) -> Result<(), FsError> {
+    imp::append_file_pinned(root, relative, content, expected)
+}
+
+/// Read UTF-8 only if the opened root still has `expected` identity.
+pub fn read_to_string_pinned(
+    root: &Path,
+    relative: &Path,
+    expected: Option<&RootIdentity>,
+) -> Result<String, FsError> {
+    imp::read_to_string_pinned(root, relative, expected)
 }
 
 /// Read bytes and metadata after checking that `requested` still resolves to
@@ -1210,14 +1476,106 @@ mod imp {
         Ok(Mode::from_bits_retain(bits.into()))
     }
 
+    fn identity_from_fd(fd: &OwnedFd, path: &Path) -> Result<RootIdentity, FsError> {
+        let stat = fs::fstat(fd).map_err(|error| map_unix_io(path, error))?;
+        Ok(RootIdentity {
+            volume: u64::try_from(stat.st_dev).map_err(|_| {
+                FsError::Io(format!("{}: invalid directory device id", path.display()))
+            })?,
+            file: u64::try_from(stat.st_ino)
+                .map_err(|_| FsError::Io(format!("{}: invalid directory inode", path.display())))?,
+        })
+    }
+
+    fn open_root_checked(root: &Path, expected: Option<&RootIdentity>) -> Result<OwnedFd, FsError> {
+        // Never canonicalize the root before opening it. Canonicalization
+        // follows a swapped task-output directory (or one of its parents),
+        // turning a safe-looking rooted operation into a write to the swap
+        // target. Start from a fixed directory handle and walk every root
+        // component with `openat(..., NOFOLLOW)` instead; this pins the
+        // parent-directory chain for the operation.
+        // Darwin exposes `/tmp`, `/var`, and `/etc` as fixed OS aliases to
+        // `/private/*`. Resolve only those kernel-provided aliases before the
+        // no-follow walk; arbitrary user/task symlinks still fail closed at
+        // the component where they occur.
+        #[cfg(target_os = "macos")]
+        let root_alias_free = {
+            let mut components = root.components();
+            match (components.next(), components.next()) {
+                (Some(Component::RootDir), Some(Component::Normal(first))) => {
+                    let mapped = match first.to_str() {
+                        Some("etc") | Some("tmp") | Some("var") => {
+                            Some(first.to_string_lossy().into_owned())
+                        }
+                        _ => None,
+                    };
+                    if let Some(mapped) = mapped {
+                        let mut normalized = PathBuf::from("/private");
+                        normalized.push(mapped);
+                        for component in components {
+                            normalized.push(component.as_os_str());
+                        }
+                        normalized
+                    } else {
+                        root.to_path_buf()
+                    }
+                }
+                _ => root.to_path_buf(),
+            }
+        };
+        #[cfg(not(target_os = "macos"))]
+        let root_alias_free = root.to_path_buf();
+
+        let mut directory = if root_alias_free.is_absolute() {
+            fs::open(
+                Path::new("/"),
+                OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                Mode::empty(),
+            )
+            .map_err(|error| map_unix_io(Path::new("/"), error))?
+        } else {
+            fs::open(
+                Path::new("."),
+                OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                Mode::empty(),
+            )
+            .map_err(|error| map_unix_io(Path::new("."), error))?
+        };
+
+        for component in root_alias_free.components() {
+            let name = match component {
+                Component::RootDir | Component::CurDir => continue,
+                Component::Normal(name) => name,
+                Component::ParentDir | Component::Prefix(_) => {
+                    return Err(FsError::OutsideWorkspace(root.display().to_string()));
+                }
+            };
+            directory = fs::openat(
+                &directory,
+                name,
+                OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                Mode::empty(),
+            )
+            .map_err(|error| map_unix_io(root, error))?;
+        }
+        if let Some(expected) = expected {
+            if identity_from_fd(&directory, root)? != *expected {
+                return Err(FsError::OutsideWorkspace(format!(
+                    "root directory identity changed: {}",
+                    root.display()
+                )));
+            }
+        }
+        Ok(directory)
+    }
+
     fn open_root(root: &Path) -> Result<OwnedFd, FsError> {
-        let canonical = std::fs::canonicalize(root).map_err(|error| map_io(root, error))?;
-        fs::open(
-            &canonical,
-            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-            Mode::empty(),
-        )
-        .map_err(|error| map_unix_io(&canonical, error))
+        open_root_checked(root, None)
+    }
+
+    pub(super) fn root_identity(root: &Path) -> Result<RootIdentity, FsError> {
+        let directory = open_root(root)?;
+        identity_from_fd(&directory, root)
     }
 
     fn split(relative: &Path) -> Result<(Vec<OsString>, OsString), FsError> {
@@ -1241,8 +1599,18 @@ mod imp {
         create: bool,
         dir_mode: u32,
     ) -> Result<(OwnedFd, OsString), FsError> {
+        open_parent_checked(root, relative, create, dir_mode, None)
+    }
+
+    fn open_parent_checked(
+        root: &Path,
+        relative: &Path,
+        create: bool,
+        dir_mode: u32,
+        expected: Option<&RootIdentity>,
+    ) -> Result<(OwnedFd, OsString), FsError> {
         let (parents, file) = split(relative)?;
-        let mut directory = open_root(root)?;
+        let mut directory = open_root_checked(root, expected)?;
         for component in parents {
             if create {
                 match fs::mkdirat(&directory, &component, mode(dir_mode, relative)?) {
@@ -1340,6 +1708,109 @@ mod imp {
         .map_err(|error| map_unix_io(relative, error))?;
         ensure_opened_regular(&fd, relative)?;
         read_opened_to_string_limited(std::fs::File::from(fd), relative, max_bytes)
+    }
+
+    pub(super) fn read_tail_bytes(
+        root: &Path,
+        relative: &Path,
+        max_bytes: u64,
+    ) -> Result<Vec<u8>, FsError> {
+        let (parent, file_name) = open_parent(root, relative, false, PRIVATE_DIR_MODE)?;
+        let fd = fs::openat(
+            &parent,
+            &file_name,
+            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .map_err(|error| map_unix_io(relative, error))?;
+        ensure_opened_regular(&fd, relative)?;
+        read_opened_tail_bytes(std::fs::File::from(fd), relative, max_bytes)
+    }
+
+    pub(super) fn create_new_file(root: &Path, relative: &Path) -> Result<(), FsError> {
+        create_new_file_pinned(root, relative, None)
+    }
+
+    pub(super) fn create_new_file_pinned(
+        root: &Path,
+        relative: &Path,
+        expected: Option<&RootIdentity>,
+    ) -> Result<(), FsError> {
+        let (parent, file_name) =
+            open_parent_checked(root, relative, false, PRIVATE_DIR_MODE, expected)?;
+        let fd = fs::openat(
+            &parent,
+            &file_name,
+            OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            mode(PRIVATE_FILE_MODE, relative)?,
+        )
+        .map_err(|error| map_unix_io(relative, error))?;
+        ensure_opened_regular(&fd, relative)
+    }
+
+    pub(super) fn append_file(root: &Path, relative: &Path, content: &str) -> Result<(), FsError> {
+        append_file_bytes_pinned(root, relative, content.as_bytes(), None)
+    }
+
+    pub(super) fn append_file_bytes(
+        root: &Path,
+        relative: &Path,
+        content: &[u8],
+    ) -> Result<(), FsError> {
+        append_file_bytes_pinned(root, relative, content, None)
+    }
+
+    pub(super) fn append_file_pinned(
+        root: &Path,
+        relative: &Path,
+        content: &str,
+        expected: Option<&RootIdentity>,
+    ) -> Result<(), FsError> {
+        append_file_bytes_pinned(root, relative, content.as_bytes(), expected)
+    }
+
+    fn append_file_bytes_pinned(
+        root: &Path,
+        relative: &Path,
+        content: &[u8],
+        expected: Option<&RootIdentity>,
+    ) -> Result<(), FsError> {
+        let (parent, file_name) =
+            open_parent_checked(root, relative, false, PRIVATE_DIR_MODE, expected)?;
+        let fd = fs::openat(
+            &parent,
+            &file_name,
+            OFlags::WRONLY | OFlags::APPEND | OFlags::CREATE | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            mode(PRIVATE_FILE_MODE, relative)?,
+        )
+        .map_err(|error| map_unix_io(relative, error))?;
+        ensure_opened_regular(&fd, relative)?;
+        let mut file = std::fs::File::from(fd);
+        file.write_all(content)
+            .map_err(|error| map_io(relative, error))?;
+        file.flush().map_err(|error| map_io(relative, error))
+    }
+
+    pub(super) fn read_to_string_pinned(
+        root: &Path,
+        relative: &Path,
+        expected: Option<&RootIdentity>,
+    ) -> Result<String, FsError> {
+        let (parent, file_name) =
+            open_parent_checked(root, relative, false, PRIVATE_DIR_MODE, expected)?;
+        let fd = fs::openat(
+            &parent,
+            &file_name,
+            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .map_err(|error| map_unix_io(relative, error))?;
+        ensure_opened_regular(&fd, relative)?;
+        let mut file = std::fs::File::from(fd);
+        let mut body = String::new();
+        file.read_to_string(&mut body)
+            .map_err(|error| map_io(relative, error))?;
+        Ok(body)
     }
 
     fn temp_name(final_name: &OsStr) -> OsString {
@@ -1651,6 +2122,10 @@ mod imp {
         FsError::Io("root-confined filesystem operations are unsupported on this platform".into())
     }
 
+    pub(super) fn root_identity(_root: &Path) -> Result<RootIdentity, FsError> {
+        Err(unsupported())
+    }
+
     pub(super) fn lock_exclusive(
         _root: &Path,
         _relative: &Path,
@@ -1704,12 +2179,65 @@ mod imp {
         Err(unsupported())
     }
 
+    pub(super) fn read_tail_bytes(
+        _root: &Path,
+        _relative: &Path,
+        _max_bytes: u64,
+    ) -> Result<Vec<u8>, FsError> {
+        Err(unsupported())
+    }
+
     pub(super) fn atomic_write(
         _root: &Path,
         _relative: &Path,
         _bytes: &[u8],
         _options: AtomicWriteOptions,
     ) -> Result<(), FsError> {
+        Err(unsupported())
+    }
+
+    pub(super) fn create_new_file(_root: &Path, _relative: &Path) -> Result<(), FsError> {
+        Err(unsupported())
+    }
+
+    pub(super) fn create_new_file_pinned(
+        _root: &Path,
+        _relative: &Path,
+        _expected: Option<&RootIdentity>,
+    ) -> Result<(), FsError> {
+        Err(unsupported())
+    }
+
+    pub(super) fn append_file(
+        _root: &Path,
+        _relative: &Path,
+        _content: &str,
+    ) -> Result<(), FsError> {
+        Err(unsupported())
+    }
+
+    pub(super) fn append_file_bytes(
+        _root: &Path,
+        _relative: &Path,
+        _content: &[u8],
+    ) -> Result<(), FsError> {
+        Err(unsupported())
+    }
+
+    pub(super) fn append_file_pinned(
+        _root: &Path,
+        _relative: &Path,
+        _content: &str,
+        _expected: Option<&RootIdentity>,
+    ) -> Result<(), FsError> {
+        Err(unsupported())
+    }
+
+    pub(super) fn read_to_string_pinned(
+        _root: &Path,
+        _relative: &Path,
+        _expected: Option<&RootIdentity>,
+    ) -> Result<String, FsError> {
         Err(unsupported())
     }
 
@@ -1769,6 +2297,64 @@ mod tests {
         )
         .is_err());
         assert!(!victim.path().join("state.json").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rooted_task_output_rejects_a_swapped_root_symlink() {
+        let parent = tempfile::tempdir().unwrap();
+        let victim = tempfile::tempdir().unwrap();
+        let task_dir = parent.path().join("tasks");
+        std::os::unix::fs::symlink(victim.path(), &task_dir).unwrap();
+
+        let create = create_new_file(&task_dir, Path::new("task.output"));
+        assert!(
+            create.is_err(),
+            "a symlinked task directory must be refused"
+        );
+        assert!(!victim.path().join("task.output").exists());
+
+        let append = append_file(&task_dir, Path::new("task.output"), "must not escape");
+        assert!(append.is_err(), "append must use the same root pin");
+        assert!(!victim.path().join("task.output").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rooted_task_output_walk_rejects_a_symlinked_ancestor() {
+        let parent = tempfile::tempdir().unwrap();
+        let victim = tempfile::tempdir().unwrap();
+        let swapped_parent = parent.path().join("runtime");
+        std::os::unix::fs::symlink(victim.path(), &swapped_parent).unwrap();
+        let task_dir = swapped_parent.join("tasks");
+
+        let result = create_new_file(&task_dir, Path::new("task.output"));
+        assert!(result.is_err(), "a symlinked ancestor must be refused");
+        assert!(!victim.path().join("tasks/task.output").exists());
+    }
+
+    #[test]
+    fn pinned_root_rejects_same_path_directory_replacement() {
+        let parent = tempfile::tempdir().unwrap();
+        let task_dir = parent.path().join("tasks");
+        std::fs::create_dir(&task_dir).unwrap();
+        let identity = root_identity(&task_dir).unwrap();
+
+        std::fs::rename(&task_dir, parent.path().join("tasks-old")).unwrap();
+        std::fs::create_dir(&task_dir).unwrap();
+
+        let result = create_new_file_pinned(&task_dir, Path::new("task.output"), Some(&identity));
+        assert!(result.is_err(), "a replacement directory must fail the pin");
+        assert!(!task_dir.join("task.output").exists());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn pinned_root_accepts_darwin_tmp_alias() {
+        let task_dir = tempfile::tempdir_in("/tmp").unwrap();
+        let identity = root_identity(task_dir.path()).unwrap();
+        create_new_file_pinned(task_dir.path(), Path::new("task.output"), Some(&identity)).unwrap();
+        assert!(task_dir.path().join("task.output").exists());
     }
 
     #[cfg(unix)]

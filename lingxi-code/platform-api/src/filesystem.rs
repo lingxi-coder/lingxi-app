@@ -135,6 +135,63 @@ pub trait FileSystem: Send + Sync {
         self.append_file(path, content).await
     }
 
+    /// Exclusively create a file addressed relative to `root`, without
+    /// following directory or final-component symlinks on hardened
+    /// implementations.
+    async fn create_new_file_rooted_no_follow(
+        &self,
+        root: &Path,
+        relative: &Path,
+    ) -> Result<(), FsError> {
+        let path = crate::rooted_fs::checked_join(root, relative)?;
+        self.create_new_file(&path.to_string_lossy()).await
+    }
+
+    /// Capture a stable root-directory identity when the platform supports
+    /// handle-relative filesystem operations. Virtual filesystems return
+    /// `None` and retain their existing path-based behavior.
+    async fn root_identity_no_follow(
+        &self,
+        _root: &Path,
+    ) -> Result<Option<crate::rooted_fs::RootIdentity>, FsError> {
+        Ok(None)
+    }
+
+    /// Pinned counterpart to [`Self::create_new_file_rooted_no_follow`].
+    async fn create_new_file_rooted_no_follow_pinned(
+        &self,
+        root: &Path,
+        relative: &Path,
+        _expected: Option<&crate::rooted_fs::RootIdentity>,
+    ) -> Result<(), FsError> {
+        self.create_new_file_rooted_no_follow(root, relative).await
+    }
+
+    /// Append to a file addressed relative to `root`, without following
+    /// directory or final-component symlinks on hardened implementations.
+    async fn append_file_rooted_no_follow(
+        &self,
+        root: &Path,
+        relative: &Path,
+        content: &str,
+    ) -> Result<(), FsError> {
+        let path = crate::rooted_fs::checked_join(root, relative)?;
+        self.append_file_no_follow(&path.to_string_lossy(), content)
+            .await
+    }
+
+    /// Pinned counterpart to [`Self::append_file_rooted_no_follow`].
+    async fn append_file_rooted_no_follow_pinned(
+        &self,
+        root: &Path,
+        relative: &Path,
+        content: &str,
+        _expected: Option<&crate::rooted_fs::RootIdentity>,
+    ) -> Result<(), FsError> {
+        self.append_file_rooted_no_follow(root, relative, content)
+            .await
+    }
+
     /// Append `content` to `path`, creating the file with the given unix
     /// permission `mode` if it does not yet exist.
     ///
@@ -169,6 +226,36 @@ pub trait FileSystem: Send + Sync {
     ) -> Result<FileContent, FsError> {
         let path = crate::rooted_fs::checked_join(root, relative)?;
         self.read_file(&path.to_string_lossy(), None, None).await
+    }
+
+    /// Read a line-indexed window of a file addressed relative to `root`,
+    /// without following symlinks on hardened implementations.
+    async fn read_file_rooted_no_follow_window(
+        &self,
+        root: &Path,
+        relative: &Path,
+        offset: Option<u64>,
+        limit: Option<u64>,
+    ) -> Result<FileContent, FsError> {
+        // Keep the default's existing `read_file` offset/limit contract for
+        // virtual filesystems and legacy mocks. Hardened implementations
+        // override this with a rooted open followed by their native windowing
+        // semantics, so no pathname is reopened after validation.
+        let path = crate::rooted_fs::checked_join(root, relative)?;
+        self.read_file(&path.to_string_lossy(), offset, limit).await
+    }
+
+    /// Pinned counterpart to [`Self::read_file_rooted_no_follow_window`].
+    async fn read_file_rooted_no_follow_window_pinned(
+        &self,
+        root: &Path,
+        relative: &Path,
+        offset: Option<u64>,
+        limit: Option<u64>,
+        _expected: Option<&crate::rooted_fs::RootIdentity>,
+    ) -> Result<FileContent, FsError> {
+        self.read_file_rooted_no_follow_window(root, relative, offset, limit)
+            .await
     }
 
     /// Atomically replace a file addressed relative to a trusted `root`,

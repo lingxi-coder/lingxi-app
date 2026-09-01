@@ -476,6 +476,9 @@ fn command_runs_config_startup(command: Option<&crate::commands::Commands>) -> b
             | crate::commands::Commands::Attach(_)
             | crate::commands::Commands::RemoteControl(_)
             | crate::commands::Commands::Rm(_)
+            | crate::commands::Commands::Logs(_)
+            | crate::commands::Commands::Stop(_)
+            | crate::commands::Commands::Respawn(_)
             | crate::commands::Commands::Daemon(_)
             | crate::commands::Commands::BgRun(_)
             | crate::commands::Commands::BgPtySession(_),

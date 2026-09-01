@@ -810,6 +810,14 @@ fn ensure_daemon<LP: LockProbe, S: DaemonSpawner>(
     }
 }
 
+/// Ensure the background supervisor is available for a control command that
+/// has already written a durable request (for example `respawn`).  Keeping the
+/// production wrapper beside the dispatch path reuses the same lock probe,
+/// detached spawner, and process-wrapper argv as `--bg` dispatch.
+pub(crate) fn ensure_daemon_for_control(runtime_dir: &Path) {
+    ensure_daemon(runtime_dir, &SystemLockProbe, &mut RealSpawner);
+}
+
 fn launch_env() -> BTreeMap<String, String> {
     let mut env = BTreeMap::new();
     // The PTY process builder clears its environment, so preserve the minimal

@@ -279,24 +279,95 @@ pub async fn run(_cli: &Cli) -> i32 {
 /// unwind first (so its PTY handle closes normally), then use the persisted PTY
 /// identity as a process-tree fallback.
 fn stop_all_workers(runtime_dir: &Path) {
-    let probe = SystemProbe;
     for (short, job) in agents_registry::read_jobs(&agents_registry::jobs_dir(runtime_dir)) {
         if agents_registry::job_is_terminal(&job) {
             continue;
         }
-        let stopped = crate::commands::rm::stop_worker(&job);
-        cleanup_orphaned_pty(runtime_dir, &short, &probe);
-        #[cfg(unix)]
-        if !stopped {
-            if let Some(pid) = job.worker_pid {
-                let _ = nix::sys::signal::kill(
-                    nix::unistd::Pid::from_raw(pid),
-                    Some(nix::sys::signal::Signal::SIGKILL),
+        let _ = stop_background_job(runtime_dir, &short, &job);
+    }
+}
+
+/// Stop one user-selected background job using the same worker and PTY
+/// primitives as daemon shutdown.  Keeping this seam here prevents the public
+/// `stop`/`kill` commands from inventing a second process-tree protocol.
+pub(crate) fn stop_background_job(
+    runtime_dir: &Path,
+    short: &str,
+    job: &agents_registry::JobState,
+) -> bool {
+    // A terminal job is already stopped from the user's perspective.  Keep
+    // its recorded outcome and never act on a stale terminal workerPid.
+    if agents_registry::job_is_terminal(job) {
+        return true;
+    }
+
+    let probe = SystemProbe;
+    let roster = daemon_roster::read_roster(runtime_dir, 0, false).into_roster();
+    let record = roster.workers.get(short).cloned();
+
+    let stopped_record = match record {
+        Some(record) => {
+            // A state snapshot naming a different worker generation is stale.
+            // Fail closed instead of stopping the replacement process.
+            if job.worker_pid.is_some_and(|pid| pid != record.pid)
+                || record.proc_start.as_deref().is_none_or(str::is_empty)
+            {
+                return false;
+            }
+            let mut terminator = SystemStallTerminator;
+            if !terminate_stalled_worker(
+                runtime_dir,
+                short,
+                &record,
+                &probe,
+                &mut terminator,
+                StallTerminationMode::GracefulThenHard,
+            ) {
+                return false;
+            }
+            Some(record)
+        }
+        None => {
+            // `workerPid` alone has no creation-time identity and may have
+            // been recycled. It is safe to accept only a PID that is already
+            // gone; a live unverified numeric PID is never signalled.
+            if job.worker_pid.is_some_and(|pid| probe.is_alive(pid)) {
+                return false;
+            }
+            cleanup_orphaned_pty(runtime_dir, short, &probe);
+            if read_stall_pty_runtime(runtime_dir, short)
+                .as_ref()
+                .is_some_and(|runtime| !pty_runtime_is_gone(runtime, &probe))
+            {
+                return false;
+            }
+            None
+        }
+    };
+
+    if let Err(error) = agents_registry::update_job_state(runtime_dir, short, "stopped", None) {
+        tracing::warn!("lingxi-cli daemon: could not persist stop state for {short}: {error}");
+        return false;
+    }
+
+    // Remove only the generation we just stopped. A concurrent replacement
+    // must remain owned by the daemon and make this control operation fail on
+    // its next state read rather than being silently orphaned.
+    if let Some(stopped_record) = stopped_record {
+        let mut latest = daemon_roster::read_roster(runtime_dir, 0, false).into_roster();
+        let same_generation = latest.workers.get(short).is_some_and(|current| {
+            current.pid == stopped_record.pid && current.proc_start == stopped_record.proc_start
+        });
+        if same_generation {
+            latest.workers.remove(short);
+            if let Err(error) = daemon_roster::write_roster(runtime_dir, &latest) {
+                tracing::warn!(
+                    "lingxi-cli daemon: could not retire stopped worker record for {short}: {error}"
                 );
             }
         }
-        let _ = agents_registry::update_job_state(runtime_dir, &short, "stopped", None);
     }
+    true
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1036,7 +1107,13 @@ fn spawn_pending_workers<PP: ProcProbe, WS: WorkerSpawner>(
         // it from a same-heartbeat double-spawn; we can't probe liveness with
         // no pid, so leave it working for a later heartbeat to resolve.
         if claimed.contains(&short) {
-            continue;
+            if roster.workers.contains_key(&short) {
+                continue;
+            }
+            // A control command can retire a verified worker between
+            // heartbeats. Once both durable PID and roster generation are
+            // absent, release the in-memory claim so a queued resume can run.
+            claimed.remove(&short);
         }
 
         // CWD-GONE guard: never spawn a worker into a working directory that no

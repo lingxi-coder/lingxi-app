@@ -21,6 +21,8 @@ pub const LAUNCH_SPEC_VERSION: u32 = 1;
 pub const LAUNCH_SPEC_FILE: &str = "launch.json";
 /// Owner-only runtime identity for orphan process-tree cleanup.
 pub const PTY_RUNTIME_FILE: &str = "pty.json";
+/// Recent PTY output retained for the `logs <id>` control command.
+pub const OUTPUT_LOG_FILE: &str = "output.log";
 /// Refuse unexpectedly large files before parsing them.
 const MAX_LAUNCH_SPEC_BYTES: u64 = 2 * 1024 * 1024;
 

@@ -43,6 +43,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, Weak};
 
+use crate::audio_bridge::{AudioRequestSink, AudioResponder};
 use async_trait::async_trait;
 use bridge::wire::Frame;
 use bridge::{
@@ -52,6 +53,7 @@ use bridge::{
 use client_adapter::{
     BridgeAskUserQuestionBroker, ClientEventSink, ComputerAccessRequestSink, PermissionRequestSink,
 };
+use client_protocol::commands::AudioResultDto;
 use client_protocol::commands::{ClientCommand, ImageRefDto};
 use client_protocol::computer_access::{ComputerAccessRequestDto, ComputerAccessResponseDto};
 use client_protocol::events::ClientEvent;
@@ -353,6 +355,36 @@ impl FrameComputerAccessSink {
     }
 }
 
+/// An [`AudioRequestSink`] that forwards each [`ClientEvent::AudioRequest`] out
+/// as a [`Frame::Event`], reporting whether a client was there to receive it.
+///
+/// Unlike [`FramePermissionSink`] and [`FrameComputerAccessSink`] it does NOT
+/// gate on [`ActiveTurnControl::accepts_interactions`]. Those two ask the USER
+/// to authorize something on behalf of a turn, so a request outliving its turn
+/// is meaningless and is rejected. An audio op is not a prompt: it is a device
+/// operation whose caller is awaiting a VALUE, and it is reachable outside any
+/// turn (`is_recording` paints a button). Silently refusing it when no turn is
+/// active would make `is_recording` answer `false` while the microphone is
+/// open — a lie about the device, not a denied permission. Cancellation is the
+/// caller's own concern; a dropped caller drops the receiver.
+struct FrameAudioSink {
+    out: SharedFrameSink,
+}
+
+#[async_trait]
+impl AudioRequestSink for FrameAudioSink {
+    async fn emit_request(&self, request: ClientEvent) -> bool {
+        // `FrameSink::send` is false once the connection's write task has ended,
+        // and the cell itself is `None` before a client attaches or after it
+        // detaches — both are "nobody is listening", which the bridge turns into
+        // an immediate failure instead of a parked request.
+        match self.out.lock().await.as_ref() {
+            Some(sink) => sink.send(Frame::Event(request)),
+            None => false,
+        }
+    }
+}
+
 /// A bound connection: the [`bridge::FramePump`] the endpoint drives, holding the
 /// connection-scoped permission gate, the outbound sink cell, the turn driver,
 /// and the `request_id → tool_name` map.
@@ -375,6 +407,12 @@ pub struct BridgeConnection {
     computer_access_broker: Option<Arc<BridgeComputerAccessBroker>>,
     /// Connection-scoped broker for `AskUserQuestion` UI exchanges.
     ask_user_question_broker: Option<Arc<BridgeAskUserQuestionBroker>>,
+    /// The response side of the connection's [`crate::audio_bridge::AudioBridge`]
+    /// (the desktop's stand-in for the mobile clients' native
+    /// `SpeechToText`/`TextToSpeech`/`VoiceRecorder`). `None` when no audio
+    /// bridge was wired at boot — `AudioResponse` is then silently dropped,
+    /// exactly like an unrouted command with no [`CommandRouter`] bound.
+    audio_responder: Option<AudioResponder>,
     permission_gate_ref: SharedPermissionGate,
     computer_access_broker_ref: SharedComputerAccessBroker,
     ask_user_question_broker_ref: SharedAskUserQuestionBroker,
@@ -713,6 +751,7 @@ impl BridgeConnection {
             gate: None,
             computer_access_broker: None,
             ask_user_question_broker: None,
+            audio_responder: None,
             permission_gate_ref: Arc::new(StdMutex::new(None)),
             computer_access_broker_ref: Arc::new(StdMutex::new(None)),
             ask_user_question_broker_ref: Arc::new(StdMutex::new(None)),
@@ -792,6 +831,32 @@ impl BridgeConnection {
             .unwrap_or_else(|poison| poison.into_inner()) = Some(Arc::downgrade(&gate));
         self.gate = Some(gate);
         self.driver = Some(driver);
+        self
+    }
+
+    /// The connection-scoped [`AudioRequestSink`] to build an
+    /// [`crate::audio_bridge::AudioBridge`] over. Every audio trait call the
+    /// engine makes flows through here as a
+    /// [`Frame::Event`]`(`[`ClientEvent::AudioRequest`]`)`.
+    #[must_use]
+    pub fn audio_sink(&self) -> Arc<dyn AudioRequestSink> {
+        Arc::new(FrameAudioSink {
+            out: self.out.clone(),
+        })
+    }
+
+    /// Attach the response side of the connection's audio bridge, so an inbound
+    /// `AudioResponse` resolves the parked trait call and a disconnect drains
+    /// every request still parked. Additive over [`Self::bind`]: a connection
+    /// built without this call (e.g. most existing tests) simply never receives
+    /// an audio bridge, and `AudioResponse` is a no-op.
+    ///
+    /// Unlike [`Self::bind_computer_access`] there is no receive loop to spawn:
+    /// the audio traits ARE the request source, so the bridge emits directly
+    /// through [`Self::audio_sink`] rather than draining a channel.
+    #[must_use]
+    pub fn bind_audio(mut self, responder: AudioResponder) -> Self {
+        self.audio_responder = Some(responder);
         self
     }
 
@@ -1019,6 +1084,9 @@ impl BridgeConnection {
             }
             ClientCommand::DenyComputerAccess { request_id } => {
                 self.deny_computer_access(request_id).await;
+            }
+            ClientCommand::AudioResponse { request_id, result } => {
+                self.resolve_audio(request_id, result).await;
             }
             ClientCommand::AnswerAskUserQuestion {
                 request_id,
@@ -1300,6 +1368,25 @@ impl BridgeConnection {
         }
     }
 
+    /// Resolve a parked audio trait call with the client's outcome (the WS read
+    /// task side of the SAME inverted handshake the permission gate and the
+    /// computer-access broker use).
+    async fn resolve_audio(&self, request_id: u64, result: AudioResultDto) {
+        let Some(responder) = self.audio_responder.as_ref() else {
+            return;
+        };
+        let resolved = responder.resolve(request_id, result).await;
+        if !resolved {
+            // Unknown, already resolved, or already past its deadline. A safe
+            // no-op: the caller has been given an answer either way, and a
+            // client is allowed to answer a request we stopped waiting for.
+            tracing::debug!(
+                request_id,
+                "bridge-server: response for unknown / already-resolved audio id"
+            );
+        }
+    }
+
     async fn resolve_ask_user_question(&self, request_id: u64, answers: HashMap<String, String>) {
         let Some(broker) = self.ask_user_question_broker.as_ref() else {
             return;
@@ -1453,6 +1540,22 @@ impl BridgeConnection {
                 tracing::debug!(
                     drained,
                     "bridge-server: drained parked AskUserQuestion requests on close"
+                );
+            }
+        }
+
+        // Audio requests are drained on DISCONNECT only, never at end-of-turn
+        // (they are not in `TurnInteractions`): an audio op is a device
+        // operation, not a per-turn user interaction, and `is_recording` is
+        // reachable with no turn active at all. Without this the caller would
+        // wait out its full deadline for an answer the departed client can
+        // never send.
+        if let Some(responder) = self.audio_responder.as_ref() {
+            let drained = responder.drain().await;
+            if drained > 0 {
+                tracing::debug!(
+                    drained,
+                    "bridge-server: drained parked audio requests on close"
                 );
             }
         }

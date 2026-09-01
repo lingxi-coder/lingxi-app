@@ -1042,3 +1042,388 @@ test('non-bypass permission modes are not gated by the acceptance dialog', async
   assert.equal(commands.length, 1);
   assert.equal(commands[0]!['mode'], 'acceptEdits');
 });
+
+// ── Settings/permission/MCP command surface reaches the engine ─────────────
+
+test('the settings and MCP commands reach the engine through dispatchCommand', async () => {
+  const { manager, commands } = trustedManager();
+  await (manager as any).dispatchCommand({ type: 'update_settings', destination: 'user', patch_json: '{"outputStyle":"terse"}' });
+  await (manager as any).dispatchCommand({
+    type: 'upsert_mcp_server',
+    scope: 'user',
+    name: 'filesystem',
+    config_json: '{"command":"npx"}',
+  });
+  assert.deepEqual(commands.map((command) => command['type']), ['update_settings', 'upsert_mcp_server']);
+});
+
+test('a real protocol command outside the desktop surface never reaches the engine', async () => {
+  const { manager, commands } = trustedManager();
+  await assert.rejects((manager as any).dispatchCommand({ type: 'login' }), /command is not allowed/);
+  assert.equal(commands.length, 0, 'a rejected command must never be forwarded');
+});
+
+// ---------------------------------------------------------------------------
+// An engine request that must be answered EXACTLY ONCE cannot be broadcast.
+//
+// `audio_request` is not a notification: `audio_bridge.rs` parks a call
+// waiting for one `audio_response`. Sent to every registered renderer, each
+// one would service it independently — two windows would each call
+// `getUserMedia` and start a real recording. The engine drops the second
+// answer, so the WIRE stays correct and the bug is invisible there; the
+// DEVICE does not. Only one window exists today, which is exactly why this
+// has to be structural rather than a comment: whoever adds the second window
+// will not be looking for this.
+// ---------------------------------------------------------------------------
+
+function eventsFor(sent: Array<{ channel: string; payload: unknown }>): unknown[] {
+  return sent
+    .filter((entry) => entry.channel === 'lingxi:event')
+    .map((entry) => (entry.payload as { event?: unknown }).event ?? entry.payload);
+}
+
+test('an audio request goes to exactly one renderer, while ordinary events reach all of them', () => {
+  const first: Array<{ channel: string; payload: unknown }> = [];
+  const second: Array<{ channel: string; payload: unknown }> = [];
+  const runtime = new SessionRuntime({
+    launchConfig: { workspace: '/workspace', sessionId: '44444444-5555-4666-8777-888888888888', trusted: true },
+    sessionId: '44444444-5555-4666-8777-888888888888',
+    projectPath: '/workspace',
+    envelopeEvents: true,
+  } as any);
+  runtime.registerWindow(fakeWebContents(first) as any, 'app://desktop/index.html');
+  runtime.registerWindow(fakeWebContents(second) as any, 'app://desktop/index.html');
+
+  // `broadcastClientEvent` is private; every other test in this file reaches
+  // into SessionRuntime's internals the same way, and there is no public
+  // entry point that does not require a live bridge client.
+  const dispatch = (event: unknown) => (runtime as any).broadcastClientEvent(event);
+
+  dispatch({ type: 'text_delta', text: 'hello' });
+  assert.equal(eventsFor(first).length, 1, 'an ordinary event must still reach every window');
+  assert.equal(eventsFor(second).length, 1, 'an ordinary event must still reach every window');
+
+  dispatch({ type: 'audio_request', request_id: 1, op: { type: 'start_recording', sample_rate_hz: 16000, format: 'webm' } });
+
+  const audioFirst = eventsFor(first).filter((event: any) => event.type === 'audio_request');
+  const audioSecond = eventsFor(second).filter((event: any) => event.type === 'audio_request');
+  assert.equal(
+    audioFirst.length + audioSecond.length,
+    1,
+    'exactly one renderer may be asked to drive the microphone; two would start two recordings',
+  );
+  assert.deepEqual(audioFirst.length, 1, 'the first registered renderer is the deterministic responder');
+});
+
+test('the audio responder falls through to a live window when the first is destroyed', () => {
+  const first: Array<{ channel: string; payload: unknown }> = [];
+  const second: Array<{ channel: string; payload: unknown }> = [];
+  const runtime = new SessionRuntime({
+    launchConfig: { workspace: '/workspace', sessionId: '55555555-6666-4777-8888-999999999999', trusted: true },
+    sessionId: '55555555-6666-4777-8888-999999999999',
+    projectPath: '/workspace',
+    envelopeEvents: true,
+  } as any);
+  const dead = fakeWebContents(first);
+  dead.isDestroyed = () => true;
+  runtime.registerWindow(dead as any, 'app://desktop/index.html');
+  runtime.registerWindow(fakeWebContents(second) as any, 'app://desktop/index.html');
+
+  (runtime as any).broadcastClientEvent({ type: 'audio_request', request_id: 2, op: { type: 'is_recording' } });
+
+  assert.equal(eventsFor(first).length, 0, 'a destroyed window must never be picked as the responder');
+  assert.equal(
+    eventsFor(second).filter((event: any) => event.type === 'audio_request').length,
+    1,
+    'the request must fall through to a live window, not be dropped into a 5-second stall',
+  );
+});
+
+// ---------------------------------------------------------------------------
+// A responder destroyed AFTER dispatch must FAIL the request, not strand it.
+//
+// The two tests above prove a window already destroyed at dispatch time is
+// skipped. The dangerous case is the other one, and a user reaches it in two
+// steps: start a recording, close the window. `main/index.ts` deliberately
+// keeps the app alive on macOS when the last window closes ("the bridge stays
+// available for reopen"), so the engine's parked call simply has no renderer
+// left that can answer it — and nothing fails it. It hangs for the whole
+// 30-second deadline, silently.
+//
+// Broadcasting used to give this accidental cover: permission and
+// computer-access requests reach every window, so a second one could answer.
+// Electing a single audio responder removed that second chance, which makes
+// this case the responsibility of the code that elected.
+// ---------------------------------------------------------------------------
+
+function audioRuntime(sessionId: string) {
+  return new SessionRuntime({
+    launchConfig: { workspace: '/workspace', sessionId, trusted: true },
+    sessionId,
+    projectPath: '/workspace',
+    envelopeEvents: true,
+  } as any);
+}
+
+const START_RECORDING = {
+  type: 'audio_request',
+  request_id: 77,
+  op: { type: 'start_recording', sample_rate_hz: 16000, format: 'webm' },
+};
+
+test('a responder destroyed after dispatch hands its request to another live window', () => {
+  const first: Array<{ channel: string; payload: unknown }> = [];
+  const second: Array<{ channel: string; payload: unknown }> = [];
+  const runtime = audioRuntime('66666666-7777-4888-8999-aaaaaaaaaaaa');
+  const chosen = fakeWebContents(first);
+  const spare = fakeWebContents(second);
+  runtime.registerWindow(chosen as any, 'app://desktop/index.html');
+  runtime.registerWindow(spare as any, 'app://desktop/index.html');
+
+  (runtime as any).broadcastClientEvent(START_RECORDING);
+  assert.equal(eventsFor(first).length, 1, 'the first window was elected');
+  assert.equal(eventsFor(second).length, 0);
+
+  // The elected window goes away while the engine is still waiting.
+  chosen.isDestroyed = () => true;
+  runtime.unregisterWindow(chosen as any);
+
+  const rerouted = eventsFor(second).filter((event: any) => event.type === 'audio_request');
+  assert.equal(rerouted.length, 1, 'the request must move to a window that can still answer it');
+  assert.equal((rerouted[0] as any).request_id, 77, 'rerouted under the same request id the engine is waiting on');
+});
+
+test('a responder destroyed with no window left fails the request instead of stranding it', () => {
+  const sent: Array<{ channel: string; payload: unknown }> = [];
+  const commands: unknown[] = [];
+  const runtime = audioRuntime('77777777-8888-4999-8aaa-bbbbbbbbbbbb');
+  (runtime as any).client = { sendCommand: (command: unknown) => { commands.push(command); } };
+  const only = fakeWebContents(sent);
+  runtime.registerWindow(only as any, 'app://desktop/index.html');
+
+  (runtime as any).broadcastClientEvent(START_RECORDING);
+  assert.equal(eventsFor(sent).length, 1);
+
+  only.isDestroyed = () => true;
+  runtime.unregisterWindow(only as any);
+
+  assert.equal(commands.length, 1, 'the engine must be answered by main when no renderer can answer');
+  assert.deepEqual(commands[0], {
+    type: 'audio_response',
+    request_id: 77,
+    result: {
+      type: 'failed',
+      kind: 'unavailable',
+      message: 'the desktop window that was asked to perform this audio operation closed before it could answer',
+    },
+  });
+});
+
+// ---------------------------------------------------------------------------
+// A request that arrives when there is NO window is the same stall, one step
+// earlier.
+//
+// The rescue above only fires for a request already handed to a window that
+// then died. On macOS the app outlives its last window (`main/index.ts`'s
+// `window-all-closed` deliberately does not quit), and the bridge child and
+// its WebSocket stay up — so `FrameAudioSink::emit_request` reports success
+// and the engine PARKS. Dropping the event here leaves nobody to answer it
+// and nothing recorded to rescue later, so the engine waits out its whole
+// deadline for an answer that was never going to come.
+// ---------------------------------------------------------------------------
+
+const NO_WINDOW_MESSAGE =
+  'no desktop window is open to perform this audio operation';
+
+test('an audio request that arrives with no window registered is failed, not dropped', () => {
+  const commands: unknown[] = [];
+  const runtime = audioRuntime('aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee');
+  (runtime as any).client = { sendCommand: (command: unknown) => { commands.push(command); } };
+
+  // No window has ever registered: the app is running headless on macOS.
+  (runtime as any).broadcastClientEvent(START_RECORDING);
+
+  assert.deepEqual(commands, [{
+    type: 'audio_response',
+    request_id: 77,
+    result: { type: 'failed', kind: 'unavailable', message: NO_WINDOW_MESSAGE },
+  }], 'a request nobody can service must be answered here, not left to time out');
+});
+
+test('an audio request that arrives after the last window closed is failed, not dropped', () => {
+  const sent: Array<{ channel: string; payload: unknown }> = [];
+  const commands: unknown[] = [];
+  const runtime = audioRuntime('bbbbbbbb-cccc-4ddd-8eee-ffffffffffff');
+  (runtime as any).client = { sendCommand: (command: unknown) => { commands.push(command); } };
+  const only = fakeWebContents(sent);
+  runtime.registerWindow(only as any, 'app://desktop/index.html');
+
+  // The user closes the last window BEFORE the model asks for the microphone.
+  only.isDestroyed = () => true;
+  runtime.unregisterWindow(only as any);
+  assert.deepEqual(commands, [], 'nothing was outstanding, so closing answers nothing');
+
+  (runtime as any).broadcastClientEvent(START_RECORDING);
+
+  assert.equal(eventsFor(sent).length, 0, 'a destroyed window must never be handed the request');
+  assert.deepEqual(commands, [{
+    type: 'audio_response',
+    request_id: 77,
+    result: { type: 'failed', kind: 'unavailable', message: NO_WINDOW_MESSAGE },
+  }], 'closed-first / asked-second must fail as immediately as asked-first / closed-second');
+});
+
+test('an answered request is forgotten, so a later window close does not fail it twice', async () => {
+  const sent: Array<{ channel: string; payload: unknown }> = [];
+  const commands: unknown[] = [];
+  const runtime = audioRuntime('88888888-9999-4aaa-8bbb-cccccccccccc');
+  (runtime as any).client = { sendCommand: (command: unknown) => { commands.push(command); } };
+  // `dispatchCommand` forwards through `requireClient`, which refuses an
+  // untrusted workspace; this fixture never runs a real launch, so grant the
+  // trust the real flow would have established before any turn could start.
+  (runtime as any).activeWorkspace = '/workspace';
+  (runtime as any).refreshAccessState = () => { (runtime as any).activeWorkspaceTrusted = true; };
+  const only = fakeWebContents(sent);
+  runtime.registerWindow(only as any, 'app://desktop/index.html');
+
+  (runtime as any).broadcastClientEvent(START_RECORDING);
+  await runtime.dispatchCommand({ type: 'audio_response', request_id: 77, result: { type: 'ok' } });
+
+  only.isDestroyed = () => true;
+  runtime.unregisterWindow(only as any);
+
+  assert.deepEqual(
+    commands.map((command: any) => command.result?.type),
+    ['ok'],
+    'only the renderer answer may reach the engine; a second, invented failure would race a real reply',
+  );
+});
+
+// ---------------------------------------------------------------------------
+// The end of a TURN is not the end of an audio request.
+//
+// `AudioResponder::drain()` has exactly one call site on the Rust side,
+// `BridgeConnection::close_connection`, and server.rs says so in as many
+// words: "Audio requests are drained on DISCONNECT only, never at end-of-turn
+// (they are not in `TurnInteractions`)". `speech`/`voice` do not override
+// `Tool::interrupt_behavior` either, whose default `Block` keeps the parked
+// call alive through a Stop. So forgetting the tracking at turn end — or, from
+// `cancelTurn`, in the same tick as the Stop and before the engine has read
+// the frame — disarms the window-close rescue for a request that IS still
+// parked.
+// ---------------------------------------------------------------------------
+
+const CLOSED_BEFORE_ANSWER = {
+  type: 'audio_response',
+  request_id: 77,
+  result: {
+    type: 'failed',
+    kind: 'unavailable',
+    message: 'the desktop window that was asked to perform this audio operation closed before it could answer',
+  },
+};
+
+test('a turn ending keeps outstanding audio requests, because the engine does not drop them', () => {
+  const sent: Array<{ channel: string; payload: unknown }> = [];
+  const commands: unknown[] = [];
+  const runtime = audioRuntime('99999999-aaaa-4bbb-8ccc-dddddddddddd');
+  (runtime as any).client = { sendCommand: (command: unknown) => { commands.push(command); } };
+  const only = fakeWebContents(sent);
+  runtime.registerWindow(only as any, 'app://desktop/index.html');
+
+  (runtime as any).broadcastClientEvent(START_RECORDING);
+  (runtime as any).clearTurnInteractions();
+
+  only.isDestroyed = () => true;
+  runtime.unregisterWindow(only as any);
+
+  assert.deepEqual(
+    commands,
+    [CLOSED_BEFORE_ANSWER],
+    'the engine is still parked after a turn ends, so the window-close rescue must still fire',
+  );
+});
+
+test('pressing Stop keeps outstanding audio requests, because Block tools survive a cancel', () => {
+  const sent: Array<{ channel: string; payload: unknown }> = [];
+  const commands: unknown[] = [];
+  const runtime = audioRuntime('aaaaaaaa-1111-4222-8333-444444444444');
+  (runtime as any).client = {
+    cancel: () => undefined,
+    sendCommand: (command: unknown) => { commands.push(command); },
+  };
+  (runtime as any).activeWorkspace = '/workspace';
+  (runtime as any).refreshAccessState = () => { (runtime as any).activeWorkspaceTrusted = true; };
+  (runtime as any).activeTurn = true;
+  const only = fakeWebContents(sent);
+  runtime.registerWindow(only as any, 'app://desktop/index.html');
+
+  (runtime as any).broadcastClientEvent(START_RECORDING);
+  runtime.cancelTurn(undefined);
+
+  only.isDestroyed = () => true;
+  runtime.unregisterWindow(only as any);
+
+  assert.deepEqual(
+    commands,
+    [CLOSED_BEFORE_ANSWER],
+    'Stop does not kill a parked audio call, so closing the window afterwards must still answer it',
+  );
+});
+
+test('losing the engine connection forgets outstanding audio requests, because that IS the drain', async () => {
+  const sent: Array<{ channel: string; payload: unknown }> = [];
+  const commands: unknown[] = [];
+  const runtime = audioRuntime('bbbbbbbb-2222-4333-8444-555555555555');
+  (runtime as any).client = {
+    sendCommand: (command: unknown) => { commands.push(command); },
+    close: () => undefined,
+  };
+  const only = fakeWebContents(sent);
+  runtime.registerWindow(only as any, 'app://desktop/index.html');
+
+  (runtime as any).broadcastClientEvent(START_RECORDING);
+  await (runtime as any).stopBridge();
+
+  only.isDestroyed = () => true;
+  runtime.unregisterWindow(only as any);
+
+  assert.deepEqual(
+    commands,
+    [],
+    'close_connection drains the audio responder, so a later window close must not answer a dead request',
+  );
+});
+
+test('a window detached while still alive does not have its own request handed back to it', () => {
+  // `unregisterWindow` is not only reached from the `destroyed` event:
+  // `SessionRuntimeManager.detachWindow` also calls it during `dispose`, and
+  // for a window that navigated away — in both cases `isDestroyed()` is still
+  // false. If the rescue ran before the target was dropped, the election would
+  // hand the request straight back to the window that is leaving, and the
+  // engine would park exactly as before. This is the ordering test; without it
+  // swapping those two lines passes every other assertion in this file.
+  const leaving: Array<{ channel: string; payload: unknown }> = [];
+  const spare: Array<{ channel: string; payload: unknown }> = [];
+  const runtime = audioRuntime('aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee');
+  const departing = fakeWebContents(leaving);
+  runtime.registerWindow(departing as any, 'app://desktop/index.html');
+  runtime.registerWindow(fakeWebContents(spare) as any, 'app://desktop/index.html');
+
+  (runtime as any).broadcastClientEvent(START_RECORDING);
+  assert.equal(eventsFor(leaving).length, 1, 'the departing window was elected first');
+
+  // Still "alive" as far as Electron is concerned — just no longer a target.
+  runtime.unregisterWindow(departing as any);
+
+  assert.equal(
+    eventsFor(leaving).filter((event: any) => event.type === 'audio_request').length,
+    1,
+    'the departing window must not be asked a second time; it is on its way out',
+  );
+  assert.equal(
+    eventsFor(spare).filter((event: any) => event.type === 'audio_request').length,
+    1,
+    'the request must move to the window that is staying',
+  );
+});

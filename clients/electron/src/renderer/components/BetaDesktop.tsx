@@ -6,7 +6,7 @@ import type {
   SessionRowDto,
 } from '@lingxi/bridge-client';
 
-import type { UseBridge } from '../bridge/useBridge';
+import { type UseBridge } from '../bridge/useBridge';
 import { orderedTasks } from '../bridge/desktopState';
 import { classifyDesktopError } from '../bridge/errors';
 import { useT } from '../theme/ThemeContext';
@@ -25,13 +25,12 @@ import {
   slashMenuLabel,
   slashNavigationDirection,
 } from '../bridge/slashCommands';
-import { groupModelReferences, modelReference } from '../bridge/modelCatalog';
-import { persistProviderCredentialInput } from '../bridge/providerCredentials';
+import { groupModelReferences, modelReference, resolveModelSelection } from '../bridge/modelCatalog';
 import { formatSessionMetadata } from '../bridge/sessionPresentation';
 import { DESKTOP_COMMANDS } from '../bridge/desktopCommands';
 import { resolveDesktopCommand, type DesktopCommandContext } from '../bridge/slashDispatch';
 import { Icon } from './Icon';
-import { PROVIDERS, providerById } from '../../shared/providers';
+import { providerById } from '../../shared/providers';
 import { MAX_IMAGE_ATTACHMENTS } from '../../shared/imageInput';
 import { PERM_MODES } from '../data';
 
@@ -658,11 +657,12 @@ function createFileMention(path: string, color: string): HTMLElement {
   return token;
 }
 
-export function BetaComposer({ bridge, ready, onOpenSettings, onSetTheme }: {
+export function BetaComposer({ bridge, ready, onOpenSettings, onSetTheme, onOpenProviderSettings }: {
   bridge: UseBridge;
   ready: boolean;
   onOpenSettings(): void;
   onSetTheme(theme: 'dark' | 'light'): void;
+  onOpenProviderSettings(providerId: string, modelReference: string, restoreFocus: () => void): void;
 }) {
   const t = useT();
   const [text, setText] = useState('');
@@ -690,6 +690,7 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onSetTheme }: {
   const permissionControl = useRef<HTMLDivElement>(null);
   const permissionButton = useRef<HTMLButtonElement>(null);
   const modelControl = useRef<HTMLDivElement>(null);
+  const modelTrigger = useRef<HTMLButtonElement>(null);
   const slashControl = useRef<HTMLDivElement>(null);
   const recognition = useRef<SpeechRecognitionLike | null>(null);
   const voiceBase = useRef('');
@@ -1677,6 +1678,7 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onSetTheme }: {
 
           <div ref={modelControl} style={{ position: 'relative' }}>
             <button
+              ref={modelTrigger}
               type="button"
               disabled={!ready || bridge.running || bridge.desktop.models.length === 0}
               aria-haspopup="menu"
@@ -1765,7 +1767,8 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onSetTheme }: {
                         const metadata = statusProviderId
                           ? providerCredentials?.find((entry) => entry.providerId === statusProviderId)
                           : undefined;
-                        const connectionLabel = group.providerId
+                        const knownProvider = Boolean(statusProviderId && providerById(statusProviderId));
+                        const connectionLabel = knownProvider
                           ? providerCredentials
                             ? metadata?.configured ? 'Connected' : 'Not connected'
                             : 'Checking…'
@@ -1782,10 +1785,20 @@ export function BetaComposer({ bridge, ready, onOpenSettings, onSetTheme }: {
                               const entryDetail = modelDetailsByReference.get(entry.reference);
                               const entrySupportsFastMode = modelReference(entry.reference).providerId === 'anthropic'
                                 && modelSupportsFastMode(entryDetail);
+                              const selection = resolveModelSelection(entry.reference, providerCredentials);
+                              const unavailable = selection.kind === 'loading';
+                              const requiresConnection = selection.kind === 'connect';
                               return (
-                                <button key={entry.reference} type="button" role="menuitemradio" aria-checked={active} onClick={() => { invoke(() => bridge.setModel(entry.reference)); setModelOpen(false); setModelSubmenu(null); }} style={{ display: 'flex', alignItems: 'center', gap: 9, width: '100%', minHeight: 40, padding: '7px 10px', border: 0, borderRadius: 7, background: active ? t.accentBg : 'transparent', color: t.text, textAlign: 'left', cursor: 'pointer', font: 'inherit', fontSize: 12.5 }} onMouseEnter={(event) => { if (!active) event.currentTarget.style.background = t.surfaceHover; }} onMouseLeave={(event) => { if (!active) event.currentTarget.style.background = 'transparent'; }}>
-                                  {entrySupportsFastMode && <Icon name="bolt" size={14} color={active ? t.accent : t.text3} />}
+                                <button key={entry.reference} type="button" role="menuitemradio" aria-checked={active} disabled={unavailable} aria-disabled={unavailable} title={unavailable ? 'Checking provider connection…' : requiresConnection ? `Connect ${providerById(selection.providerId)?.label ?? selection.providerId} in Settings to use this model` : undefined} onClick={() => {
+                                  if (selection.kind === 'loading') return;
+                                  setModelOpen(false);
+                                  setModelSubmenu(null);
+                                  if (selection.kind === 'connect') onOpenProviderSettings(selection.providerId, entry.reference, () => modelTrigger.current?.focus());
+                                  else invoke(() => bridge.setModel(entry.reference));
+                                }} style={{ display: 'flex', alignItems: 'center', gap: 9, width: '100%', minHeight: 40, padding: '7px 10px', border: 0, borderRadius: 7, background: active ? t.accentBg : 'transparent', color: unavailable ? t.text4 : requiresConnection ? t.text2 : t.text, textAlign: 'left', cursor: unavailable ? 'wait' : 'pointer', font: 'inherit', fontSize: 12.5, opacity: unavailable ? .68 : 1 }} onMouseEnter={(event) => { if (!active && !unavailable) event.currentTarget.style.background = t.surfaceHover; }} onMouseLeave={(event) => { if (!active && !unavailable) event.currentTarget.style.background = 'transparent'; }}>
+                                  {unavailable ? <span className="beta-spinner" aria-hidden="true" style={{ width: 11, height: 11, borderWidth: 1.5, color: t.text4 }} /> : requiresConnection ? <Icon name="lock" size={14} color={t.warn} /> : entrySupportsFastMode && <Icon name="bolt" size={14} color={active ? t.accent : t.text3} />}
                                   <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontWeight: active ? 650 : 500 }}>{entry.label}</span>
+                                  {requiresConnection && <span style={{ flexShrink: 0, color: t.warn, fontSize: 10, fontWeight: 600 }}>Connect in Settings</span>}
                                   {active && <Icon name="check" size={14} color={t.accent} stroke={2.2} />}
                                 </button>
                               );
@@ -1949,86 +1962,6 @@ export function BetaTasks({ bridge, onClose }: { bridge: UseBridge; onClose(): v
       </div>
     </aside>
   );
-}
-
-export function BetaSettings({ bridge, theme, onTheme, onClose }: { bridge: UseBridge; theme: ThemeMode; onTheme(value: ThemeMode): void; onClose(): void }) {
-  const t = useT();
-  const snapshot = bridge.bootstrap;
-  const [key, setKey] = useState('');
-  const [selectedProviderId, setSelectedProviderId] = useState('anthropic');
-  const selectedProvider = providerById(selectedProviderId) ?? PROVIDERS[0];
-  const selectedMetadata = snapshot?.providerCredentials?.find((entry) => entry.providerId === selectedProvider.id);
-  const panelRef = useRef<HTMLElement>(null);
-  const closeRef = useRef<HTMLButtonElement>(null);
-  const onCloseRef = useRef(onClose);
-  onCloseRef.current = onClose;
-  useEffect(() => { invoke(bridge.refreshDiagnostics); }, [bridge.refreshDiagnostics]);
-  useEffect(() => {
-    const previouslyFocused = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-    closeRef.current?.focus();
-    const keyDown = (event: globalThis.KeyboardEvent) => {
-      if (event.key === 'Escape') {
-        event.preventDefault();
-        onCloseRef.current();
-        return;
-      }
-      if (event.key !== 'Tab') return;
-      const focusable = [...(panelRef.current?.querySelectorAll<HTMLElement>('button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled])') ?? [])];
-      const first = focusable[0];
-      const last = focusable.at(-1);
-      if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last?.focus(); }
-      else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus(); }
-    };
-    document.addEventListener('keydown', keyDown);
-    return () => { document.removeEventListener('keydown', keyDown); previouslyFocused?.focus(); };
-  }, []);
-  const save = () => {
-    const submitted = key;
-    invoke(async () => {
-      const saved = await persistProviderCredentialInput(selectedProvider.id, submitted, bridge.setProviderCredential);
-      if (saved) setKey((current) => current === submitted ? '' : current);
-    });
-  };
-  return (
-    <div role="dialog" aria-modal="true" aria-labelledby="lingxi-settings-title" style={{ position: 'absolute', inset: 0, zIndex: 50, display: 'grid', placeItems: 'center', background: 'rgba(0,0,0,.42)', padding: 24 }}>
-      <section ref={panelRef} style={{ width: 'min(720px, 100%)', maxHeight: 'min(720px, 92vh)', overflow: 'auto', borderRadius: 15, border: `0.5px solid ${t.border}`, background: t.windowBg, boxShadow: '0 24px 70px rgba(0,0,0,.36)' }}>
-        <header style={{ position: 'sticky', top: 0, zIndex: 1, display: 'flex', alignItems: 'center', padding: '14px 17px', borderBottom: `0.5px solid ${t.border}`, background: t.windowBg }}><strong id="lingxi-settings-title" style={{ flex: 1, color: t.text, fontSize: 14 }}>Settings & diagnostics</strong><button ref={closeRef} type="button" onClick={onClose} aria-label="Close settings" style={{ border: 0, background: 'transparent', color: t.text3, cursor: 'pointer' }}><Icon name="x" size={16} /></button></header>
-        <div style={{ padding: 18, display: 'grid', gap: 18 }}>
-          <SettingsSection title="Appearance"><div style={{ display: 'flex', gap: 8 }}><Button primary={theme === 'dark'} onClick={() => onTheme('dark')}><Icon name="moon" size={13} /> Dark</Button><Button primary={theme === 'light'} onClick={() => onTheme('light')}><Icon name="sun" size={13} /> Light</Button></div></SettingsSection>
-          <SettingsSection title="Providers">
-            <p>Desktop, CLI, and TUI share one credential store. It uses the macOS login Keychain when available and an owner-only local fallback otherwise.</p>
-            <div style={{ width: '100%', display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(145px, 1fr))', gap: 7 }}>
-              {PROVIDERS.map((provider) => {
-                const metadata = snapshot?.providerCredentials?.find((entry) => entry.providerId === provider.id);
-                const selected = provider.id === selectedProvider.id;
-                return <button key={provider.id} type="button" onClick={() => { setSelectedProviderId(provider.id); setKey(''); }} style={{ padding: '8px 9px', borderRadius: 8, border: `0.5px solid ${selected ? t.accentBorder : t.border}`, background: selected ? t.accentBg : t.surface, color: t.text, textAlign: 'left', cursor: 'pointer', opacity: provider.available ? 1 : .55 }}><span style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 11.5, fontWeight: 650 }}>{metadata?.configured && <Icon name="check" size={12} color={t.ok} stroke={2.5} />}{provider.label}</span><span style={{ display: 'block', color: t.text4, fontSize: 10, marginTop: 2 }}>{provider.available ? provider.description : 'CLI/TUI sign-in'}</span></button>;
-              })}
-            </div>
-            {selectedMetadata?.runtimeOnly && <p style={{ color: t.ok }}>The running engine received this credential from an external runtime source. LingXi has not stored it.</p>}
-            {selectedMetadata?.configured && selectedMetadata.encryptionAvailable && !selectedMetadata.runtimeOnly && <p style={{ color: t.ok }}>Persisted securely on this Mac. Generic API keys are intentionally not listed in the Passwords app.</p>}
-            {selectedMetadata?.configured && !selectedMetadata.encryptionAvailable && !selectedMetadata.runtimeOnly && <p style={{ color: t.warn }}>macOS Keychain is unavailable. This credential is in the shared owner-only local fallback used by Desktop, CLI, and TUI.</p>}
-            {!selectedMetadata?.configured && selectedMetadata?.encryptionAvailable === false && <p style={{ color: t.warn }}>macOS Keychain is unavailable. Connecting will use the shared owner-only local fallback used by Desktop, CLI, and TUI.</p>}
-            {selectedProvider.available ? <>
-              <label htmlFor="settings-provider-credential" style={{ color: t.text2, fontSize: 11 }}>{selectedProvider.keyLabel}</label>
-              <div style={{ display: 'flex', gap: 7, width: '100%' }}><input id="settings-provider-credential" type="password" autoComplete="off" disabled={bridge.running} value={key} onChange={(event) => setKey(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') save(); }} placeholder={selectedMetadata?.configured ? 'Enter a replacement key' : selectedProvider.keyPlaceholder} aria-label={`${selectedProvider.keyLabel} for settings`} style={{ flex: 1, height: 33, borderRadius: 8, border: `0.5px solid ${t.border}`, background: t.surface, color: t.text, padding: '0 9px' }} /><Button disabled={!key.trim() || bridge.running} onClick={save}>{selectedMetadata?.runtimeOnly ? 'Use entered key' : selectedMetadata?.configured ? 'Replace' : 'Connect'}</Button>{selectedMetadata?.configured && !selectedMetadata.runtimeOnly && <Button disabled={bridge.running} danger onClick={() => invoke(() => bridge.clearProviderCredential(selectedProvider.id))}>Delete</Button>}</div>
-            </> : <p style={{ color: t.warn }}>{selectedProvider.label} sign-in is currently available from the CLI/TUI connect flow.</p>}
-          </SettingsSection>
-          <SettingsSection title="Engine">
-            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}><ConnectionDot bridge={bridge} /><Button onClick={() => invoke(bridge.restartBridge)}>Restart engine</Button><Button onClick={() => invoke(bridge.refresh)}>Refresh all</Button></div>
-            {bridge.desktop.status && <div className="mono" style={{ color: t.text3, fontSize: 10.5 }}>session {bridge.desktop.status.session_id} · {bridge.desktop.status.model} · {bridge.desktop.status.n_messages} messages</div>}
-            {bridge.desktop.doctor && <div style={{ color: bridge.desktop.doctor.summary.failed > 0 ? t.danger : bridge.desktop.doctor.summary.warnings > 0 ? t.warn : t.ok, fontSize: 10.5 }}>Doctor: {bridge.desktop.doctor.summary.passed} passed, {bridge.desktop.doctor.summary.warnings} warnings, {bridge.desktop.doctor.summary.failed} failed</div>}
-          </SettingsSection>
-          <SettingsSection title="Diagnostics"><p>Sanitized lifecycle messages only. Prompts, tool payloads and credential values are excluded.</p><div style={{ display: 'flex', gap: 7 }}><Button onClick={() => invoke(bridge.copyDiagnostics)}>Copy report</Button><Button onClick={() => invoke(bridge.exportDiagnostics)}>Export JSON…</Button><Button onClick={() => invoke(bridge.refreshDiagnostics)}>Refresh</Button></div><div className="mono" style={{ maxHeight: 170, overflow: 'auto', padding: 9, borderRadius: 8, background: t.surface, border: `0.5px solid ${t.border}`, color: t.text3, fontSize: 9.5, lineHeight: 1.55 }}>{snapshot?.diagnostics.length ? snapshot.diagnostics.map((entry, index) => <div key={`${entry.timestamp}-${index}`}><span style={{ color: entry.level === 'error' ? t.danger : entry.level === 'warn' ? t.warn : t.text4 }}>{entry.timestamp} [{entry.source}/{entry.level}]</span> {entry.message}</div>) : 'No diagnostic entries.'}</div></SettingsSection>
-          <SettingsSection title="About"><p>LingXi Code Desktop · Internal Beta</p><p>Local engine, explicit project trust, shared credential storage, manual signed updates.</p></SettingsSection>
-        </div>
-      </section>
-    </div>
-  );
-}
-
-function SettingsSection({ title, children }: { title: string; children: ReactNode }) {
-  const t = useT();
-  return <section style={{ display: 'grid', gridTemplateColumns: '145px 1fr', gap: 18, paddingBottom: 18, borderBottom: `0.5px solid ${t.border}` }}><h2 style={{ color: t.text, fontSize: 12.5 }}>{title}</h2><div style={{ minWidth: 0, display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: 9, color: t.text3, fontSize: 11.5, lineHeight: 1.5 }}>{children}</div></section>;
 }
 
 export function ErrorBanner({ bridge }: { bridge: UseBridge }) {

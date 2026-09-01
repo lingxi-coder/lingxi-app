@@ -1,5 +1,5 @@
 {
-  "totalKeys": 1893,
+  "totalKeys": 1971,
   "androidIllegal": 113,
   "androidIllegalUnpaired": 106,
   "empty": {
@@ -11,10 +11,10 @@
   },
   "identicalToBase": {
     "zh-Hans": 0,
-    "zh-Hant": 227,
-    "en": 20,
-    "ja": 41,
-    "ko": 15
+    "zh-Hant": 228,
+    "en": 19,
+    "ja": 40,
+    "ko": 14
   },
   "unpairedKeys": [
     "chat_active_agents %u",

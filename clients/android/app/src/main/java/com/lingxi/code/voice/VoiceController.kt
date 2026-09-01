@@ -751,6 +751,27 @@ internal fun cancelActiveOrbVoiceSession() {
     OrbVoiceSessionRegistry.cancelActive()
 }
 
+private object HeldVoiceSessionRegistry {
+    private var capture: VoiceCapture? = null
+
+    fun attach(value: VoiceCapture) {
+        capture = value
+    }
+
+    fun detach(value: VoiceCapture) {
+        if (capture === value) capture = null
+    }
+
+    fun cancelActive() {
+        capture?.takeIf { it.isActive() }?.cancel()
+    }
+}
+
+/** Stop held-mic capture without finalizing or submitting a late transcript. */
+internal fun cancelActiveHeldVoiceSession() {
+    HeldVoiceSessionRegistry.cancelActive()
+}
+
 /**
  * Compose entry point: returns the hold-to-talk handlers wired to a live
  * [VoiceCapture]. [onTranscript] receives the recognized text on a successful
@@ -805,7 +826,11 @@ fun rememberVoiceCapture(
         )
     }
     DisposableEffect(capture) {
-        onDispose { capture.dispose() }
+        HeldVoiceSessionRegistry.attach(capture)
+        onDispose {
+            HeldVoiceSessionRegistry.detach(capture)
+            capture.dispose()
+        }
     }
 
     val onHoldStart: () -> Unit = {

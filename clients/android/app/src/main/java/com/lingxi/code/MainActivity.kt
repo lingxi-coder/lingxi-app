@@ -44,6 +44,8 @@ import com.lingxi.code.settings.SettingsHost
 import com.lingxi.code.settings.SettingsRoutes
 import com.lingxi.code.settings.SettingsStore
 import com.lingxi.code.model.ProviderKind
+import com.lingxi.code.conversation.ConversationLaunchRequest
+import com.lingxi.code.conversation.ConversationNotificationRoute
 import com.lingxi.code.terminal.TerminalRoute
 import com.lingxi.code.terminal.TerminalRouteArgs
 import com.lingxi.code.terminal.createTerminalGateway
@@ -69,6 +71,8 @@ class MainActivity : ComponentActivity() {
     private val pendingCronRunId = kotlinx.coroutines.flow.MutableStateFlow<String?>(null)
     private val pendingTerminalArgs =
         kotlinx.coroutines.flow.MutableStateFlow<TerminalRouteArgs?>(null)
+    private val pendingConversationLaunch =
+        kotlinx.coroutines.flow.MutableStateFlow<ConversationLaunchRequest?>(null)
     private val pendingLocalAppLaunch =
         kotlinx.coroutines.flow.MutableStateFlow<LocalAppLaunchRequest?>(null)
     private val pendingOpenLocalApps = kotlinx.coroutines.flow.MutableStateFlow(false)
@@ -102,6 +106,7 @@ class MainActivity : ComponentActivity() {
             com.lingxi.code.cron.CronNotifications.EXTRA_CRON_RUN_ID,
         )
         pendingTerminalArgs.value = intent.terminalRouteArgs()
+        pendingConversationLaunch.value = ConversationNotificationRoute.parse(intent)
         pendingLocalAppLaunch.value = LocalAppWidgetDeepLink.parse(intent)
         pendingOpenLocalApps.value = intent.getBooleanExtra(
             LocalAppWidgetDeepLink.EXTRA_OPEN_LOCAL_APPS,
@@ -213,6 +218,7 @@ class MainActivity : ComponentActivity() {
             val settingsState by settingsStore.state.collectAsState()
             val requestedCronRunId by pendingCronRunId.collectAsState()
             val requestedTerminalArgs by pendingTerminalArgs.collectAsState()
+            val requestedConversationLaunch by pendingConversationLaunch.collectAsState()
             val requestedLocalAppLaunch by pendingLocalAppLaunch.collectAsState()
             val requestedOpenLocalApps by pendingOpenLocalApps.collectAsState()
             val scope = rememberCoroutineScope()
@@ -256,6 +262,12 @@ class MainActivity : ComponentActivity() {
                 requestedTerminalArgs?.let {
                     openTerminal(it.sessionId, it.initCommand)
                     pendingTerminalArgs.value = null
+                }
+            }
+            LaunchedEffect(requestedConversationLaunch) {
+                if (requestedConversationLaunch != null) {
+                    settingsOpen = false
+                    terminalOpen = false
                 }
             }
             LaunchedEffect(requestedLocalAppLaunch, requestedOpenLocalApps) {
@@ -323,6 +335,8 @@ class MainActivity : ComponentActivity() {
                         reconnectToken = engineReconnect,
                         settingsStore = settingsStore,
                         onConversationSourceChanged = { activeConversationSource = it },
+                        requestedConversationLaunch = requestedConversationLaunch,
+                        onConversationLaunchHandled = { pendingConversationLaunch.value = null },
                         requestedLocalAppLaunch = requestedLocalAppLaunch,
                         onLocalAppLaunchHandled = { pendingLocalAppLaunch.value = null },
                         openLocalAppsRequest = requestedOpenLocalApps,
@@ -464,6 +478,7 @@ class MainActivity : ComponentActivity() {
             com.lingxi.code.cron.CronNotifications.EXTRA_CRON_RUN_ID,
         )
         pendingTerminalArgs.value = intent.terminalRouteArgs()
+        pendingConversationLaunch.value = ConversationNotificationRoute.parse(intent)
         pendingLocalAppLaunch.value = LocalAppWidgetDeepLink.parse(intent)
         pendingOpenLocalApps.value = intent.getBooleanExtra(
             LocalAppWidgetDeepLink.EXTRA_OPEN_LOCAL_APPS,

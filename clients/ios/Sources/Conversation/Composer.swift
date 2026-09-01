@@ -55,6 +55,10 @@ struct Composer: View {
     // A running turn keeps both controls available: Stop interrupts it, while
     // Send places new text into Rust's canonical pending-message queue.
     var streaming: Bool = false
+    /// True when a durable turn is inactive while waiting for explicit user
+    /// resolution. This changes only the trailing affordance; the source's
+    /// actual streaming state remains separate for background/voice policy.
+    var showDiscardRecovery: Bool = false
     var isCancelling: Bool = false
     /// Session transitions and cancellation can temporarily make a draft
     /// non-submittable even though the text field remains editable.
@@ -116,6 +120,7 @@ struct Composer: View {
         slashCommandsLoaded: Bool = false,
         slashCommandPending: Bool = false,
         streaming: Bool = false,
+        showDiscardRecovery: Bool = false,
         isCancelling: Bool = false,
         sendEnabled: Bool = true,
         onStop: @escaping () -> Void = {},
@@ -158,6 +163,7 @@ struct Composer: View {
         self.slashCommandsLoaded = slashCommandsLoaded
         self.slashCommandPending = slashCommandPending
         self.streaming = streaming
+        self.showDiscardRecovery = showDiscardRecovery
         self.isCancelling = isCancelling
         self.sendEnabled = sendEnabled
         self.onStop = onStop
@@ -239,6 +245,17 @@ struct Composer: View {
                             .tint(t.text3)
                             .frame(width: 40, height: 40)
                             .accessibilityLabel(isCancelling ? "composer_stopping" : "slash_command_running")
+                    } else if showDiscardRecovery {
+                        Button(action: onStop) {
+                            ComposerTurnActionIcon(
+                                systemName: "stop.fill",
+                                symbolSize: 11,
+                                background: t.danger
+                            )
+                        }
+                        .buttonStyle(ComposerActionButtonStyle())
+                        .accessibilityLabel(showDiscardRecovery ? "composer_discard_recovery" : "composer_stop")
+                        .accessibilityIdentifier(showDiscardRecovery ? "composer.discard-recovery" : "composer.stop")
                     } else {
                         HStack(spacing: 6) {
                             if streaming {
@@ -550,6 +567,7 @@ struct Composer: View {
                     in: draft.trimmingCharacters(in: .whitespacesAndNewlines),
                     catalog: slashCommands
                 ) != nil)
+            && !showDiscardRecovery
     }
 
     private func acceptSlashCommand(_ command: ConversationSlashCommand) {
@@ -562,6 +580,7 @@ struct Composer: View {
     private func send() {
         let trimmed = draft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty,
+              !showDiscardRecovery,
               !isCancelling,
               !slashCommandPending,
               canSubmitDraft

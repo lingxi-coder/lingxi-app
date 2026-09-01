@@ -42,6 +42,10 @@
 //! | `ListSessions` / `RefreshListings{Sessions}` | persisted JSONL catalog | `SessionList` |
 //! | `NewSession` | `clear_session` + optional `switch_model` | `SessionStarted` / `Error` |
 //! | `ResumeSession` | JSONL replay + `resume_session` | `SessionResumed` / `Error` |
+//! | `RefreshListings{Settings}` | `settings_bridge::build_snapshot` | `SettingsSnapshot` |
+//! | `UpdatePermissionRules` | `permission::persist_permission_rule_set` | `SettingsSnapshot` / `Error` |
+//! | `SetDefaultPermissionMode` | `permission::persist_permission_mode` | `SettingsSnapshot` / `Error` |
+//! | `UpdateWorkspaceDirectories` | `permission::persist_workspace_directories` | `SettingsSnapshot` / `Error` |
 //! | `RequestExit` | `request_exit` | — |
 //!
 //! ## Mid-turn semantics
@@ -56,8 +60,10 @@
 //! Per governing decisions §0.7/§0.9, the router NEVER live-sources the reserved
 //! DTOs (`ThinkingDelta`, `UsageUpdate`, `CoordinatorStatus`); the corresponding
 //! engine sources do not exist in the foundation, so no command maps to them.
-//! Listing kinds with no engine handle or host store in the foundation
-//! (`Memory`, `Settings`) remain unrouted here.
+//! The listing kind with no engine handle or host store in the foundation
+//! (`Memory`) remains unrouted here. `Settings` IS routed: it reads the layered
+//! settings files through [`crate::settings_bridge`] using the
+//! [`crate::settings_bridge::SettingsContext`] the composition root supplies.
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -67,10 +73,12 @@ use std::time::Duration;
 use async_trait::async_trait;
 use client_adapter::lowering::{
     lower_agent_info, lower_doctor_report, lower_hook_info, lower_mcp_server_info,
-    lower_status_snapshot, lower_task_output_chunk, lower_task_record,
+    lower_skill_info, lower_status_snapshot, lower_task_output_chunk, lower_task_record,
 };
 use client_adapter::ClientEventSink;
-use client_protocol::commands::{ClientCommand, ListingKindDto};
+use client_protocol::commands::{
+    ClientCommand, ListingKindDto, McpScopeDto, PermissionBehaviorDto, SettingsDestinationDto,
+};
 use client_protocol::controls::{
     ConversationControlsDto, ReasoningControlStateDto, ReasoningSelectionDto,
 };
@@ -85,6 +93,12 @@ use traits::auth::{AuthHandle, LoginInfo};
 use traits::orchestrator::OrchestratorHandle;
 use traits::task_registry::{TaskListFilter, TaskRegistryHandle};
 use traits::SlashCommandDispatcher;
+
+use crate::mcp_bridge::McpPaths;
+use crate::settings_bridge::{
+    apply_patch, build_snapshot, lower_snapshot, permission_destination, permission_paths,
+    permission_rule_from_wire, SettingsContext,
+};
 
 /// Default number of recent sessions returned when `ListSessions` omits its
 /// explicit limit. This matches the CLI `/resume` picker and the mobile host.
@@ -184,6 +198,17 @@ pub struct EngineCommandRouter {
     /// Shared provider credential manager. Production bridge boot wires the
     /// exact manager used by the runtime; tests/embedded clients may omit it.
     credentials: Option<Arc<secret::CredentialManager>>,
+    /// Optional layered-settings context backing the `Settings` listing.
+    /// Production boot wires it from the desktop composition root; lightweight
+    /// users of the routing seam may omit it, in which case the listing
+    /// reports the missing context rather than emitting nothing.
+    settings: Option<SettingsContext>,
+    /// Optional MCP-scope roots backing `UpsertMcpServer` / `RemoveMcpServer`.
+    /// Production boot wires it from the SAME `.mcp.json` / global-config
+    /// paths `engine_desktop` resolves the read-side registry from;
+    /// lightweight users of the routing seam may omit it, in which case the
+    /// two commands report the missing context rather than doing nothing.
+    mcp: Option<McpPaths>,
     /// Set while a turn is in flight — `ClearSession` is rejected in this window
     /// (plan §2 mid-turn semantics).
     turn_active: AtomicBool,
@@ -216,6 +241,8 @@ impl EngineCommandRouter {
             slash_registry,
             session_store: None,
             credentials: None,
+            settings: None,
+            mcp: None,
             turn_active: AtomicBool::new(false),
         }
     }
@@ -232,6 +259,28 @@ impl EngineCommandRouter {
     #[must_use]
     pub fn with_session_store(mut self, session_store: SessionStoreContext) -> Self {
         self.session_store = Some(session_store);
+        self
+    }
+
+    /// Attach the layered-settings context the `Settings` listing reads. The
+    /// composition root supplies the settings roots, the file-layer values read
+    /// at session start, and the administrator's managed overlay; this router
+    /// only reads and lowers them.
+    #[must_use]
+    pub fn with_settings_context(mut self, settings: SettingsContext) -> Self {
+        self.settings = Some(settings);
+        self
+    }
+
+    /// Attach the MCP-scope roots the `UpsertMcpServer` / `RemoveMcpServer`
+    /// commands write through. The composition root supplies the SAME
+    /// project directory and global-config path the read-side registry was
+    /// loaded from (`resolve_desktop_config`'s `project_mcp_path` /
+    /// `global_mcp_path`), so a write always lands where the next reload
+    /// would look for it.
+    #[must_use]
+    pub fn with_mcp_paths(mut self, mcp: McpPaths) -> Self {
+        self.mcp = Some(mcp);
         self
     }
 
@@ -287,6 +336,391 @@ impl EngineCommandRouter {
 
         sink.emit(ClientEvent::FastModeChanged { enabled: fast_mode })
             .await;
+    }
+
+    /// Read, merge and emit the layered settings. This listing was defined in
+    /// the protocol from the start and, until now, matched the same do-nothing
+    /// arm as `Memory`: it logged a debug line and emitted nothing at all.
+    ///
+    /// Without a settings context there is nothing to read, so it says so
+    /// rather than reverting to silence — silence is precisely the defect this
+    /// path exists to remove.
+    async fn emit_settings_snapshot(&self, sink: &dyn ClientEventSink) {
+        let Some(context) = self.settings.as_ref() else {
+            sink.emit(ClientEvent::Error {
+                kind: ErrorKindDto::Internal,
+                message: "settings listing unavailable: this connection was built without a \
+                          settings context"
+                    .to_string(),
+            })
+            .await;
+            return;
+        };
+
+        let snapshot = build_snapshot(
+            &context.paths,
+            context.active.clone(),
+            context.managed.clone(),
+        );
+        let lowered = lower_snapshot(&snapshot);
+        sink.emit(ClientEvent::SettingsSnapshot {
+            effective_json: lowered.effective_json,
+            provenance_json: lowered.provenance_json,
+            files_json: Some(lowered.files_json),
+            active_json: Some(lowered.active_json),
+            locked: Some(lowered.locked),
+            layers_json: Some(lowered.layers_json),
+            merged_keys: Some(lowered.merged_keys),
+        })
+        .await;
+    }
+
+    /// Decode `patch_json` via [`parse_settings_patch`] and apply it to
+    /// `destination` through [`crate::settings_bridge::apply_patch`]. On
+    /// success, resends the settings snapshot so the caller sees the write it
+    /// just made reflected back (rather than requiring a separate
+    /// `RefreshListings{Settings}` round-trip). On any failure — no settings
+    /// context, a patch that fails to parse (see [`parse_settings_patch`]), or
+    /// `apply_patch`'s own errors (reserved key, broken destination file,
+    /// write failure) — emits the SAME [`ClientEvent::Error`] path the rest of
+    /// this router uses, rather than a dedicated failure event.
+    async fn apply_settings_patch(
+        &self,
+        destination: SettingsDestinationDto,
+        patch_json: &str,
+        sink: &dyn ClientEventSink,
+    ) {
+        let Some(context) = self.settings.as_ref() else {
+            sink.emit(ClientEvent::Error {
+                kind: ErrorKindDto::Internal,
+                message: "settings update unavailable: this connection was built without a \
+                          settings context"
+                    .to_string(),
+            })
+            .await;
+            return;
+        };
+
+        let patch = match parse_settings_patch(patch_json) {
+            Ok(patch) => patch,
+            Err(message) => {
+                sink.emit(ClientEvent::Error {
+                    kind: ErrorKindDto::Protocol,
+                    message,
+                })
+                .await;
+                return;
+            }
+        };
+
+        match apply_patch(&context.paths, destination, patch) {
+            Ok(()) => {
+                self.emit_settings_snapshot(sink).await;
+            }
+            Err(message) => {
+                sink.emit(ClientEvent::Error {
+                    kind: ErrorKindDto::Internal,
+                    message,
+                })
+                .await;
+            }
+        }
+    }
+
+    /// Shared preflight for the three persisted-permission commands
+    /// ([`ClientCommand::UpdatePermissionRules`],
+    /// [`ClientCommand::SetDefaultPermissionMode`],
+    /// [`ClientCommand::UpdateWorkspaceDirectories`]): resolve the active
+    /// [`SettingsContext`] into the `permission` crate's two-root paths, or
+    /// report the same "no settings context" gap
+    /// [`Self::apply_settings_patch`] reports on the generic path.
+    async fn require_permission_paths(
+        &self,
+        sink: &dyn ClientEventSink,
+    ) -> Option<permission::PermissionPaths> {
+        let Some(context) = self.settings.as_ref() else {
+            sink.emit(ClientEvent::Error {
+                kind: ErrorKindDto::Internal,
+                message: "permission update unavailable: this connection was built without a \
+                          settings context"
+                    .to_string(),
+            })
+            .await;
+            return None;
+        };
+        Some(permission_paths(&context.paths))
+    }
+
+    /// Route [`ClientCommand::UpdatePermissionRules`] to
+    /// `permission::persist_permission_rule_set` — never reimplementing its
+    /// per-destination lock, atomic write, or alias-normalizing de-dup. `add`
+    /// and `remove` are each persisted in their own call (the persister does
+    /// one same-behavior set per transaction); a rule string is never
+    /// rejected here — [`permission_rule_from_wire`] parses infallibly,
+    /// matching claude-code's own parser.
+    async fn apply_permission_rule_update(
+        &self,
+        destination: SettingsDestinationDto,
+        behavior: PermissionBehaviorDto,
+        add: Vec<String>,
+        remove: Vec<String>,
+        sink: &dyn ClientEventSink,
+    ) {
+        let Some(paths) = self.require_permission_paths(sink).await else {
+            return;
+        };
+        let dest = permission_destination(destination);
+        let to_add: Vec<permission::PermissionRule> = add
+            .iter()
+            .map(|raw| permission_rule_from_wire(raw, behavior, destination))
+            .collect();
+        let to_remove: Vec<permission::PermissionRule> = remove
+            .iter()
+            .map(|raw| permission_rule_from_wire(raw, behavior, destination))
+            .collect();
+
+        let mut changed = false;
+        for (rules, add_flag) in [(&to_add, true), (&to_remove, false)] {
+            if rules.is_empty() {
+                continue;
+            }
+            match permission::persist_permission_rule_set(rules, add_flag, dest, &paths).await {
+                Ok(did_change) => changed |= did_change,
+                Err(error) => {
+                    sink.emit(ClientEvent::Error {
+                        kind: ErrorKindDto::Internal,
+                        message: format!("failed to persist permission rules: {error}"),
+                    })
+                    .await;
+                    // `add` and `remove` are two SEPARATE transactions. If the
+                    // `add` half already landed durably before this half
+                    // errored, the file has genuinely changed — telling the
+                    // caller only "it failed" would leave its view of
+                    // settings stale and silently wrong. The error still says
+                    // the operation did not complete; the snapshot says what
+                    // is actually on disk now. Both are true.
+                    if changed {
+                        self.emit_settings_snapshot(sink).await;
+                    }
+                    return;
+                }
+            }
+        }
+
+        if changed {
+            self.emit_settings_snapshot(sink).await;
+        } else {
+            // Ok(false) with no error means nothing on disk actually moved —
+            // an empty add/remove set, or every entry already matched what
+            // was there. Silence here would look identical to a successful
+            // write from the caller's side, so it is reported rather than
+            // swallowed.
+            sink.emit(ClientEvent::Error {
+                kind: ErrorKindDto::Rejected,
+                message: "no permission rule changed: `add`/`remove` were empty, or every \
+                          entry already matched the file"
+                    .to_string(),
+            })
+            .await;
+        }
+    }
+
+    /// Route [`ClientCommand::SetDefaultPermissionMode`] to
+    /// `permission::persist_permission_mode`. Distinct from the
+    /// session-scoped [`ClientCommand::SetPermissionMode`]: this writes the
+    /// DEFAULT mode a future session boots into. `persist_permission_mode`
+    /// deliberately refuses to persist `"bypassPermissions"` (a security
+    /// property — persisting it would silently re-enter bypass mode on the
+    /// next session load), and that refusal is reported here rather than
+    /// swallowed.
+    async fn apply_default_permission_mode(
+        &self,
+        destination: SettingsDestinationDto,
+        mode: String,
+        sink: &dyn ClientEventSink,
+    ) {
+        let Some(paths) = self.require_permission_paths(sink).await else {
+            return;
+        };
+        let dest = permission_destination(destination);
+        match permission::persist_permission_mode(&mode, dest, &paths).await {
+            Ok(true) => self.emit_settings_snapshot(sink).await,
+            Ok(false) if mode == "bypassPermissions" => {
+                sink.emit(ClientEvent::Error {
+                    kind: ErrorKindDto::Rejected,
+                    message: "`bypassPermissions` is session-scoped and is deliberately never \
+                              persisted as the default mode"
+                        .to_string(),
+                })
+                .await;
+            }
+            Ok(false) => {
+                sink.emit(ClientEvent::Error {
+                    kind: ErrorKindDto::Rejected,
+                    message: format!(
+                        "default permission mode was not persisted: `{mode}` is unrecognized, \
+                         or already the current default"
+                    ),
+                })
+                .await;
+            }
+            Err(error) => {
+                sink.emit(ClientEvent::Error {
+                    kind: ErrorKindDto::Internal,
+                    message: format!("failed to persist default permission mode: {error}"),
+                })
+                .await;
+            }
+        }
+    }
+
+    /// Route [`ClientCommand::UpdateWorkspaceDirectories`] to
+    /// `permission::persist_workspace_directories`, the same
+    /// add-then-remove, report-if-nothing-changed shape as
+    /// [`Self::apply_permission_rule_update`].
+    async fn apply_workspace_directories_update(
+        &self,
+        destination: SettingsDestinationDto,
+        add: Vec<String>,
+        remove: Vec<String>,
+        sink: &dyn ClientEventSink,
+    ) {
+        let Some(paths) = self.require_permission_paths(sink).await else {
+            return;
+        };
+        let dest = permission_destination(destination);
+
+        let mut changed = false;
+        for (directories, add_flag) in [(&add, true), (&remove, false)] {
+            if directories.is_empty() {
+                continue;
+            }
+            match permission::persist_workspace_directories(directories, add_flag, dest, &paths)
+                .await
+            {
+                Ok(did_change) => changed |= did_change,
+                Err(error) => {
+                    sink.emit(ClientEvent::Error {
+                        kind: ErrorKindDto::Internal,
+                        message: format!("failed to persist workspace directories: {error}"),
+                    })
+                    .await;
+                    // Same honesty property as `apply_permission_rule_update`:
+                    // `add` and `remove` are two SEPARATE transactions, so an
+                    // `add` that already landed before `remove` errored is a
+                    // real, durable change. Report it alongside the error
+                    // rather than leaving the caller's view stale.
+                    if changed {
+                        self.emit_settings_snapshot(sink).await;
+                    }
+                    return;
+                }
+            }
+        }
+
+        if changed {
+            self.emit_settings_snapshot(sink).await;
+        } else {
+            sink.emit(ClientEvent::Error {
+                kind: ErrorKindDto::Rejected,
+                message: "no workspace directory changed: `add`/`remove` were empty, or every \
+                          entry already matched the file"
+                    .to_string(),
+            })
+            .await;
+        }
+    }
+
+    /// Route [`ClientCommand::UpsertMcpServer`] to `mcp_bridge::upsert_server`.
+    /// `config_json` is decoded and validated as a JSON object HERE (a
+    /// malformed client payload is [`ErrorKindDto::Protocol`], matching
+    /// [`apply_settings_patch`](Self::apply_settings_patch)'s
+    /// `patch_json` handling); a write that fails once the shape is valid
+    /// (broken destination file, non-object `mcpServers`, legacy bare-map
+    /// `.mcp.json`, I/O failure) is [`ErrorKindDto::Internal`], matching every
+    /// other write-failure path in this router. There is no dedicated success
+    /// event — the desktop already has the wired `RefreshListings{Mcp}` path
+    /// to observe the change (decision: adding a parallel listing here would
+    /// duplicate that path, and the live `McpRegistry` snapshot it reads is
+    /// not reloaded from disk by a bare file write, so re-emitting it here
+    /// would not even show the new value).
+    async fn apply_mcp_upsert(
+        &self,
+        scope: McpScopeDto,
+        name: &str,
+        config_json: &str,
+        sink: &dyn ClientEventSink,
+    ) {
+        let Some(mcp) = self.mcp.as_ref() else {
+            sink.emit(ClientEvent::Error {
+                kind: ErrorKindDto::Internal,
+                message: "MCP server update unavailable: this connection was built without an \
+                          MCP context"
+                    .to_string(),
+            })
+            .await;
+            return;
+        };
+
+        if name.trim().is_empty() {
+            // `mcp::json_config::build_servers_from_map` would turn a `""`
+            // map key into a nameless server entry — reject at the wire
+            // boundary rather than writing it. (Reserved-name collisions,
+            // e.g. `computer-use` per `mcp/src/server_gate.rs`, are
+            // deliberately NOT blocked here: a hardcoded name blocklist in
+            // the writer would be a second source of truth that drifts from
+            // `server_gate`'s own allowlist.)
+            sink.emit(ClientEvent::Error {
+                kind: ErrorKindDto::Protocol,
+                message: "MCP server name must not be empty".to_string(),
+            })
+            .await;
+            return;
+        }
+
+        let config = match parse_mcp_config_json(config_json) {
+            Ok(config) => config,
+            Err(message) => {
+                sink.emit(ClientEvent::Error {
+                    kind: ErrorKindDto::Protocol,
+                    message,
+                })
+                .await;
+                return;
+            }
+        };
+
+        if let Err(message) = crate::mcp_bridge::upsert_server(mcp, scope, name, config) {
+            sink.emit(ClientEvent::Error {
+                kind: ErrorKindDto::Internal,
+                message,
+            })
+            .await;
+        }
+    }
+
+    /// Route [`ClientCommand::RemoveMcpServer`] to `mcp_bridge::remove_server`.
+    /// Same context/error-kind shape as [`Self::apply_mcp_upsert`], minus the
+    /// `config_json` decode (there is nothing to parse for a removal).
+    async fn apply_mcp_remove(&self, scope: McpScopeDto, name: &str, sink: &dyn ClientEventSink) {
+        let Some(mcp) = self.mcp.as_ref() else {
+            sink.emit(ClientEvent::Error {
+                kind: ErrorKindDto::Internal,
+                message: "MCP server update unavailable: this connection was built without an \
+                          MCP context"
+                    .to_string(),
+            })
+            .await;
+            return;
+        };
+
+        if let Err(message) = crate::mcp_bridge::remove_server(mcp, scope, name) {
+            sink.emit(ClientEvent::Error {
+                kind: ErrorKindDto::Internal,
+                message,
+            })
+            .await;
+        }
     }
 
     async fn emit_provider_credential_status(
@@ -571,6 +1005,16 @@ impl EngineCommandRouter {
                     .collect();
                 sink.emit(ClientEvent::McpServers { servers }).await;
             }
+            ListingKindDto::Skills => {
+                let skills = self
+                    .handle
+                    .list_skills()
+                    .await
+                    .iter()
+                    .map(lower_skill_info)
+                    .collect();
+                sink.emit(ClientEvent::Skills { skills }).await;
+            }
             ListingKindDto::Hooks => {
                 let hooks = self
                     .handle
@@ -623,7 +1067,10 @@ impl EngineCommandRouter {
                 self.emit_session_list(DEFAULT_SESSION_LIST_LIMIT, sink)
                     .await;
             }
-            ListingKindDto::Memory | ListingKindDto::Settings => {
+            ListingKindDto::Settings => {
+                self.emit_settings_snapshot(sink).await;
+            }
+            ListingKindDto::Memory => {
                 tracing::debug!(
                     ?kind,
                     "bridge-server: listing kind has no engine handle in the foundation"
@@ -965,6 +1412,51 @@ impl CommandRouter for EngineCommandRouter {
                 }
             }
 
+            // ── Settings ─────────────────────────────────────────────────────
+            ClientCommand::UpdateSettings {
+                destination,
+                patch_json,
+            } => {
+                self.apply_settings_patch(destination, &patch_json, &*sink)
+                    .await;
+            }
+
+            // ── Permissions (persisted) ─────────────────────────────────────
+            ClientCommand::UpdatePermissionRules {
+                destination,
+                behavior,
+                add,
+                remove,
+            } => {
+                self.apply_permission_rule_update(destination, behavior, add, remove, &*sink)
+                    .await;
+            }
+            ClientCommand::SetDefaultPermissionMode { destination, mode } => {
+                self.apply_default_permission_mode(destination, mode, &*sink)
+                    .await;
+            }
+            ClientCommand::UpdateWorkspaceDirectories {
+                destination,
+                add,
+                remove,
+            } => {
+                self.apply_workspace_directories_update(destination, add, remove, &*sink)
+                    .await;
+            }
+
+            // ── MCP servers (persisted) ──────────────────────────────────────
+            ClientCommand::UpsertMcpServer {
+                scope,
+                name,
+                config_json,
+            } => {
+                self.apply_mcp_upsert(scope, &name, &config_json, &*sink)
+                    .await;
+            }
+            ClientCommand::RemoveMcpServer { scope, name } => {
+                self.apply_mcp_remove(scope, &name, &*sink).await;
+            }
+
             // ── Auth ───────────────────────────────────────────────────────
             ClientCommand::Login => {
                 let state = match self.auth.login().await {
@@ -1285,6 +1777,43 @@ impl CommandRouter for EngineCommandRouter {
                 .await;
             }
 
+            // Durable turn recovery (`attach_turn` / `resume_turn` /
+            // `pause_turn`) is a MOBILE host capability: it needs the retained
+            // per-turn event log and the recovery state machine that
+            // `engine-mobile`'s host owns (`host.rs`'s `AttachTurn` /
+            // `ResumeTurn` / `PauseTurn` arms). This bridge keeps no retained
+            // event window and no `TurnRecoverySnapshotDto` state, so there is
+            // nothing here to attach to, resume, or pause.
+            //
+            // Each of the three is a REQUEST-REPLY command on the mobile host —
+            // the client sends it and waits for a `turn_recovery_state` (and,
+            // for `attach_turn`, a `turn_event_replay` burst). Dropping them in
+            // the catch-all below leaves such a client waiting forever for a
+            // reply that will never come, so answer with the same explicit
+            // typed rejection `ResumeWorkflow` uses. One arm per command so the
+            // message names the command the client actually sent.
+            ClientCommand::AttachTurn { .. } => {
+                sink.emit(ClientEvent::Error {
+                    kind: ErrorKindDto::Rejected,
+                    message: "attach_turn is unavailable on this bridge".to_string(),
+                })
+                .await;
+            }
+            ClientCommand::ResumeTurn { .. } => {
+                sink.emit(ClientEvent::Error {
+                    kind: ErrorKindDto::Rejected,
+                    message: "resume_turn is unavailable on this bridge".to_string(),
+                })
+                .await;
+            }
+            ClientCommand::PauseTurn { .. } => {
+                sink.emit(ClientEvent::Error {
+                    kind: ErrorKindDto::Rejected,
+                    message: "pause_turn is unavailable on this bridge".to_string(),
+                })
+                .await;
+            }
+
             // ── Handled elsewhere / not routed by this seam ──────────────────
             //
             // `SendPrompt` + `Cancel` are the turn path (`TurnDriver`), and
@@ -1364,4 +1893,140 @@ fn task_status_wire(status: TaskStatusDto) -> String {
         _ => "pending",
     }
     .to_string()
+}
+
+/// Decode a `ClientCommand::UpdateSettings.patch_json` wire string into the
+/// shallow `(key, Option<value>)` patch [`crate::settings_bridge::apply_patch`]
+/// expects. A JSON `null` value means "delete this key" (documented on the
+/// wire field); any other value means "set this key". Pulled out as a pure
+/// function — rather than left inline in [`EngineCommandRouter::apply_settings_patch`]
+/// — so the untrusted-input decoding step has its own unit tests independent
+/// of a router/sink/settings-context fixture.
+///
+/// # Errors
+/// `patch_json` is not valid JSON, or it parses to something other than a
+/// JSON object (a bare array/string/number/bool/null patch is rejected, not
+/// silently coerced).
+fn parse_settings_patch(
+    patch_json: &str,
+) -> Result<Vec<(String, Option<serde_json::Value>)>, String> {
+    match serde_json::from_str::<serde_json::Value>(patch_json) {
+        Ok(serde_json::Value::Object(map)) => Ok(map
+            .into_iter()
+            .map(|(k, v)| {
+                let v = if v.is_null() { None } else { Some(v) };
+                (k, v)
+            })
+            .collect()),
+        Ok(other) => Err(format!(
+            "settings patch must be a JSON object, got: {other}"
+        )),
+        Err(e) => Err(format!("settings patch is not valid JSON: {e}")),
+    }
+}
+
+#[cfg(test)]
+mod settings_patch_parsing_tests {
+    use super::parse_settings_patch;
+    use serde_json::json;
+
+    /// A `null` value in the wire patch means "delete this key" — it must be
+    /// decoded to `None`, never to a stored `Some(Value::Null)`. A regression
+    /// that kept the literal `Value::Null` would still satisfy "the key has
+    /// an entry" but would be silently wrong once applied (it would WRITE a
+    /// JSON `null`, not delete the key), so this asserts the exact `None`
+    /// shape, not just success.
+    #[test]
+    fn null_value_decodes_to_a_delete_not_a_stored_null() {
+        let patch = parse_settings_patch(r#"{"outputStyle": null}"#).unwrap();
+        assert_eq!(
+            patch,
+            vec![("outputStyle".to_string(), None)],
+            "a JSON null must decode to None (delete), not Some(Value::Null)"
+        );
+    }
+
+    /// A non-null value decodes to `Some(value)` (a set, not a delete) —
+    /// the companion case to the null test above, so the `is_null` branch is
+    /// exercised on both sides.
+    #[test]
+    fn non_null_value_decodes_to_a_set() {
+        let patch = parse_settings_patch(r#"{"outputStyle": "terse"}"#).unwrap();
+        assert_eq!(
+            patch,
+            vec![("outputStyle".to_string(), Some(json!("terse")))]
+        );
+    }
+
+    /// A JSON array is syntactically valid JSON but not an acceptable patch
+    /// shape (there are no keys to patch). It must be rejected, not coerced
+    /// or silently accepted as an empty/no-op patch.
+    #[test]
+    fn a_json_array_patch_is_rejected() {
+        let err = parse_settings_patch(r#"["outputStyle"]"#).unwrap_err();
+        assert!(
+            err.contains("object"),
+            "error must say the patch needs to be an object, got: {err}"
+        );
+    }
+
+    /// Syntactically broken JSON must be rejected with a message a client
+    /// can act on, not panic or silently produce an empty patch.
+    #[test]
+    fn invalid_json_is_rejected() {
+        let err = parse_settings_patch("{ not json").unwrap_err();
+        assert!(
+            err.contains("JSON"),
+            "error must say the patch is not valid JSON, got: {err}"
+        );
+    }
+}
+
+/// Decode a `ClientCommand::UpsertMcpServer.config_json` wire string into the
+/// `serde_json::Value` [`crate::mcp_bridge::upsert_server`] expects. Mirrors
+/// [`parse_settings_patch`]'s object-shape validation: `config_json` must be
+/// a JSON object (a `.mcp.json` entry is always `{command: ...}` or
+/// `{url: ...}` shaped — never a bare string/array/number).
+///
+/// # Errors
+/// `config_json` is not valid JSON, or it parses to something other than a
+/// JSON object.
+fn parse_mcp_config_json(config_json: &str) -> Result<serde_json::Value, String> {
+    match serde_json::from_str::<serde_json::Value>(config_json) {
+        Ok(value @ serde_json::Value::Object(_)) => Ok(value),
+        Ok(other) => Err(format!(
+            "MCP server config must be a JSON object, got: {other}"
+        )),
+        Err(e) => Err(format!("MCP server config is not valid JSON: {e}")),
+    }
+}
+
+#[cfg(test)]
+mod mcp_config_json_parsing_tests {
+    use super::parse_mcp_config_json;
+    use serde_json::json;
+
+    #[test]
+    fn a_json_object_decodes_to_itself() {
+        let value = parse_mcp_config_json(r#"{"command": "npx"}"#).unwrap();
+        assert_eq!(value, json!({ "command": "npx" }));
+    }
+
+    #[test]
+    fn a_non_object_is_rejected() {
+        let err = parse_mcp_config_json(r#"["npx"]"#).unwrap_err();
+        assert!(
+            err.contains("object"),
+            "error must say the config needs to be an object, got: {err}"
+        );
+    }
+
+    #[test]
+    fn invalid_json_is_rejected() {
+        let err = parse_mcp_config_json("{ not json").unwrap_err();
+        assert!(
+            err.contains("JSON"),
+            "error must say the config is not valid JSON, got: {err}"
+        );
+    }
 }

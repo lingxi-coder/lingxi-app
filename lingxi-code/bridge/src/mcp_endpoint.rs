@@ -32,6 +32,37 @@ pub const WS_SUBPROTOCOL: &str = "mcp";
 /// pinned by [`mcp_endpoint_test.rs`].
 const UNAUTHORIZED_BODY: &str = "unauthorized\n";
 
+/// Largest single inbound WebSocket frame this endpoint will read.
+///
+/// DECLARED, not inherited. tungstenite's `WebSocketConfig::default()` already
+/// caps a frame at 16 MiB, but that is a dependency's number: nothing here
+/// stated it, a version bump could move it, and a client choosing its own
+/// payload bounds had nothing on this side to read. It chose 24 MiB, which sat
+/// above the real limit, and the consequence of the gap was not a rejected
+/// command — an over-length frame makes the read yield
+/// `Err(Capacity(MessageTooLong))`, which ends [`run_frame_pump`] and runs
+/// `on_close_with_sink`, so `BridgeConnection::close_connection` aborts the
+/// active turn and drains every broker. The user loses the session.
+///
+/// `MAX_BRIDGE_FRAME_BYTES` in `clients/shared/src/protocol.ts` is this number
+/// on the client side, and `clients/electron/test/audio-engine-bounds.test.ts`
+/// reads THIS declaration to prove the two still agree — which is only possible
+/// because the value is written here rather than left to a default.
+const MAX_INBOUND_FRAME_BYTES: usize = 16 * 1024 * 1024;
+
+/// The WebSocket configuration every accepted connection is given.
+///
+/// `max_message_size` is pinned to the same value on purpose: nothing in this
+/// protocol fragments a command across frames, so a message larger than one
+/// frame is not something a well-formed client produces.
+fn websocket_config() -> tokio_tungstenite::tungstenite::protocol::WebSocketConfig {
+    tokio_tungstenite::tungstenite::protocol::WebSocketConfig {
+        max_frame_size: Some(MAX_INBOUND_FRAME_BYTES),
+        max_message_size: Some(MAX_INBOUND_FRAME_BYTES),
+        ..Default::default()
+    }
+}
+
 /// A connection-scoped outbound sink the [`FramePump`] uses to push [`Frame`]s
 /// back to the client — both the synchronous reply to an inbound command AND
 /// later UNSOLICITED server pushes (streamed turn events, permission requests).
@@ -263,7 +294,7 @@ async fn handle_connection(
         Ok(response)
     };
 
-    match tokio_tungstenite::accept_hdr_async(stream, cb).await {
+    match tokio_tungstenite::accept_hdr_async_with_config(stream, cb, Some(websocket_config())).await {
         Ok(ws) => {
             tracing::debug!(?addr, "bridge: client connected");
             match pump {
@@ -373,6 +404,17 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn websocket_config_declares_the_inbound_frame_limit() {
+        // The constant is only worth pinning from the TypeScript side if the
+        // endpoint actually runs with it; a decorative constant next to an
+        // `accept_hdr_async` with no config would pass that pin and still
+        // read whatever tungstenite defaults to.
+        let config = websocket_config();
+        assert_eq!(config.max_frame_size, Some(MAX_INBOUND_FRAME_BYTES));
+        assert_eq!(config.max_message_size, Some(MAX_INBOUND_FRAME_BYTES));
+    }
 
     #[test]
     fn constant_time_eq_matches_eq() {

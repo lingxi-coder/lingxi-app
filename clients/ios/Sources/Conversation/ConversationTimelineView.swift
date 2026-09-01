@@ -199,6 +199,9 @@ struct ConversationTimelineView: View {
 
 private struct ConversationThoughtRow: View {
     @Environment(\.theme) private var t
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @FocusState private var isFocused: Bool
+    @State private var isHovering = false
 
     let id: String
     let text: String
@@ -216,9 +219,14 @@ private struct ConversationThoughtRow: View {
                         Text(thoughtLabel)
                             .font(.system(size: 12.5, weight: .medium))
                             .foregroundStyle(t.text2)
+                            .runtimeTextSweep(isActive: isRunning, highlightColor: t.text)
                         Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
                             .font(.system(size: 9, weight: .semibold))
                             .foregroundStyle(t.text4)
+                            .timelineChevron(
+                                isHighlighted: isFocused || isHovering,
+                                reduceMotion: reduceMotion
+                            )
                     }
                     if !isExpanded, let preview = firstLine, !preview.isEmpty {
                         Text(preview)
@@ -241,6 +249,8 @@ private struct ConversationThoughtRow: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .focused($isFocused)
+        .onHover { isHovering = $0 }
         .accessibilityLabel(thoughtLabel)
         .accessibilityValue(isExpanded
             ? String(localized: "chat_agent_details_collapse")
@@ -261,6 +271,9 @@ private struct ConversationThoughtRow: View {
 
 private struct ConversationToolBatchRow: View {
     @Environment(\.theme) private var t
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @FocusState private var isFocused: Bool
+    @State private var isHovering = false
 
     let id: String
     let tools: [ConversationToolTrace]
@@ -274,13 +287,16 @@ private struct ConversationToolBatchRow: View {
             Button(action: onToggleBatch) {
                 HStack(spacing: 8) {
                     LXIcon(name: batchIcon, size: 14, color: t.text3, stroke: 1.6)
-                    Text(String(localized: "chat_tool_batch_count \(tools.count)"))
-                        .font(.system(size: 12.5, weight: .medium))
-                        .foregroundStyle(t.text2)
-                    Text(summary)
-                        .font(.system(size: 11.5))
-                        .foregroundStyle(t.text4)
-                        .lineLimit(1)
+                    HStack(spacing: 8) {
+                        Text(String(localized: "chat_tool_batch_count \(tools.count)"))
+                            .font(.system(size: 12.5, weight: .medium))
+                            .foregroundStyle(t.text2)
+                        Text(summary)
+                            .font(.system(size: 11.5))
+                            .foregroundStyle(t.text4)
+                            .lineLimit(1)
+                    }
+                    .runtimeTextSweep(isActive: containsRunningTool, highlightColor: t.accent)
                     if let terminalStatus {
                         Text(terminalStatus.label)
                             .font(.system(size: 10.5, weight: .medium))
@@ -290,12 +306,18 @@ private struct ConversationToolBatchRow: View {
                     Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
                         .font(.system(size: 9, weight: .semibold))
                         .foregroundStyle(t.text4)
+                        .timelineChevron(
+                            isHighlighted: isFocused || isHovering,
+                            reduceMotion: reduceMotion
+                        )
                 }
                 .padding(.horizontal, 10)
                 .padding(.vertical, 7)
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
+            .focused($isFocused)
+            .onHover { isHovering = $0 }
             .accessibilityLabel(String(localized: "chat_tool_batch_count \(tools.count)"))
             .accessibilityValue(isExpanded
                 ? String(localized: "chat_agent_details_collapse")
@@ -327,6 +349,10 @@ private struct ConversationToolBatchRow: View {
         return nil
     }
 
+    private var containsRunningTool: Bool {
+        tools.contains(where: { $0.status == .running })
+    }
+
     private var batchIcon: LXIconName {
         guard let first = tools.first.map({ ToolDisplayText.icon(header: $0.header, tool: $0.tool) }) else {
             return .workflow
@@ -335,6 +361,32 @@ private struct ConversationToolBatchRow: View {
             ToolDisplayText.icon(header: $0.header, tool: $0.tool).rawValue == first.rawValue
         }
         return isUniform ? first : .workflow
+    }
+}
+
+/// The disclosure mark is an always-present touch affordance. Pointer hover
+/// and keyboard focus only increase its emphasis; they must not be the only
+/// way the mark becomes visible on iPhone.
+enum ConversationTimelineChevronPresentation {
+    static let restingOpacity = 0.72
+    static let highlightedOpacity = 1.0
+    static let restingScale: CGFloat = 0.92
+    static let highlightedScale: CGFloat = 1.0
+
+    static func opacity(isHighlighted: Bool) -> Double {
+        isHighlighted ? highlightedOpacity : restingOpacity
+    }
+
+    static func scale(isHighlighted: Bool) -> CGFloat {
+        isHighlighted ? highlightedScale : restingScale
+    }
+}
+
+private extension View {
+    func timelineChevron(isHighlighted: Bool, reduceMotion: Bool) -> some View {
+        opacity(ConversationTimelineChevronPresentation.opacity(isHighlighted: isHighlighted))
+            .scaleEffect(ConversationTimelineChevronPresentation.scale(isHighlighted: isHighlighted))
+            .animation(reduceMotion ? nil : .easeOut(duration: 0.16), value: isHighlighted)
     }
 }
 

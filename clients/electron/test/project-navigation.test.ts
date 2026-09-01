@@ -302,7 +302,16 @@ test('setup stays out of the transcript while project and provider controls rema
   assert.doesNotMatch(readFileSync(join(process.cwd(), 'src/preload/index.ts'), 'utf8'), /lingxi:trust:set|setWorkspaceTrusted/);
   assert.doesNotMatch(readFileSync(join(process.cwd(), 'src/main/host.ts'), 'utf8'), /CH_TRUST_SET|lingxi:trust:set/);
   assert.match(desktopSource, /aria-label="Add project"/);
-  assert.match(desktopSource, /<SettingsSection title="Providers">/);
+  // Provider controls moved out of `BetaDesktop.tsx`'s old settings modal
+  // (retired in Task 20, cutting `<SettingsSection title="Providers">` from
+  // this file entirely) into `ProviderCredentials.tsx`, reached through
+  // `SettingsScreen`. The regression this test guards against — provider
+  // controls disappearing along with `SetupCard` — is checked at their
+  // current address instead of their old one.
+  assert.match(
+    readFileSync(join(process.cwd(), 'src/renderer/components/settings/pages/ProviderCredentials.tsx'), 'utf8'),
+    /<Card title="Provider">/,
+  );
 });
 
 test('session interaction prompts are scoped to the main panel instead of covering global navigation', () => {

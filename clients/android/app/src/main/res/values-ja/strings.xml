@@ -459,6 +459,7 @@
     <string name="composer_placeholder">灵犀に質問する…</string>
     <string name="composer_add_attachment">添付を追加</string>
     <string name="composer_stopping">停止中</string>
+    <string name="composer_discard_recovery">復旧待ちのターンを破棄</string>
     <string name="composer_stop">停止</string>
     <string name="composer_stop_recording">通常録音を終了</string>
     <string name="composer_record">通常録音</string>
@@ -1057,6 +1058,16 @@
     <string name="chat_background_service_channel_description">実行中の会話をバックグラウンドで継続します</string>
     <string name="chat_background_service_title">灵犀が処理中です</string>
     <string name="chat_background_service_text">会話はバックグラウンドで続行中です</string>
+    <string name="chat_background_result_channel">会話の結果</string>
+    <string name="chat_background_result_channel_description">会話の完了または対応が必要なときに通知します</string>
+    <string name="chat_background_completed_title">灵犀が完了しました</string>
+    <string name="chat_background_completed_text">バックグラウンドの会話が完了しました。タップして確認できます。</string>
+    <string name="chat_background_failed_title">会話の処理に失敗しました</string>
+    <string name="chat_background_failed_text">タップして会話に戻り、再試行してください。</string>
+    <string name="chat_background_waiting_title">灵犀が入力を待っています</string>
+    <string name="chat_background_waiting_text">続行するには入力が必要です。</string>
+    <string name="chat_background_paused_title">会話を安全に一時停止しました</string>
+    <string name="chat_background_paused_text">バックグラウンド時間が終了しました。会話を開くと安全に再開できます。</string>
     <string name="chat_run_accessibility_label">Agent の実行状況、%1$s</string>
     <string name="chat_run_active_collaborators">%1$d 人の協力者</string>
     <string name="chat_run_tool_executing">ツール実行中</string>
@@ -1804,4 +1815,21 @@
     <string name="local_apps_error_mcp_authoring_required">まだ意味のある MCP ツールが生成されていません。アプリの目的をさらに絞り込んでください。</string>
     <string name="local_apps_error_repair_budget_exhausted">アプリが検証を通過する前に修復予算を使い切りました。</string>
     <string name="local_apps_error_exposure_capacity_reached">ローカルアプリ MCP の公開スロットがすべて固定されています。1 つ解除してから再試行してください。</string>
+    <string name="chat_discarding">破棄しています…</string>
+    <string name="chat_error_discard_background_failed">バックグラウンドの会話を破棄できませんでした: %1$s</string>
+    <string name="chat_error_background_resume_failed">バックグラウンドの会話を再開できませんでした: %1$s</string>
+    <string name="chat_error_discard_unconfirmed">破棄が確認されませんでした。この会話のロックを解除しました。</string>
+    <string name="chat_error_finish_background_turn_first">先にバックグラウンドの会話を再開するか破棄してください。</string>
+    <string name="chat_error_open_conversation_failed">通知からこの会話を開けませんでした。セッション一覧から選んでください。</string>
+    <string name="composer_discard_background_turn">バックグラウンドの会話を破棄</string>
+    <string name="chat_live_activity_status_running">実行中</string>
+    <string name="chat_live_activity_status_waiting">あなたを待っています</string>
+    <string name="chat_live_activity_status_paused">安全に一時停止中</string>
+    <string name="chat_live_activity_status_completed">完了</string>
+    <string name="chat_live_activity_status_failed">対応が必要</string>
+    <string name="chat_live_activity_short_running">実行</string>
+    <string name="chat_live_activity_short_waiting">待機</string>
+    <string name="chat_live_activity_short_paused">一時停止</string>
+    <string name="chat_live_activity_short_completed">完了</string>
+    <string name="chat_live_activity_short_failed">失敗</string>
 </resources>

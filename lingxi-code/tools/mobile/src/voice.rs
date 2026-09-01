@@ -1,7 +1,23 @@
-//! `tool-voice` (M8-P11) — the mobile-exclusive `voice` tool.
+//! `tool-voice` (M8-P11) — the `voice` tool (raw microphone capture).
 //!
-//! Routes to `ctx.voice` (`Arc<dyn VoiceRecorder>`). `None` on desktop; mobile
-//! composition roots wire a native Swift / Kotlin impl via `UniFFI` (P12).
+//! Routes to `ctx.voice` (`Arc<dyn VoiceRecorder>`).
+//!
+//! ## Who wires that capability, and what it is
+//!
+//! - **Mobile** (`engine-mobile`) injects `platform.voice()`: a native Swift /
+//!   Kotlin recorder called in-process over `UniFFI` (P12).
+//! - **Desktop** (`engine-desktop`, from `bridge_server::boot::assemble`)
+//!   injects a `bridge_server::audio_bridge::AudioBridge`. There is no native
+//!   desktop recorder — the microphone belongs to the Electron renderer — so
+//!   `start_recording` / `stop_recording` / `is_recording` each become one
+//!   `AudioRequest` event pushed at the connected client and parked until that
+//!   client's `AudioResponse` comes back. The desktop's non-bridge roots
+//!   (CLI / TUI) still wire nothing.
+//!
+//! The capability may therefore be `None`. `tool_mobile::register_audio` (the
+//! desktop's entry point) will not register this tool in that case; where it IS
+//! registered without one (mobile's unconditional `register_all`), `call`
+//! reports "microphone not available on this platform".
 
 use async_trait::async_trait;
 use once_cell::sync::Lazy;

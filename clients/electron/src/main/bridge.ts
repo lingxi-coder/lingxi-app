@@ -255,6 +255,51 @@ const TRANSCRIPT_REPLAY_BASE_EVENTS = new Set<ClientEvent['type']>([
   'session_resumed',
 ]);
 
+/**
+ * Engine events that must be answered EXACTLY ONCE, and therefore go to a
+ * single renderer rather than to every registered one.
+ *
+ * `audio_request` is not a notification. `audio_bridge.rs` parks the engine
+ * call waiting for one `audio_response` (5s / 30s / 180s per op). Broadcast to
+ * N windows, each renderer would service it independently: N calls to
+ * `getUserMedia`, N real recordings, N answers. The engine drops all but the
+ * first, so the WIRE looks correct and nothing reports a problem — but the
+ * DEVICE is wrong, and the user sees two recording indicators.
+ *
+ * Only one `BrowserWindow` exists today (`main/index.ts`), which is precisely
+ * why this is enforced structurally instead of noted in a comment: whoever
+ * adds a second window will not be looking for this, and the symptom would
+ * appear at the microphone rather than in any test or log. Any future
+ * engine->client request that expects a single reply belongs in this set.
+ */
+const SINGLE_RESPONDER_EVENTS = new Set<ClientEvent['type']>(['audio_request']);
+
+/**
+ * How many single-responder requests may be tracked at once. Real use has one
+ * or two in flight; past this the request is still delivered but no longer
+ * tracked, which is exactly the behaviour before tracking existed - a bound
+ * that degrades rather than one that starts refusing real work.
+ */
+const MAX_OUTSTANDING_RESPONDER_REQUESTS = 32;
+
+/**
+ * What the engine is told when a single-responder request arrives with no
+ * window that could service it.
+ *
+ * Distinct from `reassignResponderRequests`' message on purpose: that one names
+ * a window that WAS asked and then closed, this one names a request that never
+ * reached a renderer at all. Both are answered from main rather than dropped,
+ * for the same reason — see `broadcastClientEvent`.
+ */
+const NO_RESPONDER_WINDOW_MESSAGE =
+  'no desktop window is open to perform this audio operation';
+
+/** The correlation id of a single-responder event, or `null` if it carries none. */
+function singleResponderRequestId(event: ClientEvent): number | null {
+  const requestId = (event as { request_id?: unknown }).request_id;
+  return Number.isSafeInteger(requestId) && (requestId as number) >= 0 ? requestId as number : null;
+}
+
 const TRANSCRIPT_REPLAY_EVENTS = new Set<ClientEvent['type']>([
   'turn_started',
   'turn_ended',
@@ -335,6 +380,20 @@ export class SessionRuntime {
   private eventSequence = 0;
   private replayEvents: SequencedRuntimeEventEnvelope<ClientEvent>[] = [];
   private readonly targets = new Map<WebContents, Set<string>>();
+  /**
+   * Single-responder requests the engine is currently parked on, and the
+   * window each was handed to.
+   *
+   * Main has to carry this because electing one responder removed the
+   * accidental redundancy broadcasting used to provide: a permission request
+   * reaches every window, so another can answer it, but an audio request has
+   * exactly one addressee and no second chance. If that window dies while the
+   * engine waits, only main knows enough to reroute or to fail the call - the
+   * dead renderer cannot, and the engine has no idea a window ever existed.
+   * The event itself is kept, not just the id, because rerouting means asking
+   * the same question again.
+   */
+  private readonly outstandingResponderRequests = new Map<number, { event: ClientEvent; responder: WebContents }>();
   private readonly diagnostics: DiagnosticBuffer;
   private startPromise: Promise<void> | null = null;
 
@@ -417,7 +476,49 @@ export class SessionRuntime {
     webContents.send(CH_EVENT, this.opts.envelopeEvents ? envelope : event);
   }
 
+  /**
+   * The one renderer that answers single-responder requests: the
+   * first-registered live window. Deterministic (a `Map` preserves insertion
+   * order) and self-healing — destroyed windows are dropped as they are
+   * encountered, the same bookkeeping `broadcast` does.
+   */
+  private responderTarget(): WebContents | null {
+    for (const webContents of this.targets.keys()) {
+      if (webContents.isDestroyed()) this.targets.delete(webContents);
+      else return webContents;
+    }
+    return null;
+  }
+
   private broadcastClientEvent(event: ClientEvent): void {
+    if (SINGLE_RESPONDER_EVENTS.has(event.type)) {
+      // Sent to one window, or to none — never to several. See
+      // SINGLE_RESPONDER_EVENTS. `sendClientEvent` handles both the
+      // enveloped and bare wire shapes, so this needs no second branch.
+      const requestId = singleResponderRequestId(event);
+      const responder = this.responderTarget();
+      if (!responder) {
+        // Nobody can service it, and — unlike the post-dispatch case
+        // `reassignResponderRequests` handles — there is nothing recorded for a
+        // later reopen to rescue either. The engine parked the moment the sink
+        // accepted this event (`FrameAudioSink::emit_request` reports success
+        // while main's socket is up, which it is: `main/index.ts` keeps the app
+        // and the bridge alive on macOS when the last window closes), so
+        // returning silently costs it the full deadline and a failure with
+        // nothing to explain it. Answer from here instead, for the same reason
+        // `reassignResponderRequests` does.
+        if (requestId !== null) this.failResponderRequest(requestId, NO_RESPONDER_WINDOW_MESSAGE);
+        return;
+      }
+      this.sendClientEvent(responder, event, false);
+      if (requestId === null) return;
+      if (this.outstandingResponderRequests.size >= MAX_OUTSTANDING_RESPONDER_REQUESTS) {
+        this.diagnostics.add('warn', 'host', 'too many outstanding audio requests to track');
+        return;
+      }
+      this.outstandingResponderRequests.set(requestId, { event, responder });
+      return;
+    }
     const envelope = this.eventEnvelope(event, true);
     if (!this.opts.envelopeEvents) {
       this.broadcast(CH_EVENT, event);
@@ -441,7 +542,55 @@ export class SessionRuntime {
   }
 
   unregisterWindow(webContents: WebContents): void {
+    // Drop the target FIRST, so `responderTarget()` below cannot hand the
+    // request back to the window that is going away.
     this.targets.delete(webContents);
+    this.reassignResponderRequests(webContents);
+  }
+
+  /**
+   * Rescues every request the lost window was going to answer: hands it to
+   * another live window if there is one, and otherwise answers the engine
+   * from here.
+   *
+   * Answering from main is not a nicety. `main/index.ts` keeps the app alive
+   * on macOS when the last window closes, so "start a recording, close the
+   * window" leaves the engine parked with no renderer in existence that could
+   * ever reply. Without this it waits out its whole deadline and fails with
+   * nothing to explain it; with it the failure is immediate and says what
+   * happened.
+   */
+  private reassignResponderRequests(lost: WebContents): void {
+    for (const [requestId, pending] of [...this.outstandingResponderRequests]) {
+      if (pending.responder !== lost) continue;
+      this.outstandingResponderRequests.delete(requestId);
+      const next = this.responderTarget();
+      if (next) {
+        this.outstandingResponderRequests.set(requestId, { event: pending.event, responder: next });
+        this.sendClientEvent(next, pending.event, false);
+        continue;
+      }
+      this.failResponderRequest(
+        requestId,
+        'the desktop window that was asked to perform this audio operation closed before it could answer',
+      );
+    }
+  }
+
+  /** Answers a parked engine request from main, because no renderer can. */
+  private failResponderRequest(requestId: number, message: string): void {
+    const command: ClientCommand = {
+      type: 'audio_response',
+      request_id: requestId,
+      result: { type: 'failed', kind: 'unavailable', message },
+    };
+    try {
+      this.client?.sendCommand(command);
+    } catch (error) {
+      // The transport may already be gone, in which case the engine's own
+      // drain will fail the call. Never let this throw out of window teardown.
+      this.diagnostics.add('warn', 'host', error);
+    }
   }
 
   private clearPendingAskUserQuestion(requestId: number): void {
@@ -449,6 +598,24 @@ export class SessionRuntime {
     this.pendingAskUserQuestionIds.delete(requestId);
   }
 
+  /**
+   * Forgets the interactions the engine itself drops when a turn ends.
+   *
+   * `outstandingResponderRequests` is deliberately NOT among them. The engine
+   * drains parked audio requests from `BridgeConnection::close_connection`
+   * only — `AudioResponder::drain()` has no other call site, `TurnInteractions`
+   * carries the permission gate, the computer-access broker, the
+   * AskUserQuestion broker and the tool-name map but no audio responder, and
+   * server.rs says so in as many words: "Audio requests are drained on
+   * DISCONNECT only, never at end-of-turn". `cancel_active_turn` sets a
+   * cooperative token rather than aborting the tool future, and neither
+   * `speech` nor `voice` overrides `Tool::interrupt_behavior`, whose default
+   * `Block` keeps the parked call alive across a Stop. So an audio request is
+   * still parked after this runs, and dropping the tracking here would disarm
+   * the window-close rescue for exactly the case it was written for. The
+   * matching clear lives in `stopBridge`, which is where the disconnect — and
+   * therefore the engine's own drain — actually happens.
+   */
   private clearTurnInteractions(): void {
     this.pendingPermissionIds.clear();
     this.pendingComputerAccessIds.clear();
@@ -479,10 +646,14 @@ export class SessionRuntime {
     return this.startPromise;
   }
 
-  restart(): Promise<void> {
+  restart(beforeRestart?: () => void): Promise<void> {
     if (this.opts.registerIpc !== false) this.registerIpc();
     this.restartChain = this.restartChain.catch(() => undefined).then(async () => {
-      if (this.disposed) return;
+      if (this.disposed) throw new Error('session runtime is no longer open');
+      // This runs after any earlier queued lifecycle work and immediately
+      // before stopping the child. Callers can re-check ownership/work here
+      // to close the queueing race between IPC validation and restart.
+      beforeRestart?.();
       this.setState({ status: 'restarting' });
       try {
         await this.stopBridge();
@@ -1064,6 +1235,12 @@ export class SessionRuntime {
         throw new Error('Bypass Permissions mode was not accepted');
       }
     }
+    if (validated.type === 'audio_response') {
+      // The renderer answered; nothing left for a window closure to rescue.
+      // Forgetting BEFORE the forward matters: a failure invented afterwards
+      // would race a real reply the engine has already accepted.
+      this.outstandingResponderRequests.delete(validated.request_id);
+    }
     this.requireClient().sendCommand(validated);
   }
 
@@ -1181,6 +1358,12 @@ export class SessionRuntime {
     ++this.generation;
     this.rejectPendingSessionResume(new Error('session resume was interrupted'));
     this.clearTurnInteractions();
+    // Losing the connection IS the engine's own drain: `close_connection`
+    // drops every parked audio sender, so each in-flight call has already
+    // failed and a window closing later must not answer one nobody is waiting
+    // on. This is the only place that premise holds — see
+    // `clearTurnInteractions`.
+    this.outstandingResponderRequests.clear();
     for (const pending of this.pendingCredentialOperations.values()) {
       clearTimeout(pending.timer);
       pending.reject(new Error('bridge credential operation was interrupted'));
@@ -1436,17 +1619,22 @@ export class SessionRuntimeManager {
     return { ...ref };
   }
 
-  async restart(ref: SessionRef): Promise<void> {
+  async restart(ref: SessionRef, beforeRestart?: () => void): Promise<void> {
     const runtime = this.require(ref);
-    await runtime.restart();
+    await runtime.restart(beforeRestart);
     await runtime.restoreOwnedSessionIfNeeded();
   }
 
   async closeSession(ref: SessionRef): Promise<void> {
     const runtime = this.require(ref);
-    await runtime.dispose();
+    // Remove from the routable map BEFORE the first await, for the same reason
+    // `closeProject` does: while `dispose()` is in flight `get()` would still
+    // hand this runtime out, and `restart()` now rejects on a disposed runtime
+    // instead of resolving silently — surfacing a failure for a settings or
+    // credential write that actually succeeded.
     this.runtimes.delete(ref.sessionId);
     this.clearDraftSession(ref);
+    await runtime.dispose();
   }
 
   async closeProject(projectPath: string): Promise<void> {

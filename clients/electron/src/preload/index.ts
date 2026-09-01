@@ -1,7 +1,6 @@
 import { contextBridge, ipcRenderer, type IpcRendererEvent } from 'electron';
 import type {
   AskUserQuestionRequestDto,
-  ClientCommand,
   ClientEvent,
   ComputerAccessRequestDto,
   ComputerAccessResponseDto,
@@ -11,6 +10,17 @@ import type {
   SessionRowDto,
 } from '@lingxi/bridge-client';
 import { createRuntimeEventReplayBuffer, type SequencedRuntimeEventEnvelope } from './event-replay.js';
+import type { AllowedClientCommand } from '../shared/clientCommands.js';
+import type { PublicSettings, SessionPinInput, SessionRef } from '../shared/settings.js';
+import type { MicrophonePermissionStatus } from '../shared/microphoneAccess.js';
+
+export type { AllowedClientCommand } from '../shared/clientCommands.js';
+export type {
+  PinnedSessionRecord,
+  PublicSettings,
+  SessionPinInput,
+  SessionRef,
+} from '../shared/settings.js';
 
 const CH_SEND_PROMPT = 'lingxi:sendPrompt';
 const CH_APPROVE = 'lingxi:approve';
@@ -28,6 +38,7 @@ const CH_PERMISSION = 'lingxi:permission';
 const CH_COMPUTER_ACCESS = 'lingxi:computerAccess';
 const CH_STATE_CHANGED = 'lingxi:connectionStateChanged';
 const CH_OPEN_SYSTEM_SETTINGS = 'lingxi:openSystemSettings';
+const CH_MICROPHONE_ACCESS_GET = 'lingxi:microphone-access:get';
 const CH_BOOTSTRAP = 'lingxi:bootstrap';
 const CH_SETTINGS_GET = 'lingxi:settings:get';
 const CH_SETTINGS_UPDATE = 'lingxi:settings:update';
@@ -57,27 +68,6 @@ export type ConnectionState =
   | { status: 'disconnected'; reason?: string }
   | { status: 'error'; message: string };
 
-export type AllowedClientCommand = Extract<ClientCommand, {
-  type: 'set_model' | 'list_models' | 'new_session' | 'resume_session' | 'list_sessions' |
-    'task_list' | 'task_output' | 'task_stop' | 'set_permission_mode' | 'run_slash_command';
-}> | { type: 'refresh_listings'; which: Array<{ type: 'status' | 'doctor' | 'slash_commands' }> };
-
-export interface PublicSettings {
-  version: 1;
-  theme?: 'dark' | 'light';
-  model?: string;
-  apiBaseUrl?: string;
-  activeProject?: string;
-  activeSession?: SessionRef;
-  projects: string[];
-  pinnedSessions: PinnedSessionRecord[];
-}
-
-export interface SessionRef {
-  projectPath: string;
-  sessionId: string;
-}
-
 export interface RuntimeEventEnvelope<T = unknown> {
   sessionId: string;
   event: T;
@@ -96,14 +86,6 @@ export interface ProjectSessionCatalogState {
   sessions: SessionRowDto[];
   error?: string;
 }
-
-export interface PinnedSessionRecord {
-  projectPath: string;
-  sessionId: string;
-  title: string;
-  pinnedAt: string;
-}
-export type SessionPinInput = Omit<PinnedSessionRecord, 'pinnedAt'>;
 
 export interface WorkspaceMetadata {
   path?: string;
@@ -138,15 +120,15 @@ export interface WorkspaceFileSearchResult { files: string[]; truncated: boolean
 
 export type Unsubscribe = () => void;
 
-/** The two macOS System Settings deep links the computer-access TCC panel opens. */
-export type SystemSettingsPane = 'accessibility' | 'screen_recording';
+/** The macOS System Settings deep links this app opens: the computer-access TCC panel's two panes, plus the voice settings page's `microphone` row. */
+export type SystemSettingsPane = 'accessibility' | 'screen_recording' | 'microphone';
 
 export interface LingxiApi {
   platform: NodeJS.Platform;
   isElectron: true;
   bootstrap(): Promise<BootstrapState>;
   settings(): Promise<PublicSettings>;
-  updateSettings(patch: { theme?: 'dark' | 'light'; model?: string | null; apiBaseUrl?: string | null }): Promise<PublicSettings>;
+  updateSettings(patch: { theme?: 'dark' | 'light' | 'system'; model?: string | null; apiBaseUrl?: string | null; voice?: unknown }): Promise<PublicSettings>;
   pickWorkspace(): Promise<WorkspaceMetadata | null>;
   setWorkspace(path: string): Promise<WorkspaceMetadata>;
   removeProject(path: string): Promise<BootstrapState>;
@@ -171,6 +153,14 @@ export interface LingxiApi {
   answerAskUserQuestion(sessionId: string, requestId: number, answers: Record<string, string>): Promise<void>;
   cancelAskUserQuestion(sessionId: string, requestId: number): Promise<void>;
   openSystemSettings(pane: SystemSettingsPane): Promise<void>;
+  /**
+   * The OS microphone grant, read in the main process
+   * (`systemPreferences.getMediaAccessStatus`). The renderer has no
+   * equivalent: `navigator.permissions.query({name:'microphone'})` reports
+   * the page permission this app grants itself, which can say `granted`
+   * while macOS denies the device — see `shared/microphoneAccess.ts`.
+   */
+  microphoneAccess(): Promise<MicrophonePermissionStatus>;
   cancel(sessionId: string, turnId?: number): Promise<void>;
   /** Only the bounded Desktop model/session/task/slash surface is accepted by the main process. */
   command(sessionId: string, command: AllowedClientCommand): Promise<void>;
@@ -232,6 +222,7 @@ const api: LingxiApi = {
   answerAskUserQuestion: (sessionId, requestId, answers) => ipcRenderer.invoke(CH_ANSWER_ASK_USER_QUESTION, sessionId, requestId, answers) as Promise<void>,
   cancelAskUserQuestion: (sessionId, requestId) => ipcRenderer.invoke(CH_CANCEL_ASK_USER_QUESTION, sessionId, requestId) as Promise<void>,
   openSystemSettings: (pane) => ipcRenderer.invoke(CH_OPEN_SYSTEM_SETTINGS, pane) as Promise<void>,
+  microphoneAccess: () => ipcRenderer.invoke(CH_MICROPHONE_ACCESS_GET) as Promise<MicrophonePermissionStatus>,
   cancel: (sessionId, turnId) => ipcRenderer.invoke(CH_CANCEL, sessionId, turnId) as Promise<void>,
   command: (sessionId, command) => ipcRenderer.invoke(CH_COMMAND, sessionId, command) as Promise<void>,
   connectionState: (sessionId) => ipcRenderer.invoke(CH_CONNECTION_STATE, sessionId) as Promise<ConnectionState>,

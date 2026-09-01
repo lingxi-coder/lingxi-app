@@ -4,6 +4,7 @@ import { writeFileSync } from 'node:fs';
 
 import type { AskUserQuestionRequestDto, SessionRowDto } from '@lingxi/bridge-client';
 import type {
+  BridgeRuntimeVersions,
   ConnectionState,
   RuntimeEventEnvelope,
   SessionRef,
@@ -22,6 +23,7 @@ import {
   type PublicSettings,
 } from './host-utils.js';
 import { validateClipboardText } from './validation.js';
+import { readMicrophoneAccess, type MediaAccessReader } from './microphoneAccess.js';
 import { PROVIDER_IDS, providerById } from '../shared/providers.js';
 import type { SettingsStore } from './settings.js';
 
@@ -53,19 +55,23 @@ export const CH_DIAGNOSTICS_COPY = 'lingxi:diagnostics:copy';
 export const CH_DIAGNOSTICS_EXPORT = 'lingxi:diagnostics:export';
 export const CH_CLIPBOARD_WRITE_TEXT = 'lingxi:clipboard:writeText';
 export const CH_OPEN_SYSTEM_SETTINGS = 'lingxi:openSystemSettings';
+export const CH_MICROPHONE_ACCESS_GET = 'lingxi:microphone-access:get';
 export const CH_PROJECT_SESSIONS_LIST = 'lingxi:project-sessions:list';
 export const CH_SESSION_NEW = 'lingxi:session:new';
 export const CH_SESSION_OPEN = 'lingxi:session:open';
 
 /**
- * The only two macOS System Settings deep links the `computer` tool's TCC
- * panel ever opens (Accessibility / Screen Recording). A fixed allowlist, not
- * a renderer-supplied URL — `shell.openExternal` must never be handed an
- * arbitrary string from the renderer.
+ * The macOS System Settings deep links this app ever opens: the `computer`
+ * tool's TCC panel (Accessibility / Screen Recording), plus `microphone`
+ * (Task 9 of the desktop-audio-capability plan: the voice settings page's
+ * denied-microphone row). A fixed allowlist, not a renderer-supplied URL —
+ * `shell.openExternal` must never be handed an arbitrary string from the
+ * renderer.
  */
 const SYSTEM_SETTINGS_PANES = {
   accessibility: 'x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility',
   screen_recording: 'x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture',
+  microphone: 'x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone',
 } as const;
 const SESSION_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 export type SystemSettingsPane = keyof typeof SYSTEM_SETTINGS_PANES;
@@ -91,6 +97,13 @@ export interface BootstrapState {
   pendingAskUserQuestions?: AskUserQuestionRequestDto[];
   connection: ConnectionState;
   diagnostics: DiagnosticEntry[];
+  /**
+   * The three numbers the About page needs. `engine` is only known once a
+   * bridge runtime has connected at least once (same source as
+   * `diagnosticReport`'s `bridgeRuntime` field below) — absent, not a fake
+   * value, before that.
+   */
+  versions: { app: string; electron: string; engine?: BridgeRuntimeVersions };
 }
 
 export interface ProjectSessionCatalogState {
@@ -145,6 +158,14 @@ export class HostController {
     private readonly bridge: SessionRuntimeManager,
     private readonly diagnostics: DiagnosticBuffer,
     sessionCatalog?: ProjectSessionCatalog,
+    private readonly ipc: Pick<typeof ipcMain, 'handle' | 'removeHandler'> = ipcMain,
+    /**
+     * Overrides the OS microphone-grant source. `undefined` means "the real
+     * one" — `readMicrophoneAccess`'s own default is Electron's
+     * `systemPreferences`, so a test can drive every OS answer without this
+     * class ever holding a second, drift-prone copy of that wiring.
+     */
+    private readonly mediaAccess?: MediaAccessReader,
   ) {
     this.sessionCatalog = sessionCatalog ?? new ProjectSessionCatalog();
   }
@@ -163,20 +184,25 @@ export class HostController {
     if (this.registered) return;
     this.registered = true;
     this.bridge.registerIpc();
-    ipcMain.handle(CH_BOOTSTRAP, (event: IpcMainInvokeEvent) => { this.assertSender(event); return this.bootstrap(); });
-    ipcMain.handle(CH_SETTINGS_GET, (event: IpcMainInvokeEvent) => { this.assertSender(event); return this.settings.getPublic(); });
-    ipcMain.handle(CH_SETTINGS_UPDATE, async (event: IpcMainInvokeEvent, patch: unknown) => {
+    this.ipc.handle(CH_BOOTSTRAP, (event: IpcMainInvokeEvent) => { this.assertSender(event); return this.bootstrap(); });
+    this.ipc.handle(CH_SETTINGS_GET, (event: IpcMainInvokeEvent) => { this.assertSender(event); return this.settings.getPublic(); });
+    this.ipc.handle(CH_SETTINGS_UPDATE, async (event: IpcMainInvokeEvent, patch: unknown) => {
       this.assertSender(event);
       if (!patch || typeof patch !== 'object' || Array.isArray(patch)) throw new Error('invalid settings patch');
       const keys = Object.keys(patch);
-      if (keys.some((key) => key !== 'theme' && key !== 'model' && key !== 'apiBaseUrl')) throw new Error('unsupported setting');
+      if (keys.some((key) => key !== 'theme' && key !== 'model' && key !== 'apiBaseUrl' && key !== 'voice')) throw new Error('unsupported setting');
       const restartsBridge = 'model' in patch || 'apiBaseUrl' in patch;
       if (restartsBridge) this.assertNoActiveTurn();
-      const result = this.settings.update(patch as { theme?: 'dark' | 'light'; model?: string | null; apiBaseUrl?: string | null });
+      // `voice` never restarts the bridge: recognition/synthesis read
+      // `bootstrap.settings.voice` fresh on every audio request
+      // (`renderer/audio/requests.ts`'s `playback()`), so a write here takes
+      // effect on the NEXT request with no engine restart needed — unlike
+      // `model`/`apiBaseUrl`, which change what the running engine talks to.
+      const result = this.settings.update(patch as { theme?: 'dark' | 'light' | 'system'; model?: string | null; apiBaseUrl?: string | null; voice?: unknown });
       if (restartsBridge) await this.restartIfConfigured();
       return result;
     });
-    ipcMain.handle(CH_WORKSPACE_PICK, async (event: IpcMainInvokeEvent) => {
+    this.ipc.handle(CH_WORKSPACE_PICK, async (event: IpcMainInvokeEvent) => {
       this.assertSender(event);
       return this.enqueueNavigation(async () => {
         const result = await dialog.showOpenDialog({ properties: ['openDirectory', 'createDirectory'], securityScopedBookmarks: false });
@@ -184,7 +210,7 @@ export class HostController {
         return this.selectWorkspaceInternal(result.filePaths[0], true);
       });
     });
-    ipcMain.handle(CH_WORKSPACE_SET, async (event: IpcMainInvokeEvent, workspace: unknown) => {
+    this.ipc.handle(CH_WORKSPACE_SET, async (event: IpcMainInvokeEvent, workspace: unknown) => {
       this.assertSender(event);
       return this.enqueueNavigation(async () => {
         if (typeof workspace !== 'string') throw new Error('invalid workspace path');
@@ -193,13 +219,13 @@ export class HostController {
         return this.selectWorkspaceInternal(canonical, false);
       });
     });
-    ipcMain.handle(CH_PROJECT_SESSIONS_LIST, async (event: IpcMainInvokeEvent, projectPath: unknown) => {
+    this.ipc.handle(CH_PROJECT_SESSIONS_LIST, async (event: IpcMainInvokeEvent, projectPath: unknown) => {
       this.assertSender(event);
       const project = this.requireProject(projectPath);
       const result = await this.loadProjectSessions(project);
       return { projectPath: project, ...result };
     });
-    ipcMain.handle(CH_SESSION_NEW, async (event: IpcMainInvokeEvent, projectPath: unknown, model: unknown) => {
+    this.ipc.handle(CH_SESSION_NEW, async (event: IpcMainInvokeEvent, projectPath: unknown, model: unknown) => {
       this.assertSender(event);
       return this.enqueueNavigation(async () => {
         const project = this.requireProject(projectPath);
@@ -210,7 +236,7 @@ export class HostController {
         return this.bootstrap();
       });
     });
-    ipcMain.handle(CH_SESSION_OPEN, async (event: IpcMainInvokeEvent, projectPath: unknown, sessionId: unknown) => {
+    this.ipc.handle(CH_SESSION_OPEN, async (event: IpcMainInvokeEvent, projectPath: unknown, sessionId: unknown) => {
       this.assertSender(event);
       return this.enqueueNavigation(async () => {
         const project = this.requireProject(projectPath);
@@ -219,14 +245,14 @@ export class HostController {
         return this.openSessionAndActivateInternal(ref);
       });
     });
-    ipcMain.handle(CH_PROJECT_REMOVE, async (event: IpcMainInvokeEvent, projectPath: unknown) => {
+    this.ipc.handle(CH_PROJECT_REMOVE, async (event: IpcMainInvokeEvent, projectPath: unknown) => {
       this.assertSender(event);
       return this.enqueueNavigation(async () => {
         const project = this.requireProject(projectPath);
         return this.removeProjectInternal(project);
       });
     });
-    ipcMain.handle(CH_SESSION_PIN_SET, (event: IpcMainInvokeEvent, input: unknown, pinned: unknown) => {
+    this.ipc.handle(CH_SESSION_PIN_SET, (event: IpcMainInvokeEvent, input: unknown, pinned: unknown) => {
       this.assertSender(event);
       if (!input || typeof input !== 'object' || Array.isArray(input) || typeof pinned !== 'boolean') {
         throw new Error('invalid pinned session');
@@ -252,17 +278,17 @@ export class HostController {
       };
       return this.settings.setSessionPinned(record, pinned);
     });
-    ipcMain.handle(CH_WORKSPACE_FILES_SEARCH, async (event: IpcMainInvokeEvent, query: unknown) => {
+    this.ipc.handle(CH_WORKSPACE_FILES_SEARCH, async (event: IpcMainInvokeEvent, query: unknown) => {
       this.assertSender(event);
       const workspace = this.requireWorkspace();
       if (!this.settings.hasProject(workspace)) throw new Error('project is not in the project list');
       return this.workspaceFiles.search(workspace, query);
     });
-    ipcMain.handle(CH_PROVIDER_CREDENTIALS_GET, (event: IpcMainInvokeEvent) => {
+    this.ipc.handle(CH_PROVIDER_CREDENTIALS_GET, (event: IpcMainInvokeEvent) => {
       this.assertSender(event);
       return this.providerCredentialSnapshot();
     });
-    ipcMain.handle(CH_PROVIDER_CREDENTIAL_SET, async (event: IpcMainInvokeEvent, providerId: unknown, credential: unknown) => {
+    this.ipc.handle(CH_PROVIDER_CREDENTIAL_SET, async (event: IpcMainInvokeEvent, providerId: unknown, credential: unknown) => {
       this.assertSender(event);
       const provider = this.requireProvider(providerId);
       if (typeof credential !== 'string') throw new Error('invalid credential');
@@ -278,11 +304,12 @@ export class HostController {
         configured: true,
         encryptionAvailable: stored.storage_encrypted,
       };
-      if (provider.defaultModel) this.settings.update({ model: provider.defaultModel });
-      await this.restartIfConfigured();
+      if (provider.defaultModel) this.updateProviderDefaultModel(provider.defaultModel);
+      // Persistence is the boundary of this IPC operation. Restart is owned by
+      // the renderer so it can clear the secret before handling recovery.
       return { credential: credentialMetadata, settings: this.settings.getPublic() };
     });
-    ipcMain.handle(CH_PROVIDER_CREDENTIAL_CLEAR, async (event: IpcMainInvokeEvent, providerId: unknown) => {
+    this.ipc.handle(CH_PROVIDER_CREDENTIAL_CLEAR, async (event: IpcMainInvokeEvent, providerId: unknown) => {
       this.assertSender(event);
       const provider = this.requireProvider(providerId);
       this.assertNoActiveTurn();
@@ -291,23 +318,31 @@ export class HostController {
       await this.restartIfConfigured();
       return this.providerCredentialMetadata(provider.id);
     });
-    ipcMain.handle(CH_BRIDGE_RESTART, async (event: IpcMainInvokeEvent, sessionId: unknown) => {
+    this.ipc.handle(CH_BRIDGE_RESTART, async (event: IpcMainInvokeEvent, sessionId: unknown) => {
       this.assertSender(event);
       if (!isSessionId(sessionId)) throw new Error('invalid session id');
       const runtime = this.bridge.get(sessionId);
       if (!runtime) throw new Error(`session runtime is not open: ${sessionId}`);
-      await this.bridge.restart({ projectPath: runtime.projectPath, sessionId });
+      const ref = { projectPath: runtime.projectPath, sessionId } satisfies SessionRef;
+      this.assertRestartAllowed(ref, runtime);
+      await this.bridge.restart(ref, () => {
+        const current = this.bridge.get(sessionId);
+        if (!current || current !== runtime) {
+          throw new Error(`session runtime is no longer open: ${sessionId}`);
+        }
+        this.assertRestartAllowed(ref, current);
+      });
     });
-    ipcMain.handle(CH_DIAGNOSTICS_GET, (event: IpcMainInvokeEvent) => { this.assertSender(event); return this.diagnostics.snapshot(); });
-    ipcMain.handle(CH_DIAGNOSTICS_COPY, (event: IpcMainInvokeEvent) => {
+    this.ipc.handle(CH_DIAGNOSTICS_GET, (event: IpcMainInvokeEvent) => { this.assertSender(event); return this.diagnostics.snapshot(); });
+    this.ipc.handle(CH_DIAGNOSTICS_COPY, (event: IpcMainInvokeEvent) => {
       this.assertSender(event);
       clipboard.writeText(this.diagnosticReport());
     });
-    ipcMain.handle(CH_CLIPBOARD_WRITE_TEXT, (event: IpcMainInvokeEvent, text: unknown) => {
+    this.ipc.handle(CH_CLIPBOARD_WRITE_TEXT, (event: IpcMainInvokeEvent, text: unknown) => {
       this.assertSender(event);
       clipboard.writeText(validateClipboardText(text));
     });
-    ipcMain.handle(CH_DIAGNOSTICS_EXPORT, async (event: IpcMainInvokeEvent) => {
+    this.ipc.handle(CH_DIAGNOSTICS_EXPORT, async (event: IpcMainInvokeEvent) => {
       this.assertSender(event);
       const result = await dialog.showSaveDialog({
         title: 'Export sanitized LingXi diagnostics',
@@ -318,12 +353,22 @@ export class HostController {
       writeFileSync(result.filePath, this.diagnosticReport(), { encoding: 'utf8', mode: 0o600 });
       return result.filePath;
     });
-    ipcMain.handle(CH_OPEN_SYSTEM_SETTINGS, async (event: IpcMainInvokeEvent, pane: unknown) => {
+    this.ipc.handle(CH_OPEN_SYSTEM_SETTINGS, async (event: IpcMainInvokeEvent, pane: unknown) => {
       this.assertSender(event);
       if (typeof pane !== 'string' || !(pane in SYSTEM_SETTINGS_PANES)) {
         throw new Error('unsupported System Settings pane');
       }
       await shell.openExternal(SYSTEM_SETTINGS_PANES[pane as SystemSettingsPane]);
+    });
+    // The renderer cannot read this itself: `navigator.permissions.query`
+    // answers `main/index.ts`'s own `setPermissionCheckHandler`, which grants
+    // the app's renderer `media` unconditionally and never consults the OS —
+    // so the voice page's 麦克风权限 row used to say 已授权 while every
+    // recording failed. `systemPreferences.getMediaAccessStatus` is the real
+    // grant, and it lives here.
+    this.ipc.handle(CH_MICROPHONE_ACCESS_GET, (event: IpcMainInvokeEvent) => {
+      this.assertSender(event);
+      return readMicrophoneAccess(this.mediaAccess);
     });
   }
 
@@ -356,6 +401,12 @@ export class HostController {
       connectionState?: ConnectionState;
     };
     const pendingAskUserQuestions = activeRuntime?.pendingAskUserQuestions ?? legacy.pendingAskUserQuestions ?? [];
+    // Same source `diagnosticReport` below already reads for its
+    // `bridgeRuntime` field — reused here rather than recomputed, so the
+    // About page's engine version and the exported diagnostic report can
+    // never disagree.
+    const engineVersions = activeRuntime?.runtimeVersions
+      ?? (this.bridge as unknown as { runtimeVersions?: BridgeRuntimeVersions }).runtimeVersions;
     return {
       revision,
       settings: this.settings.getPublic(),
@@ -369,6 +420,11 @@ export class HostController {
       providerCredentials: this.providerCredentialSnapshot(),
       ...(pendingAskUserQuestions.length > 0 ? { pendingAskUserQuestions: [...pendingAskUserQuestions] } : {}),
       connection: activeRuntime?.connectionState ?? legacy.connectionState ?? { status: 'idle' },
+      versions: {
+        app: app?.getVersion?.() ?? 'unknown',
+        electron: process.versions.electron,
+        ...(engineVersions ? { engine: engineVersions } : {}),
+      },
       diagnostics: this.diagnostics.snapshot(),
     };
   }
@@ -525,10 +581,32 @@ export class HostController {
     if (this.hasActiveWork()) throw new Error('cancel the active turn before changing engine settings');
   }
 
+  private assertRestartAllowed(ref: SessionRef, runtime: ReturnType<SessionRuntimeManager['get']>): void {
+    if (!runtime) throw new Error(`session runtime is not open: ${ref.sessionId}`);
+    const active = this.settings.getPublic().activeSession;
+    if (!active || active.sessionId !== ref.sessionId || active.projectPath !== ref.projectPath) {
+      throw new Error('the requested session is no longer active; credential was saved but the engine was not restarted');
+    }
+    if (runtime.turnActive || runtime.pendingInteractions > 0 || this.bridge.hasActiveWork(ref.projectPath)) {
+      throw new Error('cancel active turns and pending interactions before restarting the engine');
+    }
+  }
+
   private async restartIfConfigured(): Promise<void> {
     const ref = this.settings.getPublic().activeSession;
     if (!ref || !this.bridge.get(ref.sessionId)) return;
     await this.bridge.restart(ref);
+  }
+
+  private updateProviderDefaultModel(model: string): void {
+    try {
+      this.settings.update({ model });
+    } catch (error) {
+      // The credential write is already authoritative. A settings mirror
+      // failure is recoverable and must not turn a successful credential write
+      // into a renderer-visible persistence failure.
+      this.diagnostics.add('error', 'host', `provider credential persisted but default model update failed: ${sanitizeDiagnostic(error)}`);
+    }
   }
 
   private requireCurrentRuntime() {
@@ -646,7 +724,7 @@ export class HostController {
       CH_PROVIDER_CREDENTIALS_GET, CH_PROVIDER_CREDENTIAL_SET, CH_PROVIDER_CREDENTIAL_CLEAR,
       CH_BRIDGE_RESTART, CH_DIAGNOSTICS_GET,
       CH_DIAGNOSTICS_COPY, CH_DIAGNOSTICS_EXPORT, CH_CLIPBOARD_WRITE_TEXT, CH_OPEN_SYSTEM_SETTINGS,
-    ]) ipcMain.removeHandler(channel);
+    ]) this.ipc.removeHandler(channel);
     this.registered = false;
     this.targets.clear();
   }

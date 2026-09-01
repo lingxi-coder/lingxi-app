@@ -111,6 +111,10 @@ fun Composer(
     onOpenProviderSettings: (String?) -> Unit = { onOpenModelSettings() },
     /** Fired by the Stop button to cancel the in-flight turn. */
     onStop: () -> Unit = {},
+    /** True when a recovered WaitingForUser turn can be discarded. */
+    showDiscardRecovery: Boolean = false,
+    /** Discards the recovered turn after the host confirms cancellation. */
+    onDiscardRecovery: () -> Unit = {},
 ) {
     val t = LingXiTheme.palette
     val hasText = text.trim().isNotEmpty()
@@ -210,6 +214,13 @@ fun Composer(
                 )
                 Spacer(Modifier.weight(1f))
                 val stopGeneratingDescription = stringResource(R.string.composer_stop_generating)
+                // The Discard affordance is a DIFFERENT action from Stop: it
+                // throws away a parked background checkpoint rather than
+                // interrupting live generation. It used to announce
+                // "Stop generating" to TalkBack, which is the one thing it does
+                // not do.
+                val discardRecoveryDescription =
+                    stringResource(R.string.composer_discard_background_turn)
                 val sendDescription = stringResource(R.string.composer_send)
                 val recordDescription = stringResource(R.string.composer_record)
                 val startRecordingLabel = stringResource(R.string.composer_start_recording)
@@ -259,6 +270,29 @@ fun Composer(
                                 )
                             }
                         }
+                    }
+                    // A recovered WaitingForUser checkpoint has no local
+                    // executor, but still owns the durable session identity.
+                    // Keep the composer action visible so the user can submit
+                    // the correlated discard and wait for terminal confirmation.
+                    showDiscardRecovery -> Box(
+                        modifier = Modifier
+                            .size(34.dp)
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(t.accent)
+                            .clickable(onClick = onDiscardRecovery)
+                            .testTag(UiTags.COMPOSER_DISCARD),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(12.dp)
+                                .clip(RoundedCornerShape(3.dp))
+                                .background(Color.White)
+                                .clearAndSetSemantics {
+                                    contentDescription = discardRecoveryDescription
+                                },
+                        )
                     }
                     // Idle with text: the accent Send button.
                     hasText -> Box(

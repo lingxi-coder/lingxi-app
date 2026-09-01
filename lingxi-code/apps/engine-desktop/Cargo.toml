@@ -135,6 +135,11 @@ tool-lsp = { path = "../../tools/lsp" }
 tool-team = { path = "../../tools/team" }
 tool-worktree = { path = "../../tools/worktree" }
 tool-computer-use = { path = "../../tools/computer-use" }
+# The two audio tools (`voice` + `speech`). The crate is named for mobile, but
+# the desktop registers exactly those two when a `DesktopConfig::audio`
+# capability is wired (the bridge's `AudioBridge`) — see
+# `tool_mobile::register_audio`.
+tool-mobile = { path = "../../tools/mobile" }
 
 # (`!` bash mode) The TUI's `BashRunner` seam — engine-desktop constructs the
 # sandboxed host impl (over the same `BuiltinToolContext` + `tool-shell::BashTool`

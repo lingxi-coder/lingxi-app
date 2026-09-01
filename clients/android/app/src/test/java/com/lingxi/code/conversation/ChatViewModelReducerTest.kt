@@ -5,6 +5,7 @@ import com.lingxi.code.bindings.ClientEvent
 import com.lingxi.code.bindings.ClientCommand
 import com.lingxi.code.bindings.CostDto
 import com.lingxi.code.bindings.HeadlineKindDto
+import com.lingxi.code.bindings.ImageRefDto
 import com.lingxi.code.bindings.MessageBlockDto
 import com.lingxi.code.bindings.MessageDto
 import com.lingxi.code.bindings.PlanTaskDto
@@ -15,6 +16,8 @@ import com.lingxi.code.bindings.ToolHeaderDto
 import com.lingxi.code.bindings.ToolResultDisplayDto
 import com.lingxi.code.bindings.ToolVerbDto
 import com.lingxi.code.bindings.TurnOutcomeDto
+import com.lingxi.code.bindings.TurnRecoverySnapshotDto
+import com.lingxi.code.bindings.TurnRecoveryStateDto
 import com.lingxi.code.model.Message
 import com.lingxi.code.model.Role
 import com.lingxi.code.model.SessionRef
@@ -83,6 +86,8 @@ class ChatViewModelReducerTest {
     private class RecordingSource : ConversationSource {
         val submitted = mutableListOf<String>()
         val pending = mutableListOf<String>()
+        val cancelledTurnIds = mutableListOf<Long?>()
+        var submittedTurnId: Long? = null
         var cancelCount = 0
         private val never = MutableSharedFlow<ReplyEvent>()
         override fun initialMessages(): List<Message> = emptyList()
@@ -93,7 +98,18 @@ class ChatViewModelReducerTest {
         override suspend fun submitClientCommand(command: ClientCommand) {
             if (command is ClientCommand.SendPrompt) pending += command.text
         }
-        override suspend fun cancel() { cancelCount++ }
+        override fun submit(
+            text: String,
+            images: List<ImageRefDto>,
+            turnId: Long,
+        ): Flow<ReplyEvent> {
+            submittedTurnId = turnId
+            return submit(text)
+        }
+        override suspend fun cancel(turnId: Long?) {
+            cancelCount++
+            cancelledTurnIds += turnId
+        }
     }
 
     private class RecordingBackgroundExecution : ConversationBackgroundExecution {
@@ -171,6 +187,80 @@ class ChatViewModelReducerTest {
         }
     }
 
+    private class DurableAttachSource : ConversationSource {
+        val active = MutableStateFlow<ActivatedSession?>(null)
+        val attachRequests = mutableListOf<Long>()
+        val submitted = mutableListOf<String>()
+        val discarded = mutableListOf<Long>()
+
+        override val activeSessionState = active.asStateFlow()
+        override fun submit(text: String): Flow<ReplyEvent> {
+            submitted += text
+            return emptyFlow()
+        }
+
+        override suspend fun attachDurableTurnForUi(afterSequence: Long) {
+            attachRequests += afterSequence
+        }
+
+        override suspend fun discardDurableTurn(turnId: Long) {
+            discarded += turnId
+        }
+    }
+
+    private class FailingDurableAttachSource : ConversationSource {
+        val active = MutableStateFlow<ActivatedSession?>(null)
+        val events = MutableSharedFlow<ClientEvent>(extraBufferCapacity = 16)
+        val discarded = mutableListOf<Long>()
+        val submitted = mutableListOf<String>()
+        val sessionOperations = mutableListOf<String>()
+
+        override val activeSessionState = active.asStateFlow()
+        override val clientEvents: Flow<ClientEvent> = events.asSharedFlow()
+        override fun submit(text: String): Flow<ReplyEvent> {
+            submitted += text
+            return emptyFlow()
+        }
+
+        override suspend fun attachDurableTurnForUi(afterSequence: Long) {
+            val paused = TurnRecoverySnapshotDto(
+                sessionId = "session-a",
+                turnId = 94u,
+                state = TurnRecoveryStateDto.PAUSED_RECOVERABLE,
+                firstSequence = 0u,
+                lastSequence = 1u,
+                safeToResume = true,
+                reason = "paused",
+            )
+            events.tryEmit(ClientEvent.TurnRecoveryState(paused))
+            events.tryEmit(
+                ClientEvent.TurnEventReplay(
+                    sessionId = "session-a",
+                    turnId = 94u,
+                    sequence = 1u,
+                    eventJson = """{"type":"tool_use_started","id":"read-1","tool":"Read","input_json":"{}"}""",
+                ),
+            )
+            throw DurableAttachFailure(
+                turnId = 94L,
+                phase = "resume",
+                cause = IllegalStateException("resume failed"),
+            )
+        }
+
+        override suspend fun discardDurableTurn(turnId: Long) {
+            discarded += turnId
+        }
+
+        override suspend fun resumeSession(uuid: String) {
+            sessionOperations += "resume:$uuid"
+        }
+
+        override suspend fun newSession() {
+            sessionOperations += "new"
+        }
+    }
+
     private class CloseTrackingSource : ConversationSource {
         var closeCount = 0
         var newSessionCount = 0
@@ -220,6 +310,444 @@ class ChatViewModelReducerTest {
         vm.reduceClientEvent(ClientEvent.TaskStatusChanged("task-1", TaskStatusDto.COMPLETED, null))
         runCurrent()
         assertEquals(listOf(true, false), execution.activeStates)
+    }
+
+    @Test
+    fun durableAttachReplaysHistoryThenRendersLiveEventsOnce() = runTest(dispatcher) {
+        val source = DurableAttachSource()
+        val vm = ChatViewModel(source)
+        source.active.value = ActivatedSession(
+            "session-a",
+            listOf(Message(Role.User, "prior"), Message(Role.Ai, "prior answer")),
+            SessionActivationKind.Resumed,
+        )
+        runCurrent()
+        val running = TurnRecoverySnapshotDto(
+            sessionId = "session-a",
+            turnId = 88u,
+            state = TurnRecoveryStateDto.RUNNING,
+            firstSequence = 1u,
+            lastSequence = 1u,
+            safeToResume = true,
+            reason = null,
+        )
+
+        vm.reduceClientEvent(ClientEvent.TurnRecoveryState(running))
+        vm.reduceClientEvent(
+            ClientEvent.TurnEventReplay(
+                sessionId = "session-a",
+                turnId = 88u,
+                sequence = 1u,
+                eventJson = """{"type":"text_delta","text":"history"}""",
+            ),
+        )
+        // ResumeTurn emits its own state and closes the attach replay window.
+        vm.reduceClientEvent(ClientEvent.TurnRecoveryState(running))
+        vm.reduceClientEvent(ClientEvent.TextDelta("live"))
+        vm.reduceClientEvent(
+            ClientEvent.TurnEventReplay(
+                sessionId = "session-a",
+                turnId = 88u,
+                sequence = 2u,
+                eventJson = """{"type":"text_delta","text":"live"}""",
+            ),
+        )
+
+        assertEquals(listOf(0L), source.attachRequests)
+        assertEquals("historylive", vm.state.value.streamingMessage?.text)
+    }
+
+    @Test
+    fun coldResumeUsesTerminalTranscriptInsteadOfProjectingCheckpointReplay() =
+        runTest(dispatcher) {
+            val source = DurableAttachSource()
+            val restored = listOf(
+                Message(Role.User, "question"),
+                Message(Role.Ai, "authoritative assistant result"),
+            )
+            val vm = ChatViewModel(source)
+            source.active.value = ActivatedSession(
+                sessionId = "session-a",
+                transcript = restored,
+                kind = SessionActivationKind.Resumed,
+            )
+            runCurrent()
+
+            val terminal = TurnRecoverySnapshotDto(
+                sessionId = "session-a",
+                turnId = 88u,
+                state = TurnRecoveryStateDto.COMPLETED,
+                firstSequence = 1u,
+                lastSequence = 3u,
+                safeToResume = false,
+                reason = null,
+            )
+            vm.reduceClientEvent(ClientEvent.TurnRecoveryState(terminal))
+            // These are the retained terminal checkpoints that can race past
+            // the source-side replay gate after a process restart.  Neither
+            // assistant prose nor a tool payload may be projected again.
+            vm.reduceClientEvent(
+                ClientEvent.TurnEventReplay(
+                    sessionId = "session-a",
+                    turnId = 88u,
+                    sequence = 1u,
+                    eventJson = """{"type":"text_delta","text":"duplicate assistant"}""",
+                ),
+            )
+            vm.reduceClientEvent(
+                ClientEvent.TurnEventReplay(
+                    sessionId = "session-a",
+                    turnId = 88u,
+                    sequence = 2u,
+                    eventJson = """{"type":"tool_use_started","id":"tool-1","tool":"Read","input_json":"{}"}""",
+                ),
+            )
+            vm.reduceClientEvent(
+                ClientEvent.TurnEventReplay(
+                    sessionId = "session-a",
+                    turnId = 88u,
+                    sequence = 3u,
+                    eventJson = """{"type":"tool_use_result","id":"tool-1","tool":"Read","result_json":"{}","is_error":false}""",
+                ),
+            )
+            vm.reduceClientEvent(ClientEvent.TurnRecoveryState(terminal))
+
+            assertEquals(restored, vm.state.value.messages)
+            assertNull(vm.state.value.streamingMessage)
+            assertFalse(vm.state.value.streaming)
+            assertNull(vm.state.value.agentRun)
+            assertEquals(0L, vm.durableReplayCursorForTesting())
+        }
+
+    @Test
+    fun durableReplayCursorAdvancesWithinOneViewModelButResetsForANewOwner() = runTest(dispatcher) {
+        val source = DurableAttachSource()
+        val vm = ChatViewModel(source)
+        source.active.value = ActivatedSession(
+            "session-a",
+            emptyList(),
+            SessionActivationKind.Resumed,
+        )
+        runCurrent()
+        val running = TurnRecoverySnapshotDto(
+            sessionId = "session-a",
+            turnId = 88u,
+            state = TurnRecoveryStateDto.RUNNING,
+            firstSequence = 1u,
+            lastSequence = 1u,
+            safeToResume = true,
+            reason = null,
+        )
+
+        vm.reduceClientEvent(ClientEvent.TurnRecoveryState(running))
+        vm.reduceClientEvent(
+            ClientEvent.TurnEventReplay(
+                sessionId = "session-a",
+                turnId = 88u,
+                sequence = 1u,
+                eventJson = """{"type":"text_delta","text":"history"}""",
+            ),
+        )
+        vm.reduceClientEvent(ClientEvent.TurnRecoveryState(running))
+        vm.reduceClientEvent(ClientEvent.TextDelta("live"))
+        vm.reduceClientEvent(
+            ClientEvent.TurnEventReplay(
+                sessionId = "session-a",
+                turnId = 88u,
+                sequence = 2u,
+                eventJson = """{"type":"text_delta","text":"live"}""",
+            ),
+        )
+        val replacementVm = ChatViewModel(source)
+        runCurrent()
+
+        assertEquals(2L, vm.durableReplayCursorForTesting())
+        assertEquals(0L, replacementVm.durableReplayCursorForTesting())
+        assertEquals(listOf(0L, 0L), source.attachRequests)
+        assertEquals("historylive", vm.state.value.streamingMessage?.text)
+        assertNull(replacementVm.state.value.streamingMessage)
+    }
+
+    @Test
+    fun notificationStopCancelsAReattachedTurnWithoutALocalCollector() = runTest(dispatcher) {
+        val source = object : ConversationSource {
+            val active = MutableStateFlow<ActivatedSession?>(null)
+            val cancelled = mutableListOf<Long?>()
+            override val activeSessionState = active.asStateFlow()
+            override fun submit(text: String): Flow<ReplyEvent> = emptyFlow()
+            override suspend fun cancel(turnId: Long?) {
+                cancelled += turnId
+            }
+        }
+        val vm = ChatViewModel(source)
+        source.active.value = ActivatedSession(
+            "session-a",
+            emptyList(),
+            SessionActivationKind.Resumed,
+        )
+        runCurrent()
+        vm.reduceClientEvent(
+            ClientEvent.TurnRecoveryState(
+                TurnRecoverySnapshotDto(
+                    sessionId = "session-a",
+                    turnId = 91u,
+                    state = TurnRecoveryStateDto.RUNNING,
+                    firstSequence = 0u,
+                    lastSequence = 0u,
+                    safeToResume = true,
+                    reason = null,
+                ),
+            ),
+        )
+
+        vm.cancelFromSystem(91L)
+        runCurrent()
+
+        assertEquals(listOf(91L), source.cancelled)
+        assertFalse(vm.state.value.streaming)
+    }
+
+    @Test
+    fun inactiveWaitingCheckpointBlocksNewTurnsAndSessionsUntilCorrelatedDiscardTerminal() =
+        runTest(dispatcher) {
+            val source = DurableAttachSource()
+            val vm = ChatViewModel(source)
+            source.active.value = ActivatedSession(
+                "session-a",
+                emptyList(),
+                SessionActivationKind.Resumed,
+            )
+            runCurrent()
+
+            val waiting = TurnRecoverySnapshotDto(
+                sessionId = "session-a",
+                turnId = 92u,
+                state = TurnRecoveryStateDto.WAITING_FOR_USER,
+                firstSequence = 0u,
+                lastSequence = 0u,
+                safeToResume = false,
+                reason = "waiting_for_user",
+            )
+            vm.reduceClientEvent(ClientEvent.TurnRecoveryState(waiting))
+            assertTrue(vm.state.value.durableRecoveryBlocked)
+            assertFalse(vm.state.value.streaming)
+
+            // The checkpoint has no local executor. Prompt/session transitions
+            // must not replace its durable identity before a correlated discard.
+            vm.send("must remain parked")
+            vm.openSession(SessionRef("session-b", "B"))
+            vm.newChat()
+            assertTrue(source.submitted.isEmpty())
+            assertEquals("session-a", vm.state.value.session.id)
+
+            // The foreground composer routes its Stop/Discard affordance through
+            // the existing cancel callback; it must reach the correlated discard
+            // path even though this is not active streaming work.
+            vm.cancel()
+            runCurrent()
+            assertEquals(listOf(92L), source.discarded)
+            vm.send("still parked until terminal")
+            assertTrue(source.submitted.isEmpty())
+
+            vm.reduceClientEvent(
+                ClientEvent.TurnRecoveryState(
+                    waiting.copy(state = TurnRecoveryStateDto.CANCELLED),
+                ),
+            )
+            vm.send("after discard")
+            runCurrent()
+            assertEquals(listOf("after discard"), source.submitted)
+        }
+
+    @Test
+    fun liveWaitingExecutorKeepsPromptAndSessionTransitionsGatedUntilNormalStop() =
+        runTest(dispatcher) {
+            val source = RecordingSource()
+            val execution = RecordingBackgroundExecution()
+            val vm = ChatViewModel(source, backgroundExecution = execution)
+            vm.applyActivatedSession(
+                ActivatedSession("session-a", emptyList(), SessionActivationKind.Started),
+            )
+            vm.send("first prompt")
+            runCurrent()
+            val liveTurnId = source.submittedTurnId ?: error("send did not reach source")
+
+            vm.reduceClientEvent(
+                ClientEvent.TurnRecoveryState(
+                    TurnRecoverySnapshotDto(
+                        sessionId = "session-a",
+                        turnId = liveTurnId.toULong(),
+                        state = TurnRecoveryStateDto.WAITING_FOR_USER,
+                        firstSequence = 0u,
+                        lastSequence = 0u,
+                        safeToResume = false,
+                        reason = "waiting_for_user",
+                    ),
+                ),
+            )
+
+            assertFalse(vm.state.value.streaming)
+            assertTrue(vm.state.value.liveTurnWaitingForUser)
+            assertTrue(vm.state.value.isStreaming) // Composer keeps ordinary Stop visible.
+            assertTrue(vm.state.value.requiresBackgroundExecution)
+
+            vm.send("must remain gated")
+            vm.openSession(SessionRef("session-b", "B"))
+            vm.newChat()
+            assertEquals(listOf("first prompt"), source.submitted)
+            assertEquals("session-a", vm.state.value.session.id)
+
+            // Live WaitingForUser owns a local collector, so Stop sends the
+            // ordinary Cancel(turn id), not the recovered Discard path.
+            vm.cancel()
+            runCurrent()
+            assertEquals(listOf(liveTurnId), source.cancelledTurnIds)
+            assertFalse(vm.state.value.liveTurnWaitingForUser)
+            assertFalse(vm.state.value.requiresBackgroundExecution)
+            assertEquals(listOf(true, false), execution.activeStates)
+        }
+
+    @Test
+    fun inactiveRecoverySettlesOnlyCorrelatedRunAndShellLease() = runTest(dispatcher) {
+        val source = DurableAttachSource()
+        val execution = RecordingBackgroundExecution()
+        val vm = ChatViewModel(source, backgroundExecution = execution)
+        vm.applyActivatedSession(
+            ActivatedSession("session-a", emptyList(), SessionActivationKind.Started),
+        )
+        vm.reduceClientEvent(
+            ClientEvent.TaskRow(
+                TaskRowDto("workflow-1", "workflow", TaskStatusDto.RUNNING, "review", false, null),
+            ),
+        )
+        val waiting = TurnRecoverySnapshotDto(
+            sessionId = "session-a",
+            turnId = 93u,
+            state = TurnRecoveryStateDto.WAITING_FOR_USER,
+            firstSequence = 0u,
+            lastSequence = 1u,
+            safeToResume = false,
+            reason = "waiting_for_user",
+        )
+        vm.reduceClientEvent(ClientEvent.TurnRecoveryState(waiting))
+        vm.reduceClientEvent(
+            ClientEvent.TurnEventReplay(
+                sessionId = "session-a",
+                turnId = 93u,
+                sequence = 1u,
+                eventJson = """{"type":"tool_use_started","id":"shell-1","tool":"shell","input_json":"{\"command\":\"npm test\"}"}""",
+            ),
+        )
+        assertTrue(vm.state.value.requiresBackgroundExecution)
+
+        // ResumeTurn's state closes the retained replay window. It must settle
+        // the recovered main run/tool, but keep an unrelated workflow lease.
+        vm.reduceClientEvent(ClientEvent.TurnRecoveryState(waiting))
+
+        assertTrue(vm.state.value.durableRecoveryBlocked)
+        assertFalse(vm.state.value.agentRun?.active == true)
+        assertTrue(vm.state.value.agentRun?.tools.orEmpty().all { it.status != AgentToolStatus.Running })
+        assertTrue(vm.state.value.activeBackgroundTaskIds.contains("workflow-1"))
+        assertTrue(vm.state.value.requiresBackgroundExecution)
+        // The remaining lease is the unrelated workflow task, not the parked
+        // recovered turn's unmatched tool/run state.
+        vm.reduceClientEvent(
+            ClientEvent.TaskStatusChanged("workflow-1", TaskStatusDto.PAUSED, null),
+        )
+        runCurrent()
+        assertFalse(vm.state.value.requiresBackgroundExecution)
+        assertEquals(listOf(true, false), execution.activeStates)
+    }
+
+    @Test
+    fun failedColdResumeKeepsPausedCheckpointIdentityAndGatesNewWork() = runTest(dispatcher) {
+        val source = FailingDurableAttachSource()
+        val vm = ChatViewModel(source)
+        runCurrent()
+        source.active.value = ActivatedSession(
+            "session-a",
+            emptyList(),
+            SessionActivationKind.Resumed,
+        )
+        runCurrent()
+
+        assertTrue(vm.state.value.durableRecoveryBlocked)
+        assertFalse(vm.state.value.streaming)
+        assertTrue(vm.state.value.error?.message?.contains("resume failed") == true)
+
+        vm.send("must remain gated")
+        vm.openSession(SessionRef("session-b", "B"))
+        vm.newChat()
+        assertTrue(source.sessionOperations.isEmpty())
+        assertTrue(source.discarded.isEmpty())
+
+        // The failed ResumeTurn did not lose its correlated durable id; the
+        // only available foreground action is still Discard(94).
+        vm.cancel()
+        runCurrent()
+        assertEquals(listOf(94L), source.discarded)
+        assertEquals("session-a", vm.state.value.session.id)
+
+        // A matching terminal clears the durable identity even though the
+        // failed Resume left no render token. The next ordinary send is now
+        // allowed and cannot overwrite the still-blocked checkpoint.
+        vm.reduceClientEvent(
+            ClientEvent.TurnRecoveryState(
+                TurnRecoverySnapshotDto(
+                    sessionId = "session-a",
+                    turnId = 94u,
+                    state = TurnRecoveryStateDto.CANCELLED,
+                    firstSequence = 0u,
+                    lastSequence = 1u,
+                    safeToResume = false,
+                    reason = null,
+                ),
+            ),
+        )
+        assertFalse(vm.state.value.durableRecoveryBlocked)
+        vm.send("after discard")
+        runCurrent()
+        assertEquals(listOf("after discard"), source.submitted)
+    }
+
+    @Test
+    fun failedColdResumeMatchingCompletedOrFailedClearsRecoveryGate() = runTest(dispatcher) {
+        for (terminalState in listOf(
+            TurnRecoveryStateDto.COMPLETED,
+            TurnRecoveryStateDto.FAILED,
+        )) {
+            val source = FailingDurableAttachSource()
+            val vm = ChatViewModel(source)
+            runCurrent()
+            source.active.value = ActivatedSession(
+                "session-a",
+                emptyList(),
+                SessionActivationKind.Resumed,
+            )
+            runCurrent()
+            assertTrue(vm.state.value.durableRecoveryBlocked)
+
+            vm.cancel()
+            runCurrent()
+            vm.reduceClientEvent(
+                ClientEvent.TurnRecoveryState(
+                    TurnRecoverySnapshotDto(
+                        sessionId = "session-a",
+                        turnId = 94u,
+                        state = terminalState,
+                        firstSequence = 0u,
+                        lastSequence = 1u,
+                        safeToResume = false,
+                        reason = "terminal",
+                    ),
+                ),
+            )
+
+            assertFalse("$terminalState must release durable recovery", vm.state.value.durableRecoveryBlocked)
+            vm.send("after $terminalState")
+            runCurrent()
+            assertEquals(listOf("after $terminalState"), source.submitted)
+        }
     }
 
     @Test

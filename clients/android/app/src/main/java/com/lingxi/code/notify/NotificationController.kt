@@ -36,10 +36,12 @@ class NotifyException(val failure: NotifyFailure) : Exception(
  * `com.lingxi.code.bindings.AndroidNotification` callback interface and the
  * system [NotificationManager].
  *
- * Mirrors [com.lingxi.code.share.ShareController]: because the engine has no
- * [Context] handle, the host Activity attaches the application context in
- * `onCreate` ([attach]) and clears it in `onDestroy` ([detach]). The
- * notification channel is created lazily on the first successful post.
+ * The engine has no [Context] handle, so the host installs the application
+ * context through [attach]. Unlike Activity-bound launchers, notifications are
+ * safe to keep process-global after the first attach; background turns and
+ * headless completions must still be able to post after the Activity leaves the
+ * foreground. The notification channel is created lazily on the first
+ * successful post.
  *
  * The post is engine-driven (`tool-notification`), so there is no user-facing
  * affordance — the model posts a notification by calling [notify].
@@ -59,9 +61,7 @@ object NotificationController {
         this.context = context.applicationContext
     }
 
-    fun detach() {
-        context = null
-    }
+    fun detach() = Unit
 
     /**
      * Post a single local notification built from [title] / [body]. When [tag]

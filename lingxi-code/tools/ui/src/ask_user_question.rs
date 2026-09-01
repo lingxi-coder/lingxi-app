@@ -815,7 +815,26 @@ impl Tool for AskUserQuestionTool {
         // Resolve the per-question answers (UI substitute). The resolver keys
         // its auto-continue policy off the session's interactivity.
         let non_interactive = ctx.options.is_non_interactive_session;
-        let answers_map = match self.resolver.resolve(&questions, non_interactive).await {
+        // Dropping the resolver future drops its response receiver. The
+        // broker can then remove exactly this request by observing a closed
+        // sender, while unrelated workflow questions remain parked.
+        let resolve = self.resolver.resolve(&questions, non_interactive);
+        let answers_map = match if let Some(cancel) = ctx.cancel {
+            tokio::select! {
+                result = resolve => result,
+                // `interrupt_behavior()` above is `Block`, so `turn_loop`'s
+                // dispatcher-level abort race (`turn_loop.rs:4688`) never runs
+                // for this tool: THIS arm is the only path a user interrupt
+                // takes. `turn_loop.rs:4788` gates the `"interrupted"`
+                // `toolDenialKind` on `matches!(err, ToolError::Aborted)`, so
+                // returning `Internal` made `is_abort` false and recorded a
+                // plain interrupt as a genuine tool failure carrying fabricated
+                // model-facing copy. Use the repo's abort variant.
+                _ = cancel.cancelled() => Err(ToolError::Aborted),
+            }
+        } else {
+            resolve.await
+        } {
             Ok(m) => m,
             Err(e) => {
                 emit_failed(&bus, "resolver_error", started.elapsed().as_millis() as u64).await;
@@ -867,7 +886,7 @@ impl Tool for AskUserQuestionTool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tool_api::test_support::{fresh_ctx, fresh_tx, shell_test_ctx};
+    use tool_api::test_support::{fresh_ctx, fresh_ctx_cancelled, fresh_tx, shell_test_ctx};
     use traits::process::ProcessOutput;
 
     fn dummy_out() -> ProcessOutput {
@@ -1430,5 +1449,58 @@ mod tests {
             .await
             .expect_err("interactive never must not auto-continue");
         assert!(matches!(err, ToolError::InteractionRequired(_)));
+    }
+
+    /// `interrupt_behavior()` is `Block`, so `turn_loop`'s dispatcher-level
+    /// abort race never applies to this tool: the in-tool `ctx.cancel` arm is
+    /// the ONLY path a user interrupt takes. `turn_loop.rs` gates the
+    /// `"interrupted"` `toolDenialKind` on `matches!(err, ToolError::Aborted)`,
+    /// so returning `ToolError::Internal` recorded a plain interrupt as a
+    /// genuine tool failure.
+    /// A resolver that parks forever, so the only ready arm of the tool's
+    /// `select!` is the cancellation token — the shape a real parked prompt has.
+    struct NeverResolves;
+
+    #[async_trait]
+    impl AskUserQuestionResolver for NeverResolves {
+        async fn resolve(
+            &self,
+            _questions: &[Question],
+            _non_interactive: bool,
+        ) -> Result<HashMap<String, String>, ToolError> {
+            std::future::pending::<()>().await;
+            unreachable!()
+        }
+    }
+
+    #[tokio::test]
+    async fn cancelled_prompt_reports_aborted_not_internal() {
+        let tool =
+            AskUserQuestionTool::with_resolver(shell_test_ctx(dummy_out()), Arc::new(NeverResolves));
+        let err = tool
+            .call(one_question(), fresh_ctx_cancelled(), fresh_tx())
+            .await
+            .expect_err("a cancelled prompt must not succeed");
+        assert!(
+            matches!(err, ToolError::Aborted),
+            "a user interrupt must take the abort path so turn_loop stamps \
+             toolDenialKind=\"interrupted\", got {err:?}"
+        );
+        assert_eq!(
+            err.model_facing_message(),
+            "aborted",
+            "the abort variant carries no fabricated failure copy"
+        );
+    }
+
+    /// `Block` is the contract that keeps `turn_loop`'s dispatcher from racing
+    /// this tool's future; the fix above depends on it staying `Block`.
+    #[test]
+    fn ask_user_question_blocks_on_interrupt() {
+        let tool = AskUserQuestionTool::new(shell_test_ctx(dummy_out()));
+        assert!(matches!(
+            tool.interrupt_behavior(&one_question()),
+            InterruptBehavior::Block
+        ));
     }
 }

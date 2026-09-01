@@ -4,7 +4,7 @@ import { mkdtempSync, readFileSync, realpathSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { HostController } from '../src/main/host';
+import { CH_BRIDGE_RESTART, CH_SETTINGS_UPDATE, HostController } from '../src/main/host';
 import { DiagnosticBuffer } from '../src/main/host-utils';
 import { SettingsStore } from '../src/main/settings';
 
@@ -17,6 +17,86 @@ function deferred<T = void>(): { promise: Promise<T>; resolve(value?: T): void; 
   });
   return { promise, resolve: (value?: T) => resolvePromise(value as T), reject: rejectPromise };
 }
+
+test('bridge restart IPC re-checks session ownership and active work at execution time', async () => {
+  const userData = mkdtempSync(join(tmpdir(), 'lingxi-restart-ipc-settings-'));
+  const projectDirectory = mkdtempSync(join(tmpdir(), 'lingxi-restart-ipc-project-'));
+  const project = realpathSync.native(projectDirectory);
+  const sessionId = '11111111-2222-4333-8444-555555555555';
+  const otherSessionId = '22222222-3333-4444-8555-666666666666';
+  const settings = new SettingsStore(userData);
+  settings.addProject(project);
+  settings.activateProject(project);
+  settings.setActiveSession({ projectPath: project, sessionId });
+
+  const handlers = new Map<string, (...args: unknown[]) => unknown>();
+  const ipc = {
+    handle: (channel: string, handler: (...args: unknown[]) => unknown) => { handlers.set(channel, handler); },
+    removeHandler: (channel: string) => { handlers.delete(channel); },
+  };
+  const runtime = {
+    projectPath: project,
+    connectionState: { status: 'connected' as const },
+    turnActive: false,
+    pendingInteractions: 0,
+  };
+  let runtimeOpen = true;
+  let restartCalls = 0;
+  const bridge = {
+    registerIpc: () => undefined,
+    registerWindow: () => undefined,
+    get: (requestedSessionId: string) => runtimeOpen && requestedSessionId === sessionId ? runtime : undefined,
+    hasActiveWork: () => runtime.turnActive || runtime.pendingInteractions > 0,
+    restart: async (_ref: unknown, beforeRestart?: () => void) => {
+      // Simulate work arriving after the handler's first check but before the
+      // manager's queued restart starts.
+      runtime.turnActive = true;
+      beforeRestart?.();
+      restartCalls += 1;
+    },
+  };
+  const host = new HostController(settings, bridge as any, new DiagnosticBuffer(), undefined, ipc as any);
+  const frame = { url: 'http://127.0.0.1:4242' };
+  const sender = {
+    mainFrame: frame,
+    isDestroyed: () => false,
+    once: () => undefined,
+    removeListener: () => undefined,
+  };
+  host.registerWindow(sender as any, frame.url);
+  host.registerIpc();
+  const restart = handlers.get(CH_BRIDGE_RESTART);
+  assert.ok(restart);
+  const event = { sender, senderFrame: frame };
+
+  try {
+    await assert.rejects(
+      () => Promise.resolve(restart!(event, sessionId)),
+      /cancel active turns and pending interactions/,
+    );
+    assert.equal(restartCalls, 0);
+
+    runtime.turnActive = false;
+    settings.setActiveSession({ projectPath: project, sessionId: otherSessionId });
+    await assert.rejects(
+      () => Promise.resolve(restart!(event, sessionId)),
+      /no longer active/,
+    );
+    assert.equal(restartCalls, 0);
+
+    settings.setActiveSession({ projectPath: project, sessionId });
+    runtimeOpen = false;
+    await assert.rejects(
+      () => Promise.resolve(restart!(event, sessionId)),
+      /session runtime is not open/,
+    );
+    assert.equal(restartCalls, 0);
+  } finally {
+    host.dispose();
+    rmSync(userData, { recursive: true, force: true });
+    rmSync(projectDirectory, { recursive: true, force: true });
+  }
+});
 
 test('adding the first project uses the real settings store, trusts it, and starts one session without restarting', async () => {
   const userData = mkdtempSync(join(tmpdir(), 'lingxi-auto-trust-settings-'));
@@ -499,6 +579,17 @@ test('bootstrap reports CLI/TUI credentials discovered by the shared engine stor
   });
 });
 
+test('default model mirror failure is recoverable after credential persistence', () => {
+  const diagnostics = new DiagnosticBuffer();
+  const settings = {
+    update: () => { throw new Error('settings mirror failed'); },
+  };
+  const host = new HostController(settings as any, {} as any, diagnostics);
+
+  (host as any).updateProviderDefaultModel('deepseek/deepseek-v4-flash');
+  assert.match(diagnostics.snapshot()[0]?.message ?? '', /default model update failed/);
+});
+
 test('bootstrap replays pending AskUserQuestion requests after a renderer reload', () => {
   const diagnostics = new DiagnosticBuffer();
   const settings = {
@@ -599,4 +690,72 @@ test('host catalog generations keep only the newest deferred response', async ()
   await firstLoad;
 
   assert.equal((host as any).bootstrap().projectCatalogs[projectPath].sessions[0].title, 'new');
+});
+
+test('the settings-update IPC handler accepts a voice patch, normalizes it through the real store, and never restarts the bridge for it', async () => {
+  const userData = mkdtempSync(join(tmpdir(), 'lingxi-settings-update-voice-'));
+  const settings = new SettingsStore(userData);
+  const handlers = new Map<string, (...args: unknown[]) => unknown>();
+  const ipc = {
+    handle: (channel: string, handler: (...args: unknown[]) => unknown) => { handlers.set(channel, handler); },
+    removeHandler: (channel: string) => { handlers.delete(channel); },
+  };
+  let restartCalls = 0;
+  const bridge = {
+    registerIpc: () => undefined,
+    registerWindow: () => undefined,
+    // If a `voice`-only patch ever triggered a restart, this would be
+    // called — `main/host.ts`'s own `restartsBridge` check only looks at
+    // `'model' in patch || 'apiBaseUrl' in patch`, deliberately excluding
+    // `voice` (see its comment: recognition/synthesis read
+    // `bootstrap.settings.voice` fresh on every audio request, so a write
+    // takes effect on the next request with no restart needed).
+    restart: async () => { restartCalls += 1; },
+  };
+  const host = new HostController(settings, bridge as any, new DiagnosticBuffer(), undefined, ipc as any);
+  const frame = { url: 'http://127.0.0.1:4242' };
+  const sender = {
+    mainFrame: frame,
+    isDestroyed: () => false,
+    once: () => undefined,
+    removeListener: () => undefined,
+  };
+  host.registerWindow(sender as any, frame.url);
+  host.registerIpc();
+  const update = handlers.get(CH_SETTINGS_UPDATE);
+  assert.ok(update);
+  const event = { sender, senderFrame: frame };
+
+  try {
+    const result = await Promise.resolve(update!(event, {
+      voice: { schemaVersion: 2, recognitionMode: 'localOnly', language: '  ZH-cn  ', voiceSelection: 'Alex', rate: 99, autoPlayReplies: true },
+    })) as { voice?: Record<string, unknown> };
+
+    // Normalized through the REAL `parseVoicePreferences` (Task 4), not
+    // echoed back raw: language is trimmed (case preserved — only an
+    // "auto"-insensitive match is special-cased), `rate` is clamped into
+    // [0.5, 2.0], and the bare voice name gets its `system:` prefix.
+    assert.deepEqual(result.voice, {
+      schemaVersion: 2,
+      recognitionMode: 'localOnly',
+      language: 'ZH-cn',
+      voiceSelection: 'system:Alex',
+      rate: 2.0,
+    });
+    // The removed auto-play flag cannot re-enter the settings file through a
+    // renderer patch either: `parseVoicePreferences` keeps known keys only.
+    assert.ok(!('autoPlayReplies' in (result.voice ?? {})));
+    assert.deepEqual(settings.getPublic().voice, result.voice, 'the IPC response must reflect what was actually persisted, not an optimistic echo');
+    assert.equal(restartCalls, 0, 'a voice-only patch must never restart the bridge');
+
+    // The allowlist genuinely rejects anything else — `voice` joining it
+    // must not have accidentally opened the gate to arbitrary keys.
+    await assert.rejects(
+      () => Promise.resolve(update!(event, { notARealSetting: true })),
+      /unsupported setting/,
+    );
+  } finally {
+    host.dispose();
+    rmSync(userData, { recursive: true, force: true });
+  }
 });

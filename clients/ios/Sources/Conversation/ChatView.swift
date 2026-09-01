@@ -12,6 +12,7 @@ struct ChatView: View {
 
     @Environment(AppState.self) private var app
     @Environment(\.theme) private var t
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     let session: SessionRef
 
@@ -158,6 +159,7 @@ struct ChatView: View {
                          slashCommandsLoaded: convo.slashCommandsLoaded,
                          slashCommandPending: convo.slashCommandPending,
                          streaming: convo.streaming,
+                         showDiscardRecovery: convo.hasInactiveDurableRecovery,
                          isCancelling: convo.isCancelling,
                          sendEnabled: !convo.sessionTransitionPending
                              && !convo.slashCommandPending
@@ -650,19 +652,49 @@ struct ChatView: View {
         icon: LXIconName? = nil,
         onDismiss: (() -> Void)? = nil
     ) -> some View {
-        HStack(spacing: 8) {
+        let hasIcon = icon != nil
+        return HStack(spacing: 8) {
             HStack(spacing: 8) {
                 if let icon {
                     LXIcon(name: icon, size: 15, color: color, stroke: 1.7)
                         .frame(width: 18)
                 } else {
-                    LLMActivityIndicator(isActive: isAnimated, color: color)
-                        .frame(width: 18)
+                    switch RuntimeFooterMotionPolicy.indicatorPresentation(
+                        isAnimated: isAnimated,
+                        hasIcon: hasIcon,
+                        reduceMotion: reduceMotion
+                    ) {
+                    case .hidden:
+                        // Both sibling cases occupy 18pt, so an EmptyView here
+                        // collapses the leading slot and shifts the label by
+                        // that width plus the HStack's spacing — on every
+                        // turn boundary and every tool start/stop. The running
+                        // affordance is the text sweep, not this slot, but the
+                        // slot still has to hold its place.
+                        Color.clear
+                            .frame(width: 18, height: 18)
+                            .accessibilityHidden(true)
+                    case .staticIndicator:
+                        LLMActivityIndicator(isActive: false, color: color)
+                            .frame(width: 18)
+                    case .activeIndicator:
+                        // Reduce Motion keeps the active path reachable while
+                        // LLMActivityIndicator itself renders it statically.
+                        LLMActivityIndicator(isActive: true, color: color)
+                            .frame(width: 18)
+                    }
                 }
                 VStack(alignment: .leading, spacing: 1) {
                     Text(label)
                         .font(.system(size: 11.5, weight: .medium))
                         .foregroundStyle(color)
+                        .runtimeTextSweep(
+                            isActive: RuntimeFooterMotionPolicy.textSweepIsActive(
+                                isAnimated: isAnimated,
+                                reduceMotion: reduceMotion
+                            ),
+                            highlightColor: t.text
+                        )
                     if let detail, !detail.isEmpty {
                         Text(detail)
                             .font(.system(size: 10.5))
@@ -821,6 +853,87 @@ private enum RuntimeFooterState: Equatable {
     case stopping
     case waiting
     case error(String)
+}
+
+/// Selects one running affordance for the footer. Text-only active states use
+/// the existing text sweep during normal motion and a static indicator under
+/// Reduce Motion; non-running text-only states retain their static indicator.
+enum RuntimeFooterIndicatorPresentation: Equatable {
+    case hidden
+    case staticIndicator
+    case activeIndicator
+}
+
+enum RuntimeFooterMotionPolicy {
+    static func indicatorPresentation(
+        isAnimated: Bool,
+        hasIcon: Bool,
+        reduceMotion: Bool
+    ) -> RuntimeFooterIndicatorPresentation {
+        guard !hasIcon else { return .hidden }
+        if isAnimated {
+            return reduceMotion ? .activeIndicator : .hidden
+        }
+        return .staticIndicator
+    }
+
+    static func textSweepIsActive(
+        isAnimated: Bool,
+        reduceMotion: Bool
+    ) -> Bool {
+        isAnimated && !reduceMotion
+    }
+}
+
+/// Matches desktop's 2.2-second left-to-right text sweep for any running text
+/// while keeping the underlying content readable when Reduce Motion is enabled.
+struct RuntimeTextSweep: ViewModifier {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var sweepIsVisible = false
+
+    let isActive: Bool
+    let highlightColor: Color
+
+    func body(content: Content) -> some View {
+        content
+            .overlay {
+                if isActive && !reduceMotion {
+                    GeometryReader { geometry in
+                        LinearGradient(
+                            stops: [
+                                .init(color: .clear, location: 0),
+                                .init(color: .clear, location: 0.42),
+                                .init(color: highlightColor, location: 0.5),
+                                .init(color: .clear, location: 0.58),
+                                .init(color: .clear, location: 1),
+                            ],
+                            startPoint: .leading,
+                            endPoint: .trailing
+                        )
+                        .offset(x: sweepIsVisible ? geometry.size.width * 1.2 : -geometry.size.width * 1.2)
+                        .animation(
+                            .linear(duration: 2.2).repeatForever(autoreverses: false),
+                            value: sweepIsVisible
+                        )
+                    }
+                    .mask(content)
+                    .allowsHitTesting(false)
+                }
+            }
+            .onAppear { sweepIsVisible = isActive && !reduceMotion }
+            .onChange(of: isActive) { _, active in
+                sweepIsVisible = active && !reduceMotion
+            }
+            .onChange(of: reduceMotion) { _, shouldReduceMotion in
+                sweepIsVisible = isActive && !shouldReduceMotion
+            }
+    }
+}
+
+extension View {
+    func runtimeTextSweep(isActive: Bool, highlightColor: Color) -> some View {
+        modifier(RuntimeTextSweep(isActive: isActive, highlightColor: highlightColor))
+    }
 }
 
 private struct LLMActivityIndicator: View {

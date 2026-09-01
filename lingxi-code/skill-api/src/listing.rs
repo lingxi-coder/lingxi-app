@@ -19,6 +19,10 @@ pub struct FileSkillRow {
     pub description: String,
     /// Optional long-form frontmatter usage hint.
     pub when_to_use: Option<String>,
+    /// The skill's own directory on disk (e.g. `<root>/skills/<name>`), as
+    /// discovered by the scan — not the section's aggregate root. Used by the
+    /// desktop Skills settings listing to show where each skill came from.
+    pub source_dir: PathBuf,
 }
 
 /// One source section in Claude Code render order.
@@ -163,6 +167,7 @@ fn load_skills_from_dirs(
             }
 
             let dir_name = entry.file_name().to_string_lossy().into_owned();
+            let source_dir = path.clone();
             let Ok(skill) = parse_skill_markdown(&raw, path, source, LoadedFrom::Skills) else {
                 continue;
             };
@@ -170,6 +175,7 @@ fn load_skills_from_dirs(
                 name: dir_name,
                 description: skill.description,
                 when_to_use: skill.frontmatter.when_to_use,
+                source_dir,
             });
         }
     }

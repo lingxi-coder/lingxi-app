@@ -36,13 +36,16 @@ use serde::Deserialize;
 
 use bridge::lockfile::{IdeLockfile, LockfileGuard};
 use bridge::McpEndpoint;
-use engine_desktop::{build, DesktopConfig, DesktopRuntime};
+use engine_desktop::{build, DesktopAudio, DesktopConfig, DesktopRuntime};
 use platform_posix::PosixFileSystem;
 use traits::{OrchestratorHandle, OutputStream, SlashCommandDispatcher};
 
+use crate::audio_bridge::{new_audio_bridge, AudioBridge};
 use crate::driver::{CredentialRequiredTurnDriver, OrchestratorTurnDriver};
+use crate::mcp_bridge::McpPaths;
 use crate::router::{EngineCommandRouter, SessionStoreContext};
 use crate::server::{BridgeConnection, TurnDriver};
+use crate::settings_bridge::{active_settings_baseline, SettingsContext, SettingsPaths};
 
 /// Env override for the API base URL (mirrors `apps/cli`'s `resolve_api_base`).
 pub const API_BASE_ENV: &str = "LINGXI_API_BASE_URL";
@@ -511,6 +514,10 @@ pub fn resolve_desktop_config(args: &BridgeArgs) -> DesktopConfig {
         // session still boots in Default and changes mode only after an
         // authenticated renderer command crosses the bridge IPC boundary.
         allow_dangerously_skip_permissions: trusted,
+        // Device audio is CONNECTION-scoped, not argv-scoped: the bridge it
+        // proxies through cannot exist until `assemble` has a connection to
+        // build it over, so it is filled there and never here.
+        audio: None,
     }
 }
 
@@ -549,14 +556,39 @@ pub struct BoundServer {
     pub connection: BridgeConnection,
     /// The desktop runtime — held (not read) so its handles and the spawned
     /// background tasks it owns (the cost-persist drain, the orchestrator's
-    /// registries) stay alive for as long as the server serves. Private so the
-    /// `_` hold-alive intent is expressed without a `pub` dead-field lint.
-    #[allow(dead_code)]
+    /// registries) stay alive for as long as the server serves. Not exposed:
+    /// `DesktopRuntime` carries broad handles (the tool registry among them)
+    /// that nothing outside this struct has a reason to hold.
     runtime: DesktopRuntime,
+    /// The request half of THIS connection's audio bridge — the same object
+    /// that went into `DesktopConfig::audio` and whose responder half is bound
+    /// to `connection`. Held so the pairing is visible at the composition root
+    /// rather than only implied by the order of two statements inside
+    /// [`assemble_with_provider_keys`].
+    audio: Arc<AudioBridge>,
     /// Keeps the cross-session live identity and inbox registered for the
     /// lifetime of this bridge process.
     #[allow(dead_code)]
     live_session: LiveSessionGuard,
+}
+
+impl BoundServer {
+    /// The names of the tools the assembled engine registered.
+    ///
+    /// Delegates to [`DesktopRuntime::registered_tool_names`]; the runtime
+    /// itself stays inside this struct.
+    #[must_use]
+    pub fn registered_tool_names(&self) -> Vec<String> {
+        self.runtime.registered_tool_names()
+    }
+
+    /// This connection's audio bridge — the engine-side object every
+    /// `SpeechToText` / `TextToSpeech` / `VoiceRecorder` call on this
+    /// connection goes through.
+    #[must_use]
+    pub fn audio(&self) -> &Arc<AudioBridge> {
+        &self.audio
+    }
 }
 
 /// Process-local live-session registration owned by a bridge runtime.
@@ -778,6 +810,58 @@ pub async fn assemble_with_provider_keys(
         Arc::new(PosixFileSystem::new(cfg.cwd.clone())),
     );
 
+    // The layered-settings read path, captured from the SAME roots the engine
+    // loads its own settings from, again before `cfg` moves into the desktop
+    // composition root.
+    //
+    // `active` is snapshotted ONCE, here, and answers "what did this session
+    // load at boot" — the baseline a later on-disk edit, or a later listing's
+    // freshly re-read `effective`, is shown as diverging from. It DOES fold in
+    // the managed overlay, even though it is otherwise file-layers-only and
+    // never re-read: the engine loads managed (policy) settings at boot too,
+    // same as the three files, so a managed key is just as much "already
+    // loaded" as a `user`/`project`/`local` one. Leaving it out here made a
+    // managed key differ from `effective` (which always re-applies the same
+    // overlay) permanently and unfixably — a "restart to apply" banner for a
+    // change no restart can ever apply, since the user never wrote it and no
+    // restart changes it. Folding it in here, once, from the same overlay
+    // `effective` re-applies every time, makes the two agree on managed keys
+    // forever, which is the correct answer: nothing IS pending on a key the
+    // user cannot change.
+    let settings_context = {
+        let paths = SettingsPaths {
+            lingxi_home: cfg.lingxi_home.clone(),
+            project_dir: cfg.cwd.clone(),
+        };
+        // Managed (policy) discovery is the desktop composition root's job;
+        // bridge-server does not locate those tiers itself. Resolved once,
+        // here, and reused for both `active`'s one-time bake-in below and the
+        // `managed` field every later listing re-applies to `effective` — the
+        // same map both places, so the two can never drift apart.
+        let managed = engine_desktop::managed_settings_overlay().await;
+        let active = active_settings_baseline(&paths, &managed);
+        SettingsContext {
+            paths,
+            active,
+            managed,
+        }
+    };
+
+    // The MCP write-side roots, captured from `cfg` before it moves into the
+    // desktop composition root below — same pattern as `settings_context`
+    // above. `global_config_path` is resolved the SAME way
+    // `resolve_desktop_config`'s `global_mcp_path` is (rather than being
+    // derived from `cfg.mcp_paths`, which the trust gate can null out): the
+    // desktop's OWN edit to `~/.lingxi.json` is a deliberate user action, not
+    // an automatic load of workspace-supplied config, so it always targets
+    // the real file regardless of whether THIS workspace is currently
+    // trusted to auto-load a repo-supplied `.mcp.json`.
+    let mcp_paths = McpPaths {
+        project_dir: cfg.cwd.clone(),
+        global_config_path: migrations::global_config::global_config_path()
+            .unwrap_or_else(|| PathBuf::from("/dev/null")),
+    };
+
     // The orchestrator's output stream + the gate's request sink BOTH ride the
     // same connection-scoped outbound channel (the F2-06 contract).
     let event_sink = connection.event_sink();
@@ -800,6 +884,31 @@ pub async fn assemble_with_provider_keys(
     let computer_access_broker = Arc::new(client_adapter::BridgeComputerAccessBroker::new(
         connection.computer_access_sink(),
     ));
+    // Device audio (microphone / recognizer / synthesizer). The desktop has no
+    // native implementation — those devices belong to the Electron client — so
+    // one `AudioBridge` over THIS connection's sink stands in for all three
+    // traits: each engine-side call becomes a `ClientEvent::AudioRequest` parked
+    // until the client's `ClientCommand::AudioResponse` comes back.
+    //
+    // Both halves are connection-scoped ON PURPOSE, and this is the only place
+    // that can make that true: the bridge parks into a table the responder
+    // resolves out of, and BOTH are created here, per `assemble`, per
+    // `BridgeConnection`. A later connection gets a fresh pair, so its
+    // `AudioResponse` cannot resolve a request this one parked (the ids are
+    // per-bridge counters into per-bridge tables), and `on_close` drains what is
+    // still parked instead of leaving a caller to wait out its deadline.
+    //
+    // There is deliberately NO capability handshake: this runs before any
+    // client connects, so the desktop cannot know whether the renderer that
+    // eventually attaches implements audio at all. That is answered honestly at
+    // call time instead — `AudioBridge` reports "no desktop client is connected"
+    // when nothing is listening, and a deadline when nothing answers.
+    //
+    // Any capability the caller put on `cfg` is REPLACED, not honored: it could
+    // only have been built over some other connection, and the engine's audio
+    // calls must reach THIS one.
+    let (audio_bridge, audio_responder) = new_audio_bridge(connection.audio_sink());
+    cfg.audio = Some(DesktopAudio::from_single(audio_bridge.clone()));
     let (ask_user_question_tx, ask_user_question_rx) = tokio::sync::mpsc::channel::<
         tui_core::ask_user_question_bridge::AskUserQuestionExchange,
     >(8);
@@ -911,17 +1020,25 @@ pub async fn assemble_with_provider_keys(
             Some(runtime.shared_command_registry.clone()),
         )
         .with_credentials(runtime.credentials.clone())
-        .with_session_store(session_store),
+        .with_session_store(session_store)
+        .with_settings_context(settings_context)
+        .with_mcp_paths(mcp_paths),
     );
 
     let connection = connection
         .bind(gate, driver)
         .bind_router(router)
         .bind_computer_access(computer_access_broker, computer_access_rx)
-        .bind_ask_user_question(ask_user_question_broker, ask_user_question_rx);
+        .bind_ask_user_question(ask_user_question_broker, ask_user_question_rx)
+        // The response half of the SAME pair whose request half went into
+        // `cfg.audio` above — this is what makes an inbound `AudioResponse` on
+        // this connection resolve a call the engine parked on this connection,
+        // and a disconnect drain them.
+        .bind_audio(audio_responder);
     Ok(BoundServer {
         connection,
         runtime,
+        audio: audio_bridge,
         live_session,
     })
 }
@@ -1423,6 +1540,10 @@ mod tests {
             bg_session_forker: None,
             worktree_launch: None,
             tmux_launch: None,
+            // `assemble` fills this with the connection's own bridge; a
+            // caller-supplied value would be a lie about which connection the
+            // engine's audio calls reach.
+            audio: None,
         };
         let bound = assemble(cfg).await.expect("assemble must succeed");
         // The gate handle is reachable only when bind() ran with a real gate.

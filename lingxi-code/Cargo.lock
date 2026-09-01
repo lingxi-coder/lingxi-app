@@ -791,6 +791,7 @@ version = "0.9.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "base64 0.22.1",
  "branding",
  "bridge",
  "client-adapter",
@@ -802,6 +803,7 @@ dependencies = [
  "engine-desktop",
  "futures-util",
  "http",
+ "mcp",
  "migrations",
  "msgqueue",
  "once_cell",
@@ -1160,6 +1162,7 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.18",
+ "traits",
  "uniffi",
 ]
 
@@ -1843,6 +1846,7 @@ dependencies = [
  "tool-lsp",
  "tool-mcp",
  "tool-meta",
+ "tool-mobile",
  "tool-plan",
  "tool-shell",
  "tool-skill",

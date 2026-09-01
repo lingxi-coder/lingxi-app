@@ -15,6 +15,7 @@ import {
   canonicalWorkspace,
   defaultSettings,
   parseSettings,
+  publicSettings,
   sanitizeDiagnostic,
   setWorkspaceTrust,
   withActiveProject,
@@ -23,6 +24,7 @@ import {
   withSessionPinned,
   workspaceFingerprint,
   workspaceTrust,
+  type VoicePreferences,
 } from '../src/main/host-utils';
 import { SettingsStore } from '../src/main/settings';
 
@@ -56,6 +58,15 @@ test('settings parser fails closed and migrates legacy workspaces into bounded p
   });
   assert.deepEqual(explicitlyEmpty.projects, []);
   assert.equal(explicitlyEmpty.activeProject, undefined);
+});
+
+test("parseSettings keeps 'system' and still rejects garbage", () => {
+  assert.equal(parseSettings({ version: 1, theme: 'system', projects: [] }).theme, 'system');
+  assert.equal(parseSettings({ version: 1, theme: 'dark', projects: [] }).theme, 'dark');
+  assert.equal(
+    parseSettings({ version: 1, theme: 'chartreuse', projects: [] }).theme, undefined,
+    'an unknown theme must still be dropped, not passed through',
+  );
 });
 
 test('bypassPermissionsModeAccepted round-trips only for a strict true', () => {
@@ -340,4 +351,74 @@ test('settings store keeps draft active sessions volatile until committed', () =
   store.removeProject(second);
   assert.deepEqual(store.getPublic().activeSession, firstRef);
   assert.equal(JSON.parse(readFileSync(store.settingsPath, 'utf8')).activeSession.projectPath, first);
+});
+
+// ---------------------------------------------------------------------------
+// Task 4: voice preferences wired through parseSettings/publicSettings/update,
+// on top of the pure-function contract pinned by test/voice-preferences.test.ts.
+// ---------------------------------------------------------------------------
+
+test('parseSettings leaves voice absent when never persisted, matching every other optional field', () => {
+  const parsed = parseSettings({ version: 1, projects: [], pinnedSessions: [], trustedWorkspaces: {} });
+  assert.equal(parsed.voice, undefined);
+});
+
+test('parseSettings normalizes a persisted voice value, repairing garbage rather than dropping it', () => {
+  const parsed = parseSettings({
+    version: 1,
+    projects: [],
+    pinnedSessions: [],
+    trustedWorkspaces: {},
+    // 'onDevice' is the Swift case name, not a persisted value on either
+    // mobile platform; rate is out of range. Both must be repaired, not
+    // rejected wholesale.
+    voice: { recognitionMode: 'onDevice', rate: 99, voiceSelection: 'Alex' },
+  });
+  const expected: VoicePreferences = {
+    schemaVersion: 2,
+    recognitionMode: 'automatic',
+    language: 'auto',
+    voiceSelection: 'system:Alex',
+    rate: 2,
+  };
+  assert.deepEqual(parsed.voice, expected);
+});
+
+test('publicSettings passes voice through as an independent copy', () => {
+  const parsed = parseSettings({
+    version: 1, projects: [], pinnedSessions: [], trustedWorkspaces: {},
+    voice: { recognitionMode: 'localOnly' },
+  });
+  const pub1 = publicSettings(parsed);
+  assert.deepEqual(pub1.voice, parsed.voice);
+  if (pub1.voice) pub1.voice.recognitionMode = 'automatic';
+  assert.equal(parsed.voice?.recognitionMode, 'localOnly', 'mutating the returned copy must not affect stored settings');
+});
+
+test('SettingsStore.update writes and reloads voice preferences, normalized', () => {
+  const userData = temporaryDirectory();
+  const store = new SettingsStore(userData);
+  assert.equal(store.getPublic().voice, undefined, 'a fresh store has no voice preferences yet');
+
+  const result = store.update({ voice: { recognitionMode: 'localOnly', language: 'ZH-cn', rate: 0.1 } });
+  const expected: VoicePreferences = {
+    schemaVersion: 2,
+    recognitionMode: 'localOnly',
+    language: 'ZH-cn',
+    voiceSelection: 'system:default',
+    rate: 0.5,
+  };
+  assert.deepEqual(result.voice, expected);
+  assert.deepEqual(new SettingsStore(userData).getPublic().voice, expected, 'voice preferences must survive a reload');
+
+  // A later update() replaces the whole snapshot, matching how both mobile
+  // platforms persist it (never a partial per-field merge).
+  const replaced = store.update({ voice: { rate: 1.75 } });
+  assert.deepEqual(replaced.voice, {
+    schemaVersion: 2,
+    recognitionMode: 'automatic',
+    language: 'auto',
+    voiceSelection: 'system:default',
+    rate: 1.75,
+  }, 'the earlier localOnly/ZH-cn values must be replaced wholesale, not merged into');
 });

@@ -40,6 +40,25 @@ final class AppIntegrationTests: XCTestCase {
         XCTAssertNil(LingxiDeepLink.action(from: URL(string: "lingxi://unknown")!))
     }
 
+    func testConversationDeepLinkParsesSessionAndOptionalTurn() {
+        XCTAssertEqual(
+            LingxiDeepLink.action(
+                from: URL(string: "lingxi://open_conversation?sessionId=session-a&turnId=42")!
+            ),
+            .openConversation(sessionID: "session-a", turnID: 42)
+        )
+        XCTAssertEqual(
+            LingxiDeepLink.action(
+                from: URL(string: "lingxi://open_conversation?sessionId=session-a")!
+            ),
+            .openConversation(sessionID: "session-a", turnID: nil)
+        )
+        XCTAssertEqual(
+            LingxiDeepLink.conversationURL(sessionID: "session-a", turnID: 42)?.absoluteString,
+            "lingxi://open_conversation?sessionId=session-a&turnId=42"
+        )
+    }
+
     func testLocalAppDeepLinkParsesValidatedUnifiedRoute() {
         let url = URL(
             string: "lingxi://open_local_app?appId=tracker-1&destination=preview&autostart=1&source=widget"

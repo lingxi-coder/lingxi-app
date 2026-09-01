@@ -48,6 +48,8 @@ G1	clients/electron/src/main/index.ts	LINGXI_
 G1	clients/electron/test/host-utils.test.ts	\.claude(?![A-Za-z0-9_.\-])
 G1	clients/electron/test/host-utils.test.ts	\.lingxi(?![A-Za-z0-9_.\-])
 G1	clients/electron/test/packaged-app-smoke.test.mjs	\.claude(?![A-Za-z0-9_.\-])
+G1	clients/electron/test/settings-coding-pages.test.ts	\.lingxi(?![A-Za-z0-9_.\-])
+G1	clients/electron/test/settings-raw-json.test.ts	\.lingxi(?![A-Za-z0-9_.\-])
 G1	clients/ios/Sources/App/RootView.swift	LINGXI_
 G1	clients/ios/Sources/Conversation/ConversationSource.swift	LINGXI_
 G1	clients/ios/Sources/LinuxRuntimeNative/LXISHNativeRootfs.swift	LINGXI_
@@ -71,6 +73,7 @@ G1	clients/shared/scripts/e2e.mjs	\.lingxi(?![A-Za-z0-9_.\-])
 G1	clients/shared/src/client.ts	X-LingXi-Ide-Authorization
 G1	clients/shared/src/client.ts	\.lingxi(?![A-Za-z0-9_.\-])
 G1	clients/shared/src/lockfile.ts	\.lingxi(?![A-Za-z0-9_.\-])
+G1	clients/shared/test/snapshots.test.ts	\.lingxi(?![A-Za-z0-9_.\-])
 G1	clients/web/src/pages/DocsPage.tsx	LINGXI_
 G1	clients/web/src/pages/PublicPages.tsx	LINGXI_
 G1	lingxi-code/Cargo.toml	LingXi
@@ -89,6 +92,9 @@ G1	lingxi-code/apps/android-aar/src/lib.rs	\.lingxi
 G1	lingxi-code/apps/android-aar/uniffi.toml	\.lingxi
 G1	lingxi-code/apps/bridge-server/src/boot.rs	LINGXI
 G1	lingxi-code/apps/bridge-server/src/boot.rs	\.lingxi
+G1	lingxi-code/apps/bridge-server/src/mcp_bridge.rs	\.lingxi
+G1	lingxi-code/apps/bridge-server/src/settings_bridge.rs	\.lingxi
+G1	lingxi-code/apps/bridge-server/tests/e2e_audio_assembly_test.rs	\.lingxi
 G1	lingxi-code/apps/bridge-server/tests/e2e_serve_test.rs	\.lingxi
 G1	lingxi-code/apps/bridge-server/tests/router_test.rs	\.lingxi
 G1	lingxi-code/apps/cli/build.rs	LINGXI
@@ -163,6 +169,7 @@ G1	lingxi-code/apps/engine-desktop/src/lib.rs	\.lingxi
 G1	lingxi-code/apps/engine-desktop/src/settings_watch.rs	LINGXI
 G1	lingxi-code/apps/engine-desktop/src/settings_watch.rs	\.lingxi
 G1	lingxi-code/apps/engine-desktop/src/skill_loader.rs	LINGXI
+G1	lingxi-code/apps/engine-desktop/tests/audio_injection.rs	\.lingxi
 G1	lingxi-code/apps/engine-desktop/tests/sandbox_startup_test.rs	\.lingxi
 G1	lingxi-code/apps/engine-desktop/tests/settings_watch_spawn.rs	\.lingxi
 G1	lingxi-code/apps/engine-mobile/build.rs	\.lingxi
@@ -198,6 +205,7 @@ G1	lingxi-code/client-adapter/src/permission_gate.rs	\.lingxi
 G1	lingxi-code/client-protocol/snapshots/event/attachment.json	LINGXI
 G1	lingxi-code/client-protocol/snapshots/event/memory_entries.json	LINGXI
 G1	lingxi-code/client-protocol/snapshots/event/session_list.json	\.lingxi
+G1	lingxi-code/client-protocol/snapshots/event/skills.json	\.lingxi
 G1	lingxi-code/client-protocol/tests/listings_test.rs	LINGXI
 G1	lingxi-code/client-protocol/tests/listings_test.rs	\.lingxi
 G1	lingxi-code/client-protocol/tests/snapshot_test.rs	LINGXI
@@ -886,9 +894,17 @@ G3	clients/electron/src/main/host-utils.ts	.lingxi
 G3	clients/electron/src/main/host-utils.ts	LINGXI.local.md
 G3	clients/electron/src/main/host-utils.ts	LINGXI.md
 G3	clients/electron/src/renderer/bridge/useBridge.ts	.lingxi
+G3	clients/electron/src/renderer/bridge/useBridge.ts	.lingxi.json
 G3	clients/electron/src/renderer/components/CodeBlock.tsx	.lingxi
+G3	clients/electron/src/renderer/components/settings/pages/McpServers.tsx	.lingxi.json
+G3	clients/electron/src/shared/settings.ts	.lingxi
+G3	clients/electron/test/audio-request-interaction.test.mjs	.lingxi
+G3	clients/electron/test/fixtures/audio-request-main.tsx	.lingxi
+G3	clients/electron/test/fixtures/microphone-permission-main.tsx	.lingxi
 G3	clients/electron/test/host-utils.test.ts	.lingxi
 G3	clients/electron/test/host-utils.test.ts	LINGXI.md
+G3	clients/electron/test/settings-coding-pages.test.ts	.lingxi
+G3	clients/electron/test/settings-raw-json.test.ts	.lingxi
 G3	clients/ios/Sources/LocalApps/LocalAppCodeBrowser.swift	.lingxi
 G3	clients/ios/Sources/LocalApps/LocalAppWebView.swift	.lingxi
 G3	clients/ios/Sources/LocalApps/LocalAppsStore.swift	.lingxi
@@ -901,6 +917,7 @@ G3	clients/shared/scripts/e2e.mjs	.lingxi
 G3	clients/shared/src/client.ts	.lingxi
 G3	clients/shared/src/lockfile.ts	.lingxi
 G3	clients/shared/src/protocol.ts	LINGXI.md
+G3	clients/shared/test/snapshots.test.ts	.lingxi
 G3	lingxi-code/.gitignore	.lingxi
 G3	lingxi-code/.gitignore	.lingxi-*
 G3	lingxi-code/LINGXI.md	.lingxi
@@ -911,8 +928,12 @@ G3	lingxi-code/agent/src/handle.rs	LINGXI.md
 G3	lingxi-code/agent/src/hooks_trust.rs	.lingxi.json
 G3	lingxi-code/apps/android-aar/src/lib.rs	.lingxi
 G3	lingxi-code/apps/bridge-server/src/boot.rs	.lingxi
+G3	lingxi-code/apps/bridge-server/src/mcp_bridge.rs	.lingxi.json
+G3	lingxi-code/apps/bridge-server/src/settings_bridge.rs	.lingxi
+G3	lingxi-code/apps/bridge-server/tests/e2e_audio_assembly_test.rs	.lingxi
 G3	lingxi-code/apps/bridge-server/tests/e2e_serve_test.rs	.lingxi
 G3	lingxi-code/apps/bridge-server/tests/router_test.rs	.lingxi
+G3	lingxi-code/apps/bridge-server/tests/router_test.rs	.lingxi.json
 G3	lingxi-code/apps/cli/src/background_dispatch.rs	.lingxi
 G3	lingxi-code/apps/cli/src/background_dispatch.rs	LINGXI_CONFIG_DIR
 G3	lingxi-code/apps/cli/src/background_launch.rs	.lingxi
@@ -949,6 +970,7 @@ G3	lingxi-code/apps/engine-desktop/src/lib.rs	.lingxi-plugin
 G3	lingxi-code/apps/engine-desktop/src/lib.rs	LINGXI.md
 G3	lingxi-code/apps/engine-desktop/src/settings_watch.rs	.lingxi
 G3	lingxi-code/apps/engine-desktop/src/settings_watch.rs	LINGXI.md
+G3	lingxi-code/apps/engine-desktop/tests/audio_injection.rs	.lingxi
 G3	lingxi-code/apps/engine-desktop/tests/sandbox_startup_test.rs	.lingxi
 G3	lingxi-code/apps/engine-desktop/tests/settings_watch_spawn.rs	.lingxi
 G3	lingxi-code/apps/engine-mobile/build.rs	.lingxi-plugin
@@ -977,6 +999,7 @@ G3	lingxi-code/client-adapter/src/permission_gate.rs	.lingxi
 G3	lingxi-code/client-protocol/snapshots/event/attachment.json	LINGXI.md
 G3	lingxi-code/client-protocol/snapshots/event/memory_entries.json	LINGXI.md
 G3	lingxi-code/client-protocol/snapshots/event/session_list.json	.lingxi
+G3	lingxi-code/client-protocol/snapshots/event/skills.json	.lingxi
 G3	lingxi-code/client-protocol/tests/listings_test.rs	.lingxi
 G3	lingxi-code/client-protocol/tests/listings_test.rs	LINGXI.md
 G3	lingxi-code/client-protocol/tests/snapshot_test.rs	.lingxi

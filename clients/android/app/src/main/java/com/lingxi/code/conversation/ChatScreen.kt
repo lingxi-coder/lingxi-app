@@ -107,6 +107,7 @@ fun ChatScreen(
     onRemoveAttachment: () -> Unit = {},
     onShare: (String) -> Unit = {},
     onStop: () -> Unit = {},
+    onDiscardRecoveredTurn: () -> Unit = {},
     onDismissError: () -> Unit = {},
     /** True to surface the dismissible offline banner above the composer. */
     showOfflineBanner: Boolean = false,
@@ -259,12 +260,15 @@ fun ChatScreen(
                 attachment = attachment,
                 onRemoveAttachment = onRemoveAttachment,
                 isStreaming = state.isStreaming,
-                enabled = modelSetupRequired || (state.sessionReady && !state.sessionTransitioning),
+                showDiscardRecovery = state.durableRecoveryBlocked,
+                enabled = !state.durableRecoveryBlocked &&
+                    (modelSetupRequired || (state.sessionReady && !state.sessionTransitioning)),
                 modelSetupRequired = modelSetupRequired,
                 onOpenModelSettings = onOpenModelSettings,
                 modelProviderStatuses = modelProviderStatuses,
                 onOpenProviderSettings = onOpenProviderSettings,
                 onStop = onStop,
+                onDiscardRecovery = onDiscardRecoveredTurn,
             )
         }
     }

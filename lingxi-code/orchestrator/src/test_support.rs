@@ -721,7 +721,7 @@ use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, AtomicUsize, Ordering}
 use std::sync::Mutex as StdMutex;
 use traits::{
     ActiveGoalSnapshot, AgentInfo, CompactionSummary, DoctorReport, HandleError, HookInfo,
-    McpServerInfo, MemoryEditorOutcome, OrchestratorHandle, StatusSnapshot,
+    McpServerInfo, MemoryEditorOutcome, OrchestratorHandle, SkillInfo, StatusSnapshot,
 };
 
 /// Test double for `OrchestratorHandle`.
@@ -784,6 +784,8 @@ pub struct MockOrchestratorHandle {
     // M5-11 additions:
     /// Pre-loaded MCP server list returned by `list_mcp_servers`.
     mcp_servers: StdMutex<Vec<McpServerInfo>>,
+    /// Pre-loaded skill list returned by `list_skills`.
+    skills: StdMutex<Vec<SkillInfo>>,
     /// Pre-loaded hooks list returned by `list_hooks`.
     hooks_list: StdMutex<Vec<HookInfo>>,
     /// Session-scoped `/goal` state returned through the handle.
@@ -839,6 +841,7 @@ impl MockOrchestratorHandle {
             cost_tokens: AtomicU64::new(0),
             cost_snapshot: StdMutex::new(None),
             mcp_servers: StdMutex::new(Vec::new()),
+            skills: StdMutex::new(Vec::new()),
             hooks_list: StdMutex::new(Vec::new()),
             active_goal: StdMutex::new(None),
             workspace_trusted: AtomicBool::new(true),
@@ -948,6 +951,10 @@ impl MockOrchestratorHandle {
     /// Pre-load the MCP server list returned by `list_mcp_servers`.
     pub fn set_mcp_servers(&self, v: Vec<McpServerInfo>) {
         *self.mcp_servers.lock().unwrap() = v;
+    }
+    /// Pre-load the skill list returned by `list_skills`.
+    pub fn set_skills(&self, v: Vec<SkillInfo>) {
+        *self.skills.lock().unwrap() = v;
     }
     /// Pre-load the hooks list returned by `list_hooks`.
     pub fn set_hooks(&self, v: Vec<HookInfo>) {
@@ -1212,6 +1219,10 @@ impl OrchestratorHandle for MockOrchestratorHandle {
 
     async fn list_mcp_servers(&self) -> Vec<McpServerInfo> {
         self.mcp_servers.lock().unwrap().clone()
+    }
+
+    async fn list_skills(&self) -> Vec<SkillInfo> {
+        self.skills.lock().unwrap().clone()
     }
 
     async fn list_hooks(&self) -> Vec<HookInfo> {

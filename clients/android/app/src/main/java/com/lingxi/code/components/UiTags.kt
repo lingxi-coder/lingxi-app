@@ -23,6 +23,9 @@ object UiTags {
     /** The composer's Stop button (replaces Send while a turn streams). */
     const val COMPOSER_STOP = "tag.composerStop"
 
+    /** The composer's discard action for a recovered parked turn. */
+    const val COMPOSER_DISCARD = "tag.composerDiscard"
+
     /** The persistent, dismissible turn-error banner above the composer. */
     const val CHAT_ERROR = "tag.chatError"
 

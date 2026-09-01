@@ -522,6 +522,7 @@ final class VoiceInteractionController {
     private var cancellationTask: Task<Void, Error>?
     private var cancellationSourceID: ObjectIdentifier?
     private var isCancellingFlowTurn = false
+    private var flowPausedInBackground = false
     private var pendingInterruptionTranscript: String?
     private var resumeAfterConfiguration = false
     private var generation: UInt64 = 0
@@ -698,6 +699,18 @@ final class VoiceInteractionController {
             recoverUnavailablePermissionsOrRequireConfiguration(for: mode)
             return
         }
+        if mode == .flow, flowPausedInBackground {
+            let stillRunning = source?.model.streaming == true
+                || source?.model.isCancelling == true
+                || source?.model.sessionTransitionPending == true
+                || activeFlowToken != nil
+            if stillRunning {
+                detailOverride = String(localized: "voice_stopped_in_background")
+                transition(to: .paused)
+                return
+            }
+            flowPausedInBackground = false
+        }
         if mode == .flow,
            let pendingInterruptionTranscript,
            let context = flowContext {
@@ -745,7 +758,8 @@ final class VoiceInteractionController {
               update.token == context.token,
               update.sequence > context.lastSpeechSequence,
               context.token != suppressedFlowToken,
-              !isCancellingFlowTurn
+              !isCancellingFlowTurn,
+              !flowPausedInBackground
         else { return }
 
         context.lastSpeechSequence = update.sequence
@@ -766,6 +780,20 @@ final class VoiceInteractionController {
         else { return }
 
         context.terminalCompletion = completion
+        if flowPausedInBackground {
+            if completion.outcome == .completed {
+                context.pendingSegments.append(contentsOf: context.segmenter.finish(
+                    finalText: completion.finalAssistantText
+                ))
+                if context.segmenter.detectedTerminalRewrite {
+                    Self.log.notice(
+                        "background assistant text rewrote streamed prefix turn=\(completion.token.clientTurnId, privacy: .public) epoch=\(completion.token.sessionEpoch, privacy: .public) sequence=\(context.lastSpeechSequence, privacy: .public)"
+                    )
+                }
+            }
+            finishBackgroundPausedFlowTurn(context, completion: completion)
+            return
+        }
         if completion.outcome == .completed {
             context.pendingSegments.append(contentsOf: context.segmenter.finish(
                 finalText: completion.finalAssistantText
@@ -802,15 +830,19 @@ final class VoiceInteractionController {
             speechPlayer.stop()
             return
         }
-        let ownedSource = activeFlowToken == nil ? nil : source
+        let preservesSubmittedFlowTurn = mode == .flow && activeFlowToken != nil && flowContext != nil
+        let ownedSource = preservesSubmittedFlowTurn ? nil : (activeFlowToken == nil ? nil : source)
         let context = flowContext
         invalidateTasks(keepingMode: true, cancelOwnedTurn: false)
         stopFlowAudioDetached(context)
         voiceCapture.cancel()
         speechPlayer.stop()
-        activeFlowToken = nil
+        flowPausedInBackground = preservesSubmittedFlowTurn
+        if !preservesSubmittedFlowTurn {
+            activeFlowToken = nil
+            flowContext = nil
+        }
         suppressedFlowToken = nil
-        flowContext = nil
         pendingInterruptionTranscript = nil
         isCancellingFlowTurn = false
         caption = ""
@@ -837,6 +869,7 @@ final class VoiceInteractionController {
         flowContext = nil
         pendingInterruptionTranscript = nil
         isCancellingFlowTurn = false
+        flowPausedInBackground = false
         source = nil
         automaticPlaybackToken = nil
         dictationCompletion = nil
@@ -867,6 +900,7 @@ final class VoiceInteractionController {
             flowContext = nil
             pendingInterruptionTranscript = nil
             isCancellingFlowTurn = false
+            flowPausedInBackground = false
             source = nil
             automaticPlaybackToken = nil
             dictationCompletion = nil
@@ -874,6 +908,7 @@ final class VoiceInteractionController {
         self.mode = mode
         caption = ""
         detailOverride = nil
+        flowPausedInBackground = false
         resumeAfterConfiguration = false
     }
 
@@ -1042,6 +1077,7 @@ final class VoiceInteractionController {
         }
         activeFlowToken = token
         suppressedFlowToken = nil
+        flowPausedInBackground = false
         pendingInterruptionTranscript = nil
         let operation = nextGeneration()
         let context = FlowResponseContext(token: token, operation: operation)
@@ -1253,7 +1289,8 @@ final class VoiceInteractionController {
         guard flowContext === context,
               generation == context.operation,
               !context.isInterrupting,
-              !context.pendingSegments.isEmpty
+              !context.pendingSegments.isEmpty,
+              !flowPausedInBackground
         else { return }
 
         if let session = context.speechSession {
@@ -1359,6 +1396,7 @@ final class VoiceInteractionController {
             self.flowContext = nil
             self.activeFlowToken = nil
             self.suppressedFlowToken = nil
+            self.flowPausedInBackground = false
             self.caption = ""
             switch outcome {
             case .completed:
@@ -1472,6 +1510,7 @@ final class VoiceInteractionController {
             self.activeFlowToken = nil
             self.suppressedFlowToken = nil
             self.isCancellingFlowTurn = false
+            self.flowPausedInBackground = false
             self.flowContext = nil
             self.pendingInterruptionTranscript = nil
             self.scheduleListening()
@@ -1510,6 +1549,30 @@ final class VoiceInteractionController {
         Task { @MainActor [weak self] in
             try? await self?.awaitCancellation(of: source)
         }
+    }
+
+    private func finishBackgroundPausedFlowTurn(
+        _ context: FlowResponseContext,
+        completion: ConversationTurnCompletion
+    ) {
+        if flowContext === context { flowContext = nil }
+        if activeFlowToken == context.token { activeFlowToken = nil }
+        suppressedFlowToken = nil
+        pendingInterruptionTranscript = nil
+        isCancellingFlowTurn = false
+        flowPausedInBackground = false
+        caption = ""
+        switch completion.outcome {
+        case .completed:
+            detailOverride = String(localized: "voice_stopped_in_background")
+        case .cancelled:
+            detailOverride = String(localized: "voice_turn_cancelled_retry")
+        case .maxTurns:
+            detailOverride = String(localized: "voice_turn_max_turns")
+        case .failed:
+            detailOverride = String(localized: "voice_turn_failed")
+        }
+        transition(to: .paused)
     }
 
     private func stopPlaybackAndWait() async {

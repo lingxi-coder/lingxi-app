@@ -49,6 +49,7 @@ import com.lingxi.code.conversation.ChatScreen
 import com.lingxi.code.conversation.ConversationTurnOrigin
 import com.lingxi.code.conversation.ConversationTurnOutcome
 import com.lingxi.code.conversation.ChatViewModel
+import com.lingxi.code.conversation.ConversationLaunchRequest
 import com.lingxi.code.conversation.ConversationSource
 import com.lingxi.code.conversation.ComputerUseSetupStatus
 import com.lingxi.code.conversation.ComposerAttachment
@@ -125,6 +126,7 @@ import com.lingxi.code.localapps.widget.LocalAppWidgetPinRequester
 import com.lingxi.code.model.sessionCatalogStrings
 import com.lingxi.code.voice.FlowModeOverlay
 import com.lingxi.code.voice.VoiceFlowOverlay
+import com.lingxi.code.voice.cancelActiveHeldVoiceSession
 import com.lingxi.code.voice.rememberOrbVoiceListen
 import com.lingxi.code.voice.rememberVoiceCapture
 import com.lingxi.code.voice.audio.VoiceSpeechPlayer
@@ -151,6 +153,14 @@ import kotlinx.coroutines.withTimeoutOrNull
 private const val LANDING_SWITCH_ATTEMPTS = 40
 private const val LANDING_SWITCH_RETRY_MS = 250L
 private const val SESSION_READY_TIMEOUT_MS = 20_000L
+
+/**
+ * A conversation notification is usually tapped on a COLD start, so the first
+ * attempt can land before the engine source is bound. Retry on the same budget
+ * shape as the created-app landing, then report instead of dropping the route.
+ */
+private const val CONVERSATION_LAUNCH_ATTEMPTS = 40
+private const val CONVERSATION_LAUNCH_RETRY_MS = 250L
 
 /**
  * Root composable for the app shell.
@@ -193,6 +203,8 @@ fun RootScreen(
     settingsStore: SettingsStore? = null,
     onConversationSourceChanged: (ConversationSource) -> Unit = {},
     viewModel: ChatViewModel? = null,
+    requestedConversationLaunch: ConversationLaunchRequest? = null,
+    onConversationLaunchHandled: () -> Unit = {},
     requestedLocalAppLaunch: LocalAppLaunchRequest? = null,
     onLocalAppLaunchHandled: () -> Unit = {},
     openLocalAppsRequest: Boolean = false,
@@ -345,6 +357,31 @@ fun RootScreen(
         localAppsViewModel.openLibrary()
         onOpenLocalAppsHandled()
     }
+    LaunchedEffect(requestedConversationLaunch) {
+        val request = requestedConversationLaunch ?: return@LaunchedEffect
+        showingApps = false
+        // NOT `openSession`: every one of these notifications announces a
+        // PARKED durable turn, and `openSession` refuses exactly that state.
+        // The tap therefore did nothing, and `onConversationLaunchHandled()`
+        // below then threw the request away — no retry, no feedback. Route
+        // through the entry point that is allowed to cross the parked-turn
+        // guard, carry the announced `turnId` so the checkpoint the user was
+        // sent to look at is preserved, and retry the way the created-app
+        // landing below does (the engine source may not be bound yet on a cold
+        // start from the notification).
+        var routed = false
+        var attempt = 0
+        while (!routed && attempt < CONVERSATION_LAUNCH_ATTEMPTS) {
+            if (attempt > 0) delay(CONVERSATION_LAUNCH_RETRY_MS)
+            attempt += 1
+            routed = chatViewModel.openSessionFromNotification(
+                ref = SessionRef(request.sessionId, ""),
+                turnId = request.turnId,
+            )
+        }
+        if (!routed) chatViewModel.reportConversationLaunchFailed()
+        onConversationLaunchHandled()
+    }
     LaunchedEffect(requestedLocalAppLaunch, localAppsState.loading) {
         val request = requestedLocalAppLaunch ?: return@LaunchedEffect
         if (localAppsState.loading) return@LaunchedEffect
@@ -475,6 +512,9 @@ fun RootScreen(
     // flips it on (the long-press STT path still drives `voiceActive`). The
     // overlay renders above the drawer + conversation + voice-flow overlay.
     var flowActive by remember { mutableStateOf(false) }
+    var appInForeground by remember {
+        mutableStateOf(lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED))
+    }
 
     // FlowMode orb voice driver: a one-shot tap-to-talk listener, plus the live
     // assistant reply text derived from the same conversation state ChatScreen
@@ -482,6 +522,26 @@ fun RootScreen(
     val orbListen = rememberOrbVoiceListen()
     val orbAssistantText = (state.streamingMessage ?: state.messages.lastOrNull())
         ?.let { if (it.role == Role.Ai) it.text else "" } ?: ""
+    DisposableEffect(lifecycleOwner, orbListen, voiceSpeechPlayer) {
+        val observer = LifecycleEventObserver { _, event ->
+            when (event) {
+                Lifecycle.Event.ON_START, Lifecycle.Event.ON_RESUME -> appInForeground = true
+                Lifecycle.Event.ON_STOP -> {
+                    appInForeground = false
+                    voiceSpeechPlayer.stop()
+                    cancelActiveHeldVoiceSession()
+                    orbListen.cancel()
+                    // Keep Flow Mode open but paused. Returning to the app shows
+                    // the latest assistant result; another explicit tap is
+                    // required before either microphone starts again.
+                    voiceActive = false
+                }
+                else -> Unit
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
 
     // Mirror the engine's REAL MCP listing into the activity-scoped SettingsStore
     // (the same instance SettingsHost renders). RefreshListings runs again after
@@ -492,10 +552,12 @@ fun RootScreen(
     val currentEngineSource by chatViewModel.engineSource.collectAsStateWithLifecycle()
     val currentAutoPlayReplies = rememberUpdatedState(settingsState.voice.autoPlayReplies)
     val currentFlowActive = rememberUpdatedState(flowActive)
+    val currentAppInForeground = rememberUpdatedState(appInForeground)
     LaunchedEffect(chatViewModel, voiceSpeechPlayer) {
         chatViewModel.turnCompletions.collect { completion ->
             if (completion.origin != ConversationTurnOrigin.Ordinary) return@collect
             if (completion.outcome != ConversationTurnOutcome.Completed) return@collect
+            if (!currentAppInForeground.value) return@collect
             if (!currentAutoPlayReplies.value || currentFlowActive.value) return@collect
             val text = completion.finalAssistantText.trim()
             if (text.isEmpty()) return@collect
@@ -699,10 +761,11 @@ fun RootScreen(
                             appId = engineScope.appId,
                             workspaceRel = localAppsViewModel.uiState.value.apps
                                 .firstOrNull { it.id == engineScope.appId }
-                                ?.workspaceRel,
+                            ?.workspaceRel,
                         )
                     },
                     linuxRuntimeMode = settingsState.linuxRuntime.selectedMode,
+                    reuseProcessSource = true,
                 )
             },
             persistSelection = {
@@ -1445,6 +1508,7 @@ fun RootScreen(
                         onRemoveAttachment = { attachment = null },
                         onShare = onShare,
                         onStop = chatViewModel::cancel,
+                        onDiscardRecoveredTurn = chatViewModel::discardRecoveredTurn,
                         onDismissError = chatViewModel::dismissError,
                         showOfflineBanner = shouldShowOfflineBanner(isOnline, dismissedWhileOffline),
                         onDismissOffline = { dismissedWhileOffline = true },

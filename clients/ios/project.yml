@@ -254,6 +254,13 @@ targets:
     sources:
       - path: Sources/LocalAppsWidget
       - path: Sources/LocalAppsWidgetShared
+      # The Live Activity's status chips are localized in the EXTENSION, whose
+      # `Bundle.main` is this bundle — not the app's. Only the catalog is added
+      # (not all of `Resources/`), so no app asset is duplicated into the
+      # extension. `ConversationLiveActivityWidget` reads it through
+      # `NSLocalizedString(_:value:)`, so the surface degrades to English, never
+      # to raw keys, if this line is ever lost.
+      - path: Resources/Localizable.xcstrings
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.lingxi.code.widget

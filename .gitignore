@@ -60,6 +60,7 @@ codegraph-out/
 # Rust build artifacts (when the engine starts being built)
 # ---------------------------------------------------------------
 target/
+node_modules/
 **/*.rs.bk
 Cargo.lock.*
 

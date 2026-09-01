@@ -207,4 +207,42 @@ class EngineReplyStreamTest {
             stream.toList(),
         )
     }
+
+    @Test
+    fun durableReplayEnvelopeAcksOnlyAfterRenderableRawEvent() = runTest {
+        val events = MutableSharedFlow<ClientEvent>(replay = 0, extraBufferCapacity = 8)
+        val stream = mapReplyStream(
+            events.onSubscription {
+                emit(ClientEvent.TextDelta("live"))
+                emit(
+                    ClientEvent.TurnEventReplay(
+                        sessionId = "session-a",
+                        turnId = 9u,
+                        sequence = 1u,
+                        eventJson = """{"type":"text_delta","text":"live"}""",
+                    ),
+                )
+                emit(ClientEvent.ModelChanged(model = "ignored"))
+                emit(
+                    ClientEvent.TurnEventReplay(
+                        sessionId = "session-a",
+                        turnId = 9u,
+                        sequence = 2u,
+                        eventJson = """{"type":"model_changed","model":"ignored"}""",
+                    ),
+                )
+                emit(ClientEvent.TurnEnded(outcome = TurnOutcomeDto.END_TURN, stopReason = null, cost = cost))
+            },
+        )
+
+        assertEquals(
+            listOf(
+                ReplyEvent.Thinking,
+                ReplyEvent.Delta("live"),
+                ReplyEvent.DurableTurnReplayAcknowledged(turnId = 9L, sequence = 1L),
+                ReplyEvent.End,
+            ),
+            stream.toList(),
+        )
+    }
 }

@@ -46,6 +46,10 @@ protocol = { path = "../../protocol" }
 secret = { path = "../../secret" }
 platform-posix = { path = "../../platforms/posix" }
 uuid = "1.10"
+# `AudioResultDto` carries recorded/synthesized audio as base64 (the same
+# convention as `ImageRefDto`); `audio_bridge` decodes it back to the `Vec<u8>`
+# the `traits::{VoiceRecording, TtsAudio}` structs hold.
+base64 = "0.22"
 # Input message queue (spec §27). The connection's SendPrompt path enqueues a
 # prompt that arrives while a turn is in flight and the spawned run loop drains
 # it as a follow-up turn — the parity twin of print.ts run()'s `running` guard +
@@ -97,12 +101,20 @@ tool-computer-use = { path = "../../tools/computer-use" }
 # composition root seeds, so `RunSlashCommand` routes through the production
 # registry (not a test-only stub).
 command-core = { path = "../../commands/core" }
+# `test-util` (dev-only) gives the audio_bridge tests `#[tokio::test(start_paused
+# = true)]`, so the "client never answers" deadline is exercised by advancing the
+# runtime's clock rather than by sleeping for the real timeout.
+tokio = { workspace = true, features = ["test-util"] }
 tokio-tungstenite = "0.21"
 futures-util.workspace = true
 http = "1"
 once_cell = "1"
 # S2: deterministic sandbox dirs for the boot/assembly + end-to-end serve tests.
 tempfile = "3"
+# mcp_bridge tests confirm the REAL `mcp/src/json_config.rs` parser accepts
+# what the writer produced, not just that this crate's own reader agrees with
+# its own writer. Dev-only: production mcp_bridge.rs never calls into `mcp`.
+mcp = { path = "../../mcp" }
 
 [lints]
 workspace = true

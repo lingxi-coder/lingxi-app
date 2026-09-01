@@ -107,6 +107,26 @@ import XCTest
             XCTAssertEqual(source.model.pendingQuestions.map(\.requestId), [5])
         }
 
+        func testLiveWaitingForUserKeepsActiveStopInsteadOfDiscard() {
+            let source = makeSource()
+            source.beginTurnForTesting(turnId: 4, sessionId: "test-session")
+            source.applyForTesting(.askUserQuestion(request: request(id: 6)))
+
+            source.applyForTesting(.turnRecoveryState(snapshot: TurnRecoverySnapshotDto(
+                sessionId: "test-session",
+                turnId: 4,
+                state: .waitingForUser,
+                firstSequence: 0,
+                lastSequence: 0,
+                safeToResume: false,
+                reason: "question"
+            )))
+
+            XCTAssertTrue(source.model.streaming)
+            XCTAssertFalse(source.model.hasInactiveDurableRecovery)
+            XCTAssertTrue(source.model.hasUnresolvedTurnRecovery)
+        }
+
         /// A background task finishing AFTER its turn ended (the normal case)
         /// appends a transcript notice line; pending/running transitions stay
         /// silent.

@@ -58,18 +58,6 @@ pub use sleep::SleepTool;
 pub use synthetic_output::SyntheticOutputTool;
 pub use tui_core::ask_user_question_bridge::AskUserQuestionExchange;
 
-/// Serialize tests that mutate the process-wide live-session directory.
-///
-/// The production directory is intentionally process-global, but the
-/// `ListAgents` and `SendMessage` unit tests install isolated temporary roots
-/// in that global slot. A crate-level lock keeps those tests deterministic when
-/// libtest runs them in parallel.
-#[cfg(test)]
-pub(crate) fn live_session_test_lock() -> &'static std::sync::Mutex<()> {
-    static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
-    LOCK.get_or_init(|| std::sync::Mutex::new(()))
-}
-
 use std::sync::Arc;
 /// Register the UI tools against `reg` (the full set, including the builtin
 /// `SendMessage`). This is the default-session path.

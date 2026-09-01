@@ -35,9 +35,10 @@
 //! manifests' commands + hooks into the live registries.
 //!
 //! Residual (still NOT ported in either path): marketplace-catalog source
-//! resolution, enterprise allow/blocklist policy, seed-dir precedence, and
-//! reading the exact installed version out of `installed_plugins.json`
-//! (`discover_enabled_plugins` probes the single-version case instead).
+//! resolution, enterprise allow/blocklist policy, and seed-dir precedence.
+//! Enabled cache entries use the exact version in `installed_plugins.json`;
+//! cache-only entries without a record retain the single-version compatibility
+//! probe.
 
 use crate::manifest::{
     BinaryPin, ComponentPath, HljsLanguageEntry, MonitorTrigger, PluginChannel, PluginComponents,
@@ -52,7 +53,7 @@ use indexmap::IndexMap;
 use protocol::PluginId;
 use serde::Deserialize;
 use serde_json::Value;
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 /// A leading UTF-8 byte-order mark, as some editors on Windows write it.
@@ -417,11 +418,10 @@ struct RawPluginChannel {
 /// top-level manifest) and `Vs`'s inner `experimental` object — the same
 /// schema shape at two layers, with the experimental one winning.
 ///
-/// `experimental`'s remaining declared keys (`monitors`, `hooks`, `evals`)
-/// are not wired to anything in this port yet. ⚠️ `monitors` has the SAME
-/// two-layer precedence as `themes`
-/// (`(A.experimental?.monitors??A.monitors)`, @162824976) and would need the
-/// same treatment the day `components.monitors` becomes load-bearing.
+/// `experimental`'s remaining declared keys (`hooks`, `evals`) are not
+/// wired to anything in this port yet. The stable top-level `monitors` field
+/// is resolved below and materialized by `PluginManager` when a task registry
+/// is available.
 #[derive(Debug, Clone, Default)]
 struct RawExperimental {
     syntax_highlighting: Option<RawSyntaxHighlighting>,
@@ -783,6 +783,110 @@ pub(crate) fn sanitize_segment(s: &str, allow_dot: bool) -> String {
     }
 }
 
+/// Build the versioned cache path from the authoritative plugin identity and
+/// installed version.
+fn versioned_cache_path(
+    plugins_dir: &Path,
+    marketplace: &str,
+    name: &str,
+    version: &str,
+) -> PathBuf {
+    plugins_dir
+        .join("cache")
+        .join(sanitize_segment(marketplace, false))
+        .join(sanitize_segment(name, false))
+        .join(sanitize_segment(version, true))
+}
+
+/// Resolve a legacy or hand-written installPath relative to the plugins root.
+/// The production writer normally persists an absolute path; accepting a
+/// relative path keeps older records readable without changing the cache
+/// layout.
+fn recorded_install_path(plugins_dir: &Path, raw: &str) -> PathBuf {
+    let path = PathBuf::from(raw);
+    if path.is_absolute() {
+        path
+    } else {
+        plugins_dir.join(path)
+    }
+}
+
+/// Return authoritative cache candidates for one enabledPlugins key. Some
+/// means the installed database contains a matching record, including when the
+/// record is malformed or points at a missing cache; callers must not fall back
+/// to probing in that case. None means this is an old cache-only installation
+/// with no record for the enabled key.
+fn exact_installed_paths(
+    plugins_dir: &Path,
+    entry_id: &str,
+    records: Option<&Value>,
+) -> Option<Vec<PathBuf>> {
+    let (name, Some(marketplace)) = parse_plugin_identifier(entry_id) else {
+        return None;
+    };
+    if name.is_empty() || marketplace.is_empty() {
+        return None;
+    }
+    let Some(records) = records.and_then(Value::as_object) else {
+        return None;
+    };
+
+    let canonical_id = format!("{name}@{marketplace}");
+    if let Some(value) = records
+        .get(entry_id)
+        .or_else(|| records.get(canonical_id.as_str()))
+    {
+        let mut seen = HashSet::new();
+        let paths = match value {
+            Value::Array(entries) => entries
+                .iter()
+                .filter_map(|record| {
+                    let version = record
+                        .get("version")
+                        .and_then(Value::as_str)
+                        .filter(|version| !version.is_empty());
+                    if let Some(version) = version {
+                        Some(versioned_cache_path(
+                            plugins_dir,
+                            marketplace,
+                            name,
+                            version,
+                        ))
+                    } else {
+                        record
+                            .get("installPath")
+                            .and_then(Value::as_str)
+                            .map(|path| recorded_install_path(plugins_dir, path))
+                    }
+                })
+                .filter(|path| seen.insert(path.clone()))
+                .collect(),
+            _ => Vec::new(),
+        };
+        return Some(paths);
+    }
+
+    // Older files keyed records by marketplace, then plugin name.
+    let Some(marketplace_records) = records
+        .get(marketplace)
+        .and_then(Value::as_object)
+    else {
+        return None;
+    };
+    let Some(record) = marketplace_records.get(name) else {
+        return None;
+    };
+    let version = record.get("version").and_then(Value::as_str).unwrap_or_default();
+    let path = if !version.is_empty() {
+        versioned_cache_path(plugins_dir, marketplace, name, version)
+    } else if let Some(raw) = record.get("installPath").and_then(Value::as_str) {
+        recorded_install_path(plugins_dir, raw)
+    } else {
+        return Some(Vec::new());
+    };
+    Some(vec![path])
+}
+
 /// Oracle `yt` (2.1.251, `@~154669075`):
 /// `/[\p{Cc}\u200E\u200F\u202A-\u202E\u2066-\u2069]/u` — Unicode control
 /// characters plus the bidi-formatting marks/embeddings/isolates a name has no
@@ -1067,23 +1171,26 @@ mod name_validation_tests {
 /// whose `.lingxi-plugin/plugin.json` is then read by `createPluginFromPath`
 /// (`pluginLoader.ts:1348`).
 ///
-/// This port reads the `enabled` allowlist, skips disabled entries, resolves
-/// each remaining `name@marketplace` to `cache/{marketplace}/{plugin}/`, and
-/// probes that directory for an installed version dir (the version normally
-/// comes from `installed_plugins.json`; with a single installed version we
-/// pick it, mirroring `probeSeedCacheAnyVersion`,
-/// `pluginLoader.ts:217`). Bare `name` entries (no marketplace) and
-/// uninstalled/missing entries are skipped — never a flat walk.
+/// This port reads the `enabled` allowlist, skips disabled entries, and resolves
+/// each remaining `name@marketplace` from the matching `installed_plugins.json`
+/// record's exact version. Bare `name` entries (no marketplace) and
+/// uninstalled/missing entries are skipped — never a flat walk. For old
+/// cache-only installations with no matching record, the single-version probe
+/// remains as a compatibility fallback.
 ///
 /// What is still NOT ported (residual): marketplace-catalog source resolution,
 /// enterprise allow/blocklist policy (`getStrictKnownMarketplaces` /
-/// `getBlockedMarketplaces`), seed-dir precedence, and reading the exact
-/// version out of `installed_plugins.json` (we probe instead).
+/// `getBlockedMarketplaces`), and seed-dir precedence.
 pub async fn discover_enabled_plugins(
     plugins_dir: &Path,
     enabled: &BTreeMap<String, bool>,
 ) -> Vec<(PluginId, PluginManifest, PathBuf)> {
     let cache_root = plugins_dir.join("cache");
+    let installed_records = tokio::fs::read_to_string(crate::installed::path(plugins_dir))
+        .await
+        .ok()
+        .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+        .and_then(|value| value.get("plugins").cloned());
     let mut out = Vec::new();
     for (entry_id, is_enabled) in enabled {
         if !is_enabled {
@@ -1099,16 +1206,26 @@ pub async fn discover_enabled_plugins(
         if name.is_empty() {
             continue;
         }
-        let plugin_cache_dir = cache_root
-            .join(sanitize_segment(marketplace, false))
-            .join(sanitize_segment(name, false));
-        let Some(versioned) = resolve_installed_version_dir(&plugin_cache_dir).await else {
-            continue;
-        };
-        if let Some((id, manifest)) =
-            load_plugin_from_path_with_mcp_gate(&versioned, false, Some(entry_id.as_str())).await
+        let candidates = if let Some(exact) =
+            exact_installed_paths(plugins_dir, entry_id, installed_records.as_ref())
         {
-            out.push((id, manifest, versioned));
+            exact
+        } else {
+            let plugin_cache_dir = cache_root
+                .join(sanitize_segment(marketplace, false))
+                .join(sanitize_segment(name, false));
+            resolve_installed_version_dir(&plugin_cache_dir)
+                .await
+                .into_iter()
+                .collect()
+        };
+        for versioned in candidates {
+            if let Some((id, manifest)) =
+                load_plugin_from_path_with_mcp_gate(&versioned, false, Some(entry_id.as_str()))
+                    .await
+            {
+                out.push((id, manifest, versioned));
+            }
         }
     }
     // Stable ordering by plugin name for deterministic bootstrap.
@@ -1118,12 +1235,10 @@ pub async fn discover_enabled_plugins(
 
 /// Probe `cache/{marketplace}/{plugin}/` for an installed version directory.
 ///
-/// claude-code knows the exact version from `installed_plugins.json` /
-/// marketplace catalog and joins it directly (`getVersionedCachePath`). We
-/// don't carry that metadata here, so we probe: if the plugin dir holds
-/// exactly one version subdirectory with content, use it (mirroring
-/// `probeSeedCacheAnyVersion`'s single-version rule, `pluginLoader.ts:217`).
-/// Zero or multiple versions → ambiguous → skip (returns `None`).
+/// This is only used when no matching `installed_plugins.json` record exists.
+/// If the plugin dir holds exactly one version subdirectory with content, use
+/// it for compatibility with old cache-only installations. Zero or multiple
+/// versions are ambiguous and return `None`.
 async fn resolve_installed_version_dir(plugin_dir: &Path) -> Option<PathBuf> {
     let mut entries = tokio::fs::read_dir(plugin_dir).await.ok()?;
     let mut version_dirs = Vec::new();
@@ -1170,22 +1285,38 @@ async fn discover_recorded_plugins_identified(
         let cache_root = plugins_dir.join("cache");
         for (key, value) in &records {
             match value {
-                // v2: array of per-scope records; use each record's installPath.
+                // v2: array of per-scope records; the version is authoritative
+                // for the cache path. Fall back to installPath only for older
+                // records that did not persist a version.
                 serde_json::Value::Array(recs) => {
-                    let mut seen: Option<PathBuf> = None;
+                    let (name, marketplace) = parse_plugin_identifier(key);
+                    let mut seen = HashSet::new();
                     for rec in recs {
-                        if let Some(path) = rec.get("installPath").and_then(|p| p.as_str()) {
-                            let dir = PathBuf::from(path);
-                            if seen.as_ref() == Some(&dir) {
-                                continue; // same cache dir across scopes — load once
-                            }
-                            if let Some((id, manifest)) =
-                                load_plugin_from_path_with_mcp_gate(&dir, false, Some(key.as_str()))
-                                    .await
-                            {
-                                out.push((key.clone(), id, manifest, dir.clone()));
-                                seen = Some(dir);
-                            }
+                        let dir = rec
+                            .get("version")
+                            .and_then(Value::as_str)
+                            .filter(|version| !version.is_empty())
+                            .and_then(|version| {
+                                marketplace.map(|marketplace| {
+                                    versioned_cache_path(plugins_dir, marketplace, name, version)
+                                })
+                            })
+                            .or_else(|| {
+                                rec.get("installPath")
+                                    .and_then(Value::as_str)
+                                    .map(|path| recorded_install_path(plugins_dir, path))
+                            });
+                        let Some(dir) = dir else {
+                            continue;
+                        };
+                        if !seen.insert(dir.clone()) {
+                            continue;
+                        }
+                        if let Some((id, manifest)) =
+                            load_plugin_from_path_with_mcp_gate(&dir, false, Some(key.as_str()))
+                                .await
+                        {
+                            out.push((key.clone(), id, manifest, dir));
                         }
                     }
                 }

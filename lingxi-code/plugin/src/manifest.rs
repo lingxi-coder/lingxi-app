@@ -209,10 +209,9 @@ impl<'de> Deserialize<'de> for MonitorTrigger {
 
 /// One `monitors` entry (oracle `$s`, a strict object): a persistent
 /// background watch script the host can arm as a Monitor task ("unsandboxed,
-/// same trust tier as hooks"). Parsed + validated only —
-/// [`crate::discovery`] enforces the strict shape and the unique-`name`
-/// constraint (oracle `kAn`), but arming one is `tasks::handlers::monitor`'s
-/// concern and is not wired by this change.
+/// same trust tier as hooks"). [`crate::discovery`] enforces the strict shape
+/// and unique-`name` constraint (oracle `kAn`); `PluginManager` submits the
+/// resulting registration through the host's shared task registry.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PluginMonitor {
     /// Identifier for this monitor, unique within the plugin.
@@ -287,9 +286,9 @@ pub struct PluginComponents {
     pub binaries: HashMap<String, BinaryPin>,
     /// Background watch scripts the host can arm as persistent Monitor tasks
     /// (`monitors` in `plugin.json`, or the `monitors/monitors.json`
-    /// auto-scan when the field is absent; oracle `mt`). Parsed + validated
-    /// only — arming one is `tasks::handlers::monitor`'s concern, not wired
-    /// by this change.
+    /// auto-scan when the field is absent; oracle `mt`). The manager arms
+    /// `always` entries during enable and exposes on-skill activation through
+    /// its shared task-registry seam.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub monitors: Vec<PluginMonitor>,
     /// Inline hook definitions.

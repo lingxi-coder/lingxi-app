@@ -196,6 +196,10 @@ pub trait SkillLoader: Send + Sync {
     /// Load a skill by its normalized name (leading slash already stripped).
     /// Returns `None` if no such skill is registered → `Unknown skill:`.
     async fn load(&self, name: &str) -> Result<Option<SkillDescriptor>, ToolError>;
+
+    /// Notify the host that a validated prompt skill is about to run. Default
+    /// loaders have no lifecycle side effects.
+    async fn skill_invoked(&self, _name: &str) {}
 }
 
 /// Default hermetic loader — always reports "not found" (→ `Unknown skill:`).
@@ -453,7 +457,9 @@ impl SkillTool {
             sync_request.frozen_command_denies = Vec::new();
             let (agent_id, result) = match spawner.spawn(sync_request, inherit).await {
                 Ok(platform_api::subagent_spawn::SubagentResult::Completed {
-                    agent_id, content, ..
+                    agent_id,
+                    content,
+                    ..
                 }) => {
                     let text = crate::fork::final_text(&content);
                     (
@@ -877,6 +883,8 @@ present this turn, the skill is loaded — follow it directly rather than callin
                 "{command_name} is a built-in CLI command, not a skill. Ask the user to run /{command_name} themselves — it cannot be invoked via the {SKILL_TOOL_NAME} tool."
             )));
         }
+
+        self.loader.skill_invoked(&command_name).await;
 
         // SKILLEXEC.5: fire the registered `SKILL_INVOKED` event on the success
         // path — after validateInput passes (descriptor loaded, prompt-type, not

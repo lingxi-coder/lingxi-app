@@ -15,12 +15,12 @@ use async_trait::async_trait;
 use hooks::events::{HookEvent, PromptExpansionType};
 use hooks::registry::HookContext;
 use hooks::HookExecutorImpl;
+use platform_api::{SlashCommandDispatcher, SlashDispatchResult};
 use protocol::McpConnectionId;
 use serde_json::{Map, Value};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use platform_api::{SlashCommandDispatcher, SlashDispatchResult};
 
 /// Supplies the per-dispatch [`HookContext`] (session id, cwd, transcript path,
 /// permission mode) for the `UserPromptExpansion` hook. The dispatcher does not
@@ -61,6 +61,13 @@ pub type McpPromptResolver = Arc<
             -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Value, String>> + Send>>
         + Send
         + Sync,
+>;
+
+/// Observes a successfully dispatched prompt skill. The desktop composition
+/// root uses this late-bound seam to arm plugin `on-skill-invoke` monitors;
+/// hosts without plugin monitors leave it unwired.
+pub type SkillInvocationObserver = Arc<
+    dyn Fn(String) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> + Send + Sync,
 >;
 
 /// The `UserPromptExpansion` firing dependencies threaded into a
@@ -156,6 +163,8 @@ pub struct RegistrySlashDispatcher {
     /// Live `prompts/get` bridge. Kept host-owned so `command-api` does not
     /// depend on the concrete MCP registry crate.
     mcp_prompt_resolver: Option<McpPromptResolver>,
+    /// Best-effort observer for successful prompt-skill dispatches.
+    skill_invocation_observer: Option<SkillInvocationObserver>,
 }
 
 impl RegistrySlashDispatcher {
@@ -169,6 +178,7 @@ impl RegistrySlashDispatcher {
             skill_usage_home: None,
             background_prompt_launcher: None,
             mcp_prompt_resolver: None,
+            skill_invocation_observer: None,
         }
     }
 
@@ -207,6 +217,20 @@ impl RegistrySlashDispatcher {
     pub fn with_mcp_prompt_resolver(mut self, resolver: McpPromptResolver) -> Self {
         self.mcp_prompt_resolver = Some(resolver);
         self
+    }
+
+    /// Wire the observer used to arm plugin monitors on the first successful
+    /// dispatch of a matching skill.
+    #[must_use]
+    pub fn with_skill_invocation_observer(mut self, observer: SkillInvocationObserver) -> Self {
+        self.skill_invocation_observer = Some(observer);
+        self
+    }
+
+    async fn observe_skill_invocation(&self, name: &str) {
+        if let Some(observer) = self.skill_invocation_observer.as_ref() {
+            observer(name.to_string()).await;
+        }
     }
 
     /// Wire the `UserPromptExpansion` hook (#39): the engine's hook executor
@@ -301,6 +325,7 @@ impl RegistrySlashDispatcher {
             skill_usage_home: self.skill_usage_home.clone(),
             background_prompt_launcher: self.background_prompt_launcher.clone(),
             mcp_prompt_resolver: self.mcp_prompt_resolver.clone(),
+            skill_invocation_observer: self.skill_invocation_observer.clone(),
         }
     }
 
@@ -409,6 +434,7 @@ impl SlashCommandDispatcher for RegistrySlashDispatcher {
             return match builder {
                 Some(pf) => {
                     let content = pf.build(&parsed.raw_args);
+                    self.observe_skill_invocation(&command.name).await;
                     self.fire_user_prompt_expansion(
                         &command.name,
                         &parsed.raw_args,
@@ -540,6 +566,7 @@ impl SlashCommandDispatcher for RegistrySlashDispatcher {
             };
             return match expand_markdown_command(&command, &parsed, &expand_ctx).await {
                 Ok(content) => {
+                    self.observe_skill_invocation(&command.name).await;
                     // `/skill-doctor` reads this persistent counter. Record
                     // file-backed and plugin skills; bundled/managed commands
                     // are not part of its diagnostic surface.
@@ -1227,7 +1254,10 @@ mod tests {
     struct UnusedHttp;
     #[async_trait]
     impl platform_api::HttpTransport for UnusedHttp {
-        async fn request(&self, _req: HttpRequest) -> Result<HttpResponse, platform_api::HttpError> {
+        async fn request(
+            &self,
+            _req: HttpRequest,
+        ) -> Result<HttpResponse, platform_api::HttpError> {
             Err(platform_api::HttpError::InvalidRequest("unused".into()))
         }
         async fn stream_sse(

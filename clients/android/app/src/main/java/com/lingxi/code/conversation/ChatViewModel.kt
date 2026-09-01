@@ -7,6 +7,7 @@ import com.lingxi.code.R
 import com.lingxi.code.bindings.AskUserQuestionRequestDto
 import com.lingxi.code.bindings.ClientCommand
 import com.lingxi.code.bindings.ClientEvent
+import com.lingxi.code.bindings.ImageRefDto
 import com.lingxi.code.bindings.PermissionResponseDto
 import com.lingxi.code.bindings.MobileLinuxEventFfi
 import com.lingxi.code.bindings.MobileLinuxEventKindFfi
@@ -1174,6 +1175,7 @@ class ChatViewModel(
      */
     fun send(
         text: String,
+        images: List<ImageRefDto> = emptyList(),
         origin: ConversationTurnOrigin = ConversationTurnOrigin.Ordinary,
     ) {
         val trimmed = text.trim()
@@ -1200,7 +1202,7 @@ class ChatViewModel(
                 statusLine = null,
                 error = null, // a fresh turn clears the prior turn's error banner
                 streaming = true, // gate the composer immediately, before the first event
-                messages = it.messages + Message(role = Role.User, text = trimmed),
+                messages = it.messages + Message(role = Role.User, text = trimmed, images = images),
                 streamingMessage = null,
                 agentRun = AgentRunState(turnId = token),
             )
@@ -1211,7 +1213,7 @@ class ChatViewModel(
         setBackgroundTurnActive(true)
 
         turnJob = viewModelScope.launch {
-            source.submit(trimmed).collect { event -> reduce(event, token) }
+            source.submit(trimmed, images).collect { event -> reduce(event, token) }
         }
     }
 
@@ -1318,7 +1320,7 @@ class ChatViewModel(
     fun resendLast() {
         if (_state.value.streaming) return
         val lastUser = _state.value.messages.lastOrNull { it.role == Role.User } ?: return
-        send(lastUser.text)
+        send(lastUser.text, images = lastUser.images)
     }
 
     /**

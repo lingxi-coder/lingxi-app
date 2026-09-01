@@ -1,14 +1,22 @@
-import type { ClientCommand, ComputerAccessResponseDto, PermissionResponseDto } from '@lingxi/bridge-client';
+import type {
+  ClientCommand,
+  ComputerAccessResponseDto,
+  ImageRefDto,
+  PermissionResponseDto,
+  ReasoningSelectionDto,
+} from '@lingxi/bridge-client';
+import { detectImageMediaType, isSupportedImageMediaType, MAX_IMAGE_ATTACHMENTS, MAX_IMAGE_BYTES } from '../shared/imageInput.js';
 
 const MAX_PROMPT_LENGTH = 256 * 1024;
 const MAX_ID_LENGTH = 512;
 const ALLOWED_COMMANDS = new Set([
   'set_model',
   'set_permission_mode',
+  'get_conversation_controls',
+  'set_reasoning_selection',
+  'set_fast_mode',
   'list_models',
   'run_slash_command',
-  'new_session',
-  'resume_session',
   'list_sessions',
   'task_list',
   'task_output',
@@ -44,6 +52,41 @@ export function validatePrompt(value: unknown): string {
     throw new Error('invalid prompt');
   }
   return value;
+}
+
+const BASE64_PATTERN = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
+const MAX_IMAGE_BASE64_LENGTH = Math.ceil(MAX_IMAGE_BYTES / 3) * 4;
+
+function decodeImageBase64(value: unknown): Uint8Array {
+  if (
+    typeof value !== 'string'
+    || value.length === 0
+    || value.length > MAX_IMAGE_BASE64_LENGTH
+    || value.startsWith('data:')
+    || value.length % 4 !== 0
+    || !BASE64_PATTERN.test(value)
+  ) {
+    throw new Error('invalid image base64');
+  }
+  const bytes = Buffer.from(value, 'base64');
+  if (bytes.length === 0 || bytes.length > MAX_IMAGE_BYTES || bytes.toString('base64') !== value) {
+    throw new Error('invalid image base64');
+  }
+  return new Uint8Array(bytes);
+}
+
+export function validateImageRefs(value: unknown): ImageRefDto[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value) || value.length > MAX_IMAGE_ATTACHMENTS) throw new Error('invalid image attachments');
+  return value.map((entry) => {
+    const input = object(entry);
+    exactKeys(input, ['media_type', 'base64']);
+    if (!isSupportedImageMediaType(input['media_type'])) throw new Error('invalid image media type');
+    const base64 = input['base64'];
+    const bytes = decodeImageBase64(base64);
+    if (detectImageMediaType(bytes) !== input['media_type']) throw new Error('invalid image format');
+    return { media_type: input['media_type'], base64: base64 as string };
+  });
 }
 
 export function validateOptionalTurnId(value: unknown): number | undefined {
@@ -153,21 +196,16 @@ export function validateClientCommand(value: unknown, workspace?: string): Clien
     case 'list_models':
       exactKeys(input, ['type']);
       return { type };
-    case 'new_session': {
-      exactKeys(input, ['type', 'cwd', 'model']);
-      if (input['cwd'] !== undefined && input['cwd'] !== workspace) throw new Error('session cwd must match the active workspace');
-      const command: ClientCommand = { type };
-      if (workspace) command.cwd = workspace;
-      if (input['model'] !== undefined) command.model = string(input['model'], 'model', 256);
-      return command;
-    }
-    case 'resume_session': {
-      exactKeys(input, ['type', 'session_id', 'cwd']);
-      if (input['cwd'] !== undefined && input['cwd'] !== workspace) throw new Error('session cwd must match the active workspace');
-      const command: ClientCommand = { type, session_id: string(input['session_id'], 'session id') };
-      if (workspace) command.cwd = workspace;
-      return command;
-    }
+    case 'get_conversation_controls':
+      exactKeys(input, ['type']);
+      return { type };
+    case 'set_reasoning_selection':
+      exactKeys(input, ['type', 'selection']);
+      return { type, selection: validateReasoningSelection(input['selection']) };
+    case 'set_fast_mode':
+      exactKeys(input, ['type', 'enabled']);
+      if (typeof input['enabled'] !== 'boolean') throw new Error('invalid fast mode enabled flag');
+      return { type, enabled: input['enabled'] };
     case 'run_slash_command': {
       exactKeys(input, ['type', 'raw']);
       const raw = string(input['raw'], 'slash command raw', 4096);
@@ -223,6 +261,8 @@ export function assertCommandAllowedDuringTurn(command: ClientCommand, turnActiv
     && (
       command.type === 'set_model'
       || command.type === 'set_permission_mode'
+      || command.type === 'set_reasoning_selection'
+      || command.type === 'set_fast_mode'
       || command.type === 'run_slash_command'
       || command.type === 'new_session'
       || command.type === 'resume_session'
@@ -232,11 +272,45 @@ export function assertCommandAllowedDuringTurn(command: ClientCommand, turnActiv
   }
 }
 
+function validateReasoningSelection(value: unknown): ReasoningSelectionDto {
+  const input = object(value);
+  const type = string(input['type'], 'reasoning selection type', 32);
+  switch (type) {
+    case 'automatic':
+      exactKeys(input, ['type']);
+      return { type };
+    case 'disabled':
+      exactKeys(input, ['type']);
+      return { type };
+    case 'enabled':
+      exactKeys(input, ['type']);
+      return { type };
+    case 'level':
+      exactKeys(input, ['type', 'id']);
+      return { type, id: string(input['id'], 'reasoning level', 64) };
+    case 'token_budget':
+      exactKeys(input, ['type', 'tokens']);
+      return { type, tokens: integer(input['tokens'], 'reasoning token budget', 0, 1_000_000_000) };
+    default:
+      throw new Error('invalid reasoning selection');
+  }
+}
+
 export interface IpcSenderDescriptor {
   senderId: number;
   frameId: number;
   topFrameId: number;
   url: string;
+}
+
+export const MAX_CLIPBOARD_TEXT_CHARS = 2_000_000;
+
+/** Bound the one plain-text clipboard capability exposed to the renderer. */
+export function validateClipboardText(value: unknown): string {
+  if (typeof value !== 'string' || value.length > MAX_CLIPBOARD_TEXT_CHARS) {
+    throw new Error('invalid clipboard text');
+  }
+  return value;
 }
 
 export function isAllowedIpcSender(

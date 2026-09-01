@@ -460,6 +460,20 @@ fn unit_control_commands_round_trip() {
     }
 }
 
+#[test]
+fn set_fast_mode_round_trips() {
+    let command = ClientCommand::SetFastMode { enabled: true };
+    let json = serde_json::to_value(&command).expect("serialize SetFastMode");
+    assert_eq!(
+        json,
+        serde_json::json!({ "type": "set_fast_mode", "enabled": true })
+    );
+    assert_eq!(
+        serde_json::from_value::<ClientCommand>(json).unwrap(),
+        command
+    );
+}
+
 /// `TaskList` — carries an optional status filter (reuses `TaskStatusDto`).
 #[test]
 fn task_list_round_trips() {

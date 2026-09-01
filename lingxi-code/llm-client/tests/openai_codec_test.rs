@@ -501,6 +501,50 @@ fn stream_usage_keeps_reasoning_and_cached_buckets_independent() {
 }
 
 #[test]
+fn kimi_stream_requests_terminal_usage_and_decodes_top_level_cached_tokens() {
+    let codec = OpenAiChatCodec::new("https://api.moonshot.ai/v1").with_profile_name("kimi");
+    let mut request = LlmRequest::new("kimi-k3").with_user_text("hello");
+    request.stream = true;
+
+    let encoded = codec.encode_request(&request).expect("encode Kimi stream");
+    assert_eq!(encoded.body_json["stream"], serde_json::json!(true));
+    assert_eq!(
+        encoded.body_json["stream_options"]["include_usage"],
+        serde_json::json!(true)
+    );
+
+    let frames = [
+        r#"{"id":"c","model":"kimi-k3","choices":[{"index":0,"delta":{"role":"assistant","content":"hi"}}]}"#,
+        r#"{"choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":100,"completion_tokens":25,"total_tokens":125,"cached_tokens":40}}"#,
+        "[DONE]",
+    ];
+    let mut decoder = codec.stream_decoder();
+    let mut events = Vec::new();
+    for frame in frames {
+        events.extend(
+            decoder
+                .decode_frame(RawStreamFrame::new(frame.as_bytes().to_vec()))
+                .unwrap(),
+        );
+    }
+    events.extend(decoder.finish().unwrap());
+
+    let usage = events
+        .iter()
+        .find_map(|event| match event {
+            LlmEvent::MessageDelta {
+                usage: Some(usage), ..
+            } => Some(usage),
+            _ => None,
+        })
+        .expect("Kimi terminal usage");
+    assert_eq!(usage.billable_tokens.input, 60);
+    assert_eq!(usage.billable_tokens.cache_read, 40);
+    assert_eq!(usage.billable_tokens.output, 25);
+    assert_eq!(usage.provider_reported_total_tokens, Some(125));
+}
+
+#[test]
 fn decode_response_usage_normalization_matches_stream_path() {
     let codec = OpenAiChatCodec::new("https://api.openai.com/v1");
     let response = ProviderResponse::json(

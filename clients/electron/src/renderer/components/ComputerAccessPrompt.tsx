@@ -16,7 +16,8 @@
  *    (clipboardRead/clipboardWrite/systemKeyCombos), and a submit button
  *    ("Allow for this session (N apps)").
  *
- * Esc anywhere denies (matching the TUI and {@link PermissionPrompt}). Local
+ * Escape while this panel is focused denies (matching the TUI and
+ * {@link PermissionPrompt}). Local
  * checkbox state resets to a fresh pre-checked state whenever a NEW
  * `request.request_id` arrives, so it never carries over stale selections
  * from a previous request.
@@ -44,10 +45,8 @@ function initialCheckedApps(request: ComputerAccessRequestDto | null): Set<strin
 
 export function ComputerAccessPrompt({ request, onSubmit, onDeny, onOpenSystemSettings }: ComputerAccessPromptProps) {
   const t = useT();
-  const dialogRef = useRef<HTMLDivElement>(null);
   const primaryRef = useRef<HTMLButtonElement>(null);
-  const onDenyRef = useRef(onDeny);
-  onDenyRef.current = onDeny;
+  const promptHasFocus = useRef(false);
 
   const [checkedApps, setCheckedApps] = useState<Set<string>>(() => initialCheckedApps(request));
   const [clipboardRead, setClipboardRead] = useState(Boolean(request?.clipboard_read));
@@ -68,29 +67,8 @@ export function ComputerAccessPrompt({ request, onSubmit, onDeny, onOpenSystemSe
     if (!request) return;
     const previouslyFocused = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     primaryRef.current?.focus();
-    const keyDown = (event: globalThis.KeyboardEvent) => {
-      if (event.key === 'Escape') {
-        event.preventDefault();
-        onDenyRef.current(request.request_id);
-        return;
-      }
-      if (event.key !== 'Tab') return;
-      const focusable = [...(dialogRef.current?.querySelectorAll<HTMLElement>('button:not([disabled])') ?? [])];
-      if (focusable.length === 0) return;
-      const first = focusable[0];
-      const last = focusable.at(-1);
-      if (event.shiftKey && document.activeElement === first) {
-        event.preventDefault();
-        last?.focus();
-      } else if (!event.shiftKey && document.activeElement === last) {
-        event.preventDefault();
-        first?.focus();
-      }
-    };
-    document.addEventListener('keydown', keyDown);
     return () => {
-      document.removeEventListener('keydown', keyDown);
-      previouslyFocused?.focus();
+      if (promptHasFocus.current) previouslyFocused?.focus();
     };
   }, [request]);
 
@@ -127,9 +105,15 @@ export function ComputerAccessPrompt({ request, onSubmit, onDeny, onOpenSystemSe
   return (
     <div
       role="dialog"
-      aria-modal="true"
       aria-label={title}
       aria-describedby="lingxi-computer-access-detail"
+      onFocusCapture={() => { promptHasFocus.current = true; }}
+      onBlurCapture={(event) => { promptHasFocus.current = event.currentTarget.contains(event.relatedTarget as Node | null); }}
+      onKeyDown={(event) => {
+        if (event.key !== 'Escape') return;
+        event.preventDefault();
+        onDeny(request.request_id);
+      }}
       style={{
         position: 'absolute', inset: 0, zIndex: 60,
         display: 'flex', alignItems: 'center', justifyContent: 'center',
@@ -137,7 +121,6 @@ export function ComputerAccessPrompt({ request, onSubmit, onDeny, onOpenSystemSe
       }}
     >
       <div
-        ref={dialogRef}
         style={{
           width: 440, maxWidth: '90%', borderRadius: 14, overflow: 'hidden',
           background: t.windowBg, border: `0.5px solid ${t.border}`,

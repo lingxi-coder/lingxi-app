@@ -2,6 +2,7 @@ import type { ReactNode } from 'react';
 
 import { parseMarkdown, type MarkdownBlock } from '../markdown';
 import { useT } from '../theme/ThemeContext';
+import { CodeBlock } from './CodeBlock';
 import { Icon } from './Icon';
 
 export function MarkdownContent({ text }: { text: string }) {
@@ -29,12 +30,7 @@ function MarkdownBlockView({ block, t }: { block: MarkdownBlock; t: ReturnType<t
     const Tag = block.ordered ? 'ol' : 'ul';
     return <Tag style={{ margin: 0, paddingLeft: 23, display: 'grid', gap: 5 }}>{block.items.map((item, index) => <li key={index} style={{ paddingLeft: 3 }}><InlineMarkdown text={item} t={t} /></li>)}</Tag>;
   }
-  return (
-    <div style={{ position: 'relative', minWidth: 0 }}>
-      {block.language && <span className="mono" style={{ position: 'absolute', top: 8, right: 10, color: t.text4, fontSize: 10 }}>{block.language}</span>}
-      <pre className="mono" style={{ margin: 0, padding: '12px 13px', overflowX: 'auto', borderRadius: 8, background: t.windowBg, border: `0.5px solid ${t.border}`, color: t.text2, fontSize: 12, lineHeight: 1.55, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{block.text}</pre>
-    </div>
-  );
+  return <CodeBlock code={block.text} language={block.language} closed={block.closed} />;
 }
 
 function InlineMarkdown({ text, t }: { text: string; t: ReturnType<typeof useT> }) {

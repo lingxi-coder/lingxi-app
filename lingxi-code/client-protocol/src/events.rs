@@ -389,6 +389,10 @@ pub enum ClientEvent {
     ConversationControlsChanged {
         controls: ConversationControlsDto,
     },
+
+    FastModeChanged {
+        enabled: bool,
+    },
 }
 
 #[allow(clippy::trivially_copy_pass_by_ref)]

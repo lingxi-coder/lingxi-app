@@ -3,7 +3,8 @@ import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, readlinkSy
 import { dirname, isAbsolute, join, normalize, resolve } from 'node:path';
 
 export const SETTINGS_VERSION = 1 as const;
-export const MAX_RECENT_WORKSPACES = 10;
+export const MAX_PROJECTS = 50;
+export const MAX_PINNED_SESSIONS = 100;
 export const MAX_DIAGNOSTICS = 200;
 export const MAX_DIAGNOSTIC_LENGTH = 2_000;
 export const MAX_TRUST_FINGERPRINT_ENTRIES = 512;
@@ -41,13 +42,27 @@ export interface TrustRecord {
   trustedAt: string;
 }
 
+export interface PinnedSessionRecord {
+  projectPath: string;
+  sessionId: string;
+  title: string;
+  pinnedAt: string;
+}
+
+export interface SessionRef {
+  projectPath: string;
+  sessionId: string;
+}
+
 export interface PersistedSettings {
   version: typeof SETTINGS_VERSION;
   theme?: 'dark' | 'light';
   model?: string;
   apiBaseUrl?: string;
-  lastWorkspace?: string;
-  recentWorkspaces: string[];
+  activeProject?: string;
+  activeSession?: SessionRef;
+  projects: string[];
+  pinnedSessions: PinnedSessionRecord[];
   trustedWorkspaces: Record<string, TrustRecord>;
   /** One-time acknowledgement that the user accepted Bypass Permissions mode
    * (oracle `bypassPermissionsModeAccepted`). Persisted so the blocking
@@ -60,8 +75,10 @@ export interface PublicSettings {
   theme?: 'dark' | 'light';
   model?: string;
   apiBaseUrl?: string;
-  lastWorkspace?: string;
-  recentWorkspaces: string[];
+  activeProject?: string;
+  activeSession?: SessionRef;
+  projects: string[];
+  pinnedSessions: PinnedSessionRecord[];
 }
 
 export interface DiagnosticEntry {
@@ -77,7 +94,12 @@ interface FingerprintBudget {
 }
 
 export function defaultSettings(): PersistedSettings {
-  return { version: SETTINGS_VERSION, recentWorkspaces: [], trustedWorkspaces: {} };
+  return {
+    version: SETTINGS_VERSION,
+    projects: [],
+    pinnedSessions: [],
+    trustedWorkspaces: {},
+  };
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
@@ -88,6 +110,19 @@ function boundedString(value: unknown, max: number): string | undefined {
   return typeof value === 'string' && value.length > 0 && value.length <= max ? value : undefined;
 }
 
+function boundedStringArray(value: unknown, maxItems: number): string[] {
+  if (!Array.isArray(value)) return [];
+  const unique = new Set<string>();
+  for (const item of value) {
+    const path = boundedString(item, 32_768);
+    if (path) unique.add(path);
+    if (unique.size >= maxItems) break;
+  }
+  return [...unique];
+}
+
+const SESSION_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
 export function parseSettings(value: unknown): PersistedSettings {
   if (!isPlainObject(value) || value['version'] !== SETTINGS_VERSION) {
     return defaultSettings();
@@ -97,15 +132,47 @@ export function parseSettings(value: unknown): PersistedSettings {
   settings.theme = value['theme'] === 'dark' || value['theme'] === 'light' ? value['theme'] : undefined;
   settings.model = boundedString(value['model'], 256);
   settings.apiBaseUrl = boundedString(value['apiBaseUrl'], 2_048);
-  settings.lastWorkspace = boundedString(value['lastWorkspace'], 32_768);
   if (value['bypassPermissionsModeAccepted'] === true) {
     settings.bypassPermissionsModeAccepted = true;
   }
 
-  if (Array.isArray(value['recentWorkspaces'])) {
-    settings.recentWorkspaces = value['recentWorkspaces']
-      .filter((item): item is string => typeof item === 'string' && item.length > 0 && item.length <= 32_768)
-      .slice(0, MAX_RECENT_WORKSPACES);
+  const legacyActive = boundedString(value['lastWorkspace'], 32_768);
+  const persistedProjects = boundedStringArray(value['projects'], MAX_PROJECTS);
+  const legacyProjects = boundedStringArray(value['recentWorkspaces'], MAX_PROJECTS);
+  settings.projects = Array.isArray(value['projects'])
+    ? persistedProjects
+    : boundedStringArray([legacyActive, ...legacyProjects], MAX_PROJECTS);
+  const requestedActive = boundedString(value['activeProject'], 32_768) ?? legacyActive;
+  settings.activeProject = requestedActive && settings.projects.includes(requestedActive)
+    ? requestedActive
+    : settings.projects[0];
+
+  if (isPlainObject(value['activeSession'])) {
+    const projectPath = boundedString(value['activeSession']['projectPath'], 32_768);
+    const sessionId = boundedString(value['activeSession']['sessionId'], 64);
+    if (projectPath && sessionId && settings.projects.includes(projectPath) && SESSION_ID_PATTERN.test(sessionId)) {
+      settings.activeSession = { projectPath, sessionId };
+    }
+  }
+
+  if (Array.isArray(value['pinnedSessions'])) {
+    const seen = new Set<string>();
+    for (const item of value['pinnedSessions']) {
+      if (!isPlainObject(item)) continue;
+      const projectPath = boundedString(item['projectPath'], 32_768);
+      const sessionId = boundedString(item['sessionId'], 64);
+      const title = boundedString(item['title'], 512);
+      const pinnedAt = boundedString(item['pinnedAt'], 64);
+      if (!projectPath || !settings.projects.includes(projectPath) || !sessionId
+        || !SESSION_ID_PATTERN.test(sessionId) || !title || !pinnedAt
+        || Number.isNaN(Date.parse(pinnedAt))) continue;
+      const key = `${projectPath}\0${sessionId}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      settings.pinnedSessions.push({ projectPath, sessionId, title, pinnedAt });
+      if (settings.pinnedSessions.length >= MAX_PINNED_SESSIONS) break;
+    }
+    settings.pinnedSessions.sort((left, right) => right.pinnedAt.localeCompare(left.pinnedAt));
   }
   if (isPlainObject(value['trustedWorkspaces'])) {
     for (const [workspace, record] of Object.entries(value['trustedWorkspaces'])) {
@@ -119,8 +186,17 @@ export function parseSettings(value: unknown): PersistedSettings {
 }
 
 export function publicSettings(settings: PersistedSettings): PublicSettings {
-  const { version, theme, model, apiBaseUrl, lastWorkspace, recentWorkspaces } = settings;
-  return { version, theme, model, apiBaseUrl, lastWorkspace, recentWorkspaces: [...recentWorkspaces] };
+  const { version, theme, model, apiBaseUrl, activeProject, activeSession, projects, pinnedSessions } = settings;
+  return {
+    version,
+    theme,
+    model,
+    apiBaseUrl,
+    activeProject,
+    activeSession: activeSession ? { ...activeSession } : undefined,
+    projects: [...projects],
+    pinnedSessions: pinnedSessions.map((session) => ({ ...session })),
+  };
 }
 
 export function canonicalWorkspace(input: string): string {
@@ -133,14 +209,71 @@ export function canonicalWorkspace(input: string): string {
   return canonical;
 }
 
-export function withRecentWorkspace(settings: PersistedSettings, workspace: string): PersistedSettings {
+export function withAddedProject(settings: PersistedSettings, projectPath: string): PersistedSettings {
+  const existing = settings.projects.includes(projectPath);
+  if (!existing && settings.projects.length >= MAX_PROJECTS) {
+    throw new Error(`Project limit reached (${MAX_PROJECTS}). Remove a project before adding another.`);
+  }
   return {
     ...settings,
-    lastWorkspace: workspace,
-    recentWorkspaces: [workspace, ...settings.recentWorkspaces.filter((item) => item !== workspace)].slice(
-      0,
-      MAX_RECENT_WORKSPACES,
-    ),
+    activeProject: settings.activeProject ?? projectPath,
+    activeSession: settings.activeSession ? { ...settings.activeSession } : undefined,
+    projects: existing ? [...settings.projects] : [projectPath, ...settings.projects],
+    pinnedSessions: settings.pinnedSessions.map((session) => ({ ...session })),
+    trustedWorkspaces: { ...settings.trustedWorkspaces },
+  };
+}
+
+export function withActiveProject(settings: PersistedSettings, projectPath: string): PersistedSettings {
+  if (!settings.projects.includes(projectPath)) throw new Error('project is not in the project list');
+  return {
+    ...settings,
+    activeProject: projectPath,
+    activeSession: settings.activeSession ? { ...settings.activeSession } : undefined,
+    projects: [...settings.projects],
+    pinnedSessions: settings.pinnedSessions.map((session) => ({ ...session })),
+    trustedWorkspaces: { ...settings.trustedWorkspaces },
+  };
+}
+
+export function withoutProject(settings: PersistedSettings, projectPath: string): PersistedSettings {
+  if (!settings.projects.includes(projectPath)) throw new Error('project is not in the project list');
+  const projects = settings.projects.filter((path) => path !== projectPath);
+  const trustedWorkspaces = { ...settings.trustedWorkspaces };
+  delete trustedWorkspaces[projectPath];
+  const activeSession = settings.activeSession?.projectPath === projectPath
+    ? undefined
+    : settings.activeSession ? { ...settings.activeSession } : undefined;
+  return {
+    ...settings,
+    activeProject: settings.activeProject === projectPath ? projects[0] : settings.activeProject,
+    activeSession,
+    projects,
+    pinnedSessions: settings.pinnedSessions
+      .filter((session) => session.projectPath !== projectPath)
+      .map((session) => ({ ...session })),
+    trustedWorkspaces,
+  };
+}
+
+export function withSessionPinned(
+  settings: PersistedSettings,
+  session: PinnedSessionRecord,
+  pinned: boolean,
+): PersistedSettings {
+  if (!settings.projects.includes(session.projectPath)) throw new Error('project is not in the project list');
+  const matches = (item: PinnedSessionRecord): boolean => (
+    item.projectPath === session.projectPath && item.sessionId === session.sessionId
+  );
+  const existing = settings.pinnedSessions.filter((item) => !matches(item));
+  if (pinned && existing.length >= MAX_PINNED_SESSIONS) {
+    throw new Error(`Pinned session limit reached (${MAX_PINNED_SESSIONS}). Unpin a session before adding another.`);
+  }
+  return {
+    ...settings,
+    projects: [...settings.projects],
+    activeSession: settings.activeSession ? { ...settings.activeSession } : undefined,
+    pinnedSessions: pinned ? [{ ...session }, ...existing] : existing,
     trustedWorkspaces: { ...settings.trustedWorkspaces },
   };
 }
@@ -282,13 +415,17 @@ export function buildBridgeEnvironment(source: NodeJS.ProcessEnv, apiBaseUrl?: s
 export function buildBridgeArguments(config: {
   workspace: string;
   bridgeDir: string;
+  sessionId?: string;
+  listSessionsJson?: boolean;
   model?: string;
   hasApiKey: boolean;
   hasCredentialStdin?: boolean;
   trusted: boolean;
   packagedCredentialBoundary?: boolean;
 }): string[] {
+  if (config.listSessionsJson) return ['--cwd', config.workspace, '--list-sessions-json'];
   const args = ['--cwd', config.workspace, '--bridge-dir', config.bridgeDir];
+  if (config.sessionId) args.push('--session-id', config.sessionId);
   if (config.model) args.push('--model', config.model);
   if (config.hasCredentialStdin) args.push('--credential-stdin');
   else if (config.hasApiKey) args.push('--api-key-stdin');

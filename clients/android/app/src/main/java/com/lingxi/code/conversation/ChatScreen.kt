@@ -87,6 +87,7 @@ import com.lingxi.code.theme.LingXiTheme
 fun ChatScreen(
     state: ChatState,
     onSend: (String) -> Unit,
+    onSendWithAttachment: (String, ComposerAttachment?) -> Unit = { text, _ -> onSend(text) },
     onNewChat: () -> Unit,
     onSelectModel: (ModelOption) -> Unit,
     isDark: Boolean,
@@ -244,8 +245,9 @@ fun ChatScreen(
                     if (modelSetupRequired) {
                         onOpenModelSettings()
                     } else if (state.sessionReady && !state.sessionTransitioning) {
-                        onSend(draft)
+                        onSendWithAttachment(draft, attachment)
                         onDraftChange("")
+                        onRemoveAttachment()
                     }
                 },
                 onMicClick = onMicClick,

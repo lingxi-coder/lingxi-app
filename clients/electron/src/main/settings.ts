@@ -6,10 +6,15 @@ import {
   parseSettings,
   publicSettings,
   setWorkspaceTrust,
-  withRecentWorkspace,
+  withActiveProject,
+  withAddedProject,
+  withoutProject,
+  withSessionPinned,
   workspaceTrust,
+  type PinnedSessionRecord,
   type PersistedSettings,
   type PublicSettings,
+  type SessionRef,
 } from './host-utils.js';
 
 export class SettingsStore {
@@ -46,16 +51,46 @@ export class SettingsStore {
   }
 
   getWorkspace(): string | undefined {
-    return this.settings.lastWorkspace;
+    return this.settings.activeProject;
   }
 
-  setWorkspace(canonical: string): void {
-    this.settings = withRecentWorkspace(this.settings, canonical);
+  addProject(canonical: string): void {
+    this.settings = withAddedProject(this.settings, canonical);
     this.persist();
   }
 
-  isRecentWorkspace(canonical: string): boolean {
-    return this.settings.recentWorkspaces.includes(canonical);
+  activateProject(canonical: string): void {
+    this.settings = withActiveProject(this.settings, canonical);
+    this.persist();
+  }
+
+  setActiveSession(ref: SessionRef | undefined): PublicSettings {
+    if (ref !== undefined) {
+      if (!this.settings.projects.includes(ref.projectPath)) throw new Error('project is not in the project list');
+      if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(ref.sessionId)) {
+        throw new Error('invalid session id');
+      }
+      this.settings.activeSession = { ...ref };
+    } else {
+      delete this.settings.activeSession;
+    }
+    this.persist();
+    return this.getPublic();
+  }
+
+  hasProject(canonical: string): boolean {
+    return this.settings.projects.includes(canonical);
+  }
+
+  removeProject(projectPath: string): void {
+    this.settings = withoutProject(this.settings, projectPath);
+    this.persist();
+  }
+
+  setSessionPinned(session: PinnedSessionRecord, pinned: boolean): PublicSettings {
+    this.settings = withSessionPinned(this.settings, session, pinned);
+    this.persist();
+    return this.getPublic();
   }
 
   update(patch: { theme?: 'dark' | 'light'; model?: string | null; apiBaseUrl?: string | null }): PublicSettings {

@@ -24,10 +24,12 @@
 
 import { memo, type CSSProperties } from 'react';
 
+import { standaloneJsonForDisplay } from '../markdown';
 import type { ToolRunItem } from '../model/runItem';
-import { toolDefaultOpen, toolHasBody, toolTruncationNotice } from '../model/runItem';
+import { toolHasBody, toolTruncationNotice } from '../model/runItem';
 import { useT } from '../theme/ThemeContext';
 import { ltrAnchored } from './bidi';
+import { CodeBlock } from './CodeBlock';
 import { DiffView } from './DiffView';
 import { Disclosure } from './Disclosure';
 import { Icon } from './Icon';
@@ -35,8 +37,10 @@ import { Icon } from './Icon';
 const CARD_STYLE: CSSProperties = Object.freeze({
   display: 'flex',
   flexDirection: 'column',
-  gap: 4,
-  maxWidth: 720,
+  gap: 5,
+  maxWidth: 760,
+  padding: '10px 12px 8px',
+  borderRadius: 12,
   position: 'relative',
 });
 
@@ -82,6 +86,37 @@ export function formatElapsed(ms: number): string {
   return `${minutes}m ${String(seconds).padStart(2, '0')}s`;
 }
 
+/** Existing icon vocabulary mapped onto the engine's open-ended tool verbs. */
+export function toolIconName(verb: string): string {
+  const value = verb.toLowerCase();
+  if (['search', 'find', 'grep', 'web'].some((part) => value.includes(part))) return 'search';
+  if (['bash', 'shell', 'terminal', 'command', 'exec'].some((part) => value.includes(part))) return 'terminal';
+  // `TodoWrite` is a task tool even though it also contains "write".
+  if (['todo', 'task', 'plan'].some((part) => value.includes(part))) return 'tasks';
+  if (['edit', 'write', 'update', 'create', 'patch'].some((part) => value.includes(part))) return 'code';
+  if (['git', 'commit', 'branch'].some((part) => value.includes(part))) return 'git';
+  if (['read', 'file', 'glob', 'directory', 'list'].some((part) => value.includes(part))) return 'file';
+  return 'box';
+}
+
+function ToolGlyph({ item }: { item: ToolRunItem }) {
+  const t = useT();
+  const color = item.status === 'error' ? t.danger : item.status === 'running' ? t.accent : t.text3;
+  return (
+    <span
+      aria-hidden="true"
+      style={{
+        width: 28, height: 28, borderRadius: 8, flexShrink: 0,
+        display: 'grid', placeItems: 'center', color,
+        background: `color-mix(in oklab, ${color} 10%, ${t.windowBg})`,
+        boxShadow: `inset 0 0 0 1px color-mix(in oklab, ${color} 18%, transparent)`,
+      }}
+    >
+      <Icon name={toolIconName(item.view.verb)} size={14} color="currentColor" stroke={1.8} />
+    </span>
+  );
+}
+
 function StatusDot({ status }: { status: ToolRunItem['status'] }) {
   const t = useT();
   if (status === 'running') {
@@ -115,7 +150,7 @@ export const ToolCall = memo(function ToolCall({ item, open, onSetOpen }: ToolCa
   const t = useT();
   const { view, result } = item;
   const expandable = toolHasBody(item);
-  const isOpen = open ?? toolDefaultOpen(item);
+  const isOpen = open ?? false;
 
   // Compose from the parts so the argument can be truncated on its own; fall
   // back to the pre-composed English `title` when there is no primary.
@@ -133,6 +168,7 @@ export const ToolCall = memo(function ToolCall({ item, open, onSetOpen }: ToolCa
 
   const headline = result?.headline;
   const body = result?.body ?? item.note;
+  const jsonBody = body === undefined ? undefined : standaloneJsonForDisplay(body);
   const diff = result?.diff;
   // `body_lines` is the count BEFORE clamping, so the affordance can promise
   // the right number without measuring anything.
@@ -159,45 +195,61 @@ export const ToolCall = memo(function ToolCall({ item, open, onSetOpen }: ToolCa
   );
 
   return (
-    <div style={CARD_STYLE}>
-      {/* Header line: status, title, elapsed clock. */}
-      <div style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 }}>
-        <StatusDot status={item.status} />
-        <span
-          style={{
-            display: 'flex', minWidth: 0, alignItems: 'baseline',
-            fontSize: 14, fontWeight: 500,
-            color: item.status === 'error' ? t.danger : t.text,
-          }}
-        >
-          {title}
-        </span>
-        {item.status === 'running' && item.elapsedMs !== undefined && (
-          <span className="mono" style={{ fontSize: 11, color: t.text4, flexShrink: 0 }}>
-            {formatElapsed(item.elapsedMs)}
+    <div
+      className="transcript-tool-card"
+      style={{
+        ...CARD_STYLE,
+        '--tool-card-bg': t.surface,
+        '--tool-card-hover': `color-mix(in oklab, ${t.surfaceHover} 72%, ${t.surface})`,
+        '--tool-card-border': t.border,
+        '--tool-card-shadow': t.dark
+          ? '0 1px 0 rgba(255,255,255,.025), 0 8px 24px rgba(0,0,0,.16)'
+          : '0 1px 0 rgba(255,255,255,.9), 0 8px 24px rgba(66,55,44,.07)',
+      } as CSSProperties}
+    >
+      {/* Header: tool identity, tail-preserving title, status, and live clock. */}
+      <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10, minWidth: 0 }}>
+        <ToolGlyph item={item} />
+        <div style={{ display: 'flex', flex: 1, minWidth: 0, flexDirection: 'column', gap: 2 }}>
+          <span
+            style={{
+              display: 'flex', minWidth: 0, alignItems: 'baseline',
+              fontSize: 14, lineHeight: 1.45, fontWeight: 560,
+              color: item.status === 'error' ? t.danger : t.text,
+            }}
+          >
+            {title}
           </span>
-        )}
-      </div>
 
-      {/* The header's own second line, e.g. `$ cargo test --all`. */}
-      {view.sub_line && (
-        <div
-          className="mono-code"
-          style={{
-            display: 'flex', gap: 6, marginLeft: 22, fontSize: 12, color: t.text2,
-            overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
-          }}
-        >
-          <span style={{ color: t.text4, flexShrink: 0 }}>{view.sub_line.prefix}</span>
-          <span style={{ overflow: 'hidden', textOverflow: 'ellipsis' }}>{view.sub_line.text}</span>
+          {/* The header's second line, e.g. `$ cargo test --all`. */}
+          {view.sub_line && (
+            <div
+              className="mono-code"
+              style={{
+                display: 'flex', gap: 6, minWidth: 0, fontSize: 12, color: t.text2,
+                overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+              }}
+            >
+              <span style={{ color: t.text4, flexShrink: 0 }}>{view.sub_line.prefix}</span>
+              <span style={{ overflow: 'hidden', textOverflow: 'ellipsis' }}>{view.sub_line.text}</span>
+            </div>
+          )}
         </div>
-      )}
+        <div style={{ display: 'inline-flex', alignItems: 'center', gap: 7, minHeight: 28, flexShrink: 0 }}>
+          {item.status === 'running' && item.elapsedMs !== undefined && (
+            <span className="mono" style={{ fontSize: 11, color: t.text4, fontVariantNumeric: 'tabular-nums' }}>
+              {formatElapsed(item.elapsedMs)}
+            </span>
+          )}
+          <StatusDot status={item.status} />
+        </div>
+      </div>
 
       {/* The result headline — the terminal's `⎿` line. */}
       {headline && (
         <div
           style={{
-            display: 'flex', gap: 6, marginLeft: 22, fontSize: 13,
+            display: 'flex', gap: 6, marginLeft: 38, fontSize: 13, lineHeight: 1.45,
             color: item.status === 'error' ? t.danger : t.text2,
           }}
         >
@@ -215,13 +267,14 @@ export const ToolCall = memo(function ToolCall({ item, open, onSetOpen }: ToolCa
         whole collapse design exists to avoid.
       */}
       {expandable && (
-        <div style={{ display: 'flex', flexDirection: 'column', marginLeft: 22 }}>
+        <div style={{ display: 'flex', flexDirection: 'column', marginLeft: 38 }}>
           <Disclosure
             id={item.id}
             open={isOpen}
             onToggle={() => onSetOpen(item.id, !isOpen)}
             summary={summary}
-            buttonStyle={{ marginTop: 4 }}
+            buttonClassName="tool-disclosure-trigger"
+            buttonStyle={{ minHeight: 40, margin: '0 0 -6px -8px', padding: '0 8px', borderRadius: 8 }}
           >
             {diff && (
               <div style={{ marginTop: 6 }}>
@@ -229,18 +282,24 @@ export const ToolCall = memo(function ToolCall({ item, open, onSetOpen }: ToolCa
               </div>
             )}
             {body !== undefined && (
-              <pre
-                className="mono-code"
-                style={{
-                  ...BODY_STYLE,
-                  marginLeft: 0,
-                  background: t.windowBg,
-                  color: item.status === 'error' ? t.danger : t.text2,
-                  border: `0.5px solid ${t.border}`,
-                }}
-              >
-                {body}
-              </pre>
+              jsonBody !== undefined ? (
+                <div style={{ marginTop: 6 }}>
+                  <CodeBlock code={jsonBody} language="json" variant="tool" />
+                </div>
+              ) : (
+                <pre
+                  className="mono-code"
+                  style={{
+                    ...BODY_STYLE,
+                    marginLeft: 0,
+                    background: t.windowBg,
+                    color: item.status === 'error' ? t.danger : t.text2,
+                    border: `0.5px solid ${t.border}`,
+                  }}
+                >
+                  {body}
+                </pre>
+              )
             )}
             {/* The engine clamped the body; say so where the shortfall is
                 actually visible, not only on the collapsed label. */}

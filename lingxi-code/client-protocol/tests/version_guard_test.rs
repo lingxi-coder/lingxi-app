@@ -374,6 +374,8 @@ fn current_contract_index() -> ContractIndex {
         "ClientEvent::ConversationControlsChanged.controls",
         "ConversationControlsDto",
     );
+    put("ClientEvent::FastModeChanged", "fast_mode_changed");
+    put("ClientEvent::FastModeChanged.enabled", "bool");
     put(
         "ClientEvent::ProviderCredentialStatus",
         "provider_credential_status",
@@ -635,6 +637,8 @@ fn current_contract_index() -> ContractIndex {
         "ClientCommand::SetReasoningSelection.selection",
         "ReasoningSelectionDto",
     );
+    put("ClientCommand::SetFastMode", "set_fast_mode");
+    put("ClientCommand::SetFastMode.enabled", "bool");
     put("ClientCommand::RunSlashCommand", "run_slash_command");
     put("ClientCommand::RunSlashCommand.raw", "String");
     put("ClientCommand::RunSlashCommand.turn_id", "Option<u64>");
@@ -1093,6 +1097,7 @@ fn current_contract_index() -> ContractIndex {
     put("ModelDetailsDto.pricing", "Option<ModelPricingDto>");
     put("ModelDetailsDto.capabilities", "ModelCapabilitiesDto");
     put("ModelDetailsDto.reasoning", "ReasoningControlSpecDto");
+    put("ModelDetailsDto.supports_fast_mode", "bool");
 
     put("PermissionModeOptionDto.mode", "String");
     put("PermissionModeOptionDto.available", "bool");
@@ -2030,6 +2035,7 @@ fn contract_index_covers_every_dto() {
         ClientCommand::SetReasoningSelection {
             selection: ReasoningSelectionDto::Automatic,
         },
+        ClientCommand::SetFastMode { enabled: false },
         ClientCommand::ApproveComputerAccess {
             request_id: 0,
             response: ComputerAccessResponseDto::default(),
@@ -2054,6 +2060,7 @@ fn contract_index_covers_every_dto() {
         blocks: vec![MessageBlockDto::Text {
             text: String::new(),
         }],
+        images: Vec::new(),
     };
     let _req = PermissionRequest {
         request_id: 0,

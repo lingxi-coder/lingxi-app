@@ -3,13 +3,91 @@ export type MarkdownBlock =
   | { type: 'heading'; level: number; text: string }
   | { type: 'blockquote'; text: string }
   | { type: 'list'; ordered: boolean; items: string[] }
-  | { type: 'code'; language?: string; text: string };
+  | { type: 'code'; language?: string; text: string; closed: boolean };
+
+/**
+ * Return a display-safe, two-space formatted JSON object/array only when the
+ * complete input is valid JSON. Formatting is lexical rather than
+ * parse/stringify based, so duplicate keys and large integer spellings survive
+ * unchanged.
+ */
+export function standaloneJsonForDisplay(source: string): string | undefined {
+  const trimmed = source.trim();
+  const objectLike = trimmed.startsWith('{') && trimmed.endsWith('}');
+  const arrayLike = trimmed.startsWith('[') && trimmed.endsWith(']');
+  if (!objectLike && !arrayLike) return undefined;
+
+  try {
+    JSON.parse(trimmed);
+  } catch {
+    return undefined;
+  }
+
+  let output = '';
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  const indentation = () => '  '.repeat(depth);
+
+  for (let index = 0; index < trimmed.length; index += 1) {
+    const character = trimmed[index] ?? '';
+    if (inString) {
+      output += character;
+      if (escaped) escaped = false;
+      else if (character === '\\') escaped = true;
+      else if (character === '"') inString = false;
+      continue;
+    }
+
+    if (/\s/.test(character)) continue;
+    if (character === '"') {
+      inString = true;
+      output += character;
+      continue;
+    }
+    if (character === '{' || character === '[') {
+      const closing = character === '{' ? '}' : ']';
+      let next = index + 1;
+      while (next < trimmed.length && /\s/.test(trimmed[next] ?? '')) next += 1;
+      if (trimmed[next] === closing) {
+        output += `${character}${closing}`;
+        index = next;
+      } else {
+        output += `${character}\n`;
+        depth += 1;
+        output += indentation();
+      }
+      continue;
+    }
+    if (character === '}' || character === ']') {
+      depth -= 1;
+      output += `\n${indentation()}${character}`;
+      continue;
+    }
+    if (character === ',') {
+      output += `,\n${indentation()}`;
+      continue;
+    }
+    if (character === ':') {
+      output += ': ';
+      continue;
+    }
+    output += character;
+  }
+
+  return output;
+}
 
 /**
  * Parse the small, safe Markdown subset used by model messages. The renderer
  * turns this data into React nodes, so source HTML is always treated as text.
  */
 export function parseMarkdown(source: string): MarkdownBlock[] {
+  const standaloneJson = standaloneJsonForDisplay(source);
+  if (standaloneJson !== undefined) {
+    return [{ type: 'code', language: 'json', text: standaloneJson, closed: true }];
+  }
+
   const lines = normalizeMarkdown(source).split('\n');
   const blocks: MarkdownBlock[] = [];
   let index = 0;
@@ -30,8 +108,9 @@ export function parseMarkdown(source: string): MarkdownBlock[] {
         content.push(lines[index] ?? '');
         index += 1;
       }
-      if (index < lines.length) index += 1;
-      blocks.push({ type: 'code', language: fence[2] || undefined, text: content.join('\n') });
+      const closed = index < lines.length;
+      if (closed) index += 1;
+      blocks.push({ type: 'code', language: fence[2] || undefined, text: content.join('\n'), closed });
       continue;
     }
 

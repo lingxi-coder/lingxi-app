@@ -15,10 +15,8 @@
 //! resolves a teammate *name* (the TS contract) rather than a bare UUID.
 //!
 //! Delivery routes through the injected [`traits::mailbox::MailboxRouterHandle`]
-//! seam. The desktop host wires the same name-aware router used by coordinator
-//! teammates and background agents; its mailbox pump wakes a parked persistent
-//! agent on delivery. Cross-session `uds:`/`bridge:` transports remain outside
-//! this local tool (the richer coordinator tool rejects them explicitly).
+//! seam for teammates. Canonical `session:<uuid>` recipients use the local live
+//! session registry with UDS first and a JSONL inbox fallback.
 //!
 //! The LingXi-internal claim window stays byte-locked at
 //! `Duration::from_secs(30)` (spec §7 line 498), and the telemetry event names
@@ -110,7 +108,7 @@ fn build_input_schema() -> Value {
         "properties": {
             "to": {
                 "type": "string",
-                "description": "Recipient: teammate name"
+                "description": "Recipient: teammate name or session:<uuid>"
             },
             "notify_when_idle": {
                 "type": "boolean",
@@ -164,6 +162,8 @@ enum Recipient {
     Teammate(String),
     /// An explicit `agent:<uuid>` reference (prefix stripped).
     Agent(String),
+    /// A live Claude session addressed by its canonical UUID.
+    Session(String),
 }
 
 impl Recipient {
@@ -171,7 +171,7 @@ impl Recipient {
     fn route_target(&self) -> &str {
         match self {
             Recipient::Broadcast => "*",
-            Recipient::Teammate(s) | Recipient::Agent(s) => s,
+            Recipient::Teammate(s) | Recipient::Agent(s) | Recipient::Session(s) => s,
         }
     }
 }
@@ -226,7 +226,14 @@ impl SendMessageTool {
         if trimmed == "*" {
             return Ok(Recipient::Broadcast);
         }
-        // Resolve by teammate NAME first, then the explicit `agent:<uuid>` form.
+        // Resolve by teammate NAME first, then the explicit session/agent UUID
+        // forms. The session ID is the canonical cross-process identity.
+        if let Some(session_id) = trimmed.strip_prefix("session:") {
+            let parsed = protocol::SessionId::parse_prefixed(session_id).ok_or_else(|| {
+                ToolError::InvalidInput("session address must contain a valid UUID".into())
+            })?;
+            return Ok(Recipient::Session(parsed.as_uuid().to_string()));
+        }
         if let Some(uuid) = trimmed.strip_prefix("agent:") {
             return Ok(Recipient::Agent(uuid.to_string()));
         }
@@ -279,6 +286,9 @@ impl SendMessageTool {
                     )
                 })
             }),
+            Recipient::Session(id) => traits::live_sessions::process_session_id()
+                .filter(|self_id| self_id == id)
+                .map(|_| format!("'{to_display}' is this session's own address.")),
             Recipient::Teammate(_) => {
                 let trimmed = to_display.trim();
                 if ctx.agent_name.as_deref().is_some_and(|name| name == trimmed) {
@@ -424,46 +434,71 @@ impl SendMessageTool {
         sender: &str,
         notify_when_idle: bool,
     ) -> Result<Value, ToolError> {
-        if let Some((dir, peer)) = traits::live_sessions::process_dir().and_then(|d| {
-            d.find_exact(
-                to_display,
-                traits::live_sessions::process_session_id().as_deref(),
-            )
-            .map(|peer| (d, peer))
-        }) {
+        // A teammate name belongs to the current team before it is considered
+        // a live-session alias. The router's named-recipient snapshot tells us
+        // whether the name is actually owned by the current team; otherwise
+        // the compatibility live-session alias may handle it.
+        if let Recipient::Teammate(target) = recipient {
+            let is_team_recipient = router
+                .named_recipients()
+                .await
+                .into_iter()
+                .any(|(name, _)| name.eq_ignore_ascii_case(target));
+            if is_team_recipient {
+                Self::deliver(router, from, target, content.to_string()).await?;
+                let preview = truncate_preview(content, ROUTING_CONTENT_PREVIEW_CHARS);
+                return Ok(json!({
+                    "success": true,
+                    "message": format!("Message sent to {to_display}'s inbox"),
+                    "routing": Self::routing(sender, &format!("@{to_display}"), summary, Some(&preview)),
+                }));
+            }
+        }
+
+        let live_target = match recipient {
+            Recipient::Session(session_id) => {
+                traits::live_sessions::process_dir().and_then(|dir| {
+                    dir.find_by_session_id(
+                        session_id,
+                        traits::live_sessions::process_session_id().as_deref(),
+                    )
+                    .map(|peer| (dir, peer))
+                })
+            }
+            Recipient::Teammate(_) => traits::live_sessions::process_dir().and_then(|dir| {
+                dir.find_exact(
+                    to_display,
+                    traits::live_sessions::process_session_id().as_deref(),
+                )
+                .map(|peer| (dir, peer))
+            }),
+            _ => None,
+        };
+        if let Some((dir, peer)) = live_target {
             let from_name =
                 traits::live_sessions::process_name().unwrap_or_else(|| from.to_string());
             let from_sid = traits::live_sessions::process_session_id().unwrap_or_default();
             let preview = truncate_preview(content, ROUTING_CONTENT_PREVIEW_CHARS);
+            let message = traits::live_sessions::outbound_peer_message(
+                &from_name, &from_sid, content, summary,
+            );
             let sock = peer
                 .messaging_socket_path
                 .as_deref()
                 .filter(|s| !s.is_empty())
                 .map(std::path::PathBuf::from)
                 .filter(|p| traits::uds_inbox::is_canonical_inbox_sock(p));
-            if let Some(sock) = sock {
-                traits::uds_inbox::send_to_live_peer(&sock, &from_name, &from_sid, content)
-                    .map_err(|e| {
-                        ToolError::Internal(format!(
-                            "SendMessage: failed to deliver to live session: {e}"
-                        ))
-                    })?;
-            } else {
-                dir.send_inbox(
-                    peer.sid(),
-                    &traits::live_sessions::PeerMessage {
-                        from: from_name.clone(),
-                        from_session_id: from_sid.clone(),
-                        content: content.to_string(),
-                        summary: summary.map(str::to_string),
-                        msg_id: None,
-                        from_addr: None,
-                        from_mode: None,
-                    },
-                )
-                .map_err(|e| {
+            let uds_error = sock
+                .as_deref()
+                .map(|path| traits::uds_inbox::send_peer_message(path, &message))
+                .and_then(Result::err);
+            if sock.is_none() || uds_error.is_some() {
+                dir.send_inbox(peer.sid(), &message).map_err(|e| {
+                    let transport = uds_error
+                        .as_ref()
+                        .map_or_else(String::new, |uds| format!(" (UDS failed first: {uds})"));
                     ToolError::Internal(format!(
-                        "SendMessage: failed to deliver to live session inbox: {e}"
+                        "SendMessage: failed to deliver to live session inbox: {e}{transport}"
                     ))
                 })?;
             }
@@ -500,6 +535,11 @@ impl SendMessageTool {
                 ),
             }));
         }
+        if matches!(recipient, Recipient::Session(_)) {
+            return Err(ToolError::InvalidInput(
+                "SendMessage: no live session with that session id".into(),
+            ));
+        }
         if notify_when_idle {
             return Err(ToolError::InvalidInput(
                 "notify_when_idle is only supported for local live sessions".into(),
@@ -520,16 +560,24 @@ impl SendMessageTool {
     }
 
     async fn handle_idle_subscription_only(
+        recipient: &Recipient,
         to_display: &str,
         summary: Option<&str>,
         sender: &str,
     ) -> Result<Value, ToolError> {
         let Some((dir, peer)) = traits::live_sessions::process_dir().and_then(|d| {
-            d.find_exact(
-                to_display,
-                traits::live_sessions::process_session_id().as_deref(),
-            )
-            .map(|peer| (d, peer))
+            let peer = match recipient {
+                Recipient::Session(session_id) => d.find_by_session_id(
+                    session_id,
+                    traits::live_sessions::process_session_id().as_deref(),
+                ),
+                Recipient::Teammate(_) => d.find_exact(
+                    to_display,
+                    traits::live_sessions::process_session_id().as_deref(),
+                ),
+                _ => None,
+            };
+            peer.map(|peer| (d, peer))
         }) else {
             return Err(ToolError::InvalidInput(
                 "notify_when_idle is only supported for local live sessions".into(),
@@ -869,9 +917,9 @@ impl Tool for SendMessageTool {
     }
 
     async fn check_permissions(&self, _: &Value, _: &ToolUseContext) -> PermissionResult {
-        // The TS tool only escalates to `ask` for the cross-machine `bridge:`
-        // scheme (a UDS_INBOX feature not modelled here); all local sends are
-        // allowed.
+        // The TS tool only escalates to `ask` for a cross-machine `bridge:`
+        // scheme. This tool exposes teammate and canonical local-session sends,
+        // both of which remain local and are allowed here.
         PermissionResult::Allow {
             reason: PermissionDecisionReason::Other {
                 reason: "SendMessage routes teammate-to-teammate text via the swarm mailbox".into(),
@@ -1145,7 +1193,13 @@ Approving shutdown terminates your process. Rejecting plan sends the teammate ba
         let data_result: Result<Value, ToolError> = match message {
             None => {
                 if notify_when_idle {
-                    Self::handle_idle_subscription_only(&to, summary.as_deref(), &sender).await
+                    Self::handle_idle_subscription_only(
+                        &recipient,
+                        &to,
+                        summary.as_deref(),
+                        &sender,
+                    )
+                    .await
                 } else {
                     Self::emit_failed(
                         &bus,
@@ -1186,6 +1240,12 @@ Approving shutdown terminates your process. Rejecting plan sends the teammate ba
                     .await;
                     return Err(ToolError::InvalidInput(
                         "structured messages cannot be broadcast".into(),
+                    ));
+                }
+                if matches!(recipient, Recipient::Session(_)) {
+                    return Err(ToolError::InvalidInput(
+                        "structured protocol messages cannot target session:<uuid>; use a team teammate address"
+                            .into(),
                     ));
                 }
                 let mtype = obj.get("type").and_then(Value::as_str).unwrap_or("");
@@ -1369,8 +1429,7 @@ mod tests {
     }
 
     fn process_lock() -> &'static Mutex<()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
+        crate::live_session_test_lock()
     }
 
     /// Records every `(from, to, content)` it is asked to route and always acks
@@ -1564,6 +1623,12 @@ mod tests {
             SendMessageTool::parse_recipient("*").unwrap(),
             Recipient::Broadcast
         );
+        let session_id = "11111111-2222-3333-4444-555555555555";
+        assert_eq!(
+            SendMessageTool::parse_recipient(&format!("session:{session_id}")).unwrap(),
+            Recipient::Session(session_id.into())
+        );
+        assert!(SendMessageTool::parse_recipient("session:not-a-uuid").is_err());
     }
 
     // ----- validate_input parity (byte-faithful rejection strings) ----------
@@ -1693,7 +1758,10 @@ mod tests {
         assert!(router.routed.lock().unwrap().is_empty());
         let delivered = dir.drain_inbox("peer-session").unwrap();
         assert_eq!(delivered.len(), 1);
-        assert_eq!(delivered[0].content, "check this when free");
+        assert_eq!(
+            traits::live_sessions::extract_cross_session_inner(&delivered[0].content),
+            "check this when free"
+        );
         assert_eq!(delivered[0].summary.as_deref(), Some("later"));
         let queued = dir.drain_idle_subscriptions("peer-session").unwrap();
         assert_eq!(queued.len(), 1);
@@ -1703,8 +1771,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn notify_when_idle_without_message_registers_subscription_only() {
+    async fn session_uuid_routes_to_live_session_inbox() {
         let _g = process_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let peer_session_id = "11111111-2222-3333-4444-555555555555";
         let temp = tempfile::TempDir::new().unwrap();
         let dir = traits::live_sessions::LiveSessionDir::at(temp.path().join("sessions"));
         traits::live_sessions::set_process_dir(dir.clone());
@@ -1715,7 +1784,61 @@ mod tests {
             dir.root().join("222.json"),
             serde_json::to_vec(&serde_json::json!({
                 "pid": 222u32,
-                "sessionId": "peer-session",
+                "sessionId": peer_session_id,
+                "name": "peer",
+                "kind": "interactive",
+                "startedAt": 0,
+                "status": "idle",
+                "messagingSocketPath": traits::uds_inbox::default_socket_path(222).to_string_lossy()
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let router = Arc::new(RecordingRouter::new());
+        let tool = SendMessageTool::new(ctx_with(router.clone()));
+        let result = tool
+            .call(
+                json!({
+                    "to": format!("session:{peer_session_id}"),
+                    "summary": "direct session ping",
+                    "message": "hello by stable id"
+                }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .expect("session-id send succeeds");
+
+        assert!(result
+            .model_content
+            .as_deref()
+            .is_some_and(|message| message.contains(peer_session_id)));
+        assert!(router.routed.lock().unwrap().is_empty());
+        let messages = dir.drain_inbox(peer_session_id).unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(
+            traits::live_sessions::extract_cross_session_inner(&messages[0].content),
+            "hello by stable id"
+        );
+        assert!(messages[0].msg_id.is_some());
+    }
+
+    #[tokio::test]
+    async fn notify_when_idle_without_message_registers_subscription_only() {
+        let _g = process_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let peer_session_id = "22222222-3333-4444-8555-666666666666";
+        let temp = tempfile::TempDir::new().unwrap();
+        let dir = traits::live_sessions::LiveSessionDir::at(temp.path().join("sessions"));
+        traits::live_sessions::set_process_dir(dir.clone());
+        traits::live_sessions::set_process_session_id("self-session");
+        traits::live_sessions::set_process_name("lead");
+        std::fs::create_dir_all(dir.root()).unwrap();
+        std::fs::write(
+            dir.root().join("222.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "pid": 222u32,
+                "sessionId": peer_session_id,
                 "name": "peer",
                 "kind": "interactive",
                 "startedAt": 0,
@@ -1730,7 +1853,7 @@ mod tests {
         let result = tool
             .call(
                 json!({
-                    "to": "peer",
+                    "to": format!("session:{peer_session_id}"),
                     "notify_when_idle": true,
                     "summary": "ping me"
                 }),
@@ -1740,16 +1863,33 @@ mod tests {
             .await
             .expect("subscription succeeds");
 
-        assert_eq!(
-            result.model_content.as_deref(),
-            Some(
-                "Subscribed — you will get one notice here when \"peer\" is next idle (or exits). Do not poll or wait for it; carry on."
-            )
+        let expected = format!(
+            "Subscribed — you will get one notice here when \"session:{peer_session_id}\" is next idle (or exits). Do not poll or wait for it; carry on."
         );
+        assert_eq!(result.model_content.as_deref(), Some(expected.as_str()));
         assert!(router.routed.lock().unwrap().is_empty());
-        let queued = dir.drain_idle_subscriptions("peer-session").unwrap();
+        let queued = dir.drain_idle_subscriptions(peer_session_id).unwrap();
         assert_eq!(queued.len(), 1);
         assert_eq!(queued[0].summary.as_deref(), Some("ping me"));
+    }
+
+    #[tokio::test]
+    async fn structured_protocol_message_rejects_session_target() {
+        let tool = SendMessageTool::new(ctx_with(Arc::new(RecordingRouter::new())));
+        let err = tool
+            .call(
+                json!({
+                    "to": "session:11111111-2222-4333-8444-555555555555",
+                    "message": {"type": "shutdown_request", "reason": "done"}
+                }),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await
+            .expect_err("team protocol messages must not target a session");
+        assert!(err
+            .model_facing_message()
+            .contains("structured protocol messages cannot target session:<uuid>"));
     }
 
     #[tokio::test]

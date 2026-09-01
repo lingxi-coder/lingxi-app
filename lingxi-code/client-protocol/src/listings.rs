@@ -178,6 +178,9 @@ pub struct ModelDetailsDto {
     pub pricing: Option<ModelPricingDto>,
     pub capabilities: ModelCapabilitiesDto,
     pub reasoning: crate::controls::ReasoningControlSpecDto,
+    /// Whether this model/provider route supports the first-party fast tier.
+    #[serde(default)]
+    pub supports_fast_mode: bool,
 }
 
 // ── MCP ──────────────────────────────────────────────────────────────────────

@@ -206,6 +206,7 @@ impl AdapterOutputStream {
                 message: Some(MessageDto {
                     role: "assistant".to_string(),
                     blocks,
+                    images: Vec::new(),
                 }),
             })
             .await;

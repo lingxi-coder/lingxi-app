@@ -41,7 +41,7 @@ use client_protocol::listings::{
     ModelCapabilitiesDto, ModelDetailsDto, ModelPricingDto, ModelPricingTierDto, SessionRowDto,
     StatusSnapshotDto, TaskRowDto, TaskStatusDto,
 };
-use client_protocol::message::{MessageBlockDto, MessageDto};
+use client_protocol::message::{MessageBlockDto, MessageDto, MessageImageDto};
 
 use protocol::ConversationMessage;
 
@@ -170,6 +170,11 @@ pub fn lower_model_details(listing: &traits::ModelListing) -> ModelDetailsDto {
             structured_output: listing.capabilities.structured_output,
         },
         reasoning: lower_reasoning_control_spec(&listing.reasoning),
+        supports_fast_mode: listing.provider_id == "anthropic"
+            && traits::model_capabilities::has_capability(
+                &listing.request_model,
+                traits::model_capabilities::ModelCapability::FastMode,
+            ),
     }
 }
 
@@ -442,9 +447,9 @@ pub fn lower_worker_agent(info: &WorkerInfo) -> CoordinatorWorkerDto {
 /// the content blocks are lowered through the SAME
 /// [`crate::turn::lower_content_block`] path `MessageComplete` uses, so a resumed
 /// message and a live-turn message reproduce an IDENTICAL [`MessageDto`] block set
-/// for any given content. Blocks with no `MessageBlockDto` analog
-/// ([`protocol::ContentBlock::Image`], [`protocol::ContentBlock::Document`]) are
-/// dropped, matching the live path.
+/// for any given content. Image content is projected to the message-level
+/// `images` field because clients render it before the user's text row; document
+/// content has no client message projection and is dropped.
 ///
 /// A [`ConversationMessage::System`] carries a flat `content: String` (no blocks),
 /// so it lowers to a single [`MessageBlockDto::Text`] — a faithful, lossless
@@ -472,6 +477,7 @@ pub fn lower_conversation_message_with(
                 .iter()
                 .filter_map(|block| crate::turn::lower_content_block_with(block, index))
                 .collect(),
+            images: content.iter().filter_map(lower_message_image).collect(),
         },
         ConversationMessage::Assistant { content, .. } => MessageDto {
             role: "assistant".to_string(),
@@ -479,6 +485,7 @@ pub fn lower_conversation_message_with(
                 .iter()
                 .filter_map(|block| crate::turn::lower_content_block_with(block, index))
                 .collect(),
+            images: Vec::new(),
         },
         ConversationMessage::System {
             subtype,
@@ -494,13 +501,34 @@ pub fn lower_conversation_message_with(
                 messages_after: 0,
                 summary: String::new(),
             }],
+            images: Vec::new(),
         },
         ConversationMessage::System { content, .. } => MessageDto {
             role: "system".to_string(),
             blocks: vec![MessageBlockDto::Text {
                 text: content.clone(),
             }],
+            images: Vec::new(),
         },
+    }
+}
+
+/// Keep persisted image bytes renderable across every client. The engine's
+/// session history is already durable, so inline data becomes a URL-shaped
+/// transcript value; a source that was already a URL remains a URL.
+fn lower_message_image(block: &protocol::ContentBlock) -> Option<MessageImageDto> {
+    let protocol::ContentBlock::Image { source } = block else {
+        return None;
+    };
+    match source {
+        protocol::ImageSource::Base64 { media_type, data } => Some(MessageImageDto {
+            media_type: media_type.clone(),
+            url: format!("data:{media_type};base64,{data}"),
+        }),
+        protocol::ImageSource::Url { url } => Some(MessageImageDto {
+            media_type: String::new(),
+            url: url.clone(),
+        }),
     }
 }
 
@@ -1211,10 +1239,10 @@ mod tests {
     }
 
     #[test]
-    fn lower_conversation_message_drops_image_blocks() {
+    fn lower_conversation_message_projects_image_blocks_to_message_media() {
         use protocol::{ContentBlock, ImageSource, MessageId};
-        // An image block has no MessageBlockDto analog — it is dropped, leaving
-        // only the text block (matching the live MessageComplete path).
+        // An image block has no MessageBlockDto analog, so it is projected to a
+        // durable URL-shaped message media entry while text stays in blocks.
         let msg = ConversationMessage::User {
             id: MessageId::new(),
             content: vec![
@@ -1236,6 +1264,13 @@ mod tests {
             dto.blocks,
             vec![MessageBlockDto::Text {
                 text: "look".to_string()
+            }]
+        );
+        assert_eq!(
+            dto.images,
+            vec![MessageImageDto {
+                media_type: String::new(),
+                url: "https://example.com/i.png".to_string(),
             }]
         );
     }

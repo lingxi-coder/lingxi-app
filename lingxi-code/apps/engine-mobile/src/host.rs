@@ -6456,6 +6456,22 @@ impl MobileEngineHandle {
                 Ok(())
             }
 
+            ClientCommand::SetFastMode { enabled } => {
+                let handle: Arc<dyn OrchestratorHandle> = self.inner.orchestrator.clone();
+                handle
+                    .set_fast_mode(enabled)
+                    .await
+                    .map_err(|e| ClientError::Rejected {
+                        message: format!("set_fast_mode failed: {e}"),
+                    })?;
+                self.event_sink
+                    .emit(ClientEvent::FastModeChanged {
+                        enabled: handle.fast_mode().await,
+                    })
+                    .await;
+                Ok(())
+            }
+
             // ── Provider credentials ────────────────────────────────────────
             // Mobile uses the same CredentialManager instance as the live
             // multi-provider client. Settings writes therefore become visible

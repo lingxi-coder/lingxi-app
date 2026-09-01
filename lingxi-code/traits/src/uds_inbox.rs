@@ -28,6 +28,7 @@ const SEND_TIMEOUT: Duration = Duration::from_secs(5);
 const MACOS_LINGER: Duration = Duration::from_millis(150);
 const SOCK_PATH_MAX: usize = 103;
 const SOCK_DIR: &str = "cc-socks";
+const SEEN_MESSAGE_LIMIT: usize = 2_048;
 
 /// One parked inbound message (2.1.232 `Uy.inbound.held`).
 #[derive(Debug, Clone)]
@@ -49,6 +50,7 @@ struct InboxState {
     accepted: Mutex<VecDeque<PeerMessage>>,
     held: Mutex<Vec<HeldEntry>>,
     receipts: Mutex<VecDeque<String>>,
+    seen_message_ids: Mutex<VecDeque<String>>,
     path: Mutex<Option<PathBuf>>,
     peer_token: Mutex<Option<String>>,
     child_token: Mutex<Option<String>>,
@@ -61,6 +63,7 @@ impl InboxState {
             accepted: Mutex::new(VecDeque::new()),
             held: Mutex::new(Vec::new()),
             receipts: Mutex::new(VecDeque::new()),
+            seen_message_ids: Mutex::new(VecDeque::new()),
             path: Mutex::new(None),
             peer_token: Mutex::new(None),
             child_token: Mutex::new(None),
@@ -723,6 +726,19 @@ fn attribute_user_message(
 }
 
 fn apply_inbound(msg: PeerMessage, state: &InboxState) {
+    if let Some(message_id) = msg.msg_id.as_deref() {
+        let mut seen = state
+            .seen_message_ids
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if seen.iter().any(|known| known == message_id) {
+            return;
+        }
+        if seen.len() >= SEEN_MESSAGE_LIMIT {
+            seen.pop_front();
+        }
+        seen.push_back(message_id.to_string());
+    }
     let (policy, cause) = inbound_decision(msg.from_mode.as_deref());
     match policy {
         InboundPolicy::Refuse | InboundPolicy::Default => {
@@ -991,6 +1007,12 @@ pub fn enqueue_accepted(msg: PeerMessage) {
         .push_back(msg);
 }
 
+/// Enqueue a message from the JSONL fallback through the same inbound policy
+/// and message-id de-duplication used by the UDS receive loop.
+pub fn enqueue_inbound(msg: PeerMessage) {
+    apply_inbound(msg, &inbox());
+}
+
 /// Drain accepted UDS messages into reminder strings.
 #[must_use]
 pub fn take_accepted_peer_reminders(mid_turn: bool) -> Vec<String> {
@@ -1048,6 +1070,11 @@ pub fn stop_process_inbox() {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clear();
+        state
+            .seen_message_ids
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
         *state.path.lock().unwrap_or_else(|e| e.into_inner()) = None;
         *state.peer_token.lock().unwrap_or_else(|e| e.into_inner()) = None;
         *state.child_token.lock().unwrap_or_else(|e| e.into_inner()) = None;
@@ -1073,6 +1100,35 @@ pub fn send_to_live_peer(
     }
     let from_addr = process_uds_address().unwrap_or_else(|| uds_address(Path::new("/")));
     let payload = user_payload(from_name, from_sid, &from_addr, body);
+    send_uds(sock, &payload)
+}
+
+/// Deliver a pre-built message over UDS without changing its stable id.
+pub fn send_peer_message(sock: &Path, message: &PeerMessage) -> io::Result<()> {
+    if !is_inbox_sock_path(sock) {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "refusing to send on a non-inbox socket path",
+        ));
+    }
+    let payload = UdsUserPayload {
+        msg_v: MSG_V,
+        msg_id: message
+            .msg_id
+            .clone()
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+        kind: "user".into(),
+        message: UdsUserMessage {
+            role: "user".into(),
+            content: message.content.clone(),
+        },
+        priority: "next".into(),
+        from: message
+            .from_addr
+            .clone()
+            .or_else(process_uds_address)
+            .unwrap_or_else(|| uds_address(Path::new("/"))),
+    };
     send_uds(sock, &payload)
 }
 
@@ -1171,6 +1227,38 @@ mod tests {
         assert!(got[0].contains("<cross-session-message"), "{got:?}");
         assert!(got[0].contains("hello"), "{got:?}");
         assert!(got[0].contains("from=\"alpha\""), "{got:?}");
+    }
+
+    #[test]
+    fn file_fallback_uses_receive_policy_and_delivers_each_message_id_once() {
+        let _guard = test_guard();
+        stop_process_inbox();
+        clean_env();
+        std::env::set_var("LINGXI_CROSS_SESSION_INBOUND", "accept");
+        let temp = tempfile::TempDir::new().unwrap();
+        let dir = crate::live_sessions::LiveSessionDir::at(temp.path().join("sessions"));
+        let session_id = "11111111-2222-4333-8444-555555555555";
+        crate::live_sessions::set_process_dir(dir.clone());
+        crate::live_sessions::set_process_session_id(session_id);
+        crate::live_sessions::set_process_name("receiver");
+        let message = crate::live_sessions::outbound_peer_message(
+            "sender",
+            "22222222-3333-4444-8555-666666666666",
+            "fallback hello",
+            Some("fallback"),
+        );
+        dir.send_inbox(session_id, &message).unwrap();
+        let first = crate::live_sessions::take_accepted_peer_reminders(false);
+        assert_eq!(first.len(), 1);
+        assert!(first[0].contains("fallback hello"));
+        assert!(crate::live_sessions::take_accepted_peer_reminders(false).is_empty());
+
+        // A retry over the alternate transport with the same stable id must not
+        // surface twice.
+        dir.send_inbox(session_id, &message).unwrap();
+        assert!(crate::live_sessions::take_accepted_peer_reminders(false).is_empty());
+        std::env::remove_var("LINGXI_CROSS_SESSION_INBOUND");
+        stop_process_inbox();
     }
 
     #[test]

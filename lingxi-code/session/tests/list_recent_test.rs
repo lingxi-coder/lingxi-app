@@ -175,6 +175,16 @@ fn custom_title_line(sid: Uuid, custom_title: &str) -> String {
     .unwrap()
 }
 
+fn mobile_empty_title_line(sid: Uuid, custom_title: &str) -> String {
+    serde_json::to_string(&serde_json::json!({
+        "type": "custom-title",
+        "sessionId": sid.to_string(),
+        "customTitle": custom_title,
+        "mobileEmptySession": 1,
+    }))
+    .unwrap()
+}
+
 fn ai_title_line(sid: Uuid, ai_title: &str) -> String {
     serde_json::to_string(&serde_json::json!({
         "type": "ai-title",
@@ -202,6 +212,43 @@ async fn summary_for_tip_leaf_becomes_picker_title() {
         .expect("list");
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].title, "Refactor the JSONL parser");
+}
+
+#[tokio::test]
+async fn metadata_only_title_file_is_not_a_session() {
+    let sid = Uuid::new_v4();
+    let (temp, lingxi_home, cwd) = setup_one(&[custom_title_line(sid, "Control Rename")], sid).await;
+    assert!(matches!(
+        list_recent_sessions(&lingxi_home, &cwd, 5, make_fs(temp.path())).await,
+        Err(LoaderError::Io { .. })
+    ));
+}
+
+#[tokio::test]
+async fn mobile_empty_anchor_is_listed_with_zero_messages_and_title() {
+    let sid = Uuid::new_v4();
+    let (temp, lingxi_home, cwd) = setup_one(&[mobile_empty_title_line(sid, "New mobile session")], sid).await;
+    let rows = list_recent_sessions(&lingxi_home, &cwd, 5, make_fs(temp.path()))
+        .await
+        .expect("list");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].uuid, sid);
+    assert_eq!(rows[0].title, "New mobile session");
+    assert_eq!(rows[0].message_count, 0);
+}
+
+#[tokio::test]
+async fn later_unmarked_title_revokes_mobile_empty_anchor() {
+    let sid = Uuid::new_v4();
+    let lines = vec![
+        mobile_empty_title_line(sid, "New mobile session"),
+        custom_title_line(sid, "Renamed session"),
+    ];
+    let (temp, lingxi_home, cwd) = setup_one(&lines, sid).await;
+    assert!(matches!(
+        list_recent_sessions(&lingxi_home, &cwd, 5, make_fs(temp.path())).await,
+        Err(LoaderError::Io { .. })
+    ));
 }
 
 #[tokio::test]

@@ -75,6 +75,7 @@ fn session_agent_events_round_trip() {
         blocks: vec![MessageBlockDto::Text {
             text: "done".into(),
         }],
+        images: Vec::new(),
     };
     for event in [
         ClientEvent::SessionAgentTranscript {
@@ -165,6 +166,17 @@ fn conversation_controls_changed_round_trips() {
     let back: ClientEvent =
         serde_json::from_value(json).expect("deserialize ConversationControlsChanged");
     assert_eq!(back, event);
+}
+
+#[test]
+fn fast_mode_changed_round_trips() {
+    let event = ClientEvent::FastModeChanged { enabled: true };
+    let json = serde_json::to_value(&event).expect("serialize FastModeChanged");
+    assert_eq!(
+        json,
+        serde_json::json!({ "type": "fast_mode_changed", "enabled": true })
+    );
+    assert_eq!(serde_json::from_value::<ClientEvent>(json).unwrap(), event);
 }
 
 #[test]
@@ -288,6 +300,7 @@ fn message_complete_round_trips() {
                     header: None,
                 },
             ],
+            images: Vec::new(),
         }),
     };
     let json = serde_json::to_value(&ev).expect("serialize MessageComplete");

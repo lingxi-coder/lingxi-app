@@ -132,6 +132,7 @@ export type ClientCommand =
   | { type: 'list_models' }
   | { type: 'get_conversation_controls' }
   | { type: 'set_reasoning_selection'; selection: ReasoningSelectionDto }
+  | { type: 'set_fast_mode'; enabled: boolean }
   // ── Slash commands ──────────────────────────────────────────────────────────
   | { type: 'run_slash_command'; raw: string; turn_id?: number }
   // ── Listings ────────────────────────────────────────────────────────────────
@@ -388,6 +389,13 @@ export type MessageBlockDto =
 export interface MessageDto {
   role: string;
   blocks: MessageBlockDto[];
+  /** User-attached images projected as stable renderable URLs. */
+  images?: MessageImageDto[];
+}
+
+export interface MessageImageDto {
+  media_type: string;
+  url: string;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -536,6 +544,7 @@ export interface ModelDetailsDto {
   pricing?: ModelPricingDto;
   capabilities: ModelCapabilitiesDto;
   reasoning: ReasoningControlSpecDto;
+  supports_fast_mode?: boolean;
 }
 
 /** Authoritative state for the active conversation's reasoning controls. */
@@ -1375,6 +1384,7 @@ export type ClientEvent =
   | { type: 'model_changed'; model: string }
   | { type: 'permission_mode_changed'; mode: PermissionModeId }
   | { type: 'conversation_controls_changed'; controls: ConversationControlsDto }
+  | { type: 'fast_mode_changed'; enabled: boolean }
   | {
       type: 'provider_credential_status';
       operation_id: number;

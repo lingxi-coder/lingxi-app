@@ -465,17 +465,31 @@ enum ModelDisplay {
 
 enum Role { case user, ai }
 
+struct MessageImage: Identifiable, Equatable {
+    let id: UUID
+    let mediaType: String
+    let url: String
+
+    init(id: UUID = UUID(), mediaType: String, url: String) {
+        self.id = id
+        self.mediaType = mediaType
+        self.url = url
+    }
+}
+
 struct Message: Identifiable, Equatable {
     let id: UUID
     let role: Role
     var tag: String? = nil
     let text: String
+    let images: [MessageImage]
 
-    init(id: UUID = UUID(), role: Role, tag: String? = nil, text: String) {
+    init(id: UUID = UUID(), role: Role, tag: String? = nil, text: String, images: [MessageImage] = []) {
         self.id = id
         self.role = role
         self.tag = tag
         self.text = text
+        self.images = images
     }
 }
 

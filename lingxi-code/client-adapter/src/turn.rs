@@ -203,6 +203,7 @@ pub fn synthesize_message(turn: &PumpedTurn) -> MessageDto {
             .iter()
             .filter_map(lower_content_block)
             .collect(),
+        images: Vec::new(),
     }
 }
 

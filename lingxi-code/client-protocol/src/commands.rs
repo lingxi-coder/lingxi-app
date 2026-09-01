@@ -551,6 +551,12 @@ pub enum ClientCommand {
         /// Provider-neutral reasoning selection.
         selection: ReasoningSelectionDto,
     },
+
+    /// Toggle the session's fast-mode tier for subsequent requests.
+    SetFastMode {
+        /// Whether the user wants the fast tier enabled.
+        enabled: bool,
+    },
 }
 
 /// Prompt-input mode for [`ClientCommand::SendPrompt`]. Internally tagged on

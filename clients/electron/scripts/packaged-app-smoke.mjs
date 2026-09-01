@@ -154,8 +154,9 @@ export function createPackagedSettings({ workspace, theme = 'dark', now = new Da
   return {
     version: SETTINGS_VERSION,
     theme,
-    lastWorkspace: canonical,
-    recentWorkspaces: [canonical],
+    activeProject: canonical,
+    projects: [canonical],
+    pinnedSessions: [],
     trustedWorkspaces: {
       [canonical]: {
         fingerprint: workspaceTrustFingerprint(canonical),
@@ -194,6 +195,11 @@ export function sanitizePackagedAppEnvironment(source, overrides = {}) {
     else env[name] = value;
   }
   return env;
+}
+
+export function isKeylessProviderCredentialSnapshot(providerCredentials) {
+  return Array.isArray(providerCredentials)
+    && providerCredentials.every((entry) => entry?.configured === false);
 }
 
 function writeJson(path, value) {
@@ -532,7 +538,11 @@ async function assertKeylessBundledSidecar(page, appPath, tempRoot) {
     },
     { timeoutMs: 20_000, label: 'keyless bundled bridge connection' },
   );
-  assert.equal(bootstrap.credential.configured, false, 'packaged smoke profile must remain keyless');
+  assert.equal(
+    isKeylessProviderCredentialSnapshot(bootstrap.providerCredentials),
+    true,
+    'packaged smoke profile must remain keyless',
+  );
   assert.equal(bootstrap.workspace.trusted, true, 'workspace should be pretrusted for automated smoke verification');
 
   const fileSearch = await evaluate(page, `window.lingxi.searchWorkspaceFiles('smoke-context')`);

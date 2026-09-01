@@ -71,6 +71,9 @@ use client_adapter::lowering::{
 };
 use client_adapter::ClientEventSink;
 use client_protocol::commands::{ClientCommand, ListingKindDto};
+use client_protocol::controls::{
+    ConversationControlsDto, ReasoningControlStateDto, ReasoningSelectionDto,
+};
 use client_protocol::events::{ClientEvent, ErrorKindDto};
 use client_protocol::listings::{AuthStateDto, SlashCommandDto, TaskStatusDto};
 use command_api::builtin_support::names::{core_description, is_palette_hidden};
@@ -243,6 +246,47 @@ impl EngineCommandRouter {
     #[must_use]
     pub fn is_turn_active(&self) -> bool {
         self.turn_active.load(Ordering::SeqCst)
+    }
+
+    async fn emit_controls_snapshot(&self, sink: &dyn ClientEventSink) {
+        let Some(controls) = self.handle.conversation_controls().await else {
+            return;
+        };
+        let fast_mode = self.handle.fast_mode().await;
+        let reasoning = controls.reasoning_spec.clone();
+        sink.emit(ClientEvent::ConversationControlsChanged {
+            controls: ConversationControlsDto {
+                qualified_model: controls.model_reference.clone(),
+                permission: client_protocol::controls::PermissionControlStateDto {
+                    requested: controls.permission.requested,
+                    effective: controls.permission.effective,
+                    options: controls
+                        .permission
+                        .modes
+                        .into_iter()
+                        .map(|mode| client_protocol::controls::PermissionModeOptionDto {
+                            mode: mode.mode,
+                            available: mode.available,
+                            disabled_reason: mode.disabled_reason.map(|code| {
+                                client_protocol::controls::ControlDisabledReasonDto {
+                                    code,
+                                    message: None,
+                                }
+                            }),
+                        })
+                        .collect(),
+                },
+                reasoning: ReasoningControlStateDto {
+                    requested: lower_reasoning_selection(&controls.requested_reasoning_selection),
+                    effective: lower_reasoning_selection(&controls.effective_reasoning_selection),
+                    spec: client_adapter::lowering::lower_reasoning_control_spec(&reasoning),
+                },
+            },
+        })
+        .await;
+
+        sink.emit(ClientEvent::FastModeChanged { enabled: fast_mode })
+            .await;
     }
 
     async fn emit_provider_credential_status(
@@ -773,6 +817,10 @@ impl CommandRouter for EngineCommandRouter {
                 match self.handle.set_permission_mode(&mode).await {
                     Ok(()) => {
                         let active = self.handle.permission_mode().await.unwrap_or(mode);
+                        traits::live_sessions::set_process_permission_mode(
+                            &active,
+                            active == "bypassPermissions",
+                        );
                         sink.emit(ClientEvent::PermissionModeChanged { mode: active })
                             .await;
                     }
@@ -784,6 +832,7 @@ impl CommandRouter for EngineCommandRouter {
                         .await;
                     }
                 }
+                self.emit_controls_snapshot(&*sink).await;
             }
 
             // ── Model ──────────────────────────────────────────────────────
@@ -798,7 +847,20 @@ impl CommandRouter for EngineCommandRouter {
                     Ok(()) => {
                         let selected = traits::qualified_model_ref(&model_id, profile.as_deref());
                         sink.emit(ClientEvent::ModelChanged { model: selected })
-                            .await
+                            .await;
+                        if let Some(controls) = self.handle.conversation_controls().await {
+                            if controls.requested_reasoning_selection
+                                != traits::ReasoningSelection::Automatic
+                                && controls.requested_reasoning_selection
+                                    != controls.effective_reasoning_selection
+                            {
+                                let _ = self
+                                    .handle
+                                    .set_reasoning_selection(traits::ReasoningSelection::Automatic)
+                                    .await;
+                            }
+                        }
+                        self.emit_controls_snapshot(&*sink).await;
                     }
                     Err(e) => {
                         sink.emit(ClientEvent::Error {
@@ -811,6 +873,55 @@ impl CommandRouter for EngineCommandRouter {
             }
             ClientCommand::ListModels => {
                 self.emit_listing(ListingKindDto::Models, &*sink).await;
+            }
+            ClientCommand::GetConversationControls => {
+                self.emit_controls_snapshot(&*sink).await;
+            }
+            ClientCommand::SetReasoningSelection { selection } => {
+                if self.is_turn_active() {
+                    sink.emit(ClientEvent::Error {
+                        kind: ErrorKindDto::Rejected,
+                        message: "cannot change reasoning selection while a turn is active"
+                            .to_string(),
+                    })
+                    .await;
+                    return;
+                }
+                if let Err(error) = self
+                    .handle
+                    .set_reasoning_selection(decode_reasoning_selection(selection))
+                    .await
+                {
+                    sink.emit(ClientEvent::Error {
+                        kind: ErrorKindDto::Rejected,
+                        message: format!("set_reasoning_selection failed: {error}"),
+                    })
+                    .await;
+                    return;
+                }
+                self.emit_controls_snapshot(&*sink).await;
+            }
+            ClientCommand::SetFastMode { enabled } => {
+                if self.is_turn_active() {
+                    sink.emit(ClientEvent::Error {
+                        kind: ErrorKindDto::Rejected,
+                        message: "cannot change fast mode while a turn is active".to_string(),
+                    })
+                    .await;
+                    return;
+                }
+                if let Err(error) = self.handle.set_fast_mode(enabled).await {
+                    sink.emit(ClientEvent::Error {
+                        kind: ErrorKindDto::Rejected,
+                        message: format!("set_fast_mode failed: {error}"),
+                    })
+                    .await;
+                    return;
+                }
+                sink.emit(ClientEvent::FastModeChanged {
+                    enabled: self.handle.fast_mode().await,
+                })
+                .await;
             }
 
             // ── Slash commands ──────────────────────────────────────────────
@@ -1090,6 +1201,21 @@ impl CommandRouter for EngineCommandRouter {
                     messages,
                 })
                 .await;
+                // resume_session restores the model/effort held by this exact
+                // transcript. Publish that authoritative session state after
+                // activation so clients do not keep showing the model selected
+                // in whichever session happened to be open previously.
+                let status = self.handle.get_status_snapshot().await;
+                if !status.model.is_empty() {
+                    sink.emit(ClientEvent::ModelChanged {
+                        model: traits::qualified_model_ref(
+                            &status.model,
+                            status.model_profile.as_deref(),
+                        ),
+                    })
+                    .await;
+                }
+                self.emit_controls_snapshot(&*sink).await;
             }
             ClientCommand::RequestExit => {
                 self.handle.request_exit().await;
@@ -1172,6 +1298,31 @@ impl CommandRouter for EngineCommandRouter {
                 );
             }
         }
+    }
+}
+
+fn lower_reasoning_selection(selection: &traits::ReasoningSelection) -> ReasoningSelectionDto {
+    match selection {
+        traits::ReasoningSelection::Automatic => ReasoningSelectionDto::Automatic,
+        traits::ReasoningSelection::Disabled => ReasoningSelectionDto::Disabled,
+        traits::ReasoningSelection::Enabled => ReasoningSelectionDto::Enabled,
+        traits::ReasoningSelection::Level { id } => ReasoningSelectionDto::Level { id: id.clone() },
+        traits::ReasoningSelection::TokenBudget { tokens } => {
+            ReasoningSelectionDto::TokenBudget { tokens: *tokens }
+        }
+    }
+}
+
+fn decode_reasoning_selection(selection: ReasoningSelectionDto) -> traits::ReasoningSelection {
+    match selection {
+        ReasoningSelectionDto::Automatic => traits::ReasoningSelection::Automatic,
+        ReasoningSelectionDto::Disabled => traits::ReasoningSelection::Disabled,
+        ReasoningSelectionDto::Enabled => traits::ReasoningSelection::Enabled,
+        ReasoningSelectionDto::Level { id } => traits::ReasoningSelection::Level { id },
+        ReasoningSelectionDto::TokenBudget { tokens } => {
+            traits::ReasoningSelection::TokenBudget { tokens }
+        }
+        _ => traits::ReasoningSelection::Automatic,
     }
 }
 

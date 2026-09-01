@@ -26,7 +26,7 @@ import {
   type ConversationState,
 } from '../src/renderer/bridge/conversation';
 import type { ToolRunItem } from '../src/renderer/model/runItem';
-import { INLINE_DIFF_ROW_BUDGET, toolDefaultOpen, toolHasBody } from '../src/renderer/model/runItem';
+import { toolHasBody } from '../src/renderer/model/runItem';
 
 type Narration = Extract<ConversationState['items'][number], { type: 'narration' }>;
 type Tool = ToolRunItem;
@@ -115,12 +115,15 @@ test('text_delta accumulates into a single open assistant narration line', () =>
   const lines = s.items.filter((i) => i.type === 'narration') as Narration[];
   assert.equal(lines.length, 1);
   assert.equal(lines[0].text, 'Hello world');
+  assert.equal(lines[0].streamed, true);
 });
 
 test('message_complete closes the open line so the next delta starts a new one', () => {
   let s = emptyConversation();
   s = reduceEvent(s, { type: 'text_delta', text: 'first' });
   s = reduceEvent(s, { type: 'message_complete' });
+  const completed = s.items[0] as Narration;
+  assert.equal(completed.streamed, true, 'completion must not collapse a live reply by changing its provenance');
   s = reduceEvent(s, { type: 'text_delta', text: 'second' });
   const lines = s.items.filter((i) => i.type === 'narration') as Narration[];
   assert.deepEqual(lines.map((l) => l.text), ['first', 'second']);
@@ -180,8 +183,6 @@ test('an older engine (no header/display) still renders through the shared fallb
   assert.equal(card.result, undefined);
   assert.equal(card.note, 'file contents');
   assert.equal(toolHasBody(card), true);
-  // No engine verdict on the inline budget ⇒ stay collapsed.
-  assert.equal(toolDefaultOpen(card), false);
 });
 
 test('a result with neither body nor diff offers no disclosure at all', () => {
@@ -198,41 +199,6 @@ test('a result with neither body nor diff offers no disclosure at all', () => {
   });
   const card = firstTool(s);
   assert.equal(toolHasBody(card), false);
-  assert.equal(toolDefaultOpen(card), false);
-});
-
-test("the engine's `collapsed` verdict decides the default state of a body-only result", () => {
-  const inline: ToolRunItem = {
-    type: 'tool', id: 'a', tool: 'Read', status: 'done',
-    view: READ_HEADER,
-    result: { body: 'short', body_lines: 2 },
-  };
-  const overflowing: ToolRunItem = {
-    ...inline,
-    result: { body: 'long', body_lines: 400, collapsed: true },
-  };
-  assert.equal(toolDefaultOpen(inline), true);
-  assert.equal(toolDefaultOpen(overflowing), false);
-});
-
-test('a diff opens on its own, but only within the client row budget', () => {
-  // `collapsed` is derived from the BODY line count alone, so it cannot speak
-  // for a diff; the wire cap is 400 rows and mounting that per edit is the
-  // blow-up the collapse design avoids.
-  const rowsFor = (n: number): StructuredDiffDto => ({
-    ...DIFF,
-    rows: Array.from({ length: n }, (_, i) => ({
-      kind: 'add' as const, line_no: i + 1, hunk: 0, segments: [{ text: 'x', class: 'plain' as const }],
-    })),
-  });
-  const withDiff = (n: number): ToolRunItem => ({
-    type: 'tool', id: 'a', tool: 'Edit', status: 'done',
-    view: READ_HEADER,
-    // A long body would otherwise force `collapsed`; the diff still wins.
-    result: { diff: rowsFor(n), body_lines: 900, collapsed: true },
-  });
-  assert.equal(toolDefaultOpen(withDiff(INLINE_DIFF_ROW_BUDGET)), true);
-  assert.equal(toolDefaultOpen(withDiff(INLINE_DIFF_ROW_BUDGET + 1)), false);
 });
 
 test('a tool that interrupts streaming text reopens a fresh line afterwards', () => {

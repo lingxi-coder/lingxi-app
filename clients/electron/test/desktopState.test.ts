@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import type { ClientEvent } from '@lingxi/bridge-client';
+import type { ClientEvent, ModelDetailsDto } from '@lingxi/bridge-client';
 import {
   beginTaskRefresh,
   emptyDesktopState,
@@ -17,15 +17,54 @@ test('session and model events replace authoritative host state', () => {
   const state = reduceDesktopEvents(emptyDesktopState(), [
     { type: 'session_list', sessions },
     { type: 'session_resumed', session_id: 's1', messages: [] },
-    { type: 'model_list', models: ['openai/gpt-5.4', 'anthropic/claude-sonnet-5'], current: 'openai/gpt-5.4' },
+    {
+      type: 'model_list',
+      models: ['openai/gpt-5.4', 'anthropic/claude-sonnet-5'],
+      current: 'openai/gpt-5.4',
+      details: [{ reference: 'openai/gpt-5.4', supports_fast_mode: true } as ModelDetailsDto],
+    },
     { type: 'model_changed', model: 'anthropic/claude-sonnet-5' },
+    { type: 'fast_mode_changed', enabled: true },
     { type: 'permission_mode_changed', mode: 'auto' },
   ]);
   assert.deepEqual(state.sessions, sessions);
   assert.equal(state.activeSessionId, 's1');
   assert.deepEqual(state.models, ['openai/gpt-5.4', 'anthropic/claude-sonnet-5']);
+  assert.equal(state.modelDetails[0]?.supports_fast_mode, true);
   assert.equal(state.currentModel, 'anthropic/claude-sonnet-5');
+  assert.equal(state.fastMode, true);
   assert.equal(state.permissionMode, 'auto');
+});
+
+test('a started session stays visible until the file-backed catalog catches up', () => {
+  const started = reduceDesktopEvent(emptyDesktopState(), {
+    type: 'session_started',
+    session_id: 'fresh-session',
+  });
+
+  assert.equal(started.activeSessionId, 'fresh-session');
+  assert.deepEqual(started.sessions.map((session) => session.uuid), ['fresh-session']);
+  assert.equal(started.sessions[0]?.message_count, 0);
+  assert.equal(started.sessions[0]?.path, '');
+
+  const beforeFirstTurnPersists = reduceDesktopEvent(started, {
+    type: 'session_list',
+    sessions: [],
+  });
+  assert.deepEqual(beforeFirstTurnPersists.sessions.map((session) => session.uuid), ['fresh-session']);
+
+  const durable = {
+    uuid: 'fresh-session',
+    title: 'First prompt',
+    modified_rfc3339: '2026-08-26T12:00:00Z',
+    message_count: 2,
+    path: '/tmp/fresh-session.jsonl',
+  };
+  const afterFirstTurnPersists = reduceDesktopEvent(beforeFirstTurnPersists, {
+    type: 'session_list',
+    sessions: [durable],
+  });
+  assert.deepEqual(afterFirstTurnPersists.sessions, [durable]);
 });
 
 test('task rows, output and status updates remain correlated by id', () => {

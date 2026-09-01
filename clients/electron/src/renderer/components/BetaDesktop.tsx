@@ -1,9 +1,13 @@
-import { useEffect, useMemo, useRef, useState, type CSSProperties, type ClipboardEvent, type KeyboardEvent, type ReactNode } from 'react';
-import type { SessionRowDto } from '@lingxi/bridge-client';
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type ClipboardEvent, type KeyboardEvent, type ReactNode } from 'react';
+import type {
+  ImageRefDto,
+  ModelDetailsDto,
+  ReasoningSelectionDto,
+  SessionRowDto,
+} from '@lingxi/bridge-client';
 
 import type { UseBridge } from '../bridge/useBridge';
 import { orderedTasks } from '../bridge/desktopState';
-import { engineLaunchStatus } from '../bridge/engineStatus';
 import { classifyDesktopError } from '../bridge/errors';
 import { useT } from '../theme/ThemeContext';
 import type { ThemeMode } from '../theme/tokens';
@@ -11,6 +15,7 @@ import {
   activeFileMention,
   promptWithFileMentions,
 } from '../bridge/fileMentions';
+import { imageFileToAttachment, type ImageAttachment } from '../bridge/imageInput';
 import {
   activeSlashCommand,
   filterSlashCommands,
@@ -21,12 +26,14 @@ import {
 } from '../bridge/slashCommands';
 import { groupModelReferences, modelReference } from '../bridge/modelCatalog';
 import { persistProviderCredentialInput } from '../bridge/providerCredentials';
+import { formatSessionMetadata } from '../bridge/sessionPresentation';
 import { Icon } from './Icon';
 import { PROVIDERS, providerById } from '../../shared/providers';
+import { MAX_IMAGE_ATTACHMENTS } from '../../shared/imageInput';
 import { PERM_MODES } from '../data';
 
 function basename(path?: string): string {
-  if (!path) return 'No workspace';
+  if (!path) return 'No project';
   return path.split(/[\\/]/).filter(Boolean).at(-1) ?? path;
 }
 
@@ -90,91 +97,317 @@ function ConnectionDot({ bridge }: { bridge: UseBridge }) {
   );
 }
 
-function SessionRow({ session, active, disabled, onClick }: {
+function SessionRow({ session, active, pinned, opening, status, onClick, onPin }: {
   session: SessionRowDto;
   active: boolean;
-  disabled: boolean;
+  pinned: boolean;
+  opening: boolean;
+  status?: ReturnType<UseBridge['sessionRuntimeStatus']>;
   onClick(): void;
+  onPin(): void;
 }) {
   const t = useT();
-  const when = Number.isNaN(Date.parse(session.modified_rfc3339))
-    ? ''
-    : new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric' }).format(new Date(session.modified_rfc3339));
+  const highlighted = active || opening;
+  const attention = opening
+    ? { label: 'Opening session', color: t.accent }
+    : status?.connection.status === 'error' || status?.error
+    ? { label: 'Session error', color: t.danger }
+    : status?.pendingInteractions
+      ? { label: 'Waiting for input', color: t.warn }
+      : status?.turnActive
+        ? { label: 'Running', color: t.ok }
+        : undefined;
   return (
-    <button
-      type="button"
-      disabled={disabled}
-      onClick={onClick}
-      aria-current={active ? 'page' : undefined}
-      style={{
-        width: '100%', display: 'grid', gridTemplateColumns: '1fr auto', gap: '3px 8px',
-        padding: '9px 10px', borderRadius: 8, border: 0, textAlign: 'left',
-        background: active ? t.accentBg : 'transparent', color: active ? t.text : t.text2,
-        cursor: disabled ? 'not-allowed' : 'pointer', opacity: disabled ? 0.55 : 1,
-      }}
-    >
-      <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: 12.5, fontWeight: active ? 600 : 500 }}>
-        {session.title || 'Untitled session'}
-      </span>
-      <span className="mono" style={{ color: t.text4, fontSize: 10 }}>{when}</span>
-      <span style={{ color: t.text4, fontSize: 10.5 }}>{session.message_count} messages</span>
-    </button>
+    <div className="sidebar-tree-row" style={{ position: 'relative' }}>
+      <button
+        type="button"
+        onClick={onClick}
+        disabled={opening}
+        aria-busy={opening || undefined}
+        aria-current={active ? 'page' : undefined}
+        title={session.title || 'Untitled session'}
+        style={{
+          width: '100%', minHeight: 43, display: 'grid', gap: 1,
+          padding: '6px 34px 6px 30px', borderRadius: 8, border: 0, textAlign: 'left',
+          background: highlighted ? t.surface : 'transparent', color: highlighted ? t.text : t.text2,
+          cursor: opening ? 'wait' : 'pointer',
+          fontSize: 12.5, fontWeight: active ? 620 : 470,
+        }}
+      >
+        <span style={{ display: 'flex', alignItems: 'center', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+          <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{session.title || 'Untitled session'}</span>
+          {opening
+            ? <span className="beta-spinner" role="status" aria-label="Opening session" title="Opening session" style={{ marginLeft: 7, color: t.accent }} />
+            : attention ? <span aria-label={attention.label} title={attention.label} style={{ flexShrink: 0, width: 6, height: 6, marginLeft: 7, borderRadius: 99, background: attention.color }} /> : null}
+        </span>
+        <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: t.text4, fontSize: 10.5 }}>
+          {formatSessionMetadata(session.modified_rfc3339, session.message_count)}
+        </span>
+      </button>
+      <button
+        type="button"
+        className="sidebar-row-action"
+        data-visible={pinned ? 'true' : undefined}
+        aria-label={`${pinned ? 'Unpin' : 'Pin'} ${session.title || 'Untitled session'}`}
+        title={pinned ? 'Unpin session' : 'Pin session'}
+        onClick={(event) => { event.stopPropagation(); onPin(); }}
+        style={{
+          position: 'absolute', right: 4, top: 4, width: 26, height: 26,
+          display: 'grid', placeItems: 'center', border: 0, borderRadius: 6,
+          background: active ? t.surface : t.sidebarBg, color: pinned ? t.accent : t.text3,
+          cursor: 'pointer',
+        }}
+      >
+        <Icon name="pin" size={13} stroke={1.8} />
+      </button>
+    </div>
   );
 }
 
 export function BetaSidebar({ bridge, onOpenSettings }: { bridge: UseBridge; onOpenSettings(): void }) {
   const t = useT();
-  const workspace = bridge.bootstrap?.workspace;
+  const settings = bridge.bootstrap?.settings;
+  const projects = settings?.projects ?? [];
+  const pinnedSessions = settings?.pinnedSessions ?? [];
+  const selectedProject = settings?.activeProject ?? bridge.bootstrap?.workspace.path;
+  const visibleSession = bridge.bootstrap?.activeSession ?? settings?.activeSession;
+  const [expandedProjects, setExpandedProjects] = useState<Set<string>>(
+    () => new Set(selectedProject ? [selectedProject] : []),
+  );
+  const [showAllSessions, setShowAllSessions] = useState<Record<string, boolean>>({});
+  const [menuProject, setMenuProject] = useState<string | null>(null);
+  const [openingSessionKey, setOpeningSessionKey] = useState<string | null>(null);
+
+  useEffect(() => {
+    setMenuProject(null);
+    if (selectedProject) {
+      setExpandedProjects((current) => current.has(selectedProject) ? current : new Set([...current, selectedProject]));
+    }
+  }, [selectedProject]);
+
+  useEffect(() => {
+    for (const projectPath of expandedProjects) {
+      if (!bridge.bootstrap?.projectCatalogs?.[projectPath]) void bridge.listProjectSessions(projectPath).catch(() => undefined);
+    }
+  }, [bridge.bootstrap?.projectCatalogs, bridge.listProjectSessions, expandedProjects]);
+
+  useEffect(() => {
+    const pinnedProjects = new Set(pinnedSessions.map((session) => session.projectPath));
+    for (const projectPath of pinnedProjects) {
+      if (!bridge.bootstrap?.projectCatalogs?.[projectPath]) void bridge.listProjectSessions(projectPath).catch(() => undefined);
+    }
+  }, [bridge.bootstrap?.projectCatalogs, bridge.listProjectSessions, pinnedSessions]);
+
+  const pinnedKeys = useMemo(
+    () => new Set(pinnedSessions.map((session) => `${session.projectPath}\0${session.sessionId}`)),
+    [pinnedSessions],
+  );
+  const openSidebarSession = useCallback((projectPath: string, sessionId: string) => {
+    const key = `${projectPath}\0${sessionId}`;
+    setOpeningSessionKey(key);
+    void bridge.openSession(projectPath, sessionId)
+      .catch(() => undefined)
+      .finally(() => setOpeningSessionKey((current) => current === key ? null : current));
+  }, [bridge.openSession]);
+  const pinInput = (projectPath: string, sessionId: string, title: string) => ({ projectPath, sessionId, title });
+
   return (
-    <aside style={{ width: 250, flexShrink: 0, display: 'flex', flexDirection: 'column', background: t.sidebarBg, borderRight: `0.5px solid ${t.border}`, paddingTop: 42 }}>
-      <div style={{ padding: '8px 12px 12px' }}>
+    <aside style={{ width: 260, flexShrink: 0, display: 'flex', flexDirection: 'column', background: t.sidebarBg, borderRight: `0.5px solid ${t.border}`, paddingTop: 38 }}>
+      <div className="drag-region" style={{ minHeight: 46, padding: '7px 14px 6px', display: 'flex', alignItems: 'center' }}>
+        <strong style={{ color: t.text, fontSize: 17, fontWeight: 680, letterSpacing: '-.025em' }}>LingXi</strong>
+      </div>
+
+      <div style={{ padding: '2px 9px 10px' }}>
         <button
+          className="sidebar-primary-action"
           type="button"
-          disabled={bridge.running}
-          onClick={() => invoke(bridge.pickWorkspace)}
+          onClick={() => invoke(bridge.newSession)}
           style={{
-            width: '100%', display: 'flex', alignItems: 'center', gap: 9, padding: '9px 10px',
-            borderRadius: 9, border: `0.5px solid ${t.border}`, background: t.surface,
-            color: t.text, cursor: bridge.running ? 'not-allowed' : 'pointer', textAlign: 'left',
-            opacity: bridge.running ? .55 : 1,
+            width: '100%', minHeight: 38, display: 'flex', alignItems: 'center', gap: 11,
+            padding: '8px 10px', borderRadius: 8, border: 0, background: 'transparent',
+            color: t.text, cursor: 'pointer', textAlign: 'left', fontSize: 13.5, fontWeight: 560,
           }}
         >
-          <Icon name="folder" size={15} color={t.accent} />
-          <span style={{ flex: 1, minWidth: 0 }}>
-            <span style={{ display: 'block', fontSize: 12.5, fontWeight: 650, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{basename(workspace?.path)}</span>
-            <span style={{ display: 'block', color: workspace?.trusted ? t.ok : t.warn, fontSize: 10.5, marginTop: 2 }}>{workspace?.trusted ? 'Trusted workspace' : workspace?.path ? 'Review trust required' : 'Choose a folder'}</span>
-          </span>
-          <Icon name="chevron" size={13} color={t.text4} />
+          <Icon name="pencil" size={16} color={t.text2} stroke={1.8} />
+          <span>{selectedProject ? 'New session' : 'Add your first project'}</span>
         </button>
       </div>
 
-      <div style={{ display: 'flex', alignItems: 'center', padding: '3px 14px 7px' }}>
-        <span style={{ flex: 1, color: t.text3, fontSize: 10.5, fontWeight: 700, letterSpacing: '.08em', textTransform: 'uppercase' }}>Sessions</span>
-        <button
-          type="button"
-          title="New session"
-          aria-label="New session"
-          disabled={!bridge.connected || bridge.running}
-          onClick={() => invoke(bridge.newSession)}
-          style={{ width: 24, height: 24, border: 0, borderRadius: 6, background: 'transparent', color: t.text3, cursor: 'pointer' }}
-        >
-          <Icon name="plus" size={14} />
-        </button>
-      </div>
-      <nav aria-label="Sessions" style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: '0 7px' }}>
-        {bridge.desktop.sessions.length === 0 ? (
-          <div style={{ padding: '14px 10px', color: t.text4, fontSize: 11.5, lineHeight: 1.5 }}>
-            {bridge.connected ? 'No saved sessions in this workspace.' : 'Sessions appear after the engine connects.'}
+      <nav aria-label="Projects and sessions" style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: '0 8px 12px' }}>
+        {pinnedSessions.length > 0 ? (
+          <section aria-labelledby="pinned-sessions-heading" style={{ marginBottom: 16 }}>
+            <h2 id="pinned-sessions-heading" style={{ padding: '7px 8px 6px', color: t.text4, fontSize: 12, fontWeight: 620 }}>Pinned</h2>
+            {pinnedSessions.map((pinned) => {
+              const current = bridge.bootstrap?.projectCatalogs?.[pinned.projectPath]?.sessions.find((session) => session.uuid === pinned.sessionId);
+              const title = current?.title || pinned.title || 'Untitled session';
+              const active = visibleSession?.projectPath === pinned.projectPath && visibleSession.sessionId === pinned.sessionId;
+              const opening = openingSessionKey === `${pinned.projectPath}\0${pinned.sessionId}`;
+              const status = bridge.sessionRuntimeStatus(pinned.sessionId);
+              const attention = status?.connection.status === 'error' || status?.error
+                ? { label: 'Session error', color: t.danger }
+                : status?.pendingInteractions
+                  ? { label: 'Waiting for input', color: t.warn }
+                  : status?.turnActive
+                    ? { label: 'Running', color: t.ok }
+                    : undefined;
+              return (
+                <div className="sidebar-tree-row" key={`${pinned.projectPath}-${pinned.sessionId}`} style={{ position: 'relative' }}>
+                  <button
+                    type="button"
+                    aria-current={active ? 'page' : undefined}
+                    aria-busy={opening || undefined}
+                    disabled={opening}
+                    onClick={() => openSidebarSession(pinned.projectPath, pinned.sessionId)}
+                    title={`${title}\n${pinned.projectPath}`}
+                    style={{
+                      width: '100%', minHeight: 43, display: 'grid', gap: 1, padding: '6px 34px 6px 10px',
+                      border: 0, borderRadius: 8, background: active || opening ? t.surface : 'transparent',
+                      color: t.text2, textAlign: 'left', cursor: opening ? 'wait' : 'pointer',
+                    }}
+                  >
+                    <span style={{ display: 'flex', alignItems: 'center', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: 12.5, fontWeight: 520 }}>
+                      <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{title}</span>
+                      {opening
+                        ? <span className="beta-spinner" role="status" aria-label="Opening session" title="Opening session" style={{ marginLeft: 7, color: t.accent }} />
+                        : attention ? <span aria-label={attention.label} title={attention.label} style={{ flexShrink: 0, width: 6, height: 6, marginLeft: 7, borderRadius: 99, background: attention.color }} /> : null}
+                    </span>
+                    <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: t.text4, fontSize: 10.5 }}>{basename(pinned.projectPath)}</span>
+                    <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: t.text4, fontSize: 10.5 }}>
+                      {formatSessionMetadata(current?.modified_rfc3339 ?? '', current?.message_count ?? 0)}
+                    </span>
+                  </button>
+                  <button
+                    type="button"
+                    className="sidebar-row-action"
+                    data-visible="true"
+                    aria-label={`Unpin ${title}`}
+                    title="Unpin session"
+                    onClick={() => invoke(() => bridge.setSessionPinned(pinInput(pinned.projectPath, pinned.sessionId, title), false))}
+                    style={{ position: 'absolute', right: 4, top: 8, width: 26, height: 26, display: 'grid', placeItems: 'center', border: 0, borderRadius: 6, background: 'transparent', color: t.accent, cursor: 'pointer' }}
+                  >
+                    <Icon name="pin" size={13} stroke={1.8} />
+                  </button>
+                </div>
+              );
+            })}
+          </section>
+        ) : null}
+
+        <section aria-labelledby="projects-heading">
+          <div style={{ minHeight: 31, padding: '2px 4px 4px 8px', display: 'flex', alignItems: 'center' }}>
+            <h2 id="projects-heading" style={{ flex: 1, color: t.text4, fontSize: 12, fontWeight: 620 }}>Projects</h2>
+            <button
+              type="button"
+              className="sidebar-header-action"
+              aria-label="Add project"
+              title="Add project"
+              onClick={() => invoke(bridge.addProject)}
+              style={{ width: 28, height: 28, display: 'grid', placeItems: 'center', border: 0, borderRadius: 7, background: 'transparent', color: t.text3, cursor: 'pointer' }}
+            >
+              <Icon name="plus" size={14} stroke={1.9} />
+            </button>
           </div>
-        ) : bridge.desktop.sessions.map((session) => (
-          <SessionRow
-            key={session.uuid}
-            session={session}
-            active={bridge.desktop.activeSessionId === session.uuid}
-            disabled={bridge.running || !bridge.connected}
-            onClick={() => invoke(() => bridge.resumeSession(session.uuid))}
-          />
-        ))}
+
+          {projects.length === 0 ? (
+            <div style={{ padding: '12px 9px', color: t.text4, fontSize: 11.5, lineHeight: 1.5 }}>
+              Add a project folder to start a session.
+            </div>
+          ) : projects.map((projectPath) => {
+            const active = projectPath === selectedProject;
+            const open = expandedProjects.has(projectPath);
+            const catalog = bridge.bootstrap?.projectCatalogs?.[projectPath];
+            const allSessions = catalog?.sessions ?? [];
+            const visibleSessions = showAllSessions[projectPath] ? allSessions : allSessions.slice(0, 5);
+            const projectHasActiveWork = (bridge.bootstrap?.runtimes ?? []).some((runtime) => {
+              if (runtime.projectPath !== projectPath) return false;
+              const status = bridge.sessionRuntimeStatus(runtime.sessionId);
+              return Boolean(status?.turnActive || status?.pendingInteractions);
+            });
+            return (
+              <div key={projectPath} style={{ position: 'relative', marginBottom: 2 }}>
+                <div className="sidebar-tree-row" style={{ position: 'relative' }}>
+                  <button
+                    type="button"
+                    aria-expanded={open}
+                    aria-controls={open ? `project-sessions-${encodeURIComponent(projectPath)}` : undefined}
+                    title={projectPath}
+                    onClick={() => {
+                      setExpandedProjects((current) => {
+                        const next = new Set(current);
+                        if (next.has(projectPath)) next.delete(projectPath);
+                        else next.add(projectPath);
+                        return next;
+                      });
+                      if (!active) invoke(() => bridge.activateProject(projectPath));
+                    }}
+                    style={{
+                      width: '100%', minHeight: 37, display: 'flex', alignItems: 'center', gap: 9,
+                      padding: '7px 34px 7px 8px', border: 0, borderRadius: 8,
+                      background: active ? t.surface : 'transparent', color: active ? t.text : t.text2,
+                      cursor: 'pointer', textAlign: 'left',
+                    }}
+                  >
+                    <Icon name="folder" size={16} color={active ? t.text2 : t.text3} stroke={1.7} />
+                    <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: 13, fontWeight: active ? 620 : 520 }}>{basename(projectPath)}</span>
+                    {active ? <Icon name="chevron" size={12} color={t.text4} stroke={2} style={{ transform: open ? 'rotate(0deg)' : 'rotate(-90deg)' }} /> : null}
+                  </button>
+                  <button
+                    type="button"
+                    className="sidebar-row-action"
+                    data-visible={menuProject === projectPath ? 'true' : undefined}
+                    disabled={projectHasActiveWork}
+                    aria-label={`Project actions for ${basename(projectPath)}`}
+                    aria-expanded={menuProject === projectPath}
+                    onClick={() => setMenuProject((current) => current === projectPath ? null : projectPath)}
+                    style={{ position: 'absolute', right: 4, top: 5, width: 26, height: 26, display: 'grid', placeItems: 'center', border: 0, borderRadius: 6, background: active ? t.surface : t.sidebarBg, color: t.text3, cursor: projectHasActiveWork ? 'not-allowed' : 'pointer' }}
+                  >
+                    <Icon name="more" size={14} stroke={1.9} />
+                  </button>
+                </div>
+
+                {menuProject === projectPath ? (
+                  <div className="sidebar-project-menu" role="menu" style={{ margin: '2px 4px 5px 24px', padding: 4, borderRadius: 8, border: `0.5px solid ${t.border}`, background: t.windowBg, boxShadow: '0 8px 24px rgba(0,0,0,.18)' }}>
+                    <button type="button" role="menuitem" disabled={projectHasActiveWork} onClick={() => { setMenuProject(null); invoke(() => bridge.removeProject(projectPath)); }} style={{ width: '100%', minHeight: 30, display: 'flex', alignItems: 'center', gap: 8, padding: '5px 7px', border: 0, borderRadius: 6, background: 'transparent', color: t.danger, cursor: projectHasActiveWork ? 'not-allowed' : 'pointer', textAlign: 'left', fontSize: 11.5 }}>
+                      <Icon name="x" size={13} /> Remove from sidebar
+                    </button>
+                  </div>
+                ) : null}
+
+                {open ? (
+                  <div id={`project-sessions-${encodeURIComponent(projectPath)}`}>
+                    {catalog?.error ? (
+                      <div style={{ padding: '8px 10px 8px 30px', color: t.danger, fontSize: 10.5 }}>{catalog.error}</div>
+                    ) : !catalog ? (
+                      <div style={{ padding: '8px 10px 8px 30px', color: t.text4, fontSize: 10.5 }}>Loading sessions…</div>
+                    ) : allSessions.length === 0 ? (
+                      <div style={{ padding: '8px 10px 8px 30px', color: t.text4, fontSize: 10.5 }}>No saved sessions yet.</div>
+                    ) : visibleSessions.map((session) => {
+                      const pinned = pinnedKeys.has(`${projectPath}\0${session.uuid}`);
+                      const opening = openingSessionKey === `${projectPath}\0${session.uuid}`;
+                      return (
+                        <SessionRow
+                          key={session.uuid}
+                          session={session}
+                          active={visibleSession?.projectPath === projectPath && visibleSession.sessionId === session.uuid}
+                          pinned={pinned}
+                          opening={opening}
+                          status={bridge.sessionRuntimeStatus(session.uuid)}
+                          onClick={() => openSidebarSession(projectPath, session.uuid)}
+                          onPin={() => invoke(() => bridge.setSessionPinned(pinInput(projectPath, session.uuid, session.title || 'Untitled session'), !pinned))}
+                        />
+                      );
+                    })}
+                    {allSessions.length > 5 ? (
+                      <button type="button" onClick={() => setShowAllSessions((current) => ({ ...current, [projectPath]: !current[projectPath] }))} style={{ minHeight: 32, marginLeft: 30, padding: '5px 8px', border: 0, borderRadius: 7, background: 'transparent', color: t.text4, cursor: 'pointer', fontSize: 11.5 }}>
+                        {showAllSessions[projectPath] ? 'Show less' : `Show more (${allSessions.length - 5})`}
+                      </button>
+                    ) : null}
+                  </div>
+                ) : null}
+              </div>
+            );
+          })}
+        </section>
       </nav>
 
       <div style={{ padding: 10, borderTop: `0.5px solid ${t.border}`, display: 'flex', flexDirection: 'column', gap: 8 }}>
@@ -202,8 +435,8 @@ export function BetaTopBar({ bridge, tasksOpen, onToggleTasks, theme, onTheme }:
   return (
     <header className="drag-region" style={{ height: 52, flexShrink: 0, display: 'flex', alignItems: 'center', gap: 12, padding: '0 14px', borderBottom: `0.5px solid ${t.border}`, background: t.windowBg }}>
       <div style={{ flex: 1, minWidth: 0 }}>
-        <div style={{ color: t.text, fontSize: 12.5, fontWeight: 650, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{basename(bridge.bootstrap?.workspace.path)}</div>
-        <div className="mono" style={{ color: t.text4, fontSize: 9.5, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{bridge.bootstrap?.workspace.path ?? 'Select a workspace to begin'}</div>
+        <div style={{ color: t.text, fontSize: 12.5, fontWeight: 650, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{basename(bridge.bootstrap?.activeSession?.projectPath ?? bridge.bootstrap?.workspace.path)}</div>
+        <div className="mono" style={{ color: t.text4, fontSize: 9.5, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{bridge.bootstrap?.activeSession?.projectPath ?? bridge.bootstrap?.workspace.path ?? 'Add a project to begin'}</div>
       </div>
       {bridge.usage && (
         <span className="mono" style={{ color: t.text4, fontSize: 9.5 }} title="Input + output tokens">
@@ -257,10 +490,40 @@ function modelLabel(model?: string | null): string {
   return modelReference(model).label;
 }
 
+function reasoningSelectionKey(selection: ReasoningSelectionDto): string {
+  return JSON.stringify(selection);
+}
+
+function reasoningSelectionLabel(selection?: ReasoningSelectionDto): string {
+  if (!selection) return 'Auto';
+  switch (selection.type) {
+    case 'automatic': return 'Auto';
+    case 'disabled': return 'Off';
+    case 'enabled': return 'On';
+    case 'level': {
+      const levelLabels: Record<string, string> = { xhigh: 'Extra High', extra_high: 'Extra High' };
+      return levelLabels[selection.id] ?? selection.id.replace(/[-_]/g, ' ').replace(/\b\w/g, (letter) => letter.toUpperCase());
+    }
+    case 'token_budget': return `${selection.tokens.toLocaleString()} tokens`;
+    default: return 'Auto';
+  }
+}
+
+function modelSupportsFastMode(detail?: ModelDetailsDto): boolean {
+  if (detail?.supports_fast_mode !== true) return false;
+  const modelId = detail.model_id.toLowerCase();
+  return modelId.includes('claude-opus-4-7')
+    || modelId.includes('claude-opus-4-8')
+    || modelId.includes('claude-opus-5');
+}
+
 type FilePickerState = {
   source: 'mention' | 'button';
   query: string;
 };
+
+type ModelPickerSubmenu = 'model' | 'effort' | 'speed' | null;
+type ModelPickerSection = Exclude<ModelPickerSubmenu, null>;
 
 type RichPromptSnapshot = {
   text: string;
@@ -360,6 +623,7 @@ export function BetaComposer({ bridge, ready }: { bridge: UseBridge; ready: bool
   const t = useT();
   const [text, setText] = useState('');
   const [modelOpen, setModelOpen] = useState(false);
+  const [modelSubmenu, setModelSubmenu] = useState<ModelPickerSubmenu>(null);
   const [permissionOpen, setPermissionOpen] = useState(false);
   const [slashQuery, setSlashQuery] = useState<string | null>(null);
   const [filePicker, setFilePicker] = useState<FilePickerState | null>(null);
@@ -368,6 +632,9 @@ export function BetaComposer({ bridge, ready }: { bridge: UseBridge; ready: bool
   const [fileSearchStatus, setFileSearchStatus] = useState<'idle' | 'loading' | 'ready' | 'error'>('idle');
   const [fileResultIndex, setFileResultIndex] = useState(0);
   const [selectedFiles, setSelectedFiles] = useState<string[]>([]);
+  const [imageAttachments, setImageAttachments] = useState<ImageAttachment[]>([]);
+  const [imageNotice, setImageNotice] = useState<string | null>(null);
+  const [imageDragActive, setImageDragActive] = useState(false);
   const [goalMode, setGoalMode] = useState(false);
   const [voiceState, setVoiceState] = useState<'idle' | 'listening' | 'unsupported' | 'denied'>('idle');
   const [flowMode, setFlowMode] = useState(false);
@@ -375,8 +642,10 @@ export function BetaComposer({ bridge, ready }: { bridge: UseBridge; ready: bool
   const input = useRef<HTMLDivElement>(null);
   const fileControl = useRef<HTMLDivElement>(null);
   const fileSearchInput = useRef<HTMLInputElement>(null);
+  const imageFileInput = useRef<HTMLInputElement>(null);
   const permissionControl = useRef<HTMLDivElement>(null);
   const permissionButton = useRef<HTMLButtonElement>(null);
+  const modelControl = useRef<HTMLDivElement>(null);
   const slashControl = useRef<HTMLDivElement>(null);
   const recognition = useRef<SpeechRecognitionLike | null>(null);
   const voiceBase = useRef('');
@@ -386,6 +655,8 @@ export function BetaComposer({ bridge, ready }: { bridge: UseBridge; ready: bool
   const activeSlashRange = useRef<Range | null>(null);
   const activeSlashQuery = useRef<string | null>(null);
   const slashDismissed = useRef(false);
+  const imageAttachmentsRef = useRef<ImageAttachment[]>([]);
+  imageAttachmentsRef.current = imageAttachments;
 
   const slashCommands = useMemo(
     () => filterSlashCommands(bridge.desktop.slashCommands, slashQuery ?? ''),
@@ -395,9 +666,35 @@ export function BetaComposer({ bridge, ready }: { bridge: UseBridge; ready: bool
     () => groupModelReferences(bridge.desktop.models),
     [bridge.desktop.models],
   );
+  const modelDetailsByReference = useMemo(
+    () => new Map(bridge.desktop.modelDetails.map((detail) => [detail.reference, detail])),
+    [bridge.desktop.modelDetails],
+  );
+  const currentModelDetail = modelDetailsByReference.get(bridge.desktop.currentModel ?? '');
+  const currentModelProvider = modelReference(bridge.desktop.currentModel ?? '').providerId;
+  const fastModeAvailable = currentModelProvider === 'anthropic'
+    && modelSupportsFastMode(currentModelDetail);
+  const pickerSubmenus: readonly ModelPickerSection[] = fastModeAvailable
+    ? ['model', 'effort', 'speed']
+    : ['model', 'effort'];
+  const reasoningControls = bridge.desktop.conversationControls?.reasoning;
+  const reasoningOptions = reasoningControls?.spec.options ?? [];
+  const selectedReasoning = reasoningControls?.effective ?? reasoningControls?.requested;
+  const providerCredentials = bridge.bootstrap?.providerCredentials;
   const slashMenuOpen = slashQuery !== null && ready && !bridge.running;
 
   const fileMenuOpen = Boolean(filePicker && ready && !bridge.running);
+
+  useEffect(() => {
+    if (!modelOpen) return;
+    const closeOnOutsidePointer = (event: PointerEvent) => {
+      if (modelControl.current?.contains(event.target as Node)) return;
+      setModelOpen(false);
+      setModelSubmenu(null);
+    };
+    document.addEventListener('pointerdown', closeOnOutsidePointer);
+    return () => document.removeEventListener('pointerdown', closeOnOutsidePointer);
+  }, [modelOpen]);
 
   useEffect(() => {
     setSlashResultIndex((index) => reconcileSlashSelectionIndex(
@@ -474,6 +771,10 @@ export function BetaComposer({ bridge, ready }: { bridge: UseBridge; ready: bool
   useEffect(() => () => {
     recognition.current?.stop();
     recognition.current = null;
+  }, []);
+
+  useEffect(() => () => {
+    imageAttachmentsRef.current.forEach((attachment) => URL.revokeObjectURL(attachment.previewUrl));
   }, []);
 
   useEffect(() => {
@@ -595,6 +896,7 @@ export function BetaComposer({ bridge, ready }: { bridge: UseBridge; ready: bool
       ));
       setFilePicker(null);
       setModelOpen(false);
+      setModelSubmenu(null);
       setPermissionOpen(false);
       return;
     }
@@ -677,26 +979,90 @@ export function BetaComposer({ bridge, ready }: { bridge: UseBridge; ready: bool
     if (voiceState !== 'listening') toggleVoice();
   };
 
-  const submit = () => {
-    const snapshot = input.current ? richPromptSnapshot(input.current) : { text, files: selectedFiles };
-    const value = promptWithFileMentions(snapshot.text, snapshot.files);
-    if (!value || !ready || bridge.running) return;
-    const slashCommand = snapshot.files.length === 0 ? snapshot.text.trim() : '';
-    const isSlashCommand = /^\/[^\s/]+(?:\s|$)/.test(slashCommand);
-    if (voiceState === 'listening') stopVoice();
+  const addImageFiles = async (files: File[]) => {
+    if (!ready || bridge.running) return;
+    const remaining = MAX_IMAGE_ATTACHMENTS - imageAttachments.length;
+    if (remaining <= 0) {
+      setImageNotice(`最多添加 ${MAX_IMAGE_ATTACHMENTS} 张图片。`);
+      return;
+    }
+    const candidates = files.slice(0, remaining);
+    const results = await Promise.all(candidates.map(async (file) => {
+      try {
+        return { attachment: await imageFileToAttachment(file) };
+      } catch (error) {
+        return { error: error instanceof Error ? error.message : '无法读取图片。' };
+      }
+    }));
+    const attachments = results.flatMap((result) => result.attachment ? [result.attachment] : []);
+    const firstError = results.find((result) => result.error)?.error;
+    if (files.length > candidates.length) {
+      setImageNotice(`最多添加 ${MAX_IMAGE_ATTACHMENTS} 张图片。`);
+    } else if (firstError) {
+      setImageNotice(firstError);
+    } else if (attachments.length > 0) {
+      setImageNotice(null);
+    }
+    if (!attachments.length) return;
+    setImageAttachments((current) => {
+      const available = Math.max(0, MAX_IMAGE_ATTACHMENTS - current.length);
+      const accepted = attachments.slice(0, available);
+      attachments.slice(available).forEach((attachment) => URL.revokeObjectURL(attachment.previewUrl));
+      return [...current, ...accepted];
+    });
+  };
+
+  const removeImage = (id: string) => {
+    setImageAttachments((current) => {
+      const removed = current.find((attachment) => attachment.id === id);
+      if (removed) URL.revokeObjectURL(removed.previewUrl);
+      return current.filter((attachment) => attachment.id !== id);
+    });
+  };
+
+  const clearComposer = () => {
     input.current?.replaceChildren();
     setText('');
     setSelectedFiles([]);
+    setImageAttachments((current) => {
+      current.forEach((attachment) => URL.revokeObjectURL(attachment.previewUrl));
+      return [];
+    });
+    setImageNotice(null);
     setFilePicker(null);
     setSlashQuery(null);
     activeSlashRange.current = null;
     activeSlashQuery.current = null;
     slashDismissed.current = false;
+  };
+
+  const submit = async () => {
+    const snapshot = input.current ? richPromptSnapshot(input.current) : { text, files: selectedFiles };
+    const value = promptWithFileMentions(snapshot.text, snapshot.files);
+    if (!ready || bridge.running) return;
+    if (!value) {
+      if (imageAttachments.length) setImageNotice('请先输入问题，再发送图片。');
+      return;
+    }
+    const slashCommand = snapshot.files.length === 0 ? snapshot.text.trim() : '';
+    const isSlashCommand = /^\/[^\s/]+(?:\s|$)/.test(slashCommand);
+    if (isSlashCommand && imageAttachments.length) {
+      setImageNotice('图片附件不能和 / 命令一起发送，请先输入普通问题。');
+      return;
+    }
+    if (voiceState === 'listening') stopVoice();
     if (isSlashCommand) {
+      clearComposer();
       invoke(() => bridge.runSlashCommand(slashCommand));
       return;
     }
-    invoke(() => bridge.sendPrompt(value));
+    const images: ImageRefDto[] = imageAttachments.map(({ media_type, base64 }) => ({ media_type, base64 }));
+    try {
+      await bridge.sendPrompt(value, images);
+      clearComposer();
+    } catch {
+      setImageNotice('发送失败，图片附件已保留，可以重试。');
+    }
   };
 
   const chooseSlashCommand = (name: string) => {
@@ -777,6 +1143,7 @@ export function BetaComposer({ bridge, ready }: { bridge: UseBridge; ready: bool
     activeSlashRange.current = null;
     setFilePicker({ source: 'button', query: '' });
     setModelOpen(false);
+    setModelSubmenu(null);
     setPermissionOpen(false);
   };
 
@@ -842,7 +1209,7 @@ export function BetaComposer({ bridge, ready }: { bridge: UseBridge; ready: bool
     if (event.defaultPrevented) return;
     if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) {
       event.preventDefault();
-      submit();
+      void submit();
     }
   };
   const keyUp = (event: KeyboardEvent<HTMLDivElement>) => {
@@ -854,6 +1221,15 @@ export function BetaComposer({ bridge, ready }: { bridge: UseBridge; ready: bool
   };
 
   const pastePlainText = (event: ClipboardEvent<HTMLDivElement>) => {
+    const clipboardImages = [...event.clipboardData.items]
+      .filter((item) => item.kind === 'file' && (item.type.startsWith('image/') || item.type === ''))
+      .map((item) => item.getAsFile())
+      .filter((file): file is File => Boolean(file));
+    if (clipboardImages.length) {
+      event.preventDefault();
+      void addImageFiles(clipboardImages);
+      return;
+    }
     event.preventDefault();
     const editor = input.current;
     if (!editor) return;
@@ -870,8 +1246,14 @@ export function BetaComposer({ bridge, ready }: { bridge: UseBridge; ready: bool
     updateActiveCompletions();
   };
   const permissionMode = PERM_MODES.find((mode) => mode.id === bridge.desktop.permissionMode) ?? PERM_MODES[0]!;
+  const workspace = bridge.bootstrap?.workspace;
+  const providerConfigured = bridge.bootstrap?.providerCredentials?.some((entry) => entry.configured) ?? false;
   const promptPlaceholder = !ready
-    ? 'Complete setup to start coding…'
+    ? !workspace?.path || workspace.recovery
+      ? 'Add or select an available project to start coding…'
+      : !providerConfigured
+        ? 'Connect a provider in Settings to start coding…'
+        : 'Waiting for the local engine…'
     : bridge.running
       ? 'LingXi is working…'
       : goalMode
@@ -926,7 +1308,35 @@ export function BetaComposer({ bridge, ready }: { bridge: UseBridge; ready: bool
           </div>
         </div>
       )}
-      <div className="beta-composer" style={{ position: 'relative', maxWidth: 980, margin: '0 auto', borderRadius: 26, border: `1px solid ${ready ? t.borderStrong : t.border}`, background: t.surface, boxShadow: '0 12px 34px rgba(0,0,0,.10)', overflow: 'visible' }}>
+      <div
+        className="beta-composer"
+        onDragOver={(event) => {
+          if (!ready || bridge.running || !event.dataTransfer.types.includes('Files')) return;
+          event.preventDefault();
+          event.dataTransfer.dropEffect = 'copy';
+          setImageDragActive(true);
+        }}
+        onDragLeave={(event) => {
+          if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setImageDragActive(false);
+        }}
+        onDrop={(event) => {
+          event.preventDefault();
+          setImageDragActive(false);
+          void addImageFiles([...event.dataTransfer.files]);
+        }}
+        style={{ position: 'relative', maxWidth: 980, margin: '0 auto', borderRadius: 26, border: `1px solid ${imageDragActive ? t.accent : ready ? t.borderStrong : t.border}`, background: imageDragActive ? t.accentBg : t.surface, boxShadow: '0 12px 34px rgba(0,0,0,.10)', overflow: 'visible', transition: 'border-color 0.16s ease, background-color 0.16s ease' }}
+      >
+        {imageAttachments.length > 0 && (
+          <div aria-label="Image attachments" style={{ display: 'flex', flexWrap: 'wrap', gap: 8, padding: '12px 18px 2px' }}>
+            {imageAttachments.map((attachment) => (
+              <div key={attachment.id} title={attachment.name} style={{ position: 'relative', width: 74, height: 62, overflow: 'hidden', borderRadius: 10, background: t.surfaceHover, outline: `1px solid color-mix(in oklab, ${t.borderStrong} 55%, transparent)` }}>
+                <img src={attachment.previewUrl} alt={attachment.name} style={{ display: 'block', width: '100%', height: '100%', objectFit: 'cover', outline: `1px solid color-mix(in oklab, ${t.text} 10%, transparent)`, outlineOffset: -1 }} />
+                <button type="button" aria-label={`Remove ${attachment.name}`} title="Remove image" onClick={() => removeImage(attachment.id)} style={{ position: 'absolute', top: 3, right: 3, width: 24, height: 24, display: 'grid', placeItems: 'center', padding: 0, border: 0, borderRadius: 99, background: 'rgba(0,0,0,.62)', color: '#fff', cursor: 'pointer' }}><Icon name="x" size={11} stroke={2} /></button>
+              </div>
+            ))}
+          </div>
+        )}
+        {imageNotice && <div role="status" style={{ padding: '0 18px 9px', color: t.warn, fontSize: 10.5 }}>{imageNotice}</div>}
         <div
           ref={input}
           className="beta-rich-prompt"
@@ -936,7 +1346,7 @@ export function BetaComposer({ bridge, ready }: { bridge: UseBridge; ready: bool
           spellCheck
           data-placeholder={promptPlaceholder}
           data-empty={!hasPrompt ? 'true' : 'false'}
-          onInput={() => { slashDismissed.current = false; syncPromptState(); updateActiveCompletions(); }}
+          onInput={() => { slashDismissed.current = false; setImageNotice(null); syncPromptState(); updateActiveCompletions(); }}
           onFocus={() => { slashDismissed.current = false; savePromptSelection(); updateActiveCompletions(); }}
           onBlur={savePromptSelection}
           onKeyUp={keyUp}
@@ -998,6 +1408,8 @@ export function BetaComposer({ bridge, ready }: { bridge: UseBridge; ready: bool
           </div>
         )}
         <div style={{ display: 'flex', alignItems: 'center', gap: 6, minHeight: 54, padding: '0 10px 10px 14px' }}>
+          <input ref={imageFileInput} type="file" accept="image/png,image/jpeg,image/gif,image/webp" multiple onChange={(event) => { void addImageFiles(event.target.files ? [...event.target.files] : []); event.currentTarget.value = ''; }} style={{ display: 'none' }} />
+          <button type="button" disabled={!ready || bridge.running} aria-label="Attach image" title="Attach image" onClick={() => imageFileInput.current?.click()} style={{ ...composerIconStyle(t), width: 34, height: 34 }}><Icon name="image" size={19} color={t.text2} stroke={1.7} /></button>
           <div ref={fileControl}>
             <button type="button" disabled={!ready || bridge.running} aria-label="Search workspace files" aria-expanded={fileMenuOpen} title="Add file context (@)" onMouseDown={savePromptSelection} onClick={openFileMenu} style={{ ...composerIconStyle(t), width: 34, height: 34 }}><Icon name="plus" size={21} color={t.text2} stroke={1.7} /></button>
             {fileMenuOpen && (
@@ -1067,7 +1479,7 @@ export function BetaComposer({ bridge, ready }: { bridge: UseBridge; ready: bool
               aria-label={`Permission mode: ${permissionMode.label}`}
               title="Change permission mode"
               onMouseDown={() => { setSlashQuery(null); activeSlashRange.current = null; }}
-              onClick={() => { setPermissionOpen((open) => !open); setModelOpen(false); }}
+              onClick={() => { setPermissionOpen((open) => !open); setModelOpen(false); setModelSubmenu(null); }}
               style={{
                 ...composerPillStyle(t, permissionOpen),
                 color: permissionMode.danger ? t.danger : permissionOpen ? t.accent : t.text2,
@@ -1127,53 +1539,159 @@ export function BetaComposer({ bridge, ready }: { bridge: UseBridge; ready: bool
 
           <div style={{ flex: 1 }} />
 
-          <div style={{ position: 'relative' }}>
+          <div ref={modelControl} style={{ position: 'relative' }}>
             <button
               type="button"
               disabled={!ready || bridge.running || bridge.desktop.models.length === 0}
+              aria-haspopup="menu"
               aria-expanded={modelOpen}
-              aria-label={`Model: ${modelLabel(bridge.desktop.currentModel)}`}
+              aria-label={`${fastModeAvailable && bridge.desktop.fastMode ? 'Fast mode, ' : ''}Model: ${modelLabel(bridge.desktop.currentModel)}, reasoning ${reasoningSelectionLabel(selectedReasoning)}`}
               onMouseDown={() => { setSlashQuery(null); activeSlashRange.current = null; }}
-              onClick={() => { setModelOpen((open) => !open); setPermissionOpen(false); }}
-              style={{ ...composerPillStyle(t, modelOpen), maxWidth: 280, color: t.text }}
+              onClick={() => { setModelOpen((open) => !open); setModelSubmenu(null); setPermissionOpen(false); }}
+              style={{ ...composerPillStyle(t, modelOpen), maxWidth: 340, color: t.text }}
             >
-              <Icon name="bolt" size={18} color={t.text} stroke={2.1} />
+              {fastModeAvailable && <Icon name="bolt" size={18} color={t.text} stroke={2.1} />}
+              {fastModeAvailable && bridge.desktop.fastMode && <span style={{ color: t.accent, fontSize: 11.5, fontWeight: 700 }}>Fast</span>}
+              {fastModeAvailable && bridge.desktop.fastMode && <span style={{ color: t.text4 }}>·</span>}
               <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{modelLabel(bridge.desktop.currentModel)}</span>
+              <span style={{ color: t.text4 }}>·</span>
+              <span style={{ color: t.text3, fontSize: 11.5 }}>{reasoningSelectionLabel(selectedReasoning)}</span>
               <Icon name="chevron" size={14} color={t.text3} />
             </button>
-            {modelOpen && <div style={composerMenuStyle(t, 'right')} role="menu" aria-label="Available models">
-              {modelGroups.map((group, groupIndex) => (
-                <section
-                  key={group.providerId ?? 'unqualified'}
-                  aria-labelledby={`desktop-model-provider-${group.providerId ?? 'other'}`}
-                  style={groupIndex === 0 ? undefined : { marginTop: 5, paddingTop: 5, borderTop: `0.5px solid ${t.border}` }}
-                >
-                  <div id={`desktop-model-provider-${group.providerId ?? 'other'}`} style={{ padding: '7px 10px 5px', color: t.text3, fontSize: 10.5, fontWeight: 700, letterSpacing: '.08em', textTransform: 'uppercase' }}>{group.providerLabel}</div>
-                  {group.models.map((entry) => (
+            {modelOpen && (
+              <div
+                style={{
+                  ...composerMenuStyle(t, 'right'),
+                  width: 340,
+                  maxWidth: 'min(340px, calc(100vw - 44px))',
+                  padding: 8,
+                  overflow: 'visible',
+                }}
+                role="menu"
+                aria-label="Model settings"
+              >
+                {pickerSubmenus.map((submenu) => {
+                  const labels = { model: 'Model', effort: 'Effort', speed: 'Speed' };
+                  const values = {
+                    model: modelLabel(bridge.desktop.currentModel),
+                    effort: reasoningSelectionLabel(selectedReasoning),
+                    speed: fastModeAvailable && bridge.desktop.fastMode ? 'Fast' : 'Standard',
+                  };
+                  const disabled = submenu === 'effort' && !reasoningControls;
+                  return (
                     <button
-                      key={entry.reference}
+                      key={submenu}
                       type="button"
-                      role="menuitemradio"
-                      aria-checked={entry.reference === bridge.desktop.currentModel}
-                      onClick={() => {
-                        invoke(() => bridge.setModel(entry.reference));
-                        setModelOpen(false);
-                      }}
+                      role="menuitem"
+                      aria-haspopup="menu"
+                      aria-expanded={modelSubmenu === submenu}
+                      disabled={disabled}
+                      onClick={() => setModelSubmenu((current) => current === submenu ? null : submenu)}
                       style={{
-                        display: 'flex', alignItems: 'center', gap: 9, width: '100%',
-                        padding: '9px 10px', border: 0, borderRadius: 7,
-                        background: entry.reference === bridge.desktop.currentModel ? t.accentBg : 'transparent',
-                        color: t.text, textAlign: 'left', cursor: 'pointer', font: 'inherit', fontSize: 12.5,
+                        display: 'flex', alignItems: 'center', gap: 12, width: '100%', minHeight: 42,
+                        padding: '7px 9px', border: 0, borderRadius: 8, background: modelSubmenu === submenu ? t.surfaceHover : 'transparent',
+                        color: disabled ? t.text4 : t.text, textAlign: 'left', cursor: disabled ? 'not-allowed' : 'pointer', font: 'inherit',
                       }}
+                      onMouseEnter={(event) => { if (modelSubmenu !== submenu && !disabled) event.currentTarget.style.background = t.surfaceHover; }}
+                      onMouseLeave={(event) => { if (modelSubmenu !== submenu) event.currentTarget.style.background = 'transparent'; }}
                     >
-                      <Icon name="bolt" size={14} color={entry.reference === bridge.desktop.currentModel ? t.accent : t.text3} />
-                      <span style={{ flex: 1 }}>{entry.label}</span>
-                      {entry.reference === bridge.desktop.currentModel && <Icon name="check" size={14} color={t.accent} stroke={2.2} />}
+                      <span style={{ flex: 1, minWidth: 0, fontSize: 13, fontWeight: 520 }}>{labels[submenu]}</span>
+                      <span style={{ maxWidth: 180, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: disabled ? t.text4 : t.text3, fontSize: 12.5 }}>{values[submenu]}</span>
+                      <Icon name="chevronR" size={14} color={disabled ? t.text4 : t.text3} stroke={1.8} />
                     </button>
-                  ))}
-                </section>
-              ))}
-            </div>}
+                  );
+                })}
+
+                <div aria-hidden="true" style={{ height: 1, margin: '7px 9px', background: t.border }} />
+                <button
+                  type="button"
+                  role="menuitem"
+                  disabled={!ready || bridge.running}
+                  onClick={() => {
+                    invoke(() => bridge.setReasoningSelection({ type: 'automatic' }));
+                    invoke(() => bridge.setFastMode(false));
+                    setModelSubmenu(null);
+                  }}
+                  style={{ display: 'flex', alignItems: 'center', gap: 12, width: '100%', minHeight: 42, padding: '7px 9px', border: 0, borderRadius: 8, background: 'transparent', color: !ready || bridge.running ? t.text4 : t.text3, textAlign: 'left', cursor: !ready || bridge.running ? 'not-allowed' : 'pointer', font: 'inherit', fontSize: 13, opacity: !ready || bridge.running ? .6 : 1 }}
+                  onMouseEnter={(event) => { if (ready && !bridge.running) event.currentTarget.style.background = t.surfaceHover; }}
+                  onMouseLeave={(event) => { event.currentTarget.style.background = 'transparent'; }}
+                >
+                  <span style={{ flex: 1 }}>Reset to default</span>
+                  <span aria-hidden="true" style={{ color: t.text3, fontSize: 22, fontWeight: 300, lineHeight: 1 }}>↻</span>
+                </button>
+
+                {modelSubmenu === 'model' && (
+                  <div style={{ ...modelPickerSubmenuStyle(t), width: 390, maxWidth: 'min(390px, calc(100vw - 44px))', maxHeight: 'min(500px, calc(100vh - 140px))', overflow: 'hidden', display: 'flex', flexDirection: 'column' }} role="menu" aria-label="Available models">
+                    <div style={{ flexShrink: 0, padding: '5px 10px 8px', color: t.text3, fontSize: 12, fontWeight: 600 }}>Model</div>
+                    <div style={{ flex: '1 1 auto', minHeight: 0, overflowY: 'auto', padding: '0 3px 3px', scrollbarGutter: 'stable' }}>
+                      {modelGroups.map((group, groupIndex) => {
+                        const statusProviderId = group.providerId === 'builtin' ? 'anthropic' : group.providerId;
+                        const metadata = statusProviderId
+                          ? providerCredentials?.find((entry) => entry.providerId === statusProviderId)
+                          : undefined;
+                        const connectionLabel = group.providerId
+                          ? providerCredentials
+                            ? metadata?.configured ? 'Connected' : 'Not connected'
+                            : 'Checking…'
+                          : undefined;
+                        const connected = metadata?.configured === true;
+                        return (
+                          <section key={group.providerId ?? 'unqualified'} aria-labelledby={`desktop-model-provider-${group.providerId ?? 'other'}`} style={groupIndex === 0 ? undefined : { marginTop: 5, paddingTop: 5, borderTop: `0.5px solid ${t.border}` }}>
+                            <div id={`desktop-model-provider-${group.providerId ?? 'other'}`} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '7px 10px 5px', color: t.text3, fontSize: 10.5, fontWeight: 700, letterSpacing: '.08em', textTransform: 'uppercase' }}>
+                              <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{group.providerLabel}</span>
+                              {connectionLabel && <span title={`${group.providerLabel}: ${connectionLabel}`} style={{ display: 'inline-flex', alignItems: 'center', gap: 5, flexShrink: 0, color: connected ? t.ok : connectionLabel === 'Checking…' ? t.text4 : t.warn, fontSize: 9.5, fontWeight: 600, letterSpacing: 0, textTransform: 'none' }}><span aria-hidden="true" style={{ width: 6, height: 6, borderRadius: 99, background: 'currentColor' }} />{connectionLabel}</span>}
+                            </div>
+                            {group.models.map((entry) => {
+                              const active = entry.reference === bridge.desktop.currentModel;
+                              const entryDetail = modelDetailsByReference.get(entry.reference);
+                              const entrySupportsFastMode = modelReference(entry.reference).providerId === 'anthropic'
+                                && modelSupportsFastMode(entryDetail);
+                              return (
+                                <button key={entry.reference} type="button" role="menuitemradio" aria-checked={active} onClick={() => { invoke(() => bridge.setModel(entry.reference)); setModelOpen(false); setModelSubmenu(null); }} style={{ display: 'flex', alignItems: 'center', gap: 9, width: '100%', minHeight: 40, padding: '7px 10px', border: 0, borderRadius: 7, background: active ? t.accentBg : 'transparent', color: t.text, textAlign: 'left', cursor: 'pointer', font: 'inherit', fontSize: 12.5 }} onMouseEnter={(event) => { if (!active) event.currentTarget.style.background = t.surfaceHover; }} onMouseLeave={(event) => { if (!active) event.currentTarget.style.background = 'transparent'; }}>
+                                  {entrySupportsFastMode && <Icon name="bolt" size={14} color={active ? t.accent : t.text3} />}
+                                  <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontWeight: active ? 650 : 500 }}>{entry.label}</span>
+                                  {active && <Icon name="check" size={14} color={t.accent} stroke={2.2} />}
+                                </button>
+                              );
+                            })}
+                          </section>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+
+                {modelSubmenu === 'effort' && (
+                  <div style={{ ...modelPickerSubmenuStyle(t), width: 300, maxWidth: 'min(300px, calc(100vw - 44px))', maxHeight: 'min(430px, calc(100vh - 140px))', overflow: 'hidden' }} role="menu" aria-label="Reasoning effort">
+                    <div style={{ padding: '5px 10px 8px', color: t.text3, fontSize: 12, fontWeight: 600 }}>Effort</div>
+                    {reasoningOptions.length > 0 ? reasoningOptions.map((option) => {
+                      const active = reasoningSelectionKey(option.selection) === reasoningSelectionKey(selectedReasoning ?? { type: 'automatic' });
+                      const disabled = reasoningControls?.spec.editable === false;
+                      return (
+                        <button key={reasoningSelectionKey(option.selection)} type="button" role="menuitemradio" aria-checked={active} disabled={disabled} onClick={() => invoke(() => bridge.setReasoningSelection(option.selection))} style={{ display: 'flex', alignItems: 'center', gap: 9, width: '100%', minHeight: 40, padding: '7px 10px', border: 0, borderRadius: 7, background: active ? t.accentBg : 'transparent', color: disabled ? t.text4 : t.text, textAlign: 'left', cursor: disabled ? 'not-allowed' : 'pointer', font: 'inherit', fontSize: 12.5, opacity: disabled ? .65 : 1 }} onMouseEnter={(event) => { if (!active && !disabled) event.currentTarget.style.background = t.surfaceHover; }} onMouseLeave={(event) => { if (!active && !disabled) event.currentTarget.style.background = 'transparent'; }}>
+                          <span style={{ flex: 1 }}>{reasoningSelectionLabel(option.selection)}</span>
+                          {active && <Icon name="check" size={14} color={t.accent} stroke={2.2} />}
+                        </button>
+                      );
+                    }) : <div style={{ padding: '5px 10px 10px', color: t.text4, fontSize: 11.5 }}>Effort is not configurable for this model.</div>}
+                  </div>
+                )}
+
+                {modelSubmenu === 'speed' && fastModeAvailable && (
+                  <div style={{ ...modelPickerSubmenuStyle(t), width: 300, maxWidth: 'min(300px, calc(100vw - 44px))', maxHeight: 'min(300px, calc(100vh - 140px))', overflow: 'hidden' }} role="menu" aria-label="Speed">
+                    <div style={{ padding: '5px 10px 8px', color: t.text3, fontSize: 12, fontWeight: 600 }}>Speed</div>
+                    <button type="button" role="menuitemradio" aria-checked={!bridge.desktop.fastMode || !fastModeAvailable} disabled={!ready || bridge.running} onClick={() => invoke(() => bridge.setFastMode(false))} style={speedOptionStyle(t, !bridge.desktop.fastMode || !fastModeAvailable, !ready || bridge.running)}>
+                      <span style={{ flex: 1 }}><span style={{ display: 'block', fontSize: 13, fontWeight: 540 }}>Standard</span><span style={{ display: 'block', marginTop: 2, color: t.text3, fontSize: 11.5 }}>Default speed</span></span>
+                      {(!bridge.desktop.fastMode || !fastModeAvailable) && <Icon name="check" size={16} color={t.accent} stroke={2.2} />}
+                    </button>
+                    {fastModeAvailable && <button type="button" role="menuitemradio" aria-checked={bridge.desktop.fastMode} disabled={!ready || bridge.running} onClick={() => invoke(() => bridge.setFastMode(true))} style={speedOptionStyle(t, bridge.desktop.fastMode, !ready || bridge.running)}>
+                      <span style={{ flex: 1 }}><span style={{ display: 'block', fontSize: 13, fontWeight: 540 }}>Fast</span><span style={{ display: 'block', marginTop: 2, color: t.text3, fontSize: 11.5 }}>1.5x speed, more usage</span></span>
+                      {bridge.desktop.fastMode && <Icon name="check" size={16} color={t.accent} stroke={2.2} />}
+                    </button>}
+                  </div>
+                )}
+              </div>
+            )}
           </div>
           <button type="button" disabled={!ready || bridge.running} aria-label={voiceState === 'listening' && !flowMode ? 'Stop ordinary recording' : 'Start ordinary recording'} title={voiceState === 'unsupported' ? 'Voice input is unavailable in this environment' : voiceState === 'denied' ? 'Microphone permission was denied' : '普通录音'} onClick={toggleStandardVoice} style={{ ...composerIconStyle(t), width: 36, height: 36, color: voiceState === 'listening' && !flowMode ? t.accent : voiceState === 'denied' ? t.danger : t.text }}><Icon name="mic" size={20} color="currentColor" stroke={voiceState === 'listening' && !flowMode ? 2.1 : 1.7} /></button>
           <button
@@ -1197,7 +1715,7 @@ export function BetaComposer({ bridge, ready }: { bridge: UseBridge; ready: bool
               style={{ ...composerSendStyle(t, true), background: t.danger, cursor: bridge.isCancelling ? 'wait' : 'pointer', opacity: bridge.isCancelling ? .7 : 1 }}
             ><Icon name="stop" size={15} color="#fff" /></button>
           ) : (
-            <button type="button" disabled={!ready || !hasPrompt} onClick={submit} aria-label="Send prompt" title="Send prompt" style={composerSendStyle(t, Boolean(ready && hasPrompt))}><Icon name="arrowU" size={19} color={ready && hasPrompt ? '#fff' : t.text4} /></button>
+            <button type="button" disabled={!ready || !hasPrompt} onClick={() => { void submit(); }} aria-label="Send prompt" title="Send prompt" style={composerSendStyle(t, Boolean(ready && hasPrompt))}><Icon name="arrowU" size={19} color={ready && hasPrompt ? '#fff' : t.text4} /></button>
           )}
         </div>
         {(voiceState === 'unsupported' || voiceState === 'denied') && <div style={{ position: 'relative' }}>
@@ -1227,6 +1745,14 @@ function composerSendStyle(t: ReturnType<typeof useT>, enabled: boolean): CSSPro
 
 function composerMenuStyle(t: ReturnType<typeof useT>, side: 'left' | 'right'): CSSProperties {
   return { position: 'absolute', bottom: 'calc(100% + 9px)', [side]: 0, zIndex: 20, width: 286, padding: 7, borderRadius: 12, border: `0.5px solid ${t.borderStrong}`, background: t.surface, boxShadow: '0 16px 40px rgba(0,0,0,.22)', animation: 'fade-in .15s ease' };
+}
+
+function modelPickerSubmenuStyle(t: ReturnType<typeof useT>): CSSProperties {
+  return { position: 'absolute', right: 'calc(100% + 12px)', bottom: 12, zIndex: 21, padding: 8, borderRadius: 12, border: `0.5px solid ${t.borderStrong}`, background: t.surface, boxShadow: '0 16px 40px rgba(0,0,0,.22)', animation: 'fade-in .15s ease' };
+}
+
+function speedOptionStyle(t: ReturnType<typeof useT>, active: boolean, disabled: boolean): CSSProperties {
+  return { display: 'flex', alignItems: 'center', gap: 9, width: '100%', minHeight: 54, padding: '7px 10px', border: 0, borderRadius: 7, background: active ? t.accentBg : 'transparent', color: disabled ? t.text4 : t.text, textAlign: 'left', cursor: disabled ? 'not-allowed' : 'pointer', font: 'inherit', opacity: disabled ? .65 : 1 };
 }
 
 export function BetaTasks({ bridge, onClose }: { bridge: UseBridge; onClose(): void }) {
@@ -1264,139 +1790,6 @@ export function BetaTasks({ bridge, onClose }: { bridge: UseBridge; onClose(): v
         {output && <pre className="mono" style={{ marginTop: 10, padding: 10, borderRadius: 8, border: `0.5px solid ${t.border}`, background: t.windowBg, color: t.text2, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', fontSize: 10.5, lineHeight: 1.55 }}>{output.content || '(No output yet)'}{output.truncated ? `\n\n…output truncated (${output.totalLines} total lines)` : ''}</pre>}
       </div>
     </aside>
-  );
-}
-
-export function SetupCard({ bridge }: { bridge: UseBridge }) {
-  const t = useT();
-  const snapshot = bridge.bootstrap;
-  const workspace = snapshot?.workspace;
-  const providerCredentials = snapshot?.providerCredentials ?? [];
-  const configuredProviders = PROVIDERS.filter((provider) => providerCredentials.find((entry) => entry.providerId === provider.id)?.configured);
-  const [selectedProviderId, setSelectedProviderId] = useState(configuredProviders[0]?.id ?? 'anthropic');
-  const [key, setKey] = useState('');
-  const selectedProvider = providerById(selectedProviderId) ?? PROVIDERS[0];
-  const selectedMetadata = providerCredentials.find((entry) => entry.providerId === selectedProvider.id);
-  const save = () => {
-    const submitted = key;
-    invoke(async () => {
-      const saved = await persistProviderCredentialInput(selectedProvider.id, submitted, bridge.setProviderCredential);
-      if (saved) setKey((current) => current === submitted ? '' : current);
-    });
-  };
-  const workspaceUnavailable = Boolean(workspace?.recovery);
-  const hasProvider = configuredProviders.length > 0;
-  const step = !workspace?.path || workspaceUnavailable ? 1 : !workspace.trusted ? 2 : !hasProvider ? 3 : 4;
-  return (
-    <div style={{ flex: 1, display: 'grid', placeItems: 'center', padding: 30, background: t.stageBg, overflow: 'auto' }}>
-      <section style={{ width: 'min(560px, 100%)', padding: 26, borderRadius: 16, background: t.surface, border: `0.5px solid ${t.border}`, boxShadow: '0 18px 50px rgba(0,0,0,.16)' }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 20 }}>
-          <div style={{ width: 38, height: 38, borderRadius: 11, display: 'grid', placeItems: 'center', color: '#fff', background: `linear-gradient(145deg, ${t.accent}, ${t.accent2})` }}><Icon name="spark" size={20} color="#fff" /></div>
-          <div><h1 style={{ color: t.text, fontSize: 17, lineHeight: 1.3 }}>Set up LingXi Code Beta</h1><p style={{ color: t.text3, fontSize: 11.5, marginTop: 3 }}>Local-first desktop coding agent for internal testing</p></div>
-        </div>
-        <SetupStep number={1} title="Choose a workspace" active={step === 1} complete={Boolean(workspace?.path) && !workspaceUnavailable}>
-          <p>LingXi only reads and changes the folder you select.</p>
-          {workspace?.recovery && <p role="alert" style={{ color: t.danger }}>{workspace.recovery.message} Choose an available folder to recover.</p>}
-          <Button primary={!workspace?.path} onClick={() => invoke(bridge.pickWorkspace)}><Icon name="folder" size={14} /> {workspace?.path ? 'Change folder' : 'Choose folder'}</Button>
-          {workspace?.path && <code className="mono" style={{ color: t.text3, fontSize: 10.5, overflowWrap: 'anywhere' }}>{workspace.path}</code>}
-        </SetupStep>
-        <SetupStep number={2} title="Trust executable workspace settings" active={step === 2} complete={Boolean(workspace?.trusted)}>
-          <p>Trust enables project hooks, MCP servers and local agent settings. Review the repository first. If these files change, trust is revoked automatically.</p>
-          <Button primary={step === 2} disabled={!workspace?.path || workspaceUnavailable} onClick={() => invoke(() => bridge.setWorkspaceTrusted(true))}>Trust this workspace</Button>
-        </SetupStep>
-          <SetupStep number={3} title="Connect a provider" active={step === 3} complete={hasProvider}>
-            <p>Choose a provider for this desktop. API keys are persisted by the local engine and shared with CLI and TUI.</p>
-            {selectedMetadata?.runtimeOnly && <p style={{ color: t.ok }}>Available to the running engine for this app launch. LingXi has not stored this external credential.</p>}
-            {selectedMetadata?.configured && selectedMetadata.encryptionAvailable && !selectedMetadata.runtimeOnly && <p style={{ color: t.ok }}>Saved in the shared macOS login Keychain used by Desktop, CLI, and TUI. Generic API keys do not appear in the Passwords app.</p>}
-            {selectedMetadata?.configured && !selectedMetadata.encryptionAvailable && !selectedMetadata.runtimeOnly && <p style={{ color: t.warn }}>macOS Keychain is unavailable. Saved in the shared owner-only local fallback used by Desktop, CLI, and TUI.</p>}
-            {!selectedMetadata?.configured && selectedMetadata?.encryptionAvailable === false && <p style={{ color: t.warn }}>macOS Keychain is unavailable. Connecting will use the shared owner-only local fallback used by Desktop, CLI, and TUI.</p>}
-          <div role="radiogroup" aria-label="LLM providers" style={{ width: '100%', display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(155px, 1fr))', gap: 7 }}>
-            {PROVIDERS.map((provider) => {
-              const metadata = providerCredentials.find((entry) => entry.providerId === provider.id);
-              const selected = provider.id === selectedProvider.id;
-              return (
-                <button key={provider.id} type="button" role="radio" aria-checked={selected} onClick={() => { setSelectedProviderId(provider.id); setKey(''); }} style={{ minHeight: 58, padding: '8px 9px', borderRadius: 9, border: `0.5px solid ${selected ? t.accentBorder : t.border}`, background: selected ? t.accentBg : t.windowBg, color: t.text, textAlign: 'left', cursor: 'pointer', opacity: provider.available ? 1 : .58 }}>
-                  <span style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 11.5, fontWeight: 650 }}>{metadata?.configured && <Icon name="check" size={12} color={t.ok} stroke={2.5} />}{provider.label}</span>
-                  <span style={{ display: 'block', color: t.text4, fontSize: 10, marginTop: 3 }}>{provider.description}</span>
-                </button>
-              );
-            })}
-          </div>
-          {selectedProvider.available ? <>
-            <label htmlFor="provider-credential" style={{ color: t.text2, fontSize: 11 }}>{selectedProvider.keyLabel}</label>
-            <div style={{ display: 'flex', gap: 7, width: '100%' }}>
-              <input id="provider-credential" type="password" autoComplete="off" spellCheck={false} value={key} onChange={(event) => setKey(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') save(); }} placeholder={selectedProvider.keyPlaceholder} aria-label={selectedProvider.keyLabel} style={{ flex: 1, minWidth: 0, height: 33, borderRadius: 8, border: `0.5px solid ${t.border}`, background: t.windowBg, color: t.text, padding: '0 9px', outline: 0 }} />
-              <Button primary disabled={!key.trim()} onClick={save}>{selectedMetadata?.runtimeOnly ? 'Use entered key' : selectedMetadata?.configured ? 'Replace' : 'Connect'}</Button>
-            </div>
-          </> : <p style={{ color: t.warn }}>{selectedProvider.label} uses {selectedProvider.authMethod === 'oauth' ? 'OAuth' : 'device sign-in'}, which is available from the CLI/TUI connect flow but is not wired into this desktop build yet.</p>}
-        </SetupStep>
-        <SetupStep number={4} title="Start the local engine" active={step === 4} complete={bridge.connected}>
-          <EngineStartControl bridge={bridge} workspaceReady={Boolean(workspace?.path)} />
-        </SetupStep>
-      </section>
-    </div>
-  );
-}
-
-function EngineStartControl({ bridge, workspaceReady }: { bridge: UseBridge; workspaceReady: boolean }) {
-  const t = useT();
-  const status = engineLaunchStatus(bridge.connection);
-  const stages = [
-    { label: 'Prepare', threshold: 1 },
-    { label: 'Launch', threshold: 32 },
-    { label: 'Connect', threshold: 72 },
-  ];
-  const buttonLabel = status.phase === 'ready'
-    ? 'Engine ready'
-    : status.active
-      ? status.label.replace(' engine', '…')
-      : status.phase === 'error'
-        ? 'Retry start'
-        : 'Start engine';
-  return (
-    <div style={{ width: '100%', display: 'grid', gap: 10 }}>
-      <div role="status" aria-live="polite" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-        {status.active && <span className="beta-spinner" aria-hidden="true" />}
-        <strong style={{ color: status.phase === 'error' ? t.danger : status.phase === 'ready' ? t.ok : t.text2, fontSize: 12 }}>{status.label}</strong>
-        <span className="mono" style={{ marginLeft: 'auto', color: t.text4, fontSize: 10 }}>{status.percent}%</span>
-      </div>
-      <p style={{ color: status.phase === 'error' ? t.danger : t.text3 }}>{status.detail}</p>
-      <div aria-label={`Engine startup progress: ${status.percent}%`} role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={status.percent} style={{ height: 6, overflow: 'hidden', borderRadius: 99, background: t.windowBg, border: `0.5px solid ${t.border}` }}>
-        <span style={{ display: 'block', height: '100%', width: `${status.percent}%`, borderRadius: 99, background: status.phase === 'error' ? t.danger : status.phase === 'ready' ? t.ok : t.accent, transition: 'width 360ms ease' }} />
-      </div>
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 8 }}>
-        {stages.map((stage) => {
-          const complete = status.phase === 'ready' || (status.percent > stage.threshold && status.phase !== 'error');
-          const current = status.active && status.percent === stage.threshold;
-          return <div key={stage.label} style={{ display: 'flex', alignItems: 'center', gap: 5, color: complete ? t.ok : current ? t.accent : t.text4, fontSize: 10.5 }}><span style={{ width: 6, height: 6, borderRadius: 99, background: complete ? t.ok : current ? t.accent : t.border }} />{stage.label}</div>;
-        })}
-      </div>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 9, flexWrap: 'wrap' }}>
-        <Button
-          primary={status.phase !== 'ready' && status.phase !== 'error'}
-          success={status.phase === 'ready'}
-          disabled={!workspaceReady || !status.canStart}
-          onClick={() => invoke(bridge.restartBridge)}
-        >
-          {status.active && <span className="beta-spinner" aria-hidden="true" />}
-          {buttonLabel}
-        </Button>
-        <ConnectionDot bridge={bridge} />
-      </div>
-    </div>
-  );
-}
-
-function SetupStep({ number, title, active, complete, children }: { number: number; title: string; active: boolean; complete: boolean; children: ReactNode }) {
-  const t = useT();
-  return (
-    <div style={{ display: 'grid', gridTemplateColumns: '26px 1fr', gap: 10, padding: '12px 0', borderTop: `0.5px solid ${t.border}`, opacity: active || complete ? 1 : .55 }}>
-      <span style={{ width: 24, height: 24, borderRadius: 99, display: 'grid', placeItems: 'center', background: complete ? t.ok : active ? t.accent : t.windowBg, color: complete || active ? '#fff' : t.text3, fontSize: 11, fontWeight: 700 }}>{complete ? <Icon name="check" size={13} color="#fff" stroke={2.5} /> : number}</span>
-      <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: 8 }}>
-        <h2 style={{ color: t.text, fontSize: 13.5 }}>{title}</h2>
-        <div style={{ color: t.text3, fontSize: 11.5, lineHeight: 1.5, width: '100%', display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: 8 }}>{children}</div>
-      </div>
-    </div>
   );
 }
 
@@ -1444,7 +1837,6 @@ export function BetaSettings({ bridge, theme, onTheme, onClose }: { bridge: UseB
         <header style={{ position: 'sticky', top: 0, zIndex: 1, display: 'flex', alignItems: 'center', padding: '14px 17px', borderBottom: `0.5px solid ${t.border}`, background: t.windowBg }}><strong id="lingxi-settings-title" style={{ flex: 1, color: t.text, fontSize: 14 }}>Settings & diagnostics</strong><button ref={closeRef} type="button" onClick={onClose} aria-label="Close settings" style={{ border: 0, background: 'transparent', color: t.text3, cursor: 'pointer' }}><Icon name="x" size={16} /></button></header>
         <div style={{ padding: 18, display: 'grid', gap: 18 }}>
           <SettingsSection title="Appearance"><div style={{ display: 'flex', gap: 8 }}><Button primary={theme === 'dark'} onClick={() => onTheme('dark')}><Icon name="moon" size={13} /> Dark</Button><Button primary={theme === 'light'} onClick={() => onTheme('light')}><Icon name="sun" size={13} /> Light</Button></div></SettingsSection>
-          <SettingsSection title="Workspace"><code className="mono" style={{ color: t.text2, fontSize: 10.5, overflowWrap: 'anywhere' }}>{snapshot?.workspace.path ?? 'Not selected'}</code><div style={{ display: 'flex', flexWrap: 'wrap', gap: 7 }}><Button disabled={bridge.running} onClick={() => invoke(bridge.pickWorkspace)}>Change folder</Button>{snapshot?.workspace.path && <Button disabled={bridge.running} danger={snapshot.workspace.trusted} onClick={() => invoke(() => bridge.setWorkspaceTrusted(!snapshot.workspace.trusted))}>{snapshot.workspace.trusted ? 'Revoke trust' : 'Trust workspace'}</Button>}</div>{snapshot?.settings.recentWorkspaces.length ? <div><p style={{ marginBottom: 6 }}>Recent workspaces</p>{snapshot.settings.recentWorkspaces.map((path) => <button key={path} type="button" disabled={bridge.running} onClick={() => invoke(() => bridge.selectRecentWorkspace(path))} className="mono" style={{ display: 'block', width: '100%', padding: '5px 0', border: 0, background: 'transparent', color: t.accent, textAlign: 'left', cursor: bridge.running ? 'not-allowed' : 'pointer', opacity: bridge.running ? .5 : 1, fontSize: 10.5, overflow: 'hidden', textOverflow: 'ellipsis' }}>{path}</button>)}</div> : null}</SettingsSection>
           <SettingsSection title="Providers">
             <p>Desktop, CLI, and TUI share one credential store. It uses the macOS login Keychain when available and an owner-only local fallback otherwise.</p>
             <div style={{ width: '100%', display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(145px, 1fr))', gap: 7 }}>
@@ -1465,11 +1857,11 @@ export function BetaSettings({ bridge, theme, onTheme, onClose }: { bridge: UseB
           </SettingsSection>
           <SettingsSection title="Engine">
             <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}><ConnectionDot bridge={bridge} /><Button onClick={() => invoke(bridge.restartBridge)}>Restart engine</Button><Button onClick={() => invoke(bridge.refresh)}>Refresh all</Button></div>
-            {bridge.desktop.status && <div className="mono" style={{ color: t.text3, fontSize: 10.5 }}>session {bridge.desktop.status.session_id} · {bridge.desktop.status.model} · {bridge.desktop.status.n_messages} messages · ${bridge.desktop.status.total_cost_usd.toFixed(4)}</div>}
+            {bridge.desktop.status && <div className="mono" style={{ color: t.text3, fontSize: 10.5 }}>session {bridge.desktop.status.session_id} · {bridge.desktop.status.model} · {bridge.desktop.status.n_messages} messages</div>}
             {bridge.desktop.doctor && <div style={{ color: bridge.desktop.doctor.summary.failed > 0 ? t.danger : bridge.desktop.doctor.summary.warnings > 0 ? t.warn : t.ok, fontSize: 10.5 }}>Doctor: {bridge.desktop.doctor.summary.passed} passed, {bridge.desktop.doctor.summary.warnings} warnings, {bridge.desktop.doctor.summary.failed} failed</div>}
           </SettingsSection>
           <SettingsSection title="Diagnostics"><p>Sanitized lifecycle messages only. Prompts, tool payloads and credential values are excluded.</p><div style={{ display: 'flex', gap: 7 }}><Button onClick={() => invoke(bridge.copyDiagnostics)}>Copy report</Button><Button onClick={() => invoke(bridge.exportDiagnostics)}>Export JSON…</Button><Button onClick={() => invoke(bridge.refreshDiagnostics)}>Refresh</Button></div><div className="mono" style={{ maxHeight: 170, overflow: 'auto', padding: 9, borderRadius: 8, background: t.surface, border: `0.5px solid ${t.border}`, color: t.text3, fontSize: 9.5, lineHeight: 1.55 }}>{snapshot?.diagnostics.length ? snapshot.diagnostics.map((entry, index) => <div key={`${entry.timestamp}-${index}`}><span style={{ color: entry.level === 'error' ? t.danger : entry.level === 'warn' ? t.warn : t.text4 }}>{entry.timestamp} [{entry.source}/{entry.level}]</span> {entry.message}</div>) : 'No diagnostic entries.'}</div></SettingsSection>
-          <SettingsSection title="About"><p>LingXi Code Desktop · Internal Beta</p><p>Local engine, explicit workspace trust, shared credential storage, manual signed updates.</p></SettingsSection>
+          <SettingsSection title="About"><p>LingXi Code Desktop · Internal Beta</p><p>Local engine, explicit project trust, shared credential storage, manual signed updates.</p></SettingsSection>
         </div>
       </section>
     </div>

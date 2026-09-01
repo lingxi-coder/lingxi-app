@@ -4,6 +4,7 @@ import androidx.compose.runtime.Immutable
 import androidx.compose.ui.graphics.Color
 import com.lingxi.code.bindings.ModelBillingModeDto
 import com.lingxi.code.bindings.ModelDetailsDto
+import com.lingxi.code.bindings.ImageRefDto
 import java.util.UUID
 
 /**
@@ -383,6 +384,8 @@ data class Message(
     val text: String,
     val tag: String? = null,
     val id: String = UUID.randomUUID().toString(),
+    /** Images attached to this user turn, kept in the same order as SendPrompt. */
+    val images: List<ImageRefDto> = emptyList(),
     /**
      * The message's ORDERED content, when the engine supplied structure.
      *

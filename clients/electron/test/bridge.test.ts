@@ -5,12 +5,292 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { EventEmitter } from 'node:events';
 
-import { BridgeManager } from '../src/main/bridge';
+import { BridgeManager, SessionRuntime, SessionRuntimeManager } from '../src/main/bridge';
 import { DiagnosticBuffer } from '../src/main/host-utils';
 
 function temporaryDirectory(): string {
   return mkdtempSync(join(tmpdir(), 'lingxi-electron-bridge-test-'));
 }
+
+function deferred<T = void>(): { promise: Promise<T>; resolve(value?: T): void; reject(error: unknown): void } {
+  let resolvePromise!: (value: T) => void;
+  let rejectPromise!: (error: unknown) => void;
+  const promise = new Promise<T>((resolve, reject) => {
+    resolvePromise = resolve;
+    rejectPromise = reject;
+  });
+  return { promise, resolve: (value?: T) => resolvePromise(value as T), reject: rejectPromise };
+}
+
+function fakeWebContents(sent: Array<{ channel: string; payload: unknown }> = []): EventEmitter & {
+  isDestroyed(): boolean;
+  send(channel: string, payload: unknown): void;
+} {
+  const webContents = new EventEmitter() as EventEmitter & {
+    isDestroyed(): boolean;
+    send(channel: string, payload: unknown): void;
+  };
+  webContents.isDestroyed = () => false;
+  webContents.send = (channel, payload) => sent.push({ channel, payload });
+  return webContents;
+}
+
+test('SessionRuntimeManager owns one destroyed listener for all session runtimes', async () => {
+  const manager = new SessionRuntimeManager({
+    launchConfig: (ref) => ({ workspace: ref.projectPath, sessionId: ref.sessionId, trusted: true }),
+  });
+  const webContents = fakeWebContents();
+  const first = { projectPath: '/workspace', sessionId: '11111111-2222-4333-8444-555555555555' };
+  const second = { projectPath: '/workspace', sessionId: '22222222-3333-4444-8555-666666666666' };
+
+  manager.registerWindow(webContents as any, 'app://desktop/index.html');
+  await manager.ensure(first, false);
+  await manager.ensure(second, false);
+
+  assert.equal(webContents.listenerCount('destroyed'), 1);
+  webContents.emit('destroyed');
+  assert.equal(webContents.listenerCount('destroyed'), 0);
+  assert.equal((manager.get(first.sessionId) as any).targets.size, 0);
+  assert.equal((manager.get(second.sessionId) as any).targets.size, 0);
+
+  await manager.dispose();
+});
+
+test('disposing SessionRuntimeManager removes its centralized destroyed listener', async () => {
+  const manager = new SessionRuntimeManager({
+    launchConfig: (ref) => ({ workspace: ref.projectPath, sessionId: ref.sessionId, trusted: true }),
+  });
+  const webContents = fakeWebContents();
+
+  manager.registerWindow(webContents as any, 'app://desktop/index.html');
+  assert.equal(webContents.listenerCount('destroyed'), 1);
+  await manager.dispose();
+  assert.equal(webContents.listenerCount('destroyed'), 0);
+});
+
+test('disposing a session runtime sends an explicit removal state to the renderer', async () => {
+  const sent: Array<{ channel: string; payload: unknown }> = [];
+  const manager = new SessionRuntimeManager({
+    launchConfig: (ref) => ({ workspace: ref.projectPath, sessionId: ref.sessionId, trusted: true }),
+  });
+  const webContents = fakeWebContents(sent);
+  const ref = { projectPath: '/workspace', sessionId: '33333333-4444-4555-8666-777777777777' };
+
+  manager.registerWindow(webContents as any, 'app://desktop/index.html');
+  await manager.ensure(ref, false);
+  await manager.closeSession(ref);
+
+  assert.deepEqual(sent.at(-1), {
+    channel: 'lingxi:connectionStateChanged',
+    payload: {
+      sessionId: ref.sessionId,
+      event: { status: 'disconnected', reason: 'session runtime disposed' },
+    },
+  });
+
+  await manager.dispose();
+});
+
+test('newSession keeps the generated runtime/session id and does not send a second new_session command', async () => {
+  const commands: unknown[] = [];
+  let launchRef: { projectPath: string; sessionId: string } | undefined;
+  const originalStart = SessionRuntime.prototype.start;
+  const manager = new SessionRuntimeManager({
+    launchConfig: (ref) => {
+      launchRef = ref;
+      return { workspace: '/workspace', sessionId: ref.sessionId, trusted: true };
+    },
+  });
+  SessionRuntime.prototype.start = async function () {
+    const launch = await (this as any).opts.launchConfig();
+    assert.equal(launch.sessionId, this.sessionId);
+  };
+  try {
+    const created = await manager.newSession('/workspace');
+    assert.deepEqual(created, launchRef);
+    assert.equal(commands.length, 0);
+  } finally {
+    SessionRuntime.prototype.start = originalStart;
+    await manager.dispose();
+  }
+});
+
+test('owned resume waits for a matching engine event and never exposes renderer lifecycle commands', async () => {
+  const sessionId = '11111111-2222-4333-8444-555555555555';
+  const commands: unknown[] = [];
+  const client = new EventEmitter() as EventEmitter & { sendCommand(command: unknown): void };
+  client.sendCommand = (command) => { commands.push(command); };
+  const runtime = new SessionRuntime({
+    sessionId,
+    projectPath: '/workspace',
+    sessionResumeTimeoutMs: 100,
+    launchConfig: () => ({ workspace: '/workspace', sessionId, trusted: true }),
+  });
+  (runtime as any).activeWorkspace = '/workspace';
+  (runtime as any).activeWorkspaceTrusted = true;
+  (runtime as any).state = { status: 'connected' };
+  (runtime as any).generation = 1;
+  (runtime as any).client = client;
+  (runtime as any).wireClient(client, 1);
+
+  let settled = false;
+  const resume = runtime.resumeOwnedSession().then(() => { settled = true; });
+  await Promise.resolve();
+  assert.equal(settled, false);
+  assert.deepEqual(commands, [{ type: 'resume_session', session_id: sessionId, cwd: '/workspace' }]);
+
+  client.emit('event', { type: 'session_resumed', session_id: sessionId, messages: [] });
+  await resume;
+  assert.equal(settled, true);
+});
+
+test('failed historical resume removes only the newly-created runtime', async () => {
+  const sessionId = '22222222-3333-4444-8555-666666666666';
+  const originalStart = SessionRuntime.prototype.start;
+  const originalResume = SessionRuntime.prototype.resumeOwnedSession;
+  SessionRuntime.prototype.start = async function () {
+    (this as any).state = { status: 'connected' };
+  };
+  SessionRuntime.prototype.resumeOwnedSession = async function () {
+    throw new Error('transcript is corrupt');
+  };
+  const manager = new SessionRuntimeManager({
+    launchConfig: (ref) => ({ workspace: ref.projectPath, sessionId: ref.sessionId, trusted: true }),
+  });
+  try {
+    await assert.rejects(manager.openSession({ projectPath: '/workspace', sessionId }), /transcript is corrupt/);
+    assert.equal(manager.get(sessionId), undefined);
+  } finally {
+    SessionRuntime.prototype.start = originalStart;
+    SessionRuntime.prototype.resumeOwnedSession = originalResume;
+    await manager.dispose();
+  }
+});
+
+test('opening another session leaves the running session alive', async () => {
+  const runningRef = { projectPath: '/workspace-a', sessionId: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee' };
+  const nextRef = { projectPath: '/workspace-b', sessionId: 'bbbbbbbb-cccc-4ddd-8eee-ffffffffffff' };
+  const originalStart = SessionRuntime.prototype.start;
+  const originalResume = SessionRuntime.prototype.resumeOwnedSession;
+  SessionRuntime.prototype.start = async function () {
+    (this as any).state = { status: 'connected' };
+  };
+  SessionRuntime.prototype.resumeOwnedSession = async function () {};
+  const manager = new SessionRuntimeManager({
+    launchConfig: (ref) => ({ workspace: ref.projectPath, sessionId: ref.sessionId, trusted: true }),
+  });
+  try {
+    const running = await manager.ensure(runningRef, true);
+    (running as any).activeTurn = true;
+
+    const opened = await manager.openSession(nextRef);
+
+    assert.equal(manager.size, 2);
+    assert.equal(manager.get(runningRef.sessionId), running);
+    assert.equal(running.turnActive, true);
+    assert.equal(manager.get(nextRef.sessionId), opened);
+    assert.equal(opened.connectionState.status, 'connected');
+  } finally {
+    SessionRuntime.prototype.start = originalStart;
+    SessionRuntime.prototype.resumeOwnedSession = originalResume;
+    await manager.dispose();
+  }
+});
+
+test('openSession deduplicates concurrent opens by UUID and rejects a different project', async () => {
+  const ref = { projectPath: '/workspace-a', sessionId: 'cccccccc-dddd-4eee-8fff-000000000000' };
+  const gate = deferred<void>();
+  const originalStart = SessionRuntime.prototype.start;
+  const originalResume = SessionRuntime.prototype.resumeOwnedSession;
+  let starts = 0;
+  let resumes = 0;
+  SessionRuntime.prototype.start = async function () {
+    starts += 1;
+    (this as any).state = { status: 'connected' };
+    await gate.promise;
+  };
+  SessionRuntime.prototype.resumeOwnedSession = async function () {
+    resumes += 1;
+  };
+  const manager = new SessionRuntimeManager({
+    launchConfig: (candidate) => ({ workspace: candidate.projectPath, sessionId: candidate.sessionId, trusted: true }),
+  });
+  try {
+    const first = manager.openSession(ref);
+    const second = manager.openSession(ref);
+    assert.strictEqual(first, second);
+    assert.throws(
+      () => manager.openSession({ ...ref, projectPath: '/workspace-b' }),
+      /owned by a different project/,
+    );
+    assert.equal(starts, 1);
+    assert.equal(resumes, 0);
+    gate.resolve();
+    const [firstRuntime, secondRuntime] = await Promise.all([first, second]);
+    assert.strictEqual(firstRuntime, secondRuntime);
+    assert.equal(resumes, 1);
+  } finally {
+    SessionRuntime.prototype.start = originalStart;
+    SessionRuntime.prototype.resumeOwnedSession = originalResume;
+    await manager.dispose();
+  }
+});
+
+test('opening a validated empty session keeps its UUID runtime without sending resume_session', async () => {
+  const sessionId = 'eeeeeeee-ffff-4000-8111-222222222222';
+  const originalStart = SessionRuntime.prototype.start;
+  const originalResume = SessionRuntime.prototype.resumeOwnedSession;
+  let resumes = 0;
+  SessionRuntime.prototype.start = async function () {
+    (this as any).state = { status: 'connected' };
+  };
+  SessionRuntime.prototype.resumeOwnedSession = async function () { resumes += 1; };
+  const manager = new SessionRuntimeManager({
+    launchConfig: (ref) => ({ workspace: ref.projectPath, sessionId: ref.sessionId, trusted: true }),
+  });
+  try {
+    const runtime = await manager.openSession({ projectPath: '/workspace', sessionId }, true);
+    assert.equal(runtime.sessionId, sessionId);
+    assert.equal(resumes, 0);
+  } finally {
+    SessionRuntime.prototype.start = originalStart;
+    SessionRuntime.prototype.resumeOwnedSession = originalResume;
+    await manager.dispose();
+  }
+});
+
+test('closeProject removes runtimes from routing before asynchronous disposal', async () => {
+  const projectPath = '/workspace-closing';
+  const ref = { projectPath, sessionId: 'dddddddd-eeee-4fff-8000-111111111111' };
+  const gate = deferred<void>();
+  const originalDispose = SessionRuntime.prototype.dispose;
+  SessionRuntime.prototype.dispose = async function () {
+    await gate.promise;
+  };
+  const manager = new SessionRuntimeManager({
+    launchConfig: (candidate) => ({ workspace: candidate.projectPath, sessionId: candidate.sessionId, trusted: true }),
+  });
+  try {
+    const runtime = await manager.ensure(ref, false);
+    (runtime as any).activeTurn = true;
+    await assert.rejects(manager.closeProject(projectPath), /cancel active turns/);
+    assert.strictEqual(manager.get(ref.sessionId), runtime);
+    (runtime as any).activeTurn = false;
+    const closing = manager.closeProject(projectPath);
+    assert.equal(manager.get(ref.sessionId), undefined);
+    assert.equal(manager.isProjectClosing(projectPath), true);
+    assert.throws(() => manager.require(ref), /not open/);
+    await assert.rejects(manager.newSession(projectPath), /project is closing/);
+    assert.throws(() => manager.openSession({ projectPath, sessionId: 'eeeeeeee-ffff-4000-8111-222222222222' }), /project is closing/);
+    assert.equal(runtime.projectPath, projectPath);
+    gate.resolve();
+    await closing;
+    assert.equal(manager.isProjectClosing(projectPath), false);
+  } finally {
+    SessionRuntime.prototype.dispose = originalDispose;
+    await manager.dispose();
+  }
+});
 
 test('restart exposes an explicit restarting state and structured connection diagnostics', async () => {
   const diagnostics = new DiagnosticBuffer();
@@ -36,6 +316,23 @@ test('restart exposes an explicit restarting state and structured connection dia
     events.filter((entry) => entry.event === 'connection_state').map((entry) => entry.state.status),
     ['restarting', 'connected'],
   );
+});
+
+test('stop disconnects the active project and returns the bridge to idle', async () => {
+  const manager = new BridgeManager({
+    launchConfig: () => ({ workspace: '/workspace', trusted: true }),
+  });
+  const states: string[] = [];
+  (manager as any).registerIpc = () => undefined;
+  (manager as any).broadcast = (_channel: string, payload: { status?: string }) => {
+    if (payload?.status) states.push(payload.status);
+  };
+  (manager as any).stopBridge = async () => undefined;
+
+  await manager.stop();
+
+  assert.deepEqual(states, ['idle']);
+  assert.deepEqual(manager.connectionState, { status: 'idle' });
 });
 
 test('restart surfaces launch failures instead of remaining stuck in restarting', async () => {
@@ -399,7 +696,7 @@ test('prompt submission owns the pre-turn_started cancellation window', () => {
   });
   const handlers = new Map<string, (...args: unknown[]) => void>();
   const fakeClient = {
-    sendPrompt: (text: string) => calls.push({ type: 'prompt', value: text }),
+    sendPrompt: (text: string, opts?: { images?: unknown[] }) => calls.push({ type: 'prompt', value: { text, images: opts?.images ?? [] } }),
     cancel: (turnId?: number) => calls.push({ type: 'cancel', value: turnId }),
     on: (event: string, handler: (...args: unknown[]) => void) => { handlers.set(event, handler); return fakeClient; },
   };
@@ -418,9 +715,33 @@ test('prompt submission owns the pre-turn_started cancellation window', () => {
   assert.equal((manager as any).cancellingTurn, true, 'turn_started must not undo an accepted cancel');
   assert.equal((manager as any).pendingPermissionIds.size, 0);
   assert.deepEqual(calls, [
-    { type: 'prompt', value: 'hello' },
+    { type: 'prompt', value: { text: 'hello', images: [] } },
     { type: 'cancel', value: undefined },
   ]);
+});
+
+test('prompt submission forwards validated image attachments to the bridge client', () => {
+  const calls: Array<{ text: string; images?: unknown[] }> = [];
+  const manager = new BridgeManager({
+    accessState: () => ({ workspace: '/workspace', trusted: true }),
+    launchConfig: () => ({ workspace: '/workspace', trusted: true }),
+  });
+  const fakeClient = {
+    sendPrompt: (text: string, opts?: { images?: unknown[] }) => calls.push({ text, images: opts?.images }),
+  };
+  (manager as any).client = fakeClient;
+  (manager as any).activeWorkspace = '/workspace';
+  (manager as any).sendPrompt('describe this', [{
+    media_type: 'image/png',
+    base64: Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00]).toString('base64'),
+  }]);
+  assert.deepEqual(calls, [{
+    text: 'describe this',
+    images: [{
+      media_type: 'image/png',
+      base64: Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00]).toString('base64'),
+    }],
+  }]);
 });
 
 test('provider credential status is sourced from the engine secure store', async () => {

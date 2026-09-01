@@ -60,6 +60,17 @@ async fn main() -> anyhow::Result<()> {
         std::env::set_current_dir(cwd)
             .map_err(|e| anyhow::anyhow!("failed to chdir into --cwd {}: {e}", cwd.display()))?;
     }
+
+    if args.list_sessions_json {
+        let cwd = std::env::current_dir()
+            .map_err(|_| anyhow::anyhow!("failed to resolve session catalog directory"))?;
+        let json = boot::list_sessions_json(&cwd)
+            .await
+            .map_err(|e| anyhow::anyhow!(e))?;
+        println!("{json}");
+        return Ok(());
+    }
+
     let _telemetry_guard = telemetry::otel::install_process("bridge-server", false);
 
     // (2) Resolve config, then receive credentials over the dedicated stdin

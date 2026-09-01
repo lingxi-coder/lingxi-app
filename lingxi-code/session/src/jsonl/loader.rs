@@ -652,11 +652,14 @@ async fn enrich_candidate_uncached(
         }
     };
 
-    // Preserve crash-tail tolerance: a valid transcript remains resumable
-    // even when its last line was truncated. If no message can be recovered
-    // at all, however, a zero-turn `(session)` row would be a dead resume
-    // target and conceal catalog damage from the desktop client.
-    if loaded.messages_in_order.is_empty() && loaded.malformed_line_count > 0 {
+    // A metadata-only file is not a resumable session unless its latest
+    // custom-title is the explicit versioned mobile empty-session anchor.
+    // This semantic check belongs in the shared loader; Electron must not
+    // blanket-filter zero-count rows because validated empty sessions are
+    // real UUID-preserving conversation targets on mobile.
+    if loaded.messages_in_order.is_empty()
+        && !loaded.mobile_empty_sessions.contains(&stem)
+    {
         *skipped_files += 1;
         return Ok(None);
     }

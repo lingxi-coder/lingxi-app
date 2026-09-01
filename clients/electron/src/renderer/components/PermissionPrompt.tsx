@@ -4,8 +4,8 @@
  *
  * The main process forwards every inbound {@link PermissionRequest} over the
  * bridge; `useBridge` queues them and exposes the head as `pendingPermission`
- * plus `approve` / `deny`. This component renders a minimal modal for that head
- * request with three actions — allow-once / allow-always / deny — each calling
+ * plus `approve` / `deny`. This component renders a compact session panel for
+ * that head request with three actions — allow-once / allow-always / deny — each calling
  * back through the bridge with the matching {@link PermissionResponseDto}.
  *
  * It is intentionally framework-light (inline styles via the theme tokens,
@@ -115,37 +115,16 @@ export interface PermissionPromptProps {
 
 export function PermissionPrompt({ request, onApprove, onDeny }: PermissionPromptProps) {
   const t = useT();
-  const dialogRef = useRef<HTMLDivElement>(null);
   const primaryRef = useRef<HTMLButtonElement>(null);
-  const onDenyRef = useRef(onDeny);
-  onDenyRef.current = onDeny;
+  const promptHasFocus = useRef(false);
   useEffect(() => {
     if (!request) return;
     const previouslyFocused = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     primaryRef.current?.focus();
-    const keyDown = (event: globalThis.KeyboardEvent) => {
-      if (event.key === 'Escape') {
-        event.preventDefault();
-        onDenyRef.current(request.request_id);
-        return;
-      }
-      if (event.key !== 'Tab') return;
-      const focusable = [...(dialogRef.current?.querySelectorAll<HTMLElement>('button:not([disabled])') ?? [])];
-      if (focusable.length === 0) return;
-      const first = focusable[0];
-      const last = focusable.at(-1);
-      if (event.shiftKey && document.activeElement === first) {
-        event.preventDefault();
-        last?.focus();
-      } else if (!event.shiftKey && document.activeElement === last) {
-        event.preventDefault();
-        first?.focus();
-      }
-    };
-    document.addEventListener('keydown', keyDown);
     return () => {
-      document.removeEventListener('keydown', keyDown);
-      previouslyFocused?.focus();
+      // Do not steal focus back after the user has moved into the global
+      // Sidebar while this session prompt is still visible.
+      if (promptHasFocus.current) previouslyFocused?.focus();
     };
   }, [request]);
   if (!request) return null;
@@ -156,9 +135,15 @@ export function PermissionPrompt({ request, onApprove, onDeny }: PermissionPromp
   return (
     <div
       role="dialog"
-      aria-modal="true"
       aria-label={title}
       aria-describedby={detail ? 'lingxi-permission-detail lingxi-permission-scope' : 'lingxi-permission-scope'}
+      onFocusCapture={() => { promptHasFocus.current = true; }}
+      onBlurCapture={(event) => { promptHasFocus.current = event.currentTarget.contains(event.relatedTarget as Node | null); }}
+      onKeyDown={(event) => {
+        if (event.key !== 'Escape') return;
+        event.preventDefault();
+        onDeny(request.request_id);
+      }}
       style={{
         position: 'absolute', inset: 0, zIndex: 60,
         display: 'flex', alignItems: 'center', justifyContent: 'center',
@@ -166,7 +151,6 @@ export function PermissionPrompt({ request, onApprove, onDeny }: PermissionPromp
       }}
     >
       <div
-        ref={dialogRef}
         style={{
           width: 420, maxWidth: '90%', borderRadius: 14, overflow: 'hidden',
           background: t.windowBg, border: `0.5px solid ${t.border}`,

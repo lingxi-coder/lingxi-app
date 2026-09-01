@@ -317,7 +317,7 @@ mod tests {
     use super::*;
     use async_trait::async_trait;
     use std::collections::HashMap;
-    use std::sync::{Arc, Mutex, OnceLock};
+    use std::sync::{Arc, Mutex};
     use tool_api::test_support::{fresh_ctx, fresh_tx, shell_test_ctx};
     use traits::agent_name_registry::{AgentNameRegistry, InMemoryAgentNameRegistry};
     use traits::process::ProcessOutput;
@@ -336,8 +336,7 @@ mod tests {
     }
 
     fn process_lock() -> &'static Mutex<()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
+        crate::live_session_test_lock()
     }
 
     #[derive(Default)]

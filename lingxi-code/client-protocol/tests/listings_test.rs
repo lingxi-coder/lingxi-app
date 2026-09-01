@@ -92,6 +92,7 @@ fn session_lifecycle_events_round_trip() {
             blocks: vec![MessageBlockDto::Text {
                 text: "prior turn".to_string(),
             }],
+            images: Vec::new(),
         }],
     };
     let json = serde_json::to_value(&resumed).expect("serialize SessionResumed");
@@ -189,6 +190,7 @@ fn rich_model_details_round_trip_and_legacy_event_default() {
             editable: true,
             disabled_reason: None,
         },
+        supports_fast_mode: true,
     };
     let event = ClientEvent::ModelList {
         models: vec![detail.reference.clone()],

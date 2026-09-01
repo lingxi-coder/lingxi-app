@@ -25,7 +25,7 @@ use platform_api::{LspError, LspServerConfig};
 const CONTENT_MODIFIED: i32 = -32801;
 const CONTENT_MODIFIED_RETRIES: u32 = 3;
 const CONTENT_MODIFIED_BASE_DELAY_MS: u64 = 500;
-const LSP_CLIENT_VERSION: &str = "2.1.251";
+const LSP_CLIENT_VERSION: &str = "2.1.252";
 
 /// Typed client over a JSON-RPC connection to one LSP server.
 pub struct LspClient {

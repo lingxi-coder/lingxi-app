@@ -867,6 +867,20 @@ mod tests {
             reason: "end_turn".into(),
         };
         assert_eq!(hook_name_for_event(&stop), "Stop");
+
+        let model_switch = HookEvent::PostModelSwitch {
+            from_model: "claude-sonnet-4-6".into(),
+            to_model: "claude-opus-4-6".into(),
+            requested_model: Some("opus".into()),
+            source: "picker".into(),
+            context_tokens: 0,
+            prompt_cache_warm: false,
+            cache_ttl: "5m".into(),
+            estimated_cache_write_usd: 0.0,
+            pricing: "default".into(),
+        };
+        assert_eq!(hook_name_for_event(&model_switch), "PostModelSwitch");
+        assert!(tool_use_id_for_event(&model_switch).is_none());
     }
 
     #[test]

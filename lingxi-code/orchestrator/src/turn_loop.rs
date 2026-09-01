@@ -5776,15 +5776,49 @@ pub(crate) async fn apply_model_context_modifiers(
     if modifiers.is_empty() {
         return;
     }
-    let mut s = orch.session.lock().await;
-    let current = s.model.clone();
+    let (current, current_profile) = {
+        let s = orch.session.lock().await;
+        (s.model.clone(), s.model_profile.clone())
+    };
     let resolved = modifiers
         .into_iter()
         .fold(ToolUseContext::model_seed(current.clone()), |ctx, m| m(ctx))
         .options
         .main_loop_model;
     if resolved != current {
-        s.model = resolved;
+        let listings = orch.api.list_model_listings();
+        let (target_model, explicit_profile) = platform_api::parse_model_ref(&resolved, &listings);
+        let target_profile = explicit_profile.or_else(|| {
+            current_profile
+                .as_ref()
+                .filter(|profile| {
+                    listings.iter().any(|listing| {
+                        listing.provider_id.as_str() == profile.as_str()
+                            && listing.request_model == target_model
+                    })
+                })
+                .cloned()
+                .or_else(|| {
+                    let mut matches = listings
+                        .iter()
+                        .filter(|listing| listing.request_model == target_model);
+                    let first = matches.next()?;
+                    matches.next().is_none().then(|| first.provider_id.clone())
+                })
+        });
+        {
+            let mut s = orch.session.lock().await;
+            s.model.clone_from(&target_model);
+            s.model_profile.clone_from(&target_profile);
+        }
+        orch.run_post_model_switch_hooks(
+            &current,
+            &target_model,
+            None,
+            target_profile.as_deref(),
+            "auto",
+        )
+        .await;
     }
 }
 
@@ -6197,6 +6231,9 @@ mod denial_kind_wiring_tests {
     use crate::turn_loop::dispatch_tool_uses_tracked;
     use crate::OrchestratorConfig;
     use async_trait::async_trait;
+    use platform_api::permission_gate::{
+        PermissionDecision, PermissionDecisionSource, PermissionGate, PermissionResolution,
+    };
     use protocol::ToolUseId;
     use serde_json::json;
     use std::path::PathBuf;
@@ -6207,9 +6244,6 @@ mod denial_kind_wiring_tests {
     use tool_api::tool_trait::{
         DescriptionOptions, PromptOptions, Tool, ToolCallResult, ToolError, ToolStaticContext,
         ValidationError,
-    };
-    use platform_api::permission_gate::{
-        PermissionDecision, PermissionDecisionSource, PermissionGate, PermissionResolution,
     };
 
     /// A gate that always denies through the SOURCED resolution, with the
@@ -7276,9 +7310,9 @@ mod hook_context_attachment_tests {
         use protocol::MessageId;
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("session.jsonl");
-        let fs: Arc<dyn platform_api::FileSystem> = Arc::new(platform_posix::fs::PosixFileSystem::new(
-            dir.path().to_path_buf(),
-        ));
+        let fs: Arc<dyn platform_api::FileSystem> = Arc::new(
+            platform_posix::fs::PosixFileSystem::new(dir.path().to_path_buf()),
+        );
         let writer = Arc::new(session::jsonl::writer::JsonlWriter::new(path.clone(), fs));
         let mut tools = ToolRegistry::new();
         tools.register_builtin(Arc::new(EchoTool) as Arc<dyn Tool>);
@@ -8014,6 +8048,8 @@ mod tool_hook_wiring_tests {
     use crate::OrchestratorConfig;
     use async_trait::async_trait;
     use hooks::events::HookEventType;
+    use platform_api::permission_gate::{PermissionDecision, PermissionGate, PermissionResolution};
+    use platform_api::tool_invoker::{SubagentInvocationContext, ToolInvoker};
     use protocol::{ContentBlock, HookId, ToolUseId};
     use serde_json::{json, Value};
     use std::path::PathBuf;
@@ -8026,8 +8062,6 @@ mod tool_hook_wiring_tests {
         CoercedInput, DescriptionOptions, PromptOptions, Tool, ToolCallResult, ToolError,
         ToolStaticContext, ValidationError,
     };
-    use platform_api::permission_gate::{PermissionDecision, PermissionGate, PermissionResolution};
-    use platform_api::tool_invoker::{SubagentInvocationContext, ToolInvoker};
 
     /// A gate that RESOLVES to a plain allow (the `rule_source` under test) but
     /// whose prompt transport always denies — so "the ask reached the prompt" is

@@ -23,15 +23,18 @@ use crate::hook_payload::{
     HookEventNameElicitationResult, HookEventNameFileChanged, HookEventNameInstructionsLoaded,
     HookEventNameMessageDisplay, HookEventNameNotification, HookEventNamePermissionDenied,
     HookEventNamePermissionRequest, HookEventNamePost, HookEventNamePostCompact,
+    HookEventNamePostModelSwitch,
     HookEventNamePostToolBatch, HookEventNamePostToolUseFailure, HookEventNamePre,
-    HookEventNamePreCompact, HookEventNameSessionEnd, HookEventNameSessionStart,
+    HookEventNamePreCompact, HookEventNamePreModelSwitch, HookEventNameSessionEnd,
+    HookEventNameSessionStart,
     HookEventNameSetup, HookEventNameStop, HookEventNameStopFailure, HookEventNameSubagentStart,
     HookEventNameSubagentStop, HookEventNameTaskCompleted, HookEventNameTaskCreated,
     HookEventNameTeammateIdle, HookEventNameUserPromptExpansion, HookEventNameUserPromptSubmit,
     HookEventNameWorktreeCreate, HookEventNameWorktreeRemove, InstructionsLoadedPayload,
     MessageDisplayPayload, NotificationPayload, PermissionDeniedPayload, PermissionRequestPayload,
-    PostCompactPayload, PostToolBatchPayload, PostToolUseFailurePayload, PostToolUsePayload,
-    PreCompactPayload, PreToolUsePayload, SessionEndPayload, SessionStartPayload, SetupPayload,
+    PostCompactPayload, PostModelSwitchPayload, PostToolBatchPayload, PostToolUseFailurePayload,
+    PostToolUsePayload, PreCompactPayload, PreModelSwitchPayload, PreToolUsePayload,
+    SessionEndPayload, SessionStartPayload, SetupPayload,
     StopFailurePayload, StopPayload, SubagentStartPayload, SubagentStopPayload,
     TaskCompletedPayload, TaskCreatedPayload, TeammateIdlePayload, UserPromptExpansionPayload,
     UserPromptSubmitPayload, WorktreeCreatePayload, WorktreeRemovePayload,
@@ -1834,7 +1837,8 @@ impl HookExecutorImpl {
     }
 
     /// The `matchQuery` the binary's `cH` runner is invoked with for `event`
-    /// (the tool name for tool/permission events, else `None`) — used only to
+    /// (the tool/model name for tool/permission/model-switch events, else
+    /// `None`) — used only to
     /// format the #41 skip-log label. Mirrors `HookRegistry::match_query_for`.
     fn runner_match_query(event: &HookEvent) -> Option<String> {
         match event {
@@ -1843,6 +1847,8 @@ impl HookExecutorImpl {
             | HookEvent::PostToolUseFailure { tool_name, .. }
             | HookEvent::PermissionRequest { tool_name, .. }
             | HookEvent::PermissionDenied { tool_name, .. } => Some(tool_name.clone()),
+            HookEvent::PreModelSwitch { to_model, .. }
+            | HookEvent::PostModelSwitch { to_model, .. } => Some(to_model.clone()),
             _ => None,
         }
     }
@@ -1856,6 +1862,32 @@ impl HookExecutorImpl {
         r: HookResult,
         hook_event: &str,
     ) {
+        let mut r = r;
+        // PreModelSwitch is a gate: execution failures before a hook can
+        // answer must stop the switch. A command's explicit non-2 exit remains
+        // advisory (the command mapper preserves its exit code), matching the
+        // upstream distinction between a failed invocation and a hook choosing
+        // an arbitrary non-zero status. PostModelSwitch is already after the
+        // mutation, so a missing/failed response never blocks anything.
+        if hook_event == "PreModelSwitch"
+            && r.response.is_none()
+            && r.exit_code.is_none()
+            && matches!(
+                r.outcome,
+                HookOutcome::Error | HookOutcome::Timeout | HookOutcome::Cancelled
+            )
+        {
+            let reason = if r.stderr.is_empty() {
+                format!("PreModelSwitch hook {} failed before answering", hook.id)
+            } else {
+                r.stderr.clone()
+            };
+            r.response = Some(HookResponse {
+                decision: Some(HookDecision::Block),
+                reason: Some(reason),
+                ..HookResponse::default()
+            });
+        }
         if let Some(resp) = &r.response {
             // #45(b): claude-code's `cH` runner dispatches EVERY matched hook
             // (`c.map(async …)` + await-all, BIN off 205755512 — no break) then
@@ -1870,8 +1902,12 @@ impl HookExecutorImpl {
             // the old early `break` silently dropped — are now preserved.
             let already_blocked =
                 matches!(agg.decision, Some(crate::response::HookDecision::Block));
-            if resp.decision.is_some() && !already_blocked {
-                agg.decision = resp.decision;
+            // PostModelSwitch cannot gate a switch that has already happened;
+            // retain its response in `all_results` but keep the aggregate
+            // decision channel empty for best-effort callers.
+            let decision = (hook_event != "PostModelSwitch").then_some(resp.decision).flatten();
+            if decision.is_some() && !already_blocked {
+                agg.decision = decision;
                 agg.hook_source = Some(hook.source);
             }
             // Freeze the block reason at the first blocker: once blocked, a later
@@ -1888,9 +1924,7 @@ impl HookExecutorImpl {
             // The exit-2 arm supplies `iSe`; every other blocking arm (JSON
             // `decision:"block"`, PreToolUse `permissionDecision:"deny"`) is
             // reached through `Tfn({command: ee})`, i.e. `qq`.
-            if !already_blocked
-                && matches!(resp.decision, Some(crate::response::HookDecision::Block))
-            {
+            if !already_blocked && matches!(decision, Some(crate::response::HookDecision::Block)) {
                 agg.block_command = Some(
                     resp.block_command
                         .clone()
@@ -2732,6 +2766,72 @@ fn build_lifecycle_envelope_body(
             };
             Some(("PostCompact", serde_json::to_string(&payload).ok()?))
         }
+        HookEvent::PreModelSwitch {
+            from_model,
+            to_model,
+            requested_model,
+            source,
+            context_tokens,
+            prompt_cache_warm,
+            cache_ttl,
+            estimated_cache_write_usd,
+            pricing,
+        } => {
+            let payload = PreModelSwitchPayload {
+                hook_event_name: HookEventNamePreModelSwitch,
+                session_id: b.session_id,
+                transcript_path: b.transcript_path,
+                cwd: b.cwd,
+                prompt_id: b.prompt_id,
+                permission_mode: b.permission_mode,
+                agent_id: b.agent_id,
+                agent_type: b.agent_type,
+                effort: b.effort,
+                from_model: from_model.clone(),
+                to_model: to_model.clone(),
+                requested_model: requested_model.clone(),
+                source: source.clone(),
+                context_tokens: *context_tokens,
+                prompt_cache_warm: *prompt_cache_warm,
+                cache_ttl: cache_ttl.clone(),
+                estimated_cache_write_usd: *estimated_cache_write_usd,
+                pricing: pricing.clone(),
+            };
+            Some(("PreModelSwitch", serde_json::to_string(&payload).ok()?))
+        }
+        HookEvent::PostModelSwitch {
+            from_model,
+            to_model,
+            requested_model,
+            source,
+            context_tokens,
+            prompt_cache_warm,
+            cache_ttl,
+            estimated_cache_write_usd,
+            pricing,
+        } => {
+            let payload = PostModelSwitchPayload {
+                hook_event_name: HookEventNamePostModelSwitch,
+                session_id: b.session_id,
+                transcript_path: b.transcript_path,
+                cwd: b.cwd,
+                prompt_id: b.prompt_id,
+                permission_mode: b.permission_mode,
+                agent_id: b.agent_id,
+                agent_type: b.agent_type,
+                effort: b.effort,
+                from_model: from_model.clone(),
+                to_model: to_model.clone(),
+                requested_model: requested_model.clone(),
+                source: source.clone(),
+                context_tokens: *context_tokens,
+                prompt_cache_warm: *prompt_cache_warm,
+                cache_ttl: cache_ttl.clone(),
+                estimated_cache_write_usd: *estimated_cache_write_usd,
+                pricing: pricing.clone(),
+            };
+            Some(("PostModelSwitch", serde_json::to_string(&payload).ok()?))
+        }
         HookEvent::Notification { message, kind } => {
             let payload = NotificationPayload {
                 hook_event_name: HookEventNameNotification,
@@ -3210,6 +3310,18 @@ fn map_command_output(
             if o.stdout.trim_start().starts_with('{') {
                 match parse_response(&o.stdout, expected_event) {
                     Ok(parsed) => {
+                        if expected_event == "PostModelSwitch" && o.exit_code != 0 {
+                            return (
+                                HookResult {
+                                    outcome: HookOutcome::Error,
+                                    stdout: o.stdout,
+                                    stderr: o.stderr,
+                                    exit_code: Some(o.exit_code),
+                                    response: None,
+                                },
+                                false,
+                            );
+                        }
                         let outcome = if o.exit_code == 0 {
                             HookOutcome::Success
                         } else {
@@ -3260,6 +3372,22 @@ fn map_command_output(
                         stdout: o.stdout,
                         stderr: o.stderr,
                         exit_code: Some(2),
+                        response: None,
+                    },
+                    false,
+                );
+            }
+            // PostModelSwitch is best-effort: even an explicit exit-2 status
+            // cannot undo the model mutation. Preserve the process failure for
+            // diagnostics/attachments, but do not synthesize a blocking
+            // decision as the generic command arm does for pre-action hooks.
+            if expected_event == "PostModelSwitch" && o.exit_code != 0 {
+                return (
+                    HookResult {
+                        outcome: HookOutcome::Error,
+                        stdout: o.stdout,
+                        stderr: o.stderr,
+                        exit_code: Some(o.exit_code),
                         response: None,
                     },
                     false,

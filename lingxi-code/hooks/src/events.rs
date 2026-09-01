@@ -1,6 +1,6 @@
 //! Hook event taxonomy (spec §9.1).
 //!
-//! The engine emits one of 30 well-known event kinds at observable points in
+//! The engine emits one of 33 well-known event kinds at observable points in
 //! its lifecycle. Each kind carries a payload describing what just happened
 //! (tool input, session metadata, file path, etc.). Registered hooks subscribe
 //! by `HookEventType` (the type-tag enum) and inspect the carried `HookEvent`
@@ -42,6 +42,11 @@ pub enum HookEventType {
     PreCompact,
     /// Compaction finished; payload reports tokens freed.
     PostCompact,
+    /// A requested model switch is about to run; hooks may allow, ask, or
+    /// block the switch.
+    PreModelSwitch,
+    /// A model switch completed; hooks may add context for the next request.
+    PostModelSwitch,
     /// Engine is about to ask the user (or auto-policy) for permission.
     PermissionRequest,
     /// A permission request was denied.
@@ -302,6 +307,51 @@ pub enum HookEvent {
         /// it into the wire payload (`{hook_event_name:"PostCompact", trigger,
         /// compact_summary}`).
         trigger: String,
+    },
+    /// A requested model switch is about to run. A `PreModelSwitch` hook can
+    /// allow, ask for confirmation, or block the switch through its response.
+    PreModelSwitch {
+        /// Model active before the switch.
+        from_model: String,
+        /// Model requested by the switch operation.
+        to_model: String,
+        /// Original requested model, when one was supplied by the caller.
+        requested_model: Option<String>,
+        /// What initiated the switch (`command`, `picker`, or `sdk`).
+        source: String,
+        /// Input-context token count used to estimate prompt-cache writes.
+        context_tokens: u64,
+        /// Whether the prompt cache is warm for the target model.
+        prompt_cache_warm: bool,
+        /// Prompt-cache lifetime (`5m` or `1h`).
+        cache_ttl: String,
+        /// Estimated cache-write cost in USD.
+        estimated_cache_write_usd: f64,
+        /// Pricing provenance (`configured`, `catalog`, or `default`).
+        pricing: String,
+    },
+    /// A model switch completed. A `PostModelSwitch` hook may provide
+    /// additional context for the next model request.
+    PostModelSwitch {
+        /// Model active before the switch.
+        from_model: String,
+        /// Model active after the switch.
+        to_model: String,
+        /// Original requested model, when one was supplied by the caller.
+        requested_model: Option<String>,
+        /// What initiated the switch (`command`, `picker`, `sdk`, `auto`, or
+        /// `resume`).
+        source: String,
+        /// Input-context token count used to estimate prompt-cache writes.
+        context_tokens: u64,
+        /// Whether the prompt cache is warm for the target model.
+        prompt_cache_warm: bool,
+        /// Prompt-cache lifetime (`5m` or `1h`).
+        cache_ttl: String,
+        /// Estimated cache-write cost in USD.
+        estimated_cache_write_usd: f64,
+        /// Pricing provenance (`configured`, `catalog`, or `default`).
+        pricing: String,
     },
     /// Engine is about to request permission.
     PermissionRequest {
@@ -596,6 +646,8 @@ impl HookEvent {
             Self::SubagentStop { .. } => HookEventType::SubagentStop,
             Self::PreCompact { .. } => HookEventType::PreCompact,
             Self::PostCompact { .. } => HookEventType::PostCompact,
+            Self::PreModelSwitch { .. } => HookEventType::PreModelSwitch,
+            Self::PostModelSwitch { .. } => HookEventType::PostModelSwitch,
             Self::PermissionRequest { .. } => HookEventType::PermissionRequest,
             Self::PermissionDenied { .. } => HookEventType::PermissionDenied,
             Self::TeammateIdle { .. } => HookEventType::TeammateIdle,

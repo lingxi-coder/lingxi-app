@@ -987,6 +987,267 @@ impl ConversationOrchestrator {
             .await
     }
 
+    /// Build the cache metadata shared by `PreModelSwitch` and
+    /// `PostModelSwitch`. Context is the last main-thread response's complete
+    /// usage (input already includes cache read/write, plus output). Cache warmth
+    /// describes the existing prompt prefix before the switch: a recent
+    /// successful call is likely still inside its configured TTL even though
+    /// the target model will need a new provider-local cache entry.
+    async fn model_switch_cache_metadata(
+        &self,
+        to_model: &str,
+        to_profile: Option<&str>,
+    ) -> (u64, bool, String, f64, String) {
+        let context_tokens = self
+            .compaction_runtime
+            .last_response_input_tokens
+            .load(std::sync::atomic::Ordering::Relaxed)
+            .saturating_add(
+                self.compaction_runtime
+                    .last_response_output_tokens
+                    .load(std::sync::atomic::Ordering::Relaxed),
+            );
+        let ttl_1h = platform_api::env::is_env_truthy(
+            std::env::var("ENABLE_PROMPT_CACHING_1H").ok().as_deref(),
+        );
+        let cache_ttl = if ttl_1h { "1h" } else { "5m" };
+        let ttl_ms = if ttl_1h {
+            60 * 60 * 1_000
+        } else {
+            5 * 60 * 1_000
+        };
+        let last_call_ms = self
+            .model_runtime
+            .last_api_call_at_ms
+            .load(std::sync::atomic::Ordering::SeqCst);
+        let now_ms = i64::try_from(
+            self.model_runtime
+                .session_started_at
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .elapsed()
+                .as_millis(),
+        )
+        .unwrap_or(i64::MAX);
+        let prompt_cache_warm =
+            last_call_ms >= 0 && now_ms.saturating_sub(last_call_ms) <= i64::from(ttl_ms);
+        let (estimated_cache_write_usd, pricing) =
+            self.model_switch_cache_write_estimate(to_model, to_profile, context_tokens, ttl_1h);
+        (
+            context_tokens,
+            prompt_cache_warm,
+            cache_ttl.to_string(),
+            estimated_cache_write_usd,
+            pricing,
+        )
+    }
+
+    /// Estimate the target route's cache-write cost from the same assembled
+    /// multi-provider catalog used for real accounting. Display metadata is
+    /// consulted for explicit free/subscription routes and user overrides;
+    /// unknown routes use the tracker's documented default tier rather than a
+    /// misleading zero.
+    #[allow(clippy::cast_precision_loss)]
+    fn model_switch_cache_write_estimate(
+        &self,
+        to_model: &str,
+        to_profile: Option<&str>,
+        context_tokens: u64,
+        ttl_1h: bool,
+    ) -> (f64, String) {
+        let listings = self.api.list_model_listings();
+        let listing = listings.iter().find(|listing| {
+            listing.request_model == to_model
+                && to_profile.map_or_else(
+                    || {
+                        listings
+                            .iter()
+                            .filter(|candidate| candidate.request_model == to_model)
+                            .count()
+                            == 1
+                    },
+                    |profile| listing.provider_id == profile,
+                )
+        });
+        let display_pricing = listing.and_then(|listing| listing.metadata.pricing.as_ref());
+        if display_pricing.is_some_and(|pricing| {
+            matches!(
+                pricing.billing_mode,
+                platform_api::ModelBillingMode::Subscription | platform_api::ModelBillingMode::Free
+            )
+        }) {
+            return (0.0, "catalog".to_string());
+        }
+
+        let model_ref = crate::cost_wiring::model_ref_from_string(to_model, to_profile);
+        let (catalog_pricing, resolution) = self.model_runtime.cost_tracker.as_ref().map_or_else(
+            || {
+                (
+                    cost::pricing::PricingCatalog::default_unknown_pricing(&model_ref),
+                    cost::pricing::PricingResolution::UnpricedModel {
+                        requested: model_ref.clone(),
+                    },
+                )
+            },
+            |tracker| tracker.resolve_pricing_with_default(&model_ref),
+        );
+        let used_default = matches!(
+            &resolution,
+            cost::pricing::PricingResolution::UnpricedModel { .. }
+        );
+
+        let direct_rate = display_pricing.and_then(|pricing| {
+            pricing
+                .tiers
+                .iter()
+                .filter(|tier| tier.context_threshold_tokens <= context_tokens)
+                .max_by_key(|tier| tier.context_threshold_tokens)
+                .and_then(|tier| tier.cache_write_per_million)
+                .or(pricing.cache_write_per_million)
+        });
+        let catalog_rate = |class: cost::pricing::TokenClass| {
+            catalog_pricing
+                .token_rates
+                .get(&class)
+                .map(|rate| rate.nano_usd_per_token as f64 / 1_000.0)
+        };
+        let rate_per_million = direct_rate.map_or_else(
+            || {
+                if ttl_1h {
+                    catalog_rate(cost::pricing::TokenClass::CacheWrite1h)
+                } else {
+                    None
+                }
+                .or_else(|| catalog_rate(cost::pricing::TokenClass::CacheWrite))
+                .unwrap_or(0.0)
+            },
+            |rate| {
+                if !ttl_1h {
+                    return rate;
+                }
+                let base = catalog_rate(cost::pricing::TokenClass::CacheWrite);
+                let hourly = catalog_rate(cost::pricing::TokenClass::CacheWrite1h);
+                match (base, hourly) {
+                    _ if used_default => rate,
+                    (Some(base), Some(hourly)) if base > 0.0 => rate * hourly / base,
+                    _ => rate,
+                }
+            },
+        );
+        let estimate = ((context_tokens as f64 * rate_per_million / 1_000_000.0) * 10_000.0)
+            .round()
+            / 10_000.0;
+        let pricing = if display_pricing.and_then(|pricing| pricing.source.as_deref())
+            == Some("userOverride")
+        {
+            "configured"
+        } else if used_default {
+            "default"
+        } else {
+            "catalog"
+        };
+        (estimate, pricing.to_string())
+    }
+
+    /// Fire the blocking `PreModelSwitch` hooks before mutating the live model.
+    /// Only callers that provide a `command`, `picker`, or `sdk` source should
+    /// invoke this method; `auto` and `resume` are Post-only upstream paths.
+    pub(crate) async fn run_pre_model_switch_hooks(
+        &self,
+        from_model: &str,
+        to_model: &str,
+        requested_model: Option<&str>,
+        to_profile: Option<&str>,
+        source: &str,
+    ) -> hooks::response::AggregateHookResult {
+        if !self
+            .hooks
+            .has_hooks_for(&hooks::events::HookEventType::PreModelSwitch)
+            .await
+        {
+            return hooks::response::AggregateHookResult::default();
+        }
+        let (context_tokens, prompt_cache_warm, cache_ttl, estimated_cache_write_usd, pricing) =
+            self.model_switch_cache_metadata(to_model, to_profile).await;
+        let ctx = self.lifecycle_hook_ctx(false).await;
+        self.hooks
+            .execute(
+                HookEvent::PreModelSwitch {
+                    from_model: from_model.to_string(),
+                    to_model: to_model.to_string(),
+                    requested_model: requested_model.map(str::to_string),
+                    source: source.to_string(),
+                    context_tokens,
+                    prompt_cache_warm,
+                    cache_ttl,
+                    estimated_cache_write_usd,
+                    pricing,
+                },
+                ctx,
+            )
+            .await
+    }
+
+    /// Fire `PostModelSwitch` after the live model changes. Post hooks are
+    /// best-effort: their decisions never roll back an already-applied switch.
+    /// Additional context is persisted as one attachment and kept as a meta
+    /// message in the live history for the next model request.
+    pub(crate) async fn run_post_model_switch_hooks(
+        &self,
+        from_model: &str,
+        to_model: &str,
+        requested_model: Option<&str>,
+        to_profile: Option<&str>,
+        source: &str,
+    ) -> hooks::response::AggregateHookResult {
+        if !self
+            .hooks
+            .has_hooks_for(&hooks::events::HookEventType::PostModelSwitch)
+            .await
+        {
+            return hooks::response::AggregateHookResult::default();
+        }
+        let (context_tokens, prompt_cache_warm, cache_ttl, estimated_cache_write_usd, pricing) =
+            self.model_switch_cache_metadata(to_model, to_profile).await;
+        let ctx = self.lifecycle_hook_ctx(false).await;
+        let aggregate = self
+            .hooks
+            .execute(
+                HookEvent::PostModelSwitch {
+                    from_model: from_model.to_string(),
+                    to_model: to_model.to_string(),
+                    requested_model: requested_model.map(str::to_string),
+                    source: source.to_string(),
+                    context_tokens,
+                    prompt_cache_warm,
+                    cache_ttl,
+                    estimated_cache_write_usd,
+                    pricing,
+                },
+                ctx,
+            )
+            .await;
+
+        if !aggregate.additional_contexts.is_empty() {
+            let tool_use_id = format!("hook-{}", protocol::HookId::new().as_uuid());
+            self.persist_hook_attachment_to_jsonl(hooks::additional_context_attachment(
+                "PostModelSwitch",
+                &tool_use_id,
+                "PostModelSwitch",
+                &aggregate.additional_contexts,
+            ))
+            .await;
+            let body = aggregate.additional_contexts.join("\n");
+            self.session.lock().await.history.push(ConversationMessage::user_meta(
+                MessageId::new(),
+                format!(
+                    "<system-reminder>\nPostModelSwitch hook additional context: {body}\n</system-reminder>"
+                ),
+            ));
+        }
+        aggregate
+    }
+
     pub(super) async fn collect_session_start_messages(
         &self,
         source: &str,
@@ -1534,5 +1795,61 @@ impl ConversationOrchestrator {
             let mut s = self.session.lock().await;
             s.history.push(msg);
         }
+    }
+}
+
+#[cfg(test)]
+mod model_switch_metadata_tests {
+    use super::*;
+    use crate::test_support::{
+        noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate,
+        StaticMemoryProvider,
+    };
+
+    #[tokio::test]
+    async fn metadata_counts_output_and_uses_target_profile_pricing() {
+        let api = Arc::new(MockApiClient::new(Vec::new()));
+        api.set_model_listings(vec![platform_api::ModelListing {
+            display_model: "Example".to_string(),
+            request_model: "shared-model".to_string(),
+            provider_id: "example".to_string(),
+            provider_label: "Example".to_string(),
+            metadata: platform_api::ModelMetadata {
+                pricing: Some(platform_api::ModelPricing {
+                    billing_mode: platform_api::ModelBillingMode::PerToken,
+                    cache_write_per_million: Some(2.5),
+                    source: Some("userOverride".to_string()),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+            ..Default::default()
+        }]);
+        let orch = ConversationOrchestrator::new(
+            crate::OrchestratorConfig::default(),
+            api,
+            Arc::new(tool_api::ToolRegistry::new()),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            std::env::temp_dir(),
+        );
+        orch.compaction_runtime
+            .last_response_input_tokens
+            .store(1_000, std::sync::atomic::Ordering::Relaxed);
+        orch.compaction_runtime
+            .last_response_output_tokens
+            .store(100, std::sync::atomic::Ordering::Relaxed);
+
+        let (tokens, warm, ttl, estimate, pricing) = orch
+            .model_switch_cache_metadata("shared-model", Some("example"))
+            .await;
+
+        assert_eq!(tokens, 1_100);
+        assert!(!warm);
+        assert!(matches!(ttl.as_str(), "5m" | "1h"));
+        assert_eq!(estimate, 0.0028);
+        assert_eq!(pricing, "configured");
     }
 }

@@ -726,6 +726,49 @@ mod tests {
     }
 
     #[test]
+    fn parse_response_model_switch_permission_decisions_match_schema() {
+        let allowed = parse_response(
+            r#"{"hookSpecificOutput":{"hookEventName":"PreModelSwitch","permissionDecision":"allow","permissionDecisionReason":"approved"}}"#,
+            "PreModelSwitch",
+        )
+        .unwrap();
+        assert_eq!(allowed.decision, Some(HookDecision::Approve));
+        assert_eq!(allowed.reason.as_deref(), Some("approved"));
+
+        let asked = parse_response(
+            r#"{"hookSpecificOutput":{"hookEventName":"PreModelSwitch","permissionDecision":"ask"}}"#,
+            "PreModelSwitch",
+        )
+        .unwrap();
+        assert_eq!(asked.decision, Some(HookDecision::Ask));
+
+        let blocked = parse_response(
+            r#"{"hookSpecificOutput":{"hookEventName":"PreModelSwitch","permissionDecision":"deny"}}"#,
+            "PreModelSwitch",
+        )
+        .unwrap();
+        assert_eq!(blocked.decision, Some(HookDecision::Block));
+
+        let deferred = parse_response(
+            r#"{"hookSpecificOutput":{"hookEventName":"PreModelSwitch","permissionDecision":"defer"}}"#,
+            "PreModelSwitch",
+        )
+        .unwrap_err();
+        assert!(matches!(
+            deferred,
+            HookResponseParseError::UnknownPermissionDecision { value } if value == "defer"
+        ));
+
+        let post = parse_response(
+            r#"{"hookSpecificOutput":{"hookEventName":"PostModelSwitch","additionalContext":"use the new model"}}"#,
+            "PostModelSwitch",
+        )
+        .unwrap();
+        assert_eq!(post.decision, None);
+        assert_eq!(post.additional_context.as_deref(), Some("use the new model"));
+    }
+
+    #[test]
     fn parse_response_unknown_decision_throws() {
         // R-O2c: an unrecognised legacy `decision` rejects the whole output
         // (`azn` `default: throw Error("Unknown hook decision type: …")`).
@@ -1462,6 +1505,59 @@ mod tests {
     }
 
     #[test]
+    fn model_switch_payloads_keep_required_cache_fields_and_nullable_request() {
+        let pre = PreModelSwitchPayload {
+            hook_event_name: HookEventNamePreModelSwitch,
+            session_id: "sess-1".into(),
+            transcript_path: "/tmp/t.jsonl".into(),
+            cwd: "/work".into(),
+            prompt_id: None,
+            permission_mode: None,
+            agent_id: None,
+            agent_type: None,
+            effort: None,
+            from_model: "claude-sonnet-4-6".into(),
+            to_model: "claude-opus-4-6".into(),
+            requested_model: None,
+            source: "command".into(),
+            context_tokens: 2048,
+            prompt_cache_warm: false,
+            cache_ttl: "5m".into(),
+            estimated_cache_write_usd: 0.0123,
+            pricing: "catalog".into(),
+        };
+        assert_eq!(
+            serde_json::to_string(&pre).unwrap(),
+            r#"{"hook_event_name":"PreModelSwitch","session_id":"sess-1","transcript_path":"/tmp/t.jsonl","cwd":"/work","from_model":"claude-sonnet-4-6","to_model":"claude-opus-4-6","requested_model":null,"source":"command","context_tokens":2048,"prompt_cache_warm":false,"cache_ttl":"5m","estimated_cache_write_usd":0.0123,"pricing":"catalog"}"#
+        );
+
+        let post = PostModelSwitchPayload {
+            hook_event_name: HookEventNamePostModelSwitch,
+            session_id: "sess-1".into(),
+            transcript_path: "/tmp/t.jsonl".into(),
+            cwd: "/work".into(),
+            prompt_id: None,
+            permission_mode: None,
+            agent_id: None,
+            agent_type: None,
+            effort: None,
+            from_model: "claude-sonnet-4-6".into(),
+            to_model: "claude-opus-4-6".into(),
+            requested_model: Some("opus".into()),
+            source: "resume".into(),
+            context_tokens: 2048,
+            prompt_cache_warm: true,
+            cache_ttl: "1h".into(),
+            estimated_cache_write_usd: 0.0,
+            pricing: "default".into(),
+        };
+        let post_json = serde_json::to_string(&post).unwrap();
+        assert!(post_json.contains(r#""hook_event_name":"PostModelSwitch""#));
+        assert!(post_json.contains(r#""requested_model":"opus""#));
+        assert!(post_json.contains(r#""cache_ttl":"1h","estimated_cache_write_usd":0.0,"pricing":"default""#));
+    }
+
+    #[test]
     fn notification_payload_serializes_byte_lock() {
         let p = NotificationPayload {
             hook_event_name: HookEventNameNotification,
@@ -1679,6 +1775,14 @@ mod tests {
             (
                 serde_json::to_string(&HookEventNamePostCompact).unwrap(),
                 r#""PostCompact""#,
+            ),
+            (
+                serde_json::to_string(&HookEventNamePreModelSwitch).unwrap(),
+                r#""PreModelSwitch""#,
+            ),
+            (
+                serde_json::to_string(&HookEventNamePostModelSwitch).unwrap(),
+                r#""PostModelSwitch""#,
             ),
             (
                 serde_json::to_string(&HookEventNameNotification).unwrap(),

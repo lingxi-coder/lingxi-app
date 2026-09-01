@@ -1008,7 +1008,11 @@ pub(crate) async fn run_ratatui_with_initial_state(
             // entry, the boot connected-provider fallback's first-preference
             // pass. This recording was lost in the iocraft-TUI deletion; the
             // ratatui picker previously only mutated in-memory session state.
-            if orch.switch_model(&model, profile.as_deref()).await.is_ok() {
+            if orch
+                .switch_model_with_source(&model, profile.as_deref(), "picker")
+                .await
+                .is_ok()
+            {
                 match profile.as_deref() {
                     Some(p) => {
                         tui_core::recent_models::record_default_model(&format!("{p}/{model}"));

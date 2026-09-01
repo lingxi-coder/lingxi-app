@@ -115,6 +115,25 @@ impl CostTracker {
         }
     }
 
+    /// Resolve the exact pricing catalog owned by this tracker, applying the
+    /// same non-zero unknown-model fallback used by response accounting.
+    /// Callers that surface estimates can therefore report the same price and
+    /// provenance that will actually be charged into this session.
+    #[must_use]
+    pub fn resolve_pricing_with_default(
+        &self,
+        model_ref: &ModelRef,
+    ) -> (crate::ModelPricing, PricingResolution) {
+        self.catalog.resolve(model_ref).unwrap_or_else(|_| {
+            (
+                PricingCatalog::default_unknown_pricing(model_ref),
+                PricingResolution::UnpricedModel {
+                    requested: model_ref.clone(),
+                },
+            )
+        })
+    }
+
     /// Legacy M1 entry point — delegates to [`Self::record_api_response_v2`]
     /// with zero cache counters, `is_batch_request = false`, and no telemetry
     /// bus. Existing M1/M2 callers compile unchanged.
@@ -182,15 +201,7 @@ impl CostTracker {
         // (`cost-tracker.ts:228-233`); no Rust caller renders that string yet,
         // and the renderer lives outside the cost crate, so the warning is
         // surfaced there — here we guarantee the non-zero billing + the flag.
-        let (pricing, resolution) = match self.catalog.resolve(&model_ref) {
-            Ok((p, r)) => (p, r),
-            Err(_) => (
-                PricingCatalog::default_unknown_pricing(&model_ref),
-                PricingResolution::UnpricedModel {
-                    requested: model_ref.clone(),
-                },
-            ),
-        };
+        let (pricing, resolution) = self.resolve_pricing_with_default(&model_ref);
 
         let cost = CostCalculator::calculate_nano_usd(&usage, &pricing);
 

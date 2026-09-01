@@ -21,7 +21,7 @@
 ///
 /// Raised 2.1.241 → 2.1.245 on 2026-08-25, once the main query-loop identity
 /// (`querySource` / `print` vs non-interactive) matched the 2.1.245 binary.
-/// Raised 2.1.246 → 2.1.251 on 2026-08-30 after the mcp/plugin byte-alignment
+/// Raised 2.1.246 → 2.1.252 on 2026-08-30 after the mcp/plugin byte-alignment
 /// backlog was implemented against the newer oracle.
 ///
 /// The bump is deliberately LAST. It is what this session tells servers and child
@@ -29,7 +29,7 @@
 /// the port — and the port has been burned by the opposite error too (it once
 /// advertised 2.1.217 while implementing 2.1.220), which is why all three
 /// identifiers derive from this one constant.
-pub const CLAUDE_CODE_VERSION: &str = "2.1.251";
+pub const CLAUDE_CODE_VERSION: &str = "2.1.252";
 
 pub mod agent_name_registry;
 pub mod agent_view;

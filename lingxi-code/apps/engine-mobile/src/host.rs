@@ -88,14 +88,6 @@ use orchestrator::{
 };
 use permission::gate::PermissionGate;
 use permission::PermissionMode;
-use sandbox::runtime_config::{Platform as SandboxPlatform, SandboxRuntimeConfig};
-use secret::CredentialManager;
-use tokio::sync::{mpsc, Mutex, Notify, RwLock};
-use tokio_util::sync::CancellationToken;
-use tool_api::AnthropicRequestBuilder;
-use tool_api::SessionCwd;
-use tool_api::{BuiltinToolContext, ToolRegistry};
-use tool_workflow::WorkflowLauncher as _;
 use platform_api::http::{
     HttpError, RawByteStream, RawByteStreamWithMeta, SseStream, SseStreamWithMeta,
     WebSocketConnectionWithMeta, WebSocketMessageStreamWithMeta,
@@ -105,6 +97,14 @@ use platform_api::{
     MobileLinuxRuntimeMode, OrchestratorHandle, OutputStream, Platform, RootfsState, RootfsStatus,
     SlashCommandDispatcher,
 };
+use sandbox::runtime_config::{Platform as SandboxPlatform, SandboxRuntimeConfig};
+use secret::CredentialManager;
+use tokio::sync::{mpsc, Mutex, Notify, RwLock};
+use tokio_util::sync::CancellationToken;
+use tool_api::AnthropicRequestBuilder;
+use tool_api::SessionCwd;
+use tool_api::{BuiltinToolContext, ToolRegistry};
+use tool_workflow::WorkflowLauncher as _;
 
 use crate::{
     local_apps_host::{
@@ -834,19 +834,25 @@ struct SlashAuthoritySnapshot {
     catalog: Vec<SlashCommandDto>,
 }
 
-fn lower_reasoning_selection(selection: &platform_api::ReasoningSelection) -> ReasoningSelectionDto {
+fn lower_reasoning_selection(
+    selection: &platform_api::ReasoningSelection,
+) -> ReasoningSelectionDto {
     match selection {
         platform_api::ReasoningSelection::Automatic => ReasoningSelectionDto::Automatic,
         platform_api::ReasoningSelection::Disabled => ReasoningSelectionDto::Disabled,
         platform_api::ReasoningSelection::Enabled => ReasoningSelectionDto::Enabled,
-        platform_api::ReasoningSelection::Level { id } => ReasoningSelectionDto::Level { id: id.clone() },
+        platform_api::ReasoningSelection::Level { id } => {
+            ReasoningSelectionDto::Level { id: id.clone() }
+        }
         platform_api::ReasoningSelection::TokenBudget { tokens } => {
             ReasoningSelectionDto::TokenBudget { tokens: *tokens }
         }
     }
 }
 
-fn decode_reasoning_selection(selection: ReasoningSelectionDto) -> platform_api::ReasoningSelection {
+fn decode_reasoning_selection(
+    selection: ReasoningSelectionDto,
+) -> platform_api::ReasoningSelection {
     match selection {
         ReasoningSelectionDto::Automatic => platform_api::ReasoningSelection::Automatic,
         ReasoningSelectionDto::Disabled => platform_api::ReasoningSelection::Disabled,
@@ -1830,8 +1836,12 @@ fn build_mobile_runtime_environment(
         platform_api::MobileToolRuntime::MobileLinuxGuest => {
             platform_api::MobileNetworkPolicy::PermissionMediated
         }
-        platform_api::MobileToolRuntime::AndroidLegacy => platform_api::MobileNetworkPolicy::DeniedByHost,
-        platform_api::MobileToolRuntime::Unavailable => platform_api::MobileNetworkPolicy::DeniedByHost,
+        platform_api::MobileToolRuntime::AndroidLegacy => {
+            platform_api::MobileNetworkPolicy::DeniedByHost
+        }
+        platform_api::MobileToolRuntime::Unavailable => {
+            platform_api::MobileNetworkPolicy::DeniedByHost
+        }
     };
     let lifecycle_policy = match host_environment.launch_mode {
         platform_api::MobileLaunchMode::ScheduledHeadless => {
@@ -1845,11 +1855,16 @@ fn build_mobile_runtime_environment(
                 platform_api::MobileLifecyclePolicy::AndroidForegroundServiceBestEffort
             }
         },
-        platform_api::MobileLaunchMode::Unknown => platform_api::MobileLifecyclePolicy::UnknownBestEffort,
+        platform_api::MobileLaunchMode::Unknown => {
+            platform_api::MobileLifecyclePolicy::UnknownBestEffort
+        }
     };
 
-    let guest_cwd = matches!(tool_runtime, platform_api::MobileToolRuntime::MobileLinuxGuest)
-        .then(|| session_cwd.cwd().to_string_lossy().to_string());
+    let guest_cwd = matches!(
+        tool_runtime,
+        platform_api::MobileToolRuntime::MobileLinuxGuest
+    )
+    .then(|| session_cwd.cwd().to_string_lossy().to_string());
     Some(platform_api::MobileRuntimeEnvironment::new(
         host_environment,
         tool_runtime,
@@ -1861,7 +1876,9 @@ fn build_mobile_runtime_environment(
     ))
 }
 
-fn mobile_launch_is_interactive(host_environment: Option<&platform_api::MobileHostEnvironment>) -> bool {
+fn mobile_launch_is_interactive(
+    host_environment: Option<&platform_api::MobileHostEnvironment>,
+) -> bool {
     !host_environment.is_some_and(|environment| {
         matches!(
             environment.launch_mode,
@@ -3986,7 +4003,8 @@ async fn build_mobile_inner_with_ask(
     // the SAME shared registry + `TuiBridgeResolver` channel as the main
     // session.
     let subagent_pool = Arc::new(agent::StateMachinePool::new(
-        Arc::new(platform_posix_minimal::PosixRuntime::new()) as Arc<dyn platform_api::RuntimeSpawner>,
+        Arc::new(platform_posix_minimal::PosixRuntime::new())
+            as Arc<dyn platform_api::RuntimeSpawner>,
         platform_api::subagent_spawn::max_concurrent_subagents(),
     ));
     let subagent_hook_session_id = protocol::SessionId::new();
@@ -4377,12 +4395,13 @@ async fn build_mobile_inner_with_ask(
         plugin_workflows: plugin_workflow_registry.clone(),
     });
     let workflow_policy_enabled = tool_workflow::workflows_enabled(false);
-    let workflow_size_guideline_state = platform_api::session_flags::WorkflowSizeGuidelineState::new(
-        workflow_size_guideline.as_wire(),
-        false,
-        workflow_size_guideline_is_default,
-    )
-    .expect("mobile workflowSizeGuideline must be valid");
+    let workflow_size_guideline_state =
+        platform_api::session_flags::WorkflowSizeGuidelineState::new(
+            workflow_size_guideline.as_wire(),
+            false,
+            workflow_size_guideline_is_default,
+        )
+        .expect("mobile workflowSizeGuideline must be valid");
     let dynamic_workflows_gate = platform_api::session_flags::DynamicWorkflowsGate::new(
         workflow_policy_enabled && workflow_session_enabled,
         !workflow_policy_enabled,
@@ -4548,26 +4567,27 @@ async fn build_mobile_inner_with_ask(
     // stay byte-identical. On a device the env var is typically unset, so this is
     // off unless the host app explicitly sets it. A missing/unusable key makes the
     // side query fail → empty surfaced set (never breaks a turn).
-    let memdir_prefetch =
-        if platform_api::env::is_env_truthy(std::env::var("LINGXI_MEMDIR_PREFETCH").ok().as_deref()) {
-            // `cfg.lingxi_home` is the device `.claude` dir; the helper re-appends
-            // `.lingxi/memdir`, so pass its PARENT as `home` ⇒ `<lingxi_home>/memdir`.
-            let home = cfg
-                .lingxi_home
-                .parent()
-                .map(std::path::Path::to_path_buf)
-                .unwrap_or_else(|| cwd.clone());
-            Some(orchestrator::prompt::build_memdir_prefetch_from_anthropic(
-                cfg.api_key.clone(),
-                Some(cfg.api_base.clone()),
-                http.clone(),
-                Arc::new(platform_posix_minimal::runtime::PosixRuntime::new())
-                    as Arc<dyn platform_api::RuntimeSpawner>,
-                &home,
-            ))
-        } else {
-            None
-        };
+    let memdir_prefetch = if platform_api::env::is_env_truthy(
+        std::env::var("LINGXI_MEMDIR_PREFETCH").ok().as_deref(),
+    ) {
+        // `cfg.lingxi_home` is the device `.claude` dir; the helper re-appends
+        // `.lingxi/memdir`, so pass its PARENT as `home` ⇒ `<lingxi_home>/memdir`.
+        let home = cfg
+            .lingxi_home
+            .parent()
+            .map(std::path::Path::to_path_buf)
+            .unwrap_or_else(|| cwd.clone());
+        Some(orchestrator::prompt::build_memdir_prefetch_from_anthropic(
+            cfg.api_key.clone(),
+            Some(cfg.api_base.clone()),
+            http.clone(),
+            Arc::new(platform_posix_minimal::runtime::PosixRuntime::new())
+                as Arc<dyn platform_api::RuntimeSpawner>,
+            &home,
+        ))
+    } else {
+        None
+    };
 
     // Audit fix (#3): autocompaction parity with desktop. Build the real
     // CompactionOrchestrator (threshold 150_000 tokens — the M3 Anthropic prod
@@ -4800,9 +4820,8 @@ async fn build_mobile_inner_with_ask(
     // profile-qualified default_model.  SessionState::empty starts model_profile
     // at None; this is a no-op when default_model is a bare id.
     if let Some(profile) = default_model_profile.as_deref() {
-        if let Err(e) = handle.switch_model(&default_model_id, Some(profile)).await {
-            tracing::warn!(error = %e, "failed to seed default model profile");
-        }
+        orch.seed_initial_model_profile(&default_model_id, profile)
+            .await;
     }
     orch.spawn_startup_responses_websocket_prewarm();
     // Fill the shared registry slot so batch-8, the slash dispatcher, the
@@ -6400,24 +6419,23 @@ impl MobileEngineHandle {
                 };
                 self.restore_session_permission_mode(&target_permission_mode)
                     .await?;
-                if let Err(error) =
-                    handle
-                        .resume_session(
-                            protocol::SessionId::from_uuid(uuid),
-                            replayed.state.history.clone(),
-                            replayed.last_message_uuid.map(|id| id.to_string()),
-                            replayed.state.active_goal.clone().map(|goal| {
-                                platform_api::ActiveGoalSnapshot {
-                                    condition: goal.condition,
-                                    set_at: goal.set_at,
-                                    last_reason: goal.last_reason,
-                                    iterations: goal.iterations,
-                                    tokens_at_start: goal.tokens_at_start,
-                                }
-                            }),
-                            replayed.handle_runtime_snapshot(),
-                        )
-                        .await
+                if let Err(error) = handle
+                    .resume_session(
+                        protocol::SessionId::from_uuid(uuid),
+                        replayed.state.history.clone(),
+                        replayed.last_message_uuid.map(|id| id.to_string()),
+                        replayed.state.active_goal.clone().map(|goal| {
+                            platform_api::ActiveGoalSnapshot {
+                                condition: goal.condition,
+                                set_at: goal.set_at,
+                                last_reason: goal.last_reason,
+                                iterations: goal.iterations,
+                                tokens_at_start: goal.tokens_at_start,
+                            }
+                        }),
+                        replayed.handle_runtime_snapshot(),
+                    )
+                    .await
                 {
                     let _ = self
                         .restore_session_permission_mode(&previous_permission_mode)
@@ -8211,8 +8229,10 @@ impl MobileEngineHandle {
                     .local_apps_llm
                     .set_model(model_id.clone(), profile.clone());
                 let snapshot = handle.get_status_snapshot().await;
-                let selected =
-                    platform_api::qualified_model_ref(&snapshot.model, snapshot.model_profile.as_deref());
+                let selected = platform_api::qualified_model_ref(
+                    &snapshot.model,
+                    snapshot.model_profile.as_deref(),
+                );
                 self.event_sink
                     .emit(ClientEvent::ModelChanged { model: selected })
                     .await;
@@ -9606,7 +9626,10 @@ impl MobileEngineHandle {
                 .await
                 .as_uuid()
                 .to_string(),
-            model: platform_api::qualified_model_ref(&snapshot.model, snapshot.model_profile.as_deref()),
+            model: platform_api::qualified_model_ref(
+                &snapshot.model,
+                snapshot.model_profile.as_deref(),
+            ),
             permission_mode: self
                 .inner
                 .orchestrator
@@ -9699,8 +9722,10 @@ impl MobileEngineHandle {
                     snapshot.model_profile.as_deref(),
                 );
                 let details = curated.iter().map(lower_model_details).collect();
-                let current =
-                    platform_api::qualified_model_ref(&snapshot.model, snapshot.model_profile.as_deref());
+                let current = platform_api::qualified_model_ref(
+                    &snapshot.model,
+                    snapshot.model_profile.as_deref(),
+                );
                 self.event_sink
                     .emit(ClientEvent::ModelList {
                         models,
@@ -11632,10 +11657,10 @@ mod tests {
     use async_trait::async_trait;
     use client_adapter::{ClientEventListener, ListenerSink, PermissionRequestSink};
     use client_protocol::events::ClientEvent;
-    use tokio::sync::Notify;
-    use tool_skill::skill::{SkillCommandType, SkillLoader as _};
     use platform_api::subagent_spawn::{SubagentObservation, SubagentSpawnObserver};
     use platform_api::{OrchestratorHandle as _, SlashCommandDispatcher as _, SlashDispatchResult};
+    use tokio::sync::Notify;
+    use tool_skill::skill::{SkillCommandType, SkillLoader as _};
 
     use super::{
         build_mobile, builtin_provider_catalog, classify_provider_connection_response,
@@ -12188,9 +12213,9 @@ mod tests {
                 "频率",
             ),
             (
-                Err(platform_api::HttpError::Timeout(std::time::Duration::from_secs(
-                    1,
-                ))),
+                Err(platform_api::HttpError::Timeout(
+                    std::time::Duration::from_secs(1),
+                )),
                 None,
                 "超时",
             ),
@@ -12286,7 +12311,10 @@ mod tests {
             Ok(())
         }
 
-        async fn list(&self, service: &str) -> Result<Vec<String>, platform_api::SecureStorageError> {
+        async fn list(
+            &self,
+            service: &str,
+        ) -> Result<Vec<String>, platform_api::SecureStorageError> {
             Ok(self
                 .map
                 .lock()
@@ -14484,7 +14512,9 @@ mod tests {
             _tool: &str,
             _input: serde_json::Value,
         ) -> Result<platform_api::McpToolResultDto, platform_api::McpError> {
-            Err(platform_api::McpError::Internal("unused test tool call".into()))
+            Err(platform_api::McpError::Internal(
+                "unused test tool call".into(),
+            ))
         }
 
         async fn read_resource(
@@ -14516,7 +14546,9 @@ mod tests {
             _conn: &platform_api::McpRawConnection,
             _request: platform_api::ElicitRequestDto,
         ) -> Result<platform_api::ElicitResultDto, platform_api::McpError> {
-            Err(platform_api::McpError::Internal("unused test elicitation".into()))
+            Err(platform_api::McpError::Internal(
+                "unused test elicitation".into(),
+            ))
         }
 
         async fn disconnect(
@@ -15657,7 +15689,8 @@ mod tests {
         let (handle, _listener) = build_submit_handle_with_config(cfg, tmp.path());
 
         handle.runtime().block_on(async {
-            let before: Arc<dyn platform_api::OrchestratorHandle> = handle.inner.orchestrator.clone();
+            let before: Arc<dyn platform_api::OrchestratorHandle> =
+                handle.inner.orchestrator.clone();
             let before = before.get_status_snapshot().await;
 
             let result = handle

@@ -17,7 +17,7 @@ export function MarkdownContent({ text }: { text: string }) {
 
 function MarkdownBlockView({ block, t }: { block: MarkdownBlock; t: ReturnType<typeof useT> }): ReactNode {
   if (block.type === 'paragraph') {
-    return <p style={{ margin: 0, whiteSpace: 'pre-wrap' }}><InlineMarkdown text={block.text} t={t} /></p>;
+    return <p style={{ margin: 0, whiteSpace: 'pre-wrap', textWrap: 'pretty' }}><InlineMarkdown text={block.text} t={t} /></p>;
   }
   if (block.type === 'heading') {
     const sizes = [0, 20, 18, 16, 15, 14, 13.5];
@@ -51,7 +51,7 @@ function renderInline(text: string, t: ReturnType<typeof useT>): ReactNode[] {
     if (match.kind === 'emoji') {
       nodes.push(<span key={key++} style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'center', width: 16, height: 16, borderRadius: 4, background: match.value === '✓' ? t.ok : t.danger, color: '#fff', verticalAlign: -3, margin: '0 1px' }}><Icon name={match.value === '✓' ? 'check' : 'x'} size={11} stroke={3} color="#fff" /></span>);
     } else if (match.kind === 'code') {
-      nodes.push(<code key={key++} className="mono" style={{ padding: '1px 4px', borderRadius: 4, background: t.windowBg, color: t.accent, fontSize: '.9em' }}>{match.value}</code>);
+      nodes.push(<code key={key++} className="mono" style={{ padding: '2px 5px', borderRadius: 5, background: t.surfaceHover, border: `0.5px solid ${t.border}`, color: t.text, fontSize: '.9em' }}>{match.value}</code>);
     } else if (match.kind === 'link') {
       const href = safeHref(match.href);
       nodes.push(href ? <a key={key++} href={href} target="_blank" rel="noreferrer" style={{ color: t.accent, textDecoration: 'underline', textUnderlineOffset: 2 }}>{renderInline(match.value, t)}</a> : <span key={key++}>{match.raw}</span>);

@@ -1,13 +1,17 @@
 * { box-sizing: border-box; margin: 0; padding: 0; }
 *::-webkit-scrollbar { width: 8px; height: 8px; }
-*::-webkit-scrollbar-thumb { background: rgba(120, 100, 180, 0.18); border-radius: 99px; }
-*::-webkit-scrollbar-thumb:hover { background: rgba(120, 100, 180, 0.32); }
+*::-webkit-scrollbar-thumb { background: rgba(84, 82, 94, 0.18); border-radius: 99px; }
+*::-webkit-scrollbar-thumb:hover { background: rgba(84, 82, 94, 0.30); }
 *::-webkit-scrollbar-track { background: transparent; }
 html, body, #root { height: 100%; }
 body {
-  font-family: 'Inter', 'Noto Sans SC', -apple-system, BlinkMacSystemFont, sans-serif;
+  font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'SF Pro Display',
+    'Noto Sans SC', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+  font-size: 13px;
+  line-height: 1.45;
   -webkit-font-smoothing: antialiased;
-  font-feature-settings: 'cv11', 'ss01';
+  text-rendering: optimizeLegibility;
+  font-kerning: normal;
   overflow: hidden;
   background: #1a1a1d;
 }
@@ -116,7 +120,7 @@ body {
   transition-timing-function: cubic-bezier(0.2, 0, 0, 1);
 }
 .tool-row-title { color: var(--tool-label-color); }
-.tool-row-inline-detail { font-size: 12px; font-weight: 400; opacity: .78; }
+.tool-row-inline-detail { font-size: 12.5px; font-weight: 400; opacity: .78; }
 .running-sweep {
   color: transparent !important;
   background-image:

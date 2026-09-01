@@ -35,7 +35,7 @@ import { Disclosure } from './Disclosure';
 import { Icon } from './Icon';
 
 const TITLE_STYLE: CSSProperties = Object.freeze({
-  fontSize: 14,
+  fontSize: 14.5,
   fontWeight: 500,
   minWidth: 0,
   overflow: 'hidden',
@@ -167,11 +167,11 @@ export const ToolCall = memo(function ToolCall({ item, open, onSetOpen }: ToolCa
         maxWidth: 760,
         display: 'flex', flexDirection: 'column', gap: 4,
         padding: '2px 0', position: 'relative',
-        '--tool-label-color': item.status === 'error' ? t.danger : t.text2,
+        '--tool-label-color': item.status === 'error' ? t.danger : t.text3,
         '--tool-hover-color': item.status === 'error' ? t.danger : t.text,
         '--tool-focus-color': item.status === 'error' ? t.danger : t.accent,
         '--tool-icon-color': item.status === 'error' ? t.danger : item.status === 'running' ? t.accent : t.text3,
-        '--sweep-base': item.status === 'error' ? t.danger : t.text2,
+        '--sweep-base': item.status === 'error' ? t.danger : t.text3,
         '--sweep-highlight': item.status === 'error' ? t.danger : t.accent,
       } as CSSProperties}
     >

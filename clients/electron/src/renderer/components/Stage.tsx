@@ -28,7 +28,7 @@ const NarrationLine = memo(function NarrationLine({ item, open, onSetOpen }: {
       borderRadius: user ? 22 : 0,
       border: 0,
       background: user ? t.surfaceHover : 'transparent',
-      fontSize: 14.5, lineHeight: 1.7, color, fontWeight: item.strong ? 500 : 400,
+      fontSize: 15, lineHeight: 1.68, color, fontWeight: item.strong ? 500 : 400,
     }}>
       {images.length > 0 && (
         <div role="group" aria-label="Attached images" style={{ display: 'grid', gridTemplateColumns: images.length > 1 ? 'repeat(2, minmax(0, 1fr))' : 'minmax(0, 1fr)', gap: 7, marginBottom: item.text ? 8 : 0 }}>
@@ -112,7 +112,7 @@ const ThinkingBlock = memo(function ThinkingBlock({ item, open, onSetOpen }: {
         <div
           style={{
             borderLeft: `2px solid ${t.border}`, paddingLeft: 12, marginLeft: 6,
-            fontSize: 13.5, lineHeight: 1.65, color: t.text3, fontStyle: 'italic',
+            fontSize: 14, lineHeight: 1.6, color: t.text3, fontStyle: 'italic',
             whiteSpace: 'pre-wrap',
           }}
         >

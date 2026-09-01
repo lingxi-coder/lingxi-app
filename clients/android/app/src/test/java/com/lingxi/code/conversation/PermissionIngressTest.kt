@@ -18,6 +18,7 @@ class PermissionIngressTest {
         worker = null,
         owner = null,
         suppressAlwaysAllowRule = false,
+        autoModePrompt = null,
     )
 
     @Test

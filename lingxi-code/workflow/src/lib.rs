@@ -745,7 +745,7 @@ fn walk_object_literal(obj: tree_sitter::Node, src: &[u8]) -> Result<(), String>
             "method_definition" => return Err("methods/accessors not allowed in meta".into()),
             // Shorthand `{name}` → the value is an Identifier (a runtime ref).
             "shorthand_property_identifier" => {
-                return Err("non-literal node type in meta: Identifier".into())
+                return Err("non-literal node type in meta: Identifier".into());
             }
             // SpreadElement (`...x`) and anything else → not a plain Property.
             _ => return Err("only plain properties allowed in meta".into()),

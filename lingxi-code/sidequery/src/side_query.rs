@@ -89,6 +89,9 @@ pub enum SideQueryError {
     /// [`SideQueryResponse`].
     #[error("invalid response: {0}")]
     InvalidResponse(String),
+    /// Provider / codec cannot constrain the response to a JSON schema.
+    #[error("structured output is unsupported")]
+    StructuredOutputUnsupported,
     /// One or more batches completed before a later batch failed. The partial
     /// accounting must still be charged, while the incomplete analysis is not
     /// safe to persist.
@@ -108,6 +111,47 @@ pub enum SideQueryError {
     },
 }
 
+/// Strict JSON-schema side query (Fusion analyst / synthesizer).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StrictStructuredQueryRequest {
+    /// Model id.
+    pub model: String,
+    /// Optional provider profile.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
+    /// Optional system prompt.
+    pub system_prompt: Option<String>,
+    /// Conversation messages.
+    pub messages: Vec<ConversationMessage>,
+    /// JSON Schema the response must satisfy.
+    pub schema: Value,
+    /// Output cap.
+    pub max_tokens: u32,
+    /// Temperature. Analyst should pass `Some(0.0)`.
+    pub temperature: Option<f32>,
+    /// COGS tag.
+    pub query_source: QuerySource,
+    /// Skip the engine-injected system-prompt prefix.
+    pub skip_system_prompt_prefix: bool,
+}
+
+/// Decoded strict JSON-schema side query.
+#[derive(Debug, Clone)]
+pub struct StrictStructuredQueryResponse {
+    /// Parsed JSON value (already schema-decoded by the provider + serde).
+    pub value: Value,
+    /// Token / cost usage.
+    pub usage: cost::Usage,
+    /// Model that produced the value.
+    pub model: String,
+    /// Profile used.
+    pub profile: Option<String>,
+    /// Provider request id when present.
+    pub request_id: Option<String>,
+    /// Retry count for this call.
+    pub retry_count: u32,
+}
+
 /// One-shot LLM client. Implementations route to `AnthropicProvider` (M1)
 /// and to other providers in Plan 04 follow-ups.
 #[async_trait]
@@ -119,5 +163,15 @@ pub trait SideQueryClient: Send + Sync {
     /// Test doubles and direct clients default to zero.
     fn last_retry_count(&self) -> u32 {
         0
+    }
+
+    /// Strict JSON-schema query. Default rejects so existing test doubles stay
+    /// object-safe and source-compatible. Fusion's production client overrides
+    /// this and must not fall back to best-effort `output_format` parsing.
+    async fn query_json_schema(
+        &self,
+        _request: StrictStructuredQueryRequest,
+    ) -> Result<StrictStructuredQueryResponse, SideQueryError> {
+        Err(SideQueryError::StructuredOutputUnsupported)
     }
 }

@@ -14,7 +14,7 @@ impl ConversationOrchestrator {
         let draft = {
             let s = self.session.lock().await;
             PreparedModelCall {
-                history_snapshot: s.history.clone(),
+                history_snapshot: s.model_context_history(),
                 model: s.model.clone(),
                 model_profile: s.model_profile.clone(),
                 outgoing_history_rewriter: None,
@@ -60,10 +60,18 @@ impl ConversationOrchestrator {
         raw_history: Vec<ConversationMessage>,
         rewriter: Option<&Arc<dyn OutgoingHistoryRewriter>>,
     ) -> Result<Vec<ConversationMessage>, OrchestratorError> {
-        match rewriter {
+        let mut rewritten = match rewriter {
             Some(rewriter) => rewriter.rewrite(self, raw_history).await,
             None => Ok(raw_history),
-        }
+        }?;
+        let excluded = self
+            .session
+            .lock()
+            .await
+            .model_context_excluded_messages
+            .clone();
+        rewritten.retain(|message| !excluded.contains(&message.id()));
+        Ok(rewritten)
     }
 
     /// Persist the append-only commits followed by the last-wins staged-state
@@ -187,7 +195,7 @@ impl ConversationOrchestrator {
         // Snapshot history + id without holding the session lock across the fork.
         let (history, session_id) = {
             let s = self.session.lock().await;
-            (s.history.clone(), s.session_id)
+            (s.model_context_history(), s.session_id)
         };
         // Keep the same context-size baseline Claude records after a
         // successful extraction. The token count is computed from the
@@ -303,7 +311,7 @@ impl ConversationOrchestrator {
         // network call inside `process_iteration`).
         let (history_before, model) = {
             let s = self.session.lock().await;
-            (s.history.clone(), s.model.clone())
+            (s.model_context_history(), s.model.clone())
         };
         let messages_before = u32::try_from(history_before.len()).unwrap_or(u32::MAX);
         let bytes_before: u64 = history_before.iter().map(protocol::text_byte_size).sum();
@@ -1007,7 +1015,9 @@ impl ConversationOrchestrator {
         let bytes_after: u64 = history_after.iter().map(protocol::text_byte_size).sum();
         let bytes_saved = bytes_before.saturating_sub(bytes_after);
 
-        // Swap history under the same lock.
+        // Swap model-visible history under the same lock while retaining
+        // transcript-only completion envelopes. They were excluded from the
+        // compactor input and remain excluded after the transition.
         {
             let mut s = self.session.lock().await;
             metadata.active_goal = s
@@ -1016,7 +1026,7 @@ impl ConversationOrchestrator {
                 .map(compaction::compact_active_goal_from_engine);
             debug_assert!(marker.set_compact_metadata(metadata.clone()));
             history_after[0] = marker.clone();
-            s.history = history_after;
+            s.replace_model_context_history(history_after);
         }
         // Relevant-memory and skill reminders live only in outgoing request
         // snapshots. Once compaction discards those snapshots, they may surface
@@ -1389,7 +1399,10 @@ impl ConversationOrchestrator {
         // the (possibly networked) compaction call.
         let (snapshot, last_assistant_at) = {
             let s = self.session.lock().await;
-            (s.history.clone(), s.message_timing.last_assistant_at)
+            (
+                s.model_context_history(),
+                s.message_timing.last_assistant_at,
+            )
         };
         let estimate = compaction::grouping::estimate_tokens_for_range(&snapshot);
 

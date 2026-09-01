@@ -183,6 +183,10 @@ pub struct SessionState {
     /// summaries.
     #[serde(default)]
     pub compact_summary_messages: HashSet<MessageId>,
+    /// UI/transcript messages intentionally excluded from every model-facing
+    /// history snapshot. Unlike `isMeta`, this is a hard context boundary.
+    #[serde(default)]
+    pub model_context_excluded_messages: HashSet<MessageId>,
 }
 
 impl SessionState {
@@ -207,7 +211,33 @@ impl SessionState {
             injected_message_sources: HashMap::new(),
             transcript_only_messages: HashSet::new(),
             compact_summary_messages: HashSet::new(),
+            model_context_excluded_messages: HashSet::new(),
         }
+    }
+
+    /// Clone the history that may be sent to a model or model-backed
+    /// compactor, omitting transcript-only completion envelopes.
+    #[must_use]
+    pub fn model_context_history(&self) -> Vec<ConversationMessage> {
+        self.history
+            .iter()
+            .filter(|message| !self.model_context_excluded_messages.contains(&message.id()))
+            .cloned()
+            .collect()
+    }
+
+    /// Replace only the model-visible portion of history while retaining
+    /// excluded transcript messages. Recovery/compaction paths use this when
+    /// they rewrite the request history in place.
+    pub fn replace_model_context_history(&mut self, history: Vec<ConversationMessage>) {
+        let excluded = self
+            .history
+            .iter()
+            .filter(|message| self.model_context_excluded_messages.contains(&message.id()))
+            .cloned()
+            .collect::<Vec<_>>();
+        self.history = history;
+        self.history.extend(excluded);
     }
 }
 

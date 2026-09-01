@@ -55,6 +55,7 @@ pub mod file_history_sink;
 pub mod filesystem;
 pub mod fork_resume_gate;
 pub mod fork_subagent;
+pub mod fusion;
 pub mod haptics;
 pub mod http;
 pub mod ide;
@@ -114,7 +115,7 @@ pub use backgrounding::{
     DEFAULT_BACKGROUND_DEFER_MS,
 };
 pub use bridge::{BridgeConfig, BridgeConnection, BridgeError, BridgeTransport};
-pub use budget::{BudgetEnforcerHandle, BudgetError};
+pub use budget::{BudgetEnforcerHandle, BudgetError, BudgetReservationId};
 pub use calendar::{CalendarError, CalendarEvent, CalendarProvider, CalendarQuery};
 pub use camera::{CameraControl, CameraError, CameraPosition, CapturePhotoOpts, CapturedImage};
 pub use clipboard::{Clipboard, ClipboardError};
@@ -129,6 +130,16 @@ pub use file_history_sink::FileHistorySink;
 pub use filesystem::{
     apply_line_window, file_content_from_prefix_bytes, FileContent, FileEvent, FileEventKind,
     FileSystem, FileSystemCacheIdentity, FlockGuard, FsError,
+};
+pub use fusion::{
+    normalize_dimensions, validate_panel_report, EvidenceKind, FusionAgentSurface, FusionAnalysis,
+    FusionCompletionSink, FusionContradiction, FusionCostClass, FusionDecision, FusionError,
+    FusionExecutor, FusionInheritance, FusionLatencyClass, FusionModelHints, FusionModelRef,
+    FusionNeedsParentReason, FusionOrigin, FusionPreset, FusionProgress, FusionRecommendation,
+    FusionRequest, FusionResult, FusionStage, FusionStatus, FusionTiming, FusionUniqueInsight,
+    FusionUsage, NoopFusionCompletionSink, PanelClaim, PanelEvidence, PanelOutcome, PanelPosition,
+    PanelReport, PanelRisk, PanelRunStatus, RiskSeverity, DEFAULT_FUSION_DIMENSIONS,
+    FUSION_MAX_PANEL, FUSION_MIN_PANEL, FUSION_PANEL_TYPE, FUSION_SCHEMA_VERSION,
 };
 pub use haptics::{HapticError, HapticService, HapticStyle};
 pub use http::{

@@ -85,9 +85,9 @@ _entries += [
 )
 PY
 
-export LINGXI_ROOTFS_TOOL_TESTING=1
-export LINGXI_ROOTFS_TOOL_TEST_TSC_SHA256
-LINGXI_ROOTFS_TOOL_TEST_TSC_SHA256="$(shasum -a 256 "${fixture_root}/opt/lingxi/toolchains/typescript/7.0.2/tsc" | awk '{print $1}')"
+export ROOTFS_TOOL_TESTING=1
+export ROOTFS_TOOL_TEST_TSC_SHA256
+ROOTFS_TOOL_TEST_TSC_SHA256="$(shasum -a 256 "${fixture_root}/opt/lingxi/toolchains/typescript/7.0.2/tsc" | awk '{print $1}')"
 
 python3 "${tool}" verify-tree --root "${fixture_root}"
 

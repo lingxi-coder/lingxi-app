@@ -33,7 +33,7 @@
 //!    scope or edit one after the fact. The purpose is therefore always the
 //!    one the Host chose, never one recovered from a string.
 //! 2. **`app_id` is well formed.** Every constructor is fallible and rejects
-//!    an `app_id` that does not match `^[a-z0-9][a-z0-9-]{0,63}$` -- the same
+//!    an `app_id` that does not match `^[a-z0-9][a-z0-9-]{0,53}$` -- the same
 //!    grammar `local_apps::ids::is_valid_app_id` enforces before an id is
 //!    ever used in a path. `tasks` deliberately does NOT depend on
 //!    `local-apps` for this (see `MIRRORED GRAMMAR` below), so the check is a

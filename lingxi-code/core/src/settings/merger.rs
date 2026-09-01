@@ -183,6 +183,22 @@ pub fn merge(prev: SettingsJson, next: SettingsJson) -> SettingsJson {
         blocked_marketplaces: next.blocked_marketplaces.or(prev.blocked_marketplaces),
         providers: deep_merge_object(prev.providers, next.providers),
         routing: deep_merge_value_opt(prev.routing, next.routing),
+        fusion: merge_fusion_settings(prev.fusion, next.fusion),
+    }
+}
+
+fn merge_fusion_settings(
+    prev: Option<crate::settings::schema::FusionSettingsJson>,
+    next: Option<crate::settings::schema::FusionSettingsJson>,
+) -> Option<crate::settings::schema::FusionSettingsJson> {
+    match (prev, next) {
+        (None, None) => None,
+        (Some(v), None) | (None, Some(v)) => Some(v),
+        (Some(p), Some(n)) => {
+            let pv = serde_json::to_value(&p).unwrap_or(serde_json::Value::Null);
+            let nv = serde_json::to_value(&n).unwrap_or(serde_json::Value::Null);
+            serde_json::from_value(deep_merge_value(pv, nv)).ok()
+        }
     }
 }
 
@@ -659,6 +675,34 @@ mod tests {
     }
 
     #[test]
+    fn fusion_deep_merge_overrides_scalars_and_replaces_arrays() {
+        let prev = SettingsJson {
+            fusion: Some(crate::settings::schema::FusionSettingsJson {
+                enabled: Some(false),
+                quality_panel_count: Some(3),
+                allowed_profiles: Some(vec!["anthropic".into()]),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let next = SettingsJson {
+            fusion: Some(crate::settings::schema::FusionSettingsJson {
+                enabled: Some(true),
+                allowed_profiles: Some(vec!["openai".into()]),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let merged = merge(prev, next).fusion.unwrap();
+        assert_eq!(merged.enabled, Some(true));
+        assert_eq!(merged.quality_panel_count, Some(3));
+        assert_eq!(
+            merged.allowed_profiles.as_deref(),
+            Some(&["openai".to_string()][..])
+        );
+    }
+
+    #[test]
     fn new_238_settings_fields_merge_with_object_and_scalar_semantics() {
         use serde_json::json;
         use std::collections::BTreeMap;
@@ -881,6 +925,11 @@ mod tests {
                 json!({"retry": {"maxAttempts": 3}}),
             ),
             (
+                "fusion",
+                json!({"qualityPanelCount": 3}),
+                json!({"fastPanelCount": 2}),
+            ),
+            (
                 "modelOverrides",
                 json!({"lower": "m1"}),
                 json!({"upper": "m2"}),
@@ -1033,6 +1082,10 @@ mod tests {
         // is `Some(false)` and not confusable with "field unset".
         let candidates: Vec<(Value, Value)> = vec![
             (json!({"lowerEntry": "l"}), json!({"upperEntry": "u"})),
+            (
+                json!({"qualityPanelCount": 3}),
+                json!({"fastPanelCount": 2}),
+            ),
             (json!(["lower"]), json!(["upper"])),
             (json!("lower"), json!("upper")),
             (json!(true), json!(false)),

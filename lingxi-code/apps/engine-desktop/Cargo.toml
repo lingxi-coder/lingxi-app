@@ -67,6 +67,7 @@ outputstyles = { path = "../../outputstyles" }
 lsp = { path = "../../lsp" }
 compaction = { path = "../../compaction" }
 sidequery = { path = "../../sidequery" }
+fusion = { path = "../../fusion" }
 tasks = { path = "../../tasks" }
 # M10: coordinator multi-agent subsystem (`TeamRegistry` + `CoordinatorMode` +
 # `CoordinatorStatusSink`). `build()` constructs one per session and surfaces

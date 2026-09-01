@@ -289,6 +289,9 @@ mod tests {
             observer: None,
             permission_mode_override: None,
             frozen_command_denies: Vec::new(),
+            max_output_tokens_per_turn: None,
+            max_input_bytes_per_turn: None,
+            query_source_label: None,
         }
     }
 

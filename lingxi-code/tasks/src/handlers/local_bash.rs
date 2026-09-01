@@ -183,6 +183,24 @@ pub trait TaskStatusSink: Send + Sync {
     ) {
     }
 
+    /// Record a Fusion run's sanitized final text before its terminal status.
+    /// Registry-backed sinks override this; standalone sinks stay no-ops.
+    async fn set_fusion_outcome(&self, _task_id: &str, _run_id: String, _final_text: String) {}
+
+    /// Atomically publish a Fusion run's terminal payload together with its
+    /// terminal task status. Registry-backed sinks override this to close the
+    /// outcome/status race; the default preserves legacy standalone behavior.
+    async fn finish_fusion_terminal(
+        &self,
+        task_id: &str,
+        run_id: String,
+        final_text: String,
+        status: TaskStatus,
+    ) {
+        self.set_fusion_outcome(task_id, run_id, final_text).await;
+        self.set_status(task_id, status).await;
+    }
+
     /// Atomically publish a workflow's terminal payload plus terminal status.
     ///
     /// Registry-backed sinks override this so a workflow outcome cannot be
@@ -1125,6 +1143,8 @@ mod tests {
                     resume_from_run_id: None,
                     args: None,
                     run_id: None,
+                    parent_model: None,
+                    parent_model_profile: None,
                     invocation_mode: None,
                     workflow_source: None,
                     script_is_verbatim_builtin: None,

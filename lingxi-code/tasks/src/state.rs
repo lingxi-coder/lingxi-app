@@ -113,6 +113,8 @@ pub enum TaskState {
     McpTask(McpTaskState),
     /// Dream loop.
     Dream(DreamTaskState),
+    /// Fusion multi-model deliberation.
+    LocalFusion(LocalFusionTaskState),
 }
 
 impl TaskState {
@@ -129,6 +131,7 @@ impl TaskState {
             Self::Monitor(s) => &s.base,
             Self::McpTask(s) => &s.base,
             Self::Dream(s) => &s.base,
+            Self::LocalFusion(s) => &s.base,
         }
     }
 
@@ -145,6 +148,7 @@ impl TaskState {
             Self::Monitor(s) => &mut s.base,
             Self::McpTask(s) => &mut s.base,
             Self::Dream(s) => &mut s.base,
+            Self::LocalFusion(s) => &mut s.base,
         }
     }
 }
@@ -442,6 +446,28 @@ pub struct DreamTaskState {
     pub iteration_count: u32,
     /// Optional cap on iterations.
     pub max_iterations: Option<u32>,
+}
+
+/// State specific to a Fusion deliberation task.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LocalFusionTaskState {
+    /// Shared base fields.
+    #[serde(flatten)]
+    pub base: TaskStateBase,
+    /// Parent conversation id for the completion sink.
+    pub conversation_id: String,
+    /// Task prompt.
+    pub prompt: String,
+    /// `fu_…` run id once the orchestrator mints it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<String>,
+    /// `quality` or `fast`.
+    pub preset: String,
+    /// Whether panels may leave the parent provider.
+    pub cross_provider: bool,
+    /// Sanitized final text for TaskNotification `<result>`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub final_text: Option<String>,
 }
 
 /// Tripwire for the residual documented on

@@ -8,10 +8,10 @@
 
 use crate::tracker::CostTracker;
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 
 /// Basis-points threshold at which `tengu_cost_budget_warning` fires.
 ///
@@ -58,6 +58,30 @@ pub struct BudgetEnforcer {
     cost_tracker: Arc<CostTracker>,
     warnings_fired: RwLock<HashSet<u32>>,
     realized_exceeded: AtomicBool,
+    /// Active Fusion (and future) holds. Occupancy is
+    /// `realized + sum(reservations)`.
+    reservations: Mutex<ReservationBook>,
+}
+
+struct ReservationBook {
+    next_id: u64,
+    active: HashMap<u64, u64>,
+}
+
+impl ReservationBook {
+    fn new() -> Self {
+        Self {
+            next_id: 1,
+            active: HashMap::new(),
+        }
+    }
+
+    fn held(&self) -> u64 {
+        self.active
+            .values()
+            .copied()
+            .fold(0_u64, u64::saturating_add)
+    }
 }
 
 /// Result of a [`BudgetEnforcer::check_pre_api_call`].
@@ -120,7 +144,67 @@ impl BudgetEnforcer {
             cost_tracker,
             warnings_fired: RwLock::new(HashSet::new()),
             realized_exceeded: AtomicBool::new(false),
+            reservations: Mutex::new(ReservationBook::new()),
         }
+    }
+
+    /// Sum of active reservation holds.
+    pub async fn active_reservation_nano_usd(&self) -> u64 {
+        self.reservations.lock().await.held()
+    }
+
+    /// Hold `nano_usd` so concurrent work cannot spend it.
+    ///
+    /// # Errors
+    ///
+    /// [`platform_api::budget::BudgetError::Exceeded`] when
+    /// `realized + held + nano_usd` would pass the session cap.
+    pub async fn reserve_nano_usd(
+        &self,
+        nano_usd: u64,
+    ) -> Result<platform_api::BudgetReservationId, platform_api::budget::BudgetError> {
+        use platform_api::budget::{BudgetError, BudgetReservationId};
+        if nano_usd == 0 || self.config.max_session_nano_usd.is_none() {
+            return Ok(BudgetReservationId::NOOP);
+        }
+        let max = self.config.max_session_nano_usd.unwrap_or(0);
+        let mut book = self.reservations.lock().await;
+        let realized = self.cost_tracker.total_nano_usd().await;
+        let held = book.held();
+        let occupancy = realized.saturating_add(held).saturating_add(nano_usd);
+        if occupancy > max {
+            return Err(BudgetError::Exceeded {
+                current_nano_usd: realized.saturating_add(held),
+            });
+        }
+        let id = book.next_id;
+        book.next_id = book.next_id.saturating_add(1);
+        book.active.insert(id, nano_usd);
+        Ok(BudgetReservationId::from_raw(id))
+    }
+
+    /// Drop a hold. Unknown and noop ids are ignored.
+    pub async fn release_reservation(&self, id: platform_api::BudgetReservationId) {
+        if id.is_noop() {
+            return;
+        }
+        self.reservations.lock().await.active.remove(&id.raw());
+    }
+
+    /// Release the hold after work completed. Does not add `actual` onto the
+    /// cost tracker (API responses already did).
+    ///
+    /// # Errors
+    ///
+    /// Never — unknown ids succeed so commit is idempotent.
+    pub async fn commit_reservation(
+        &self,
+        id: platform_api::BudgetReservationId,
+        actual_nano_usd: u64,
+    ) -> Result<(), platform_api::budget::BudgetError> {
+        let _ = actual_nano_usd;
+        self.release_reservation(id).await;
+        Ok(())
     }
 
     /// Pre-API call gate. After the call returns, call
@@ -132,8 +216,24 @@ impl BudgetEnforcer {
             let limit = self.config.max_session_nano_usd.unwrap_or(0);
             return BudgetCheckResult::Halt { current, limit };
         }
-        let current = self.cost_tracker.total_nano_usd().await;
-        let after = current.saturating_add(estimated_cost_nano_usd);
+        let held = self.reservations.lock().await.held();
+        let realized = self.cost_tracker.total_nano_usd().await;
+        // `check_and_charge(0)` (Agent / subagent turn gate) means "already
+        // over", which is realized spend — a Fusion hold is future capacity
+        // and must not freeze the reserved child itself. Positive estimates
+        // and occupancy warnings do see reservations.
+        let current = if estimated_cost_nano_usd == 0 {
+            realized
+        } else {
+            realized.saturating_add(held)
+        };
+        let after = if estimated_cost_nano_usd == 0 {
+            realized
+        } else {
+            realized
+                .saturating_add(held)
+                .saturating_add(estimated_cost_nano_usd)
+        };
         if let Some(max) = self.config.max_session_nano_usd {
             if after >= max {
                 return match self.config.on_exceed {
@@ -151,9 +251,14 @@ impl BudgetEnforcer {
                     },
                 };
             }
+            // Threshold warning — occupancy includes holds so a large Fusion
+            // reservation can warn before the first panel token is billed.
+            let occupancy = realized
+                .saturating_add(held)
+                .saturating_add(estimated_cost_nano_usd);
             // Threshold warning — cast to f64 only for the ratio comparison.
             #[allow(clippy::cast_precision_loss)]
-            let ratio = after as f64 / max as f64;
+            let ratio = occupancy as f64 / max as f64;
             for &threshold in &self.config.warning_thresholds {
                 if ratio >= threshold {
                     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
@@ -655,5 +760,111 @@ mod tests {
             "$1.00",
             "rounding edge"
         );
+    }
+
+    #[tokio::test]
+    async fn reservation_holds_capacity_against_a_second_reserve() {
+        let cfg = BudgetConfig {
+            max_session_nano_usd: Some(1_000),
+            max_turn_nano_usd: None,
+            max_turn_tokens: None,
+            warning_thresholds: vec![],
+            on_exceed: BudgetExceedPolicy::Halt,
+        };
+        let e = BudgetEnforcer::new(cfg, make_tracker());
+        let first = e.reserve_nano_usd(800).await.expect("first hold");
+        assert!(!first.is_noop());
+        assert_eq!(e.active_reservation_nano_usd().await, 800);
+        let err = e.reserve_nano_usd(800).await.unwrap_err();
+        assert!(matches!(
+            err,
+            platform_api::budget::BudgetError::Exceeded {
+                current_nano_usd: 800
+            }
+        ));
+        e.release_reservation(first).await;
+        assert_eq!(e.active_reservation_nano_usd().await, 0);
+        e.reserve_nano_usd(800).await.expect("hold after release");
+    }
+
+    #[tokio::test]
+    async fn reservation_is_visible_to_positive_pre_api_estimates() {
+        let cfg = BudgetConfig {
+            max_session_nano_usd: Some(1_000),
+            max_turn_nano_usd: None,
+            max_turn_tokens: None,
+            warning_thresholds: vec![],
+            on_exceed: BudgetExceedPolicy::Halt,
+        };
+        let e = BudgetEnforcer::new(cfg, make_tracker());
+        let _id = e.reserve_nano_usd(800).await.unwrap();
+        // Charge-0 turn gate (subagent) must still run — the hold is future work.
+        assert!(matches!(
+            e.check_pre_api_call(0).await,
+            BudgetCheckResult::Ok
+        ));
+        // A new unreserved estimate must see the hold.
+        assert!(matches!(
+            e.check_pre_api_call(300).await,
+            BudgetCheckResult::Halt {
+                current: 800,
+                limit: 1_000
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn commit_releases_hold_without_double_counting_tracker() {
+        let cfg = BudgetConfig {
+            max_session_nano_usd: Some(10_000),
+            max_turn_nano_usd: None,
+            max_turn_tokens: None,
+            warning_thresholds: vec![],
+            on_exceed: BudgetExceedPolicy::Halt,
+        };
+        let tracker = make_tracker();
+        let e = BudgetEnforcer::new(cfg, tracker.clone());
+        let id = e.reserve_nano_usd(5_000).await.unwrap();
+        e.commit_reservation(id, 1_000).await.unwrap();
+        assert_eq!(e.active_reservation_nano_usd().await, 0);
+        assert_eq!(
+            tracker.total_nano_usd().await,
+            0,
+            "commit must not add onto tracker (API responses already charged)"
+        );
+        e.commit_reservation(id, 1_000).await.expect("idempotent");
+    }
+
+    #[tokio::test]
+    async fn zero_or_unlimited_reserve_is_noop() {
+        let unlimited = BudgetConfig {
+            max_session_nano_usd: None,
+            max_turn_nano_usd: None,
+            max_turn_tokens: None,
+            warning_thresholds: vec![],
+            on_exceed: BudgetExceedPolicy::Halt,
+        };
+        let e = BudgetEnforcer::new(unlimited, make_tracker());
+        let id = e.reserve_nano_usd(9_000_000).await.unwrap();
+        assert!(id.is_noop());
+        assert_eq!(e.active_reservation_nano_usd().await, 0);
+    }
+
+    #[tokio::test]
+    async fn two_concurrent_reserves_cannot_both_cross_the_cap() {
+        let cfg = BudgetConfig {
+            max_session_nano_usd: Some(1_000),
+            max_turn_nano_usd: None,
+            max_turn_tokens: None,
+            warning_thresholds: vec![],
+            on_exceed: BudgetExceedPolicy::Halt,
+        };
+        let e = std::sync::Arc::new(BudgetEnforcer::new(cfg, make_tracker()));
+        let a = e.clone();
+        let b = e.clone();
+        let (ra, rb) = tokio::join!(a.reserve_nano_usd(800), b.reserve_nano_usd(800));
+        let wins = u8::from(ra.is_ok()) + u8::from(rb.is_ok());
+        assert_eq!(wins, 1, "exactly one of two 800-holds on a 1000 cap");
+        assert_eq!(e.active_reservation_nano_usd().await, 800);
     }
 }

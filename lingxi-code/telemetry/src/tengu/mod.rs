@@ -13,6 +13,9 @@ pub mod api;
 pub mod command;
 pub mod coordinator;
 pub mod cost;
+/// Fusion telemetry event names (NOT in `ALL_EVENT_NAMES` — separate from the
+/// count-locked event set; kept here for string-lock testing only).
+pub mod fusion;
 /// `tengu_uncompilable_ignore_pattern` event name + its `site` values (NOT in
 /// `ALL_EVENT_NAMES` — string-lock only, mirroring `workflow`).
 pub mod ignore_pattern;

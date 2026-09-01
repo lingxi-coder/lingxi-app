@@ -30,6 +30,8 @@ pub struct ModelListing {
     pub metadata: ModelMetadata,
     /// Exact reasoning controls accepted by this route.
     pub reasoning: ReasoningControlSpec,
+    /// Optional Fusion panel/analyst hints.
+    pub fusion_hints: Option<platform_api::FusionModelHints>,
 }
 
 /// Resolved route identity for one requested model.
@@ -173,6 +175,10 @@ impl ModelRegistry {
                         base_url: &provider.base_url,
                         model: &model.request_model,
                     }),
+                    fusion_hints: crate::fusion_hints::hints_for(
+                        &provider.profile_name,
+                        &model.request_model,
+                    ),
                 })
             })
             .collect()

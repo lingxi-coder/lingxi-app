@@ -252,6 +252,7 @@ impl SubagentSpawner for MockSubagentSpawner {
                 assistant_message_count: 0,
                 response_char_count: 0,
                 last_request_id: None,
+                cumulative_usage: SubagentUsage::default(),
             },
             MockSpawnResponse::CompletedWith {
                 agent_id,
@@ -266,13 +267,14 @@ impl SubagentSpawner for MockSubagentSpawner {
             } => SubagentResult::Completed {
                 agent_id,
                 content,
-                usage,
+                usage: usage.clone(),
                 total_tool_use_count,
                 total_duration_ms,
                 total_tokens,
                 assistant_message_count,
                 response_char_count,
                 last_request_id,
+                cumulative_usage: usage,
             },
             MockSpawnResponse::Failed(reason) => SubagentResult::Failed {
                 agent_id: protocol::AgentId::new(),
@@ -431,6 +433,7 @@ impl MockTaskRegistryHandle {
             "local_workflow" => 'w',
             "monitor_mcp" => 'm',
             "dream" => 'd',
+            "local_fusion" => 'f',
             // local_bash + any unknown wire string default to 'b'.
             _ => 'b',
         };
@@ -468,10 +471,28 @@ impl TaskRegistryHandle for MockTaskRegistryHandle {
     }
 
     fn release_total_agent_spawn_reservation(&self) {
+        self.release_total_agent_spawn_reservations(1);
+    }
+
+    fn try_reserve_total_agent_spawns(&self, n: u64, cap: u64) -> Result<u64, u64> {
+        if n == 0 {
+            return Ok(self.spawns.load(Ordering::SeqCst));
+        }
+        self.spawns
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |current| {
+                current.checked_add(n).filter(|&next| next <= cap)
+            })
+            .map(|previous| previous + n)
+    }
+
+    fn release_total_agent_spawn_reservations(&self, n: u64) {
+        if n == 0 {
+            return;
+        }
         let _ = self
             .spawns
             .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |current| {
-                current.checked_sub(1)
+                Some(current.saturating_sub(n))
             });
     }
 

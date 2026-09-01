@@ -719,6 +719,60 @@ pub fn fork_agent_definition() -> AgentDefinition {
     }
 }
 
+/// Hidden Fusion panel definition. Resolved like `fork` and never listed.
+///
+/// Tools are an explicit allow-list (not `Except`): Read / Grep / Glob / Bash /
+/// WebFetch. Bash inherits the session permission mode. The structured
+/// `PanelReport` schema is applied at spawn by the fusion orchestrator.
+#[must_use]
+pub fn fusion_panel_definition() -> AgentDefinition {
+    AgentDefinition {
+        agent_type: platform_api::FUSION_PANEL_TYPE.to_string(),
+        when_to_use:
+            "Hidden Fusion panel — independent read-mostly deliberation. Not selectable via subagent_type."
+                .to_string(),
+        tools: AgentToolPolicy::Explicit(vec![
+            "Read".into(),
+            "Grep".into(),
+            "Glob".into(),
+            "Bash".into(),
+            "WebFetch".into(),
+        ]),
+        max_turns: 12,
+        model: AgentModel::Inherit,
+        permission_mode: AgentPermissionMode::Bubble,
+        source: AgentSource::BuiltIn,
+        base_dir: "built-in".into(),
+        system_prompt: Some(
+            r"You are a Fusion panel. Independently answer one task. Other panels exist but you cannot see them and must not address them.
+
+Rules:
+- Use only the tools you have: Read, Grep, Glob, Bash, WebFetch.
+- Do not create, edit, or delete files. Bash inherits the session permission mode; do not use it to mutate the workspace.
+- Do not mention provider names, model names, or that you are part of a multi-model ensemble.
+- Return your answer as a PanelReport through the StructuredOutput tool.
+
+The report must include a concise summary, a complete candidate_answer the parent could adopt, claims with evidence, explicit assumptions, risks, and unresolved questions."
+                .to_string(),
+        ),
+        mcp_servers: vec![],
+        frontmatter_hooks: vec![],
+        icon: None,
+        allowed_tools: vec![],
+        worktree_requirement: None,
+        disallowed_tools: vec![],
+        skills: vec![],
+        required_mcp_servers: vec![],
+        background: false,
+        isolation: None,
+        memory: None,
+        effort: None,
+        initial_prompt: None,
+        color: None,
+        observer: None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -823,6 +877,31 @@ mod tests {
         // getSystemPrompt () => '' is unused on the fork path → no body.
         assert!(f.system_prompt.is_none());
         assert!(f.is_fork());
+    }
+
+    #[test]
+    fn fusion_panel_definition_is_explicit_five_tools() {
+        let p = fusion_panel_definition();
+        assert_eq!(p.agent_type, "fusion-panel");
+        assert_eq!(p.max_turns, 12);
+        match &p.tools {
+            AgentToolPolicy::Explicit(tools) => {
+                assert_eq!(
+                    tools,
+                    &["Read", "Grep", "Glob", "Bash", "WebFetch"]
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>()
+                );
+            }
+            other => panic!("expected Explicit, got {other:?}"),
+        }
+        assert!(matches!(p.model, AgentModel::Inherit));
+        assert!(matches!(p.permission_mode, AgentPermissionMode::Bubble));
+        assert!(p.system_prompt.is_some());
+        assert!(!builtin_agent_definitions()
+            .iter()
+            .any(|d| d.agent_type == "fusion-panel"));
     }
 
     /// claude `vyt()` @287981417 `if(xgi())t.push(Hlr)` — the sixth built-in is

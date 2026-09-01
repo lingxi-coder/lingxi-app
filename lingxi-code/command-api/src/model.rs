@@ -297,6 +297,10 @@ pub trait BuiltinCommandHandler: Send + Sync {
     fn name(&self) -> &str;
     /// Short user-facing description.
     fn description(&self) -> &str;
+    /// Optional hint text shown after the command name in slash listings.
+    fn argument_hint(&self) -> Option<&str> {
+        None
+    }
     /// This command's declared allowed-tools (TS `command.allowedTools`), in the
     /// permission-rule syntax (e.g. `Bash(git add:*)`). Injected on top of the
     /// base policy for a fresh per-command effective policy before its embedded

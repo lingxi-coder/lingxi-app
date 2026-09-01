@@ -465,6 +465,11 @@ impl Task for LocalAgentHandler {
             forked_skill_effort: None,
             frozen_command_denies: Vec::new(),
             resumed_history: None,
+            max_turns_override: None,
+            max_output_tokens_per_turn: None,
+            max_input_bytes_per_turn: None,
+            query_source_label: None,
+            correlation_id: None,
         });
         // What `park` needs, cloned BEFORE `request` moves into the spawn:
         // the launch configuration is what a rebuilt runner is configured from.
@@ -1168,6 +1173,7 @@ mod tests {
                         assistant_message_count: 0,
                         response_char_count: 0,
                         last_request_id: None,
+                        cumulative_usage: SubagentUsage::default(),
                     })
                 }
                 Some(CannedResult::Failed(reason)) => Ok(SubagentResult::Failed {
@@ -1351,6 +1357,11 @@ mod tests {
             forked_skill_effort: None,
             frozen_command_denies: Vec::new(),
             resumed_history: None,
+            max_turns_override: None,
+            max_output_tokens_per_turn: None,
+            max_input_bytes_per_turn: None,
+            query_source_label: None,
+            correlation_id: None,
         }
     }
 
@@ -1571,6 +1582,7 @@ mod tests {
             total_duration_ms: 0,
             assistant_message_count: 0,
             last_request_id: None,
+            cumulative_usage: llm_client::Usage::default(),
         }
     }
 
@@ -2484,6 +2496,7 @@ mod tests {
             total_duration_ms: 1500,
             assistant_message_count: 0,
             last_request_id: None,
+            cumulative_usage: llm_client::Usage::default(),
         })
         .await
         .unwrap();
@@ -2832,6 +2845,11 @@ mod tests {
             forked_skill_effort: None,
             frozen_command_denies: Vec::new(),
             resumed_history: None,
+            max_turns_override: None,
+            max_output_tokens_per_turn: None,
+            max_input_bytes_per_turn: None,
+            query_source_label: None,
+            correlation_id: None,
         };
         let input = TaskSpawnInput::LocalAgent {
             agent_id: protocol::AgentId::new(),
@@ -2894,6 +2912,8 @@ mod tests {
                     resume_from_run_id: None,
                     args: None,
                     run_id: None,
+                    parent_model: None,
+                    parent_model_profile: None,
                     invocation_mode: None,
                     workflow_source: None,
                     script_is_verbatim_builtin: None,

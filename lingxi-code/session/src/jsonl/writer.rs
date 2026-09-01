@@ -295,6 +295,13 @@ impl JsonlWriter {
             .clone()
     }
 
+    /// Clone the filesystem capability used by this writer. Session-targeted
+    /// transcript appenders use the same host filesystem for lookup and write.
+    #[must_use]
+    pub fn filesystem_handle(&self) -> Arc<dyn FileSystem> {
+        self.fs.clone()
+    }
+
     /// Atomically switch subsequent appends to another session transcript.
     ///
     /// The append mutex makes the boundary explicit: an append already in
@@ -562,6 +569,23 @@ impl JsonlWriter {
         Ok(())
     }
 
+    /// Append one line to an explicit session transcript without retargeting
+    /// the writer's active session. The shared append lock prevents an
+    /// in-process current-session write from interleaving with this line.
+    pub async fn append_to_path(&self, path: &Path, msg: &JsonlMessage) -> Result<(), WriterError> {
+        if self.active_path() == path {
+            return self.append(msg).await;
+        }
+
+        let _g = self.lock.lock().await;
+        let stamped = stamp_session_kind(msg);
+        let line = serde_json::to_string(stamped.as_ref().unwrap_or(msg))?;
+        let mut payload = String::with_capacity(line.len() + 1);
+        payload.push_str(&line);
+        payload.push('\n');
+        self.append_payload_to_path(path, &payload, false).await
+    }
+
     /// Write `payload` verbatim to the active transcript and account it against
     /// the metadata-re-append backstop counter.
     ///
@@ -575,14 +599,14 @@ impl JsonlWriter {
     }
 
     /// Write `payload` to an explicit path while the caller holds
-    /// [`Self::lock`].  `account` is false when the write is the final record
-    /// on an old path during a retarget; those bytes must not arm backstops for
-    /// the newly selected transcript.
+    /// [`Self::lock`]. `account_backstops` is false when the write is the final
+    /// record on an old path during a retarget; those bytes must not arm
+    /// backstops for the newly selected transcript.
     async fn append_payload_to_path(
         &self,
         path: &Path,
         payload: &str,
-        account: bool,
+        account_backstops: bool,
     ) -> Result<(), WriterError> {
         let path_str = path.to_str().expect("session paths are UTF-8");
         if let Some(parent) = path.parent() {
@@ -613,7 +637,7 @@ impl JsonlWriter {
         // only on a SUCCESSFUL write, matching the oracle's post-await position.
         // `appendToFile` (@296775839) bumps BOTH counters from the same
         // `Buffer.byteLength`, so they never drift apart.
-        if account {
+        if account_backstops {
             self.bytes_since_metadata_re_append
                 .fetch_add(payload.len(), Ordering::Relaxed);
             self.bytes_since_compact

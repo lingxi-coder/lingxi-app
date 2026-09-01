@@ -57,6 +57,7 @@ graph TD
         sidequery["sidequery"]
         coord["coordinator"]
         wf["workflow"]
+        fusion["fusion"]
     end
 
     subgraph Layer2["Layer 2: Abstraction"]

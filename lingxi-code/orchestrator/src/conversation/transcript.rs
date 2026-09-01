@@ -1080,6 +1080,108 @@ impl ConversationOrchestrator {
         }
     }
 
+    /// Persist a meta user message to one exact session transcript and mark it
+    /// as excluded from model context. This never retargets the live writer.
+    pub(crate) async fn persist_model_excluded_meta_to_session(
+        &self,
+        target_session: protocol::SessionId,
+        msg: &ConversationMessage,
+    ) -> Result<Option<String>, platform_api::HandleError> {
+        let Some(writer) = self.transcript.jsonl_writer.as_ref() else {
+            return Ok(None);
+        };
+
+        let fs = writer.filesystem_handle();
+        let target_uuid = target_session.as_uuid();
+        let target_bare = target_uuid.to_string();
+        let cwd = self.cwd.to_string_lossy().into_owned();
+        let target_path = match self.config_home.as_ref() {
+            Some(home) => {
+                match session::jsonl::resolve_session_path_across_worktrees(home, &cwd, target_uuid)
+                    .await
+                {
+                    Ok(path) => path,
+                    Err(
+                        session::jsonl::LoaderError::SessionNotFound { .. }
+                        | session::jsonl::LoaderError::EmptyDirectory,
+                    ) => session::jsonl::session_path(home, &cwd, &target_bare),
+                    Err(error) => {
+                        return Err(platform_api::HandleError::ActionFailed(format!(
+                            "could not resolve target session transcript: {error}"
+                        )))
+                    }
+                }
+            }
+            None => {
+                let current = self.session.lock().await.session_id;
+                if current != target_session {
+                    return Err(platform_api::HandleError::ActionFailed(
+                        "target-session persistence requires a configured session store".into(),
+                    ));
+                }
+                writer.active_path()
+            }
+        };
+
+        let parent_uuid = match self.config_home.as_ref() {
+            Some(home) => {
+                match session::jsonl::load_session_across_worktrees(home, &cwd, target_uuid, fs)
+                    .await
+                {
+                    Ok(messages) => messages.last().map(|message| message.uuid.clone()),
+                    Err(
+                        session::jsonl::LoaderError::SessionNotFound { .. }
+                        | session::jsonl::LoaderError::EmptyDirectory,
+                    ) => None,
+                    Err(error) => {
+                        return Err(platform_api::HandleError::ActionFailed(format!(
+                            "could not read target session transcript: {error}"
+                        )))
+                    }
+                }
+            }
+            None => self.transcript.last_jsonl_uuid.lock().await.clone(),
+        };
+
+        let mut persisted = self.to_jsonl_message_with_inner_id(
+            msg,
+            &target_session.to_string(),
+            parent_uuid,
+            self.resolve_git_branch().await,
+            Some(entrypoint_value()),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        persisted.extra.insert(
+            "isModelContextExcluded".to_string(),
+            serde_json::Value::Bool(true),
+        );
+        if matches!(msg, ConversationMessage::User { .. }) {
+            persisted.extra.insert(
+                "permissionMode".to_string(),
+                serde_json::Value::String(
+                    self.permission_mode()
+                        .unwrap_or_else(|| "default".to_string()),
+                ),
+            );
+        }
+        let uuid = persisted.uuid.clone();
+        writer
+            .append_to_path(&target_path, &persisted)
+            .await
+            .map_err(|error| {
+                platform_api::HandleError::ActionFailed(format!(
+                    "could not append target session transcript: {error}"
+                ))
+            })?;
+        telemetry::emit_session_appended(&target_session.to_string(), &uuid);
+        Ok(Some(uuid))
+    }
+
     /// Persist an assistant turn as ONE single-block JSONL line PER content block
     /// (claude-code's per-`content_block_stop` writer — `claude.ts:2171-2211`).
     ///

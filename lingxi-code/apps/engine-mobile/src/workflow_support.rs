@@ -955,6 +955,9 @@ pub(crate) struct MobileWorkflowLauncher {
     /// so a boot-time snapshot would anchor every later workflow's transcript
     /// under a session the user has already left.
     pub(crate) session_uuid: Arc<std::sync::Mutex<String>>,
+    /// Live provider-qualified session model selection.
+    pub(crate) default_model_selection_provider:
+        Arc<std::sync::OnceLock<agent::handle::DefaultModelSelectionProvider>>,
     pub(crate) checkpoints: Arc<MobileWorkflowCheckpointStore>,
     pub(crate) status_sink: Arc<MobileWorkflowStatusSink>,
     /// Same live registry written by the mobile PluginManager and read by the
@@ -1757,6 +1760,13 @@ impl tool_workflow::WorkflowLauncher for MobileWorkflowLauncher {
             .await
             .map_err(|error| tool_workflow::WorkflowLaunchError(error.to_string()))?;
         let launch_result = async {
+            // Read one coherent provider-qualified snapshot. Calling the live
+            // provider separately for model/profile could pair values from two
+            // session selections racing a mobile retarget.
+            let default_selection = self
+                .default_model_selection_provider
+                .get()
+                .and_then(|provider| provider());
             let subagents = orchestrator::transcript_paths::subagents_dir(
                 &self.lingxi_home,
                 &self.project_cwd.to_string_lossy(),
@@ -1902,6 +1912,12 @@ impl tool_workflow::WorkflowLauncher for MobileWorkflowLauncher {
                             .as_ref()
                             .map(|v| serde_json::to_string(v).unwrap_or_default()),
                         run_id: Some(run_id.clone()),
+                        parent_model: default_selection
+                            .as_ref()
+                            .map(|selection| selection.model.clone()),
+                        parent_model_profile: default_selection
+                            .as_ref()
+                            .and_then(|selection| selection.model_profile.clone()),
                         invocation_mode: Some(invocation_mode),
                         workflow_source: Some(workflow_source),
                         script_is_verbatim_builtin: Some(script_is_verbatim_builtin),
@@ -3865,6 +3881,7 @@ mod run_id_tests {
             current_cwd: Arc::new(std::sync::Mutex::new(root.to_path_buf())),
             lingxi_home,
             session_uuid,
+            default_model_selection_provider: Arc::new(std::sync::OnceLock::new()),
             checkpoints,
             status_sink,
             plugin_workflows: Arc::new(plugin_workflows),

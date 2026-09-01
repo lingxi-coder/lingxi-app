@@ -20,6 +20,7 @@ pub mod cost;
 pub mod credentials;
 pub mod error;
 pub mod eventstream;
+pub mod fusion_hints;
 pub mod model;
 pub mod oauth;
 pub mod prompt_format;
@@ -80,6 +81,7 @@ pub use error::{
     api_error_detail, api_error_status, error_display_text, LlmError, MediaDelegationAccounting,
 };
 pub use eventstream::{crc32, EventStreamMessage, EventStreamSplitter};
+pub use fusion_hints::hints_for;
 pub use platform_api::ModelBillingMode;
 pub use protocol::{
     stream_provider_metadata_from_headers, validate_capabilities, CacheControl, CacheEdit,

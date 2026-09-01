@@ -624,7 +624,6 @@ G1	lingxi-code/scripts/mobile-linux/check-rootfs-manifest.sh	LINGXI
 G1	lingxi-code/scripts/mobile-linux/check-sbom-and-licenses.sh	LINGXI
 G1	lingxi-code/scripts/mobile-linux/generate-local-app-sbom.py	LingXi
 G1	lingxi-code/scripts/mobile-linux/rootfs-build-inner.sh	LINGXI
-G1	lingxi-code/scripts/mobile-linux/rootfs_tool.py	LINGXI
 G1	lingxi-code/scripts/mobile-linux/smoke.sh	LINGXI
 G1	lingxi-code/scripts/mobile-linux/test-local-app-supply-chain.sh	\.lingxi
 G1	lingxi-code/scripts/mobile-linux/verify-local-app-supply-chain.py	LINGXI

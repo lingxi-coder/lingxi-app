@@ -1806,6 +1806,7 @@ dependencies = [
  "cost",
  "cron",
  "dirs",
+ "fusion",
  "futures",
  "futures-core",
  "hooks",
@@ -2223,6 +2224,26 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "76ee7a02da4d231650c7cea31349b889be2f45ddb3ef3032d2ec8185f6313fd2"
 dependencies = [
  "libc",
+]
+
+[[package]]
+name = "fusion"
+version = "0.12.0"
+dependencies = [
+ "async-trait",
+ "core",
+ "cost",
+ "platform-api",
+ "protocol",
+ "serde",
+ "serde_json",
+ "sidequery",
+ "telemetry",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "uuid",
 ]
 
 [[package]]
@@ -6346,6 +6367,7 @@ dependencies = [
  "core",
  "cost",
  "futures-core",
+ "futures-util",
  "hooks",
  "llm-client",
  "platform-api",
@@ -7207,6 +7229,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-util",
  "tool-api",
  "tracing",
 ]

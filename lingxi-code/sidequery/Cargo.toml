@@ -17,6 +17,7 @@ tool-api = { path = "../tool-api" }
 base64 = "0.22"
 sha2 = "0.10"
 futures-core = { workspace = true }
+futures-util.workspace = true
 url = "2"
 serde.workspace = true
 serde_json.workspace = true

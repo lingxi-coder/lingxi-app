@@ -81,6 +81,7 @@ mod tests {
         assert!(validate_task_id("t12345678").is_ok());
         assert!(validate_task_id("w12345678").is_ok());
         assert!(validate_task_id("m12345678").is_ok());
+        assert!(validate_task_id("f12345678").is_ok());
     }
 
     #[test]
@@ -95,8 +96,8 @@ mod tests {
     #[test]
     fn task_id_regex_matches_fresh_generated() {
         use regex::Regex;
-        let re = Regex::new(r"^[bartwmdks][0-9a-z]{8}$").unwrap();
-        for c in ['b', 'a', 'r', 't', 'w', 'm', 'd', 'k'] {
+        let re = Regex::new(r"^[bartwmdksf][0-9a-z]{8}$").unwrap();
+        for c in ['b', 'a', 'r', 't', 'w', 'm', 'd', 'k', 'f'] {
             let id = fresh_task_id(c);
             assert!(re.is_match(&id), "generated id {id} fails regex");
             assert!(validate_task_id(&id).is_ok());

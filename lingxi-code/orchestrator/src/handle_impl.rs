@@ -184,6 +184,7 @@ impl OrchestratorHandle for ConversationOrchestrator {
         s.history.clear();
         s.transcript_only_messages.clear();
         s.compact_summary_messages.clear();
+        s.model_context_excluded_messages.clear();
         s.active_goal = None;
         s.message_timing = lingxi_core::session::MessageTimingState::default();
         s.session_id = protocol::SessionId::new();
@@ -284,6 +285,10 @@ impl OrchestratorHandle for ConversationOrchestrator {
         }
         s.transcript_only_messages = runtime.transcript_only_message_ids.into_iter().collect();
         s.compact_summary_messages = runtime.compact_summary_message_ids.into_iter().collect();
+        s.model_context_excluded_messages = runtime
+            .model_context_excluded_message_ids
+            .into_iter()
+            .collect();
         *self
             .transcript
             .post_compact_skill_attachments
@@ -551,6 +556,11 @@ impl OrchestratorHandle for ConversationOrchestrator {
             forked_skill_effort: None,
             frozen_command_denies: Vec::new(),
             resumed_history: None,
+            max_turns_override: None,
+            max_output_tokens_per_turn: None,
+            max_input_bytes_per_turn: None,
+            query_source_label: None,
+            correlation_id: None,
         };
 
         let invoker: Arc<dyn platform_api::tool_invoker::ToolInvoker> = Arc::new(
@@ -1265,6 +1275,55 @@ impl OrchestratorHandle for ConversationOrchestrator {
             migrations::global_config::global_config_path().as_deref(),
         )
         .await
+    }
+
+    async fn append_meta_user_message(&self, text: &str) -> Result<(), HandleError> {
+        let msg =
+            protocol::ConversationMessage::user_meta(protocol::MessageId::new(), text.to_string());
+        {
+            let mut s = self.session.lock().await;
+            s.history.push(msg.clone());
+        }
+        self.persist_message_to_jsonl(&msg).await;
+        Ok(())
+    }
+
+    async fn append_meta_user_message_to_session(
+        &self,
+        session_id: &str,
+        text: &str,
+    ) -> Result<(), HandleError> {
+        let target = protocol::SessionId::parse_prefixed(session_id).ok_or_else(|| {
+            HandleError::ActionFailed(format!("invalid target session id {session_id:?}"))
+        })?;
+        // Serialize with turns and hot-resume/clear so the target check,
+        // transcript parent lookup, append, and live-history update all land on
+        // one side of a session transition.
+        let _turn_guard = self.turn_gate.lock().await;
+        let current = self.session.lock().await.session_id;
+        let msg =
+            protocol::ConversationMessage::user_meta(protocol::MessageId::new(), text.to_string());
+        let persisted_uuid = self
+            .persist_model_excluded_meta_to_session(target, &msg)
+            .await?;
+
+        if current == target {
+            let mut session = self.session.lock().await;
+            session.model_context_excluded_messages.insert(msg.id());
+            session.history.push(msg);
+            drop(session);
+            if let Some(uuid) = persisted_uuid {
+                *self.transcript.last_jsonl_uuid.lock().await = Some(uuid);
+            }
+            return Ok(());
+        }
+
+        if persisted_uuid.is_none() {
+            return Err(HandleError::ActionFailed(format!(
+                "target session {session_id} is not active and persistence is disabled"
+            )));
+        }
+        Ok(())
     }
 
     async fn get_status_snapshot(&self) -> StatusSnapshot {
@@ -2270,6 +2329,7 @@ mod tests {
                 main_thread_agent_definition: None,
                 transcript_only_message_ids: vec![transcript_only],
                 compact_summary_message_ids: vec![compact_summary],
+                model_context_excluded_message_ids: Vec::new(),
                 loaded_tool_names: vec!["DeferredTool".to_string()],
                 post_compact_skill_attachments: vec![(
                     skill_message,

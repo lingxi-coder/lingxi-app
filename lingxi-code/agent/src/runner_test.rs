@@ -472,6 +472,9 @@ fn fresh_subagent_ctx() -> SubagentContext {
         observer: None,
         permission_mode_override: None,
         frozen_command_denies: Vec::new(),
+        max_output_tokens_per_turn: None,
+        max_input_bytes_per_turn: None,
+        query_source_label: None,
     }
 }
 
@@ -1307,6 +1310,79 @@ async fn loop_g1_completed_carries_final_turn_usage_and_tool_count() {
     assert_eq!(usage.billable_tokens.cache_read, 2);
     // One tool_use across the run (turn 1).
     assert_eq!(tool_count, 1, "run-wide tool-use count");
+}
+
+#[tokio::test]
+async fn loop_completed_cumulative_usage_sums_turns_and_ceiling_truncates() {
+    let usage_a = llm_client::Usage {
+        billable_tokens: llm_client::TokenUsage {
+            input: 1000,
+            output: 40,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let usage_b = llm_client::Usage {
+        billable_tokens: llm_client::TokenUsage {
+            input: 10,
+            output: 50,
+            cache_write: 3,
+            cache_read: 2,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let api = MockSubagentApiClient::new(vec![
+        Ok(tool_use_response_with_usage(
+            "Read",
+            Some("tool_use"),
+            usage_a,
+        )),
+        Ok(llm_client::LlmResponse {
+            usage: usage_b.clone(),
+            ..text_response("done", Some("end_turn"))
+        }),
+    ]);
+    let invoker = CountingInvoker::new();
+    let mut ctx = loop_ctx(api.clone(), Some(invoker.clone()), 4);
+    ctx.max_output_tokens_per_turn = Some(8);
+    ctx.max_input_bytes_per_turn = Some(64);
+    ctx.prompt_messages = vec![
+        ConversationMessage::user(MessageId::new(), "x".repeat(200)),
+        ConversationMessage::user(MessageId::new(), "keep-me".into()),
+    ];
+    let (_tx, event_rx) = mpsc::channel::<lingxi_core::Event>(8);
+    let (out_tx, out_rx) = mpsc::channel::<SubagentEvent>(16);
+    run_subagent(ctx, event_rx, out_tx).await;
+    let evs = drain(out_rx).await;
+    let (usage, cumulative) = evs
+        .iter()
+        .find_map(|e| match e {
+            SubagentEvent::Completed {
+                usage,
+                cumulative_usage,
+                ..
+            } => Some((usage.clone(), cumulative_usage.clone())),
+            _ => None,
+        })
+        .expect("one Completed");
+    assert_eq!(usage.billable_tokens.output, 8, "final-turn output clamped");
+    assert_ne!(
+        usage.billable_tokens.input, cumulative.billable_tokens.input,
+        "cumulative input must include earlier turns"
+    );
+    assert_eq!(cumulative.billable_tokens.input, 1010);
+    assert_eq!(
+        cumulative.billable_tokens.output, 16,
+        "40 clamped to 8, plus 8"
+    );
+    let last = api.last_messages();
+    let joined = format!("{last:?}");
+    assert!(
+        !joined.contains(&"x".repeat(200)),
+        "over-budget prefix must be dropped before the API call"
+    );
+    assert!(!last.is_empty(), "at least the newest message is retained");
 }
 
 #[tokio::test]

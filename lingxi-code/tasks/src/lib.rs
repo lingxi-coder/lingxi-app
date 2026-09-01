@@ -1,7 +1,7 @@
 //! Task scheduling and tracking primitives.
 //!
 //! See spec §6.6 (Tasks subsystem). This crate provides:
-//! - The polymorphic [`state::TaskState`] union (9 variants).
+//! - The polymorphic [`state::TaskState`] union (10 variants).
 //! - The generic [`task_trait::Task`] handler interface.
 //! - [`registry::TaskRegistry`] for tracking running tasks.
 //! - [`output_manager::TaskOutputManager`] for sandboxed task spool files.
@@ -33,12 +33,13 @@ pub mod task_trait;
 // list left anywhere to twin this crate's (deleted) list against.
 
 pub use handlers::{
-    DreamHandler, InProcessTeammateHandler, LocalAgentHandler, LocalBashHandler,
-    LocalWorkflowHandler, MonitorHandler, MonitorMcpHandler,
+    escape_xml, fusion_result_xml, DreamHandler, InProcessTeammateHandler, LocalAgentHandler,
+    LocalBashHandler, LocalFusionHandler, LocalWorkflowHandler, MonitorHandler, MonitorMcpHandler,
 };
 pub use id::{generate_task_id, TaskType};
 pub use registry::{
-    register_agent_handlers, register_dream_handler, register_self_contained_handlers,
+    register_agent_handlers, register_dream_handler, register_fusion_handler,
+    register_self_contained_handlers,
 };
 pub use scope::{LocalAppWorkflowPurpose, LocalAppWorkflowTaskScope, MalformedAppId};
 pub use state::*;

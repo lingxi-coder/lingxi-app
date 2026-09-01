@@ -399,6 +399,75 @@ impl SideQueryClient for ProviderSideQueryClient {
         Ok(decode_response(resp, request.output_format.is_some()))
     }
 
+    async fn query_json_schema(
+        &self,
+        request: crate::side_query::StrictStructuredQueryRequest,
+    ) -> Result<crate::side_query::StrictStructuredQueryResponse, SideQueryError> {
+        let model = request.model.clone();
+        let profile = request.profile.clone();
+        let resp = match &self.backend {
+            ProviderSideQueryBackend::Session(service) => {
+                let stream = service
+                    .stream_json_schema(
+                        &request.model,
+                        request.profile.as_deref(),
+                        request.system_prompt.as_deref(),
+                        request.messages,
+                        request.schema,
+                        Some(request.max_tokens),
+                        None,
+                    )
+                    .await
+                    .map_err(map_structured_llm_error)?;
+                collect_completed_response(stream).await?
+            }
+            ProviderSideQueryBackend::Direct { client, transport } => {
+                let system: Vec<SystemBlock> = request
+                    .system_prompt
+                    .as_deref()
+                    .map(|s| vec![SystemBlock::text(s)])
+                    .unwrap_or_default();
+                let messages = convert_messages(request.messages)?;
+                let llm_req = LlmRequest {
+                    model: request.model,
+                    profile: request.profile,
+                    system,
+                    messages,
+                    tools: Vec::new(),
+                    max_tokens: Some(request.max_tokens),
+                    temperature: request.temperature.map(f64::from),
+                    capture_retry_count: true,
+                    query_source: Some(request.query_source.as_str().to_string()),
+                    response_format: Some(llm_client::ResponseFormat::JsonSchema {
+                        schema: request.schema,
+                    }),
+                    ..LlmRequest::default()
+                };
+                let arc_transport = ArcTransport(Arc::clone(transport));
+                let bridge = LlmTransportBridge::new(arc_transport);
+                client
+                    .execute(&llm_req, &bridge)
+                    .await
+                    .map_err(map_structured_llm_error)?
+            }
+        };
+        let request_id = (!resp.id.is_empty()).then(|| resp.id.clone());
+        let decoded = decode_response(resp, true);
+        let Some(value) = decoded.structured else {
+            return Err(SideQueryError::InvalidResponse(
+                "structured output was not valid JSON".into(),
+            ));
+        };
+        Ok(crate::side_query::StrictStructuredQueryResponse {
+            value,
+            usage: decoded.usage,
+            model,
+            profile,
+            request_id,
+            retry_count: decoded.retry_count,
+        })
+    }
+
     fn last_retry_count(&self) -> u32 {
         match &self.backend {
             ProviderSideQueryBackend::Session(service) => service.last_retry_count(),
@@ -408,6 +477,37 @@ impl SideQueryClient for ProviderSideQueryClient {
 }
 
 // ── Inline message/tool conversion (no dep on `agent` crate) ─────────────────
+
+fn map_structured_llm_error(err: llm_client::LlmError) -> SideQueryError {
+    let message = err.to_string().to_ascii_lowercase();
+    let provider = err.provider_message().unwrap_or("").to_ascii_lowercase();
+    if message.contains("json schema")
+        || message.contains("structured output")
+        || message.contains("response_format")
+        || provider.contains("json schema")
+        || provider.contains("structured output")
+    {
+        return SideQueryError::StructuredOutputUnsupported;
+    }
+    SideQueryError::Api(err)
+}
+
+async fn collect_completed_response(
+    stream: impl futures_util::Stream<Item = Result<llm_client::LlmEvent, llm_client::LlmError>>,
+) -> Result<llm_client::LlmResponse, SideQueryError> {
+    use futures_util::StreamExt;
+    futures_util::pin_mut!(stream);
+    while let Some(event) = stream.next().await {
+        match event.map_err(map_structured_llm_error)? {
+            llm_client::LlmEvent::Completed { response } => return Ok(*response),
+            llm_client::LlmEvent::MessageStop => {}
+            _ => {}
+        }
+    }
+    Err(SideQueryError::InvalidResponse(
+        "structured stream ended without a completed response".into(),
+    ))
+}
 
 fn convert_messages(
     messages: Vec<protocol::ConversationMessage>,

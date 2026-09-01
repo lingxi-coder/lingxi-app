@@ -1477,7 +1477,7 @@ pub(crate) async fn call_api_with_ptl_recovery(
                 // path here rebuilds the same way.
                 let raw_history = {
                     let s = orch.session.lock().await;
-                    s.history.clone()
+                    s.model_context_history()
                 };
                 if let compaction::context_hint::HintErrorOutcome::Reject(edits, _event) =
                     c.on_request_error(&facts, raw_history)
@@ -1485,7 +1485,7 @@ pub(crate) async fn call_api_with_ptl_recovery(
                     let retry_raw = edits.messages.clone();
                     {
                         let mut s = orch.session.lock().await;
-                        s.history.clone_from(&edits.messages);
+                        s.replace_model_context_history(edits.messages.clone());
                     }
                     let mut retry = orch
                         .rewrite_outgoing_history(retry_raw, outgoing_history_rewriter.as_ref())
@@ -1521,7 +1521,7 @@ pub(crate) async fn call_api_with_ptl_recovery(
         if let Some(compactor) = orch.compaction_runtime.compaction.as_ref() {
             let raw_history = {
                 let session = orch.session.lock().await;
-                session.history.clone()
+                session.model_context_history()
             };
             let drained = compactor
                 .context_collapse
@@ -1556,7 +1556,7 @@ pub(crate) async fn call_api_with_ptl_recovery(
         // Snapshot the current (possibly already-truncated) history.
         let history = {
             let s = orch.session.lock().await;
-            s.history.clone()
+            s.model_context_history()
         };
         let Some(truncated_raw) =
             compaction::ptl_retry::truncate_head_for_ptl_retry(history, token_gap)
@@ -1567,7 +1567,7 @@ pub(crate) async fn call_api_with_ptl_recovery(
         };
         {
             let mut s = orch.session.lock().await;
-            s.history.clone_from(&truncated_raw);
+            s.replace_model_context_history(truncated_raw.clone());
         }
         let mut truncated = orch
             .rewrite_outgoing_history(truncated_raw, outgoing_history_rewriter.as_ref())
@@ -1596,7 +1596,10 @@ pub(crate) async fn call_api_with_ptl_recovery(
     if let Some(compactor) = orch.compaction_runtime.compaction.clone() {
         let (snapshot, last_assistant_at) = {
             let s = orch.session.lock().await;
-            (s.history.clone(), s.message_timing.last_assistant_at)
+            (
+                s.model_context_history(),
+                s.message_timing.last_assistant_at,
+            )
         };
         let messages_before = u32::try_from(snapshot.len()).unwrap_or(u32::MAX);
         let bytes_before: u64 = snapshot.iter().map(protocol::text_byte_size).sum();
@@ -1693,7 +1696,7 @@ pub(crate) async fn call_api_with_ptl_recovery(
                 orch.fire_post_compact("auto", summary, tokens_freed).await;
                 let history_raw = {
                     let s = orch.session.lock().await;
-                    s.history.clone()
+                    s.model_context_history()
                 };
                 let mut history = orch
                     .rewrite_outgoing_history(history_raw, outgoing_history_rewriter.as_ref())
@@ -1779,7 +1782,7 @@ async fn reissue_after_model_fallback(
     // the 529 gate closed → no recursion.
     let history = {
         let s = orch.session.lock().await;
-        s.history.clone()
+        s.model_context_history()
     };
     orch.api
         .messages_create_with_fallback(
@@ -3581,7 +3584,11 @@ pub(crate) async fn dispatch_tool_uses_tracked(
         // gate below and reused by the eventual `tool_handle.call()`.
         let (messages, model, model_profile) = {
             let s = orch.session.lock().await;
-            (s.history.clone(), s.model.clone(), s.model_profile.clone())
+            (
+                s.model_context_history(),
+                s.model.clone(),
+                s.model_profile.clone(),
+            )
         };
         let ctx = ToolUseContext {
             options: ToolUseOptions {

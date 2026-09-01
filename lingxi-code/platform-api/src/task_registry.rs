@@ -755,6 +755,33 @@ pub trait TaskRegistryHandle: Send + Sync {
     /// Default no-op keeps legacy stateless handles source-compatible.
     fn release_total_agent_spawn_reservation(&self) {}
 
+    /// Reserve `n` lifetime spawn slots at once (Fusion panels). Rolls back
+    /// on failure so a partial hold cannot leak. Default loops the single-slot
+    /// reserve so mocks keep working.
+    fn try_reserve_total_agent_spawns(&self, n: u64, cap: u64) -> Result<u64, u64> {
+        if n == 0 {
+            return Ok(self.get_total_agent_spawns());
+        }
+        let mut last = 0_u64;
+        for i in 0..n {
+            match self.try_reserve_total_agent_spawn(cap) {
+                Ok(count) => last = count,
+                Err(count) => {
+                    self.release_total_agent_spawn_reservations(i);
+                    return Err(count);
+                }
+            }
+        }
+        Ok(last)
+    }
+
+    /// Release `n` previously reserved lifetime spawn slots.
+    fn release_total_agent_spawn_reservations(&self, n: u64) {
+        for _ in 0..n {
+            self.release_total_agent_spawn_reservation();
+        }
+    }
+
     /// Session-wide count of WebSearch calls executed so far — 1:1 with
     /// claude-code's `taskRegistry.getWebSearchCalls(){return n}` (parity
     /// 2.1.212). The `WebSearch` tool reads this before every search and compares

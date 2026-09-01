@@ -326,8 +326,8 @@ def validate_typescript_native(root: pathlib.Path) -> PackageRecord:
     if metadata.get("version") != version or metadata.get("license") != license_id:
         fail("native TypeScript package metadata diverged from its version/license pin")
     expected_tsc_sha256 = package.get("tsc_sha256")
-    if os.environ.get("LINGXI_ROOTFS_TOOL_TESTING") == "1":
-        expected_tsc_sha256 = os.environ.get("LINGXI_ROOTFS_TOOL_TEST_TSC_SHA256")
+    if os.environ.get("ROOTFS_TOOL_TESTING") == "1":
+        expected_tsc_sha256 = os.environ.get("ROOTFS_TOOL_TEST_TSC_SHA256")
     if read_sha256(tsc_path) != expected_tsc_sha256:
         fail("native TypeScript tsc diverged from its executable pin")
 

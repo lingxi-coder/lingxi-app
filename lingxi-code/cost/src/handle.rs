@@ -33,6 +33,29 @@ impl BudgetEnforcerHandle for BudgetEnforcer {
     fn max_session_nano_usd(&self) -> Option<u64> {
         BudgetEnforcer::max_session_nano_usd(self)
     }
+
+    async fn active_reservation_nano_usd(&self) -> u64 {
+        BudgetEnforcer::active_reservation_nano_usd(self).await
+    }
+
+    async fn reserve_nano_usd(
+        &self,
+        nano_usd: u64,
+    ) -> Result<platform_api::BudgetReservationId, BudgetError> {
+        BudgetEnforcer::reserve_nano_usd(self, nano_usd).await
+    }
+
+    async fn commit_reservation(
+        &self,
+        id: platform_api::BudgetReservationId,
+        actual_nano_usd: u64,
+    ) -> Result<(), BudgetError> {
+        BudgetEnforcer::commit_reservation(self, id, actual_nano_usd).await
+    }
+
+    async fn release_reservation(&self, id: platform_api::BudgetReservationId) {
+        BudgetEnforcer::release_reservation(self, id).await;
+    }
 }
 
 #[cfg(test)]
@@ -126,5 +149,25 @@ mod tests {
         let enforcer = BudgetEnforcer::new(cfg, make_tracker());
         let h: &dyn BudgetEnforcerHandle = &enforcer;
         assert_eq!(h.snapshot_total_nano_usd().await, 0);
+    }
+
+    #[tokio::test]
+    async fn handle_reserve_commit_release_roundtrip() {
+        let cfg = BudgetConfig {
+            max_session_nano_usd: Some(5_000),
+            max_turn_nano_usd: None,
+            max_turn_tokens: None,
+            warning_thresholds: vec![],
+            on_exceed: BudgetExceedPolicy::Halt,
+        };
+        let enforcer = BudgetEnforcer::new(cfg, make_tracker());
+        let h: &dyn BudgetEnforcerHandle = &enforcer;
+        let id = h.reserve_nano_usd(1_000).await.unwrap();
+        assert_eq!(h.active_reservation_nano_usd().await, 1_000);
+        h.commit_reservation(id, 400).await.unwrap();
+        assert_eq!(h.active_reservation_nano_usd().await, 0);
+        let id = h.reserve_nano_usd(1_000).await.unwrap();
+        h.release_reservation(id).await;
+        assert_eq!(h.active_reservation_nano_usd().await, 0);
     }
 }

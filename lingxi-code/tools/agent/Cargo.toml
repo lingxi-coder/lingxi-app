@@ -19,6 +19,7 @@ async-trait = { workspace = true }
 serde.workspace = true
 serde_json = { workspace = true }
 tokio = { workspace = true, features = ["sync", "time"] }
+tokio-util.workspace = true
 once_cell = "1"
 thiserror.workspace = true
 # `[web-fetch agent] isolation:… ignored` notice (claude 2.1.238 @292890415 `T(...)`).

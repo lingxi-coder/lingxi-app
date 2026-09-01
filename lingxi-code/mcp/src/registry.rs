@@ -19,8 +19,8 @@ use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, SystemTime};
 use tokio::sync::{broadcast, Mutex, Notify, RwLock};
 use platform_api::{
-    Clock, HttpTransport, McpError, McpRawConnection, McpTransport, McpTransportSpec,
-    SecureStorage, ServerCapabilitiesDto,
+    Clock, HttpTransport, McpError, McpNotificationStream, McpRawConnection, McpTransport,
+    McpTransportSpec, SecureStorage, ServerCapabilitiesDto,
 };
 
 /// OAuth seam injected into the registry for remote (SSE/HTTP) MCP servers that
@@ -902,6 +902,58 @@ impl McpRegistry {
     #[must_use]
     pub fn subscribe_catalog_changes(&self) -> broadcast::Receiver<McpCatalogChanged> {
         self.catalog_changes.subscribe()
+    }
+
+    /// Subscribe to notifications from the currently live connection for
+    /// `server_name`.
+    ///
+    /// A client-backed subscription is preferred because it is tied directly
+    /// to the registry's live JSON-RPC connection and does not expose the
+    /// private raw connection handle. Transports without a client bridge can
+    /// still provide their own multiplexed notification stream through the
+    /// platform seam. Callers should treat an error as "notifications are not
+    /// available" and use their documented reconciliation fallback.
+    pub async fn subscribe_notifications(
+        &self,
+        server_name: &str,
+    ) -> Result<McpNotificationStream, McpError> {
+        if let Some(client) = self.get_client(server_name).await {
+            return Ok(client.subscribe_notifications());
+        }
+
+        let connection_id = {
+            let connections = self.connections.read().await;
+            let normalized = normalize_name_for_mcp(server_name);
+            connections
+                .iter()
+                .find(|(name, state)| {
+                    normalize_name_for_mcp(name) == normalized
+                        && matches!(state, McpConnectionState::Connected { .. })
+                })
+                .and_then(|(_, state)| match state {
+                    McpConnectionState::Connected { connection_id, .. } => Some(*connection_id),
+                    _ => None,
+                })
+        };
+        let Some(connection_id) = connection_id else {
+            return Err(McpError::Connection(format!(
+                "MCP server \"{server_name}\" has no live notification connection"
+            )));
+        };
+
+        // A platform transport may not implement the optional notification
+        // seam yet. Keep that failure local to the caller (usually a monitor)
+        // and avoid allowing an implementation panic to take down the task.
+        std::panic::AssertUnwindSafe(self.transport.notifications(&McpRawConnection {
+            connection_id,
+        }))
+        .catch_unwind()
+        .await
+        .map_err(|_| {
+            McpError::Internal(format!(
+                "MCP transport panicked while subscribing to notifications for \"{server_name}\""
+            ))
+        })?
     }
 
     /// Register or refresh one published Local App logical server. Only a
@@ -6235,6 +6287,7 @@ mod tests {
     use crate::connection::{ConfigScope, McpServerConfig};
     use async_trait::async_trait;
     use bytes::Bytes;
+    use futures_util::StreamExt;
     use jsonrpc::{Connection, Mode};
     use protocol::McpConnectionId as ConnId;
     use serde_json::Value;
@@ -8177,6 +8230,73 @@ mod tests {
                 kind: McpCatalogKind::Tools,
             }
         );
+    }
+
+    #[tokio::test]
+    async fn inbound_resources_list_changed_is_forwarded() {
+        let mock = Arc::new(BridgeMock::new(&[]));
+        let registry = McpRegistry::new(mock as Arc<dyn McpTransport>);
+        let (connection, peer_tx, _peer_rx) = drivable_connection();
+        let connection_id = ConnId::new();
+        let mut changes = registry.subscribe_catalog_changes();
+        registry.spawn_catalog_change_listener("srv".into(), connection_id, connection);
+
+        let mut frame = serde_json::to_vec(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "notifications/resources/list_changed",
+            "params": {}
+        }))
+        .unwrap();
+        frame.push(b'\n');
+        peer_tx.send(Bytes::from(frame)).await.unwrap();
+
+        let change = tokio::time::timeout(Duration::from_secs(2), changes.recv())
+            .await
+            .expect("catalog notification within timeout")
+            .expect("catalog sender remains live");
+        assert_eq!(
+            change,
+            McpCatalogChanged {
+                server_name: "srv".into(),
+                connection_id,
+                retired_connection_id: None,
+                kind: McpCatalogKind::Resources,
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn registry_notification_subscription_uses_live_client_connection() {
+        let mock = Arc::new(BridgeMock::new(&[]));
+        let registry = McpRegistry::new(mock as Arc<dyn McpTransport>);
+        let (connection, peer_tx, _peer_rx) = drivable_connection();
+        let client = Arc::new(
+            McpClient::new("srv", std::path::PathBuf::from("/tmp/work"), connection).await,
+        );
+        registry.register_client("srv", client).await;
+
+        let mut notifications = registry
+            .subscribe_notifications("srv")
+            .await
+            .expect("a live client must expose its notification stream");
+        let mut frame = serde_json::to_vec(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "notifications/resources/list_changed",
+            "params": {"cursor": "next"}
+        }))
+        .unwrap();
+        frame.push(b'\n');
+        peer_tx.send(Bytes::from(frame)).await.unwrap();
+
+        let notification = tokio::time::timeout(
+            Duration::from_secs(2),
+            notifications.next(),
+        )
+        .await
+        .expect("registry subscription must receive a server push")
+        .expect("the live connection must remain open");
+        assert_eq!(notification.method, "notifications/resources/list_changed");
+        assert_eq!(notification.params, serde_json::json!({"cursor": "next"}));
     }
 
     #[tokio::test]

@@ -1,4 +1,4 @@
-//! `MonitorMcp` task handler — polls an MCP server's resource catalog and
+//! `MonitorMcp` task handler — follows an MCP server's resource catalog and
 //! emits a spool line on every detected change.
 //!
 //! # Why polling (not push)
@@ -9,28 +9,22 @@
 //! and re-fetches the resource list whenever the server pushes a
 //! `resources/list_changed` notification (no polling at all).
 //!
-//! lingxi cannot mirror that exactly: server-pushed notifications are only
-//! reachable through `McpTransport::notifications(&McpRawConnection)`
-//! (`platform-api/src/mcp.rs`), keyed by the *private* `McpRawConnection` that the
-//! registry hides inside `McpConnectionState::Connected`. Neither
-//! [`mcp::McpRegistry`] nor the [`mcp::McpClient`] handle returned by
-//! `get_client` exposes a notification stream. So this handler **polls**
-//! `client.list_resources()` (and, for explicitly watched URIs,
-//! `client.read_resource(uri)`) on an interval, diffs the result against the
-//! previous tick, and appends one spool line per change — approximating the
-//! same observable outcome (catalog/content drift surfaced to the caller).
-//!
-//! A future `McpRegistry::subscribe_notifications(name)` passthrough could
-//! turn this into a push subscription; that is out of scope here.
+//! The registry/client expose a per-connection notification stream. This
+//! handler performs one initial reconciliation, then waits for
+//! `notifications/resources/list_changed` before re-fetching. It falls back
+//! to the existing interval only when the live transport cannot provide a
+//! stream (or a connection closes), preserving visibility for transports that
+//! have not implemented server push yet.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
-use tokio::sync::Mutex;
+use futures::StreamExt;
 use platform_api::{BackgroundTaskHandle, FileSystem};
+use tokio::sync::{watch, Mutex};
 
 use crate::id::{generate_task_id, TaskType};
 use crate::output_manager::TaskOutputManager;
@@ -41,11 +35,27 @@ use crate::task_trait::{Task, TaskContext, TaskError, TaskHandle, TaskSpawnInput
 /// hammering the server.
 pub const DEFAULT_POLL_INTERVAL: Duration = Duration::from_secs(5);
 
+const RESOURCE_LIST_CHANGED_METHOD: &str = "notifications/resources/list_changed";
+
+/// Whether a server notification invalidates the resource catalog.
+///
+/// MCP standardizes the `notifications/` prefix. The unprefixed spelling is
+/// accepted as a compatibility measure for older platform adapters that
+/// exposed the suffix directly; other notifications must not trigger a
+/// potentially expensive catalog read.
+fn is_resource_list_changed(method: &str) -> bool {
+    matches!(
+        method,
+        RESOURCE_LIST_CHANGED_METHOD | "resources/list_changed"
+    )
+}
+
 /// Per-task control block held by the handler so [`Task::kill`] (and the
 /// `cleanup` closure on [`TaskHandle`]) can cooperatively stop the poll loop.
 struct MonitorEntry {
-    /// Cooperative stop flag — the loop checks it at the top of every tick.
-    stop: Arc<AtomicBool>,
+    /// Retained cancellation state. Unlike `Notify`, a watch value cannot lose
+    /// a stop signal sent just before the worker starts awaiting it.
+    stop: watch::Sender<bool>,
     /// Background handle returned by the runtime spawner, for hard cancel.
     handle: BackgroundTaskHandle,
 }
@@ -177,7 +187,11 @@ async fn poll_once(
                 // just catalog membership. Fall back to the list signature if
                 // the read fails.
                 let sig = match client.read_resource(uri).await {
-                    Ok(c) => format!("len:{}", c.content.len()),
+                    Ok(c) => {
+                        let mut hasher = DefaultHasher::new();
+                        c.content.hash(&mut hasher);
+                        format!("len:{};hash:{:016x}", c.content.len(), hasher.finish())
+                    }
                     Err(_) => list_signature(mime),
                 };
                 snapshot.insert(uri.clone(), sig);
@@ -271,34 +285,102 @@ impl Task for MonitorMcpHandler {
         let fs = ctx.fs.clone();
         let runtime = ctx.runtime.clone();
         let interval = self.poll_interval;
-        let stop = Arc::new(AtomicBool::new(false));
-        let stop_loop = stop.clone();
+        let (stop, mut stop_loop) = watch::channel(false);
         let server_for_loop = server_name.clone();
         let watch_for_loop = watch.clone();
 
-        // The poll loop. Cooperative cancellation: checks `stop` at the top of
-        // every tick; the runtime may also hard-cancel it on `kill`.
+        // Subscribe before the first reconciliation. If the server mutates its
+        // catalog while the snapshot is in flight, the queued notification is
+        // consumed afterwards; snapshot-before-subscribe would lose that edge
+        // and could leave a push-only monitor stale forever.
         let fut = Box::pin(async move {
-            let mut prev: Option<HashMap<String, String>> = None;
-            loop {
-                if stop_loop.load(Ordering::SeqCst) {
-                    break;
-                }
-                let snapshot = poll_once(
+            let mut notifications = tokio::select! {
+                _ = stop_loop.changed() => return,
+                stream = mcp.subscribe_notifications(&server_for_loop) => stream.ok(),
+            };
+            if *stop_loop.borrow() {
+                return;
+            }
+            let first = tokio::select! {
+                _ = stop_loop.changed() => return,
+                snapshot = poll_once(
                     &mcp,
                     &fs,
                     &spool,
                     &server_for_loop,
                     &watch_for_loop,
-                    prev.as_ref(),
-                )
-                .await;
-                prev = Some(snapshot);
+                    None,
+                ) => snapshot,
+            };
+            let mut prev = Some(first);
 
-                if stop_loop.load(Ordering::SeqCst) {
+            'monitor: loop {
+                if *stop_loop.borrow() {
                     break;
                 }
-                runtime.sleep(interval).await;
+
+                if let Some(stream) = notifications.as_mut() {
+                    // Waiting on the stop notifier is essential here: an
+                    // idle MCP server must still be cancellable without
+                    // waiting for another notification or poll interval.
+                    let stream_ended = tokio::select! {
+                        _ = stop_loop.changed() => break,
+                        notification = stream.next() => match notification {
+                            Some(notification) if is_resource_list_changed(&notification.method) => {
+                                let snapshot = tokio::select! {
+                                    _ = stop_loop.changed() => break 'monitor,
+                                    snapshot = poll_once(
+                                        &mcp,
+                                        &fs,
+                                        &spool,
+                                        &server_for_loop,
+                                        &watch_for_loop,
+                                        prev.as_ref(),
+                                    ) => snapshot,
+                                };
+                                prev = Some(snapshot);
+                                false
+                            }
+                            Some(_) => false,
+                            None => true,
+                        },
+                    };
+                    if stream_ended {
+                        // A closed stream means this connection can no longer
+                        // deliver notifications. Fall back and retry after
+                        // the normal cadence so a reconnect can restore push.
+                        notifications = None;
+                    }
+                } else {
+                    tokio::select! {
+                        _ = stop_loop.changed() => break,
+                        _ = runtime.sleep(interval) => {}
+                    }
+                    if *stop_loop.borrow() {
+                        break;
+                    }
+                    // Re-establish push before reconciling so the retry path
+                    // has the same no-gap ordering as startup.
+                    notifications = tokio::select! {
+                        _ = stop_loop.changed() => break,
+                        stream = mcp.subscribe_notifications(&server_for_loop) => stream.ok(),
+                    };
+                    if *stop_loop.borrow() {
+                        break;
+                    }
+                    let snapshot = tokio::select! {
+                        _ = stop_loop.changed() => break,
+                        snapshot = poll_once(
+                            &mcp,
+                            &fs,
+                            &spool,
+                            &server_for_loop,
+                            &watch_for_loop,
+                            prev.as_ref(),
+                        ) => snapshot,
+                    };
+                    prev = Some(snapshot);
+                }
             }
         });
 
@@ -322,7 +404,7 @@ impl Task for MonitorMcpHandler {
         // runtime cancel, so the registry / `kill` performs the hard cancel).
         let cleanup_stop = stop;
         let cleanup: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
-            cleanup_stop.store(true, Ordering::SeqCst);
+            let _ = cleanup_stop.send(true);
         });
 
         Ok(TaskHandle::new(task_id, Some(cleanup)))
@@ -334,7 +416,7 @@ impl Task for MonitorMcpHandler {
             return Err(TaskError::NotFound(task_id.to_string()));
         };
         // Cooperative stop first, then hard cancel through the runtime.
-        entry.stop.store(true, Ordering::SeqCst);
+        let _ = entry.stop.send(true);
         ctx.runtime
             .cancel(&entry.handle)
             .await
@@ -353,10 +435,17 @@ mod tests {
     use super::*;
     use std::collections::HashMap as StdHashMap;
     use std::path::PathBuf;
-    use tokio::sync::Mutex as TokioMutex;
+    use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+    use tokio::sync::{Mutex as TokioMutex, Notify};
 
+    use platform_api::{
+        ElicitRequestDto, ElicitResultDto, FileContent, FileEvent, FlockGuard, FsError, McpError,
+        McpNotificationStream, McpPromptDto, McpRawConnection, McpResourceContentDto,
+        McpResourceDto, McpToolDto, McpToolResultDto, McpTransport, McpTransportKind,
+        McpTransportSpec, RuntimeError, RuntimeSpawner, ServerCapabilitiesDto,
+    };
+    use protocol::McpConnectionId;
     use test_harness::mocks::{MockMcpTransport, MockRuntimeSpawner};
-    use platform_api::{FileContent, FileEvent, FlockGuard, FsError, RuntimeSpawner};
 
     // ---- minimal in-memory FileSystem (mirrors handle.rs tests) ----------
     struct InMemoryFs {
@@ -475,6 +564,210 @@ mod tests {
         }
     }
 
+    /// Transport with a live, never-ending notification stream. The
+    /// subscription marker lets the test distinguish a monitor waiting on
+    /// push from one still in its polling fallback.
+    struct PendingNotificationTransport {
+        subscribed: Arc<Notify>,
+    }
+
+    impl PendingNotificationTransport {
+        fn new() -> (Arc<Self>, Arc<Notify>) {
+            let subscribed = Arc::new(Notify::new());
+            (
+                Arc::new(Self {
+                    subscribed: subscribed.clone(),
+                }),
+                subscribed,
+            )
+        }
+    }
+
+    #[async_trait]
+    impl McpTransport for PendingNotificationTransport {
+        async fn connect(&self, _spec: &McpTransportSpec) -> Result<McpRawConnection, McpError> {
+            Err(McpError::Internal("test transport does not connect".into()))
+        }
+
+        async fn initialize(
+            &self,
+            _conn: &McpRawConnection,
+        ) -> Result<ServerCapabilitiesDto, McpError> {
+            Ok(ServerCapabilitiesDto {
+                tools: false,
+                resources: false,
+                prompts: false,
+                logging: false,
+                directory_read: false,
+                experimental: StdHashMap::new(),
+                extensions: StdHashMap::new(),
+            })
+        }
+
+        async fn list_tools(&self, _conn: &McpRawConnection) -> Result<Vec<McpToolDto>, McpError> {
+            Ok(Vec::new())
+        }
+
+        async fn list_resources(
+            &self,
+            _conn: &McpRawConnection,
+        ) -> Result<Vec<McpResourceDto>, McpError> {
+            Ok(Vec::new())
+        }
+
+        async fn list_prompts(
+            &self,
+            _conn: &McpRawConnection,
+        ) -> Result<Vec<McpPromptDto>, McpError> {
+            Ok(Vec::new())
+        }
+
+        async fn call_tool(
+            &self,
+            _conn: &McpRawConnection,
+            _tool: &str,
+            _input: serde_json::Value,
+        ) -> Result<McpToolResultDto, McpError> {
+            Ok(McpToolResultDto::default())
+        }
+
+        async fn read_resource(
+            &self,
+            _conn: &McpRawConnection,
+            _uri: &str,
+        ) -> Result<McpResourceContentDto, McpError> {
+            Err(McpError::Internal("test transport does not read".into()))
+        }
+
+        async fn ping(&self, _conn_id: McpConnectionId) -> Result<(), McpError> {
+            Ok(())
+        }
+
+        async fn notifications(
+            &self,
+            _conn: &McpRawConnection,
+        ) -> Result<McpNotificationStream, McpError> {
+            self.subscribed.notify_one();
+            Ok(Box::pin(futures::stream::pending()))
+        }
+
+        async fn handle_elicitation(
+            &self,
+            _conn: &McpRawConnection,
+            _request: ElicitRequestDto,
+        ) -> Result<ElicitResultDto, McpError> {
+            Err(McpError::Internal("test transport does not elicit".into()))
+        }
+
+        async fn disconnect(&self, _conn_id: McpConnectionId) -> Result<(), McpError> {
+            Ok(())
+        }
+
+        fn supported_transports(&self) -> Vec<McpTransportKind> {
+            vec![McpTransportKind::InProcess]
+        }
+    }
+
+    /// Runtime that reports when a spawned task returns, allowing the
+    /// cancellation test to verify the notification wait is woken by cleanup.
+    struct CompletionRuntime {
+        next_id: AtomicU64,
+        sleep_calls: AtomicUsize,
+        finished: Arc<Notify>,
+    }
+
+    impl CompletionRuntime {
+        fn new() -> (Arc<Self>, Arc<Notify>) {
+            let finished = Arc::new(Notify::new());
+            (
+                Arc::new(Self {
+                    next_id: AtomicU64::new(1),
+                    sleep_calls: AtomicUsize::new(0),
+                    finished: finished.clone(),
+                }),
+                finished,
+            )
+        }
+    }
+
+    #[async_trait]
+    impl RuntimeSpawner for CompletionRuntime {
+        async fn spawn(
+            &self,
+            name: &str,
+            task: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>>,
+        ) -> Result<platform_api::BackgroundTaskHandle, RuntimeError> {
+            let finished = self.finished.clone();
+            tokio::spawn(async move {
+                task.await;
+                finished.notify_one();
+            });
+            Ok(platform_api::BackgroundTaskHandle {
+                task_name: name.to_string(),
+                task_id: self.next_id.fetch_add(1, Ordering::SeqCst),
+            })
+        }
+
+        async fn sleep(&self, duration: Duration) {
+            self.sleep_calls.fetch_add(1, Ordering::SeqCst);
+            tokio::time::sleep(duration).await;
+        }
+
+        async fn cancel(
+            &self,
+            _handle: &platform_api::BackgroundTaskHandle,
+        ) -> Result<(), RuntimeError> {
+            Ok(())
+        }
+    }
+
+    async fn connected_notification_registry(
+        transport: Arc<PendingNotificationTransport>,
+    ) -> Arc<mcp::McpRegistry> {
+        let registry = Arc::new(mcp::McpRegistry::new(transport));
+        let config = mcp::McpServerConfig {
+            name: "mock".into(),
+            spec: McpTransportSpec::InProcess {
+                registry_key: "mock".into(),
+            },
+            scope: mcp::ConfigScope::User,
+            disabled: false,
+            timeout_ms: None,
+            discovery_cache: None,
+            always_load: false,
+            tools: Vec::new(),
+            tool_permissions: std::collections::BTreeMap::new(),
+            config_error: None,
+            metadata: mcp::McpServerMetadata::default(),
+        };
+        registry.connections.write().await.insert(
+            "mock".into(),
+            mcp::McpConnectionState::Connected {
+                config,
+                connection_id: McpConnectionId::new(),
+                capabilities: ServerCapabilitiesDto {
+                    tools: false,
+                    resources: false,
+                    prompts: false,
+                    logging: false,
+                    directory_read: false,
+                    experimental: StdHashMap::new(),
+                    extensions: StdHashMap::new(),
+                },
+                negotiated: platform_api::McpNegotiatedProtocol {
+                    era: platform_api::McpProtocolEra::Legacy,
+                    version: "2025-11-25".into(),
+                },
+                tools: Vec::new(),
+                resources: Vec::new(),
+                resource_templates: Vec::new(),
+                prompts: Vec::new(),
+                connected_at: SystemTime::now(),
+            },
+        );
+        registry
+    }
+
     /// Non-`MonitorMcp` input is rejected with `UnknownType`.
     #[tokio::test]
     async fn spawn_rejects_wrong_input_variant() {
@@ -512,6 +805,61 @@ mod tests {
             body.contains("mcp:ghost server not connected"),
             "first tick records the disconnect, got: {body:?}"
         );
+    }
+
+    #[test]
+    fn only_resource_catalog_notifications_trigger_reconciliation() {
+        assert!(is_resource_list_changed(
+            "notifications/resources/list_changed"
+        ));
+        assert!(is_resource_list_changed("resources/list_changed"));
+        assert!(!is_resource_list_changed(
+            "notifications/tools/list_changed"
+        ));
+        assert!(!is_resource_list_changed("notifications/progress"));
+    }
+
+    #[tokio::test]
+    async fn cleanup_wakes_push_subscription_without_polling() {
+        let dir = tempfile::tempdir().unwrap();
+        let fs: Arc<dyn FileSystem> = Arc::new(InMemoryFs::new());
+        let output = Arc::new(TaskOutputManager::new(
+            PathBuf::from(dir.path()),
+            fs.clone(),
+        ));
+        let (transport, subscribed) = PendingNotificationTransport::new();
+        let registry = connected_notification_registry(transport).await;
+        let handler = MonitorMcpHandler::new(registry, output, Duration::from_secs(5));
+        let (runtime, finished) = CompletionRuntime::new();
+        let ctx = TaskContext {
+            fs,
+            runtime: runtime.clone() as Arc<dyn RuntimeSpawner>,
+        };
+
+        let handle = handler
+            .spawn(
+                TaskSpawnInput::MonitorMcp {
+                    server_name: "mock".into(),
+                    watch: Vec::new(),
+                },
+                ctx,
+            )
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(2), subscribed.notified())
+            .await
+            .expect("monitor must subscribe to the live notification stream");
+        tokio::task::yield_now().await;
+        assert_eq!(
+            runtime.sleep_calls.load(Ordering::SeqCst),
+            0,
+            "a live notification stream must not enter the polling fallback"
+        );
+
+        (handle.cleanup.as_ref().unwrap())();
+        tokio::time::timeout(Duration::from_secs(2), finished.notified())
+            .await
+            .expect("cleanup must wake an idle push subscription");
     }
 
     /// Diff logic: a resource present in the new snapshot but absent in the

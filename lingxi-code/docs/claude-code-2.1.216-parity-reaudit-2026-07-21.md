@@ -298,7 +298,6 @@ Claude Code 当前公开 help 包含 remote-control 相关能力，LingXi 的 CL
 
 源码证据：
 
-- `features/src/lib.rs:1314`
 - `apps/cli/src/argv.rs` 与 `apps/cli/src/commands/mod.rs` 中不存在对等 surface。
 
 这是“有意不实现的官方能力”，仍属于 parity gap；它不是 LingXi 的项目特定 feature，因此不能按排除项消掉。

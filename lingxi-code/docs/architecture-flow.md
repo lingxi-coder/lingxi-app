@@ -70,7 +70,6 @@ graph TD
         proto["protocol"]
         core_crate["core"]
         branding["branding"]
-        features["features"]
     end
 
     Layer6 --> Layer5

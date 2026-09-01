@@ -374,9 +374,8 @@ const CHECKLIST: &[Entry] = &[
     // sessions still title via customTitle / AI rename
     // (`rename_generate_name`) / first-prompt extraction. So this changelog
     // entry is the Remote Control bridge default title, and lingxi has no
-    // Remote Control bridge (features::Feature::RemoteControl =
-    // Stage::Removed, default-off, config ignored).
-    Entry { version: "2.1.196", item: "Readable default session names at start", disposition: Divergence("binary-verified: the readable default name (adjective-noun ast()) is minted only for Remote Control bridge sessions + plan slugs; lingxi has no Remote Control bridge (Feature::RemoteControl removed)") },
+    // Remote Control bridge (LingXi has no Remote Control runtime).
+    Entry { version: "2.1.196", item: "Readable default session names at start", disposition: Divergence("binary-verified: the readable default name (adjective-noun ast()) is minted only for Remote Control bridge sessions + plan slugs; lingxi has no Remote Control bridge") },
     // M6 partial: tui_core::render::osc8::file_link ports the binary's `t2()`
     // (file:// OSC 8 target, plain-path display) with byte-locked tests;
     // wiring blocked on the same raw print path as the URL entry above.
@@ -554,16 +553,13 @@ const CHECKLIST: &[Entry] = &[
     // 5-min floor). Locked by stream_watchdog unit tests +
     // service_test::streaming_idle_watchdog_aborts_hung_stream.
     Entry { version: "2.1.196", item: "Streaming idle watchdog on by default (5 min, env kill-switch)", disposition: Disposition::Implemented },
-    // M13 N/A-with-evidence: lingxi has no Remote Control runtime to gate —
-    // `features::Feature::RemoteControl` is `Stage::Removed`, default-off,
-    // and its config key is ignored (features/src/lib.rs:1313 +
-    // features/src/tests.rs remote_control_* tests); only compatibility
-    // surfaces remain (the `remoteControlAtStartup` settings-key migration,
+    // M13 N/A-with-evidence: lingxi has no Remote Control runtime to gate;
+    // only compatibility surfaces remain (the `remoteControlAtStartup` settings-key migration,
     // PushNotification's "Remote Control inactive" strings, the `bridge`
     // command-name stub, and SendMessage's documented-unported `bridge:`
     // peer). With no bridge to start, the non-Anthropic-base-URL disable gate
     // has nothing to disable.
-    Entry { version: "2.1.196", item: "Remote Control disabled when ANTHROPIC_BASE_URL is non-Anthropic", disposition: Divergence("no Remote Control runtime in lingxi (Feature::RemoteControl removed/default-off); the base-URL gate has no surface") },
+    Entry { version: "2.1.196", item: "Remote Control disabled when ANTHROPIC_BASE_URL is non-Anthropic", disposition: Divergence("no Remote Control runtime in lingxi; the base-URL gate has no surface") },
     // M7 seam: lingxi's foreground TUI composer has no ←-on-empty entry
     // point yet (the binary's `[PERF:bg-leftarrow-start]` path respawns
     // `claude agents`). What DID land is the attach side: leaving an

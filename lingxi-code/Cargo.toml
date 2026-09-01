@@ -3,7 +3,6 @@ resolver = "2"
 members = [
     "branding",
     "protocol",
-    "features",
     "client-protocol",
     "client-adapter",
     "tool-api",
@@ -97,7 +96,6 @@ members = [
 default-members = [
     "branding",
     "protocol",
-    "features",
     "client-protocol",
     "client-adapter",
     "tool-api",

@@ -67,8 +67,8 @@ LingXi is a multi-provider AI coding assistant with a Ratatui TUI, CLI, and desk
 
 The crates form an inverted pyramid — libraries make no shipping choices, only the composition roots do. `scripts/check-deps.sh` enforces this at CI time.
 
-1. **Foundation** — `protocol`, `branding`, `features` (pure data types, zero deps)
-2. **Abstraction** — `traits`, `tool-api`, `skill-api`, `command-api` (interfaces, no impl deps)
+1. **Foundation** — `protocol`, `branding`, `core` (pure data types; `core` is the conversation reducer)
+2. **Abstraction** — `platform-api`, `tool-api`, `skill-api`, `command-api` (interfaces, no impl deps)
 3. **Engine libraries** — `orchestrator`, `llm-client`, `compaction`, `agent`, `session`, `memory`, `hooks`, `permission`, `cost`, `telemetry`, `mcp`, `sidequery`, `coordinator`, `workflow`
 4. **Tool implementations** — `tools/file`, `tools/shell`, `tools/web`, `tools/agent`, `tools/lsp`, `tools/mcp`, `tools/skill`, `tools/worktree`, `tools/plan`, `tools/task`, `tools/meta`, `tools/cron`, `tools/ui`, `tools/team`, `tools/workflow`, `tools/mobile`, `tools/computer-use`, `tools/android-use`, `tools/ios-use`
 5. **Platform adapters** — `platforms/posix`, `platforms/windows`, `platforms/ios`, `platforms/android`

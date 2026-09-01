@@ -167,6 +167,12 @@ echo "[build-linux-runtime] Building pinned OpenMinis iSH (${BUILD_TYPE})"
   echo "iSH network-policy patch is missing: ${ISH_NETWORK_POLICY_PATCH}" >&2
   exit 1
 }
+# Initialize nested iSH submodules before applying the temporary policy patch.
+# `build_ish.sh` performs this check itself, but doing it first is important:
+# `git submodule update --init --recursive` may refresh the parent checkout when
+# nested modules are missing, which would silently discard a patch applied just
+# before entering that helper.
+git -C "${ISH_SOURCE}" submodule update --init --recursive
 # This patch is intentionally generated with zero context so it remains small
 # beside the pinned iSH snapshot. Tell git to honor the exact hunk line numbers;
 # without this flag git may relocate insertion-only hunks to EOF and leave the

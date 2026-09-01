@@ -327,10 +327,12 @@ pub fn file_content_from_prefix_bytes(
     max_bytes: usize,
 ) -> Result<FileContent, FsError> {
     buf.truncate(n);
+    let mut incomplete_trailing_utf8 = false;
     if let Err(error) = std::str::from_utf8(&buf) {
         if error.error_len().is_some() {
             return Err(FsError::BinaryFile(path.to_string()));
         }
+        incomplete_trailing_utf8 = true;
         buf.truncate(error.valid_up_to());
     }
     let content = String::from_utf8(buf).map_err(|_| FsError::BinaryFile(path.to_string()))?;
@@ -338,7 +340,7 @@ pub fn file_content_from_prefix_bytes(
     Ok(FileContent {
         content,
         total_lines,
-        truncated: n == max_bytes,
+        truncated: n == max_bytes || incomplete_trailing_utf8,
     })
 }
 

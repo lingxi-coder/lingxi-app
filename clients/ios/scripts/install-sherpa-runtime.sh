@@ -8,14 +8,22 @@ BUILD_DIR="${IOS_DIR}/build/sherpa-runtime"
 VOICE_MANIFEST="${IOS_DIR}/../voice/models.json"
 [[ -f "${VOICE_MANIFEST}" ]] || { echo "error: shared voice manifest is missing: ${VOICE_MANIFEST}" >&2; exit 1; }
 command -v node >/dev/null 2>&1 || { echo "error: node is required to read the shared voice manifest" >&2; exit 1; }
-IFS=$'\t' read -r RUNTIME_VERSION ARCHIVE_NAME URL SHA256 < <(
+RUNTIME_META="$(
   node -e '
     const fs = require("fs");
     const manifest = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
     const artifact = manifest.runtime.ios;
     process.stdout.write([manifest.runtime.version, artifact.name, artifact.url, artifact.sha256].join("\t"));
   ' "${VOICE_MANIFEST}"
-)
+)"
+# `node` intentionally emits no trailing newline. A here-string supplies the
+# delimiter that `read` needs under `set -e`, while keeping real node failures
+# visible through the command substitution above.
+IFS=$'\t' read -r RUNTIME_VERSION ARCHIVE_NAME URL SHA256 <<<"${RUNTIME_META}"
+[[ -n "${RUNTIME_VERSION}" && -n "${ARCHIVE_NAME}" && -n "${URL}" && -n "${SHA256}" ]] || {
+  echo "error: ${VOICE_MANIFEST} did not yield a complete iOS runtime artifact" >&2
+  exit 1
+}
 ARCHIVE="${BUILD_DIR}/${ARCHIVE_NAME}"
 EXTRACTED="${BUILD_DIR}/extracted"
 

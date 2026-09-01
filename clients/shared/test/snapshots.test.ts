@@ -1485,6 +1485,16 @@ function validateCommand(name: string, v: unknown): void {
       assert.ok(isString(o['request_id']));
       validateAppAuthorizationDecision(o['decision']);
       break;
+    case 'resolve_app_runtime_profile_selection':
+      assert.ok(isString(o['request_id']));
+      if ('selected_family' in o && o['selected_family'] !== undefined) {
+        assert.ok(
+          ['react_dom', 'canvas_2d', 'three_3d', 'phaser_2d', 'babylon_3d'].includes(
+            o['selected_family'] as string,
+          ),
+        );
+      }
+      break;
     case 'resolve_app_dependency_change_confirmation':
       assert.ok(isString(o['request_id']) && isBool(o['approved']));
       break;
@@ -2043,7 +2053,7 @@ function validateError(v: unknown): void {
 
 test('every command snapshot parses as ClientCommand', () => {
   const files = listSnapshots('command');
-  assertSnapshotCoverage('command', files, ['resolve_app_runtime_profile_selection.json']);
+  assertSnapshotCoverage('command', files);
   for (const file of files) {
     validateCommand(file, loadSnapshot('command', file));
   }
@@ -2081,7 +2091,7 @@ test('workflow model metadata and paused task status pass the wire guards', () =
 
 test('every event snapshot parses as ClientEvent', () => {
   const files = listSnapshots('event');
-  assertSnapshotCoverage('event', files, ['app_runtime_profile_selection_requested.json']);
+  assertSnapshotCoverage('event', files);
   for (const file of files) {
     validateEvent(file, loadSnapshot('event', file));
   }

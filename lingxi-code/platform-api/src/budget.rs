@@ -11,6 +11,34 @@
 use async_trait::async_trait;
 use thiserror::Error;
 
+/// Opaque hold on session budget capacity. `0` is the no-op id used when the
+/// session has no max budget (or the reserved amount is zero).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct BudgetReservationId(u64);
+
+impl BudgetReservationId {
+    /// No hold. `commit` / `release` are no-ops.
+    pub const NOOP: Self = Self(0);
+
+    /// True when this id does not occupy capacity.
+    #[must_use]
+    pub const fn is_noop(self) -> bool {
+        self.0 == 0
+    }
+
+    /// Construct a non-zero id. The cost crate allocates these.
+    #[must_use]
+    pub const fn from_raw(raw: u64) -> Self {
+        Self(raw)
+    }
+
+    /// Raw value for persistence / debug.
+    #[must_use]
+    pub const fn raw(self) -> u64 {
+        self.0
+    }
+}
+
 /// Failure modes for [`BudgetEnforcerHandle::check_and_charge`].
 #[derive(Debug, Error)]
 pub enum BudgetError {
@@ -45,6 +73,48 @@ pub trait BudgetEnforcerHandle: Send + Sync {
     /// Defaulted for legacy mocks and unlimited implementations.
     fn max_session_nano_usd(&self) -> Option<u64> {
         None
+    }
+
+    /// Sum of active reservation holds, in nano-USD. Default 0.
+    async fn active_reservation_nano_usd(&self) -> u64 {
+        0
+    }
+
+    /// Hold `nano_usd` against the session cap until commit/release.
+    ///
+    /// Default: no max budget (or a zero amount) succeeds with
+    /// [`BudgetReservationId::NOOP`]. A configured max without a real
+    /// implementation returns [`BudgetError::Internal`] so Fusion can map it to
+    /// [`crate::FusionError::BudgetReservationUnavailable`].
+    async fn reserve_nano_usd(
+        &self,
+        nano_usd: u64,
+    ) -> Result<BudgetReservationId, BudgetError> {
+        if nano_usd == 0 || self.max_session_nano_usd().is_none() {
+            return Ok(BudgetReservationId::NOOP);
+        }
+        Err(BudgetError::Internal(
+            "budget reservation is unimplemented".into(),
+        ))
+    }
+
+    /// Release the hold after the work has realized `actual_nano_usd`.
+    /// Does not double-count spend that the cost tracker already recorded.
+    /// Unknown / noop ids succeed.
+    async fn commit_reservation(
+        &self,
+        id: BudgetReservationId,
+        actual_nano_usd: u64,
+    ) -> Result<(), BudgetError> {
+        let _ = actual_nano_usd;
+        self.release_reservation(id).await;
+        Ok(())
+    }
+
+    /// Drop a hold without realizing additional spend. Unknown / noop ids are
+    /// ignored. Implementations must be safe to call from a `Drop` spawned task.
+    async fn release_reservation(&self, id: BudgetReservationId) {
+        let _ = id;
     }
 }
 

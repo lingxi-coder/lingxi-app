@@ -17,6 +17,7 @@ mod panel;
 mod progress;
 mod synthesizer;
 
+pub use budget::{FusionPriceBook, FusionQuote, ModelRates};
 pub use config::FusionRuntimeConfig;
 pub use model_resolver::{CatalogModel, ModelSource, ResolvedPanel, ResolvedSet};
 pub use orchestrator::FusionOrchestrator;

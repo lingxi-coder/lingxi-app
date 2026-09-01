@@ -1,7 +1,7 @@
 //! Fusion state machine. Implements [`platform_api::FusionExecutor`].
 
 use crate::analyst::{analyze, AnalystError};
-use crate::budget;
+use crate::budget::{self, FusionPriceBook};
 use crate::config::FusionRuntimeConfig;
 use crate::decision::{interpret, panel_by_id, successful, HostDecision};
 use crate::model_resolver::{self, ModelSource};
@@ -27,6 +27,7 @@ pub struct FusionOrchestrator {
     side_query: Arc<dyn SideQueryClient>,
     config: FusionRuntimeConfig,
     catalog: Arc<dyn ModelSource>,
+    prices: Arc<dyn FusionPriceBook>,
 }
 
 impl FusionOrchestrator {
@@ -43,7 +44,15 @@ impl FusionOrchestrator {
             side_query,
             config,
             catalog,
+            prices: Arc::new(()),
         }
+    }
+
+    /// Attach a price book so hard reservation can quote nano-USD.
+    #[must_use]
+    pub fn with_price_book(mut self, prices: Arc<dyn FusionPriceBook>) -> Self {
+        self.prices = prices;
+        self
     }
 
     async fn run_inner(
@@ -63,7 +72,6 @@ impl FusionOrchestrator {
         )
         .await;
         let resolved = model_resolver::resolve(&request, &self.config, self.catalog.as_ref())?;
-        budget::preflight(&self.config)?;
         progress::emit(
             &progress,
             FusionStage::ReservingBudget,
@@ -71,6 +79,16 @@ impl FusionOrchestrator {
             "fusion budget preflight",
         )
         .await;
+        let billed_before = inherit.budget().snapshot_total_nano_usd().await;
+        let lease = budget::acquire(
+            &self.config,
+            &resolved,
+            &request,
+            self.catalog.as_ref(),
+            self.prices.as_ref(),
+            inherit.budget(),
+        )
+        .await?;
 
         if inherit.cancel.is_cancelled() {
             return Err(FusionError::Cancelled);
@@ -230,6 +248,21 @@ impl FusionOrchestrator {
         }
         egress.sort();
         egress.dedup();
+
+        let billed = inherit
+            .budget()
+            .snapshot_total_nano_usd()
+            .await
+            .saturating_sub(billed_before);
+        usage.reserved_max_nano_usd = lease.quote().reserved_nano_usd;
+        if billed > 0 {
+            usage.realized_nano_usd = billed;
+        } else {
+            let settled = budget::settle_usage(&panels, lease.quote(), 0);
+            usage.estimated = settled.estimated;
+            usage.realized_nano_usd = settled.realized_nano_usd;
+        }
+        lease.commit(usage.realized_nano_usd).await?;
 
         Ok(FusionResult {
             schema_version: platform_api::FUSION_SCHEMA_VERSION,

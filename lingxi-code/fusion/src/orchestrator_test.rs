@@ -54,6 +54,20 @@ impl BudgetEnforcerHandle for InertBudget {
     }
 }
 
+struct DenyReserveBudget;
+#[async_trait]
+impl BudgetEnforcerHandle for DenyReserveBudget {
+    async fn check_and_charge(&self, _: u64) -> Result<(), BudgetError> {
+        Ok(())
+    }
+    async fn snapshot_total_nano_usd(&self) -> u64 {
+        0
+    }
+    fn max_session_nano_usd(&self) -> Option<u64> {
+        Some(1)
+    }
+}
+
 fn inherit() -> FusionInheritance {
     FusionInheritance::new(
         SubagentInheritance {
@@ -658,6 +672,39 @@ async fn injected_system_reminder_is_sanitized_before_analyst() {
     assert!(
         !user.contains("<system-reminder>"),
         "raw control tag must not reach the analyst: {user}"
+    );
+}
+
+fn inherit_capped() -> FusionInheritance {
+    FusionInheritance::new(
+        SubagentInheritance {
+            tool_invoker: Arc::new(InertInvoker),
+            budget: Arc::new(DenyReserveBudget),
+        },
+        CancellationToken::new(),
+    )
+}
+
+#[tokio::test]
+async fn reserve_failure_makes_zero_panel_spawns() {
+    let spawner = FakeSpawner::new(three_ok());
+    let side = ScriptedAnalyst::new(AnalystMode::PickFirst, vec![]);
+    let err = orch_scripted(spawner.clone(), side)
+        .run(request("task"), inherit_capped(), None)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(
+            err,
+            platform_api::FusionError::InvalidConfiguration(_)
+                | platform_api::FusionError::BudgetExceeded
+                | platform_api::FusionError::BudgetReservationUnavailable
+        ),
+        "preflight must fail before panels, got {err:?}"
+    );
+    assert!(
+        spawner.prompts().is_empty(),
+        "no provider/panel calls after a failed reservation"
     );
 }
 

@@ -114,7 +114,7 @@ pub use backgrounding::{
     DEFAULT_BACKGROUND_DEFER_MS,
 };
 pub use bridge::{BridgeConfig, BridgeConnection, BridgeError, BridgeTransport};
-pub use budget::{BudgetEnforcerHandle, BudgetError};
+pub use budget::{BudgetEnforcerHandle, BudgetError, BudgetReservationId};
 pub use calendar::{CalendarError, CalendarEvent, CalendarProvider, CalendarQuery};
 pub use camera::{CameraControl, CameraError, CameraPosition, CapturePhotoOpts, CapturedImage};
 pub use clipboard::{Clipboard, ClipboardError};

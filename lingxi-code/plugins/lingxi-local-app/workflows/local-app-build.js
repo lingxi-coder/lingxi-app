@@ -13,6 +13,9 @@ const INTERNAL_KEYS = ['host_context', 'workflow_run_id', 'selector_capability',
 const QUALITY = ['fast', 'balanced', 'thorough'];
 const FINDING_KINDS = ['render', 'motion', 'data', 'webview', 'acceptance', 'build'];
 const HOST_CHROME_CONTRACT = 'The host draws NO chrome around a running app: the app must provide every visible title, navigation and back affordance. The host floats ONE control over the BOTTOM-LEADING corner, so keep the leading 80 CSS px by the bottom 80 CSS px clear from the safe area and keep time-critical controls off its temporary expansion strip.';
+const BUILDER_STAGE_DENIES = ['LocalAppGet', 'LocalAppScaffold', 'LocalAppBuild', 'LocalAppRuntime'];
+const BUILDER_CREATE_BUILD_DENIES = ['LocalAppStageCreate'];
+const BUILDER_UPDATE_DENIES = ['LocalAppGet', 'LocalAppScaffold', 'LocalAppStageCreate'];
 const input = args && typeof args === 'object' && !Array.isArray(args) ? args : {};
 const unknown = Object.keys(input).filter((key) => !ALLOWED_EXTERNAL.includes(key) && !INTERNAL_KEYS.includes(key));
 if (unknown.length > 0) throw new Error(`${WORKFLOW_ID}: unknown external field(s): ${unknown.join(', ')}`);
@@ -93,7 +96,7 @@ let createApproval;
 if (input.operation === 'create') {
   const handle = selection?.validated_selection_handle;
   if (!handle) throw new Error(`${WORKFLOW_ID}: CREATE_HANDLE_REQUIRED`);
-  const staged = await run(`Resolve the Host selection through LocalAppResolveTemplateSelection before any write. Call LocalAppStageCreate with app_id=${input.app_id}, workflow_run_id=${context.workflow_run_id}, validated_selection_handle=${handle}, quality_level=${quality}, and the structured design_spec ${JSON.stringify(designSpec)} when present. Verify dependency_input_sha256 and prepare only the run-scoped isolated staging candidate. Do not call LocalAppScaffold, LocalAppBuild or LocalAppRuntime yet, and do not write the real app workspace before native approval. Spec: ${input.spec || ''}`, { agentType: 'builder', label: 'builder-stage', phase: 'Generate and Build', schema: createStageSchema });
+  const staged = await run(`Resolve the Host selection through LocalAppResolveTemplateSelection before any write. Call LocalAppStageCreate with app_id=${input.app_id}, workflow_run_id=${context.workflow_run_id}, validated_selection_handle=${handle}, quality_level=${quality}, and the structured design_spec ${JSON.stringify(designSpec)} when present. Verify dependency_input_sha256 and prepare only the run-scoped isolated staging candidate. Do not call LocalAppScaffold, LocalAppBuild or LocalAppRuntime yet, and do not write the real app workspace before native approval. Spec: ${input.spec || ''}`, { agentType: 'builder', disallowedTools: BUILDER_STAGE_DENIES, label: 'builder-stage', phase: 'Generate and Build', schema: createStageSchema });
   if (staged.ok !== true) throw new Error(`${WORKFLOW_ID}: create staging did not succeed`);
   createApproval = requireObject(await workflow('lingxi-local-app:local-app-mcp-authoring', {
     app_id: input.app_id,
@@ -114,10 +117,10 @@ if (input.operation === 'create') {
     return { ok: true, workflow_id: WORKFLOW_ID, operation: input.operation, app_id: input.app_id, quality_level: quality, agent_calls: calls, repair_rounds: 0, status: createApproval.status, candidate_preserved: true, summary: createApproval.reason || 'Initial MCP authoring did not yield a bounded publishable tool surface.' };
   }
   if (createApproval.status !== 'create_approved' || !createApproval.approval?.receipt_id) throw new Error(`${WORKFLOW_ID}: create approval did not yield a unified scaffold receipt`);
-  build = await run(`Read LocalAppGet for app ${input.app_id} so the Host-confirmed current name and brief are the only values that reach the create transaction. Then call LocalAppScaffold with app_id=${input.app_id}, workflow_run_id=${context.workflow_run_id}, receipt_id=${createApproval.approval.receipt_id}, and that exact Host-confirmed name/brief. Only after scaffold succeeds may you invoke exactly the matching runtime specialist ${specialistFor()} to implement the app workspace, then call LocalAppBuild and LocalAppRuntime. ${HOST_CHROME_CONTRACT} Do not issue any second approval flow or publish directly. Spec: ${input.spec || ''}`, { agentType: 'builder', label: 'builder-build', phase: 'Generate and Build', schema: buildSchema });
+  build = await run(`Read LocalAppGet for app ${input.app_id} so the Host-confirmed current name and brief are the only values that reach the create transaction. Then call LocalAppScaffold with app_id=${input.app_id}, workflow_run_id=${context.workflow_run_id}, receipt_id=${createApproval.approval.receipt_id}, and that exact Host-confirmed name/brief. Only after scaffold succeeds may you invoke exactly the matching runtime specialist ${specialistFor()} to implement the app workspace, then call LocalAppBuild and LocalAppRuntime. ${HOST_CHROME_CONTRACT} Do not issue any second approval flow or publish directly. Spec: ${input.spec || ''}`, { agentType: 'builder', disallowedTools: BUILDER_CREATE_BUILD_DENIES, label: 'builder-build', phase: 'Generate and Build', schema: buildSchema });
   if (build.ok !== true || typeof build.preview_url !== 'string' || !build.preview_url.trim()) throw new Error(`${WORKFLOW_ID}: create builder did not produce a successful preview`);
 } else if (input.operation !== 'verify') {
-  build = await run(`Use only the Host-persisted runtime profile in host_context; do not reselect or resolve a create candidate. Invoke exactly the matching runtime specialist ${specialistFor()} for that persisted profile. Implement the confirmed Local App update for ${input.app_id}; use only App-managed files, then call LocalAppBuild and LocalAppRuntime. ${HOST_CHROME_CONTRACT} Persist no final receipt or publish. Host context: ${JSON.stringify(context)}. Revision: ${input.revision_prompt || ''}`, { agentType: 'builder', label: 'builder', phase: 'Generate and Build', schema: buildSchema });
+  build = await run(`Use only the Host-persisted runtime profile in host_context; do not reselect or resolve a create candidate. Invoke exactly the matching runtime specialist ${specialistFor()} for that persisted profile. Implement the confirmed Local App update for ${input.app_id}; use only App-managed files, then call LocalAppBuild and LocalAppRuntime. ${HOST_CHROME_CONTRACT} Persist no final receipt or publish. Host context: ${JSON.stringify(context)}. Revision: ${input.revision_prompt || ''}`, { agentType: 'builder', disallowedTools: BUILDER_UPDATE_DENIES, label: 'builder', phase: 'Generate and Build', schema: buildSchema });
   if (build.ok !== true || typeof build.preview_url !== 'string' || !build.preview_url.trim()) throw new Error(`${WORKFLOW_ID}: builder did not produce a successful preview`);
 }
 
@@ -137,7 +140,7 @@ for (;;) {
   }
   if (repairRounds >= repairBudget) throw new Error(`${WORKFLOW_ID}: verification still has findings after ${repairBudget} repair round(s): ${JSON.stringify(findings)}`);
   repairRounds += 1;
-  build = await run(`Repair only blocking findings for app ${input.app_id}, resolve the Host profile/selection first, preserve Host-managed files and dependencies, and preserve this layout contract: ${HOST_CHROME_CONTRACT} Rebuild and restart. Findings: ${JSON.stringify(findings)}`, { agentType: 'builder', label: `repair-${repairRounds}`, phase: 'Generate and Build', schema: buildSchema });
+  build = await run(`Repair only blocking findings for app ${input.app_id}, resolve the Host profile/selection first, preserve Host-managed files and dependencies, and preserve this layout contract: ${HOST_CHROME_CONTRACT} Rebuild and restart. Findings: ${JSON.stringify(findings)}`, { agentType: 'builder', disallowedTools: BUILDER_UPDATE_DENIES, label: `repair-${repairRounds}`, phase: 'Generate and Build', schema: buildSchema });
   if (build.ok !== true || typeof build.preview_url !== 'string' || !build.preview_url.trim()) throw new Error(`${WORKFLOW_ID}: repair builder did not produce a successful preview`);
 }
 

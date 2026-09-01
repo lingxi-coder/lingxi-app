@@ -8,10 +8,10 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Mutex as StdMutex;
 
-use test_harness::mocks::MockRuntimeSpawner;
-use tokio::sync::Mutex as TokioMutex;
 use platform_api::filesystem::{FileContent, FileEvent, FileSystem, FlockGuard, FsError};
 use platform_api::RuntimeSpawner;
+use test_harness::mocks::MockRuntimeSpawner;
+use tokio::sync::Mutex as TokioMutex;
 
 // ---- In-memory FileSystem (mirrors the other handler tests) ------------
 
@@ -390,7 +390,8 @@ async fn await_claim(
 ) -> task_store::TodoTask {
     for _ in 0..400 {
         if let Some(task) = store.get(task_id).await {
-            if task.owner.as_deref() == Some(owner) && task.status == lingxi_core::TodoState::InProgress
+            if task.owner.as_deref() == Some(owner)
+                && task.status == lingxi_core::TodoState::InProgress
             {
                 return task;
             }
@@ -434,6 +435,68 @@ impl TeammateSystemPromptRenderer for StaticSystemPromptRenderer {
     async fn render_default_system_prompt(&self) -> String {
         self.0.to_string()
     }
+}
+
+struct TaggedDiagnosticsSource(usize);
+
+#[async_trait]
+impl platform_api::NewDiagnosticsSource for TaggedDiagnosticsSource {
+    async fn take_new_diagnostics_block(&self) -> Option<String> {
+        Some(format!("diagnostics-cursor-{}", self.0))
+    }
+}
+
+#[tokio::test]
+async fn build_context_creates_an_independent_diagnostics_source_per_teammate() {
+    let next_cursor = Arc::new(AtomicUsize::new(0));
+    let factory_counter = next_cursor.clone();
+    let handler =
+        model_test_handler(None).with_new_diagnostics_source_factory(Arc::new(move || {
+            let cursor = factory_counter.fetch_add(1, Ordering::SeqCst) + 1;
+            Arc::new(TaggedDiagnosticsSource(cursor)) as Arc<dyn platform_api::NewDiagnosticsSource>
+        }));
+
+    let first_definition = DefaultTeammateDefinition
+        .resolve(&protocol::AgentId::new(), "first")
+        .await
+        .unwrap();
+    let second_definition = DefaultTeammateDefinition
+        .resolve(&protocol::AgentId::new(), "second")
+        .await
+        .unwrap();
+    let first = handler
+        .build_context(
+            protocol::AgentId::new(),
+            "first",
+            "team",
+            "task one",
+            first_definition,
+        )
+        .await
+        .unwrap();
+    let second = handler
+        .build_context(
+            protocol::AgentId::new(),
+            "second",
+            "team",
+            "task two",
+            second_definition,
+        )
+        .await
+        .unwrap();
+
+    let first_source = first.new_diagnostics_source.expect("first source");
+    let second_source = second.new_diagnostics_source.expect("second source");
+    assert!(!Arc::ptr_eq(&first_source, &second_source));
+    assert_eq!(
+        first_source.take_new_diagnostics_block().await.as_deref(),
+        Some("diagnostics-cursor-1")
+    );
+    assert_eq!(
+        second_source.take_new_diagnostics_block().await.as_deref(),
+        Some("diagnostics-cursor-2")
+    );
+    assert_eq!(next_cursor.load(Ordering::SeqCst), 2);
 }
 
 #[tokio::test]
@@ -1441,7 +1504,11 @@ impl Drop for ClaimEnvGuard {
     }
 }
 
-fn todo(subject: &str, status: lingxi_core::TodoState, owner: Option<&str>) -> task_store::TodoTask {
+fn todo(
+    subject: &str,
+    status: lingxi_core::TodoState,
+    owner: Option<&str>,
+) -> task_store::TodoTask {
     let mut t =
         task_store::TodoTask::new(subject.into(), "desc".into(), None, serde_json::Map::new());
     t.status = status;
@@ -1642,7 +1709,11 @@ async fn spawn_auto_claims_next_available_task_from_injected_config_home() {
     let config_home = guard.dir.join("host-owned-config");
     let store = task_store::TodoStore::for_list_at(&config_home, team);
     let tid = store
-        .create(todo("Host-owned work", lingxi_core::TodoState::Pending, None))
+        .create(todo(
+            "Host-owned work",
+            lingxi_core::TodoState::Pending,
+            None,
+        ))
         .await
         .unwrap();
 
@@ -1774,7 +1845,11 @@ async fn killed_teammate_stops_claiming() {
     handler.kill(&h.task_id, c).await.unwrap();
 
     let tid = store
-        .create(todo("Post-kill work", lingxi_core::TodoState::Pending, None))
+        .create(todo(
+            "Post-kill work",
+            lingxi_core::TodoState::Pending,
+            None,
+        ))
         .await
         .unwrap();
     // Two full tick intervals: a live poller would have claimed by now.

@@ -20,6 +20,7 @@ pub mod diagnostic_registry;
 pub mod diagnostics_format;
 pub mod open_file_tracker;
 pub mod passive_feedback;
+pub mod path_mapper;
 pub mod registry;
 pub mod tool_operations;
 pub mod transport;
@@ -28,9 +29,11 @@ pub use action::{LspAction, LspResponse};
 pub use client::LspClient;
 pub use connection::LspConnectionState;
 pub use diagnostic_registry::{DiagnosticEntry, LspDiagnosticRegistry};
+pub use lsp_types::Url;
 pub use open_file_tracker::{OpenFileTracker, MAX_OPEN_DOCUMENTS};
 pub use passive_feedback::PassiveDiagnosticSubscriber;
-pub use registry::LspRegistry;
+pub use path_mapper::{DesktopLspPathMapper, LspDocumentPath, LspPathMapper};
+pub use registry::{LspActivationMode, LspRegistry};
 pub use tool_operations::{
     LspOperation, LspOperationError, LspOperationResult, MAX_LSP_FILE_SIZE_BYTES,
 };

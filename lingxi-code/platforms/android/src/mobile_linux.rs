@@ -7,6 +7,15 @@
 use async_trait::async_trait;
 use nix::sys::signal::{kill, killpg, Signal};
 use nix::unistd::Pid;
+use platform_api::mobile_linux::LinuxEnforcementReceipt;
+use platform_api::{
+    LinuxCommandRequest, LinuxCommandResult, LinuxProcessHandle, MobileLinuxCapability,
+    MobileLinuxError, MobileLinuxEvent, MobileLinuxEventKind, MobileLinuxRuntime,
+    MobileLinuxRuntimeMode, MobileLinuxTaskSnapshot, MobileLinuxTaskStatus, MountPurpose,
+    MountSpec, NetworkPolicy, ProcessStreamSink, PtyOpenRequest, PtySessionHandle, PtySize,
+    RawStdioOpenRequest, RawStdioReadResult, RawStdioSessionHandle, RootfsState, RootfsStatus,
+    SandboxBackend,
+};
 use platform_common::{RootfsManifest, RootfsStore, RootfsStoreError};
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::fs;
@@ -18,19 +27,12 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt, BufReader};
-use tokio::process::{Child, Command};
-use platform_api::mobile_linux::LinuxEnforcementReceipt;
-use platform_api::{
-    LinuxCommandRequest, LinuxCommandResult, LinuxProcessHandle, MobileLinuxCapability,
-    MobileLinuxError, MobileLinuxEvent, MobileLinuxEventKind, MobileLinuxRuntime,
-    MobileLinuxRuntimeMode, MobileLinuxTaskSnapshot, MobileLinuxTaskStatus, MountPurpose,
-    MountSpec, NetworkPolicy, ProcessStreamSink, PtyOpenRequest, PtySessionHandle, PtySize,
-    RootfsState, RootfsStatus, SandboxBackend,
-};
+use tokio::process::{Child, ChildStdin, Command};
 
 const MAX_EVENTS: usize = 4096;
 const MAX_CAPTURE_BYTES: usize = 256 * 1024;
 const MAX_STDOUT_FRAGMENT_BYTES: usize = 16 * 1024;
+const MAX_RAW_STDIO_BUFFER_BYTES: usize = 512 * 1024;
 const DEFAULT_TIMEOUT_MS: u64 = 120_000;
 const REAP_BUDGET: Duration = Duration::from_secs(2);
 const ENFORCEMENT_RECEIPT_TIMEOUT: Duration = Duration::from_secs(3);
@@ -94,16 +96,151 @@ struct PtyControl {
     process: Arc<platform_pty::ProcessHandle>,
 }
 
+#[derive(Default)]
+struct RawStdioBuffers {
+    stdout: VecDeque<u8>,
+    stderr: VecDeque<u8>,
+    closed: bool,
+    exit_code: Option<i32>,
+    overflowed: bool,
+}
+
+struct RawStdioControl {
+    task: Arc<TaskControl>,
+    child: tokio::sync::Mutex<Child>,
+    stdin: tokio::sync::Mutex<Option<ChildStdin>>,
+    buffers: Arc<Mutex<RawStdioBuffers>>,
+    snapshot_roots: Vec<PathBuf>,
+}
+
 struct SpawnedChild {
     child: Child,
     enforcement: LinuxEnforcementReceipt,
     memory_limit_bytes: Option<u64>,
 }
 
+fn copy_raw_stdio_snapshot(source: &Path, destination: &Path) -> Result<(), MobileLinuxError> {
+    let metadata = fs::symlink_metadata(source).map_err(|error| {
+        MobileLinuxError::Io(format!(
+            "inspect read-only LSP workspace {}: {error}",
+            source.display()
+        ))
+    })?;
+    if metadata.file_type().is_symlink() {
+        let target = fs::read_link(source).map_err(|error| {
+            MobileLinuxError::Io(format!(
+                "read LSP workspace symlink {}: {error}",
+                source.display()
+            ))
+        })?;
+        std::os::unix::fs::symlink(target, destination).map_err(|error| {
+            MobileLinuxError::Io(format!(
+                "copy LSP workspace symlink {}: {error}",
+                source.display()
+            ))
+        })?;
+        return Ok(());
+    }
+    if metadata.is_dir() {
+        fs::create_dir_all(destination).map_err(|error| {
+            MobileLinuxError::Io(format!(
+                "create LSP workspace snapshot {}: {error}",
+                destination.display()
+            ))
+        })?;
+        for entry in fs::read_dir(source).map_err(|error| {
+            MobileLinuxError::Io(format!("read LSP workspace {}: {error}", source.display()))
+        })? {
+            let entry = entry.map_err(|error| MobileLinuxError::Io(error.to_string()))?;
+            copy_raw_stdio_snapshot(&entry.path(), &destination.join(entry.file_name()))?;
+        }
+        fs::set_permissions(destination, metadata.permissions()).map_err(|error| {
+            MobileLinuxError::Io(format!("preserve LSP snapshot permissions: {error}"))
+        })?;
+        return Ok(());
+    }
+    if metadata.is_file() {
+        fs::copy(source, destination).map_err(|error| {
+            MobileLinuxError::Io(format!(
+                "copy LSP workspace file {}: {error}",
+                source.display()
+            ))
+        })?;
+        fs::set_permissions(destination, metadata.permissions()).map_err(|error| {
+            MobileLinuxError::Io(format!("preserve LSP snapshot permissions: {error}"))
+        })?;
+        return Ok(());
+    }
+    Err(MobileLinuxError::InvalidRequest(format!(
+        "unsupported special file in LSP workspace snapshot: {}",
+        source.display()
+    )))
+}
+
+fn snapshot_read_only_mounts(
+    mounts: Vec<MountSpec>,
+    snapshot_root: &Path,
+) -> Result<(Vec<MountSpec>, Vec<PathBuf>), MobileLinuxError> {
+    if snapshot_root.exists() {
+        fs::remove_dir_all(snapshot_root).map_err(|error| {
+            MobileLinuxError::Io(format!("clear stale LSP workspace snapshot: {error}"))
+        })?;
+    }
+    let mut prepared = Vec::with_capacity(mounts.len());
+    let mut roots = Vec::new();
+    for (index, mut mount) in mounts.into_iter().enumerate() {
+        if mount.read_only {
+            let destination = snapshot_root.join(index.to_string());
+            let node_modules = mount.host_path.join("node_modules");
+            if mount.host_path.is_dir() {
+                fs::create_dir_all(&destination).map_err(|error| {
+                    MobileLinuxError::Io(format!(
+                        "create LSP workspace snapshot {}: {error}",
+                        destination.display()
+                    ))
+                })?;
+                for entry in fs::read_dir(&mount.host_path).map_err(|error| {
+                    MobileLinuxError::Io(format!(
+                        "read LSP workspace {}: {error}",
+                        mount.host_path.display()
+                    ))
+                })? {
+                    let entry = entry.map_err(|error| MobileLinuxError::Io(error.to_string()))?;
+                    if entry.file_name() == "node_modules" {
+                        continue;
+                    }
+                    copy_raw_stdio_snapshot(&entry.path(), &destination.join(entry.file_name()))?;
+                }
+            } else {
+                copy_raw_stdio_snapshot(&mount.host_path, &destination)?;
+            }
+            let guest_root = mount.guest_path.clone();
+            mount.host_path = destination;
+            mount.read_only = false;
+            roots.push(snapshot_root.to_path_buf());
+            prepared.push(mount);
+            if node_modules.is_dir() {
+                prepared.push(MountSpec {
+                    host_path: node_modules,
+                    guest_path: format!("{guest_root}/node_modules"),
+                    read_only: false,
+                    purpose: MountPurpose::External,
+                });
+            }
+            continue;
+        }
+        prepared.push(mount);
+    }
+    roots.sort();
+    roots.dedup();
+    Ok((prepared, roots))
+}
+
 #[derive(Clone, Copy)]
 enum ForegroundMountMode {
     Merged,
     RequestOnly,
+    ExplicitOnly,
 }
 
 struct RuntimeState {
@@ -111,6 +248,7 @@ struct RuntimeState {
     mounts: RwLock<Vec<MountSpec>>,
     tasks: Mutex<HashMap<String, Arc<TaskControl>>>,
     ptys: Mutex<HashMap<String, Arc<PtyControl>>>,
+    raw_stdio: Mutex<HashMap<String, Arc<RawStdioControl>>>,
     events: Mutex<VecDeque<MobileLinuxEvent>>,
     next_id: AtomicU64,
     next_sequence: AtomicU64,
@@ -143,6 +281,7 @@ impl AndroidProotRuntime {
                 mounts: RwLock::new(Vec::new()),
                 tasks: Mutex::new(HashMap::new()),
                 ptys: Mutex::new(HashMap::new()),
+                raw_stdio: Mutex::new(HashMap::new()),
                 events: Mutex::new(VecDeque::new()),
                 next_id: AtomicU64::new(1),
                 next_sequence: AtomicU64::new(1),
@@ -315,7 +454,9 @@ impl AndroidProotRuntime {
                 .read()
                 .expect("mobile-linux mounts rwlock")
                 .clone(),
-            ForegroundMountMode::RequestOnly => Vec::with_capacity(request_mounts.len()),
+            ForegroundMountMode::RequestOnly | ForegroundMountMode::ExplicitOnly => {
+                Vec::with_capacity(request_mounts.len())
+            }
         };
         for mount in request_mounts {
             validate_mount(mount, &self.state.config.managed_root)?;
@@ -786,6 +927,18 @@ impl AndroidProotRuntime {
         })
     }
 
+    fn append_raw_stdio_bytes(queue: &mut VecDeque<u8>, chunk: &[u8]) -> bool {
+        if queue.len().saturating_add(chunk.len()) > MAX_RAW_STDIO_BUFFER_BYTES {
+            return false;
+        }
+        queue.extend(chunk.iter().copied());
+        true
+    }
+
+    fn drain_raw_stdio_bytes(queue: &mut VecDeque<u8>, max_bytes: usize) -> Vec<u8> {
+        queue.drain(..queue.len().min(max_bytes)).collect()
+    }
+
     fn rootfs_snapshot(&self) -> RootfsStatus {
         if let Ok(manifest) = self.load_rootfs_manifest() {
             return self.rootfs_store().status(&manifest);
@@ -869,18 +1022,37 @@ impl MobileLinuxRuntime for AndroidProotRuntime {
             .keys()
             .cloned()
             .collect();
+        let raw_stdio_ids: HashSet<_> = self
+            .state
+            .raw_stdio
+            .lock()
+            .expect("mobile-linux raw stdio mutex")
+            .keys()
+            .cloned()
+            .collect();
         let task_ids: Vec<_> = self
             .state
             .tasks
             .lock()
             .expect("mobile-linux tasks mutex")
             .keys()
-            .filter(|id| !pty_ids.contains(*id))
+            .filter(|id| !pty_ids.contains(*id) && !raw_stdio_ids.contains(*id))
             .cloned()
             .collect();
         let mut errors = Vec::new();
         for id in pty_ids {
             if let Err(error) = self.close_pty(&PtySessionHandle { id }).await {
+                errors.push(error.to_string());
+            }
+        }
+        for id in raw_stdio_ids {
+            if let Err(error) = self
+                .close_raw_stdio(&RawStdioSessionHandle {
+                    id,
+                    enforcement: LinuxEnforcementReceipt::default(),
+                })
+                .await
+            {
                 errors.push(error.to_string());
             }
         }
@@ -1222,6 +1394,284 @@ impl MobileLinuxRuntime for AndroidProotRuntime {
         Ok(PtySessionHandle { id })
     }
 
+    async fn open_raw_stdio(
+        &self,
+        request: RawStdioOpenRequest,
+    ) -> Result<RawStdioSessionHandle, MobileLinuxError> {
+        self.boot().await?;
+        let (id, task) = self.create_task(
+            "stdio",
+            display_command(&request.command, &request.args),
+            MobileLinuxTaskStatus::Running,
+        );
+        let snapshot_root = self
+            .state
+            .config
+            .app_sandbox_root
+            .join("cache/lingxi-raw-stdio-snapshots")
+            .join(&id);
+        let snapshot_root_for_copy = snapshot_root.clone();
+        let request_mounts = request.mounts.clone();
+        let snapshot_result = tokio::task::spawn_blocking(move || {
+            snapshot_read_only_mounts(request_mounts, &snapshot_root_for_copy)
+        })
+        .await
+        .map_err(|error| MobileLinuxError::Io(format!("join LSP workspace snapshot: {error}")))?;
+        let (prepared_mounts, snapshot_roots) = match snapshot_result {
+            Ok(value) => value,
+            Err(error) => {
+                let _ = fs::remove_dir_all(&snapshot_root);
+                self.finish_task(
+                    &id,
+                    &task,
+                    MobileLinuxTaskStatus::Failed,
+                    None,
+                    Some(error.to_string()),
+                );
+                return Err(error);
+            }
+        };
+        let mounts =
+            match self.execution_mounts(&prepared_mounts, ForegroundMountMode::ExplicitOnly) {
+                Ok(mounts) => mounts,
+                Err(error) => {
+                    for root in &snapshot_roots {
+                        let _ = fs::remove_dir_all(root);
+                    }
+                    self.finish_task(
+                        &id,
+                        &task,
+                        MobileLinuxTaskStatus::Failed,
+                        None,
+                        Some(error.to_string()),
+                    );
+                    return Err(error);
+                }
+            };
+        let command_request = LinuxCommandRequest {
+            command: request.command,
+            args: request.args,
+            cwd: request.cwd,
+            env: request.env,
+            stdin: None,
+            timeout_ms: None,
+            network: request.network,
+            resource_limits: request.resource_limits,
+            mounts: mounts.clone(),
+        };
+        let spawned = match self
+            .spawn_child_with_mounts(&command_request, &mounts, None)
+            .await
+        {
+            Ok(spawned) => spawned,
+            Err(error) => {
+                for root in &snapshot_roots {
+                    let _ = fs::remove_dir_all(root);
+                }
+                self.finish_task(
+                    &id,
+                    &task,
+                    MobileLinuxTaskStatus::Failed,
+                    None,
+                    Some(error.to_string()),
+                );
+                return Err(error);
+            }
+        };
+        let SpawnedChild {
+            mut child,
+            enforcement,
+            ..
+        } = spawned;
+        let pid = child
+            .id()
+            .ok_or_else(|| MobileLinuxError::Io("PRoot child has no pid".to_string()))?;
+        task.pid.store(u64::from(pid), Ordering::Release);
+        let stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| MobileLinuxError::Io("PRoot stdin unavailable".to_string()))?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| MobileLinuxError::Io("PRoot stdout unavailable".to_string()))?;
+        let stderr = child
+            .stderr
+            .take()
+            .ok_or_else(|| MobileLinuxError::Io("PRoot stderr unavailable".to_string()))?;
+        let buffers = Arc::new(Mutex::new(RawStdioBuffers::default()));
+        let control = Arc::new(RawStdioControl {
+            task: task.clone(),
+            child: tokio::sync::Mutex::new(child),
+            stdin: tokio::sync::Mutex::new(Some(stdin)),
+            buffers: buffers.clone(),
+            snapshot_roots,
+        });
+        self.state
+            .raw_stdio
+            .lock()
+            .expect("mobile-linux raw stdio mutex")
+            .insert(id.clone(), control);
+        tokio::spawn(read_raw_stream(stdout, {
+            let buffers = buffers.clone();
+            move |chunk| {
+                let buffers = buffers.clone();
+                async move {
+                    let mut guard = buffers.lock().expect("raw stdio stdout mutex");
+                    if !Self::append_raw_stdio_bytes(&mut guard.stdout, &chunk) {
+                        guard.overflowed = true;
+                    }
+                    Ok(())
+                }
+            }
+        }));
+        tokio::spawn(read_raw_stream(stderr, move |chunk| {
+            let buffers = buffers.clone();
+            async move {
+                let mut guard = buffers.lock().expect("raw stdio stderr mutex");
+                if !Self::append_raw_stdio_bytes(&mut guard.stderr, &chunk) {
+                    guard.overflowed = true;
+                }
+                Ok(())
+            }
+        }));
+        Ok(RawStdioSessionHandle { id, enforcement })
+    }
+
+    async fn write_raw_stdio(
+        &self,
+        handle: &RawStdioSessionHandle,
+        input: Vec<u8>,
+    ) -> Result<(), MobileLinuxError> {
+        let control = self
+            .state
+            .raw_stdio
+            .lock()
+            .expect("mobile-linux raw stdio mutex")
+            .get(&handle.id)
+            .cloned()
+            .ok_or_else(|| {
+                MobileLinuxError::InvalidRequest("unknown raw stdio session".to_string())
+            })?;
+        let mut stdin_guard = control.stdin.lock().await;
+        let stdin = stdin_guard.as_mut().ok_or_else(|| {
+            MobileLinuxError::InvalidRequest("raw stdio stdin is closed".to_string())
+        })?;
+        stdin
+            .write_all(&input)
+            .await
+            .map_err(|error| MobileLinuxError::Io(format!("write raw stdio stdin: {error}")))?;
+        Ok(())
+    }
+
+    async fn read_raw_stdio(
+        &self,
+        handle: &RawStdioSessionHandle,
+        max_bytes: usize,
+    ) -> Result<RawStdioReadResult, MobileLinuxError> {
+        let control = self
+            .state
+            .raw_stdio
+            .lock()
+            .expect("mobile-linux raw stdio mutex")
+            .get(&handle.id)
+            .cloned()
+            .ok_or_else(|| {
+                MobileLinuxError::InvalidRequest("unknown raw stdio session".to_string())
+            })?;
+        {
+            let mut child = control.child.lock().await;
+            if let Some(status) = child
+                .try_wait()
+                .map_err(|error| MobileLinuxError::Io(format!("poll raw stdio child: {error}")))?
+            {
+                let mut guard = control.buffers.lock().expect("raw stdio buffers mutex");
+                guard.closed = true;
+                guard.exit_code = status.code().or(Some(-1));
+                self.finish_task(
+                    &handle.id,
+                    &control.task,
+                    if status.success() {
+                        MobileLinuxTaskStatus::Completed
+                    } else {
+                        MobileLinuxTaskStatus::Failed
+                    },
+                    guard.exit_code,
+                    None,
+                );
+            }
+        }
+        let mut guard = control.buffers.lock().expect("raw stdio buffers mutex");
+        if guard.overflowed {
+            return Err(MobileLinuxError::Io(
+                "raw stdio unread output exceeded 512 KiB".to_string(),
+            ));
+        }
+        let stdout = Self::drain_raw_stdio_bytes(&mut guard.stdout, max_bytes);
+        let stderr =
+            Self::drain_raw_stdio_bytes(&mut guard.stderr, max_bytes.saturating_sub(stdout.len()));
+        Ok(RawStdioReadResult {
+            stdout,
+            stderr,
+            closed: guard.closed && guard.stdout.is_empty() && guard.stderr.is_empty(),
+            exit_code: guard.exit_code,
+        })
+    }
+
+    async fn close_raw_stdio(
+        &self,
+        handle: &RawStdioSessionHandle,
+    ) -> Result<(), MobileLinuxError> {
+        let control = self
+            .state
+            .raw_stdio
+            .lock()
+            .expect("mobile-linux raw stdio mutex")
+            .remove(&handle.id)
+            .ok_or_else(|| {
+                MobileLinuxError::InvalidRequest("unknown raw stdio session".to_string())
+            })?;
+        drop(control.stdin.lock().await.take());
+        let mut child = control.child.lock().await;
+        let pid = child.id().ok_or_else(|| {
+            MobileLinuxError::InvalidRequest("raw stdio child has no pid".to_string())
+        })?;
+        terminate_group(pid, Signal::SIGTERM);
+        let status = match tokio::time::timeout(REAP_BUDGET, child.wait()).await {
+            Ok(result) => result
+                .map_err(|error| MobileLinuxError::Io(format!("wait raw stdio child: {error}")))?,
+            Err(_) => {
+                terminate_group(pid, Signal::SIGKILL);
+                tokio::time::timeout(REAP_BUDGET, child.wait())
+                    .await
+                    .map_err(|_| {
+                        MobileLinuxError::Io("raw stdio process tree survived SIGKILL".to_string())
+                    })?
+                    .map_err(|error| {
+                        MobileLinuxError::Io(format!("reap raw stdio child: {error}"))
+                    })?
+            }
+        };
+        let mut guard = control.buffers.lock().expect("raw stdio buffers mutex");
+        guard.closed = true;
+        guard.exit_code = status.code().or(Some(-1));
+        self.finish_task(
+            &handle.id,
+            &control.task,
+            if status.success() {
+                MobileLinuxTaskStatus::Completed
+            } else {
+                MobileLinuxTaskStatus::Cancelled
+            },
+            guard.exit_code,
+            Some("raw stdio session closed".to_string()),
+        );
+        for root in &control.snapshot_roots {
+            let _ = fs::remove_dir_all(root);
+        }
+        Ok(())
+    }
+
     async fn write_pty(
         &self,
         handle: &PtySessionHandle,
@@ -1351,6 +1801,14 @@ impl MobileLinuxRuntime for AndroidProotRuntime {
             .write()
             .expect("mobile-linux mounts rwlock") = mounts;
         Ok(())
+    }
+
+    fn current_mounts(&self) -> Vec<MountSpec> {
+        self.state
+            .mounts
+            .read()
+            .expect("mobile-linux mounts rwlock")
+            .clone()
     }
 
     async fn read_events(
@@ -1487,7 +1945,8 @@ fn validate_isolated_local_app_mounts(
         .iter()
         .filter(|mount| {
             matches!(mount.purpose, MountPurpose::Shared)
-                && mount.guest_path == platform_api::mobile_linux::guest_paths::LOCAL_APP_DEPENDENCY_STORE
+                && mount.guest_path
+                    == platform_api::mobile_linux::guest_paths::LOCAL_APP_DEPENDENCY_STORE
         })
         .collect();
     if build_mounts.len() != 1 || mounts.len() != 1 + store_mounts.len() || store_mounts.len() > 1 {
@@ -2052,6 +2511,25 @@ where
     Ok(captured)
 }
 
+async fn read_raw_stream<R, F, Fut>(mut reader: R, mut on_chunk: F) -> Result<(), MobileLinuxError>
+where
+    R: AsyncRead + Unpin,
+    F: FnMut(Vec<u8>) -> Fut,
+    Fut: std::future::Future<Output = Result<(), MobileLinuxError>>,
+{
+    let mut buffer = vec![0_u8; 8192];
+    loop {
+        let read = reader
+            .read(&mut buffer)
+            .await
+            .map_err(|error| MobileLinuxError::Io(format!("read raw stdio: {error}")))?;
+        if read == 0 {
+            return Ok(());
+        }
+        on_chunk(buffer[..read].to_vec()).await?;
+    }
+}
+
 async fn join_reader(
     task: tokio::task::JoinHandle<Result<Vec<u8>, MobileLinuxError>>,
     stream: &str,
@@ -2117,8 +2595,8 @@ fn rootfs_store_error(error: RootfsStoreError) -> MobileLinuxError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::TempDir;
     use platform_api::MountPurpose;
+    use tempfile::TempDir;
 
     fn runtime() -> (TempDir, AndroidProotRuntime) {
         let temp = tempfile::tempdir().expect("temp");
@@ -2462,6 +2940,46 @@ mod tests {
             "{}/apps/app/build/store",
             runtime.state.config.app_sandbox_root.display()
         )));
+    }
+
+    #[test]
+    fn raw_stdio_read_only_mounts_use_isolated_snapshots() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let source = temp.path().join("workspace");
+        let snapshot = temp.path().join("snapshots/raw-1");
+        fs::create_dir_all(source.join("src")).expect("source");
+        fs::create_dir_all(source.join("node_modules/react")).expect("node_modules");
+        fs::write(
+            source.join("src/app.jsx"),
+            b"// @ts-check\nconst value = 1;\n",
+        )
+        .expect("source file");
+        fs::write(source.join("node_modules/react/package.json"), b"{}").expect("dependency file");
+        let (mounts, roots) = snapshot_read_only_mounts(
+            vec![MountSpec {
+                host_path: source.clone(),
+                guest_path: "/workspace/lingxi-lsp-test".to_string(),
+                read_only: true,
+                purpose: MountPurpose::External,
+            }],
+            &snapshot,
+        )
+        .expect("snapshot mount");
+
+        assert!(!mounts[0].read_only);
+        assert_eq!(mounts.len(), 2);
+        assert_eq!(mounts[1].host_path, source.join("node_modules"));
+        assert_eq!(
+            mounts[1].guest_path,
+            "/workspace/lingxi-lsp-test/node_modules"
+        );
+        assert_eq!(roots, vec![snapshot.clone()]);
+        fs::write(mounts[0].host_path.join("src/app.jsx"), b"changed in guest")
+            .expect("mutate snapshot");
+        assert_eq!(
+            fs::read(source.join("src/app.jsx")).expect("read source"),
+            b"// @ts-check\nconst value = 1;\n"
+        );
     }
 
     #[tokio::test]

@@ -96,6 +96,8 @@ mod local_apps_mcp;
 mod local_apps_profile;
 #[cfg(feature = "uniffi")]
 mod mcp_transport;
+#[cfg(feature = "uniffi")]
+mod mobile_lsp;
 
 #[cfg(feature = "uniffi")]
 pub use client_protocol::listings::{
@@ -327,6 +329,13 @@ fn mobile_builtin_plugin_components(
     inventory: &[local_apps::PackedFile],
 ) -> plugin::PluginComponents {
     let mut components = plugin::PluginComponents::default();
+    components.lsp_servers = serde_json::from_str(builtin_bundle::COMPILED_PLUGIN_LSP_SERVERS_JSON)
+        .expect("build-time validated builtin Plugin LSP declarations");
+    for (name, config) in &mut components.lsp_servers {
+        // Public plugin manifests key LSP records by name; the map key is
+        // authoritative, just as it is in plugin discovery on desktop.
+        config.name.clone_from(name);
+    }
     for entry in inventory {
         let path = entry.path.as_str();
         let component = plugin::ComponentPath {
@@ -488,6 +497,30 @@ mod mobile_plugin_composition_tests {
             "the Loaded set after mobile's plugin boot must be exactly the id \
              mobile_builtin_plugins() returned"
         );
+    }
+
+    #[test]
+    fn local_app_plugin_no_longer_owns_the_native_typescript_lsp() {
+        let components = mobile_builtin_plugin_components(&[]);
+        assert!(components.lsp_servers.is_empty());
+        let config = crate::mobile_lsp::global_typescript_lsp_config();
+        assert_eq!(
+            config.name,
+            crate::mobile_lsp::GLOBAL_TYPESCRIPT_LSP_SERVER_NAME
+        );
+        assert_eq!(
+            config.command,
+            "/opt/lingxi/toolchains/typescript/7.0.2/tsc"
+        );
+        assert_eq!(config.args, ["--lsp", "--stdio"]);
+        assert_eq!(
+            config.extension_to_language.get(".jsx").map(String::as_str),
+            Some("javascriptreact")
+        );
+        assert_eq!(config.startup_timeout, Some(20_000));
+        assert_eq!(config.shutdown_timeout, Some(3_000));
+        assert_eq!(config.max_restarts, Some(2));
+        assert_eq!(config.diagnostics, Some(true));
     }
 
     /// The compiled-in plugin's `PluginId` must be a STABLE constant, not a
@@ -729,6 +762,11 @@ fn register_mobile_non_skill_tools_with_ask_resolver(
     // result text says so (see schedule_cron.rs `scheduler_active`). RemoteTrigger
     // is independent of the local scheduler (it triggers a cloud-side run).
     tool_cron::register_all(reg, ctx.clone());
+    // Mobile Linux carries plugin-provided language servers over its raw
+    // stdio transport. The tool remains self-gated until a plugin server is
+    // registered and the platform transport reports available.
+    #[cfg(feature = "uniffi")]
+    tool_lsp::register_all(reg, ctx.clone());
     match ask_resolver {
         Some(resolver) => tool_ui::register_all_with_ask_resolver(reg, ctx.clone(), resolver),
         None => tool_ui::register_all(reg, ctx.clone()),

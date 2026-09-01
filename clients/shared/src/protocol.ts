@@ -209,6 +209,7 @@ export type ClientCommand =
   | { type: 'approve_permission'; request_id: number; response: PermissionResponseDto }
   | { type: 'deny_permission'; request_id: number }
   | { type: 'set_permission_mode'; mode: PermissionModeId }
+  | { type: 'set_typescript_lsp_mode'; mode: TypescriptLspModeId }
   // ── `computer` tool request_access resolution ───────────────────────────────
   | { type: 'approve_computer_access'; request_id: number; response: ComputerAccessResponseDto }
   | { type: 'deny_computer_access'; request_id: number }
@@ -587,6 +588,9 @@ export type PermissionModeId =
   | 'auto'
   | 'dontAsk'
   | 'bypassPermissions';
+
+/** Global activation policy for the fixed, built-in TypeScript 7 LSP. */
+export type TypescriptLspModeId = 'auto' | 'off' | 'on';
 
 /** Inbound resolution of a {@link PermissionRequest} (permission.rs `PermissionResolved`). */
 export interface PermissionResolved {
@@ -1901,6 +1905,12 @@ export type ClientEvent =
   | { type: 'model_list'; models: string[]; current: string; details?: ModelDetailsDto[] }
   | { type: 'model_changed'; model: string }
   | { type: 'permission_mode_changed'; mode: PermissionModeId }
+  | {
+      type: 'typescript_lsp_mode_changed';
+      requested: TypescriptLspModeId;
+      effective: TypescriptLspModeId;
+      available: boolean;
+    }
   | { type: 'conversation_controls_changed'; controls: ConversationControlsDto }
   | { type: 'fast_mode_changed'; enabled: boolean }
   | {

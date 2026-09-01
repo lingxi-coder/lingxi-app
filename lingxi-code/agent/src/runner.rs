@@ -23,12 +23,12 @@
 use crate::context::SubagentContext;
 use futures::StreamExt;
 use llm_client::{LlmError, LlmEvent};
+use platform_api::WorkflowQueryWatchdog;
 use protocol::AgentId;
 use serde::{Deserialize, Serialize};
 use std::future::Future;
 use std::time::Duration;
 use tokio::sync::mpsc;
-use platform_api::WorkflowQueryWatchdog;
 
 /// Events emitted by [`run_subagent`] back to the host.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -218,6 +218,10 @@ async fn run_subagent_inner(
     event_rx: mpsc::Receiver<lingxi_core::Event>,
     out_tx: mpsc::Sender<SubagentEvent>,
 ) {
+    // Keep a cleanup handle outside the body: both the real loop and the stub
+    // contain many terminal returns, while this dispatcher always regains
+    // control after either future completes.
+    let diagnostics_cleanup = ctx.new_diagnostics_source.clone();
     // G4 (frontmatter hooks): register the agent definition's frontmatter hooks
     // scoped to this child `agent_id` BEFORE the run and clear them AFTER —
     // claude `registerFrontmatterHooks(…, isAgent=true)` (runAgent.ts:557-575)
@@ -397,6 +401,9 @@ async fn run_subagent_inner(
 
     if let Some((he, agent_id)) = frontmatter_cleanup {
         he.clear_agent_hooks(agent_id).await;
+    }
+    if let Some(source) = diagnostics_cleanup {
+        source.close().await;
     }
 }
 
@@ -1587,6 +1594,9 @@ async fn run_subagent_loop(
             // looped to max_turns on a truncated/refused turn that still carried
             // tool_uses (MAJOR #2).
             if !tool_uses.is_empty() {
+                let file_write_requested = tool_uses
+                    .iter()
+                    .any(|(_, name, _, _)| matches!(name.as_str(), "Write" | "Edit"));
                 // Dispatch each tool_use through the inherited invoker.
                 let Some(invoker) = &ctx.tool_invoker else {
                     emit_failed(
@@ -1804,6 +1814,19 @@ async fn run_subagent_loop(
                 };
                 history.push(tool_results_msg.clone());
                 emit_message(&out_tx, agent_id, &tool_results_msg).await;
+                if file_write_requested {
+                    if let Some(block) = match &ctx.new_diagnostics_source {
+                        Some(source) => source.take_new_diagnostics_block().await,
+                        None => None,
+                    } {
+                        let diagnostics_message = ConversationMessage::user_meta(
+                            MessageId::new(),
+                            format!("<system-reminder>\n{block}\n</system-reminder>"),
+                        );
+                        history.push(diagnostics_message.clone());
+                        emit_message(&out_tx, agent_id, &diagnostics_message).await;
+                    }
+                }
             }
 
             // claude `agent({schema})`: `kn>0 && kn>=Yr && rn===undefined` → throw the

@@ -1011,6 +1011,10 @@ pub(crate) struct LocalAppsHostBroker {
     runtime_configuration: RwLock<LocalAppsRuntimeConfiguration>,
     service: OnceLock<Arc<AppService>>,
     mcp_registry: OnceLock<std::sync::Weak<mcp::McpRegistry>>,
+    /// The same mobile LSP registry used by plugin materialization and file
+    /// tools. A weak reference avoids keeping language-server processes alive
+    /// after the owning engine connection is torn down.
+    lsp_registry: OnceLock<std::sync::Weak<lsp::LspRegistry>>,
     /// Set once at profile load (same call site as `attach_service`), so the
     /// broker's `llm.chat` bridge operation reaches the live model.
     llm: OnceLock<Arc<crate::local_apps_profile::SharedLlm>>,
@@ -1191,6 +1195,7 @@ impl LocalAppsHostBroker {
             }),
             service: OnceLock::new(),
             mcp_registry: OnceLock::new(),
+            lsp_registry: OnceLock::new(),
             llm: OnceLock::new(),
             device: OnceLock::new(),
             recording: Arc::new(Mutex::new(None)),
@@ -1248,6 +1253,17 @@ impl LocalAppsHostBroker {
 
     fn upgraded_mcp_registry(&self) -> Option<Arc<mcp::McpRegistry>> {
         self.mcp_registry.get().and_then(std::sync::Weak::upgrade)
+    }
+
+    pub(crate) fn attach_lsp_registry(
+        &self,
+        registry: std::sync::Weak<lsp::LspRegistry>,
+    ) -> Result<(), std::sync::Weak<lsp::LspRegistry>> {
+        self.lsp_registry.set(registry)
+    }
+
+    pub(crate) fn upgraded_lsp_registry(&self) -> Option<Arc<lsp::LspRegistry>> {
+        self.lsp_registry.get().and_then(std::sync::Weak::upgrade)
     }
 
     pub(crate) async fn sync_managed_local_app_publication(

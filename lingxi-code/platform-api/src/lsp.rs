@@ -245,6 +245,13 @@ pub trait NewDiagnosticsSource: Send + Sync {
     /// The next `<new-diagnostics>` block for diagnostics not yet surfaced to
     /// the model, or `None` when there are none.
     async fn take_new_diagnostics_block(&self) -> Option<String>;
+
+    /// Release any workspace-scoped resources owned by this source.
+    ///
+    /// Most sources are passive views over a process-wide registry and need no
+    /// cleanup. Mobile workflow sources override this hook so the final agent
+    /// using an app workspace shuts down its LSP child and clears diagnostics.
+    async fn close(&self) {}
 }
 
 /// Failure modes shared by every [`LspTransport`] method.

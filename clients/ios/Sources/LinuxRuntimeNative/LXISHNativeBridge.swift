@@ -262,6 +262,33 @@ private struct LXISHBackgroundEventPayload: Codable {
     }
 }
 
+private struct LXISHRawStdioOpenRequest: Codable {
+    var command: String
+    var args: [String]
+    var cwd: String?
+    var env: [String: String]
+    var network: String
+    var resourceLimits: LXISHResourceLimits?
+    var mounts: [LXISHMountSpec]?
+
+    enum CodingKeys: String, CodingKey {
+        case command, args, cwd, env, network, mounts
+        case resourceLimits = "resource_limits"
+    }
+}
+
+private struct LXISHRawStdioRequest: Codable {
+    var sessionId: String
+    var dataBase64: String?
+    var maxBytes: UInt32?
+
+    enum CodingKeys: String, CodingKey {
+        case sessionId = "session_id"
+        case dataBase64 = "data_base64"
+        case maxBytes = "max_bytes"
+    }
+}
+
 private struct LXISHShellExecutionResultBox {
     var exitCode: Int
     var errorCode: Int
@@ -1277,6 +1304,109 @@ private final class LXISHShellExecutorRuntimeBridge {
         return pid
     }
 
+    func spawnRawExecutable(
+        _ executable: String,
+        arguments: [String],
+        environment: [String: String],
+        cwd: String?,
+        networkPolicy: Int32,
+        memoryLimitBytes: UInt64?,
+        dataSink: @escaping (Data, Bool) -> Void,
+        completion: @escaping (LXISHShellExecutionResultBox) -> Void
+    ) throws -> Int32 {
+        guard let executorClass = NSClassFromString("ISHShellExecutor") else {
+            throw LXISHBridgeError.unavailable(Self.availabilityReason())
+        }
+        let selector = NSSelectorFromString(
+            "executeRawExecutable:arguments:environment:fsContext:dataCallback:completion:"
+        )
+        guard let method = class_getClassMethod(executorClass, selector) else {
+            let message = "ISHShellExecutor is missing its raw stdio entry point"
+            if networkPolicy != 0 { throw LXISHBridgeError.networkPolicyUnavailable(message) }
+            if memoryLimitBytes != nil { throw LXISHBridgeError.resourceLimitExceeded(message) }
+            throw LXISHBridgeError.unavailable(message)
+        }
+        let policyLease = try LXISHExecutionPolicyLease(
+            networkPolicy: networkPolicy,
+            memoryLimitBytes: memoryLimitBytes
+        )
+        let launch: (String, [String])
+        if let cwd, !cwd.isEmpty {
+            launch = (
+                "/bin/sh",
+                ["-c", "cd \"$1\" && shift && exec \"$@\"", "lingxi-raw-stdio", cwd, executable] + arguments
+            )
+        } else {
+            launch = (executable, arguments)
+        }
+        typealias DataBlock = @convention(block) (NSData, Bool) -> Void
+        let dataBlock: DataBlock = { data, isStdErr in dataSink(data as Data, isStdErr) }
+        typealias CompletionBlock = @convention(block) (AnyObject) -> Void
+        let completionBlock: CompletionBlock = { [weak self] result in
+            guard let self else { return }
+            let outcome = policyLease.finish()
+            completion(
+                LXISHShellExecutionResultBox(
+                    exitCode: self.intValue(from: result, selector: "exitCode"),
+                    errorCode: outcome.resourceLimitExceeded ? -5 : self.intValue(from: result, selector: "error"),
+                    stdoutText: "",
+                    stderrText: outcome.resourceLimitExceeded ? outcome.resourceLimitMessage : "",
+                    durationSeconds: self.doubleValue(from: result, selector: "duration")
+                )
+            )
+        }
+        typealias Fn = @convention(c) (
+            AnyClass, Selector, NSString, NSArray, NSDictionary, UInt64, AnyObject, AnyObject
+        ) -> Int32
+        let fn = unsafeBitCast(method_getImplementation(method), to: Fn.self)
+        let pid = fn(
+            executorClass,
+            selector,
+            launch.0 as NSString,
+            launch.1 as NSArray,
+            environment as NSDictionary,
+            policyLease.fsContext,
+            dataBlock as AnyObject,
+            completionBlock as AnyObject
+        )
+        guard pid >= 0 else {
+            _ = policyLease.finish()
+            throw LXISHBridgeError.unavailable("ISHShellExecutor failed to launch raw stdio process: \(pid)")
+        }
+        policyLease.startWatchdog { [weak self] in
+            self?.killProcessGroup(pid, executorClass: executorClass)
+        }
+        return pid
+    }
+
+    func writeRawStdin(_ data: Data, pid: Int32) throws {
+        guard let executorClass = NSClassFromString("ISHShellExecutor") else {
+            throw LXISHBridgeError.unavailable(Self.availabilityReason())
+        }
+        let selector = NSSelectorFromString("writeRawStdin:pid:")
+        guard let method = class_getClassMethod(executorClass, selector) else {
+            throw LXISHBridgeError.unavailable("ISHShellExecutor is missing writeRawStdin:pid:")
+        }
+        typealias Fn = @convention(c) (AnyClass, Selector, NSData, Int32) -> Bool
+        let fn = unsafeBitCast(method_getImplementation(method), to: Fn.self)
+        guard fn(executorClass, selector, data as NSData, pid) else {
+            throw LXISHBridgeError.io("raw stdio stdin is closed")
+        }
+    }
+
+    func closeRawStdin(pid: Int32) throws {
+        guard let executorClass = NSClassFromString("ISHShellExecutor") else {
+            throw LXISHBridgeError.unavailable(Self.availabilityReason())
+        }
+        let selector = NSSelectorFromString("closeRawStdinForPid:")
+        guard let method = class_getClassMethod(executorClass, selector) else {
+            throw LXISHBridgeError.unavailable("ISHShellExecutor is missing closeRawStdinForPid:")
+        }
+        typealias Fn = @convention(c) (AnyClass, Selector, Int32) -> Bool
+        let fn = unsafeBitCast(method_getImplementation(method), to: Fn.self)
+        _ = fn(executorClass, selector, pid)
+    }
+
     func killProcessGroup(_ pid: Int32) throws {
         guard pid > 1 else {
             throw LXISHBridgeError.invalidRequest("refusing to terminate iSH pid \(pid)")
@@ -1421,6 +1551,30 @@ private final class LXISHNativeCoordinator {
         }
     }
 
+    private final class RawStdioState {
+        let sessionId: String
+        let guestPid: Int32
+        let networkPolicyEnforced: Bool
+        let memoryLimitEnforced: Bool
+        var stdout = Data()
+        var stderr = Data()
+        var terminal = false
+        var exitCode: Int?
+        var failure: String?
+
+        init(
+            sessionId: String,
+            guestPid: Int32,
+            networkPolicyEnforced: Bool,
+            memoryLimitEnforced: Bool
+        ) {
+            self.sessionId = sessionId
+            self.guestPid = guestPid
+            self.networkPolicyEnforced = networkPolicyEnforced
+            self.memoryLimitEnforced = memoryLimitEnforced
+        }
+    }
+
     private struct RuntimeState {
         var config: LXISHNativeConfig
         var kernel = LXISHKernelRuntimeBridge()
@@ -1432,6 +1586,7 @@ private final class LXISHNativeCoordinator {
         var events: [LXISHPtyEventPayload] = []
         var backgroundProcesses: [String: BackgroundProcessState] = [:]
         var backgroundEvents: [LXISHBackgroundEventPayload] = []
+        var rawStdioSessions: [String: RawStdioState] = [:]
     }
 
     private let queue = DispatchQueue(label: "com.lingxi.ish-native.bridge")
@@ -1671,6 +1826,178 @@ private final class LXISHNativeCoordinator {
             }
             let limit = Int(request.limit ?? UInt32.max)
             return encodeEnvelope(ok: true, payload: ["events": Array(filtered.prefix(limit))])
+        }
+    }
+
+    func openRawStdio(config: LXISHNativeConfig, request: LXISHRawStdioOpenRequest) -> String {
+        execute(config: config) { runtime in
+            let runRequest = LXISHRunRequest(
+                command: request.command,
+                args: request.args,
+                cwd: request.cwd,
+                env: request.env,
+                stdin: nil,
+                timeoutMs: nil,
+                network: request.network,
+                resourceLimits: request.resourceLimits,
+                mounts: request.mounts,
+                includeDefaultMounts: true
+            )
+            let executionPolicy = try self.executionPolicy(for: runRequest)
+            let environment = self.preparedEnvironment(from: request.env, cwd: request.cwd, config: config)
+            _ = try self.rootfsManager.installIfNeeded(for: config)
+            runtime.mounts = request.mounts ?? runtime.mounts
+            guard LXISHKernelRuntimeBridge.isDeviceBridgeAvailable(),
+                  LXISHShellExecutorRuntimeBridge.isDeviceBridgeAvailable()
+            else {
+                throw LXISHBridgeError.unavailable(LXISHShellExecutorRuntimeBridge.availabilityReason())
+            }
+            try runtime.kernel.boot(withRootPath: config.rootfsURL.path)
+            runtime.kernelBooted = true
+            try self.applyMountsIfNeeded(requestedMounts: runtime.mounts, to: &runtime)
+            try self.validateEnvironment(environment)
+
+            let sessionId = UUID().uuidString.lowercased()
+            let runtimeKey = config.normalizedManagedRoot.path
+            let pid = try runtime.executor.spawnRawExecutable(
+                request.command,
+                arguments: request.args,
+                environment: environment,
+                cwd: request.cwd,
+                networkPolicy: executionPolicy.networkPolicy,
+                memoryLimitBytes: executionPolicy.memoryLimitBytes,
+                dataSink: { [weak self] data, isStdErr in
+                    self?.recordRawStdioData(
+                        runtimeKey: runtimeKey,
+                        sessionId: sessionId,
+                        data: data,
+                        isStdErr: isStdErr
+                    )
+                },
+                completion: { [weak self] result in
+                    self?.recordRawStdioCompletion(
+                        runtimeKey: runtimeKey,
+                        sessionId: sessionId,
+                        result: result
+                    )
+                }
+            )
+            runtime.rawStdioSessions[sessionId] = RawStdioState(
+                sessionId: sessionId,
+                guestPid: pid,
+                networkPolicyEnforced: executionPolicy.networkPolicy != 0,
+                memoryLimitEnforced: executionPolicy.memoryLimitBytes != nil
+            )
+            return [
+                "session_id": sessionId,
+                "network_policy_enforced": executionPolicy.networkPolicy != 0,
+                "memory_limit_enforced": executionPolicy.memoryLimitBytes != nil,
+            ]
+        }
+    }
+
+    func writeRawStdio(config: LXISHNativeConfig, request: LXISHRawStdioRequest) -> String {
+        execute(config: config) { runtime in
+            guard let session = runtime.rawStdioSessions[request.sessionId], !session.terminal else {
+                throw LXISHBridgeError.invalidRequest("unknown or closed raw stdio session")
+            }
+            guard let encoded = request.dataBase64,
+                  let data = Data(base64Encoded: encoded)
+            else {
+                throw LXISHBridgeError.invalidRequest("raw stdio write requires valid data_base64")
+            }
+            try runtime.executor.writeRawStdin(data, pid: session.guestPid)
+            return ["written": data.count]
+        }
+    }
+
+    func readRawStdio(config: LXISHNativeConfig, request: LXISHRawStdioRequest) -> String {
+        execute(config: config) { runtime in
+            guard let session = runtime.rawStdioSessions[request.sessionId] else {
+                throw LXISHBridgeError.invalidRequest("unknown raw stdio session")
+            }
+            let maxBytes = max(1, min(Int(request.maxBytes ?? 65_536), 1_048_576))
+            let stdoutCount = min(maxBytes, session.stdout.count)
+            let stderrCount = min(maxBytes, session.stderr.count)
+            let stdout = session.stdout.prefix(stdoutCount)
+            let stderr = session.stderr.prefix(stderrCount)
+            session.stdout.removeFirst(stdoutCount)
+            session.stderr.removeFirst(stderrCount)
+            return [
+                "stdout_base64": Data(stdout).base64EncodedString(),
+                "stderr_base64": Data(stderr).base64EncodedString(),
+                "closed": session.terminal,
+                "exit_code": session.exitCode ?? NSNull(),
+                "error": session.failure ?? NSNull(),
+            ]
+        }
+    }
+
+    func closeRawStdio(config: LXISHNativeConfig, request: LXISHRawStdioRequest) -> String {
+        execute(config: config) { runtime in
+            guard let session = runtime.rawStdioSessions[request.sessionId] else {
+                return ["already_closed": true]
+            }
+            if !session.terminal {
+                try runtime.executor.closeRawStdin(pid: session.guestPid)
+                try runtime.executor.killProcessGroup(session.guestPid)
+            }
+            return ["termination_requested": !session.terminal, "closed": session.terminal]
+        }
+    }
+
+    func disposeRawStdio(config: LXISHNativeConfig, request: LXISHRawStdioRequest) -> String {
+        execute(config: config) { runtime in
+            guard let session = runtime.rawStdioSessions[request.sessionId] else {
+                return ["disposed": true]
+            }
+            guard session.terminal else {
+                throw LXISHBridgeError.invalidRequest("raw stdio process has not been reaped")
+            }
+            runtime.rawStdioSessions.removeValue(forKey: request.sessionId)
+            return ["disposed": true]
+        }
+    }
+
+    private func recordRawStdioData(
+        runtimeKey: String,
+        sessionId: String,
+        data: Data,
+        isStdErr: Bool
+    ) {
+        queue.async {
+            guard let runtime = self.runtimes[runtimeKey],
+                  let session = runtime.rawStdioSessions[sessionId],
+                  !session.terminal
+            else { return }
+            let buffered = session.stdout.count + session.stderr.count
+            if buffered + data.count > 4 * 1_048_576 {
+                session.failure = "raw stdio output exceeded the 4 MiB unread buffer"
+                try? runtime.executor.killProcessGroup(session.guestPid)
+            } else if isStdErr {
+                session.stderr.append(data)
+            } else {
+                session.stdout.append(data)
+            }
+        }
+    }
+
+    private func recordRawStdioCompletion(
+        runtimeKey: String,
+        sessionId: String,
+        result: LXISHShellExecutionResultBox
+    ) {
+        queue.async {
+            guard let runtime = self.runtimes[runtimeKey],
+                  let session = runtime.rawStdioSessions[sessionId]
+            else { return }
+            session.terminal = true
+            session.exitCode = result.exitCode
+            if result.errorCode == -5 {
+                session.failure = result.stderrText.isEmpty
+                    ? "raw stdio process exceeded its memory limit"
+                    : result.stderrText
+            }
         }
     }
 
@@ -2403,6 +2730,66 @@ func lx_ish_native_background_poll_json(
     }
 }
 
+@_cdecl("lx_ish_native_raw_stdio_open_json")
+func lx_ish_native_raw_stdio_open_json(
+    _ configJSON: UnsafePointer<CChar>?,
+    _ requestJSON: UnsafePointer<CChar>?
+) -> UnsafeMutablePointer<CChar>? {
+    bridgingResult {
+        let config = try decodeConfig(configJSON)
+        let request = try decode(requestJSON, as: LXISHRawStdioOpenRequest.self)
+        return LXISHNativeCoordinator.shared.openRawStdio(config: config, request: request)
+    }
+}
+
+@_cdecl("lx_ish_native_raw_stdio_write_json")
+func lx_ish_native_raw_stdio_write_json(
+    _ configJSON: UnsafePointer<CChar>?,
+    _ requestJSON: UnsafePointer<CChar>?
+) -> UnsafeMutablePointer<CChar>? {
+    bridgingResult {
+        let config = try decodeConfig(configJSON)
+        let request = try decode(requestJSON, as: LXISHRawStdioRequest.self)
+        return LXISHNativeCoordinator.shared.writeRawStdio(config: config, request: request)
+    }
+}
+
+@_cdecl("lx_ish_native_raw_stdio_read_json")
+func lx_ish_native_raw_stdio_read_json(
+    _ configJSON: UnsafePointer<CChar>?,
+    _ requestJSON: UnsafePointer<CChar>?
+) -> UnsafeMutablePointer<CChar>? {
+    bridgingResult {
+        let config = try decodeConfig(configJSON)
+        let request = try decode(requestJSON, as: LXISHRawStdioRequest.self)
+        return LXISHNativeCoordinator.shared.readRawStdio(config: config, request: request)
+    }
+}
+
+@_cdecl("lx_ish_native_raw_stdio_close_json")
+func lx_ish_native_raw_stdio_close_json(
+    _ configJSON: UnsafePointer<CChar>?,
+    _ requestJSON: UnsafePointer<CChar>?
+) -> UnsafeMutablePointer<CChar>? {
+    bridgingResult {
+        let config = try decodeConfig(configJSON)
+        let request = try decode(requestJSON, as: LXISHRawStdioRequest.self)
+        return LXISHNativeCoordinator.shared.closeRawStdio(config: config, request: request)
+    }
+}
+
+@_cdecl("lx_ish_native_raw_stdio_dispose_json")
+func lx_ish_native_raw_stdio_dispose_json(
+    _ configJSON: UnsafePointer<CChar>?,
+    _ requestJSON: UnsafePointer<CChar>?
+) -> UnsafeMutablePointer<CChar>? {
+    bridgingResult {
+        let config = try decodeConfig(configJSON)
+        let request = try decode(requestJSON, as: LXISHRawStdioRequest.self)
+        return LXISHNativeCoordinator.shared.disposeRawStdio(config: config, request: request)
+    }
+}
+
 @_cdecl("lx_ish_native_probe_loopback_json")
 func lx_ish_native_probe_loopback_json(
     _ configJSON: UnsafePointer<CChar>?,
@@ -2549,6 +2936,46 @@ func lingxi_ish_background_poll_json(
     _ requestJSON: UnsafePointer<CChar>?
 ) -> UnsafeMutablePointer<CChar>? {
     lx_ish_native_background_poll_json(configJSON, requestJSON)
+}
+
+@_cdecl("lingxi_ish_raw_stdio_open_json")
+func lingxi_ish_raw_stdio_open_json(
+    _ configJSON: UnsafePointer<CChar>?,
+    _ requestJSON: UnsafePointer<CChar>?
+) -> UnsafeMutablePointer<CChar>? {
+    lx_ish_native_raw_stdio_open_json(configJSON, requestJSON)
+}
+
+@_cdecl("lingxi_ish_raw_stdio_write_json")
+func lingxi_ish_raw_stdio_write_json(
+    _ configJSON: UnsafePointer<CChar>?,
+    _ requestJSON: UnsafePointer<CChar>?
+) -> UnsafeMutablePointer<CChar>? {
+    lx_ish_native_raw_stdio_write_json(configJSON, requestJSON)
+}
+
+@_cdecl("lingxi_ish_raw_stdio_read_json")
+func lingxi_ish_raw_stdio_read_json(
+    _ configJSON: UnsafePointer<CChar>?,
+    _ requestJSON: UnsafePointer<CChar>?
+) -> UnsafeMutablePointer<CChar>? {
+    lx_ish_native_raw_stdio_read_json(configJSON, requestJSON)
+}
+
+@_cdecl("lingxi_ish_raw_stdio_close_json")
+func lingxi_ish_raw_stdio_close_json(
+    _ configJSON: UnsafePointer<CChar>?,
+    _ requestJSON: UnsafePointer<CChar>?
+) -> UnsafeMutablePointer<CChar>? {
+    lx_ish_native_raw_stdio_close_json(configJSON, requestJSON)
+}
+
+@_cdecl("lingxi_ish_raw_stdio_dispose_json")
+func lingxi_ish_raw_stdio_dispose_json(
+    _ configJSON: UnsafePointer<CChar>?,
+    _ requestJSON: UnsafePointer<CChar>?
+) -> UnsafeMutablePointer<CChar>? {
+    lx_ish_native_raw_stdio_dispose_json(configJSON, requestJSON)
 }
 
 @_cdecl("lingxi_ish_probe_loopback_json")

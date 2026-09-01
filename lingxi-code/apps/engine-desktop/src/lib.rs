@@ -7559,6 +7559,13 @@ pub async fn build(
     // M10 coordinator teammate handler (T13) hands the SAME seam to every
     // spawned `InProcessTeammate` so it drives the real multi-turn loop.
     let teammate_api = subagent_api.clone();
+    // The LSP registry is composed later with the rest of the tool substrate.
+    // Capture it through a set-once cell so both child factories can be wired
+    // here without moving that large composition block. No child can spawn
+    // before engine construction completes and the cell is filled below.
+    let lsp_diagnostics_cell =
+        Arc::new(OnceLock::<lsp::diagnostic_registry::LspDiagnosticRegistry>::new());
+    let teammate_session_cwd_cell = Arc::new(OnceLock::<Arc<SessionCwd>>::new());
     // The spawner cannot receive the tool registry / agent catalog here: both
     // are built below, and the registry construction forms a cycle through
     // `BuiltinToolContext` (which consumes `subagent_spawner`). So we grab clones
@@ -7633,6 +7640,21 @@ pub async fn build(
         .with_transcript_fs(
             Arc::new(PosixFileSystem::new(cwd.clone())) as Arc<dyn platform_api::FileSystem>
         )
+        // Every subagent gets its own passive-diagnostics cursor. Sharing the
+        // main registry as a source would make diagnostics first-reader-wins
+        // across the main loop and concurrent children.
+        .with_new_diagnostics_source_factory(Arc::new({
+            let diagnostics = lsp_diagnostics_cell.clone();
+            move |child_cwd| {
+                diagnostics
+                    .get()
+                    .expect("LSP diagnostics registry is initialized before subagent spawn")
+                    .diagnostics_source(
+                        child_cwd.map(std::path::PathBuf::from),
+                        Some(std::time::Duration::from_millis(500)),
+                    )
+            }
+        }))
         // 2.1.186: append the subagent `<env>` block (`tIm`) after the `Notes:`
         // trailer on every NON-fork spawn. The renderer probes the boot-stable
         // environment once (cwd/git/platform/shell/OS) via the orchestrator's own
@@ -8898,6 +8920,24 @@ pub async fn build(
     .with_permission_mode(cfg.permission_mode)
     .with_model_setting(model_setting_for_spawns.clone())
     .with_session_interactive(interactive_session)
+    .with_new_diagnostics_source_factory(Arc::new({
+        let diagnostics = lsp_diagnostics_cell.clone();
+        let session_cwd = teammate_session_cwd_cell.clone();
+        move || {
+            diagnostics
+                .get()
+                .expect("LSP diagnostics registry is initialized before teammate spawn")
+                .diagnostics_source(
+                    Some(
+                        session_cwd
+                            .get()
+                            .expect("session cwd is initialized before teammate spawn")
+                            .cwd(),
+                    ),
+                    Some(std::time::Duration::from_millis(500)),
+                )
+        }
+    }))
     .with_status_sink(teammate_status_sink as Arc<dyn tasks::handlers::TaskStatusSink>)
     // Fire the `TeammateIdle` hook (claude-code `executeTeammateIdleHooks`,
     // `stopHooks.ts:403`) each time a teammate finishes a turn-set and parks
@@ -9349,6 +9389,10 @@ pub async fn build(
     // `publishDiagnostics` into it, and the orchestrator polls it each turn to
     // surface the `<new-diagnostics>` reminder to the model.
     let lsp_diagnostics = lsp::diagnostic_registry::LspDiagnosticRegistry::new();
+    assert!(
+        lsp_diagnostics_cell.set(lsp_diagnostics.clone()).is_ok(),
+        "LSP diagnostics registry must be initialized exactly once"
+    );
     let plugin_lsp_registry = Arc::new(
         lsp::LspRegistry::new(Arc::new(platform_posix::PosixLspTransport::new()))
             .with_diagnostics(lsp_diagnostics.clone()),

@@ -145,6 +145,8 @@ pub enum AppErrorCodeDto {
     StorageCorrupt,
     /// The request itself is malformed (bad id, empty name, …).
     InvalidRequest,
+    /// Fresh LSP diagnostics blocked the requested build or authoring step.
+    LspDiagnosticsFailed,
     /// Underlying I/O failure.
     Io,
     /// The model is unreachable: offline, unauthenticated, or timed out.

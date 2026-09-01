@@ -12,7 +12,7 @@ The source baseline is immutable and machine-readable in
 - talloc 2.4.2
 - Base MobileLinux rootfs: Alpine 3.21.3 for `arm64-v8a` and `x86_64`
 - Local-app rootfs: Alpine 3.24.1, Node `24.18.1-r0`, Git `2.54.0-r0`,
-  npm `11.12.1-r0`, pinned pnpm `11.22.0`, Vite `8.2.1`, Rolldown `1.2.4`, Tailwind CSS/Oxide `4.3.3`,
+  npm `11.12.1-r0`, pinned pnpm `11.22.0`, native TypeScript/LSP `7.0.2`, Vite `8.2.1`, Rolldown `1.2.4`, Tailwind CSS/Oxide `4.3.3`,
   and React/ReactDOM `19.2.8`
 
 Android keeps one distribution dimension:

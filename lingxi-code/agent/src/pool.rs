@@ -7,13 +7,13 @@
 
 use crate::context::SubagentContext;
 use crate::runner::SubagentEvent;
+use platform_api::{BackgroundTaskHandle, RuntimeError, RuntimeSpawner};
 use protocol::AgentId;
 use std::collections::HashMap;
 use std::sync::Arc;
 #[cfg(test)]
 use tokio::sync::Notify;
 use tokio::sync::{mpsc, OwnedSemaphorePermit, RwLock, Semaphore};
-use platform_api::{BackgroundTaskHandle, RuntimeError, RuntimeSpawner};
 
 /// One slot in the [`StateMachinePool`].
 ///
@@ -276,6 +276,7 @@ mod tests {
             model_profile: None,
             api_client: None,
             tool_invoker: None,
+            new_diagnostics_source: None,
             tool_schemas: vec![],
             schema: None,
             budget: None,
@@ -388,7 +389,9 @@ mod tests {
             // Drive the stub runner to termination: UserExit makes it emit
             // Killed and return, dropping its `event_rx`. We never deallocate,
             // so the slot stays in the map with a now-closed inbound channel.
-            pool.send_event(&id, lingxi_core::Event::UserExit).await.unwrap();
+            pool.send_event(&id, lingxi_core::Event::UserExit)
+                .await
+                .unwrap();
             // Wait for the runner to actually surface Killed and return so its
             // receiver is dropped before we probe the closed channel.
             let ev = out_rx.recv().await.expect("Killed event");

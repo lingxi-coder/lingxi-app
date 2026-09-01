@@ -16,11 +16,11 @@ use jsonrpc::{Connection, ConnectionError};
 use lsp_types::{
     InitializeResult, ServerCapabilities, TextDocumentSyncCapability, TextDocumentSyncKind,
 };
+use platform_api::{LspError, LspServerConfig};
 use serde::{de::DeserializeOwned, Serialize};
 use serde_json::{json, Value};
 use tokio::sync::RwLock;
 use tracing::{debug, warn};
-use platform_api::{LspError, LspServerConfig};
 
 const CONTENT_MODIFIED: i32 = -32801;
 const CONTENT_MODIFIED_RETRIES: u32 = 3;
@@ -142,7 +142,7 @@ impl LspClient {
                     "publishDiagnostics": {
                         "relatedInformation": true,
                         "tagSupport": { "valueSet": [1, 2] },
-                        "versionSupport": false,
+                        "versionSupport": true,
                         "codeDescriptionSupport": true,
                         "dataSupport": false,
                     },

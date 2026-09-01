@@ -15,13 +15,14 @@ use local_apps::{
     AppDataStore, AppError, AppLayout, AppManifest, AppRecord, AppRuntimeProfile,
     AppRuntimeProfileBinding,
 };
+use lsp_types::{DiagnosticSeverity, NumberOrString};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::io::AsyncWriteExt;
 use platform_api::{
     LinuxCommandRequest, MobileLinuxRuntime, MountPurpose, MountSpec, NetworkPolicy, ResourceLimits,
@@ -34,6 +35,7 @@ const HIGH_MEMORY_BUILD_BUDGET_MB: u32 = 4_096;
 const MAX_BUILD_LOG_BYTES: u64 = 1 * 1024 * 1024;
 const BUILD_PROVENANCE_FILE: &str = "build.json";
 const BUILD_PROVENANCE_VERSION: u8 = 3;
+const LSP_DIAGNOSTIC_SETTLE_TIMEOUT: Duration = Duration::from_millis(500);
 /// Vite's default deployment directory, relative to the isolated project root.
 pub(crate) const VITE_OUTPUT_DIR: &str = "dist";
 
@@ -174,6 +176,47 @@ fn source_files(target: LocalAppBuildTarget) -> &'static [(&'static str, &'stati
         LocalAppBuildTarget::Phaser2dR1 => PHASER_2D_EDITABLE_FILES,
         LocalAppBuildTarget::Babylon3dR1 => BABYLON_3D_EDITABLE_FILES,
     }
+}
+
+fn is_app_managed_javascript_file(relative: &str) -> bool {
+    let path = Path::new(relative);
+    if path.is_absolute()
+        || path
+            .components()
+            .any(|component| !matches!(component, Component::Normal(_)))
+        || HOST_MANAGED_FILES.contains(&relative)
+    {
+        return false;
+    }
+    let writable_root = path
+        .components()
+        .next()
+        .and_then(|component| match component {
+            Component::Normal(root) => root.to_str(),
+            _ => None,
+        })
+        .is_some_and(|root| {
+            matches!(
+                root,
+                "app" | "components" | "lib" | "styles" | "public" | "src"
+            )
+        });
+    writable_root
+        && matches!(
+            path.extension().and_then(std::ffi::OsStr::to_str),
+            Some("js" | "jsx" | "mjs" | "cjs")
+        )
+}
+
+fn bounded_lsp_diagnostic_message(message: &str) -> String {
+    const MAX_CHARS: usize = 300;
+    let flattened = message.replace(['\n', '\r'], " ");
+    let mut chars = flattened.chars();
+    let mut bounded = chars.by_ref().take(MAX_CHARS).collect::<String>();
+    if chars.next().is_some() {
+        bounded.push('…');
+    }
+    bounded
 }
 
 fn hash_bytes(bytes: &[u8]) -> String {
@@ -628,6 +671,18 @@ pub(crate) fn scaffold_workspace(
     manifest.runtime_profile =
         crate::local_app_runtime_profiles::current_binding_for_family(target.runtime_profile())
             .ok();
+    if let Some(binding) = manifest.runtime_profile.as_ref() {
+        manifest.template_origin = Some(local_apps::AppTemplateOrigin {
+            plugin_id: local_apps::AppTemplateOrigin::BUILTIN_PLUGIN_ID.into(),
+            plugin_version: "builtin".into(),
+            template_id: format!(
+                "{}-r{}",
+                binding.family.as_str().replace('_', "-"),
+                binding.revision
+            ),
+            template_sha256: binding.contract_sha256.clone(),
+        });
+    }
     local_apps::save_manifest(layout, &manifest)?;
     // And stamp the record mirror the same way, for the same reason:
     // `detect_build_target` judges the PAIR (`scaffolded`, `surface`), so a
@@ -1033,6 +1088,99 @@ impl LocalAppBuilder<'_> {
         self.run_fixed_build(layout, workspace, output_rel).await
     }
 
+    async fn gate_lsp_diagnostics_before_build(&self, workspace: &Path) -> Result<(), AppError> {
+        let Some(registry) = self.host.upgraded_lsp_registry() else {
+            return Ok(());
+        };
+        let Some(settle) = registry
+            .settle_diagnostics_under_host_root(workspace, LSP_DIAGNOSTIC_SETTLE_TIMEOUT)
+            .await
+        else {
+            return Ok(());
+        };
+        if !matches!(
+            settle.state,
+            lsp::diagnostic_registry::DiagnosticSettleState::Settled
+        ) {
+            tracing::info!(
+                root = %workspace.display(),
+                tracked_documents = settle.tracked_documents,
+                state = ?settle.state,
+                "local-app build continuing with degraded LSP diagnostics"
+            );
+            return Ok(());
+        }
+        let mut blocking = Vec::new();
+        let mut degraded = false;
+        let mut advisory = 0_usize;
+        for snapshot in registry.latest_diagnostics_under_host_root(workspace).await {
+            let Ok(relative) = snapshot.host_path.strip_prefix(workspace) else {
+                continue;
+            };
+            let relative = relative.to_string_lossy().replace('\\', "/");
+            if !is_app_managed_javascript_file(&relative) {
+                continue;
+            }
+            if !matches!(
+                snapshot.freshness,
+                lsp::diagnostic_registry::DiagnosticFreshness::Fresh
+            ) {
+                degraded = true;
+                advisory = advisory.saturating_add(snapshot.diagnostics.len());
+                continue;
+            }
+            for diagnostic in snapshot.diagnostics {
+                if diagnostic.severity != Some(DiagnosticSeverity::ERROR) {
+                    advisory = advisory.saturating_add(1);
+                    continue;
+                }
+                let code = diagnostic
+                    .code
+                    .as_ref()
+                    .map(|code| match code {
+                        NumberOrString::Number(number) => number.to_string(),
+                        NumberOrString::String(text) => text.clone(),
+                    })
+                    .map(|code| format!(" [{code}]"))
+                    .unwrap_or_default();
+                blocking.push(format!(
+                    "{relative}:{}:{}{} {}",
+                    diagnostic.range.start.line + 1,
+                    diagnostic.range.start.character + 1,
+                    code,
+                    bounded_lsp_diagnostic_message(&diagnostic.message)
+                ));
+                if blocking.len() >= 20 {
+                    break;
+                }
+            }
+            if blocking.len() >= 20 {
+                break;
+            }
+        }
+        if degraded {
+            tracing::info!(
+                root = %workspace.display(),
+                "local-app build continuing with degraded LSP diagnostics because some files had stale or versionless snapshots"
+            );
+        }
+        if advisory > 0 {
+            tracing::info!(
+                root = %workspace.display(),
+                advisory_diagnostics = advisory,
+                "local-app LSP Warning/Info diagnostics were reported to the builder without blocking Vite"
+            );
+        }
+        if blocking.is_empty() {
+            Ok(())
+        } else {
+            Err(AppError::LspDiagnosticsFailed(format!(
+                "lsp_diagnostics_failed: vite_started=false; fix TypeScript diagnostics before LocalAppBuild:\n{}",
+                blocking.join("\n")
+            )))
+        }
+    }
+
     /// Build the app from the workspace's own dependency tree and promote only
     /// the validated output into the public build root. The workspace is the
     /// only app-owned build mount; dependencies must not be supplied by a
@@ -1112,6 +1260,7 @@ impl LocalAppBuilder<'_> {
         )? {
             return Ok(());
         }
+        self.gate_lsp_diagnostics_before_build(&workspace).await?;
         let artifact_root = workspace_build_artifact_root(&workspace);
         let artifact_output_rel = workspace_build_output_rel();
         let build_result = async {
@@ -4168,6 +4317,173 @@ mod tests {
         assert!(
             !workspace_build_artifact_root(&workspace).exists(),
             "private build output should be consumed by promotion"
+        );
+    }
+
+    #[tokio::test]
+    async fn build_fails_fast_when_fresh_lsp_errors_exist_in_app_managed_js() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let layout = AppLayout::new(root.path(), "aaaa1111").expect("layout");
+        scaffold_workspace(&layout, LocalAppBuildTarget::ReactDomR1).expect("scaffold workspace");
+        let workspace = layout.root().join(layout.workspace_rel());
+        fs::create_dir_all(workspace.join("node_modules/vite/bin")).expect("node_modules");
+        fs::write(
+            workspace.join("node_modules/vite/bin/vite.js"),
+            "#!/usr/bin/env node\n",
+        )
+        .expect("workspace vite");
+
+        let diagnostics = lsp::LspDiagnosticRegistry::new();
+        let host_path = workspace.join("components/generated-card.jsx");
+        fs::create_dir_all(host_path.parent().expect("component parent")).expect("components dir");
+        fs::write(
+            &host_path,
+            "// @ts-check\nexport const GeneratedCard = () => oops;\n",
+        )
+        .expect("generated source");
+        let uri = lsp_types::Url::parse("file:///workspace/aaaa1111/components/generated-card.jsx")
+            .expect("uri");
+        diagnostics
+            .record_document_sync(
+                &host_path,
+                Path::new("/workspace/aaaa1111/components/generated-card.jsx"),
+                uri.clone(),
+                Some(3),
+                true,
+            )
+            .await;
+        diagnostics
+            .publish(
+                uri,
+                lsp::DiagnosticEntry {
+                    version: Some(3),
+                    diagnostics: vec![lsp_types::Diagnostic {
+                        range: lsp_types::Range::new(
+                            lsp_types::Position::new(1, 4),
+                            lsp_types::Position::new(1, 5),
+                        ),
+                        severity: Some(lsp_types::DiagnosticSeverity::ERROR),
+                        code: Some(lsp_types::NumberOrString::Number(2304)),
+                        message: "Cannot find name 'oops'.".into(),
+                        ..Default::default()
+                    }],
+                },
+            )
+            .await;
+        let lsp_registry = Arc::new(
+            lsp::LspRegistry::new(Arc::new(platform_posix_minimal::PosixLsp::new()))
+                .with_diagnostics(diagnostics),
+        );
+
+        let runtime = RecordingIsolatedRuntime::new();
+        let broker = LocalAppsHostBroker::new(
+            root.path().to_path_buf(),
+            client_adapter::MockSink::arc(),
+            Some(runtime.clone() as Arc<dyn MobileLinuxRuntime>),
+            false,
+            None,
+        );
+        broker
+            .attach_lsp_registry(Arc::downgrade(&lsp_registry))
+            .expect("attach lsp");
+        let builder = LocalAppBuilder {
+            mobile_linux: Some(runtime.clone() as Arc<dyn MobileLinuxRuntime>),
+            host: broker.as_ref(),
+        };
+        let mut dependency = local_apps::storage::default_dependency_record("aaaa1111", 1);
+        dependency.state = local_apps::AppDependencyState::Ready;
+
+        let error = builder
+            .build_workspace_locked(&layout, &dependency)
+            .await
+            .expect_err("fresh LSP error must block Vite");
+        assert!(matches!(&error, AppError::LspDiagnosticsFailed(_)));
+        assert!(
+            error.to_string().contains("lsp_diagnostics_failed"),
+            "unexpected error: {error}"
+        );
+        assert_eq!(runtime.isolated_runs.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn stale_lsp_versions_only_degrade_and_do_not_block_build_start() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let layout = AppLayout::new(root.path(), "aaaa1111").expect("layout");
+        scaffold_workspace(&layout, LocalAppBuildTarget::ReactDomR1).expect("scaffold workspace");
+        let workspace = layout.root().join(layout.workspace_rel());
+        fs::create_dir_all(workspace.join("node_modules/vite/bin")).expect("node_modules");
+        fs::write(
+            workspace.join("node_modules/vite/bin/vite.js"),
+            "#!/usr/bin/env node\n",
+        )
+        .expect("workspace vite");
+
+        let diagnostics = lsp::LspDiagnosticRegistry::new();
+        let host_path = workspace.join("app/main.jsx");
+        let uri = lsp_types::Url::parse("file:///workspace/aaaa1111/app/main.jsx").expect("uri");
+        diagnostics
+            .record_document_sync(
+                &host_path,
+                Path::new("/workspace/aaaa1111/app/main.jsx"),
+                uri.clone(),
+                Some(3),
+                true,
+            )
+            .await;
+        diagnostics
+            .publish(
+                uri,
+                lsp::DiagnosticEntry {
+                    version: Some(2),
+                    diagnostics: vec![lsp_types::Diagnostic {
+                        range: lsp_types::Range::new(
+                            lsp_types::Position::new(0, 0),
+                            lsp_types::Position::new(0, 1),
+                        ),
+                        severity: Some(lsp_types::DiagnosticSeverity::ERROR),
+                        message: "stale".into(),
+                        ..Default::default()
+                    }],
+                },
+            )
+            .await;
+        let lsp_registry = Arc::new(
+            lsp::LspRegistry::new(Arc::new(platform_posix_minimal::PosixLsp::new()))
+                .with_diagnostics(diagnostics),
+        );
+
+        let runtime: Arc<dyn MobileLinuxRuntime> =
+            Arc::new(platform_api::UnavailableMobileLinuxRuntime::unavailable(
+                platform_api::SandboxBackend::IosIsh,
+                platform_api::MobileLinuxRuntimeMode::MobileLinux,
+                "ios",
+                "arm64",
+                "test runtime never executes node",
+            ));
+        let broker = LocalAppsHostBroker::new(
+            root.path().to_path_buf(),
+            client_adapter::MockSink::arc(),
+            Some(runtime.clone()),
+            false,
+            None,
+        );
+        broker
+            .attach_lsp_registry(Arc::downgrade(&lsp_registry))
+            .expect("attach lsp");
+        let builder = LocalAppBuilder {
+            mobile_linux: Some(runtime),
+            host: broker.as_ref(),
+        };
+        let mut dependency = local_apps::storage::default_dependency_record("aaaa1111", 1);
+        dependency.state = local_apps::AppDependencyState::Ready;
+
+        let error = builder
+            .build_workspace_locked(&layout, &dependency)
+            .await
+            .expect_err("runtime stub should still fail once build starts");
+        assert!(
+            !error.to_string().contains("lsp_diagnostics_failed"),
+            "stale diagnostics should degrade, not block: {error}"
         );
     }
 

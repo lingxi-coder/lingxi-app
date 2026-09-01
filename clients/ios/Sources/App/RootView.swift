@@ -552,6 +552,11 @@ struct RootView: View {
                             try await source.submitEngineCommand(.setPermissionMode(mode: mode))
                         #endif
                     },
+                    onTypescriptLspModeChanged: { mode in
+                        #if canImport(engine_mobileFFI)
+                            try await source.submitEngineCommand(.setTypescriptLspMode(mode: mode))
+                        #endif
+                    },
                     onClose: { navigation.closeSettings() },
                     navigation: navigation
                 )

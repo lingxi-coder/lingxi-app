@@ -30,6 +30,9 @@ Local-app runtime pins:
 - `npm 11.12.1-r0` (including `npx`) remains available for user terminals;
   the host-owned dependency job uses the pinned `pnpm 11.22.0` CLI installed
   from its integrity-pinned npm tarball. `corepack` and `yarn` remain excluded.
+- Native TypeScript `7.0.2` is installed from the integrity-pinned official
+  per-architecture package at `/opt/lingxi/toolchains/typescript/7.0.2/tsc`.
+  Each rootfs build must pass both `--version` and an LSP `initialize` exchange.
 - The app template is text-only: it contains the committed package manifest
   and lockfile but no `node_modules`. Each app runs a host-owned, locked
   `pnpm install --frozen-lockfile --ignore-scripts --no-runtime --prefer-offline`
@@ -40,7 +43,8 @@ Local-app runtime pins:
   pinned pnpm CLI live in the rootfs and dependencies are materialized on first
   use per workspace.
 
-`docs/mobile-linux/local-app-runtime-pins.json` records the exact APK, npm, and pnpm
+`docs/mobile-linux/local-app-runtime-pins.json` records the exact APK, npm, pnpm,
+and native TypeScript
 pins. The structural verifier accepts an explicitly recorded upstream gap, but
 the `--release` gate remains closed until x86_64's fully hashed closure has also
 passed an offline install on a native x86_64 or qemu-backed host. This prevents

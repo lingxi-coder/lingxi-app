@@ -111,6 +111,13 @@
       "license": "REPLACE_WITH_REAL_LICENSE",
       "architecture": "aarch64",
       "origin": "ca-certificates"
+    },
+    {
+      "name": "typescript-native",
+      "version": "7.0.2",
+      "license": "Apache-2.0",
+      "architecture": "aarch64",
+      "origin": "@typescript/typescript-linux-arm64"
     }
   ]
 }

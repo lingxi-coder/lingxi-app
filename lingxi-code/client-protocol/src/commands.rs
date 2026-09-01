@@ -774,6 +774,12 @@ pub enum ClientCommand {
         // Machine-readable platform reason such as `background_time_expired`.
         reason: String,
     },
+
+    // Change the global TypeScript LSP activation policy. The command/path is
+    // fixed by the engine; clients may choose only `auto`, `off`, or `on`.
+    SetTypescriptLspMode {
+        mode: String,
+    },
 }
 
 /// A writable MCP server-definition scope, as named on the wire. Deliberately

@@ -5,6 +5,14 @@
 //! unavailable stub rather than trying to link the device-only symbols.
 
 use async_trait::async_trait;
+use platform_api::mobile_linux::LinuxEnforcementReceipt;
+use platform_api::{
+    LinuxCommandRequest, LinuxCommandResult, LinuxProcessHandle, MobileLinuxCapability,
+    MobileLinuxError, MobileLinuxEvent, MobileLinuxEventKind, MobileLinuxRuntime,
+    MobileLinuxRuntimeMode, MobileLinuxTaskSnapshot, MobileLinuxTaskStatus, MountPurpose,
+    MountSpec, ProcessStreamSink, PtyOpenRequest, PtySessionHandle, PtySize, RawStdioOpenRequest,
+    RawStdioReadResult, RawStdioSessionHandle, RootfsState, RootfsStatus, SandboxBackend,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::fs;
@@ -13,14 +21,6 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::task::spawn_blocking;
-use platform_api::mobile_linux::LinuxEnforcementReceipt;
-use platform_api::{
-    LinuxCommandRequest, LinuxCommandResult, LinuxProcessHandle, MobileLinuxCapability,
-    MobileLinuxError, MobileLinuxEvent, MobileLinuxEventKind, MobileLinuxRuntime,
-    MobileLinuxRuntimeMode, MobileLinuxTaskSnapshot, MobileLinuxTaskStatus, MountPurpose,
-    MountSpec, ProcessStreamSink, PtyOpenRequest, PtySessionHandle, PtySize, RootfsState,
-    RootfsStatus, SandboxBackend,
-};
 
 const MAX_EVENTS: usize = 4096;
 const MAX_STREAM_CAPTURE_BYTES: usize = 256 * 1024;
@@ -30,7 +30,8 @@ const BACKGROUND_REAP_BUDGET: Duration = Duration::from_secs(3);
 const LINGXI_DOT_DIR: &str = ".lingxi";
 // Canonical value lives in the guest-path atlas; the local name is kept so
 // the three mount-contract call sites read unchanged.
-const LOCAL_APP_BUILD_GUEST_ROOT: &str = platform_api::mobile_linux::guest_paths::LOCAL_APP_BUILD_ROOT;
+const LOCAL_APP_BUILD_GUEST_ROOT: &str =
+    platform_api::mobile_linux::guest_paths::LOCAL_APP_BUILD_ROOT;
 
 #[derive(Clone, Copy)]
 enum ForegroundMountMode {
@@ -152,6 +153,7 @@ struct RuntimeState {
     next_sequence: AtomicU64,
     booted: AtomicBool,
     pty: Mutex<Option<(String, Arc<PtyControl>)>>,
+    raw_stdio: Mutex<HashMap<String, RawStdioSessionHandle>>,
     native_lock: Arc<Mutex<()>>,
 }
 
@@ -178,6 +180,7 @@ impl IosIshRuntime {
                 next_sequence: AtomicU64::new(1),
                 booted: AtomicBool::new(false),
                 pty: Mutex::new(None),
+                raw_stdio: Mutex::new(HashMap::new()),
                 native_lock: Arc::new(Mutex::new(())),
             }),
         }
@@ -762,6 +765,59 @@ impl IosIshRuntime {
         parse_session_id_response(&response)
     }
 
+    async fn native_open_raw_stdio(
+        &self,
+        request: &RawStdioOpenRequest,
+        mounts: &[MountSpec],
+    ) -> Result<(String, LinuxEnforcementReceipt), MobileLinuxError> {
+        let config_json = self.native_config_json()?;
+        let request_json = serde_json::to_string(&RawStdioOpenPayload::from_request(
+            request, mounts,
+        ))
+        .map_err(|error| MobileLinuxError::Io(format!("serialize raw stdio open: {error}")))?;
+        let native_lock = self.state.native_lock.clone();
+        let response = spawn_blocking(move || {
+            let _guard = native_lock.lock().expect("ios-ish native lock");
+            native::raw_stdio_open_json(&config_json, &request_json)
+        })
+        .await
+        .map_err(|error| MobileLinuxError::Io(format!("join raw stdio open: {error}")))?
+        .map_err(MobileLinuxError::Io)?;
+        parse_raw_stdio_open_response(&response)
+    }
+
+    async fn native_raw_stdio_call(
+        &self,
+        operation: RawStdioNativeOperation,
+        payload: RawStdioRequestPayload,
+    ) -> Result<String, MobileLinuxError> {
+        let config_json = self.native_config_json()?;
+        let request_json = serde_json::to_string(&payload).map_err(|error| {
+            MobileLinuxError::Io(format!("serialize raw stdio request: {error}"))
+        })?;
+        let native_lock = self.state.native_lock.clone();
+        spawn_blocking(move || {
+            let _guard = native_lock.lock().expect("ios-ish native lock");
+            match operation {
+                RawStdioNativeOperation::Write => {
+                    native::raw_stdio_write_json(&config_json, &request_json)
+                }
+                RawStdioNativeOperation::Read => {
+                    native::raw_stdio_read_json(&config_json, &request_json)
+                }
+                RawStdioNativeOperation::Close => {
+                    native::raw_stdio_close_json(&config_json, &request_json)
+                }
+                RawStdioNativeOperation::Dispose => {
+                    native::raw_stdio_dispose_json(&config_json, &request_json)
+                }
+            }
+        })
+        .await
+        .map_err(|error| MobileLinuxError::Io(format!("join raw stdio request: {error}")))?
+        .map_err(MobileLinuxError::Io)
+    }
+
     async fn native_write_pty(
         &self,
         session_id: &str,
@@ -1057,6 +1113,17 @@ impl MobileLinuxRuntime for IosIshRuntime {
         let current_pty = self.state.pty.lock().expect("ios-ish pty mutex").clone();
         if let Some((session_id, _)) = current_pty {
             let _ = self.close_pty(&PtySessionHandle { id: session_id }).await;
+        }
+        let raw_sessions: Vec<_> = self
+            .state
+            .raw_stdio
+            .lock()
+            .expect("ios-ish raw stdio mutex")
+            .values()
+            .cloned()
+            .collect();
+        for session in raw_sessions {
+            let _ = self.close_raw_stdio(&session).await;
         }
         let task_ids: Vec<_> = self
             .state
@@ -1412,6 +1479,159 @@ impl MobileLinuxRuntime for IosIshRuntime {
         native_result
     }
 
+    async fn open_raw_stdio(
+        &self,
+        request: RawStdioOpenRequest,
+    ) -> Result<RawStdioSessionHandle, MobileLinuxError> {
+        let validation_request = LinuxCommandRequest {
+            command: request.command.clone(),
+            args: request.args.clone(),
+            cwd: request.cwd.clone(),
+            env: request.env.clone(),
+            stdin: None,
+            timeout_ms: None,
+            network: request.network,
+            resource_limits: request.resource_limits,
+            mounts: request.mounts.clone(),
+        };
+        validate_request(&validation_request)?;
+        self.boot().await?;
+        let mounts = self.merged_mounts(&request.mounts)?;
+        let (id, enforcement) = self.native_open_raw_stdio(&request, &mounts).await?;
+        enforcement.ensure_for(request.network, request.resource_limits)?;
+        let handle = RawStdioSessionHandle { id, enforcement };
+        self.state
+            .raw_stdio
+            .lock()
+            .expect("ios-ish raw stdio mutex")
+            .insert(handle.id.clone(), handle.clone());
+        Ok(handle)
+    }
+
+    async fn write_raw_stdio(
+        &self,
+        handle: &RawStdioSessionHandle,
+        input: Vec<u8>,
+    ) -> Result<(), MobileLinuxError> {
+        if !self
+            .state
+            .raw_stdio
+            .lock()
+            .expect("ios-ish raw stdio mutex")
+            .contains_key(&handle.id)
+        {
+            return Err(MobileLinuxError::InvalidRequest(
+                "unknown raw stdio session".to_string(),
+            ));
+        }
+        let response = self
+            .native_raw_stdio_call(
+                RawStdioNativeOperation::Write,
+                RawStdioRequestPayload {
+                    session_id: handle.id.clone(),
+                    data_base64: Some(encode_base64(&input)),
+                    max_bytes: None,
+                },
+            )
+            .await?;
+        parse_native_ok(&response)
+    }
+
+    async fn read_raw_stdio(
+        &self,
+        handle: &RawStdioSessionHandle,
+        max_bytes: usize,
+    ) -> Result<RawStdioReadResult, MobileLinuxError> {
+        if !self
+            .state
+            .raw_stdio
+            .lock()
+            .expect("ios-ish raw stdio mutex")
+            .contains_key(&handle.id)
+        {
+            return Err(MobileLinuxError::InvalidRequest(
+                "unknown raw stdio session".to_string(),
+            ));
+        }
+        let response = self
+            .native_raw_stdio_call(
+                RawStdioNativeOperation::Read,
+                RawStdioRequestPayload {
+                    session_id: handle.id.clone(),
+                    data_base64: None,
+                    max_bytes: Some(max_bytes.clamp(1, 1_048_576) as u32),
+                },
+            )
+            .await?;
+        parse_raw_stdio_read_response(&response)
+    }
+
+    async fn close_raw_stdio(
+        &self,
+        handle: &RawStdioSessionHandle,
+    ) -> Result<(), MobileLinuxError> {
+        if !self
+            .state
+            .raw_stdio
+            .lock()
+            .expect("ios-ish raw stdio mutex")
+            .contains_key(&handle.id)
+        {
+            return Ok(());
+        }
+        let request = RawStdioRequestPayload {
+            session_id: handle.id.clone(),
+            data_base64: None,
+            max_bytes: None,
+        };
+        let close_response = self
+            .native_raw_stdio_call(RawStdioNativeOperation::Close, request)
+            .await?;
+        parse_native_ok(&close_response)?;
+
+        let deadline = tokio::time::Instant::now() + BACKGROUND_REAP_BUDGET;
+        loop {
+            let response = self
+                .native_raw_stdio_call(
+                    RawStdioNativeOperation::Read,
+                    RawStdioRequestPayload {
+                        session_id: handle.id.clone(),
+                        data_base64: None,
+                        max_bytes: Some(65_536),
+                    },
+                )
+                .await?;
+            if parse_raw_stdio_read_response(&response)?.closed {
+                break;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return Err(MobileLinuxError::Io(format!(
+                    "raw stdio session {} did not reap within 3 seconds",
+                    handle.id
+                )));
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        let dispose_response = self
+            .native_raw_stdio_call(
+                RawStdioNativeOperation::Dispose,
+                RawStdioRequestPayload {
+                    session_id: handle.id.clone(),
+                    data_base64: None,
+                    max_bytes: None,
+                },
+            )
+            .await?;
+        parse_native_ok(&dispose_response)?;
+        self.state
+            .raw_stdio
+            .lock()
+            .expect("ios-ish raw stdio mutex")
+            .remove(&handle.id);
+        Ok(())
+    }
+
     async fn rootfs_status(&self) -> Result<RootfsStatus, MobileLinuxError> {
         Ok(self.rootfs_snapshot())
     }
@@ -1607,6 +1827,52 @@ struct RunRequestPayload {
     include_default_mounts: bool,
 }
 
+#[derive(Debug, Serialize)]
+struct RawStdioOpenPayload {
+    command: String,
+    args: Vec<String>,
+    cwd: Option<String>,
+    env: BTreeMap<String, String>,
+    network: &'static str,
+    resource_limits: platform_api::ResourceLimits,
+    mounts: Vec<MountPayload>,
+}
+
+impl RawStdioOpenPayload {
+    fn from_request(request: &RawStdioOpenRequest, mounts: &[MountSpec]) -> Self {
+        Self {
+            command: request.command.clone(),
+            args: request.args.clone(),
+            cwd: request.cwd.clone(),
+            env: request.env.clone(),
+            network: match request.network {
+                platform_api::NetworkPolicy::Disabled => "disabled",
+                platform_api::NetworkPolicy::LoopbackOnly => "loopback-only",
+                platform_api::NetworkPolicy::Allowed => "allowed",
+            },
+            resource_limits: request.resource_limits,
+            mounts: mounts.iter().map(MountPayload::from_mount).collect(),
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct RawStdioRequestPayload {
+    session_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    data_base64: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_bytes: Option<u32>,
+}
+
+#[derive(Clone, Copy)]
+enum RawStdioNativeOperation {
+    Write,
+    Read,
+    Close,
+    Dispose,
+}
+
 impl RunRequestPayload {
     fn from_request(
         request: &LinuxCommandRequest,
@@ -1777,6 +2043,28 @@ struct NativeSessionEnvelope {
 }
 
 #[derive(Debug, Deserialize)]
+struct NativeRawStdioOpenEnvelope {
+    ok: bool,
+    error: Option<NativeErrorPayload>,
+    session_id: Option<String>,
+    #[serde(default)]
+    network_policy_enforced: bool,
+    #[serde(default)]
+    memory_limit_enforced: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct NativeRawStdioReadEnvelope {
+    ok: bool,
+    error: Option<NativeErrorPayload>,
+    stdout_base64: Option<String>,
+    stderr_base64: Option<String>,
+    #[serde(default)]
+    closed: bool,
+    exit_code: Option<i32>,
+}
+
+#[derive(Debug, Deserialize)]
 struct NativeProcessEnvelope {
     ok: bool,
     error: Option<NativeErrorPayload>,
@@ -1924,6 +2212,60 @@ fn parse_session_id_response(json: &str) -> Result<String, MobileLinuxError> {
     envelope
         .session_id
         .ok_or_else(|| MobileLinuxError::Io("native PTY response omitted session_id".to_string()))
+}
+
+fn parse_raw_stdio_open_response(
+    json: &str,
+) -> Result<(String, LinuxEnforcementReceipt), MobileLinuxError> {
+    let envelope = serde_json::from_str::<NativeRawStdioOpenEnvelope>(json)
+        .map_err(|error| MobileLinuxError::Io(format!("parse raw stdio open: {error}")))?;
+    if !envelope.ok {
+        return Err(native_error_to_mobile(envelope.error.unwrap_or(
+            NativeErrorPayload {
+                code: "io".to_string(),
+                message: "native raw stdio open indicated failure".to_string(),
+            },
+        )));
+    }
+    let session_id = envelope.session_id.ok_or_else(|| {
+        MobileLinuxError::Io("native raw stdio open omitted session_id".to_string())
+    })?;
+    Ok((
+        session_id,
+        LinuxEnforcementReceipt {
+            network_policy_enforced: envelope.network_policy_enforced,
+            memory_limit_enforced: envelope.memory_limit_enforced,
+        },
+    ))
+}
+
+fn parse_raw_stdio_read_response(json: &str) -> Result<RawStdioReadResult, MobileLinuxError> {
+    let envelope = serde_json::from_str::<NativeRawStdioReadEnvelope>(json)
+        .map_err(|error| MobileLinuxError::Io(format!("parse raw stdio read: {error}")))?;
+    if !envelope.ok {
+        return Err(native_error_to_mobile(envelope.error.unwrap_or(
+            NativeErrorPayload {
+                code: "io".to_string(),
+                message: "native raw stdio read indicated failure".to_string(),
+            },
+        )));
+    }
+    Ok(RawStdioReadResult {
+        stdout: envelope
+            .stdout_base64
+            .as_deref()
+            .map(decode_base64)
+            .transpose()?
+            .unwrap_or_default(),
+        stderr: envelope
+            .stderr_base64
+            .as_deref()
+            .map(decode_base64)
+            .transpose()?
+            .unwrap_or_default(),
+        closed: envelope.closed,
+        exit_code: envelope.exit_code,
+    })
 }
 
 fn parse_process_id_response(json: &str) -> Result<NativeProcessStart, MobileLinuxError> {
@@ -2156,7 +2498,10 @@ fn validate_mount(
     let lingxi_root = normalize_host_path(&config.lingxi_root(), ".lingxi root")?;
     let workspace_root = normalize_host_path(&config.workspace_host_path, "workspace_host_path")?;
 
-    if guest_path_has_prefix(&mount.guest_path, platform_api::mobile_linux::guest_paths::HOME) {
+    if guest_path_has_prefix(
+        &mount.guest_path,
+        platform_api::mobile_linux::guest_paths::HOME,
+    ) {
         return Err(MobileLinuxError::InvalidRequest(
             "request mounts may not replace the runtime-managed persistent /root".to_string(),
         ));
@@ -2590,6 +2935,26 @@ mod native {
                 config_json: *const c_char,
                 request_json: *const c_char,
             ) -> *mut c_char;
+            fn lingxi_ish_raw_stdio_open_json(
+                config_json: *const c_char,
+                request_json: *const c_char,
+            ) -> *mut c_char;
+            fn lingxi_ish_raw_stdio_write_json(
+                config_json: *const c_char,
+                request_json: *const c_char,
+            ) -> *mut c_char;
+            fn lingxi_ish_raw_stdio_read_json(
+                config_json: *const c_char,
+                request_json: *const c_char,
+            ) -> *mut c_char;
+            fn lingxi_ish_raw_stdio_close_json(
+                config_json: *const c_char,
+                request_json: *const c_char,
+            ) -> *mut c_char;
+            fn lingxi_ish_raw_stdio_dispose_json(
+                config_json: *const c_char,
+                request_json: *const c_char,
+            ) -> *mut c_char;
             fn lingxi_ish_probe_loopback_json(
                 config_json: *const c_char,
                 request_json: *const c_char,
@@ -2675,6 +3040,41 @@ mod native {
             call_binary(config_json, request_json, lingxi_ish_background_poll_json)
         }
 
+        pub fn raw_stdio_open_json(
+            config_json: &str,
+            request_json: &str,
+        ) -> Result<String, String> {
+            call_binary(config_json, request_json, lingxi_ish_raw_stdio_open_json)
+        }
+
+        pub fn raw_stdio_write_json(
+            config_json: &str,
+            request_json: &str,
+        ) -> Result<String, String> {
+            call_binary(config_json, request_json, lingxi_ish_raw_stdio_write_json)
+        }
+
+        pub fn raw_stdio_read_json(
+            config_json: &str,
+            request_json: &str,
+        ) -> Result<String, String> {
+            call_binary(config_json, request_json, lingxi_ish_raw_stdio_read_json)
+        }
+
+        pub fn raw_stdio_close_json(
+            config_json: &str,
+            request_json: &str,
+        ) -> Result<String, String> {
+            call_binary(config_json, request_json, lingxi_ish_raw_stdio_close_json)
+        }
+
+        pub fn raw_stdio_dispose_json(
+            config_json: &str,
+            request_json: &str,
+        ) -> Result<String, String> {
+            call_binary(config_json, request_json, lingxi_ish_raw_stdio_dispose_json)
+        }
+
         pub fn probe_loopback_json(
             config_json: &str,
             request_json: &str,
@@ -2747,6 +3147,41 @@ mod native {
         }
 
         pub fn availability_json() -> Result<String, String> {
+            Err(unavailable())
+        }
+
+        pub fn raw_stdio_open_json(
+            _config_json: &str,
+            _request_json: &str,
+        ) -> Result<String, String> {
+            Err(unavailable())
+        }
+
+        pub fn raw_stdio_write_json(
+            _config_json: &str,
+            _request_json: &str,
+        ) -> Result<String, String> {
+            Err(unavailable())
+        }
+
+        pub fn raw_stdio_read_json(
+            _config_json: &str,
+            _request_json: &str,
+        ) -> Result<String, String> {
+            Err(unavailable())
+        }
+
+        pub fn raw_stdio_close_json(
+            _config_json: &str,
+            _request_json: &str,
+        ) -> Result<String, String> {
+            Err(unavailable())
+        }
+
+        pub fn raw_stdio_dispose_json(
+            _config_json: &str,
+            _request_json: &str,
+        ) -> Result<String, String> {
             Err(unavailable())
         }
 
@@ -3587,6 +4022,58 @@ mod tests {
             background_terminal_state(true, &completed).0,
             MobileLinuxTaskStatus::Cancelled
         );
+    }
+
+    #[test]
+    fn native_raw_stdio_envelopes_preserve_bytes_and_enforcement() {
+        let (session, enforcement) = parse_raw_stdio_open_response(
+            r#"{"ok":true,"session_id":"raw-1","network_policy_enforced":true,"memory_limit_enforced":true}"#,
+        )
+        .expect("parse raw stdio open");
+        assert_eq!(session, "raw-1");
+        assert_eq!(
+            enforcement,
+            LinuxEnforcementReceipt {
+                network_policy_enforced: true,
+                memory_limit_enforced: true,
+            }
+        );
+
+        let chunk = parse_raw_stdio_read_response(
+            r#"{"ok":true,"stdout_base64":"Q29udGVudC1MZW5ndGg6IDINCg0Ke30=","stderr_base64":"d2Fybg==","closed":true,"exit_code":0,"error":null}"#,
+        )
+        .expect("parse raw stdio read");
+        assert_eq!(chunk.stdout, b"Content-Length: 2\r\n\r\n{}");
+        assert_eq!(chunk.stderr, b"warn");
+        assert!(chunk.closed);
+        assert_eq!(chunk.exit_code, Some(0));
+    }
+
+    #[test]
+    fn simulator_raw_stdio_fails_closed_without_using_pty() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let root = temp.path().join("app");
+        let runtime = IosIshRuntime::new(test_config(&root));
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("tokio runtime");
+        let error = rt
+            .block_on(runtime.open_raw_stdio(RawStdioOpenRequest {
+                command: "/opt/lingxi/toolchains/typescript/7.0.2/tsc".to_string(),
+                args: vec!["--lsp".to_string(), "--stdio".to_string()],
+                cwd: None,
+                env: BTreeMap::new(),
+                network: NetworkPolicy::Disabled,
+                resource_limits: platform_api::ResourceLimits {
+                    max_memory_mb: Some(384),
+                    ..platform_api::ResourceLimits::default()
+                },
+                mounts: Vec::new(),
+            }))
+            .expect_err("non-device builds must reject raw stdio");
+        assert!(matches!(error, MobileLinuxError::Unavailable(_)));
+        assert!(runtime.state.pty.lock().expect("pty mutex").is_none());
     }
 
     #[test]

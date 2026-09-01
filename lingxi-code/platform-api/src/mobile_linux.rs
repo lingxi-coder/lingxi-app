@@ -343,6 +343,39 @@ pub struct LinuxProcessHandle {
     pub enforcement: LinuxEnforcementReceipt,
 }
 
+/// Structured request for a long-lived raw stdio process inside the mobile
+/// runtime.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RawStdioOpenRequest {
+    pub command: String,
+    pub args: Vec<String>,
+    pub cwd: Option<String>,
+    pub env: BTreeMap<String, String>,
+    pub network: NetworkPolicy,
+    #[serde(default)]
+    pub resource_limits: ResourceLimits,
+    pub mounts: Vec<MountSpec>,
+}
+
+/// Opaque handle for one raw-stdio mobile process.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RawStdioSessionHandle {
+    pub id: String,
+    #[serde(default)]
+    pub enforcement: LinuxEnforcementReceipt,
+}
+
+/// One bounded poll of stdout/stderr bytes from a raw-stdio mobile process.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RawStdioReadResult {
+    #[serde(default)]
+    pub stdout: Vec<u8>,
+    #[serde(default)]
+    pub stderr: Vec<u8>,
+    pub closed: bool,
+    pub exit_code: Option<i32>,
+}
+
 /// PTY open request.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PtyOpenRequest {
@@ -668,6 +701,51 @@ pub trait MobileLinuxRuntime: Send + Sync {
     /// attached to it before returning success.
     async fn close_pty(&self, handle: &PtySessionHandle) -> Result<(), MobileLinuxError>;
 
+    /// Open a long-lived raw stdio process whose stdin/stdout/stderr are
+    /// exchanged as opaque byte streams rather than through a PTY.
+    ///
+    /// The default fails closed so a transport that requires raw byte fidelity
+    /// (notably LSP) is never silently downgraded onto another surface.
+    async fn open_raw_stdio(
+        &self,
+        request: RawStdioOpenRequest,
+    ) -> Result<RawStdioSessionHandle, MobileLinuxError> {
+        let _ = request;
+        Err(MobileLinuxError::Unsupported)
+    }
+
+    /// Write raw stdin bytes into a previously opened stdio session.
+    async fn write_raw_stdio(
+        &self,
+        handle: &RawStdioSessionHandle,
+        input: Vec<u8>,
+    ) -> Result<(), MobileLinuxError> {
+        let _ = handle;
+        let _ = input;
+        Err(MobileLinuxError::Unsupported)
+    }
+
+    /// Read at most `max_bytes` of newly produced stdout/stderr.
+    async fn read_raw_stdio(
+        &self,
+        handle: &RawStdioSessionHandle,
+        max_bytes: usize,
+    ) -> Result<RawStdioReadResult, MobileLinuxError> {
+        let _ = handle;
+        let _ = max_bytes;
+        Err(MobileLinuxError::Unsupported)
+    }
+
+    /// Close one raw stdio session and synchronously reap its full guest
+    /// process tree.
+    async fn close_raw_stdio(
+        &self,
+        handle: &RawStdioSessionHandle,
+    ) -> Result<(), MobileLinuxError> {
+        let _ = handle;
+        Err(MobileLinuxError::Unsupported)
+    }
+
     /// Inspect rootfs state.
     async fn rootfs_status(&self) -> Result<RootfsStatus, MobileLinuxError>;
 
@@ -892,6 +970,36 @@ impl MobileLinuxRuntime for UnavailableMobileLinuxRuntime {
         Err(self.err())
     }
 
+    async fn open_raw_stdio(
+        &self,
+        _request: RawStdioOpenRequest,
+    ) -> Result<RawStdioSessionHandle, MobileLinuxError> {
+        Err(self.err())
+    }
+
+    async fn write_raw_stdio(
+        &self,
+        _handle: &RawStdioSessionHandle,
+        _input: Vec<u8>,
+    ) -> Result<(), MobileLinuxError> {
+        Err(self.err())
+    }
+
+    async fn read_raw_stdio(
+        &self,
+        _handle: &RawStdioSessionHandle,
+        _max_bytes: usize,
+    ) -> Result<RawStdioReadResult, MobileLinuxError> {
+        Err(self.err())
+    }
+
+    async fn close_raw_stdio(
+        &self,
+        _handle: &RawStdioSessionHandle,
+    ) -> Result<(), MobileLinuxError> {
+        Err(self.err())
+    }
+
     async fn rootfs_status(&self) -> Result<RootfsStatus, MobileLinuxError> {
         Ok(self.status.clone())
     }
@@ -1011,6 +1119,31 @@ mod tests {
             .await
             .expect_err("isolated run must fail closed");
         assert!(matches!(err, MobileLinuxError::Unsupported));
+    }
+
+    #[tokio::test]
+    async fn default_raw_stdio_fails_closed() {
+        let runtime = UnavailableMobileLinuxRuntime::unavailable(
+            SandboxBackend::IosIsh,
+            MobileLinuxRuntimeMode::MobileLinux,
+            "ios",
+            "arm64",
+            "runtime assets not linked",
+        );
+
+        let err = runtime
+            .open_raw_stdio(RawStdioOpenRequest {
+                command: "/bin/cat".to_string(),
+                args: vec![],
+                cwd: None,
+                env: BTreeMap::new(),
+                network: NetworkPolicy::Disabled,
+                resource_limits: ResourceLimits::default(),
+                mounts: vec![],
+            })
+            .await
+            .expect_err("raw stdio must fail closed");
+        assert!(matches!(err, MobileLinuxError::Unavailable(_)));
     }
 
     #[test]

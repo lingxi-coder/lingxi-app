@@ -355,6 +355,13 @@ class MainActivity : ComponentActivity() {
                             onPermissionModeChanged = { mode ->
                                 activeConversationSource?.setPermissionMode(mode)
                             },
+                            onTypescriptLspModeChanged = { mode ->
+                                val source = activeConversationSource
+                                    ?: error("engine is not connected")
+                                source.submitClientCommand(
+                                    com.lingxi.code.bindings.ClientCommand.SetTypescriptLspMode(mode),
+                                )
+                            },
                             onSetLocalAppPluginEnabled = { pluginId, enabled ->
                                 activeConversationSource?.submitClientCommand(
                                     com.lingxi.code.bindings.ClientCommand.PluginCommand(

@@ -84,6 +84,7 @@ fun SettingsHost(
     onReconnectEngine: () -> Unit = {},
     onOpenTerminal: (LinuxRuntimeTerminalLaunchRequest) -> Unit = {},
     onPermissionModeChanged: suspend (String) -> Unit = {},
+    onTypescriptLspModeChanged: suspend (String) -> Unit = {},
     onSetLocalAppPluginEnabled: suspend (String, Boolean) -> Unit = { _, _ -> },
 ) {
     val context = LocalContext.current
@@ -171,6 +172,17 @@ fun SettingsHost(
                         error = state.permissionModeError,
                         onSelect = { mode ->
                             resolvedStore.setPermissionMode(mode, onPermissionModeChanged)
+                        },
+                    )
+                }
+                page(SettingsRoutes.TYPESCRIPT_LSP) {
+                    TypeScriptLspModePage(
+                        selected = state.typescriptLspMode,
+                        effective = state.effectiveTypescriptLspMode,
+                        available = state.typescriptLspAvailable,
+                        error = state.typescriptLspError,
+                        onSelect = { mode ->
+                            resolvedStore.setTypescriptLspMode(mode, onTypescriptLspModeChanged)
                         },
                     )
                 }
@@ -329,6 +341,7 @@ private fun titleFor(entry: androidx.navigation.NavBackStackEntry?, state: Setti
         SettingsRoutes.INPUT -> stringResource(SettingsTitles.INPUT)
         SettingsRoutes.PRIVACY -> stringResource(SettingsTitles.PRIVACY)
         SettingsRoutes.PERMISSION_MODE -> stringResource(SettingsTitles.PERMISSION_MODE)
+        SettingsRoutes.TYPESCRIPT_LSP -> stringResource(SettingsTitles.TYPESCRIPT_LSP)
         SettingsRoutes.OPEN_SOURCE -> stringResource(SettingsTitles.OPEN_SOURCE)
         SettingsRoutes.SKILLS -> stringResource(SettingsTitles.SKILLS)
         SettingsRoutes.MCP_LIST -> stringResource(SettingsTitles.MCP)

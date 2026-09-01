@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 import argparse
+import base64
+import binascii
 import hashlib
 import json
 import pathlib
@@ -273,6 +275,71 @@ def load_json(path: pathlib.Path) -> dict:
 
 def valid_sha256(value: object) -> bool:
     return isinstance(value, str) and re.fullmatch(r"[0-9a-f]{64}", value) is not None
+
+
+def valid_sha512_base64(value: object) -> bool:
+    if not isinstance(value, str):
+        return False
+    try:
+        return len(base64.b64decode(value, validate=True)) == 64
+    except (ValueError, binascii.Error):
+        return False
+
+
+def validate_typescript_native_pin(repo: pathlib.Path, pins: dict) -> None:
+    toolchain = pins.get("typescript_native")
+    if not isinstance(toolchain, dict):
+        fail("local-app runtime pins must carry typescript_native")
+    version = toolchain.get("version")
+    if version != "7.0.2":
+        fail("native TypeScript toolchain must remain pinned to 7.0.2")
+    if toolchain.get("install_root") != f"/opt/lingxi/toolchains/typescript/{version}":
+        fail("native TypeScript install_root must be its fixed /opt toolchain path")
+    if toolchain.get("license") != "Apache-2.0":
+        fail("native TypeScript license pin must be Apache-2.0")
+
+    packages = toolchain.get("packages")
+    expected = {
+        "aarch64": "@typescript/typescript-linux-arm64",
+        "x86_64": "@typescript/typescript-linux-x64",
+    }
+    if not isinstance(packages, dict) or set(packages) != set(expected):
+        fail("native TypeScript packages must cover exactly aarch64 and x86_64")
+    for arch, name in expected.items():
+        package = packages.get(arch)
+        expected_url = (
+            f"https://registry.npmjs.org/{name}/-/"
+            f"{name.rsplit('/', 1)[1]}-{version}.tgz"
+        )
+        if not isinstance(package, dict) or package.get("name") != name:
+            fail(f"native TypeScript package identity diverged for {arch}")
+        if package.get("url") != expected_url:
+            fail(f"native TypeScript package URL diverged for {arch}")
+        if not valid_sha512_base64(package.get("sha512")):
+            fail(f"native TypeScript package needs a SHA-512 integrity pin for {arch}")
+        if not valid_sha256(package.get("tsc_sha256")):
+            fail(f"native TypeScript tsc needs a SHA-256 pin for {arch}")
+
+    source_pins = load_json(repo / "docs" / "mobile-linux" / "mobile-linux-pins.json")
+    source_component = source_pins.get("components", {}).get("typescript_native")
+    if not isinstance(source_component, dict):
+        fail("mobile-linux source pins must carry typescript_native")
+    if any(
+        source_component.get(field) != toolchain.get(field)
+        for field in ("version", "install_root", "license")
+    ):
+        fail("native TypeScript source pins diverged from local-app rootfs pins")
+    source_packages = source_component.get("platform_packages")
+    for arch, abi in (("aarch64", "arm64-v8a"), ("x86_64", "x86_64")):
+        package = packages[arch]
+        source_package = source_packages.get(abi) if isinstance(source_packages, dict) else None
+        if not isinstance(source_package, dict) or source_package != {
+            "name": package["name"],
+            "tarball": package["url"],
+            "integrity": f"sha512-{package['sha512']}",
+            "tsc_sha256": package["tsc_sha256"],
+        }:
+            fail(f"native TypeScript source/rootfs package pins diverged for {arch}")
 
 
 def expected_apk_packages(pins: dict) -> dict:
@@ -1182,6 +1249,7 @@ def main() -> None:
 
     repo = pathlib.Path(args.repo_root).resolve()
     pins = load_json(repo / "docs" / "mobile-linux" / "local-app-runtime-pins.json")
+    validate_typescript_native_pin(repo, pins)
     validate_apk_pins(
         pins,
         release=args.release,

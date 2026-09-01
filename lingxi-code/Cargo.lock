@@ -1885,6 +1885,7 @@ dependencies = [
  "llm-client",
  "local-apps",
  "lsp",
+ "lsp-types",
  "mcp",
  "msgqueue",
  "orchestrator",
@@ -1918,6 +1919,7 @@ dependencies = [
  "tool-cron",
  "tool-file",
  "tool-git-mobile",
+ "tool-lsp",
  "tool-mcp",
  "tool-meta",
  "tool-mobile",
@@ -7360,7 +7362,9 @@ version = "0.12.0"
 dependencies = [
  "async-trait",
  "core",
+ "jsonrpc",
  "lsp",
+ "lsp-types",
  "once_cell",
  "permission",
  "platform-api",
@@ -7372,6 +7376,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tool-api",
+ "tracing",
 ]
 
 [[package]]

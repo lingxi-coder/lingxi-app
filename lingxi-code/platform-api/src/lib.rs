@@ -148,7 +148,8 @@ pub use mobile_linux::{
     MobileLinuxCapability, MobileLinuxError, MobileLinuxEvent, MobileLinuxEventKind,
     MobileLinuxRuntime, MobileLinuxRuntimeMode, MobileLinuxSandboxPlan, MobileLinuxTaskSnapshot,
     MobileLinuxTaskStatus, MountPurpose, MountSpec, PtyOpenRequest, PtySessionHandle, PtySize,
-    RootfsState, RootfsStatus, UnavailableMobileLinuxRuntime,
+    RawStdioOpenRequest, RawStdioReadResult, RawStdioSessionHandle, RootfsState, RootfsStatus,
+    UnavailableMobileLinuxRuntime,
 };
 pub use mobile_runtime_environment::{
     MobileDeviceClass, MobileExecutionTarget, MobileHostEnvironment, MobileHostOs,

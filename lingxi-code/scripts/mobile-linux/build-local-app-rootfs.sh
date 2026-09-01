@@ -60,7 +60,7 @@ fi
 
 # Every version below comes from the pins. Nothing in this script may introduce
 # a second copy — that divergence is exactly what took the release gate red.
-IFS=$'\t' read -r ALPINE_VERSION ALPINE_BRANCH ROOTFS_SHA PACKAGES PNPM_VERSION PNPM_URL PNPM_SHA512 < <(
+IFS=$'\t' read -r ALPINE_VERSION ALPINE_BRANCH ROOTFS_SHA PACKAGES PNPM_VERSION PNPM_URL PNPM_SHA512 TS_VERSION TS_INSTALL_ROOT TS_LICENSE TS_PACKAGE_NAME TS_URL TS_SHA512 TS_TSC_SHA256 < <(
   python3 - "${PINS}" "${ARCH}" <<'PY'
 import json, pathlib, sys
 
@@ -74,8 +74,13 @@ packages = " ".join(
     f"{name}={version}" for name, version in sorted(pins["runtime_packages"].items())
 )
 pnpm = pins["pnpm"]
+typescript = pins["typescript_native"]
+typescript_package = typescript["packages"][arch]
 print(alpine["version"], alpine["branch"], minirootfs["sha256"], packages,
-      pnpm["version"], pnpm["url"], pnpm["sha512"], sep="\t")
+      pnpm["version"], pnpm["url"], pnpm["sha512"],
+      typescript["version"], typescript["install_root"], typescript["license"],
+      typescript_package["name"], typescript_package["url"],
+      typescript_package["sha512"], typescript_package["tsc_sha256"], sep="\t")
 PY
 )
 
@@ -93,6 +98,13 @@ mkdir -p "${OUTPUT}"
   -e LINGXI_PNPM_VERSION="${PNPM_VERSION}" \
   -e LINGXI_PNPM_URL="${PNPM_URL}" \
   -e LINGXI_PNPM_SHA512="${PNPM_SHA512}" \
+  -e LINGXI_TYPESCRIPT_VERSION="${TS_VERSION}" \
+  -e LINGXI_TYPESCRIPT_INSTALL_ROOT="${TS_INSTALL_ROOT}" \
+  -e LINGXI_TYPESCRIPT_LICENSE="${TS_LICENSE}" \
+  -e LINGXI_TYPESCRIPT_PACKAGE_NAME="${TS_PACKAGE_NAME}" \
+  -e LINGXI_TYPESCRIPT_URL="${TS_URL}" \
+  -e LINGXI_TYPESCRIPT_SHA512="${TS_SHA512}" \
+  -e LINGXI_TYPESCRIPT_TSC_SHA256="${TS_TSC_SHA256}" \
   -v "${INNER}:/inner.sh:ro" \
   -v "${PINS}:/pins.json:ro" \
   -v "${OUTPUT}:/out" \

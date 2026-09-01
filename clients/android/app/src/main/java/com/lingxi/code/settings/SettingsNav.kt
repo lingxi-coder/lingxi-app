@@ -29,6 +29,7 @@ object SettingsRoutes {
     const val MCP_LIST = "settings/mcp"
     const val MCP_EDIT = "settings/mcp/{id}"
     const val LINUX_RUNTIME = "settings/linux-runtime"
+    const val TYPESCRIPT_LSP = "settings/typescript-lsp"
     const val COMPUTER_USE = "settings/computer-use"
     const val DREAM = "settings/dream"
     const val CRON = "settings/cron"
@@ -73,6 +74,7 @@ object SettingsTitles {
     val SKILLS = R.string.settings_title_skills
     val MCP = R.string.settings_mcp_servers
     val LINUX_RUNTIME = R.string.settings_linux_runtime
+    val TYPESCRIPT_LSP = R.string.settings_typescript_lsp_title
     val COMPUTER_USE = R.string.settings_title_computer_use
     val DREAM = R.string.settings_dream_mode
     val CRON = R.string.settings_title_cron

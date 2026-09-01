@@ -8,13 +8,13 @@
 use jsonrpc::Connection;
 use lsp::client::LspClient;
 use lsp_types::ServerCapabilities;
+use platform_api::LspServerConfig;
 use serde_json::{json, Value};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{duplex, AsyncReadExt, AsyncWriteExt};
 use tokio_util::codec::{BytesCodec, FramedWrite};
 use tokio_util::io::ReaderStream;
-use platform_api::LspServerConfig;
 
 const FRAME_BUFFER: usize = 64 * 1024;
 
@@ -87,7 +87,7 @@ async fn initialize_sends_canonical_lsp_params_and_receives_capabilities() {
         let params = &req["params"];
         assert!(params["processId"].is_number());
         assert_eq!(params["clientInfo"]["name"], "Claude Code");
-        assert_eq!(params["clientInfo"]["version"], "2.1.251");
+        assert_eq!(params["clientInfo"]["version"], "2.1.252");
         assert_eq!(
             params["initializationOptions"],
             json!({ "checkOnSave": true })
@@ -126,7 +126,7 @@ async fn initialize_sends_canonical_lsp_params_and_receives_capabilities() {
             json!({
                 "relatedInformation": true,
                 "tagSupport": { "valueSet": [1, 2] },
-                "versionSupport": false,
+                "versionSupport": true,
                 "codeDescriptionSupport": true,
                 "dataSupport": false,
             })

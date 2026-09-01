@@ -190,6 +190,17 @@ fun MainSettingsPage(
                 },
                 onTap = { navController.navigate(SettingsRoutes.PERMISSION_MODE) },
             )
+            SettingsRow(
+                icon = LXIconName.Cog, iconColor = Color(red = 0.3503f, green = 0.6649f, blue = 0.9741f),
+                label = stringResource(R.string.settings_typescript_lsp_title),
+                sub = stringResource(R.string.settings_typescript_lsp_sub),
+                value = if (state.typescriptLspMode == state.effectiveTypescriptLspMode) {
+                    state.typescriptLspMode
+                } else {
+                    "${state.typescriptLspMode} → ${state.effectiveTypescriptLspMode}"
+                },
+                onTap = { navController.navigate(SettingsRoutes.TYPESCRIPT_LSP) },
+            )
             PrivacyToggleRow(LXIconName.Sparkle, t.text3, stringResource(R.string.settings_usage_diagnostics), state.telemetry) {}
             PrivacyToggleRow(LXIconName.Check, t.text3, stringResource(R.string.settings_auto_update), state.autoUpdate, isLast = true) {}
         }

@@ -25,6 +25,7 @@ _PINS_PATH = (
 )
 _PINS = json.loads(_PINS_PATH.read_text(encoding="utf-8"))
 _ALPINE = _PINS["alpine"]
+_TYPESCRIPT_NATIVE = _PINS["typescript_native"]
 
 # Packages the minirootfs already provides, plus everything the pins install.
 # `openssh-client` is not a real Alpine package — the client split is shipped as
@@ -281,6 +282,64 @@ def parse_apk_installed(installed_path: pathlib.Path) -> List[PackageRecord]:
     return sorted(packages, key=lambda package: package.name)
 
 
+def validate_typescript_native(root: pathlib.Path) -> PackageRecord:
+    install_root = _TYPESCRIPT_NATIVE.get("install_root")
+    version = _TYPESCRIPT_NATIVE.get("version")
+    license_id = _TYPESCRIPT_NATIVE.get("license")
+    packages = _TYPESCRIPT_NATIVE.get("packages")
+    if (
+        install_root != f"/opt/lingxi/toolchains/typescript/{version}"
+        or not isinstance(version, str)
+        or not isinstance(license_id, str)
+        or not isinstance(packages, dict)
+    ):
+        fail("invalid native TypeScript toolchain pin")
+
+    toolchain_root = root / install_root.lstrip("/")
+    metadata_path = toolchain_root / "package.json"
+    tsc_path = toolchain_root / "tsc"
+    required_files = [
+        metadata_path,
+        tsc_path,
+        toolchain_root / "LICENSE",
+        toolchain_root / "NOTICE.txt",
+        toolchain_root / "lib.d.ts",
+    ]
+    for required in required_files:
+        if not required.is_file() or required.is_symlink():
+            fail(f"native TypeScript toolchain file missing or unsafe: {root_rel(required, root)}")
+    if not is_elf(tsc_path) or not os.access(tsc_path, os.X_OK):
+        fail("native TypeScript tsc must be a real executable ELF")
+
+    try:
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        fail(f"invalid native TypeScript package metadata: {exc}")
+    matching = [
+        (arch, package)
+        for arch, package in packages.items()
+        if isinstance(package, dict) and package.get("name") == metadata.get("name")
+    ]
+    if len(matching) != 1:
+        fail("native TypeScript package does not match exactly one pinned architecture")
+    architecture, package = matching[0]
+    if metadata.get("version") != version or metadata.get("license") != license_id:
+        fail("native TypeScript package metadata diverged from its version/license pin")
+    expected_tsc_sha256 = package.get("tsc_sha256")
+    if os.environ.get("LINGXI_ROOTFS_TOOL_TESTING") == "1":
+        expected_tsc_sha256 = os.environ.get("LINGXI_ROOTFS_TOOL_TEST_TSC_SHA256")
+    if read_sha256(tsc_path) != expected_tsc_sha256:
+        fail("native TypeScript tsc diverged from its executable pin")
+
+    return PackageRecord(
+        name="typescript-native",
+        version=version,
+        license=license_id,
+        architecture=architecture,
+        origin=package["name"],
+    )
+
+
 def is_elf(path: pathlib.Path) -> bool:
     try:
         with path.open("rb") as handle:
@@ -379,7 +438,9 @@ def validate_rootfs_tree(root: pathlib.Path) -> List[PackageRecord]:
             if mode & stat.S_IWOTH and rel not in WORLD_WRITABLE_ALLOWED:
                 fail(f"world-writable file is forbidden outside scratch paths: {rel}")
 
-    return parse_apk_installed(root / "lib" / "apk" / "db" / "installed")
+    packages = parse_apk_installed(root / "lib" / "apk" / "db" / "installed")
+    packages.append(validate_typescript_native(root))
+    return sorted(packages, key=lambda package: package.name)
 
 
 def collect_allowlist(root: pathlib.Path) -> List[dict]:
@@ -419,6 +480,7 @@ def collect_allowlist(root: pathlib.Path) -> List[dict]:
         "/usr/bin/node",
         "/usr/bin/ssh",
         "/usr/bin/python3",
+        f"{_TYPESCRIPT_NATIVE['install_root']}/tsc",
     }
     present = {entry["path"] for entry in entries}
     missing = sorted(required - present)

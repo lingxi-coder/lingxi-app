@@ -383,6 +383,10 @@ function validatePermissionMode(v: unknown): void {
   );
 }
 
+function validateTypescriptLspMode(v: unknown): void {
+  assert.ok(['auto', 'off', 'on'].includes(v as string));
+}
+
 function validateDisabledReason(v: unknown): void {
   const o = rec(v);
   assert.ok(isString(o['code']));
@@ -1377,6 +1381,9 @@ function validateCommand(name: string, v: unknown): void {
     case 'set_permission_mode':
       validatePermissionMode(o['mode']);
       break;
+    case 'set_typescript_lsp_mode':
+      validateTypescriptLspMode(o['mode']);
+      break;
     case 'list_provider_credentials':
       assert.ok(isNumber(o['operation_id']) && Array.isArray(o['provider_ids']));
       for (const providerId of o['provider_ids'] as unknown[]) assert.ok(isString(providerId));
@@ -1771,6 +1778,11 @@ function validateEvent(name: string, v: unknown): void {
       break;
     case 'permission_mode_changed':
       validatePermissionMode(o['mode']);
+      break;
+    case 'typescript_lsp_mode_changed':
+      validateTypescriptLspMode(o['requested']);
+      validateTypescriptLspMode(o['effective']);
+      assert.ok(isBool(o['available']));
       break;
     case 'conversation_controls_changed':
       validateConversationControls(o['controls']);

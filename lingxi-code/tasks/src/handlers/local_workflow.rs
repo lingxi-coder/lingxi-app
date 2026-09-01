@@ -38,15 +38,18 @@ use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 
 use async_trait::async_trait;
 use futures::stream::StreamExt;
-use serde_json::Value;
-use tokio::sync::{mpsc, oneshot, Mutex};
 use platform_api::filesystem::FileSystem;
 use platform_api::subagent_spawn::{SelectedAgentMeta, SubagentListingEntry};
 use platform_api::tool_invoker::{SubagentInvocationContext, ToolInvokerError};
 use platform_api::{
-    BackgroundTaskHandle, BudgetEnforcerHandle, RuntimeSpawner, SubagentInheritance,
+    BackgroundTaskHandle, BudgetEnforcerHandle, FusionError, FusionExecutor, FusionInheritance,
+    FusionModelRef, FusionOrigin, FusionPreset, RuntimeSpawner, SubagentInheritance,
     SubagentResult, SubagentSpawnError, SubagentSpawnRequest, SubagentSpawner, ToolInvoker,
 };
+use serde::Deserialize;
+use serde_json::Value;
+use tokio::sync::{mpsc, oneshot, Mutex};
+use tokio_util::sync::CancellationToken;
 
 use crate::id::TaskType;
 use crate::output_manager::TaskOutputManager;
@@ -350,6 +353,72 @@ fn workflow_agent_display_model(opts: &Value) -> Option<String> {
         agent_model,
         agent_model_profile,
     ))
+}
+
+fn parse_workflow_fusion_preset(raw: Option<&str>) -> Result<FusionPreset, FusionError> {
+    match raw {
+        None => Ok(FusionPreset::Quality),
+        Some("quality") => Ok(FusionPreset::Quality),
+        Some("fast") => Ok(FusionPreset::Fast),
+        Some(other) => Err(FusionError::InvalidRequest(format!(
+            "fusion preset `{other}` must be quality or fast"
+        ))),
+    }
+}
+
+fn workflow_fusion_cap(executor: Option<&Arc<dyn FusionExecutor>>) -> u32 {
+    executor
+        .map(|executor| executor.workflow_fusion_call_cap())
+        .unwrap_or(WORKFLOW_FUSION_CALL_CAP_HARD_LIMIT)
+        .clamp(1, WORKFLOW_FUSION_CALL_CAP_HARD_LIMIT)
+}
+
+fn workflow_fusion_cap_message(cap: u32) -> String {
+    format!("Workflow fusion() call cap reached ({cap})")
+}
+
+fn parse_workflow_fusion_request(
+    executor: Option<&Arc<dyn FusionExecutor>>,
+    prompt: &str,
+    opts_json: &str,
+    run_id: &str,
+    parent_model: Option<&str>,
+    parent_model_profile: Option<&str>,
+) -> Result<platform_api::FusionRequest, FusionError> {
+    let Some(executor) = executor else {
+        return Err(FusionError::UnavailableOnPlatform);
+    };
+    if !executor.agent_surface().enabled {
+        return Err(FusionError::Disabled);
+    }
+    let opts: WorkflowFusionOpts =
+        serde_json::from_str(opts_json).map_err(|error| FusionError::InvalidRequest(error.to_string()))?;
+    let preset = parse_workflow_fusion_preset(opts.preset.as_deref())?;
+    let parent_model = parent_model
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| FusionError::InvalidRequest("workflow parent model is unavailable".into()))?;
+    let parent_profile = parent_model_profile
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| FusionError::InvalidRequest("workflow parent model profile is unavailable".into()))?;
+    Ok(platform_api::FusionRequest {
+        schema_version: platform_api::FUSION_SCHEMA_VERSION,
+        origin: FusionOrigin::Workflow,
+        prompt: prompt.to_string(),
+        preset,
+        models: opts.models,
+        dimensions: opts.dimensions.unwrap_or_default(),
+        partial_ok: opts
+            .partial_ok
+            .unwrap_or(executor.agent_surface().default_partial_ok),
+        max_panel: opts.max_panel,
+        cross_provider: opts.cross_provider.unwrap_or(false),
+        parent_profile: parent_profile.to_string(),
+        parent_model: parent_model.to_string(),
+        conversation_id: None,
+        workflow_run_id: Some(run_id.to_string()),
+    })
 }
 
 fn format_workflow_agent_snapshot(progress: &WorkflowProgressUpdate) -> Option<String> {
@@ -812,6 +881,36 @@ fn group_en_us(n: u64) -> String {
 /// default workflow subagent.
 pub const DEFAULT_WORKFLOW_SUBAGENT: &str = "workflow-subagent";
 
+const WORKFLOW_FUSION_CALL_CAP_HARD_LIMIT: u32 = 20;
+
+#[derive(Debug, Deserialize, Default)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct WorkflowFusionOpts {
+    #[serde(default)]
+    preset: Option<String>,
+    #[serde(default)]
+    models: Option<Vec<FusionModelRef>>,
+    #[serde(default)]
+    dimensions: Option<Vec<String>>,
+    #[serde(default)]
+    partial_ok: Option<bool>,
+    #[serde(default)]
+    max_panel: Option<u8>,
+    #[serde(default)]
+    cross_provider: Option<bool>,
+}
+
+struct WorkflowFusionDispatch {
+    prompt: String,
+    opts_json: String,
+    reply: oneshot::Sender<String>,
+}
+
+enum WorkflowBridgeRequest {
+    AgentBatch(Vec<(String, String)>, oneshot::Sender<Vec<String>>),
+    Fusion(WorkflowFusionDispatch),
+}
+
 /// A live worker-cancel record: the background-task handle plus the runtime that
 /// minted it, so [`Task::kill`] / cleanup can cancel the in-flight worker without
 /// a fresh [`TaskContext`]. (Each handler keeps its own — the fields are private;
@@ -823,6 +922,56 @@ pub struct WorkerCancel {
     /// interrupt handler. Flipped by [`Task::kill`] / cleanup so a runaway
     /// pure-JS loop aborts instead of leaking the OS thread.
     cancel: Arc<std::sync::atomic::AtomicBool>,
+    /// Cancels any in-flight workflow-global `fusion()` call.
+    fusion_cancel: CancellationToken,
+    /// Worker completion signal. `kill` waits briefly on this after flipping
+    /// the cooperative cancel flags so in-flight Fusion can unwind before the
+    /// runtime fallback aborts the task.
+    completion_rx: StdMutex<Option<oneshot::Receiver<()>>>,
+    /// Natural completion owns the terminal transition once this flips. Kill
+    /// and cleanup must not abort the outcome/status commit window.
+    finalizing: bool,
+}
+
+struct WorkerCompletionSignal(Option<oneshot::Sender<()>>);
+
+impl WorkerCompletionSignal {
+    fn new(tx: oneshot::Sender<()>) -> Self {
+        Self(Some(tx))
+    }
+}
+
+impl Drop for WorkerCompletionSignal {
+    fn drop(&mut self) {
+        if let Some(tx) = self.0.take() {
+            let _ = tx.send(());
+        }
+    }
+}
+
+async fn cancel_workflow_worker(rec: WorkerCancel) -> Result<(), TaskError> {
+    rec.cancel
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    rec.fusion_cancel.cancel();
+    let completion_rx = rec
+        .completion_rx
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take();
+    let completed = if let Some(completion_rx) = completion_rx {
+        tokio::time::timeout(std::time::Duration::from_secs(2), completion_rx)
+            .await
+            .is_ok()
+    } else {
+        false
+    };
+    if !completed {
+        rec.runtime
+            .cancel(&rec.handle)
+            .await
+            .map_err(|error| TaskError::Io(error.to_string()))?;
+    }
+    Ok(())
 }
 
 /// Background [`Task`] that runs a workflow script and spools its result.
@@ -894,6 +1043,10 @@ pub struct LocalWorkflowHandler {
     /// saved-workflow directories have already missed (see
     /// [`resolve_nested_script`]).
     plugin_workflows: Option<Arc<workflow::PluginWorkflowRegistry>>,
+    /// Optional shared Fusion orchestrator for the workflow-global `fusion()`
+    /// helper. Mobile leaves this unset and reports
+    /// [`FusionError::UnavailableOnPlatform`] if a script calls `fusion()`.
+    fusion: Option<Arc<dyn FusionExecutor>>,
 }
 
 impl LocalWorkflowHandler {
@@ -925,6 +1078,7 @@ impl LocalWorkflowHandler {
             workspace_leases: None,
             workspace_root: None,
             plugin_workflows: None,
+            fusion: None,
         }
     }
 
@@ -1025,6 +1179,13 @@ impl LocalWorkflowHandler {
         self
     }
 
+    /// Wire the shared Fusion executor for workflow-global `fusion()`.
+    #[must_use]
+    pub fn with_fusion(mut self, executor: Arc<dyn FusionExecutor>) -> Self {
+        self.fusion = Some(executor);
+        self
+    }
+
     /// Share the same `workers` map with an external owner (registry wiring) so a
     /// [`TaskHandle::cleanup`] closure and [`Task::kill`] observe the same handles.
     #[must_use]
@@ -1040,14 +1201,18 @@ impl LocalWorkflowHandler {
             std::mem::take(&mut *pending)
         };
         for task_id in pending {
-            if self.status_sink.is_terminal(&task_id).await {
-                continue;
-            }
-            let Some(rec) = self.workers.lock().await.remove(&task_id) else {
+            let rec = {
+                let mut workers = self.workers.lock().await;
+                if workers.get(&task_id).is_some_and(|rec| rec.finalizing) {
+                    None
+                } else {
+                    workers.remove(&task_id)
+                }
+            };
+            let Some(rec) = rec else {
                 continue;
             };
-            rec.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
-            let _ = rec.runtime.cancel(&rec.handle).await;
+            let _ = cancel_workflow_worker(rec).await;
             if !self.status_sink.is_terminal(&task_id).await {
                 self.status_sink
                     .set_status(&task_id, TaskStatus::Killed)
@@ -2018,6 +2183,60 @@ async fn run_workflow_script_with_live_updates(
     phase_telemetry_ctx: Option<PhaseTelemetryCtx>,
     workflow_metrics_out: Option<Arc<tokio::sync::Mutex<WorkflowRunMetrics>>>,
 ) -> Result<workflow::RunOutcome, workflow::WorkflowError> {
+    run_workflow_script_with_live_updates_and_fusion(
+        script,
+        subagent_type,
+        spawner,
+        tool_invoker,
+        budget,
+        progress_tx,
+        live_progress_tx,
+        journal,
+        journal_writer,
+        token_budget_total,
+        shared_pool,
+        turn_start_baseline,
+        nested,
+        cancel,
+        CancellationToken::new(),
+        None,
+        None,
+        None,
+        None,
+        bus,
+        agent_count_out,
+        phase_telemetry_ctx,
+        workflow_metrics_out,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_workflow_script_with_live_updates_and_fusion(
+    script: &str,
+    subagent_type: &str,
+    spawner: Arc<dyn SubagentSpawner>,
+    tool_invoker: Arc<dyn ToolInvoker>,
+    budget: Arc<dyn BudgetEnforcerHandle>,
+    progress_tx: Option<mpsc::UnboundedSender<String>>,
+    live_progress_tx: Option<mpsc::UnboundedSender<WorkflowProgressUpdate>>,
+    journal: Option<Arc<std::sync::Mutex<HashMap<String, String>>>>,
+    journal_writer: Option<WorkflowJournalWriter>,
+    token_budget_total: Option<u64>,
+    shared_pool: Option<Arc<AtomicU64>>,
+    turn_start_baseline: u64,
+    nested: NestedConfig,
+    cancel: Arc<std::sync::atomic::AtomicBool>,
+    fusion_cancel: CancellationToken,
+    fusion: Option<Arc<dyn FusionExecutor>>,
+    workflow_run_id: Option<String>,
+    parent_model: Option<String>,
+    parent_model_profile: Option<String>,
+    bus: Arc<AnalyticsBus>,
+    agent_count_out: Option<Arc<AtomicU64>>,
+    phase_telemetry_ctx: Option<PhaseTelemetryCtx>,
+    workflow_metrics_out: Option<Arc<tokio::sync::Mutex<WorkflowRunMetrics>>>,
+) -> Result<workflow::RunOutcome, workflow::WorkflowError> {
     let NestedConfig {
         allow_nested,
         args: nested_args,
@@ -2046,6 +2265,7 @@ async fn run_workflow_script_with_live_updates(
     // on its reply before sending the next.
     let (req_tx, mut req_rx) =
         mpsc::channel::<(Vec<(String, String)>, oneshot::Sender<Vec<String>>)>(1);
+    let (fusion_req_tx, mut fusion_req_rx) = mpsc::channel::<WorkflowFusionDispatch>(1);
     let (outcome_tx, outcome_rx) =
         oneshot::channel::<Result<workflow::RunOutcome, workflow::WorkflowError>>();
     let script_owned = script.to_string();
@@ -2074,6 +2294,22 @@ async fn run_workflow_script_with_live_updates(
                 }
                 reply_rx.blocking_recv().unwrap_or_default()
             };
+            let fusion_runner = move |prompt: &str, opts_json: &str| -> String {
+                let (reply_tx, reply_rx) = oneshot::channel();
+                if fusion_req_tx
+                    .blocking_send(WorkflowFusionDispatch {
+                        prompt: prompt.to_string(),
+                        opts_json: opts_json.to_string(),
+                        reply: reply_tx,
+                    })
+                    .is_err()
+                {
+                    return wf_throw(workflow::WORKFLOW_FUSION_UNAVAILABLE_MESSAGE);
+                }
+                reply_rx
+                    .blocking_recv()
+                    .unwrap_or_else(|_| wf_throw(workflow::WORKFLOW_FUSION_UNAVAILABLE_MESSAGE))
+            };
             // `phase()`/`log()` fire this live; an unbounded `send` is non-blocking
             // and needs no runtime, so it is safe from the script thread. The host
             // drains `progress_tx` concurrently (e.g. spools to the task output).
@@ -2093,9 +2329,10 @@ async fn run_workflow_script_with_live_updates(
                     let _ = tx.send(workflow_progress_update(p));
                 }
             };
-            let outcome = workflow::run_with_progress(
+            let outcome = workflow::run_with_progress_and_fusion(
                 &script_owned,
                 runner,
+                fusion_runner,
                 on_progress,
                 Some(budget_source),
                 allow_nested,
@@ -2130,428 +2367,491 @@ async fn run_workflow_script_with_live_updates(
     // journal.
     let mut running_key = String::new();
     let mut gone_live = false;
+    let mut fusion_calls_seen = 0_u32;
+    let fusion_cap = workflow_fusion_cap(fusion.as_ref());
 
     // Async worker: answer each batch. Phase A decides cached-vs-live per call in
     // order (advancing the prefix cursor); Phase B runs the plans concurrently
     // (bounded, order-preserving). The loop ends when the runner's sender is
     // dropped — i.e. when `workflow::run` returns.
-    while let Some((calls, reply)) = req_rx.recv().await {
-        // Phase A — sequential, in call order: prefix-cache decision per call.
-        let mut plans: Vec<Plan> = Vec::with_capacity(calls.len());
-        for (prompt, opts_json) in calls {
-            let mut opts: Value = serde_json::from_str(&opts_json).unwrap_or(Value::Null);
-            if let Some(spec_json) = opts.get("__wf_resolve").and_then(Value::as_str) {
-                let spec: Value = serde_json::from_str(spec_json).unwrap_or(Value::Null);
-                plans.push(Plan::Resolve(spec));
-                continue;
+    let mut agent_open = true;
+    let mut fusion_open = true;
+    loop {
+        let maybe_work = tokio::select! {
+            maybe = req_rx.recv(), if agent_open => {
+                match maybe {
+                    Some((calls, reply)) => Some(WorkflowBridgeRequest::AgentBatch(calls, reply)),
+                    None => {
+                        agent_open = false;
+                        None
+                    }
+                }
             }
-            // Extract and strip the phase context injected by the script engine
-            // (`__wf_phase: {index, title}`) — display-only, not forwarded to spawner.
-            // This phase_index is 1-based (oracle §8: `workflow_phase` toolUseID uses `Q`
-            // which auto-increments from 1). The same 1-based index is retained in
-            // `tengu_workflow_phase_completed` telemetry in current Claude Code.
-            let (phase_index, phase_title) =
-                if let Some(ph) = opts.as_object_mut().and_then(|o| o.remove("__wf_phase")) {
-                    let idx = ph.get("index").and_then(Value::as_u64).map(|v| v as u32);
-                    let title = ph.get("title").and_then(Value::as_str).map(str::to_string);
-                    (idx, title)
-                } else {
-                    (None, None)
+            maybe = fusion_req_rx.recv(), if fusion_open => {
+                match maybe {
+                    Some(call) => Some(WorkflowBridgeRequest::Fusion(call)),
+                    None => {
+                        fusion_open = false;
+                        None
+                    }
+                }
+            }
+            else => None,
+        };
+        let Some(work) = maybe_work else {
+            if !agent_open && !fusion_open {
+                break;
+            }
+            continue;
+        };
+        match work {
+            WorkflowBridgeRequest::Fusion(call) => {
+                if fusion_calls_seen >= fusion_cap {
+                    let _ = call.reply.send(wf_throw(&workflow_fusion_cap_message(fusion_cap)));
+                    continue;
+                }
+                fusion_calls_seen = fusion_calls_seen.saturating_add(1);
+                let response = match parse_workflow_fusion_request(
+                    fusion.as_ref(),
+                    &call.prompt,
+                    &call.opts_json,
+                    workflow_run_id.as_deref().unwrap_or_default(),
+                    parent_model.as_deref(),
+                    parent_model_profile.as_deref(),
+                ) {
+                    Ok(request) => {
+                        let inherit = FusionInheritance::new(
+                            SubagentInheritance {
+                                tool_invoker: tool_invoker.clone(),
+                                budget: budget.clone(),
+                            },
+                            fusion_cancel.clone(),
+                        );
+                        match fusion
+                            .as_ref()
+                            .expect("fusion request parsing requires an executor")
+                            .run(request, inherit, None)
+                            .await
+                        {
+                            Ok(result) => serde_json::to_string(&result)
+                                .unwrap_or_else(|_| wf_throw("fusion() host could not serialize the result")),
+                            Err(error) => wf_throw(&error.to_string()),
+                        }
+                    }
+                    Err(error) => wf_throw(&error.to_string()),
                 };
-            // Compute the clean opts_json (without __wf_phase) for the spawner.
-            let clean_opts_json =
-                serde_json::to_string(&opts).unwrap_or_else(|_| opts_json.clone());
-            // Extract label: `opts.label ?? prompt.slice(0, 60)` (oracle §8).
-            let label = opts
-                .get("label")
-                .and_then(Value::as_str)
-                .filter(|s| !s.is_empty())
-                .map(str::to_string)
-                .unwrap_or_else(|| {
-                    let chars: Vec<char> = prompt.chars().take(60).collect();
-                    chars.iter().collect()
-                });
-            // Advance the chained key for this real agent() call (before the
-            // cache check, so cached calls also advance the chain — claude `m`).
-            // Normalize opts to the binary identity keys plus LingXi's provider
-            // profile: display-only fields like `phase`/`label`/`stallMs` are
-            // stripped so re-annotating a call doesn't invalidate resume cache.
-            let normalized_opts = normalize_opts_for_chain_key(&opts);
-            let key = chain_key(&running_key, &prompt, &normalized_opts);
-            running_key.clone_from(&key);
-            // Assign a monotonic call index to each real agent() call.
-            let call_index = call_index_counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            if !gone_live {
-                let cached = journal
-                    .as_ref()
-                    .and_then(|j| j.lock().unwrap().get(&key).cloned());
-                if let Some(cached) = cached {
-                    plans.push(Plan::Cached {
-                        result: cached,
+                let _ = call.reply.send(response);
+            }
+            WorkflowBridgeRequest::AgentBatch(calls, reply) => {
+                // Phase A — sequential, in call order: prefix-cache decision per call.
+                let mut plans: Vec<Plan> = Vec::with_capacity(calls.len());
+                for (prompt, opts_json) in calls {
+                    let mut opts: Value = serde_json::from_str(&opts_json).unwrap_or(Value::Null);
+                    if let Some(spec_json) = opts.get("__wf_resolve").and_then(Value::as_str) {
+                        let spec: Value = serde_json::from_str(spec_json).unwrap_or(Value::Null);
+                        plans.push(Plan::Resolve(spec));
+                        continue;
+                    }
+                    let (phase_index, phase_title) =
+                        if let Some(ph) = opts.as_object_mut().and_then(|o| o.remove("__wf_phase"))
+                        {
+                            let idx = ph.get("index").and_then(Value::as_u64).map(|v| v as u32);
+                            let title = ph.get("title").and_then(Value::as_str).map(str::to_string);
+                            (idx, title)
+                        } else {
+                            (None, None)
+                        };
+                    let clean_opts_json =
+                        serde_json::to_string(&opts).unwrap_or_else(|_| opts_json.clone());
+                    let label = opts
+                        .get("label")
+                        .and_then(Value::as_str)
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_string)
+                        .unwrap_or_else(|| {
+                            let chars: Vec<char> = prompt.chars().take(60).collect();
+                            chars.iter().collect()
+                        });
+                    let normalized_opts = normalize_opts_for_chain_key(&opts);
+                    let key = chain_key(&running_key, &prompt, &normalized_opts);
+                    running_key.clone_from(&key);
+                    let call_index =
+                        call_index_counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    if !gone_live {
+                        let cached = journal
+                            .as_ref()
+                            .and_then(|j| j.lock().unwrap().get(&key).cloned());
+                        if let Some(cached) = cached {
+                            plans.push(Plan::Cached {
+                                result: cached,
+                                call_index,
+                                label,
+                                phase_index,
+                                phase_title,
+                            });
+                            continue;
+                        }
+                        gone_live = true;
+                    }
+                    let journaled_key = journal.as_ref().map(|_| key);
+                    plans.push(Plan::Live {
+                        key: journaled_key,
+                        prompt,
+                        opts_json: clean_opts_json,
                         call_index,
                         label,
                         phase_index,
                         phase_title,
                     });
-                    continue;
                 }
-                gone_live = true; // first miss → everything after runs live
-            }
-            let journaled_key = journal.as_ref().map(|_| key);
-            plans.push(Plan::Live {
-                key: journaled_key,
-                prompt,
-                opts_json: clean_opts_json,
-                call_index,
-                label,
-                phase_index,
-                phase_title,
-            });
-        }
 
-        // Phase B — concurrent (bounded, order-preserving).
-        let results: Vec<String> = futures::stream::iter(plans.into_iter().map(|plan| {
-            let spawner = spawner.clone();
-            let tool_invoker = tool_invoker.clone();
-            let budget = budget.clone();
-            let subagent_type = subagent_type.to_string();
-            let journal = journal.clone();
-            let journal_writer = journal_writer.clone();
-            let spent = spent.clone();
-            let nested_fs = nested_fs.clone();
-            let nested_plugin_workflows = nested_plugin_workflows.clone();
-            let budget_total = token_budget_total;
-            let baseline = turn_start_baseline;
-            let bus_call = bus.clone();
-            let ptx = worker_progress_tx.clone();
-            let live_tx = worker_live_progress_tx.clone();
-            let workflow_metrics = workflow_metrics.clone();
-            async move {
-                // Claude checks the budget and lifetime cap before incrementing
-                // its agent ordinal and before looking up a journal cache hit.
-                // Do this in one mutex-protected preflight so a large parallel
-                // batch admits exactly the first 1000 calls rather than making
-                // every task observe a phase-A count of 1001+.
-                if !matches!(&plan, Plan::Resolve(_)) {
-                    if let Some(total) = budget_total.filter(|&t| t > 0) {
-                        let turn_spent = spent.load(Ordering::Relaxed).saturating_sub(baseline);
-                        if turn_spent >= total {
-                            let should_emit = {
+                let results: Vec<String> = futures::stream::iter(plans.into_iter().map(|plan| {
+                    let spawner = spawner.clone();
+                    let tool_invoker = tool_invoker.clone();
+                    let budget = budget.clone();
+                    let subagent_type = subagent_type.to_string();
+                    let journal = journal.clone();
+                    let journal_writer = journal_writer.clone();
+                    let spent = spent.clone();
+                    let nested_fs = nested_fs.clone();
+                    let nested_plugin_workflows = nested_plugin_workflows.clone();
+                    let budget_total = token_budget_total;
+                    let baseline = turn_start_baseline;
+                    let bus_call = bus.clone();
+                    let ptx = worker_progress_tx.clone();
+                    let live_tx = worker_live_progress_tx.clone();
+                    let workflow_metrics = workflow_metrics.clone();
+                    async move {
+                        if !matches!(&plan, Plan::Resolve(_)) {
+                            if let Some(total) = budget_total.filter(|&t| t > 0) {
+                                let turn_spent =
+                                    spent.load(Ordering::Relaxed).saturating_sub(baseline);
+                                if turn_spent >= total {
+                                    let should_emit = {
+                                        let mut metrics = workflow_metrics.lock().await;
+                                        if metrics.budget_telemetry_emitted {
+                                            false
+                                        } else {
+                                            metrics.budget_telemetry_emitted = true;
+                                            true
+                                        }
+                                    };
+                                    if should_emit {
+                                        let mut md: LogEventMetadata = HashMap::new();
+                                        md.insert(
+                                            "spent".to_string(),
+                                            AnalyticsValue::Int(turn_spent as i64),
+                                        );
+                                        md.insert(
+                                            "budget".to_string(),
+                                            AnalyticsValue::Int(total as i64),
+                                        );
+                                        let call_count = workflow_metrics.lock().await.call_count;
+                                        md.insert(
+                                            "agentCount".to_string(),
+                                            AnalyticsValue::Int(call_count as i64),
+                                        );
+                                        bus_call
+                                            .log_event(
+                                                telemetry::tengu::workflow::BUDGET_CAP_EXCEEDED,
+                                                md,
+                                            )
+                                            .await;
+                                    }
+                                    return wf_throw(&workflow_budget_exceeded_message(
+                                        turn_spent, total,
+                                    ));
+                                }
+                            }
+
+                            let cap_failure = {
                                 let mut metrics = workflow_metrics.lock().await;
-                                if metrics.budget_telemetry_emitted {
-                                    false
+                                if metrics.call_count >= WORKFLOW_AGENT_CAP {
+                                    let should_emit = !metrics.cap_telemetry_emitted;
+                                    metrics.cap_telemetry_emitted = true;
+                                    Some((metrics.call_count, should_emit))
                                 } else {
-                                    metrics.budget_telemetry_emitted = true;
-                                    true
+                                    metrics.call_count += 1;
+                                    None
                                 }
                             };
-                            if should_emit {
-                                let mut md: LogEventMetadata = HashMap::new();
-                                md.insert("spent".to_string(), AnalyticsValue::Int(turn_spent as i64));
-                                md.insert("budget".to_string(), AnalyticsValue::Int(total as i64));
-                                let call_count = workflow_metrics.lock().await.call_count;
-                                md.insert("agentCount".to_string(), AnalyticsValue::Int(call_count as i64));
-                                bus_call
-                                    .log_event(telemetry::tengu::workflow::BUDGET_CAP_EXCEEDED, md)
-                                    .await;
+                            if let Some((call_count, should_emit)) = cap_failure {
+                                if should_emit {
+                                    let mut md: LogEventMetadata = HashMap::new();
+                                    md.insert(
+                                        "agentCount".to_string(),
+                                        AnalyticsValue::Int(call_count as i64),
+                                    );
+                                    bus_call
+                                        .log_event(telemetry::tengu::workflow::AGENT_CAP_EXCEEDED, md)
+                                        .await;
+                                }
+                                return wf_throw(WORKFLOW_AGENT_CAP_MESSAGE);
                             }
-                            return wf_throw(&workflow_budget_exceeded_message(turn_spent, total));
                         }
-                    }
 
-                    let cap_failure = {
-                        let mut metrics = workflow_metrics.lock().await;
-                        if metrics.call_count >= WORKFLOW_AGENT_CAP {
-                            let should_emit = !metrics.cap_telemetry_emitted;
-                            metrics.cap_telemetry_emitted = true;
-                            Some((metrics.call_count, should_emit))
-                        } else {
-                            metrics.call_count += 1;
-                            None
-                        }
-                    };
-                    if let Some((call_count, should_emit)) = cap_failure {
-                        if should_emit {
-                            let mut md: LogEventMetadata = HashMap::new();
-                            md.insert("agentCount".to_string(), AnalyticsValue::Int(call_count as i64));
-                            bus_call
-                                .log_event(telemetry::tengu::workflow::AGENT_CAP_EXCEEDED, md)
-                                .await;
-                        }
-                        return wf_throw(WORKFLOW_AGENT_CAP_MESSAGE);
-                    }
-                }
-
-                let (
-                    key,
-                    prompt,
-                    opts_json,
-                    call_index,
-                    label,
-                    phase_index,
-                    phase_title,
-                ) = match plan {
-                    // `workflow()` resolution: read + strip the nested source; `""`
-                    // ⇒ the runtime throws "could not resolve".
-                    Plan::Resolve(spec) => {
-                        return match resolve_nested_script(
-                            &spec,
-                            nested_fs.as_ref(),
-                            nested_plugin_workflows.as_deref(),
-                        )
-                        .await
-                        {
-                            Ok(src) => workflow::strip_meta_export(&src),
-                            Err(_) => String::new(),
-                        }
-                    }
-                    Plan::Cached { result, call_index, label, phase_index, phase_title } => {
-                        workflow_metrics
-                            .lock()
-                            .await
-                            .record_cached(
-                                call_index,
-                                phase_index,
-                                phase_title.clone(),
-                                &result,
-                            );
-                        // Emit a `cached` workflow_agent event for journal replays.
-                        let tool_use_id = format!("workflow_agent_{call_index}_cached");
-                        let cached_event = workflow::Progress::Agent {
-                            index: call_index,
-                            label: label.clone(),
+                        let (
+                            key,
+                            prompt,
+                            opts_json,
+                            call_index,
+                            label,
                             phase_index,
                             phase_title,
-                            agent_id: None,
-                            model: None,
-                            state: workflow::AgentState::Cached,
-                            error: None,
-                            tool_use_id,
+                        ) = match plan {
+                            Plan::Resolve(spec) => {
+                                return match resolve_nested_script(
+                                    &spec,
+                                    nested_fs.as_ref(),
+                                    nested_plugin_workflows.as_deref(),
+                                )
+                                .await
+                                {
+                                    Ok(src) => workflow::strip_meta_export(&src),
+                                    Err(_) => String::new(),
+                                }
+                            }
+                            Plan::Cached {
+                                result,
+                                call_index,
+                                label,
+                                phase_index,
+                                phase_title,
+                            } => {
+                                workflow_metrics.lock().await.record_cached(
+                                    call_index,
+                                    phase_index,
+                                    phase_title.clone(),
+                                    &result,
+                                );
+                                let tool_use_id = format!("workflow_agent_{call_index}_cached");
+                                let cached_event = workflow::Progress::Agent {
+                                    index: call_index,
+                                    label: label.clone(),
+                                    phase_index,
+                                    phase_title,
+                                    agent_id: None,
+                                    model: None,
+                                    state: workflow::AgentState::Cached,
+                                    error: None,
+                                    tool_use_id,
+                                };
+                                let mut update = workflow_progress_update(&cached_event);
+                                update.tool_use_id =
+                                    Some(format!("workflow_agent_{call_index}_cached"));
+                                update.last_progress_at_ms = Some(unix_time_ms_now());
+                                if let Some(ref tx) = ptx {
+                                    emit_workflow_agent_snapshot(Some(tx), &update);
+                                }
+                                if let Some(ref tx) = live_tx {
+                                    let _ = tx.send(update);
+                                }
+                                return result;
+                            }
+                            Plan::Live {
+                                key,
+                                prompt,
+                                opts_json,
+                                call_index,
+                                label,
+                                phase_index,
+                                phase_title,
+                            } => (
+                                key,
+                                prompt,
+                                opts_json,
+                                call_index,
+                                label,
+                                phase_index,
+                                phase_title,
+                            ),
                         };
-                        let mut update = workflow_progress_update(&cached_event);
-                        update.tool_use_id = Some(format!("workflow_agent_{call_index}_cached"));
-                        update.last_progress_at_ms = Some(unix_time_ms_now());
-                        if let Some(ref tx) = ptx {
-                            emit_workflow_agent_snapshot(Some(tx), &update);
+                        let opts: Value = serde_json::from_str(&opts_json).unwrap_or(Value::Null);
+                        if opts.get("isolation").and_then(Value::as_str) == Some("remote") {
+                            return wf_throw("agent({isolation:'remote'}) is not available in this build");
                         }
-                        if let Some(ref tx) = live_tx {
-                            let _ = tx.send(update);
+                        let agent_display_model = workflow_agent_display_model(&opts);
+                        if let Some(at) = opts
+                            .get("agentType")
+                            .and_then(Value::as_str)
+                            .filter(|s| !s.is_empty())
+                        {
+                            let listing = spawner.agent_listing().await;
+                            if !listing.iter().any(|e| e.agent_type == at) {
+                                let available = listing
+                                    .iter()
+                                    .map(|e| e.agent_type.clone())
+                                    .collect::<Vec<_>>()
+                                    .join(", ");
+                                return wf_throw(&format!(
+                                    "agent({{agentType}}): agent type '{at}' not found. Available agents: {available}"
+                                ));
+                            }
                         }
-                        return result;
-                    }
-                    Plan::Live {
-                        key,
-                        prompt,
-                        opts_json,
-                        call_index,
-                        label,
-                        phase_index,
-                        phase_title,
-                    } => (
-                        key,
-                        prompt,
-                        opts_json,
-                        call_index,
-                        label,
-                        phase_index,
-                        phase_title,
-                    ),
-                };
-                let opts: Value = serde_json::from_str(&opts_json).unwrap_or(Value::Null);
-                if opts.get("isolation").and_then(Value::as_str) == Some("remote") {
-                    return wf_throw("agent({isolation:'remote'}) is not available in this build");
-                }
-                // Keep workflow progress provider-qualified. The request itself
-                // carries the provider-local wire model and profile separately,
-                // while the UI needs one stable display identity across the
-                // queued, live-observer, and terminal events.
-                let agent_display_model = workflow_agent_display_model(&opts);
-                // agentType validation (binary `F` @202933121): an explicit
-                // `agentType` must name a known agent, else throw the byte-exact
-                // not-found error listing the available agents.
-                if let Some(at) = opts
-                    .get("agentType")
-                    .and_then(Value::as_str)
-                    .filter(|s| !s.is_empty())
-                {
-                    let listing = spawner.agent_listing().await;
-                    if !listing.iter().any(|e| e.agent_type == at) {
-                        let available = listing
-                            .iter()
-                            .map(|e| e.agent_type.clone())
-                            .collect::<Vec<_>>()
-                            .join(", ");
-                        return wf_throw(&format!(
-                            "agent({{agentType}}): agent type '{at}' not found. Available agents: {available}"
-                        ));
-                    }
-                }
-                let inherit = SubagentInheritance {
-                    tool_invoker,
-                    budget,
-                };
-                let request = make_request(&subagent_type, &prompt, &opts_json);
-                let queued_ms = unix_time_ms_now();
-                emit_workflow_agent_queued(
-                    ptx.as_ref(),
-                    live_tx.as_ref(),
-                    call_index,
-                    &label,
-                    &prompt,
-                    phase_index,
-                    phase_title.clone(),
-                    agent_display_model.clone(),
-                    queued_ms,
-                );
-                let queued_at_ms = Some(queued_ms);
-                let observer_enabled = live_tx.is_some() || (journal_writer.is_some() && key.is_some());
-                let observer = observer_enabled.then(|| {
-                    Arc::new(WorkflowAgentLiveObserver::new_with_metrics(
-                        ptx.clone(),
-                        live_tx.clone(),
-                        WorkflowProgressUpdate {
-                            kind: "workflow_agent".to_string(),
-                            index: call_index,
-                            title: None,
-                            message: None,
-                            label: Some(label.clone()),
+                        let inherit = SubagentInheritance {
+                            tool_invoker,
+                            budget,
+                        };
+                        let request = make_request(&subagent_type, &prompt, &opts_json);
+                        let queued_ms = unix_time_ms_now();
+                        emit_workflow_agent_queued(
+                            ptx.as_ref(),
+                            live_tx.as_ref(),
+                            call_index,
+                            &label,
+                            &prompt,
                             phase_index,
-                            phase_title: phase_title.clone(),
-                            agent_id: None,
-                            agent_type: Some(request.subagent_type.clone()),
-                            model: agent_display_model.clone(),
-                            fallback_model: None,
-                            state: Some("start".to_string()),
-                            error: None,
-                            tool_use_id: Some(format!("workflow_agent_{call_index}_queued")),
-                            queued_at_ms,
-                            started_at_ms: None,
-                            last_progress_at_ms: queued_at_ms,
-                            attempt: Some(1),
-                            last_attempt_reason: None,
-                            tokens: None,
-                            tool_calls: None,
-                            last_tool_name: None,
-                            last_tool_summary: None,
-                            prompt_preview: Some(prompt.chars().take(120).collect()),
-                        },
-                        journal_writer
-                            .clone()
-                            .zip(key.clone()),
-                        Some(workflow_metrics.clone()),
-                        call_index,
-                    ))
-                });
-                let raw = if let Some(observer) = observer.clone() {
-                    spawner
-                        .spawn_workflow_with_observer(
-                            request,
-                            inherit,
-                            None,
-                            Some(observer as Arc<dyn platform_api::subagent_spawn::SubagentSpawnObserver>),
-                            platform_api::subagent_spawn::WorkflowQueryWatchdog::default(),
-                        )
-                        .await
-                } else {
-                    spawner.spawn(request, inherit).await
-                };
-                let terminal_error = subagent_failure_reason(&raw);
-                workflow_metrics
-                    .lock()
-                    .await
-                    .record_result(call_index, phase_index, phase_title.clone(), &raw);
-                // Accumulate this fresh subagent's output tokens into the shared
-                // `spent` pool (replayed/cached agents cost nothing) — the same
-                // pool the main loop feeds when wired.
-                if let Ok(SubagentResult::Completed { usage, .. }) = &raw {
-                    spent.fetch_add(usage.output_tokens, Ordering::Relaxed);
-                }
-                // Emit `done` or `error` workflow_agent event after spawning.
-                // For done/error, toolUseID uses the agent_id UUID (oracle §8:
-                // `workflow_agent_${K}_${ct}` where ct is the agentId UUID).
-                {
-                    let (state, agent_id_str) = match &raw {
-                        Ok(SubagentResult::Completed { agent_id, .. }) => {
-                            (workflow::AgentState::Done, Some(agent_id.to_string()))
+                            phase_title.clone(),
+                            agent_display_model.clone(),
+                            queued_ms,
+                        );
+                        let queued_at_ms = Some(queued_ms);
+                        let observer_enabled =
+                            live_tx.is_some() || (journal_writer.is_some() && key.is_some());
+                        let observer = observer_enabled.then(|| {
+                            Arc::new(WorkflowAgentLiveObserver::new_with_metrics(
+                                ptx.clone(),
+                                live_tx.clone(),
+                                WorkflowProgressUpdate {
+                                    kind: "workflow_agent".to_string(),
+                                    index: call_index,
+                                    title: None,
+                                    message: None,
+                                    label: Some(label.clone()),
+                                    phase_index,
+                                    phase_title: phase_title.clone(),
+                                    agent_id: None,
+                                    agent_type: Some(request.subagent_type.clone()),
+                                    model: agent_display_model.clone(),
+                                    fallback_model: None,
+                                    state: Some("start".to_string()),
+                                    error: None,
+                                    tool_use_id: Some(format!("workflow_agent_{call_index}_queued")),
+                                    queued_at_ms,
+                                    started_at_ms: None,
+                                    last_progress_at_ms: queued_at_ms,
+                                    attempt: Some(1),
+                                    last_attempt_reason: None,
+                                    tokens: None,
+                                    tool_calls: None,
+                                    last_tool_name: None,
+                                    last_tool_summary: None,
+                                    prompt_preview: Some(prompt.chars().take(120).collect()),
+                                },
+                                journal_writer.clone().zip(key.clone()),
+                                Some(workflow_metrics.clone()),
+                                call_index,
+                            ))
+                        });
+                        let raw = if let Some(observer) = observer.clone() {
+                            spawner
+                                .spawn_workflow_with_observer(
+                                    request,
+                                    inherit,
+                                    None,
+                                    Some(
+                                        observer
+                                            as Arc<
+                                                dyn platform_api::subagent_spawn::SubagentSpawnObserver,
+                                            >,
+                                    ),
+                                    platform_api::subagent_spawn::WorkflowQueryWatchdog::default(),
+                                )
+                                .await
+                        } else {
+                            spawner.spawn(request, inherit).await
+                        };
+                        let terminal_error = subagent_failure_reason(&raw);
+                        workflow_metrics.lock().await.record_result(
+                            call_index,
+                            phase_index,
+                            phase_title.clone(),
+                            &raw,
+                        );
+                        if let Ok(SubagentResult::Completed { usage, .. }) = &raw {
+                            spent.fetch_add(usage.output_tokens, Ordering::Relaxed);
                         }
-                        Ok(SubagentResult::Failed { agent_id, .. } | SubagentResult::Killed { agent_id, .. }) => {
-                            (workflow::AgentState::Error, Some(agent_id.to_string()))
+                        {
+                            let (state, agent_id_str) = match &raw {
+                                Ok(SubagentResult::Completed { agent_id, .. }) => {
+                                    (workflow::AgentState::Done, Some(agent_id.to_string()))
+                                }
+                                Ok(
+                                    SubagentResult::Failed { agent_id, .. }
+                                    | SubagentResult::Killed { agent_id, .. },
+                                ) => (workflow::AgentState::Error, Some(agent_id.to_string())),
+                                Err(_) => (workflow::AgentState::Error, None),
+                            };
+                            let tool_use_id = if let Some(ref id) = agent_id_str {
+                                format!("workflow_agent_{call_index}_{id}")
+                            } else {
+                                format!("workflow_agent_{call_index}_error")
+                            };
+                            let lifecycle_event = workflow::Progress::Agent {
+                                index: call_index,
+                                label: label.clone(),
+                                phase_index,
+                                phase_title,
+                                agent_id: agent_id_str.clone(),
+                                model: agent_display_model.clone(),
+                                state: state.clone(),
+                                error: terminal_error.clone(),
+                                tool_use_id: tool_use_id.clone(),
+                            };
+                            let observer_state = if let Some(observer) = observer.as_ref() {
+                                Some(observer.snapshot().await)
+                            } else {
+                                None
+                            };
+                            let observer_emitted_terminal = observer_state
+                                .as_ref()
+                                .and_then(|snapshot| snapshot.state.as_deref())
+                                .is_some_and(|state| matches!(state, "done" | "error" | "cached"));
+                            if !observer_enabled || matches!(raw, Err(_)) || !observer_emitted_terminal
+                            {
+                                let mut update = observer_state
+                                    .unwrap_or_else(|| workflow_progress_update(&lifecycle_event));
+                                update.agent_id = agent_id_str;
+                                update.model = agent_display_model;
+                                update.state = Some(state.as_str().to_string());
+                                update.error = terminal_error.clone();
+                                update.tool_use_id = Some(tool_use_id);
+                                update.last_progress_at_ms = Some(unix_time_ms_now());
+                                if let Some(ref tx) = ptx {
+                                    emit_workflow_agent_snapshot(Some(tx), &update);
+                                }
+                                if let Some(ref tx) = live_tx {
+                                    let _ = tx.send(update);
+                                }
+                            }
                         }
-                        Err(_) => (workflow::AgentState::Error, None),
-                    };
-                    let tool_use_id = if let Some(ref id) = agent_id_str {
-                        format!("workflow_agent_{call_index}_{id}")
-                    } else {
-                        format!("workflow_agent_{call_index}_error")
-                    };
-                    let lifecycle_event = workflow::Progress::Agent {
-                        index: call_index,
-                        label: label.clone(),
-                        phase_index,
-                        phase_title,
-                        agent_id: agent_id_str.clone(),
-                        model: agent_display_model.clone(),
-                        state: state.clone(),
-                        error: terminal_error.clone(),
-                        tool_use_id: tool_use_id.clone(),
-                    };
-                    let observer_state = if let Some(observer) = observer.as_ref() {
-                        Some(observer.snapshot().await)
-                    } else {
-                        None
-                    };
-                    let observer_emitted_terminal = observer_state
-                        .as_ref()
-                        .and_then(|snapshot| snapshot.state.as_deref())
-                        .is_some_and(|state| matches!(state, "done" | "error" | "cached"));
-                    if !observer_enabled || matches!(raw, Err(_)) || !observer_emitted_terminal {
-                        let mut update =
-                            observer_state.unwrap_or_else(|| workflow_progress_update(&lifecycle_event));
-                        update.agent_id = agent_id_str;
-                        update.model = agent_display_model;
-                        update.state = Some(state.as_str().to_string());
-                        update.error = terminal_error.clone();
-                        update.tool_use_id = Some(tool_use_id);
-                        update.last_progress_at_ms = Some(unix_time_ms_now());
-                        if let Some(ref tx) = ptx {
-                            emit_workflow_agent_snapshot(Some(tx), &update);
+                        if opts.get("throwOnError").and_then(Value::as_bool) == Some(true) {
+                            if let Some(error) = terminal_error {
+                                return wf_throw(&format!("Workflow agent {label:?} failed: {error}"));
+                            }
                         }
-                        if let Some(ref tx) = live_tx {
-                            let _ = tx.send(update);
+                        let journal_agent_id = match &raw {
+                            Ok(SubagentResult::Completed { agent_id, .. }) => agent_id.to_string(),
+                            _ => String::new(),
+                        };
+                        let result = result_to_string(raw);
+                        if result != workflow::WF_NULL_SENTINEL {
+                            if let (Some(j), Some(k)) = (journal.as_ref(), key) {
+                                j.lock().unwrap().insert(k.clone(), result.clone());
+                                if let Some(writer) = &journal_writer {
+                                    writer.append_result(&k, &journal_agent_id, &result).await;
+                                }
+                            }
                         }
+                        result
                     }
-                }
-                if opts.get("throwOnError").and_then(Value::as_bool) == Some(true) {
-                    if let Some(error) = terminal_error {
-                        return wf_throw(&format!("Workflow agent {label:?} failed: {error}"));
-                    }
-                }
-                let journal_agent_id = match &raw {
-                    Ok(SubagentResult::Completed { agent_id, .. }) => agent_id.to_string(),
-                    _ => String::new(),
-                };
-                let result = result_to_string(raw);
-                // Journal only a real result — a dead/skipped agent (NULL sentinel)
-                // is NOT cached (claude-code `if (a && ie && de !== null) append`),
-                // so a resume re-runs it.
-                if result != workflow::WF_NULL_SENTINEL {
-                    if let (Some(j), Some(k)) = (journal.as_ref(), key) {
-                        j.lock().unwrap().insert(k.clone(), result.clone());
-                        if let Some(writer) = &journal_writer {
-                            writer
-                                .append_result(&k, &journal_agent_id, &result)
-                                .await;
-                        }
-                    }
-                }
-                result
+                }))
+                .buffered(cap)
+                .collect()
+                .await;
+                let _ = reply.send(results);
             }
-        }))
-        .buffered(cap)
-        .collect()
-        .await;
-        // Receiver gone only if the script thread vanished; nothing to do.
-        let _ = reply.send(results);
+        }
     }
 
     let outcome = outcome_rx.await.map_err(|_| {
@@ -2647,6 +2947,8 @@ impl Task for LocalWorkflowHandler {
             resume_from_run_id,
             args: workflow_args,
             run_id: provided_run_id,
+            parent_model,
+            parent_model_profile,
             invocation_mode,
             workflow_source,
             script_is_verbatim_builtin,
@@ -2732,6 +3034,7 @@ impl Task for LocalWorkflowHandler {
         let plugin_workflows = self.plugin_workflows.clone();
         let runtime = ctx.runtime.clone();
         let token_budget_total = self.token_budget_total;
+        let fusion = self.fusion.clone();
         // The shared `budget.spent()` pool (main loop + all workflows), published
         // by the root once the orchestrator exists. `None` in tests ⇒ the run
         // uses its own private pool (own-spend only).
@@ -2755,6 +3058,9 @@ impl Task for LocalWorkflowHandler {
         // record `kill` flips. `false` until killed.
         let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let worker_cancel = cancel.clone();
+        let fusion_cancel = CancellationToken::new();
+        let worker_fusion_cancel = fusion_cancel.clone();
+        let (completion_tx, completion_rx) = oneshot::channel();
         // Cloned for kill-detection in tengu_workflow_completed status derivation
         // (oracle §7: `abortController?.signal.aborted ? "killed" : error ? "failed" : "completed"`).
         let completed_cancel = cancel.clone();
@@ -2774,6 +3080,7 @@ impl Task for LocalWorkflowHandler {
             .map(permission::WorkspacePermissionLease::token);
         let worker = Box::pin({
             async move {
+                let _completion_signal = WorkerCompletionSignal::new(completion_tx);
                 let _workspace_lease = workspace_lease;
                 let registered = wait_for_workflow_registration(
                     &status_sink,
@@ -2991,7 +3298,7 @@ impl Task for LocalWorkflowHandler {
                     workflow_name: meta_name.clone(),
                     invocation_mode: invocation_mode.clone(),
                 };
-                let run = run_workflow_script_with_live_updates(
+                let run = run_workflow_script_with_live_updates_and_fusion(
                     &script,
                     DEFAULT_WORKFLOW_SUBAGENT,
                     workflow_spawner,
@@ -3011,6 +3318,11 @@ impl Task for LocalWorkflowHandler {
                         plugin_workflows: plugin_workflows.clone(),
                     },
                     worker_cancel,
+                    worker_fusion_cancel,
+                    fusion,
+                    Some(run_id.clone()),
+                    parent_model,
+                    parent_model_profile,
                     worker_bus.clone(),
                     None,
                     // Pass the phase telemetry context so run_workflow_script can
@@ -3020,6 +3332,23 @@ impl Task for LocalWorkflowHandler {
                     Some(workflow_metrics.clone()),
                 );
                 let (outcome, (), ()) = tokio::join!(run, drain, live_drain);
+                // Natural completion and TaskStop race on the worker map. Once
+                // finalization wins, cancellation must not tear down the
+                // telemetry/journal/outcome commit window. If kill already
+                // removed the record, it owns the terminal Killed transition.
+                let may_finalize = {
+                    let mut workers = workers.lock().await;
+                    match workers.get_mut(&worker_task_id) {
+                        Some(rec) => {
+                            rec.finalizing = true;
+                            true
+                        }
+                        None => false,
+                    }
+                };
+                if !may_finalize {
+                    return;
+                }
                 let elapsed_ms = run_start.elapsed().as_millis() as i64;
                 let workflow_metrics_snapshot = workflow_metrics.lock().await.clone();
 
@@ -3149,6 +3478,9 @@ impl Task for LocalWorkflowHandler {
                 // must not mask the result.
                 let (payload, status) = match outcome {
                     Ok(out) => (out.result.unwrap_or_default(), TaskStatus::Completed),
+                    Err(e) if completed_cancel.load(std::sync::atomic::Ordering::Relaxed) => {
+                        (e.to_string(), TaskStatus::Killed)
+                    }
                     Err(e) => (e.to_string(), TaskStatus::Failed),
                 };
                 if !payload.is_empty() {
@@ -3175,6 +3507,9 @@ impl Task for LocalWorkflowHandler {
                 handle: bg_handle,
                 runtime: ctx.runtime.clone(),
                 cancel,
+                fusion_cancel,
+                completion_rx: StdMutex::new(Some(completion_rx)),
+                finalizing: false,
             },
         );
         drop(workers);
@@ -3195,22 +3530,18 @@ impl Task for LocalWorkflowHandler {
     }
 
     async fn kill(&self, task_id: &str, _ctx: TaskContext) -> Result<(), TaskError> {
-        if self.status_sink.is_terminal(task_id).await {
-            return Ok(());
-        }
-        // Cancel the in-flight worker future (the analogue of TS
-        // `abortController.abort()`). An absent record ⇒ already terminated ⇒
-        // graceful no-op.
-        let rec = self.workers.lock().await.remove(task_id);
+        // Finalization and kill arbitrate on the same worker-map lock. A worker
+        // that already owns finalization must finish its atomic outcome/status
+        // commit; otherwise kill removes the record and owns Killed.
+        let rec = {
+            let mut workers = self.workers.lock().await;
+            if workers.get(task_id).is_some_and(|rec| rec.finalizing) {
+                return Ok(());
+            }
+            workers.remove(task_id)
+        };
         if let Some(rec) = rec {
-            // Flip the cooperative-cancel flag FIRST so the script thread's engine
-            // interrupt handler aborts a runaway pure-JS loop, then cancel the
-            // async worker future (claude-code `abortController.abort()`).
-            rec.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
-            rec.runtime
-                .cancel(&rec.handle)
-                .await
-                .map_err(|e| TaskError::Io(e.to_string()))?;
+            cancel_workflow_worker(rec).await?;
         }
         if !self.status_sink.is_terminal(task_id).await {
             self.status_sink

@@ -7,6 +7,7 @@ pub mod dream;
 pub mod in_process_teammate;
 pub mod local_agent;
 pub mod local_bash;
+pub mod local_fusion;
 pub mod local_workflow;
 pub mod monitor;
 pub mod monitor_mcp;
@@ -22,6 +23,7 @@ pub use in_process_teammate::{
 };
 pub use local_agent::LocalAgentHandler;
 pub use local_bash::{LocalBashHandler, NoopStatusSink, TaskStatusSink};
+pub use local_fusion::{escape_xml, fusion_result_xml, LocalFusionHandler};
 pub use local_workflow::LocalWorkflowHandler;
 pub use monitor::MonitorHandler;
 pub use monitor_mcp::MonitorMcpHandler;

@@ -44,14 +44,14 @@ use crate::state::TaskStatus;
 use crate::task_trait::{Task, TaskContext, TaskError, TaskHandle, TaskSpawnInput};
 use agent::{StreamingSubagentSpawner, SubagentEvent};
 use async_trait::async_trait;
-use protocol::AgentId;
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex as StdMutex};
-use tokio::sync::Mutex;
 use platform_api::{
     BackgroundTaskHandle, BudgetEnforcerHandle, RuntimeSpawner, SubagentInheritance,
     SubagentResult, SubagentSpawnRequest, SubagentSpawner,
 };
+use protocol::AgentId;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex as StdMutex};
+use tokio::sync::Mutex;
 
 // Re-export the status-sink seam from the bash handler so callers wire a single
 // implementation across handlers (the wire step plugs in one adapter over the
@@ -126,7 +126,8 @@ pub struct LocalAgentHandler {
     /// `task_id` → the LAST rest payload for a persistent agent. If the agent
     /// is killed after coming to rest, cancelling the outer worker still leaves
     /// enough terminal payload to match the normal completion path.
-    persistent_outcomes: Arc<Mutex<HashMap<String, platform_api::task_registry::AgentTerminalOutcome>>>,
+    persistent_outcomes:
+        Arc<Mutex<HashMap<String, platform_api::task_registry::AgentTerminalOutcome>>>,
     /// Consulted before a parked agent is resumed: a forked skill whose
     /// permission scoping cannot be re-established must NOT resume under the
     /// parent's (wider) permissions. `None` ⇒ no gate, which is correct for a
@@ -531,9 +532,11 @@ impl Task for LocalAgentHandler {
                         if activation_rx.await.is_err() {
                             if let (Some(mgr), Some(handle)) = (&worktree_manager, &agent_worktree)
                             {
-                                let _ =
-                                    platform_api::worktree::agent_worktree_result(mgr.as_ref(), handle)
-                                        .await;
+                                let _ = platform_api::worktree::agent_worktree_result(
+                                    mgr.as_ref(),
+                                    handle,
+                                )
+                                .await;
                             }
                             workers.lock().await.remove(&worker_task_id);
                             return;
@@ -542,30 +545,31 @@ impl Task for LocalAgentHandler {
                     status_sink
                         .set_status(&worker_task_id, TaskStatus::Running)
                         .await;
-                    let (agent_id, mut rx) = match streaming
-                        .spawn_persistent(request, inherit)
-                        .await
-                    {
-                        Ok(v) => v,
-                        Err(e) => {
-                            let _ = output_manager
-                                .append(&worker_spool_path, &e.to_string())
-                                .await;
-                            status_sink
-                                .set_status(&worker_task_id, TaskStatus::Failed)
-                                .await;
-                            // Terminal (spawn never ran): judge the carried
-                            // isolation worktree so it never leaks.
-                            if let (Some(mgr), Some(handle)) = (&worktree_manager, &agent_worktree)
-                            {
-                                let _ =
-                                    platform_api::worktree::agent_worktree_result(mgr.as_ref(), handle)
-                                        .await;
+                    let (agent_id, mut rx) =
+                        match streaming.spawn_persistent(request, inherit).await {
+                            Ok(v) => v,
+                            Err(e) => {
+                                let _ = output_manager
+                                    .append(&worker_spool_path, &e.to_string())
+                                    .await;
+                                status_sink
+                                    .set_status(&worker_task_id, TaskStatus::Failed)
+                                    .await;
+                                // Terminal (spawn never ran): judge the carried
+                                // isolation worktree so it never leaks.
+                                if let (Some(mgr), Some(handle)) =
+                                    (&worktree_manager, &agent_worktree)
+                                {
+                                    let _ = platform_api::worktree::agent_worktree_result(
+                                        mgr.as_ref(),
+                                        handle,
+                                    )
+                                    .await;
+                                }
+                                workers.lock().await.remove(&worker_task_id);
+                                return;
                             }
-                            workers.lock().await.remove(&worker_task_id);
-                            return;
-                        }
-                    };
+                        };
                     *worker_persistent_agent_id.lock().unwrap() = Some(agent_id);
                     // Register the live agent id so `send_message` can resume it.
                     agent_ids
@@ -708,7 +712,8 @@ impl Task for LocalAgentHandler {
                     // status publish.
                     if let (Some(mgr), Some(handle)) = (&worktree_manager, &agent_worktree) {
                         if let Some((path, branch)) =
-                            platform_api::worktree::agent_worktree_result(mgr.as_ref(), handle).await
+                            platform_api::worktree::agent_worktree_result(mgr.as_ref(), handle)
+                                .await
                         {
                             outcome.worktree_path = Some(path);
                             outcome.worktree_branch = Some(branch);
@@ -740,9 +745,11 @@ impl Task for LocalAgentHandler {
                         if activation_rx.await.is_err() {
                             if let (Some(mgr), Some(handle)) = (&worktree_manager, &agent_worktree)
                             {
-                                let _ =
-                                    platform_api::worktree::agent_worktree_result(mgr.as_ref(), handle)
-                                        .await;
+                                let _ = platform_api::worktree::agent_worktree_result(
+                                    mgr.as_ref(),
+                                    handle,
+                                )
+                                .await;
                             }
                             workers.lock().await.remove(&worker_task_id);
                             return;
@@ -836,7 +843,8 @@ impl Task for LocalAgentHandler {
                     // after it as a fire-and-forget cleanup.
                     if let (Some(mgr), Some(handle)) = (&worktree_manager, &agent_worktree) {
                         if let Some((path, branch)) =
-                            platform_api::worktree::agent_worktree_result(mgr.as_ref(), handle).await
+                            platform_api::worktree::agent_worktree_result(mgr.as_ref(), handle)
+                                .await
                         {
                             outcome.worktree_path = Some(path);
                             outcome.worktree_branch = Some(branch);
@@ -1003,6 +1011,9 @@ impl Task for LocalAgentHandler {
 mod tests {
     use super::*;
     use crate::state::TaskStatus;
+    use platform_api::filesystem::{FileContent, FileEvent, FileSystem, FlockGuard, FsError};
+    use platform_api::tool_invoker::{SubagentInvocationContext, ToolInvoker, ToolInvokerError};
+    use platform_api::{BudgetError, SubagentSpawnError, SubagentUsage};
     use serde_json::json;
     use std::any::Any;
     use std::collections::HashMap as StdHashMap;
@@ -1011,9 +1022,6 @@ mod tests {
     use tempfile::tempdir;
     use test_harness::mocks::MockRuntimeSpawner;
     use tokio::sync::Mutex as TokioMutex;
-    use platform_api::filesystem::{FileContent, FileEvent, FileSystem, FlockGuard, FsError};
-    use platform_api::tool_invoker::{SubagentInvocationContext, ToolInvoker, ToolInvokerError};
-    use platform_api::{BudgetError, SubagentSpawnError, SubagentUsage};
 
     // ---- In-memory FileSystem (mirrors local_bash test fixture) ------------
 
@@ -1242,7 +1250,8 @@ mod tests {
             _slug: &str,
             _base_branch: Option<&str>,
             _copy_includes: &[PathBuf],
-        ) -> Result<platform_api::worktree::WorktreeHandle, platform_api::worktree::WorktreeError> {
+        ) -> Result<platform_api::worktree::WorktreeHandle, platform_api::worktree::WorktreeError>
+        {
             Err(platform_api::worktree::WorktreeError::Unsupported)
         }
         async fn remove_worktree(
@@ -1254,7 +1263,8 @@ mod tests {
         }
         async fn list_worktrees(
             &self,
-        ) -> Result<Vec<platform_api::worktree::WorktreeInfo>, platform_api::worktree::WorktreeError> {
+        ) -> Result<Vec<platform_api::worktree::WorktreeInfo>, platform_api::worktree::WorktreeError>
+        {
             Ok(Vec::new())
         }
         async fn cleanup_stale(
@@ -1269,8 +1279,10 @@ mod tests {
         async fn worktree_change_summary(
             &self,
             _handle: &platform_api::worktree::WorktreeHandle,
-        ) -> Result<Option<platform_api::worktree::WorktreeChangeSummary>, platform_api::worktree::WorktreeError>
-        {
+        ) -> Result<
+            Option<platform_api::worktree::WorktreeChangeSummary>,
+            platform_api::worktree::WorktreeError,
+        > {
             Ok(self.summary)
         }
     }
@@ -2900,6 +2912,8 @@ mod tests {
                     resume_from_run_id: None,
                     args: None,
                     run_id: None,
+                    parent_model: None,
+                    parent_model_profile: None,
                     invocation_mode: None,
                     workflow_source: None,
                     script_is_verbatim_builtin: None,

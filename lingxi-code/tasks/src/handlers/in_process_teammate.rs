@@ -183,11 +183,9 @@ fn escape_teammate_tags(text: &str) -> String {
         else {
             continue;
         };
-        if suffix
-            .chars()
-            .next()
-            .is_none_or(|c| c == '>' || c == '/' || platform_api::subagent_output_guard::is_js_space(c))
-        {
+        if suffix.chars().next().is_none_or(|c| {
+            c == '>' || c == '/' || platform_api::subagent_output_guard::is_js_space(c)
+        }) {
             out.push_str(&text[start..=index]);
             out.push('\\');
             start = index + 1;
@@ -624,7 +622,9 @@ impl InProcessTeammateHandler {
 
     /// Return a clone of the set-once skill-loader cell.
     #[must_use]
-    pub fn skill_loader_handle(&self) -> Arc<OnceLock<Arc<dyn platform_api::skill_loader::SkillLoader>>> {
+    pub fn skill_loader_handle(
+        &self,
+    ) -> Arc<OnceLock<Arc<dyn platform_api::skill_loader::SkillLoader>>> {
         self.skill_loader.clone()
     }
 

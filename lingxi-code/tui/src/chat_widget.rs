@@ -3050,6 +3050,18 @@ impl ChatWidget {
         self.dispatch_registry_slash(&input)
     }
 
+    /// LingXi's project-specific `/fusion` UI entry. Execution stays off the
+    /// render loop: the desktop command registry owns the handler.
+    pub(crate) fn cmd_fusion(&mut self, args: &str) -> ChatOutcome {
+        let args = args.trim();
+        let input = if args.is_empty() {
+            "/fusion".to_string()
+        } else {
+            format!("/fusion {args}")
+        };
+        self.dispatch_registry_slash(&input)
+    }
+
     /// `/resume [term]` (alias `/continue`): open the interactive session
     /// picker, seeded from the rows preloaded at startup ([`Self::set_resume_rows`]).
     /// With a `term` argument the picker opens pre-filtered by title. On `Enter`
@@ -6619,6 +6631,23 @@ mod tests {
         assert!(widget.turn_running());
         let shown = cell::<crate::history_cell::message::UserTextCell>(&widget, 0).body();
         assert_eq!(shown, "/worktree remove --discard");
+    }
+
+    /// The static `/fusion` palette row must still execute through the live
+    /// registry off-loop, preserving its exact argument tail for the desktop
+    /// handler.
+    #[test]
+    fn handle_slash_routes_fusion_builtin_to_registry_dispatch() {
+        let mut widget = widget();
+        let Some(ChatOutcome::DispatchSlash(input, _token)) =
+            widget.handle_slash("/fusion --fast review locking")
+        else {
+            panic!("/fusion must route to DispatchSlash");
+        };
+        assert_eq!(input, "/fusion --fast review locking");
+        assert!(widget.turn_running());
+        let shown = cell::<crate::history_cell::message::UserTextCell>(&widget, 0).body();
+        assert_eq!(shown, "/fusion --fast review locking");
     }
 
     /// A fake shell-expansion provider for the TUI expansion smoke tests: the

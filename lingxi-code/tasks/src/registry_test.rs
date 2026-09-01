@@ -4,12 +4,12 @@
 use super::*;
 use crate::task_trait::{Task, TaskContext, TaskHandle};
 use async_trait::async_trait;
+use platform_api::filesystem::{FileContent, FileEvent, FileSystem, FlockGuard, FsError};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex as StdMutex;
 use tempfile::tempdir;
 use test_harness::mocks::MockRuntimeSpawner;
-use platform_api::filesystem::{FileContent, FileEvent, FileSystem, FlockGuard, FsError};
 
 // ---- In-memory FileSystem (mirrors the other handler/registry tests) ----
 
@@ -360,6 +360,8 @@ async fn budget_stop_matches_claude_background_agent_filter() {
                 resume_from_run_id: None,
                 args: None,
                 run_id: Some("wf_budget".into()),
+                parent_model: None,
+                parent_model_profile: None,
                 invocation_mode: Some("inline".into()),
                 workflow_source: Some("inline".into()),
                 script_is_verbatim_builtin: Some(false),
@@ -1392,7 +1394,11 @@ impl FileSystem for ExclusiveCountingFs {
             total_lines,
         })
     }
-    async fn write_file(&self, path: &str, body: &str) -> Result<(), platform_api::filesystem::FsError> {
+    async fn write_file(
+        &self,
+        path: &str,
+        body: &str,
+    ) -> Result<(), platform_api::filesystem::FsError> {
         self.files
             .lock()
             .await
@@ -1403,7 +1409,9 @@ impl FileSystem for ExclusiveCountingFs {
         self.creates.fetch_add(1, Ord2::SeqCst);
         let mut map = self.files.lock().await;
         if map.contains_key(path) {
-            return Err(platform_api::filesystem::FsError::AlreadyExists(path.to_string()));
+            return Err(platform_api::filesystem::FsError::AlreadyExists(
+                path.to_string(),
+            ));
         }
         map.insert(path.to_string(), String::new());
         Ok(())
@@ -1420,7 +1428,11 @@ impl FileSystem for ExclusiveCountingFs {
     > {
         Err(platform_api::filesystem::FsError::Io("nope".into()))
     }
-    async fn append_file(&self, path: &str, body: &str) -> Result<(), platform_api::filesystem::FsError> {
+    async fn append_file(
+        &self,
+        path: &str,
+        body: &str,
+    ) -> Result<(), platform_api::filesystem::FsError> {
         self.files
             .lock()
             .await
@@ -1452,7 +1464,8 @@ impl FileSystem for ExclusiveCountingFs {
     async fn flock_exclusive(
         &self,
         _: &str,
-    ) -> Result<Box<dyn platform_api::filesystem::FlockGuard>, platform_api::filesystem::FsError> {
+    ) -> Result<Box<dyn platform_api::filesystem::FlockGuard>, platform_api::filesystem::FsError>
+    {
         Err(platform_api::filesystem::FsError::Io("nope".into()))
     }
     async fn fsync(&self, _: &str) -> Result<(), platform_api::filesystem::FsError> {
@@ -1861,6 +1874,8 @@ fn state_for_spawn_stamps_local_workflow_tool_use_id() {
         resume_from_run_id: None,
         args: Some(r#"{"scope":"src"}"#.into()),
         run_id: Some("wf_abcdef".into()),
+        parent_model: None,
+        parent_model_profile: None,
         invocation_mode: Some("inline".into()),
         workflow_source: Some("inline".into()),
         script_is_verbatim_builtin: Some(false),
@@ -2669,6 +2684,8 @@ async fn a_spawned_workflows_scope_is_what_blocks_its_apps_delete() {
             resume_from_run_id: None,
             args: Some(serde_json::json!({"app_id": "scoped-app"}).to_string()),
             run_id: Some("wf_scoped".into()),
+            parent_model: None,
+            parent_model_profile: None,
             invocation_mode: Some("named".into()),
             workflow_source: Some("built-in".into()),
             script_is_verbatim_builtin: Some(true),
@@ -3561,7 +3578,10 @@ impl platform_api::ProcessRunner for ExitZeroRunner {
     ) -> Result<platform_api::ProcessHandle, platform_api::ProcessError> {
         Err(platform_api::ProcessError::Unsupported)
     }
-    async fn kill(&self, _handle: &platform_api::ProcessHandle) -> Result<(), platform_api::ProcessError> {
+    async fn kill(
+        &self,
+        _handle: &platform_api::ProcessHandle,
+    ) -> Result<(), platform_api::ProcessError> {
         Ok(())
     }
     fn is_available(&self) -> bool {

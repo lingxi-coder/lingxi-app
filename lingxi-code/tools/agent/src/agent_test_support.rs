@@ -433,6 +433,7 @@ impl MockTaskRegistryHandle {
             "local_workflow" => 'w',
             "monitor_mcp" => 'm',
             "dream" => 'd',
+            "local_fusion" => 'f',
             // local_bash + any unknown wire string default to 'b'.
             _ => 'b',
         };

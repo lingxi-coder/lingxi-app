@@ -382,6 +382,9 @@ pub struct ResumeRuntimeSnapshot {
     pub transcript_only_message_ids: Vec<protocol::MessageId>,
     /// Message ids that are compact summaries.
     pub compact_summary_message_ids: Vec<protocol::MessageId>,
+    /// Persisted UI/meta messages that must never be replayed into a model
+    /// request. Fusion completion envelopes use this lane.
+    pub model_context_excluded_message_ids: Vec<protocol::MessageId>,
     /// Tool names restored from compact-boundary ToolSearch metadata.
     pub loaded_tool_names: Vec<String>,
     /// Exact skill bodies associated with persisted post-compact attachment
@@ -2106,6 +2109,34 @@ pub trait OrchestratorHandle: Send + Sync {
 
     /// Snapshot the full status panel. Used by `/status`.
     async fn get_status_snapshot(&self) -> StatusSnapshot;
+
+    /// Append a meta user message without starting a model turn.
+    ///
+    /// Used by Fusion slash completion. Default is a no-op so test handles
+    /// compile unchanged.
+    async fn append_meta_user_message(&self, _text: &str) -> Result<(), HandleError> {
+        Ok(())
+    }
+
+    /// Append a transcript meta message to one specific session without
+    /// starting a model turn.
+    ///
+    /// The default is deliberately fail-closed across sessions: lightweight
+    /// handles may reuse the current-session append only when the requested id
+    /// still matches. Production handles override this to route to the target
+    /// session's durable transcript and exclude the message from model input.
+    async fn append_meta_user_message_to_session(
+        &self,
+        session_id: &str,
+        text: &str,
+    ) -> Result<(), HandleError> {
+        if self.current_session_id().await.to_string() != session_id {
+            return Err(HandleError::ActionFailed(format!(
+                "target session {session_id} is no longer active"
+            )));
+        }
+        self.append_meta_user_message(text).await
+    }
 
     /// Open `$EDITOR` on `<config-dir>/claude/config.json` (creating if
     /// absent). Used by `/config`.

@@ -3,12 +3,12 @@
 //! See spec §6.6 / D8 — task output is materialized as files under a
 //! sandbox directory, with a per-file and total byte budget.
 
+use platform_api::FileSystem;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use thiserror::Error;
 use tokio::sync::Mutex;
-use platform_api::FileSystem;
 
 /// Disk cap for a single task's output file. Mirrors claude-code's
 /// `MAX_TASK_OUTPUT_BYTES = 5 * 1024 * 1024 * 1024` (`diskOutput.ts:30`).
@@ -223,10 +223,10 @@ impl TaskOutputManager {
 mod tests {
     use super::*;
     use async_trait::async_trait;
+    use platform_api::filesystem::{FileContent, FileEvent, FlockGuard, FsError};
     use std::collections::HashMap;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::sync::Mutex;
-    use platform_api::filesystem::{FileContent, FileEvent, FlockGuard, FsError};
 
     /// In-memory [`FileSystem`] with REAL exclusive-create semantics: a
     /// `create_new_file` for a path that already has a key fails with

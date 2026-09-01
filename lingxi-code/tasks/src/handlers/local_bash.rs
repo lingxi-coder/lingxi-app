@@ -42,13 +42,13 @@ use crate::output_manager::TaskOutputManager;
 use crate::state::TaskStatus;
 use crate::task_trait::{Task, TaskContext, TaskError, TaskHandle, TaskSpawnInput};
 use async_trait::async_trait;
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex as StdMutex};
-use tokio::sync::Mutex;
 use platform_api::{
     BackgroundTaskHandle, ProcessCommand, ProcessError, ProcessOutput, ProcessRunner,
     RuntimeSpawner, Sandbox,
 };
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex as StdMutex};
+use tokio::sync::Mutex;
 
 /// A worker-cancel record: the [`BackgroundTaskHandle`] returned by
 /// [`RuntimeSpawner::spawn`] plus the `runtime` Arc that minted it.
@@ -181,6 +181,24 @@ pub trait TaskStatusSink: Send + Sync {
         _task_id: &str,
         _outcome: platform_api::task_registry::WorkflowTerminalOutcome,
     ) {
+    }
+
+    /// Record a Fusion run's sanitized final text before its terminal status.
+    /// Registry-backed sinks override this; standalone sinks stay no-ops.
+    async fn set_fusion_outcome(&self, _task_id: &str, _run_id: String, _final_text: String) {}
+
+    /// Atomically publish a Fusion run's terminal payload together with its
+    /// terminal task status. Registry-backed sinks override this to close the
+    /// outcome/status race; the default preserves legacy standalone behavior.
+    async fn finish_fusion_terminal(
+        &self,
+        task_id: &str,
+        run_id: String,
+        final_text: String,
+        status: TaskStatus,
+    ) {
+        self.set_fusion_outcome(task_id, run_id, final_text).await;
+        self.set_status(task_id, status).await;
     }
 
     /// Atomically publish a workflow's terminal payload plus terminal status.
@@ -534,15 +552,17 @@ impl Task for LocalBashHandler {
 mod tests {
     use super::*;
     use crate::state::TaskStatus;
+    use platform_api::filesystem::{FileContent, FileEvent, FileSystem, FlockGuard, FsError};
+    use platform_api::sandbox::{SandboxBackend, SandboxCapability, SandboxedTag};
+    use platform_api::{
+        ProcessCommand, ProcessHandle, SandboxError, SandboxPolicy, SandboxedCommand,
+    };
     use std::collections::HashMap as StdHashMap;
     use std::path::PathBuf;
     use std::sync::Mutex as StdMutex;
     use tempfile::tempdir;
     use test_harness::mocks::MockRuntimeSpawner;
     use tokio::sync::Mutex as TokioMutex;
-    use platform_api::filesystem::{FileContent, FileEvent, FileSystem, FlockGuard, FsError};
-    use platform_api::sandbox::{SandboxBackend, SandboxCapability, SandboxedTag};
-    use platform_api::{ProcessCommand, ProcessHandle, SandboxError, SandboxPolicy, SandboxedCommand};
 
     // ---- In-memory FileSystem (mirrors handle.rs InMemoryFs) ---------------
 
@@ -1123,6 +1143,8 @@ mod tests {
                     resume_from_run_id: None,
                     args: None,
                     run_id: None,
+                    parent_model: None,
+                    parent_model_profile: None,
                     invocation_mode: None,
                     workflow_source: None,
                     script_is_verbatim_builtin: None,

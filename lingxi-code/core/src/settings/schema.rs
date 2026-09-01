@@ -737,6 +737,7 @@ pub struct SettingsJson {
 #[serde(rename_all = "camelCase")]
 pub struct FusionSettingsJson {
     /// Master switch for Agent listing + workflow `fusion()`. Default false.
+    /// When false, workflow `fusion()` rejects before any provider call.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub enabled: Option<bool>,
     /// `quality` or `fast`.
@@ -766,7 +767,8 @@ pub struct FusionSettingsJson {
     /// Per-turn reserved input tokens (not 1 byte = 1 token).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub panel_reserved_input_tokens_per_turn: Option<u32>,
-    /// Optional hard reservation ceiling in nano-USD.
+    /// Optional hard reservation ceiling in nano-USD. This caps reserved spend
+    /// up front; realized cost may end lower.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_reserved_nano_usd: Option<u64>,
     /// Analyst output cap.
@@ -793,19 +795,22 @@ pub struct FusionSettingsJson {
     /// Analyst protocol retries (0 or 1).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub analysis_protocol_retries: Option<u8>,
-    /// `/fusion` default cross-provider.
+    /// `/fusion` default cross-provider. `true` allows prompt egress beyond the
+    /// parent provider/profile unless the caller explicitly requests same-provider.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub slash_cross_provider_default: Option<bool>,
     /// Agent may request cross-provider.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub allow_cross_provider_for_agent: Option<bool>,
-    /// Workflow may request cross-provider.
+    /// Workflow may request cross-provider. When false, an explicit
+    /// `fusion(..., { crossProvider: true })` must reject instead of silently
+    /// downgrading to same-provider.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub allow_cross_provider_for_workflow: Option<bool>,
     /// Hard allowlist of profile names. Empty = no extra restriction.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub allowed_profiles: Option<Vec<String>>,
-    /// Per-workflow `fusion()` call cap.
+    /// Per-workflow `fusion()` call cap. Hard-clamped to `1..=20`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workflow_fusion_call_cap: Option<u32>,
 }

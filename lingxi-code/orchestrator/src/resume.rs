@@ -107,6 +107,12 @@ impl ReplayedSession {
                 .iter()
                 .copied()
                 .collect(),
+            model_context_excluded_message_ids: self
+                .state
+                .model_context_excluded_messages
+                .iter()
+                .copied()
+                .collect(),
             loaded_tool_names: session::jsonl::discovered_tool_names(&self.messages),
             post_compact_skill_attachments: post_compact_skill_attachments_from_messages(
                 &self.messages,
@@ -339,6 +345,16 @@ fn build_state_from_jsonl(
                 if is_compact_summary {
                     state
                         .compact_summary_messages
+                        .insert(MessageId::from_uuid(msg_uuid));
+                }
+                let is_model_context_excluded = m
+                    .extra
+                    .get("isModelContextExcluded")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false);
+                if is_model_context_excluded {
+                    state
+                        .model_context_excluded_messages
                         .insert(MessageId::from_uuid(msg_uuid));
                 }
                 state.history.push(ConversationMessage::User {

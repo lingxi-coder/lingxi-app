@@ -132,10 +132,11 @@ pub use filesystem::{
 };
 pub use fusion::{
     normalize_dimensions, validate_panel_report, EvidenceKind, FusionAgentSurface, FusionAnalysis,
-    FusionContradiction, FusionCostClass, FusionDecision, FusionError, FusionExecutor,
-    FusionInheritance, FusionLatencyClass, FusionModelHints, FusionModelRef,
+    FusionCompletionSink, FusionContradiction, FusionCostClass, FusionDecision, FusionError,
+    FusionExecutor, FusionInheritance, FusionLatencyClass, FusionModelHints, FusionModelRef,
     FusionNeedsParentReason, FusionOrigin, FusionPreset, FusionProgress, FusionRecommendation,
     FusionRequest, FusionResult, FusionStage, FusionStatus, FusionTiming, FusionUniqueInsight,
+    NoopFusionCompletionSink,
     FusionUsage, PanelClaim, PanelEvidence, PanelOutcome, PanelPosition, PanelReport, PanelRisk,
     PanelRunStatus, RiskSeverity, DEFAULT_FUSION_DIMENSIONS, FUSION_MAX_PANEL, FUSION_MIN_PANEL,
     FUSION_PANEL_TYPE, FUSION_SCHEMA_VERSION,

@@ -6,14 +6,16 @@
 //! a JS `AsyncFunction`; LingXi embeds QuickJS (via `rquickjs`) so the same
 //! model-authored scripts run with matching semantics.
 //!
-//! The full global surface is implemented (`agent`, `parallel`, `pipeline`,
-//! `phase`, `log`, `budget`, `args`, `workflow`) with CONCURRENT batch dispatch
-//! of `agent()` calls (agents pending together run as one batch) via the
-//! pluggable `agent_runner`. The host (`tasks::handlers::local_workflow`) bridges
-//! `agent_runner` to LingXi's subagent spawner and adds live progress, a real
-//! token budget ([`WorkflowBudgetSource`]), structured-output `agent({schema})`,
-//! journaling/resume, and `workflow()` nesting; the `Workflow` tool
-//! (`tool-workflow`) is registered + wired at the desktop composition root.
+//! The full global surface is implemented (`agent`, `fusion`, `parallel`,
+//! `pipeline`, `phase`, `log`, `budget`, `args`, `workflow`) with CONCURRENT
+//! batch dispatch of `agent()` calls (agents pending together run as one batch)
+//! via the pluggable `agent_runner`. The host
+//! (`tasks::handlers::local_workflow`) bridges `agent_runner` to LingXi's
+//! subagent spawner and adds live progress, a real token budget
+//! ([`WorkflowBudgetSource`]), structured-output `agent({schema})`,
+//! journaling/resume, workflow-scoped Fusion, and `workflow()` nesting; the
+//! `Workflow` tool (`tool-workflow`) is registered + wired at the desktop
+//! composition root.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -22,8 +24,9 @@ use std::sync::Arc;
 mod plugin_registry;
 pub use plugin_registry::{PluginWorkflowEntry, PluginWorkflowRegistry, MAX_WORKFLOW_SCRIPT_BYTES};
 
-/// JS prelude defining `agent()` (a deferred promise) + the `parallel()` /
-/// `pipeline()` orchestration primitives, injected before the workflow body.
+/// JS prelude defining `agent()` / `fusion()` (deferred promises) + the
+/// `parallel()` / `pipeline()` orchestration primitives, injected before the
+/// workflow body.
 /// The argument-validation `throw` messages are byte-locked to claude-code's.
 /// `parallel`/`pipeline` start every chain before awaiting, so agents pending at
 /// the same time are dispatched as ONE concurrent batch by the Rust driver
@@ -37,6 +40,7 @@ const WORKFLOW_PRELUDE: &str = r#"
 // before the first await (parallel's fan-out) run concurrently, while a
 // sequential `await agent()` chain dispatches one at a time.
 globalThis.__wf_queue = [];
+globalThis.__wf_fusion_queue = [];
 // Generalized "throw this agent()" channel: when the host refuses a spawn
 // (agent-cap `k6a`/`c0p`, or budget ceiling `I6a`), it returns the result slot
 // as `THROW_PREFIX + message`; the pump then REJECTS that agent()'s promise with
@@ -54,6 +58,7 @@ globalThis.__WF_NULL = String.fromCharCode(1) + "__wf_null__" + String.fromCharC
 // Keep the fallback so the prelude remains usable in standalone harnesses.
 if (!('__wf_record_failure' in globalThis)) globalThis.__wf_record_failure = () => {};
 globalThis.agent = (prompt, opts) => new Promise((res, rej) => { globalThis.__wf_queue.push({ prompt: String(prompt), opts: opts || {}, res, rej }); });
+globalThis.fusion = (prompt, opts) => new Promise((res, rej) => { globalThis.__wf_fusion_queue.push({ prompt: String(prompt), opts: opts || {}, res, rej }); });
 globalThis.__wf_error_info = (e) => {
   if (e && typeof e === "object") {
     return {
@@ -66,38 +71,57 @@ globalThis.__wf_error_info = (e) => {
 globalThis.__wf_plural = (n, word) => n === 1 ? word : word + "s";
 globalThis.__wf_pump = () => {
   const q = globalThis.__wf_queue;
-  if (q.length === 0) return false;
-  globalThis.__wf_queue = [];
-  // Dispatch the batch as two parallel arrays: the prompts and the JSON-encoded
-  // opts ({agentType, model, isolation, schema, label, phase, effort}). The host
-  // runner maps the spawn-affecting opts onto each subagent request; host-only
-  // behavior such as `throwOnError` is consumed by the runner itself.
-  const results = globalThis.__wf_dispatch_batch(q.map((x) => x.prompt), q.map((x) => JSON.stringify(x.opts || {})));
-  for (let i = 0; i < q.length; i++) {
-    const r = results[i];
-    if (typeof r === "string" && r.startsWith(globalThis.__WF_THROW_PREFIX)) {
-      // Agent-cap, budget-ceiling, or caller-requested terminal failure → reject.
-      const msg = r.slice(globalThis.__WF_THROW_PREFIX.length);
-      const err = new Error(msg);
-      if (msg.startsWith("Workflow token budget exceeded")) err.name = "WorkflowBudgetExceededError";
-      else if (msg.startsWith("Workflow agent() call cap reached")) err.name = "WorkflowAgentCapError";
-      q[i].rej(err);
-    } else if (r === globalThis.__WF_NULL) {
-      // skipped / dead agent → resolve with null (claude-code's contract).
-      q[i].res(null);
-    } else {
-      // `agent({ schema })` returns the VALIDATED OBJECT, not a JSON string
-      // (claude-code: `if (ne.schema) return p(he)`). The host serialises the
-      // subagent's structured content to JSON; parse it back here so the script
-      // can use `r.bugs` / `.flatMap(r => r.bugs)` directly — no manual parse.
-      // A non-schema agent returns its final text verbatim (a string), even if
-      // that text happens to look like JSON.
-      const o = q[i].opts;
-      if (o && o.schema && typeof r === "string" && r.length > 0) {
-        try { q[i].res(JSON.parse(r)); } catch (e) { q[i].res(r); }
+  if (q.length > 0) {
+    globalThis.__wf_queue = [];
+    // Dispatch the batch as two parallel arrays: the prompts and the JSON-encoded
+    // opts ({agentType, model, isolation, schema, label, phase, effort}). The host
+    // runner maps the spawn-affecting opts onto each subagent request; host-only
+    // behavior such as `throwOnError` is consumed by the runner itself.
+    const results = globalThis.__wf_dispatch_batch(q.map((x) => x.prompt), q.map((x) => JSON.stringify(x.opts || {})));
+    for (let i = 0; i < q.length; i++) {
+      const r = results[i];
+      if (typeof r === "string" && r.startsWith(globalThis.__WF_THROW_PREFIX)) {
+        // Agent-cap, budget-ceiling, or caller-requested terminal failure → reject.
+        const msg = r.slice(globalThis.__WF_THROW_PREFIX.length);
+        const err = new Error(msg);
+        if (msg.startsWith("Workflow token budget exceeded")) err.name = "WorkflowBudgetExceededError";
+        else if (msg.startsWith("Workflow agent() call cap reached")) err.name = "WorkflowAgentCapError";
+        q[i].rej(err);
+      } else if (r === globalThis.__WF_NULL) {
+        // skipped / dead agent → resolve with null (claude-code's contract).
+        q[i].res(null);
       } else {
-        q[i].res(r);
+        // `agent({ schema })` returns the VALIDATED OBJECT, not a JSON string
+        // (claude-code: `if (ne.schema) return p(he)`). The host serialises the
+        // subagent's structured content to JSON; parse it back here so the script
+        // can use `r.bugs` / `.flatMap(r => r.bugs)` directly — no manual parse.
+        // A non-schema agent returns its final text verbatim (a string), even if
+        // that text happens to look like JSON.
+        const o = q[i].opts;
+        if (o && o.schema && typeof r === "string" && r.length > 0) {
+          try { q[i].res(JSON.parse(r)); } catch (e) { q[i].res(r); }
+        } else {
+          q[i].res(r);
+        }
       }
+    }
+    return true;
+  }
+  const fq = globalThis.__wf_fusion_queue;
+  if (fq.length === 0) return false;
+  globalThis.__wf_fusion_queue = [];
+  for (let i = 0; i < fq.length; i++) {
+    const item = fq[i];
+    const r = globalThis.__wf_dispatch_fusion(item.prompt, JSON.stringify(item.opts || {}));
+    if (typeof r === "string" && r.startsWith(globalThis.__WF_THROW_PREFIX)) {
+      const msg = r.slice(globalThis.__WF_THROW_PREFIX.length);
+      item.rej(new Error(msg));
+      continue;
+    }
+    try {
+      item.res(JSON.parse(r));
+    } catch (e) {
+      item.rej(new Error("fusion() host returned invalid JSON"));
     }
   }
   return true;
@@ -190,6 +214,11 @@ pub const WF_NULL_SENTINEL: &str = "\u{1}__wf_null__\u{1}";
 /// message, the prelude rejects that `agent()` promise. Byte-identical to
 /// `globalThis.__WF_THROW_PREFIX`.
 pub const WF_THROW_PREFIX: &str = "\u{1}__wf_throw__\u{1}";
+
+/// Default host-side `fusion()` rejection when the runtime did not wire a
+/// Fusion bridge.
+pub const WORKFLOW_FUSION_UNAVAILABLE_MESSAGE: &str =
+    "fusion() is unavailable in this workflow runtime";
 
 /// State of a `workflow_agent` progress event (oracle §8).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1090,6 +1119,35 @@ where
     // Fires for every `phase()`/`log()` as it is emitted (live).
     P: FnMut(&Progress) + 'static,
 {
+    run_with_progress_and_fusion(
+        script,
+        agent_runner,
+        |_, _| format!("{WF_THROW_PREFIX}{WORKFLOW_FUSION_UNAVAILABLE_MESSAGE}"),
+        on_progress,
+        budget,
+        allow_nested,
+        args,
+        cancel,
+    )
+}
+
+/// Like [`run_with_progress`], but also wires the workflow-global `fusion()`
+/// bridge used by the desktop task host.
+pub fn run_with_progress_and_fusion<R, F, P>(
+    script: &str,
+    agent_runner: R,
+    fusion_runner: F,
+    on_progress: P,
+    budget: Option<Arc<dyn WorkflowBudgetSource>>,
+    allow_nested: bool,
+    args: Option<String>,
+    cancel: Option<Arc<std::sync::atomic::AtomicBool>>,
+) -> Result<RunOutcome, WorkflowError>
+where
+    R: FnMut(&[String], &[String]) -> Vec<String> + 'static,
+    F: FnMut(&str, &str) -> String + 'static,
+    P: FnMut(&Progress) + 'static,
+{
     use rquickjs::{Context, Function, Runtime};
 
     let rt = Runtime::new().map_err(|e| WorkflowError::Engine(e.to_string()))?;
@@ -1112,6 +1170,7 @@ where
     let result_slot: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
     let failures: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
     let runner = Rc::new(RefCell::new(agent_runner));
+    let fusion_runner = Rc::new(RefCell::new(fusion_runner));
     let on_progress = Rc::new(RefCell::new(on_progress));
     let prepared = strip_meta_export(script);
     // Wrap in an async IIFE; route a throw into `__wf_error` so it survives the
@@ -1207,6 +1266,20 @@ where
                             })
                             .collect();
                         (r.borrow_mut())(&prompts, &augmented)
+                    },
+                )
+                .map_err(eng)?,
+            )
+            .map_err(eng)?;
+
+        let fr = fusion_runner.clone();
+        globals
+            .set(
+                "__wf_dispatch_fusion",
+                Function::new(
+                    ctx.clone(),
+                    move |prompt: String, opts_json: String| -> String {
+                        (fr.borrow_mut())(&prompt, &opts_json)
                     },
                 )
                 .map_err(eng)?,
@@ -2410,5 +2483,66 @@ log('wf=' + (typeof workflow))
             }]
         );
         assert_eq!(out.result.as_deref(), Some(r#"{"ok":true,"n":1}"#));
+    }
+
+    #[test]
+    fn fusion_returns_a_parsed_object() {
+        let out = run_with_progress_and_fusion(
+            "const r = await fusion('compare models'); log('status=' + r.status); return r;",
+            no_agents,
+            |prompt: &str, opts_json: &str| {
+                assert_eq!(prompt, "compare models");
+                assert_eq!(opts_json, "{}");
+                r#"{"status":"completed","panels":[]}"#.to_string()
+            },
+            |_: &Progress| {},
+            None,
+            false,
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            out.progress,
+            vec![Progress::Log {
+                message: "status=completed".into()
+            }]
+        );
+        assert_eq!(
+            out.result.as_deref(),
+            Some(r#"{"status":"completed","panels":[]}"#)
+        );
+    }
+
+    #[test]
+    fn fusion_stringifies_the_opts_object_without_touching_agent_batches() {
+        let out = run_with_progress_and_fusion(
+            "const a = agent('one'); const f = fusion('two', { maxPanel: 4, partialOk: false, crossProvider: true }); log(await a); return await f;",
+            |prompts: &[String], _opts: &[String]| {
+                assert_eq!(prompts, &["one".to_string()]);
+                vec!["agent:one".to_string()]
+            },
+            |prompt: &str, opts_json: &str| {
+                assert_eq!(prompt, "two");
+                assert_eq!(
+                    opts_json,
+                    r#"{"maxPanel":4,"partialOk":false,"crossProvider":true}"#
+                );
+                r#"{"status":"needs_parent"}"#.to_string()
+            },
+            |_: &Progress| {},
+            None,
+            false,
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            out.progress,
+            vec![Progress::Log {
+                message: "agent:one".into()
+            }]
+        );
+        assert_eq!(out.result.as_deref(), Some(r#"{"status":"needs_parent"}"#));
     }
 }

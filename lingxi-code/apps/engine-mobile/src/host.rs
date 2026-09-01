@@ -4372,6 +4372,7 @@ async fn build_mobile_inner_with_ask(
         current_cwd: workflow_cwd.clone(),
         lingxi_home: cfg.lingxi_home.clone(),
         session_uuid: active_session_uuid.clone(),
+        default_model_selection_provider: subagent_default_model_selection_provider_cell.clone(),
         checkpoints: workflow_checkpoints.clone(),
         status_sink: local_workflow_status_sink.clone(),
         plugin_workflows: plugin_workflow_registry.clone(),
@@ -13612,6 +13613,7 @@ mod tests {
             // session watermark; a detached fixture uuid would correctly
             // suppress the completion event as stale.
             session_uuid: rt.active_session_uuid.clone(),
+            default_model_selection_provider: Arc::new(std::sync::OnceLock::new()),
             checkpoints: rt.workflow_checkpoints.clone(),
             status_sink: rt.workflow_status_sink.clone(),
             plugin_workflows: rt.wired_plugin_workflow_registry.clone(),
@@ -13702,6 +13704,68 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn workflow_global_fusion_is_unavailable_on_mobile() {
+        use tool_workflow::WorkflowLauncher as _;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let platform: Arc<dyn platform_api::Platform> =
+            Arc::new(HostFakePlatform::new(tmp.path().to_path_buf()));
+        let listener = Arc::new(FakeListener::default());
+        let listener_for_build: Arc<dyn ClientEventListener> = listener.clone();
+        let perm_sink: Arc<dyn PermissionRequestSink> =
+            Arc::new(RecordingPermissionSink::default());
+        let rt = build_mobile(
+            test_config(tmp.path()),
+            platform,
+            listener_for_build,
+            perm_sink,
+        )
+        .await
+        .expect("build_mobile");
+
+        let launched = rt
+            .workflow_launcher
+            .launch(tool_workflow::WorkflowLaunchSpec {
+                script: Some(
+                    "export const meta = { name: 'fusion-mobile', description: 'mobile fusion gate' }\n\
+                     return await fusion('review this')\n"
+                        .into(),
+                ),
+                ..Default::default()
+            })
+            .await
+            .expect("launch succeeds");
+
+        let registry: &dyn platform_api::task_registry::TaskRegistryHandle = &*rt.task_registry;
+        let status = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                let record = registry
+                    .get(&launched.task_id)
+                    .await
+                    .expect("get")
+                    .expect("task exists");
+                if record.status != "pending" && record.status != "running" {
+                    break record.status;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .expect("mobile fusion task did not reach a terminal status");
+        assert_eq!(status, "failed");
+
+        let chunk = registry
+            .output(&launched.task_id, None)
+            .await
+            .expect("output");
+        assert!(
+            chunk.content.contains("fusion is unavailable on this platform"),
+            "mobile workflow fusion should fail with the typed platform error: {}",
+            chunk.content
+        );
+    }
+
+    #[tokio::test]
     async fn workflow_relative_script_path_uses_live_cwd_but_session_files_stay_under_project_root()
     {
         use tool_workflow::WorkflowLauncher as _;
@@ -13737,6 +13801,7 @@ mod tests {
             current_cwd,
             lingxi_home: tmp.path().join(".claude"),
             session_uuid: rt.active_session_uuid.clone(),
+            default_model_selection_provider: Arc::new(std::sync::OnceLock::new()),
             checkpoints: rt.workflow_checkpoints.clone(),
             status_sink: rt.workflow_status_sink.clone(),
             plugin_workflows: rt.wired_plugin_workflow_registry.clone(),
@@ -15483,6 +15548,8 @@ mod tests {
                         resume_from_run_id: None,
                         args: None,
                         run_id: None,
+                        parent_model: None,
+                        parent_model_profile: None,
                         invocation_mode: Some("inline".to_string()),
                         workflow_source: Some("inline".to_string()),
                         script_is_verbatim_builtin: Some(false),

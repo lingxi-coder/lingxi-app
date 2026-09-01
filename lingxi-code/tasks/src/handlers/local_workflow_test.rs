@@ -2,19 +2,25 @@
 #![allow(clippy::unwrap_used)]
 
 use super::*;
+use platform_api::filesystem::{FileContent, FileEvent, FileSystem, FlockGuard, FsError};
+use platform_api::tool_invoker::{SubagentInvocationContext, ToolInvokerError};
+use platform_api::{
+    BudgetError, FusionAgentSurface, FusionDecision, FusionError, FusionExecutor,
+    FusionInheritance, FusionNeedsParentReason, FusionRequest, FusionResult, FusionStatus,
+    FusionTiming, FusionUsage, PanelRunStatus, SubagentUsage,
+};
 use serde_json::json;
 use std::any::Any;
 use std::collections::HashMap as StdHashMap;
 use std::collections::HashSet as StdHashSet;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};
 use std::sync::Mutex as StdMutex;
 use tempfile::tempdir;
 use test_harness::mocks::MockRuntimeSpawner;
 use tokio::sync::oneshot;
 use tokio::sync::Mutex as TokioMutex;
-use platform_api::filesystem::{FileContent, FileEvent, FileSystem, FlockGuard, FsError};
-use platform_api::tool_invoker::{SubagentInvocationContext, ToolInvokerError};
-use platform_api::{BudgetError, SubagentUsage};
+use tokio_util::sync::CancellationToken;
 
 static ENV_LOCK: StdMutex<()> = StdMutex::new(());
 
@@ -245,16 +251,132 @@ impl SubagentSpawner for WorkflowForwardingProbeSpawner {
         let agent_id = protocol::AgentId::new();
         if let Some(observer) = observer {
             observer
-                .on_event(platform_api::subagent_spawn::SubagentObservation::Allocated {
-                    agent_id,
-                    agent_type: request.subagent_type,
-                    name: request.name,
-                    model: request.model.unwrap_or_else(|| "inherited".to_string()),
-                    model_profile: request.model_profile,
-                })
+                .on_event(
+                    platform_api::subagent_spawn::SubagentObservation::Allocated {
+                        agent_id,
+                        agent_type: request.subagent_type,
+                        name: request.name,
+                        model: request.model.unwrap_or_else(|| "inherited".to_string()),
+                        model_profile: request.model_profile,
+                    },
+                )
                 .await;
         }
         Ok(completed_probe_result(agent_id))
+    }
+}
+
+struct ImmediateFusionExecutor {
+    surface: FusionAgentSurface,
+    cap: u32,
+    seen: StdMutex<Vec<FusionRequest>>,
+    response: StdMutex<Result<FusionResult, FusionError>>,
+}
+
+impl ImmediateFusionExecutor {
+    fn new(surface: FusionAgentSurface, cap: u32, response: Result<FusionResult, FusionError>) -> Arc<Self> {
+        Arc::new(Self {
+            surface,
+            cap,
+            seen: StdMutex::new(Vec::new()),
+            response: StdMutex::new(response),
+        })
+    }
+}
+
+#[async_trait]
+impl FusionExecutor for ImmediateFusionExecutor {
+    async fn run(
+        &self,
+        request: FusionRequest,
+        _inherit: FusionInheritance,
+        _progress: Option<tokio::sync::mpsc::Sender<platform_api::FusionProgress>>,
+    ) -> Result<FusionResult, FusionError> {
+        self.seen.lock().unwrap().push(request);
+        self.response.lock().unwrap().clone()
+    }
+
+    fn agent_surface(&self) -> FusionAgentSurface {
+        self.surface
+    }
+
+    fn workflow_fusion_call_cap(&self) -> u32 {
+        self.cap
+    }
+}
+
+struct BlockingFusionExecutor {
+    started: StdMutex<Option<oneshot::Sender<()>>>,
+    cancelled: StdMutex<Option<oneshot::Sender<()>>>,
+    seen: StdMutex<Vec<FusionRequest>>,
+    cap: u32,
+    calls: AtomicU32,
+}
+
+impl BlockingFusionExecutor {
+    fn new(started: oneshot::Sender<()>, cancelled: oneshot::Sender<()>) -> Arc<Self> {
+        Arc::new(Self {
+            started: StdMutex::new(Some(started)),
+            cancelled: StdMutex::new(Some(cancelled)),
+            seen: StdMutex::new(Vec::new()),
+            cap: 20,
+            calls: AtomicU32::new(0),
+        })
+    }
+}
+
+#[async_trait]
+impl FusionExecutor for BlockingFusionExecutor {
+    async fn run(
+        &self,
+        request: FusionRequest,
+        inherit: FusionInheritance,
+        _progress: Option<tokio::sync::mpsc::Sender<platform_api::FusionProgress>>,
+    ) -> Result<FusionResult, FusionError> {
+        self.calls.fetch_add(1, AtomicOrdering::SeqCst);
+        self.seen.lock().unwrap().push(request);
+        if let Some(tx) = self.started.lock().unwrap().take() {
+            let _ = tx.send(());
+        }
+        inherit.cancel.cancelled().await;
+        if let Some(tx) = self.cancelled.lock().unwrap().take() {
+            let _ = tx.send(());
+        }
+        Err(FusionError::Cancelled)
+    }
+
+    fn agent_surface(&self) -> FusionAgentSurface {
+        FusionAgentSurface {
+            enabled: true,
+            ..FusionAgentSurface::default()
+        }
+    }
+
+    fn workflow_fusion_call_cap(&self) -> u32 {
+        self.cap
+    }
+}
+
+fn workflow_fusion_result() -> FusionResult {
+    FusionResult {
+        schema_version: 1,
+        run_id: "fu_test".into(),
+        status: FusionStatus::NeedsParent,
+        decision: FusionDecision::NeedsParent {
+            reason: FusionNeedsParentReason::LowConfidence,
+        },
+        final_text: "needs parent".into(),
+        analysis: None,
+        panels: vec![platform_api::PanelOutcome {
+            panel_id: "P1".into(),
+            status: PanelRunStatus::Completed,
+            duration_ms: 7,
+            error_category: None,
+            usage: Some(FusionUsage::default()),
+        }],
+        usage: FusionUsage::default(),
+        timing: FusionTiming::default(),
+        egress_profiles: vec!["openai".into()],
     }
 }
 
@@ -416,7 +538,8 @@ impl platform_api::worktree::WorktreeManager for RecordingWorktreeManager {
 
     async fn list_worktrees(
         &self,
-    ) -> Result<Vec<platform_api::worktree::WorktreeInfo>, platform_api::worktree::WorktreeError> {
+    ) -> Result<Vec<platform_api::worktree::WorktreeInfo>, platform_api::worktree::WorktreeError>
+    {
         Ok(Vec::new())
     }
 
@@ -797,6 +920,8 @@ fn workflow_input(script: &str) -> TaskSpawnInput {
         resume_from_run_id: None,
         args: None,
         run_id: None,
+        parent_model: None,
+        parent_model_profile: None,
         invocation_mode: Some("inline".to_string()),
         workflow_source: Some("inline".to_string()),
         script_is_verbatim_builtin: Some(false),
@@ -1738,6 +1863,319 @@ fn make_handler(
 }
 
 #[tokio::test]
+async fn workflow_fusion_round_trips_a_compact_result() {
+    let executor = ImmediateFusionExecutor::new(
+        FusionAgentSurface {
+            enabled: true,
+            default_partial_ok: true,
+            ..FusionAgentSurface::default()
+        },
+        3,
+        Ok(workflow_fusion_result()),
+    );
+    let outcome = run_workflow_script_with_live_updates_and_fusion(
+        "return await fusion('review this', { preset: 'fast', maxPanel: 4, partialOk: false });",
+        DEFAULT_WORKFLOW_SUBAGENT,
+        Arc::new(EchoSpawner::default()),
+        Arc::new(MockInvoker),
+        Arc::new(MockBudget),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        0,
+        NestedConfig::default(),
+        Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        CancellationToken::new(),
+        Some(executor.clone()),
+        Some("wf_fusion".into()),
+        Some("gpt-5.4".into()),
+        Some("openai".into()),
+        Arc::new(AnalyticsBus::new()),
+        None,
+        None,
+        None,
+    )
+    .await
+    .expect("workflow with fusion");
+
+    let value: serde_json::Value =
+        serde_json::from_str(outcome.result.as_deref().expect("result")).expect("json");
+    assert_eq!(value["run_id"], "fu_test");
+    assert!(value["panels"][0].get("report").is_none());
+    assert!(value["panels"][0].get("candidate_answer").is_none());
+    let seen = executor.seen.lock().unwrap();
+    assert_eq!(seen.len(), 1);
+    assert_eq!(seen[0].origin, platform_api::FusionOrigin::Workflow);
+    assert_eq!(seen[0].workflow_run_id.as_deref(), Some("wf_fusion"));
+    assert_eq!(seen[0].parent_model, "gpt-5.4");
+    assert_eq!(seen[0].parent_profile, "openai");
+    assert_eq!(seen[0].preset, platform_api::FusionPreset::Fast);
+    assert_eq!(seen[0].max_panel, Some(4));
+    assert!(!seen[0].partial_ok);
+}
+
+#[tokio::test]
+async fn workflow_fusion_rejects_unknown_fields_before_executor_runs() {
+    let executor = ImmediateFusionExecutor::new(
+        FusionAgentSurface {
+            enabled: true,
+            ..FusionAgentSurface::default()
+        },
+        3,
+        Ok(workflow_fusion_result()),
+    );
+    let err = run_workflow_script_with_live_updates_and_fusion(
+        "await fusion('review this', { nope: true });",
+        DEFAULT_WORKFLOW_SUBAGENT,
+        Arc::new(EchoSpawner::default()),
+        Arc::new(MockInvoker),
+        Arc::new(MockBudget),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        0,
+        NestedConfig::default(),
+        Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        CancellationToken::new(),
+        Some(executor.clone()),
+        Some("wf_fusion".into()),
+        Some("gpt-5.4".into()),
+        Some("openai".into()),
+        Arc::new(AnalyticsBus::new()),
+        None,
+        None,
+        None,
+    )
+    .await
+    .expect_err("unknown field must reject");
+    assert!(err.to_string().contains("unknown field"));
+    assert!(executor.seen.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn workflow_fusion_rejects_when_disabled_without_executor_calls() {
+    let executor = ImmediateFusionExecutor::new(
+        FusionAgentSurface::default(),
+        3,
+        Ok(workflow_fusion_result()),
+    );
+    let err = run_workflow_script_with_live_updates_and_fusion(
+        "await fusion('review this');",
+        DEFAULT_WORKFLOW_SUBAGENT,
+        Arc::new(EchoSpawner::default()),
+        Arc::new(MockInvoker),
+        Arc::new(MockBudget),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        0,
+        NestedConfig::default(),
+        Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        CancellationToken::new(),
+        Some(executor.clone()),
+        Some("wf_fusion".into()),
+        Some("gpt-5.4".into()),
+        Some("openai".into()),
+        Arc::new(AnalyticsBus::new()),
+        None,
+        None,
+        None,
+    )
+    .await
+    .expect_err("disabled fusion must reject");
+    assert!(err.to_string().contains("fusion is disabled"));
+    assert!(executor.seen.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn workflow_fusion_surfaces_cross_provider_denials_without_silently_downgrading() {
+    let executor = ImmediateFusionExecutor::new(
+        FusionAgentSurface {
+            enabled: true,
+            ..FusionAgentSurface::default()
+        },
+        3,
+        Err(FusionError::CrossProviderDenied),
+    );
+    let err = run_workflow_script_with_live_updates_and_fusion(
+        "await fusion('review this', { crossProvider: true });",
+        DEFAULT_WORKFLOW_SUBAGENT,
+        Arc::new(EchoSpawner::default()),
+        Arc::new(MockInvoker),
+        Arc::new(MockBudget),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        0,
+        NestedConfig::default(),
+        Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        CancellationToken::new(),
+        Some(executor.clone()),
+        Some("wf_fusion".into()),
+        Some("gpt-5.4".into()),
+        Some("openai".into()),
+        Arc::new(AnalyticsBus::new()),
+        None,
+        None,
+        None,
+    )
+    .await
+    .expect_err("cross-provider deny must reject");
+    assert!(err.to_string().contains("cross-provider fusion is not allowed"));
+    let seen = executor.seen.lock().unwrap();
+    assert_eq!(seen.len(), 1);
+    assert!(seen[0].cross_provider);
+}
+
+#[tokio::test]
+async fn workflow_fusion_enforces_the_per_workflow_call_cap() {
+    let executor = ImmediateFusionExecutor::new(
+        FusionAgentSurface {
+            enabled: true,
+            ..FusionAgentSurface::default()
+        },
+        1,
+        Ok(workflow_fusion_result()),
+    );
+    let err = run_workflow_script_with_live_updates_and_fusion(
+        "await fusion('one'); await fusion('two');",
+        DEFAULT_WORKFLOW_SUBAGENT,
+        Arc::new(EchoSpawner::default()),
+        Arc::new(MockInvoker),
+        Arc::new(MockBudget),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        0,
+        NestedConfig::default(),
+        Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        CancellationToken::new(),
+        Some(executor.clone()),
+        Some("wf_fusion".into()),
+        Some("gpt-5.4".into()),
+        Some("openai".into()),
+        Arc::new(AnalyticsBus::new()),
+        None,
+        None,
+        None,
+    )
+    .await
+    .expect_err("second fusion call must be rejected");
+    assert!(err.to_string().contains("Workflow fusion() call cap reached (1)"));
+    assert_eq!(executor.seen.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn workflow_kill_cancels_an_inflight_fusion() {
+    let fs: Arc<dyn FileSystem> = Arc::new(InMemoryFs::new());
+    let dir = tempdir().unwrap();
+    let mgr = Arc::new(TaskOutputManager::new(PathBuf::from(dir.path()), fs.clone()));
+    let sink = Arc::new(RecordingSink::default());
+    let (started_tx, started_rx) = oneshot::channel();
+    let (cancelled_tx, cancelled_rx) = oneshot::channel();
+    let executor = BlockingFusionExecutor::new(started_tx, cancelled_tx);
+    let handler = LocalWorkflowHandler::new(
+        Arc::new(EchoSpawner::default()),
+        Arc::new(MockInvoker),
+        Arc::new(MockBudget),
+        mgr,
+    )
+    .with_status_sink(sink.clone())
+    .with_fusion(executor.clone());
+    let mut input = workflow_input("await fusion('wait here');");
+    if let TaskSpawnInput::LocalWorkflow {
+        parent_model,
+        parent_model_profile,
+        ..
+    } = &mut input
+    {
+        *parent_model = Some("gpt-5.4".into());
+        *parent_model_profile = Some("openai".into());
+    }
+    let handle = handler.spawn(input, make_ctx(fs.clone())).await.unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(5), started_rx)
+        .await
+        .expect("fusion start wait timed out")
+        .expect("fusion started");
+    handler.kill(&handle.task_id, make_ctx(fs)).await.unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(5), cancelled_rx)
+        .await
+        .expect("fusion cancel wait timed out")
+        .expect("fusion cancellation observed");
+    assert_eq!(
+        tokio::time::timeout(std::time::Duration::from_secs(5), await_terminal(&sink))
+            .await
+            .expect("workflow kill status wait timed out"),
+        TaskStatus::Killed
+    );
+    assert_eq!(executor.calls.load(AtomicOrdering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn workflow_cleanup_cancels_an_inflight_fusion_before_runtime_abort() {
+    let fs: Arc<dyn FileSystem> = Arc::new(InMemoryFs::new());
+    let dir = tempdir().unwrap();
+    let mgr = Arc::new(TaskOutputManager::new(PathBuf::from(dir.path()), fs.clone()));
+    let sink = Arc::new(RecordingSink::default());
+    let (started_tx, started_rx) = oneshot::channel();
+    let (cancelled_tx, cancelled_rx) = oneshot::channel();
+    let executor = BlockingFusionExecutor::new(started_tx, cancelled_tx);
+    let handler = LocalWorkflowHandler::new(
+        Arc::new(EchoSpawner::default()),
+        Arc::new(MockInvoker),
+        Arc::new(MockBudget),
+        mgr,
+    )
+    .with_status_sink(sink.clone())
+    .with_fusion(executor.clone());
+    let mut input = workflow_input("await fusion('wait here');");
+    if let TaskSpawnInput::LocalWorkflow {
+        parent_model,
+        parent_model_profile,
+        ..
+    } = &mut input
+    {
+        *parent_model = Some("gpt-5.4".into());
+        *parent_model_profile = Some("openai".into());
+    }
+    let handle = handler.spawn(input, make_ctx(fs)).await.unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(5), started_rx)
+        .await
+        .expect("fusion start wait timed out")
+        .expect("fusion started");
+
+    (handle.cleanup.as_ref().expect("cleanup seam"))();
+    handler.drain_pending_kills().await;
+
+    tokio::time::timeout(std::time::Duration::from_secs(5), cancelled_rx)
+        .await
+        .expect("fusion cancel wait timed out")
+        .expect("fusion cancellation observed");
+    assert_eq!(
+        tokio::time::timeout(std::time::Duration::from_secs(5), await_terminal(&sink))
+            .await
+            .expect("workflow cleanup status wait timed out"),
+        TaskStatus::Killed
+    );
+    assert_eq!(executor.calls.load(AtomicOrdering::SeqCst), 1);
+}
+
+#[tokio::test]
 async fn workflow_isolation_spawner_creates_worktree_and_threads_cwd() {
     let inner = Arc::new(EchoSpawner::default());
     let worktree = Arc::new(RecordingWorktreeManager::default());
@@ -2049,6 +2487,10 @@ async fn workflow_kill_preserves_terminal_status_when_sink_already_knows_task_is
         Some(TaskStatus::Completed),
         "kill must not overwrite an already-terminal workflow status"
     );
+    assert!(
+        handler.workers.lock().await.is_empty(),
+        "a stale terminal status must not leave a live workflow worker orphaned"
+    );
 }
 
 #[tokio::test]
@@ -2083,6 +2525,10 @@ async fn workflow_drain_pending_kills_preserves_terminal_status() {
         sink.last_status(),
         Some(TaskStatus::Completed),
         "drain must not overwrite an already-terminal workflow status"
+    );
+    assert!(
+        handler.workers.lock().await.is_empty(),
+        "cleanup must still tear down a live worker behind a stale terminal status"
     );
 }
 
@@ -2234,6 +2680,8 @@ async fn workflow_transcript_root_stays_pinned_across_retarget() {
                 resume_from_run_id: None,
                 args: None,
                 run_id: Some("wf_pin".into()),
+                parent_model: None,
+                parent_model_profile: None,
                 invocation_mode: Some("inline".to_string()),
                 workflow_source: Some("inline".to_string()),
                 script_is_verbatim_builtin: Some(false),
@@ -2289,6 +2737,8 @@ async fn workflow_transcript_dir_matches_child_transcript_location() {
                 resume_from_run_id: None,
                 args: None,
                 run_id: Some("wf_real_dir".into()),
+                parent_model: None,
+                parent_model_profile: None,
                 invocation_mode: Some("inline".to_string()),
                 workflow_source: Some("inline".to_string()),
                 script_is_verbatim_builtin: Some(false),
@@ -2370,6 +2820,8 @@ async fn resume_replays_journaled_agent_results_without_respawning() {
         resume_from_run_id: Some(run_id),
         args: None,
         run_id: None,
+        parent_model: None,
+        parent_model_profile: None,
         invocation_mode: Some("inline".to_string()),
         workflow_source: Some("inline".to_string()),
         script_is_verbatim_builtin: Some(false),
@@ -2429,6 +2881,8 @@ async fn transcript_journal_appends_started_and_result_before_resume() {
                 resume_from_run_id: None,
                 args: None,
                 run_id: Some("wf_append".into()),
+                parent_model: None,
+                parent_model_profile: None,
                 invocation_mode: Some("inline".into()),
                 workflow_source: Some("inline".into()),
                 script_is_verbatim_builtin: Some(false),
@@ -2478,6 +2932,8 @@ async fn transcript_journal_appends_started_and_result_before_resume() {
                 resume_from_run_id: Some("wf_append".into()),
                 args: None,
                 run_id: None,
+                parent_model: None,
+                parent_model_profile: None,
                 invocation_mode: Some("inline".into()),
                 workflow_source: Some("inline".into()),
                 script_is_verbatim_builtin: Some(false),
@@ -2561,6 +3017,8 @@ async fn resume_with_a_changed_prefix_reruns_from_the_edit_onward() {
         resume_from_run_id: Some(run_id),
         args: None,
         run_id: None,
+        parent_model: None,
+        parent_model_profile: None,
         invocation_mode: Some("inline".to_string()),
         workflow_source: Some("inline".to_string()),
         script_is_verbatim_builtin: Some(false),

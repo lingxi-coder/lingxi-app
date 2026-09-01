@@ -31,6 +31,7 @@ fn task_type_from_wire(s: &str) -> Result<TaskType, TaskRegistryError> {
         "monitor" | "monitor_ws" => TaskType::Monitor,
         "mcp_task" => TaskType::McpTask,
         "dream" => TaskType::Dream,
+        "local_fusion" => TaskType::LocalFusion,
         other => {
             return Err(TaskRegistryError::InvalidInput(format!(
                 "unknown task_type '{other}'"
@@ -50,6 +51,7 @@ pub(crate) fn task_type_to_wire(t: TaskType) -> &'static str {
         TaskType::Monitor => "monitor_ws",
         TaskType::McpTask => "mcp_task",
         TaskType::Dream => "dream",
+        TaskType::LocalFusion => "local_fusion",
     }
 }
 
@@ -240,6 +242,8 @@ fn placeholder_input(task_type: TaskType) -> TaskSpawnInput {
             resume_from_run_id: None,
             args: None,
             run_id: None,
+            parent_model: None,
+            parent_model_profile: None,
             invocation_mode: None,
             workflow_source: None,
             script_is_verbatim_builtin: None,
@@ -278,6 +282,24 @@ fn placeholder_input(task_type: TaskType) -> TaskSpawnInput {
         TaskType::Dream => TaskSpawnInput::Dream {
             prompt: String::new(),
             max_iterations: None,
+        },
+        TaskType::LocalFusion => TaskSpawnInput::LocalFusion {
+            request: platform_api::FusionRequest {
+                schema_version: platform_api::FUSION_SCHEMA_VERSION,
+                origin: platform_api::FusionOrigin::Slash,
+                prompt: String::new(),
+                preset: platform_api::FusionPreset::Quality,
+                models: None,
+                dimensions: Vec::new(),
+                partial_ok: true,
+                max_panel: None,
+                cross_provider: true,
+                parent_profile: String::new(),
+                parent_model: String::new(),
+                conversation_id: None,
+                workflow_run_id: None,
+            },
+            conversation_id: String::new(),
         },
     }
 }

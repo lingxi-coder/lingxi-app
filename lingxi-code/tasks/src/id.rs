@@ -31,6 +31,8 @@ pub enum TaskType {
     McpTask,
     /// Background long-running "dream" loop.
     Dream,
+    /// Fusion multi-model deliberation (`/fusion`).
+    LocalFusion,
 }
 
 impl TaskType {
@@ -49,6 +51,7 @@ impl TaskType {
             Self::Monitor => 's',
             Self::McpTask => 'k',
             Self::Dream => 'd',
+            Self::LocalFusion => 'f',
         }
     }
 }
@@ -78,5 +81,15 @@ mod tests {
             set.insert(generate_task_id(TaskType::LocalBash));
         }
         assert!(set.len() > 990, "too many collisions in 1000 samples");
+    }
+
+    #[test]
+    fn local_fusion_id_is_f_plus_eight_base36_chars() {
+        let id = generate_task_id(TaskType::LocalFusion);
+        assert_eq!(id.len(), 9);
+        assert!(id.starts_with('f'));
+        assert!(id[1..]
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || byte.is_ascii_lowercase()));
     }
 }

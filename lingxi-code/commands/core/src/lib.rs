@@ -29,6 +29,7 @@ pub mod exit;
 pub mod export;
 pub mod files;
 pub mod fork;
+pub mod fusion;
 pub mod goal;
 pub mod help;
 pub mod hooks;
@@ -85,6 +86,9 @@ pub use exit::ExitHandler;
 pub use export::ExportHandler;
 pub use files::FilesHandler;
 pub use fork::{ForkBackgroundHandler, ForkHandler};
+pub use fusion::{
+    fusion_request_from_slash, parse_fusion_slash, FusionSlashArgs, FUSION_SLASH_USAGE,
+};
 pub use goal::GoalHandler;
 pub use help::HelpHandler;
 pub use hooks::HooksHandler;

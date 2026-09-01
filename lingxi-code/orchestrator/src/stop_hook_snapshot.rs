@@ -61,6 +61,7 @@ fn type_label(task_type: &str) -> String {
         "in_process_teammate" => "teammate",
         "dream" => "dream",
         "remote_agent" => "cloud session",
+        "local_fusion" => "fusion",
         other => return other.to_string(),
     }
     .to_string()
@@ -194,6 +195,7 @@ mod tests {
         assert_eq!(type_label("in_process_teammate"), "teammate");
         assert_eq!(type_label("dream"), "dream");
         assert_eq!(type_label("remote_agent"), "cloud session");
+        assert_eq!(type_label("local_fusion"), "fusion");
         // O1o[type] ?? type — unknown kind falls back to the raw wire string.
         assert_eq!(type_label("something_new"), "something_new");
     }

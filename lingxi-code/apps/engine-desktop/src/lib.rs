@@ -33,6 +33,7 @@ mod background_agent;
 mod connect;
 pub mod file_changed_watch;
 pub mod fork_resume;
+mod fusion_command;
 pub mod settings_watch;
 mod skill_loader;
 
@@ -1844,6 +1845,10 @@ struct TaskRegistryWorkflowLauncher {
     /// from the composition root's `main_session_uuid` so the transcript dir
     /// anchors on the correct session.
     session_uuid: String,
+    /// Live provider-qualified session model selection published after the
+    /// orchestrator exists.
+    default_model_selection_provider:
+        Arc<std::sync::OnceLock<agent::handle::DefaultModelSelectionProvider>>,
     /// The SAME `workflow::PluginWorkflowRegistry` the composition root hands
     /// to `plugin::PluginManager` and `tool_workflow::WorkflowTool` (§14).
     ///
@@ -1985,6 +1990,10 @@ impl tool_workflow::WorkflowLauncher for TaskRegistryWorkflowLauncher {
             .await
             .map_err(|error| tool_workflow::WorkflowLaunchError(error.to_string()))?;
         let launch_result = async {
+            let default_selection = self
+                .default_model_selection_provider
+                .get()
+                .and_then(|provider| provider());
             // Persist the script so it is editable + re-runnable via `scriptPath`
             // (claude-code persists every invocation's script "under the session
             // directory"). A `scriptPath` input is already on disk → return it as-is;
@@ -2108,6 +2117,12 @@ impl tool_workflow::WorkflowLauncher for TaskRegistryWorkflowLauncher {
                             .as_ref()
                             .map(|v| serde_json::to_string(v).unwrap_or_default()),
                         run_id: Some(run_id.clone()),
+                        parent_model: default_selection
+                            .as_ref()
+                            .map(|selection| selection.model.clone()),
+                        parent_model_profile: default_selection
+                            .as_ref()
+                            .and_then(|selection| selection.model_profile.clone()),
                         invocation_mode: Some(invocation_mode),
                         workflow_source: Some(workflow_source),
                         script_is_verbatim_builtin: Some(named_builtin),
@@ -2274,19 +2289,6 @@ impl tool_api::WorktreeStatePersister for JsonlWorktreeStatePersister {
     }
 }
 
-fn desktop_fusion_catalog() -> Vec<fusion::CatalogModel> {
-    let mut out = Vec::new();
-    for model in llm_client::anthropic_model_profiles() {
-        out.push(desktop_fusion_catalog_row("anthropic", &model));
-    }
-    for provider in llm_client::builtin_presets().providers {
-        for model in provider.models {
-            out.push(desktop_fusion_catalog_row(&provider.profile_name, &model));
-        }
-    }
-    out
-}
-
 fn desktop_fusion_catalog_row(
     profile: &str,
     model: &llm_client::ModelProfile,
@@ -2299,16 +2301,37 @@ fn desktop_fusion_catalog_row(
     }
 }
 
-fn desktop_fusion_runtime_config(project_dir: &Path) -> fusion::FusionRuntimeConfig {
-    match load_merged_settings(project_dir).and_then(|eff| eff.settings.fusion) {
-        Some(settings) => match fusion::FusionRuntimeConfig::from_settings(&settings) {
-            Ok(config) => config,
-            Err(err) => {
-                tracing::warn!(error = %err, "invalid fusion settings; using defaults");
-                fusion::FusionRuntimeConfig::defaults()
-            }
-        },
-        None => fusion::FusionRuntimeConfig::defaults(),
+fn desktop_fusion_runtime_config(
+    project_dir: &Path,
+) -> Result<fusion::FusionRuntimeConfig, platform_api::FusionError> {
+    let env: BTreeMap<String, String> = std::env::vars().collect();
+    let inputs = lingxi_core::settings::LoadInputs {
+        env: &env,
+        project_dir,
+        defaults: lingxi_core::settings::schema::SettingsJson::default(),
+    };
+    let effective = lingxi_core::settings::Settings::load(inputs).map_err(|error| {
+        platform_api::FusionError::InvalidConfiguration(error.to_string())
+    })?;
+    match effective.settings.fusion {
+        Some(settings) => fusion::FusionRuntimeConfig::from_settings(&settings),
+        None => Ok(fusion::FusionRuntimeConfig::defaults()),
+    }
+}
+
+struct RejectedFusionExecutor {
+    error: platform_api::FusionError,
+}
+
+#[async_trait::async_trait]
+impl platform_api::FusionExecutor for RejectedFusionExecutor {
+    async fn run(
+        &self,
+        _request: platform_api::FusionRequest,
+        _inherit: platform_api::FusionInheritance,
+        _progress: Option<tokio::sync::mpsc::Sender<platform_api::FusionProgress>>,
+    ) -> Result<platform_api::FusionResult, platform_api::FusionError> {
+        Err(self.error.clone())
     }
 }
 
@@ -2316,13 +2339,20 @@ fn desktop_fusion_executor(
     spawner: Arc<dyn platform_api::subagent_spawn::SubagentSpawner>,
     side_query: Arc<dyn sidequery::SideQueryClient>,
     project_dir: &Path,
+    catalog: Vec<fusion::CatalogModel>,
+    bus: Arc<telemetry::AnalyticsBus>,
 ) -> Arc<dyn platform_api::FusionExecutor> {
+    let config = match desktop_fusion_runtime_config(project_dir) {
+        Ok(config) => config,
+        Err(error) => return Arc::new(RejectedFusionExecutor { error }),
+    };
     Arc::new(fusion::FusionOrchestrator::new(
         spawner,
         side_query,
-        desktop_fusion_runtime_config(project_dir),
-        Arc::new(desktop_fusion_catalog()),
-    ))
+        config,
+        Arc::new(catalog),
+    )
+    .with_bus(bus))
 }
 
 /// Assemble the desktop builtin tool set.
@@ -6136,6 +6166,8 @@ pub struct LlmStack {
     pub chains: provider_config::ChainConfig,
     /// See [`build`] for the resolution rules behind `model_providers`.
     pub model_providers: std::collections::BTreeMap<String, (String, String)>,
+    /// The live Fusion catalog assembled from every configured provider.
+    pub fusion_catalog: Vec<fusion::CatalogModel>,
     /// See [`build`] for the resolution rules behind `default_listings`.
     pub default_listings: Vec<platform_api::ModelListing>,
     /// See [`build`] for the resolution rules behind `default_model_id`.
@@ -6642,6 +6674,17 @@ pub async fn resolve_llm_stack(cfg: &DesktopConfig) -> Result<LlmStack, BuildErr
                 .or_insert_with(|| (profile.profile_name.clone(), label.clone()));
         }
     }
+    let fusion_catalog = assembled
+        .client_config
+        .providers
+        .iter()
+        .flat_map(|provider| {
+            provider
+                .models
+                .iter()
+                .map(move |model| desktop_fusion_catalog_row(&provider.profile_name, model))
+        })
+        .collect::<Vec<_>>();
 
     // Task-5 (TPM-C): resolve an optional `profile/model` qualifier in the
     // configured default_model so a shared id routes deterministically on the
@@ -6987,6 +7030,7 @@ pub async fn resolve_llm_stack(cfg: &DesktopConfig) -> Result<LlmStack, BuildErr
         pricing: assembled.pricing,
         chains: assembled.chains,
         model_providers,
+        fusion_catalog,
         default_listings,
         default_model_id,
         default_model_profile,
@@ -7267,6 +7311,7 @@ pub async fn build(
         pricing,
         chains,
         model_providers,
+        fusion_catalog,
         default_listings,
         default_model_id,
         default_model_profile,
@@ -9136,6 +9181,15 @@ pub async fn build(
         registry: local_workflow_status_sink.clone(),
         tx: workflow_event_tx,
     });
+    let fusion_executor: Arc<dyn platform_api::FusionExecutor> = desktop_fusion_executor(
+        subagent_spawner.clone(),
+        Arc::new(sidequery::ProviderSideQueryClient::from_service(
+            api_service.clone(),
+        )),
+        &cwd,
+        fusion_catalog.clone(),
+        analytics_bus.clone(),
+    );
     task_registry_inner.register_handler(
         tasks::TaskType::LocalWorkflow,
         Arc::new(
@@ -9153,7 +9207,7 @@ pub async fn build(
             .with_turn_baseline_cell(local_workflow_turn_baseline.clone())
             .with_workspace_permission_leases(workspace_leases.clone(), cwd.clone())
             .with_worktree_manager(worktree_manager.clone())
-            .with_plugin_workflows(plugin_workflow_registry.clone())
+            .with_fusion(fusion_executor.clone())
             .with_status_sink(
                 local_workflow_event_sink.clone() as Arc<dyn tasks::handlers::TaskStatusSink>
             )
@@ -9163,6 +9217,23 @@ pub async fn build(
             // the project/user directories miss.
             .with_plugin_workflows(plugin_workflow_registry.clone()),
         ),
+    );
+
+    // Fusion `/fusion` + Agent `subagent_type: "fusion"` share one orchestrator.
+    // Register the LocalFusion handler before the registry is Arc-wrapped. The
+    // completion sink is bound after the orchestrator handle exists; the tool
+    // invoker is bound at (5.5a) once `tools` exists. `/fusion` is explicit
+    // per-run and works even when `fusion.enabled` is false.
+    let fusion_completion_sink = Arc::new(fusion_command::DeferredFusionCompletionSink::new());
+    let fusion_invoker = Arc::new(DeferredToolInvoker::new());
+    let fusion_status_sink = Arc::new(tasks::registry_status_sink::RegistryStatusSink::new());
+    tasks::registry::register_fusion_handler(
+        &mut task_registry_inner,
+        fusion_executor.clone(),
+        fusion_completion_sink.clone() as Arc<dyn platform_api::FusionCompletionSink>,
+        fusion_invoker.clone() as Arc<dyn platform_api::tool_invoker::ToolInvoker>,
+        budget_enforcer.clone(),
+        fusion_status_sink.clone() as Arc<dyn tasks::handlers::TaskStatusSink>,
     );
 
     let task_registry = Arc::new(task_registry_inner);
@@ -9182,6 +9253,7 @@ pub async fn build(
     // `set_status(Completed/Failed)` now reaches `task_registry`, so `/workflows`
     // flips it off `Running` instead of showing it stuck forever.
     local_workflow_status_sink.bind(task_registry.clone());
+    fusion_status_sink.bind(task_registry.clone());
 
     // (5.48) Cron: construct, load the single persisted tasks file, and start the
     //        live cron scheduler so jobs created by CronCreate actually fire —
@@ -9904,13 +9976,6 @@ pub async fn build(
         Arc::new(tool_computer_use::TuiBridgeResolver::new(tx))
             as Arc<dyn tool_computer_use::ComputerAccessResolver>
     });
-    let fusion_executor = Some(desktop_fusion_executor(
-        subagent_spawner.clone(),
-        Arc::new(sidequery::ProviderSideQueryClient::from_service(
-            api_service.clone(),
-        )),
-        &cwd,
-    ));
     let wakeup_scheduler_cell = register_desktop_tools(
         &mut tools_inner,
         tool_ctx,
@@ -9927,7 +9992,7 @@ pub async fn build(
         // the single writer of the live cwd Read/Glob/Grep + LSP read.
         Some(current_cwd_cell.clone()),
         worktree_state_persister,
-        fusion_executor,
+        Some(fusion_executor.clone()),
     );
     // Workflow tool (desktop-only — it fans out subagents). Registered here,
     // after `register_desktop_tools`, because its launcher needs `task_registry`
@@ -9945,6 +10010,8 @@ pub async fn build(
                 current_cwd: current_cwd_cell.clone(),
                 lingxi_home: cfg.lingxi_home.clone(),
                 session_uuid: main_session_uuid.clone(),
+                default_model_selection_provider: subagent_default_model_selection_provider_cell
+                    .clone(),
                 plugin_workflows: plugin_workflow_registry.clone(),
             });
         // Resolve the workflow-size setting through the canonical settings
@@ -10184,6 +10251,11 @@ pub async fn build(
     //        workflow's `agent()` subagents dispatch their tools through the
     //        parent registry under the same recursion-lock + boot gate.
     local_workflow_invoker.set(Arc::new(
+        tool_api::tool_invoker_impl::RegistryToolInvoker::new(tools.clone())
+            .with_gate(perms.clone()),
+    ));
+
+    fusion_invoker.set(Arc::new(
         tool_api::tool_invoker_impl::RegistryToolInvoker::new(tools.clone())
             .with_gate(perms.clone()),
     ));
@@ -10601,6 +10673,11 @@ pub async fn build(
 
     // (6) Command registry through the desktop composition root.
     let handle: Arc<dyn OrchestratorHandle> = orch.clone();
+    fusion_completion_sink
+        .bind(Arc::new(
+            fusion_command::DesktopFusionCompletionSink::new(handle.clone()),
+        ))
+        .await;
     // FIX (B-agent-model-inheritance): now that the orchestrator exists, wire the
     // subagent spawner's LIVE default-model source to read the orchestrator's LIVE
     // `session.model` (the SAME source `build_prompt_context` / `get_status_snapshot`
@@ -10755,7 +10832,7 @@ pub async fn build(
         crate::connect::EngineOAuthConnect::new(auth.clone(), connect_chatgpt.clone()),
     );
     let mut reg = desktop_command_registry(
-        handle,
+        handle.clone(),
         auth.clone(),
         &cfg.cwd,
         &cfg.lingxi_home,
@@ -10773,6 +10850,17 @@ pub async fn build(
         task_registry.clone() as Arc<dyn platform_api::task_registry::TaskRegistryHandle>,
     )));
     reg.register_builtin_handler(worktree_command_handler);
+    reg.register_builtin_handler(Arc::new(
+        fusion_command::DesktopFusionCommandHandler::new(
+            task_registry.clone(),
+            fusion_executor.clone(),
+            handle.clone(),
+            model_providers
+                .iter()
+                .map(|(model, (profile, _))| (model.clone(), profile.clone()))
+                .collect(),
+        ),
+    ));
 
     // WIZARD-06: re-register `/auto-mode-setup` WITH its runners attached.
     // `register_all_builtin_commands` wires the handle-free shape (grammar,

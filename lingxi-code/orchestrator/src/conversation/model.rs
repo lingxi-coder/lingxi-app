@@ -343,7 +343,7 @@ impl ConversationOrchestrator {
         };
         let (fork_context_messages, session_id) = {
             let s = self.session.lock().await;
-            (s.history.clone(), s.session_id)
+            (s.model_context_history(), s.session_id)
         };
         let transcript_path = self
             .transcript

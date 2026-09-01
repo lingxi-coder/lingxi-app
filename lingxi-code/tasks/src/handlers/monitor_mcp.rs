@@ -29,8 +29,8 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
-use tokio::sync::Mutex;
 use platform_api::{BackgroundTaskHandle, FileSystem};
+use tokio::sync::Mutex;
 
 use crate::id::{generate_task_id, TaskType};
 use crate::output_manager::TaskOutputManager;
@@ -355,8 +355,8 @@ mod tests {
     use std::path::PathBuf;
     use tokio::sync::Mutex as TokioMutex;
 
-    use test_harness::mocks::{MockMcpTransport, MockRuntimeSpawner};
     use platform_api::{FileContent, FileEvent, FlockGuard, FsError, RuntimeSpawner};
+    use test_harness::mocks::{MockMcpTransport, MockRuntimeSpawner};
 
     // ---- minimal in-memory FileSystem (mirrors handle.rs tests) ----------
     struct InMemoryFs {

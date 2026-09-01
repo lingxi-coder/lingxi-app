@@ -12,6 +12,7 @@ sidequery = { path = "../sidequery" }
 protocol = { path = "../protocol" }
 cost = { path = "../cost" }
 core = { path = "../core" }
+telemetry = { path = "../telemetry" }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

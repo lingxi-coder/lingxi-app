@@ -105,6 +105,29 @@ impl TaskStatusSink for RegistryStatusSink {
         }
     }
 
+    async fn set_fusion_outcome(&self, task_id: &str, run_id: String, final_text: String) {
+        if let Some(reg) = self.registry.get() {
+            reg.set_fusion_outcome(task_id, run_id, final_text).await;
+        }
+    }
+
+    async fn finish_fusion_terminal(
+        &self,
+        task_id: &str,
+        run_id: String,
+        final_text: String,
+        status: TaskStatus,
+    ) {
+        if let Some(reg) = self.registry.get() {
+            let _ = reg
+                .finish_fusion_terminal(task_id, run_id, final_text, status)
+                .await;
+        } else {
+            self.set_fusion_outcome(task_id, run_id, final_text).await;
+            self.set_status(task_id, status).await;
+        }
+    }
+
     async fn finish_workflow_terminal(
         &self,
         task_id: &str,

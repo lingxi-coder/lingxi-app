@@ -23,16 +23,16 @@
 
 use crate::ConversationOrchestrator;
 use async_trait::async_trait;
-use std::path::PathBuf;
-use std::sync::atomic::Ordering;
-use std::sync::Arc;
-use std::time::SystemTime;
-use tokio::process::Command;
 use platform_api::{
     ActiveGoalSnapshot, AgentInfo, CompactionSummary, CostSnapshot, DoctorReport, ForkOutcome,
     HandleError, HookInfo, McpServerInfo, MemoryEditorOutcome, OrchestratorHandle, RecapOutcome,
     SkillInfo, StatusSnapshot,
 };
+use std::path::PathBuf;
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
+use std::time::SystemTime;
+use tokio::process::Command;
 
 /// Keep the session's provider-local wire model separate from the
 /// provider-qualified reference used by client pickers.
@@ -104,6 +104,7 @@ impl OrchestratorHandle for ConversationOrchestrator {
         s.history.clear();
         s.transcript_only_messages.clear();
         s.compact_summary_messages.clear();
+        s.model_context_excluded_messages.clear();
         s.active_goal = None;
         s.message_timing = lingxi_core::session::MessageTimingState::default();
         s.session_id = protocol::SessionId::new();
@@ -193,6 +194,10 @@ impl OrchestratorHandle for ConversationOrchestrator {
         }
         s.transcript_only_messages = runtime.transcript_only_message_ids.into_iter().collect();
         s.compact_summary_messages = runtime.compact_summary_message_ids.into_iter().collect();
+        s.model_context_excluded_messages = runtime
+            .model_context_excluded_message_ids
+            .into_iter()
+            .collect();
         *self
             .transcript
             .post_compact_skill_attachments
@@ -1118,6 +1123,55 @@ impl OrchestratorHandle for ConversationOrchestrator {
         .await
     }
 
+    async fn append_meta_user_message(&self, text: &str) -> Result<(), HandleError> {
+        let msg =
+            protocol::ConversationMessage::user_meta(protocol::MessageId::new(), text.to_string());
+        {
+            let mut s = self.session.lock().await;
+            s.history.push(msg.clone());
+        }
+        self.persist_message_to_jsonl(&msg).await;
+        Ok(())
+    }
+
+    async fn append_meta_user_message_to_session(
+        &self,
+        session_id: &str,
+        text: &str,
+    ) -> Result<(), HandleError> {
+        let target = protocol::SessionId::parse_prefixed(session_id).ok_or_else(|| {
+            HandleError::ActionFailed(format!("invalid target session id {session_id:?}"))
+        })?;
+        // Serialize with turns and hot-resume/clear so the target check,
+        // transcript parent lookup, append, and live-history update all land on
+        // one side of a session transition.
+        let _turn_guard = self.turn_gate.lock().await;
+        let current = self.session.lock().await.session_id;
+        let msg =
+            protocol::ConversationMessage::user_meta(protocol::MessageId::new(), text.to_string());
+        let persisted_uuid = self
+            .persist_model_excluded_meta_to_session(target, &msg)
+            .await?;
+
+        if current == target {
+            let mut session = self.session.lock().await;
+            session.model_context_excluded_messages.insert(msg.id());
+            session.history.push(msg);
+            drop(session);
+            if let Some(uuid) = persisted_uuid {
+                *self.transcript.last_jsonl_uuid.lock().await = Some(uuid);
+            }
+            return Ok(());
+        }
+
+        if persisted_uuid.is_none() {
+            return Err(HandleError::ActionFailed(format!(
+                "target session {session_id} is not active and persistence is disabled"
+            )));
+        }
+        Ok(())
+    }
+
     async fn get_status_snapshot(&self) -> StatusSnapshot {
         let s = self.session.lock().await;
         let cost = CostSnapshot {
@@ -1216,8 +1270,12 @@ impl OrchestratorHandle for ConversationOrchestrator {
             .await
         {
             Ok(crate::conversation::TurnOutcome::EndTurn) => Ok(platform_api::TurnOutcome::EndTurn),
-            Ok(crate::conversation::TurnOutcome::MaxTurns) => Ok(platform_api::TurnOutcome::MaxTurns),
-            Ok(crate::conversation::TurnOutcome::Cancelled) => Ok(platform_api::TurnOutcome::Cancelled),
+            Ok(crate::conversation::TurnOutcome::MaxTurns) => {
+                Ok(platform_api::TurnOutcome::MaxTurns)
+            }
+            Ok(crate::conversation::TurnOutcome::Cancelled) => {
+                Ok(platform_api::TurnOutcome::Cancelled)
+            }
             Err(e) => Err(HandleError::ActionFailed(e.to_string())),
         }
     }
@@ -1238,8 +1296,12 @@ impl OrchestratorHandle for ConversationOrchestrator {
         .await
         {
             Ok(crate::conversation::TurnOutcome::EndTurn) => Ok(platform_api::TurnOutcome::EndTurn),
-            Ok(crate::conversation::TurnOutcome::MaxTurns) => Ok(platform_api::TurnOutcome::MaxTurns),
-            Ok(crate::conversation::TurnOutcome::Cancelled) => Ok(platform_api::TurnOutcome::Cancelled),
+            Ok(crate::conversation::TurnOutcome::MaxTurns) => {
+                Ok(platform_api::TurnOutcome::MaxTurns)
+            }
+            Ok(crate::conversation::TurnOutcome::Cancelled) => {
+                Ok(platform_api::TurnOutcome::Cancelled)
+            }
             Err(e) => Err(HandleError::ActionFailed(e.to_string())),
         }
     }
@@ -1247,8 +1309,12 @@ impl OrchestratorHandle for ConversationOrchestrator {
     async fn run_async_hook_rewake(&self) -> Result<platform_api::TurnOutcome, HandleError> {
         match crate::ConversationOrchestrator::run_async_hook_rewake(self).await {
             Ok(crate::conversation::TurnOutcome::EndTurn) => Ok(platform_api::TurnOutcome::EndTurn),
-            Ok(crate::conversation::TurnOutcome::MaxTurns) => Ok(platform_api::TurnOutcome::MaxTurns),
-            Ok(crate::conversation::TurnOutcome::Cancelled) => Ok(platform_api::TurnOutcome::Cancelled),
+            Ok(crate::conversation::TurnOutcome::MaxTurns) => {
+                Ok(platform_api::TurnOutcome::MaxTurns)
+            }
+            Ok(crate::conversation::TurnOutcome::Cancelled) => {
+                Ok(platform_api::TurnOutcome::Cancelled)
+            }
             Err(error) => Err(HandleError::ActionFailed(error.to_string())),
         }
     }
@@ -2042,6 +2108,7 @@ mod tests {
                 main_thread_agent_definition: None,
                 transcript_only_message_ids: vec![transcript_only],
                 compact_summary_message_ids: vec![compact_summary],
+                model_context_excluded_message_ids: Vec::new(),
                 loaded_tool_names: vec!["DeferredTool".to_string()],
                 post_compact_skill_attachments: vec![(
                     skill_message,

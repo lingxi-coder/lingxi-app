@@ -55,6 +55,7 @@ impl CommandRegistry {
         let cmd = SlashCommand {
             name: h.name().to_string(),
             description: h.description().to_string(),
+            argument_hint: h.argument_hint().map(str::to_string),
             source: CommandSource::Builtin,
             kind: SlashCommandKind::Builtin {
                 handler_id: h.name().to_string(),

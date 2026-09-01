@@ -4,6 +4,8 @@ use crate::test_support::{
 };
 use crate::OrchestratorConfig;
 use platform_posix::fs::PosixFileSystem;
+use platform_api::OrchestratorHandle;
+use protocol::SessionId;
 use session::jsonl::schema::JsonlMessage;
 use std::sync::Arc;
 use tool_api::registry::ToolRegistry;
@@ -33,6 +35,66 @@ fn read_jsonl(path: &std::path::Path) -> Vec<JsonlMessage> {
         .filter(|l| !l.trim().is_empty())
         .map(|l| serde_json::from_str::<JsonlMessage>(l).expect("deserialize jsonl line"))
         .collect()
+}
+
+#[tokio::test]
+async fn fusion_meta_appends_only_to_launch_session_and_stays_out_of_model_context() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let home = dir.path().join(branding::DOT_DIR);
+    let cwd = dir.path().join("workspace");
+    std::fs::create_dir_all(&cwd).expect("workspace");
+    let active = SessionId::new();
+    let launch = SessionId::new();
+    let active_path = session::jsonl::session_path(
+        &home,
+        &cwd.to_string_lossy(),
+        &active.as_uuid().to_string(),
+    );
+    let launch_path = session::jsonl::session_path(
+        &home,
+        &cwd.to_string_lossy(),
+        &launch.as_uuid().to_string(),
+    );
+    let fs: Arc<dyn platform_api::FileSystem> =
+        Arc::new(PosixFileSystem::new(dir.path().to_path_buf()));
+    let writer = Arc::new(session::jsonl::writer::JsonlWriter::new(
+        active_path.clone(),
+        fs,
+    ));
+    let orch = ConversationOrchestrator::new(
+        OrchestratorConfig::default(),
+        Arc::new(MockApiClient::new(vec![])),
+        Arc::new(ToolRegistry::new()),
+        noop_hook_executor(),
+        Arc::new(NoOpPermissionGate),
+        Arc::new(MockOutputStream::new()),
+        Arc::new(StaticMemoryProvider::empty()),
+        cwd,
+    )
+    .with_jsonl_writer(writer)
+    .with_config_home(home)
+    .with_session_id(active);
+
+    orch.append_meta_user_message_to_session(&launch.to_string(), "<fusion_result />")
+        .await
+        .expect("append to launch session");
+
+    assert!(!active_path.exists(), "active session must not receive the result");
+    let launch_lines = read_jsonl(&launch_path);
+    assert_eq!(launch_lines.len(), 1);
+    assert_eq!(launch_lines[0].session_id, launch.to_string());
+    assert_eq!(
+        launch_lines[0].extra.get("isModelContextExcluded"),
+        Some(&serde_json::Value::Bool(true))
+    );
+    assert!(orch.session.lock().await.history.is_empty());
+
+    orch.append_meta_user_message_to_session(&active.to_string(), "<fusion_result />")
+        .await
+        .expect("append to active session");
+    let state = orch.session.lock().await;
+    assert_eq!(state.history.len(), 1);
+    assert!(state.model_context_history().is_empty());
 }
 
 #[tokio::test]

@@ -8,10 +8,10 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Mutex as StdMutex;
 
-use test_harness::mocks::MockRuntimeSpawner;
-use tokio::sync::Mutex as TokioMutex;
 use platform_api::filesystem::{FileContent, FileEvent, FileSystem, FlockGuard, FsError};
 use platform_api::RuntimeSpawner;
+use test_harness::mocks::MockRuntimeSpawner;
+use tokio::sync::Mutex as TokioMutex;
 
 // ---- In-memory FileSystem (mirrors the other handler tests) ------------
 
@@ -390,7 +390,8 @@ async fn await_claim(
 ) -> task_store::TodoTask {
     for _ in 0..400 {
         if let Some(task) = store.get(task_id).await {
-            if task.owner.as_deref() == Some(owner) && task.status == lingxi_core::TodoState::InProgress
+            if task.owner.as_deref() == Some(owner)
+                && task.status == lingxi_core::TodoState::InProgress
             {
                 return task;
             }
@@ -1441,7 +1442,11 @@ impl Drop for ClaimEnvGuard {
     }
 }
 
-fn todo(subject: &str, status: lingxi_core::TodoState, owner: Option<&str>) -> task_store::TodoTask {
+fn todo(
+    subject: &str,
+    status: lingxi_core::TodoState,
+    owner: Option<&str>,
+) -> task_store::TodoTask {
     let mut t =
         task_store::TodoTask::new(subject.into(), "desc".into(), None, serde_json::Map::new());
     t.status = status;
@@ -1642,7 +1647,11 @@ async fn spawn_auto_claims_next_available_task_from_injected_config_home() {
     let config_home = guard.dir.join("host-owned-config");
     let store = task_store::TodoStore::for_list_at(&config_home, team);
     let tid = store
-        .create(todo("Host-owned work", lingxi_core::TodoState::Pending, None))
+        .create(todo(
+            "Host-owned work",
+            lingxi_core::TodoState::Pending,
+            None,
+        ))
         .await
         .unwrap();
 
@@ -1774,7 +1783,11 @@ async fn killed_teammate_stops_claiming() {
     handler.kill(&h.task_id, c).await.unwrap();
 
     let tid = store
-        .create(todo("Post-kill work", lingxi_core::TodoState::Pending, None))
+        .create(todo(
+            "Post-kill work",
+            lingxi_core::TodoState::Pending,
+            None,
+        ))
         .await
         .unwrap();
     // Two full tick intervals: a live poller would have claimed by now.

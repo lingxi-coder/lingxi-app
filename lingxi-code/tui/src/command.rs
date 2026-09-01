@@ -82,9 +82,10 @@ impl SlashCommand {
 /// Commands claude-code 2.1.205 dropped are dropped here too (`/doctor` — now
 /// a bundled skill, `/files`, `/commit`, `/init-verifiers`); `/stats` and
 /// `/cost` live on as `/usage` aliases, `/vim` as a hidden
-/// moved-to-`/config` redirect. `/web`, `/connect`, `/image`, and `/worktree`
-/// are deliberate LingXi divergences (multi-provider support plus a slash
-/// façade over the existing worktree lifecycle tools).
+/// moved-to-`/config` redirect. `/web`, `/connect`, `/image`, `/worktree`,
+/// and `/fusion` are deliberate LingXi divergences (multi-provider support
+/// plus a slash façade over worktree lifecycle tools and Fusion
+/// multi-model deliberation).
 pub const BUILTIN: &[SlashCommand] = &[
     SlashCommand {
         name: "/help",
@@ -192,6 +193,19 @@ pub const BUILTIN: &[SlashCommand] = &[
         args: ArgSpec::Optional,
         advertised: true,
         run: ChatWidget::cmd_worktree,
+    },
+    SlashCommand {
+        // LingXi project-specific. Desktop composition-root command, not in
+        // command-api's locked 108-name table. Explicit per-run even when
+        // `fusion.enabled` is false.
+        name: "/fusion",
+        aliases: &[],
+        description: "Run a multi-model Fusion deliberation",
+        dynamic_description: None,
+        hint: "[--quality|--fast] [--same-provider|--cross-provider] PROMPT",
+        args: ArgSpec::Optional,
+        advertised: true,
+        run: ChatWidget::cmd_fusion,
     },
     SlashCommand {
         name: "/rewind",
@@ -1154,6 +1168,18 @@ mod tests {
         assert_eq!(
             command.hint,
             "[status|create [name]|enter <path>|keep|remove [--discard]]"
+        );
+    }
+
+    #[test]
+    fn fusion_command_is_advertised_with_prompt_hint() {
+        let (command, args) = resolve("/fusion review the plan").expect("registered");
+        assert_eq!(command.name, "/fusion");
+        assert_eq!(args, "review the plan");
+        assert!(command.advertised);
+        assert_eq!(
+            command.hint,
+            "[--quality|--fast] [--same-provider|--cross-provider] PROMPT"
         );
     }
 

@@ -11,7 +11,7 @@ use platform_api::subagent_spawn::{
 use platform_api::tool_invoker::{SubagentInvocationContext, ToolInvoker, ToolInvokerError};
 use platform_api::{
     budget::{BudgetEnforcerHandle, BudgetError},
-    EvidenceKind, FusionAnalysis, FusionContradiction, FusionDecision, FusionExecutor,
+    EvidenceKind, FusionAnalysis, FusionContradiction, FusionDecision, FusionError, FusionExecutor,
     FusionInheritance, FusionModelHints, FusionModelRef, FusionNeedsParentReason, FusionOrigin,
     FusionPreset, FusionRecommendation, FusionRequest, FusionStatus, PanelClaim, PanelEvidence,
     PanelPosition, PanelReport, PanelRunStatus, RiskSeverity, DEFAULT_FUSION_DIMENSIONS,
@@ -23,8 +23,10 @@ use sidequery::{
     StrictStructuredQueryRequest, StrictStructuredQueryResponse,
 };
 use std::collections::{HashMap, VecDeque};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use telemetry::{AnalyticsBus, AnalyticsValue, InMemorySink};
+use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 
 struct InertInvoker;
@@ -475,6 +477,80 @@ fn orch_scripted(spawner: Arc<FakeSpawner>, side: Arc<ScriptedAnalyst>) -> Fusio
     FusionOrchestrator::new(spawner, side, test_config(), Arc::new(catalog()))
 }
 
+async fn orch_with_telemetry(
+    spawner: Arc<FakeSpawner>,
+    side: Arc<dyn SideQueryClient>,
+    config: FusionRuntimeConfig,
+) -> (FusionOrchestrator, Arc<InMemorySink>) {
+    let sink = Arc::new(InMemorySink::new());
+    let bus = Arc::new(AnalyticsBus::new());
+    bus.attach_sink(sink.clone()).await;
+    (
+        FusionOrchestrator::new(spawner, side, config, Arc::new(catalog())).with_bus(bus),
+        sink,
+    )
+}
+
+#[derive(Clone, Copy)]
+enum BlockingStage {
+    Analysis,
+    Synthesis,
+}
+
+struct BlockingSideQuery {
+    stage: BlockingStage,
+    started: Arc<Notify>,
+    dropped: Arc<AtomicBool>,
+}
+
+struct PendingQueryGuard(Arc<AtomicBool>);
+
+impl Drop for PendingQueryGuard {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
+}
+
+#[async_trait]
+impl SideQueryClient for BlockingSideQuery {
+    async fn query(&self, _request: SideQueryRequest) -> Result<SideQueryResponse, SideQueryError> {
+        if matches!(self.stage, BlockingStage::Synthesis) {
+            let _guard = PendingQueryGuard(self.dropped.clone());
+            self.started.notify_one();
+            std::future::pending::<()>().await;
+        }
+        Err(SideQueryError::InvalidResponse(
+            "unexpected synthesizer call".into(),
+        ))
+    }
+
+    async fn query_json_schema(
+        &self,
+        request: StrictStructuredQueryRequest,
+    ) -> Result<StrictStructuredQueryResponse, SideQueryError> {
+        if matches!(self.stage, BlockingStage::Analysis) {
+            let _guard = PendingQueryGuard(self.dropped.clone());
+            self.started.notify_one();
+            std::future::pending::<()>().await;
+        }
+        let user = user_text(&request);
+        let ids = panel_ids_from_user(&user);
+        let id_refs: Vec<&str> = ids.iter().map(String::as_str).collect();
+        let dimensions = DEFAULT_FUSION_DIMENSIONS
+            .iter()
+            .map(|dimension| (*dimension).to_string())
+            .collect::<Vec<_>>();
+        Ok(StrictStructuredQueryResponse {
+            value: merge_analysis(&id_refs, &dimensions, 80, false),
+            usage: cost::Usage::default(),
+            model: request.model,
+            profile: request.profile,
+            request_id: None,
+            retry_count: 0,
+        })
+    }
+}
+
 #[tokio::test]
 async fn three_panels_concurrent_and_mutually_invisible() {
     let spawner = FakeSpawner::new(three_ok());
@@ -537,7 +613,8 @@ async fn min_panels_not_met() {
 async fn pick_makes_zero_synth_calls() {
     let spawner = FakeSpawner::new(three_ok());
     let side = ScriptedAnalyst::new(AnalystMode::PickFirst, vec![]);
-    let result = orch_scripted(spawner, side.clone())
+    let (orch, sink) = orch_with_telemetry(spawner, side.clone(), test_config()).await;
+    let result = orch
         .run(request("task"), inherit(), None)
         .await
         .unwrap();
@@ -545,13 +622,42 @@ async fn pick_makes_zero_synth_calls() {
     assert!(matches!(result.decision, FusionDecision::Picked { .. }));
     assert!(result.final_text.starts_with("ANSWER_"));
     assert_eq!(result.status, FusionStatus::Completed);
+    let events = sink.events().await;
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event.name == telemetry::tengu::fusion::PANEL_STARTED)
+            .count(),
+        3
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event.name == telemetry::tengu::fusion::PANEL_COMPLETED)
+            .count(),
+        3
+    );
+    assert!(events
+        .iter()
+        .any(|event| event.name == telemetry::tengu::fusion::ANALYSIS_COMPLETED));
+    assert!(events
+        .iter()
+        .any(|event| event.name == telemetry::tengu::fusion::COMPLETED));
+    assert!(!events.iter().any(|event| {
+        matches!(
+            event.name.as_str(),
+            telemetry::tengu::fusion::SYNTHESIS_COMPLETED
+                | telemetry::tengu::fusion::SYNTHESIS_FAILED
+        )
+    }));
 }
 
 #[tokio::test]
 async fn merge_calls_synth_once_with_parent_model() {
     let spawner = FakeSpawner::new(three_ok());
     let side = ScriptedAnalyst::new(AnalystMode::Merge, vec![Ok("MERGED_ANSWER".into())]);
-    let result = orch_scripted(spawner, side.clone())
+    let (orch, sink) = orch_with_telemetry(spawner, side.clone(), test_config()).await;
+    let result = orch
         .run(request("task"), inherit(), None)
         .await
         .unwrap();
@@ -562,6 +668,18 @@ async fn merge_calls_synth_once_with_parent_model() {
     );
     assert!(matches!(result.decision, FusionDecision::Merged));
     assert_eq!(result.final_text, "MERGED_ANSWER");
+    let events = sink.events().await;
+    assert!(events
+        .iter()
+        .any(|event| event.name == telemetry::tengu::fusion::SYNTHESIS_COMPLETED));
+    let completed = events
+        .iter()
+        .find(|event| event.name == telemetry::tengu::fusion::COMPLETED)
+        .expect("completed telemetry");
+    assert!(matches!(
+        completed.metadata.get("decision"),
+        Some(AnalyticsValue::String(decision)) if decision == "merged"
+    ));
 }
 
 #[tokio::test]
@@ -580,7 +698,8 @@ async fn analyst_invalid_json_retries_once() {
 async fn analyst_twice_invalid_needs_parent() {
     let spawner = FakeSpawner::new(three_ok());
     let side = ScriptedAnalyst::new(AnalystMode::AlwaysInvalid, vec![]);
-    let result = orch_scripted(spawner, side.clone())
+    let (orch, sink) = orch_with_telemetry(spawner, side.clone(), test_config()).await;
+    let result = orch
         .run(request("task"), inherit(), None)
         .await
         .unwrap();
@@ -592,6 +711,18 @@ async fn analyst_twice_invalid_needs_parent() {
         }
     ));
     assert_eq!(result.status, FusionStatus::NeedsParent);
+    let events = sink.events().await;
+    assert!(events
+        .iter()
+        .any(|event| event.name == telemetry::tengu::fusion::ANALYSIS_FAILED));
+    let completed = events
+        .iter()
+        .find(|event| event.name == telemetry::tengu::fusion::COMPLETED)
+        .expect("needs-parent completion telemetry");
+    assert!(matches!(
+        completed.metadata.get("decision"),
+        Some(AnalyticsValue::String(decision)) if decision == "needs_parent"
+    ));
 }
 
 #[tokio::test]
@@ -601,7 +732,8 @@ async fn synth_failure_needs_parent_with_summary() {
         AnalystMode::Merge,
         vec![Err(SideQueryError::InvalidResponse("boom".into()))],
     );
-    let result = orch_scripted(spawner, side.clone())
+    let (orch, sink) = orch_with_telemetry(spawner, side.clone(), test_config()).await;
+    let result = orch
         .run(request("task"), inherit(), None)
         .await
         .unwrap();
@@ -613,6 +745,13 @@ async fn synth_failure_needs_parent_with_summary() {
         }
     ));
     assert!(result.final_text.contains("synthesizer failed"));
+    let events = sink.events().await;
+    assert!(events
+        .iter()
+        .any(|event| event.name == telemetry::tengu::fusion::SYNTHESIS_FAILED));
+    assert!(events
+        .iter()
+        .any(|event| event.name == telemetry::tengu::fusion::COMPLETED));
 }
 
 #[tokio::test]
@@ -642,7 +781,7 @@ async fn cancel_joins_all_panel_tasks() {
     let spawner = FakeSpawner::new(map);
     let side = ScriptedAnalyst::new(AnalystMode::PickFirst, vec![]);
     let cancel = CancellationToken::new();
-    let orch = orch_scripted(spawner.clone(), side);
+    let (orch, sink) = orch_with_telemetry(spawner.clone(), side, test_config()).await;
     let inherit = inherit_cancel(cancel.clone());
     let handle = tokio::spawn(async move { orch.run(request("task"), inherit, None).await });
     tokio::time::sleep(std::time::Duration::from_millis(30)).await;
@@ -651,6 +790,210 @@ async fn cancel_joins_all_panel_tasks() {
     let err = handle.await.unwrap().unwrap_err();
     assert!(matches!(err, platform_api::FusionError::Cancelled));
     assert_eq!(spawner.live(), 0);
+    let events = sink.events().await;
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| {
+                matches!(
+                    event.name.as_str(),
+                    telemetry::tengu::fusion::COMPLETED
+                        | telemetry::tengu::fusion::FAILED
+                        | telemetry::tengu::fusion::CANCELLED
+                )
+            })
+            .map(|event| event.name.as_str())
+            .collect::<Vec<_>>(),
+        vec![telemetry::tengu::fusion::CANCELLED]
+    );
+}
+
+#[tokio::test]
+async fn cancel_drops_an_inflight_analyst_query_and_emits_cancelled() {
+    let started = Arc::new(Notify::new());
+    let dropped = Arc::new(AtomicBool::new(false));
+    let side = Arc::new(BlockingSideQuery {
+        stage: BlockingStage::Analysis,
+        started: started.clone(),
+        dropped: dropped.clone(),
+    });
+    let (orch, sink) =
+        orch_with_telemetry(FakeSpawner::new(three_ok()), side, test_config()).await;
+    let cancel = CancellationToken::new();
+    let inherit = inherit_cancel(cancel.clone());
+    let handle = tokio::spawn(async move { orch.run(request("task"), inherit, None).await });
+
+    tokio::time::timeout(std::time::Duration::from_secs(2), started.notified())
+        .await
+        .expect("analyst should start");
+    cancel.cancel();
+    let error = tokio::time::timeout(std::time::Duration::from_secs(2), handle)
+        .await
+        .expect("cancelled analyst should unwind")
+        .expect("join")
+        .expect_err("cancelled fusion");
+
+    assert_eq!(error, FusionError::Cancelled);
+    assert!(dropped.load(Ordering::SeqCst));
+    assert_eq!(
+        sink.events()
+            .await
+            .iter()
+            .filter(|event| event.name == telemetry::tengu::fusion::CANCELLED)
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn cancel_drops_an_inflight_synthesizer_query_and_emits_cancelled() {
+    let started = Arc::new(Notify::new());
+    let dropped = Arc::new(AtomicBool::new(false));
+    let side = Arc::new(BlockingSideQuery {
+        stage: BlockingStage::Synthesis,
+        started: started.clone(),
+        dropped: dropped.clone(),
+    });
+    let (orch, sink) =
+        orch_with_telemetry(FakeSpawner::new(three_ok()), side, test_config()).await;
+    let cancel = CancellationToken::new();
+    let inherit = inherit_cancel(cancel.clone());
+    let handle = tokio::spawn(async move { orch.run(request("task"), inherit, None).await });
+
+    tokio::time::timeout(std::time::Duration::from_secs(2), started.notified())
+        .await
+        .expect("synthesizer should start");
+    cancel.cancel();
+    let error = tokio::time::timeout(std::time::Duration::from_secs(2), handle)
+        .await
+        .expect("cancelled synthesizer should unwind")
+        .expect("join")
+        .expect_err("cancelled fusion");
+
+    assert_eq!(error, FusionError::Cancelled);
+    assert!(dropped.load(Ordering::SeqCst));
+    let events = sink.events().await;
+    assert!(events
+        .iter()
+        .any(|event| event.name == telemetry::tengu::fusion::ANALYSIS_COMPLETED));
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event.name == telemetry::tengu::fusion::CANCELLED)
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn total_timeout_emits_one_failed_terminal_event_and_drops_panels() {
+    let map = HashMap::from([
+        ("claude-sonnet-5".into(), FakePanel::Hang),
+        ("gpt-5.6-terra".into(), FakePanel::Hang),
+        ("deepseek-v4-pro".into(), FakePanel::Hang),
+    ]);
+    let spawner = FakeSpawner::new(map);
+    let side = ScriptedAnalyst::new(AnalystMode::PickFirst, vec![]);
+    let mut config = test_config();
+    config.total_timeout_ms = 25;
+    let (orch, sink) = orch_with_telemetry(spawner.clone(), side, config).await;
+
+    let error = orch
+        .run(request("task"), inherit(), None)
+        .await
+        .expect_err("total timeout");
+    assert_eq!(error, FusionError::TimedOutEmpty);
+    for _ in 0..100 {
+        if spawner.live() == 0 {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(spawner.live(), 0, "timed-out panel futures must be dropped");
+
+    let events = sink.events().await;
+    let terminal = events
+        .iter()
+        .filter(|event| {
+            matches!(
+                event.name.as_str(),
+                telemetry::tengu::fusion::COMPLETED
+                    | telemetry::tengu::fusion::FAILED
+                    | telemetry::tengu::fusion::CANCELLED
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(terminal.len(), 1);
+    assert_eq!(terminal[0].name, telemetry::tengu::fusion::FAILED);
+    assert!(matches!(
+        terminal[0].metadata.get("error"),
+        Some(AnalyticsValue::String(error)) if error == "total_timeout"
+    ));
+}
+
+#[tokio::test]
+async fn failure_telemetry_uses_categories_and_never_records_request_content() {
+    let spawner = FakeSpawner::new(three_ok());
+    let side = ScriptedAnalyst::new(AnalystMode::PickFirst, vec![]);
+    let (orch, sink) = orch_with_telemetry(spawner.clone(), side, test_config()).await;
+    let mut invalid = request("SECRET_PROMPT");
+    invalid.dimensions = vec!["https://secret.example/private-command".into()];
+
+    let error = orch
+        .run(invalid, inherit(), None)
+        .await
+        .expect_err("invalid dimension");
+    assert!(matches!(error, FusionError::InvalidRequest(_)));
+    assert!(spawner.prompts().is_empty(), "preflight must call no provider");
+
+    let events = sink.events().await;
+    let failed = events
+        .iter()
+        .find(|event| event.name == telemetry::tengu::fusion::FAILED)
+        .expect("failed telemetry");
+    assert!(matches!(
+        failed.metadata.get("error"),
+        Some(AnalyticsValue::String(category)) if category == "invalid_request"
+    ));
+    for value in failed.metadata.values() {
+        if let AnalyticsValue::String(value) = value {
+            assert!(!value.contains("SECRET_PROMPT"));
+            assert!(!value.contains("secret.example"));
+            assert!(!value.contains("private-command"));
+        }
+    }
+}
+
+#[tokio::test]
+async fn all_panel_failures_emit_panel_failed_and_failed_terminal_events() {
+    let map = HashMap::from([
+        ("claude-sonnet-5".into(), FakePanel::Fail),
+        ("gpt-5.6-terra".into(), FakePanel::Fail),
+        ("deepseek-v4-pro".into(), FakePanel::Fail),
+    ]);
+    let side = ScriptedAnalyst::new(AnalystMode::PickFirst, vec![]);
+    let (orch, sink) = orch_with_telemetry(FakeSpawner::new(map), side, test_config()).await;
+
+    let error = orch
+        .run(request("task"), inherit(), None)
+        .await
+        .expect_err("all panels fail");
+    assert_eq!(error, FusionError::AllPanelsFailed);
+    let events = sink.events().await;
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event.name == telemetry::tengu::fusion::PANEL_FAILED)
+            .count(),
+        3
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event.name == telemetry::tengu::fusion::FAILED)
+            .count(),
+        1
+    );
 }
 
 #[tokio::test]
@@ -707,5 +1050,3 @@ async fn reserve_failure_makes_zero_panel_spawns() {
         "no provider/panel calls after a failed reservation"
     );
 }
-
-

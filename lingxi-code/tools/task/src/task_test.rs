@@ -81,6 +81,7 @@ mod tests {
         assert!(validate_task_id("t12345678").is_ok());
         assert!(validate_task_id("w12345678").is_ok());
         assert!(validate_task_id("m12345678").is_ok());
+        assert!(validate_task_id("f12345678").is_ok());
     }
 
     #[test]
@@ -95,8 +96,8 @@ mod tests {
     #[test]
     fn task_id_regex_matches_fresh_generated() {
         use regex::Regex;
-        let re = Regex::new(r"^[bartwmdks][0-9a-z]{8}$").unwrap();
-        for c in ['b', 'a', 'r', 't', 'w', 'm', 'd', 'k'] {
+        let re = Regex::new(r"^[bartwmdksf][0-9a-z]{8}$").unwrap();
+        for c in ['b', 'a', 'r', 't', 'w', 'm', 'd', 'k', 'f'] {
             let id = fresh_task_id(c);
             assert!(re.is_match(&id), "generated id {id} fails regex");
             assert!(validate_task_id(&id).is_ok());
@@ -147,8 +148,9 @@ mod tests {
         // covered by `todo_v2_enabled_inner` + `platform_api::env::is_env_defined_falsy`.
         let ctx = ToolStaticContext::default();
         // Holds whenever LINGXI_ENABLE_TASKS is NOT a defined-falsy value.
-        if !platform_api::env::is_env_defined_falsy(std::env::var("LINGXI_ENABLE_TASKS").ok().as_deref())
-        {
+        if !platform_api::env::is_env_defined_falsy(
+            std::env::var("LINGXI_ENABLE_TASKS").ok().as_deref(),
+        ) {
             assert!(is_todo_v2_enabled(&ctx));
         } else {
             assert!(!is_todo_v2_enabled(&ctx));
@@ -414,11 +416,11 @@ mod tests {
     //   notification (TaskUpdateTool.ts:277-298).
     mod swarm_side_effects {
         use super::*;
+        use platform_api::mailbox::{MailboxError, MailboxMessage, MailboxRouterHandle, RouteAck};
         use protocol::AgentId;
         use std::sync::{Arc, Mutex};
         use telemetry::AnalyticsBus;
         use tool_api::test_support::{ctx_for_file_tools, fresh_ctx, fresh_tx, make_dummy_fs};
-        use platform_api::mailbox::{MailboxError, MailboxMessage, MailboxRouterHandle, RouteAck};
 
         /// Restore-on-drop guard for the swarm + store env vars; also removes the
         /// throwaway store dir. Runs even on assertion panic.
@@ -1823,15 +1825,15 @@ mod tests {
 
     mod product_b {
         use super::*;
+        use platform_api::task_registry::{
+            TaskCreateInput, TaskListFilter, TaskOutputChunk, TaskRecord, TaskRegistryHandle,
+            TaskUpdatePatch,
+        };
         use std::collections::VecDeque;
         use std::sync::Mutex as StdMutex;
         use telemetry::AnalyticsBus;
         use tool_api::test_support::{
             ctx_for_file_tools, fresh_ctx, fresh_ctx_cancelled, fresh_tx, make_dummy_fs,
-        };
-        use platform_api::task_registry::{
-            TaskCreateInput, TaskListFilter, TaskOutputChunk, TaskRecord, TaskRegistryHandle,
-            TaskUpdatePatch,
         };
 
         #[derive(Default)]

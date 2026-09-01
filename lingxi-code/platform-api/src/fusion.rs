@@ -4,6 +4,12 @@
 //! concrete orchestrator lives in the `fusion` crate so `platform-api` stays a
 //! leaf. Side-query clients and settings snapshots are injected by the
 //! composition root into that orchestrator, not onto this trait.
+//!
+//! Fusion panels are ordinary hidden subagents: they inherit the parent
+//! session's tool invoker, budget, cancellation, and permission surface. In
+//! particular, panel `Bash` calls are governed by the same live session
+//! permission mode/rules as any other subagent, not by a Fusion-specific
+//! read-only downgrade.
 
 use crate::budget::BudgetEnforcerHandle;
 use crate::subagent_spawn::SubagentInheritance;
@@ -307,7 +313,8 @@ pub struct FusionAnalysis {
 pub enum FusionStatus {
     /// A final answer was produced (pick or merge).
     Completed,
-    /// Material exists but should not be treated as a definite conclusion.
+    /// Material exists but the caller should route it back to the parent
+    /// model/user for judgment instead of treating it as a final answer.
     NeedsParent,
 }
 
@@ -343,7 +350,8 @@ pub enum FusionDecision {
     },
     /// Parent model synthesized a merged answer.
     Merged,
-    /// Structured needs-parent outcome.
+    /// Structured needs-parent outcome. The result stays `Ok(...)`; callers can
+    /// surface the compact material without pretending Fusion reached closure.
     NeedsParent {
         /// Machine-readable reason.
         reason: FusionNeedsParentReason,
@@ -396,7 +404,7 @@ pub struct FusionUsage {
     pub cache_write_tokens: u64,
     /// Realized cost in nano-USD.
     pub realized_nano_usd: u64,
-    /// Reserved maximum in nano-USD.
+    /// Reserved maximum in nano-USD. This is the cost guardrail, not a bill.
     pub reserved_max_nano_usd: u64,
     /// True when any component used an estimated fallback.
     pub estimated: bool,
@@ -443,7 +451,8 @@ pub struct FusionResult {
     /// Timings.
     #[serde(default)]
     pub timing: FusionTiming,
-    /// Provider profiles that received prompt data.
+    /// Provider profiles that received prompt data. Cross-provider runs may
+    /// include profiles beyond the parent session's provider.
     #[serde(default)]
     pub egress_profiles: Vec<String>,
 }
@@ -623,6 +632,9 @@ pub struct FusionAgentSurface {
     pub fast_panel_count: u8,
     /// Hard panel cap.
     pub max_panel: u8,
+    /// `/fusion` default when neither `--same-provider` nor `--cross-provider`
+    /// is passed. `true` allows prompt data to leave the parent provider.
+    pub slash_cross_provider_default: bool,
 }
 
 impl Default for FusionAgentSurface {
@@ -635,6 +647,7 @@ impl Default for FusionAgentSurface {
             quality_panel_count: 3,
             fast_panel_count: 2,
             max_panel: FUSION_MAX_PANEL,
+            slash_cross_provider_default: true,
         }
     }
 }
@@ -656,6 +669,32 @@ pub trait FusionExecutor: Send + Sync {
     fn agent_surface(&self) -> FusionAgentSurface {
         FusionAgentSurface::default()
     }
+
+    /// Workflow-global `fusion()` call cap for one workflow run.
+    ///
+    /// Hosts may return a lower value, but callers must still enforce the
+    /// global hard ceiling of 20.
+    fn workflow_fusion_call_cap(&self) -> u32 {
+        20
+    }
+}
+
+/// Parent-conversation sink for a finished Fusion run.
+///
+/// Failures here must not rewrite the Fusion task's terminal status.
+#[async_trait]
+pub trait FusionCompletionSink: Send + Sync {
+    /// Publish one sanitized Fusion result. Implementations must be idempotent
+    /// on `(conversation_id, run_id)`.
+    async fn publish(&self, conversation_id: &str, result: &FusionResult);
+}
+
+/// Test / unwired sink.
+pub struct NoopFusionCompletionSink;
+
+#[async_trait]
+impl FusionCompletionSink for NoopFusionCompletionSink {
+    async fn publish(&self, _conversation_id: &str, _result: &FusionResult) {}
 }
 
 /// Normalize and validate dimension names.

@@ -113,7 +113,7 @@ fn task_id_regex_matches_validate_task_id_acceptance() {
     // Probe with a few well-formed prefixes (one per TaskType).
     // One probe per TaskType prefix, incl. 's' (oracle `monitor_ws:"s"`
     // @242497270) and 'k' (`mcp_task`).
-    for prefix in ['b', 'a', 'r', 't', 'w', 'm', 'd', 'k', 's'] {
+    for prefix in ['b', 'a', 'r', 't', 'w', 'm', 'd', 'k', 's', 'f'] {
         let id = format!("{prefix}12345678");
         assert!(
             re.is_match(&id),

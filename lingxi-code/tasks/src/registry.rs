@@ -4,8 +4,8 @@
 //! the [`BackgroundTaskHandle`]s returned by the [`RuntimeSpawner`].
 
 use crate::handlers::{
-    DreamHandler, InProcessTeammateHandler, LocalAgentHandler, LocalBashHandler, MonitorHandler,
-    MonitorMcpHandler,
+    DreamHandler, InProcessTeammateHandler, LocalAgentHandler, LocalBashHandler,
+    LocalFusionHandler, MonitorHandler, MonitorMcpHandler,
 };
 use crate::id::{generate_task_id, TaskType};
 use crate::output_manager::TaskOutputManager;
@@ -15,8 +15,8 @@ use agent::{StateMachinePool, SubagentApiClient};
 use async_trait::async_trait;
 use platform_api::team_spawn::{TeamSpawnError, TeamSpawnSeam};
 use platform_api::{
-    BackgroundTaskHandle, BudgetEnforcerHandle, FileSystem, ProcessRunner, RuntimeSpawner, Sandbox,
-    SubagentSpawner, ToolInvoker,
+    BackgroundTaskHandle, BudgetEnforcerHandle, FileSystem, FusionCompletionSink, FusionExecutor,
+    ProcessRunner, RuntimeSpawner, Sandbox, SubagentSpawner, ToolInvoker,
 };
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -1349,6 +1349,7 @@ impl TaskRegistry {
                 TaskState::Monitor(m) => m.base.status = status,
                 TaskState::McpTask(m) => m.base.status = status,
                 TaskState::Dream(d) => d.base.status = status,
+                TaskState::LocalFusion(f) => f.base.status = status,
             }
             entry.clone()
             // `map` write-guard drops here — the best-effort hook fire below
@@ -1507,6 +1508,47 @@ impl TaskRegistry {
         }
     }
 
+    /// Record a Fusion run's sanitized final text before the terminal status
+    /// opens it to the notification drain.
+    pub async fn set_fusion_outcome(&self, task_id: &str, run_id: String, final_text: String) {
+        let task_id = self.canonical_or_raw(task_id).await;
+        let mut map = self.tasks.write().await;
+        if let Some(TaskState::LocalFusion(fusion)) = map.get_mut(&task_id) {
+            fusion.run_id = Some(run_id);
+            fusion.final_text = Some(final_text);
+        }
+    }
+
+    /// Atomically publish a Fusion run's terminal payload and terminal status.
+    pub async fn finish_fusion_terminal(
+        &self,
+        task_id: &str,
+        run_id: String,
+        final_text: String,
+        status: TaskStatus,
+    ) -> Result<TaskState, TaskError> {
+        let task_id = self.canonical_or_raw(task_id).await;
+        let updated = {
+            let mut map = self.tasks.write().await;
+            let entry = map
+                .get_mut(&task_id)
+                .ok_or_else(|| TaskError::NotFound(task_id.clone()))?;
+            let TaskState::LocalFusion(fusion) = entry else {
+                return Ok(entry.clone());
+            };
+            if fusion.base.status.is_terminal() {
+                return Ok(entry.clone());
+            }
+            fusion.run_id = Some(run_id);
+            fusion.final_text = Some(final_text);
+            fusion.base.status = status;
+            entry.clone()
+        };
+
+        self.fire_task_completed_hook(&task_id, status, &updated).await;
+        Ok(updated)
+    }
+
     /// Atomically publish a workflow's terminal payload and terminal status.
     ///
     /// This closes the outcome→status race: a concurrent kill/drain cannot
@@ -1620,6 +1662,10 @@ impl TaskRegistry {
                 _ => None,
             };
             let agent_outcome = agent_outcome.unwrap_or_default();
+            let fusion_final_text = match state {
+                TaskState::LocalFusion(fusion) => fusion.final_text.clone(),
+                _ => None,
+            };
             out.push(platform_api::task_registry::TaskNotification {
                 task_id: b.id.clone(),
                 task_type: task_type_to_wire(b.task_type).to_string(),
@@ -1646,7 +1692,8 @@ impl TaskRegistry {
                 result: workflow_outcome
                     .as_ref()
                     .and_then(|outcome| outcome.result.clone())
-                    .or(agent_outcome.result),
+                    .or(agent_outcome.result)
+                    .or(fusion_final_text),
                 workflow_failures: workflow_outcome
                     .as_ref()
                     .map(|outcome| outcome.failures.clone())
@@ -2133,6 +2180,8 @@ fn state_for_spawn(mut base: TaskStateBase, input: &TaskSpawnInput) -> TaskState
             resume_from_run_id,
             args,
             run_id,
+            parent_model: _,
+            parent_model_profile: _,
             invocation_mode: _,
             workflow_source: _,
             script_is_verbatim_builtin: _,
@@ -2216,6 +2265,21 @@ fn state_for_spawn(mut base: TaskStateBase, input: &TaskSpawnInput) -> TaskState
                 max_iterations: *max_iterations,
             })
         }
+        TaskSpawnInput::LocalFusion {
+            request,
+            conversation_id,
+        } => TaskState::LocalFusion(crate::state::LocalFusionTaskState {
+            base,
+            conversation_id: conversation_id.clone(),
+            prompt: request.prompt.clone(),
+            run_id: None,
+            preset: match request.preset {
+                platform_api::FusionPreset::Quality => "quality".to_string(),
+                platform_api::FusionPreset::Fast => "fast".to_string(),
+            },
+            cross_provider: request.cross_provider,
+            final_text: None,
+        }),
     }
 }
 
@@ -2402,6 +2466,26 @@ pub fn register_dream_handler(
         TaskType::Dream,
         Arc::new(
             DreamHandler::new(spawner, tool_invoker, budget, output_manager)
+                .with_status_sink(status_sink),
+        ),
+    );
+}
+
+/// Register [`TaskType::LocalFusion`]. Call before wrapping the registry in an
+/// [`Arc`].
+pub fn register_fusion_handler(
+    reg: &mut TaskRegistry,
+    executor: Arc<dyn FusionExecutor>,
+    sink: Arc<dyn FusionCompletionSink>,
+    tool_invoker: Arc<dyn ToolInvoker>,
+    budget: Arc<dyn BudgetEnforcerHandle>,
+    status_sink: Arc<dyn crate::handlers::TaskStatusSink>,
+) {
+    let output_manager = reg.output_manager.clone();
+    reg.register_handler(
+        TaskType::LocalFusion,
+        Arc::new(
+            LocalFusionHandler::new(executor, sink, tool_invoker, budget, output_manager)
                 .with_status_sink(status_sink),
         ),
     );

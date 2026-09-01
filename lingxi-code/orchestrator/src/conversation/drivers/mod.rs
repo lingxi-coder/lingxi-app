@@ -656,7 +656,11 @@ impl StreamingTurnDriver<'_> {
                 // meta message, like every `callModel` (claude-code `A6n`).
                 let (recov_snapshot_raw, recov_model, recov_profile) = {
                     let s = orch.session.lock().await;
-                    (s.history.clone(), s.model.clone(), s.model_profile.clone())
+                    (
+                        s.model_context_history(),
+                        s.model.clone(),
+                        s.model_profile.clone(),
+                    )
                 };
                 let mut recov_snapshot = orch
                     .rewrite_outgoing_history(
@@ -866,7 +870,11 @@ impl StreamingTurnDriver<'_> {
         // snapshot we used for the stream — no reset needed).
         let (non_stream_snapshot_raw, non_stream_model, non_stream_profile) = {
             let s = orch.session.lock().await;
-            (s.history.clone(), s.model.clone(), s.model_profile.clone())
+            (
+                s.model_context_history(),
+                s.model.clone(),
+                s.model_profile.clone(),
+            )
         };
         let mut non_stream_snapshot = orch
             .rewrite_outgoing_history(non_stream_snapshot_raw, outgoing_history_rewriter)
@@ -1076,7 +1084,11 @@ impl StreamingTurnDriver<'_> {
                             // the retry — same pattern as the 529 fallback.
                             let (re_snapshot_raw, re_model, re_profile) = {
                                 let s = orch.session.lock().await;
-                                (s.history.clone(), s.model.clone(), s.model_profile.clone())
+                                (
+                                    s.model_context_history(),
+                                    s.model.clone(),
+                                    s.model_profile.clone(),
+                                )
                             };
                             let mut re_snapshot = orch
                                 .rewrite_outgoing_history(

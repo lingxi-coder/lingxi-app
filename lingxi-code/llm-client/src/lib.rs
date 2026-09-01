@@ -19,6 +19,7 @@ pub mod copilot;
 pub mod cost;
 pub mod credentials;
 pub mod error;
+pub mod fusion_hints;
 pub mod eventstream;
 pub mod model;
 pub mod oauth;
@@ -72,6 +73,7 @@ pub use copilot::{
     CopilotAuthenticator, CopilotHttp, CopilotLogin, CopilotSecret, DeviceCodeResponse, PollOutcome,
 };
 pub use cost::{CostEstimator, PricingCatalog, PricingPolicy, TokenPricing};
+pub use fusion_hints::hints_for;
 pub use credentials::{
     CopilotExchangeCredentialProvider, Credential, CredentialProvider, CredentialScope,
     EnvCredentialProvider, StaticCredentialProvider,

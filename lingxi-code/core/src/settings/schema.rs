@@ -75,6 +75,9 @@ pub const MERGE_STRATEGIES: &[(&str, MergeStrategy)] = &[
     // LingXi extension — deep-merge so multiple settings layers can each
     // contribute routing aliases, fallback chains, and retry policy.
     ("routing", MergeStrategy::DeepMerge),
+    // LingXi extension — Fusion multi-model deliberation. Deep-merge objects;
+    // arrays (panel lists, dimensions, allowedProfiles) replace as a whole.
+    ("fusion", MergeStrategy::DeepMerge),
     // Managed model-restriction map — deep-merge (CC `settingsMergeCustomizer`
     // leaves objects to lodash's recursive merge; only specific arrays concat).
     // NB: `availableModels` (array) and `enforceAvailableModels` (scalar) are
@@ -720,6 +723,196 @@ pub struct SettingsJson {
     ///   never scaled.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub routing: Option<Value>,
+
+    /// Object-merge field (deep-merge). LingXi extension: Fusion multi-model
+    /// deliberation. Absent ⇒ Fusion stays disabled (default `enabled: false`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fusion: Option<FusionSettingsJson>,
+}
+
+/// Typed `settings.fusion` object. Every field is `Option` so a partial layer
+/// can set a subset. Runtime defaults are applied by the Fusion orchestrator;
+/// [`SettingsJson::validate`] rejects values that would be dangerous if used.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct FusionSettingsJson {
+    /// Master switch for Agent listing + workflow `fusion()`. Default false.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+    /// `quality` or `fast`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preset: Option<String>,
+    /// Quality preset panel count (min 2).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quality_panel_count: Option<u8>,
+    /// Fast preset panel count (min 2).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fast_panel_count: Option<u8>,
+    /// Hard cap 2..=8.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_panel: Option<u8>,
+    /// Minimum successful panels before analysis.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_successful_panels: Option<u8>,
+    /// Continue when some panels fail.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub partial_ok: Option<bool>,
+    /// Per-panel turn cap (1..=32).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub panel_max_turns: Option<u32>,
+    /// Per-turn output token cap.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub panel_max_output_tokens_per_turn: Option<u32>,
+    /// Per-turn reserved input tokens (not 1 byte = 1 token).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub panel_reserved_input_tokens_per_turn: Option<u32>,
+    /// Optional hard reservation ceiling in nano-USD.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_reserved_nano_usd: Option<u64>,
+    /// Analyst output cap.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub analyst_max_output_tokens: Option<u32>,
+    /// Synthesizer output cap.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub synthesizer_max_output_tokens: Option<u32>,
+    /// Panel idle timeout.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub panel_idle_timeout_ms: Option<u64>,
+    /// Panel total timeout.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub panel_total_timeout_ms: Option<u64>,
+    /// Analyst timeout.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub analyst_timeout_ms: Option<u64>,
+    /// Synthesizer timeout.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub synthesizer_timeout_ms: Option<u64>,
+    /// End-to-end timeout.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total_timeout_ms: Option<u64>,
+    /// Analyst protocol retries (0 or 1).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub analysis_protocol_retries: Option<u8>,
+    /// `/fusion` default cross-provider.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slash_cross_provider_default: Option<bool>,
+    /// Agent may request cross-provider.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allow_cross_provider_for_agent: Option<bool>,
+    /// Workflow may request cross-provider.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allow_cross_provider_for_workflow: Option<bool>,
+    /// Hard allowlist of profile names. Empty = no extra restriction.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allowed_profiles: Option<Vec<String>>,
+    /// Per-workflow `fusion()` call cap.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workflow_fusion_call_cap: Option<u32>,
+}
+
+impl FusionSettingsJson {
+    /// Reject values that would make Fusion unusable or unbounded.
+    ///
+    /// Absent fields are not errors — the orchestrator fills runtime defaults.
+    /// Invalid *present* values fail the settings load.
+    pub fn validate(&self) -> Result<(), crate::settings::SettingsError> {
+        use crate::settings::SettingsError::SchemaViolation;
+        if let Some(preset) = self.preset.as_deref() {
+            if preset != "quality" && preset != "fast" {
+                return Err(SchemaViolation(format!(
+                    "fusion.preset `{preset}` must be quality or fast"
+                )));
+            }
+        }
+        let max_panel = self.max_panel.unwrap_or(8);
+        if !(2..=8).contains(&max_panel) {
+            return Err(SchemaViolation(
+                "fusion.maxPanel must be in 2..=8".into(),
+            ));
+        }
+        for (name, value) in [
+            ("fusion.qualityPanelCount", self.quality_panel_count),
+            ("fusion.fastPanelCount", self.fast_panel_count),
+            ("fusion.minSuccessfulPanels", self.min_successful_panels),
+        ] {
+            if let Some(n) = value {
+                if n < 2 {
+                    return Err(SchemaViolation(format!("{name} must be at least 2")));
+                }
+                if n > max_panel {
+                    return Err(SchemaViolation(format!(
+                        "{name} must not exceed fusion.maxPanel"
+                    )));
+                }
+            }
+        }
+        if let Some(turns) = self.panel_max_turns {
+            if !(1..=32).contains(&turns) {
+                return Err(SchemaViolation(
+                    "fusion.panelMaxTurns must be in 1..=32".into(),
+                ));
+            }
+        }
+        for (name, value) in [
+            (
+                "fusion.panelMaxOutputTokensPerTurn",
+                self.panel_max_output_tokens_per_turn,
+            ),
+            (
+                "fusion.panelReservedInputTokensPerTurn",
+                self.panel_reserved_input_tokens_per_turn,
+            ),
+            (
+                "fusion.analystMaxOutputTokens",
+                self.analyst_max_output_tokens,
+            ),
+            (
+                "fusion.synthesizerMaxOutputTokens",
+                self.synthesizer_max_output_tokens,
+            ),
+        ] {
+            if let Some(n) = value {
+                if n == 0 {
+                    return Err(SchemaViolation(format!("{name} must be positive")));
+                }
+            }
+        }
+        if let Some(retries) = self.analysis_protocol_retries {
+            if retries > 1 {
+                return Err(SchemaViolation(
+                    "fusion.analysisProtocolRetries must be 0 or 1".into(),
+                ));
+            }
+        }
+        let total = self.total_timeout_ms;
+        for (name, value) in [
+            ("fusion.panelIdleTimeoutMs", self.panel_idle_timeout_ms),
+            ("fusion.panelTotalTimeoutMs", self.panel_total_timeout_ms),
+            ("fusion.analystTimeoutMs", self.analyst_timeout_ms),
+            ("fusion.synthesizerTimeoutMs", self.synthesizer_timeout_ms),
+        ] {
+            if let (Some(total), Some(stage)) = (total, value) {
+                if stage > total {
+                    return Err(SchemaViolation(format!(
+                        "{name} must not exceed fusion.totalTimeoutMs"
+                    )));
+                }
+            }
+            if let Some(stage) = value {
+                if stage == 0 {
+                    return Err(SchemaViolation(format!("{name} must be positive")));
+                }
+            }
+        }
+        if let Some(cap) = self.workflow_fusion_call_cap {
+            if cap == 0 || cap > 20 {
+                return Err(SchemaViolation(
+                    "fusion.workflowFusionCallCap must be in 1..=20".into(),
+                ));
+            }
+        }
+        Ok(())
+    }
 }
 
 impl SettingsJson {
@@ -763,6 +956,9 @@ impl SettingsJson {
             self.keybinding_flavor.as_deref(),
             &["classic", "readline"],
         )?;
+        if let Some(fusion) = self.fusion.as_ref() {
+            fusion.validate()?;
+        }
         Ok(())
     }
 
@@ -1686,5 +1882,48 @@ mod tests {
         assert!(parsed.routing.is_some());
         let back = serde_json::to_string(&parsed).expect("serialize");
         assert!(back.contains("\"routing\""));
+    }
+
+    #[test]
+    fn fusion_defaults_disabled_and_deep_merges() {
+        assert_eq!(strategy_for("fusion"), Some(MergeStrategy::DeepMerge));
+        let absent: SettingsJson = serde_json::from_str(r#"{"model":"x"}"#).unwrap();
+        assert!(absent.fusion.is_none());
+        absent.validate().expect("absent fusion is valid");
+
+        let parsed: SettingsJson = serde_json::from_str(
+            r#"{"fusion":{"enabled":false,"preset":"quality","qualityPanelCount":3}}"#,
+        )
+        .unwrap();
+        assert_eq!(parsed.fusion.as_ref().unwrap().enabled, Some(false));
+        assert_eq!(
+            parsed.fusion.as_ref().unwrap().quality_panel_count,
+            Some(3)
+        );
+        parsed.validate().expect("default-shaped fusion is valid");
+        let back = serde_json::to_string(&parsed).unwrap();
+        assert!(back.contains("\"fusion\""));
+        assert!(back.contains("\"qualityPanelCount\""));
+    }
+
+    #[test]
+    fn fusion_rejects_out_of_range_counts_and_timeouts() {
+        let too_few: SettingsJson =
+            serde_json::from_str(r#"{"fusion":{"qualityPanelCount":1}}"#).unwrap();
+        assert!(too_few.validate().is_err());
+
+        let max_panel: SettingsJson =
+            serde_json::from_str(r#"{"fusion":{"maxPanel":9}}"#).unwrap();
+        assert!(max_panel.validate().is_err());
+
+        let timeout: SettingsJson = serde_json::from_str(
+            r#"{"fusion":{"totalTimeoutMs":1000,"panelTotalTimeoutMs":2000}}"#,
+        )
+        .unwrap();
+        assert!(timeout.validate().is_err());
+
+        let retries: SettingsJson =
+            serde_json::from_str(r#"{"fusion":{"analysisProtocolRetries":2}}"#).unwrap();
+        assert!(retries.validate().is_err());
     }
 }

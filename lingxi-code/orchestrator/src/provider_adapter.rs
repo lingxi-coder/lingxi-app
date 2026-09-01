@@ -302,6 +302,11 @@ impl OrchestratorApiClient for ProviderApiAdapter {
             sidequery::SideQueryError::InvalidResponse(message) => {
                 LlmError::MediaDelegationUnavailable { message }
             }
+            sidequery::SideQueryError::StructuredOutputUnsupported => {
+                LlmError::MediaDelegationUnavailable {
+                    message: "structured output is unsupported".into(),
+                }
+            }
             sidequery::SideQueryError::Partial {
                 source,
                 usage,

@@ -1,0 +1,655 @@
+# Fusion 多模型审议 — Implementation Plan
+
+> **For agentic workers:** REQUIRED SUB-SKILL: superpowers:executing-plans. Steps use checkbox (`- [ ]`) syntax.
+
+**Goal:** 在 LingXi 增加第五种运行方式 Fusion：同一任务由多个模型并行只读作答，Analyst 结构化评估，再 Pick 或由父模型 Merge，三个入口（Agent / `/fusion` / workflow）在默认关闭下可独立回滚地交付。
+
+**Architecture:** Fusion 是编排层，不是第五套 LLM loop。`platform-api` 放 DTO + `FusionExecutor` trait；新 crate `fusion` 跑状态机；Panel 走现有 `SubagentSpawner`（隐藏 `fusion-panel`）；Analyst 走新的严格 `query_json_schema`；Synthesizer 只在 Merge 时用父 model/profile 调一次 SideQuery。`tool-agent` / `tasks` / `workflow` 只依赖 trait，组合根在 `apps/engine-desktop`。
+
+**Tech Stack:** Rust workspace（lingxi-code）、tokio JoinSet、现有 SubagentSpawner / SideQueryClient / BudgetEnforcer / TaskRegistry / QuickJS workflow / command-api + TUI slash。
+
+**Repo copy:** `docs/plans/2026-08-31-fusion-multi-model-deliberation.md`（与本文件同步）。
+
+---
+
+## 0. 全局约束（全程有效）
+
+- `fusion.enabled` 默认 **false**。每个 PR 合入后 Fusion 对外 inert，直到显式打开。
+- **不**新增名为 `Fusion` 的顶层 builtin tool。
+- **不**改 `BUILTIN_SUBAGENT_TYPES`（仍 4 项）和 `BUILTIN_COMMAND_NAMES`（仍 108）。
+- **不**给 `BuiltinToolContext` 加字段（mobile / 测试用完整 struct literal）。
+- `fusion` crate **禁止**依赖 `tool-agent`、`tasks`、`command-core`、`agent`。`fusion-panel` 定义留在 `agent` crate，orchestrator 只传 `subagent_type`。
+- 预算单位 **nano_usd: u64**，不要 `Decimal`。
+- 移动端不注册 executor；调用返回 `UnavailableOnPlatform`，禁止静默降级。
+- 不要跑整个 workspace `cargo fmt`。改动 crate 用 `cargo test -p <crate>`。
+- Panel 互不可见；Analyst 匿名；Pick 零 synth 调用；Merge 恰好一次父模型调用。
+
+---
+
+## 1. 锁定的产品决策
+
+| 项 | 决策 |
+|---|---|
+| 形态 | OpenRouter Fusion 式审议，不在父树写文件 |
+| Panel 工具 | Explicit：`Read`, `Grep`, `Glob`, `Bash`, `WebFetch`。Bash **继承 session permission**，不是 OS 只读沙箱 |
+| Analyst | 无工具；temp=0；严格 JSON Schema |
+| Synthesizer | 仅 Merge；inherit 父 model/profile；失败 → NeedsParent，不换模型 |
+| 默认维度 | `evidence_quality`, `coverage`, `reasoning`, `safety`, `actionability` |
+| Agent / Workflow | 默认当前 provider/profile |
+| `/fusion` | 默认跨 provider；`--same-provider` 强制同源；enabled=false 也可跑（用户逐次授权） |
+| 历史 | Agent 只写 tool_result；Slash 一条 `user_meta`；Workflow 不写主历史 |
+| 公开 listing | `fusion` 仅当 enabled=true 且注入了 executor |
+| 隐藏类型 | `fusion-panel` 永不进 listing，lookup 对标 `fork` |
+
+---
+
+## 2. 数据契约（`platform-api/src/fusion.rs`）
+
+输入（slash args / workflow opts / Agent extra fields）未知字段拒绝。持久化（FusionResult / task spool / history meta）未知可选字段忽略，带 `schema_version: u16 = 1`。
+
+### 2.1 请求
+
+```rust
+pub enum FusionOrigin { Agent, Slash, Workflow }
+pub enum FusionPreset { Quality, Fast }
+
+pub struct FusionModelRef {
+    pub profile: Option<String>,
+    pub model: String,
+}
+
+pub struct FusionRequest {
+    pub schema_version: u16,           // 1
+    pub origin: FusionOrigin,
+    pub prompt: String,                // 非空
+    pub preset: FusionPreset,
+    pub models: Option<Vec<FusionModelRef>>, // 显式列表，至少 2
+    pub dimensions: Vec<String>,       // 1..=12, snake_case, 去重保序
+    pub partial_ok: bool,
+    pub max_panel: Option<u8>,         // clamp 到 settings.maxPanel，2..=8
+    pub cross_provider: bool,
+    pub parent_profile: String,
+    pub parent_model: String,
+    pub conversation_id: Option<String>,
+    pub workflow_run_id: Option<String>,
+}
+```
+
+调用方 **不** 传 budget handle / permission / client。由 `FusionInheritance`（组合根注入）提供。
+
+### 2.2 PanelReport（Panel 强制 schema）
+
+```rust
+pub struct PanelReport {
+    pub schema_version: u16,
+    pub summary: String,
+    pub candidate_answer: String,
+    pub claims: Vec<PanelClaim>,          // evidence_refs ⊆ evidence.id
+    pub evidence: Vec<PanelEvidence>,     // id 报告内唯一
+    pub assumptions: Vec<String>,
+    pub risks: Vec<PanelRisk>,
+    pub unresolved_questions: Vec<String>,
+}
+```
+
+Host 再验证：confidence 0..=100；字符串 NUL 清理 + `subagent_output_guard`；超条目/字节上限 = 协议失败。
+
+### 2.3 Analyst / 结果
+
+```rust
+pub enum FusionRecommendation {
+    Pick { panel_id: String, reason: String },
+    Merge { reason: String },
+    NeedsParent { reason: String },
+}
+
+pub enum FusionStatus { Completed, NeedsParent }
+pub enum FusionDecision {
+    Picked { panel_id: String },
+    Merged,
+    NeedsParent { reason: FusionNeedsParentReason },
+}
+
+pub struct FusionResult {
+    pub schema_version: u16,
+    pub run_id: String,                 // `fu_` + ulid，不是 task id
+    pub status: FusionStatus,
+    pub decision: FusionDecision,
+    pub final_text: String,
+    pub analysis: Option<FusionAnalysis>,
+    pub panels: Vec<PanelOutcome>,      // 匿名 id；无完整 PanelReport
+    pub usage: FusionUsage,
+    pub timing: FusionTiming,
+    pub egress_profiles: Vec<String>,
+}
+```
+
+NeedsParent 是 **Ok 成功状态**，不是 ToolError。宿主决策：
+
+- Pick：panel_id 必须存在且有 `candidate_answer`
+- Merge：`confidence >= 60` 且无未解决 critical contradiction，否则强制 NeedsParent
+- scores 的 panel id / dimension / 0..=100 必须与请求完全匹配
+
+### 2.4 错误
+
+预检类（零 provider 调用）：`Disabled`, `UnavailableOnPlatform`, `InvalidConfiguration`, `InvalidRequest`, `TooFewModels`, `InvalidCustomModels`, `CrossProviderDenied`, `NoJudgeModel`, `StructuredOutputUnsupported`, `BudgetReservationUnavailable`, `BudgetExceeded`, `SpawnLimitExceeded`。
+
+运行类：`AllPanelsFailed`, `MinPanelsNotMet`, `PanelSetIncomplete`, `TimedOutEmpty`, `Cancelled`, `Internal`。
+
+### 2.5 Trait
+
+```rust
+#[async_trait]
+pub trait FusionExecutor: Send + Sync {
+    async fn run(
+        &self,
+        request: FusionRequest,
+        inherit: FusionInheritance,
+        progress: Option<tokio::sync::mpsc::Sender<FusionProgress>>,
+    ) -> Result<FusionResult, FusionError>;
+}
+```
+
+---
+
+## 3. Settings（`core/src/settings/schema.rs`）
+
+`MERGE_STRATEGIES` 增加 `("fusion", MergeStrategy::DeepMerge)`。对象 deep-merge，数组整体替换。
+
+```json
+{
+  "fusion": {
+    "enabled": false,
+    "preset": "quality",
+    "qualityPanelCount": 3,
+    "fastPanelCount": 2,
+    "maxPanel": 8,
+    "minSuccessfulPanels": 2,
+    "partialOk": true,
+    "panelMaxTurns": 12,
+    "panelMaxOutputTokensPerTurn": 8192,
+    "panelReservedInputTokensPerTurn": 32768,
+    "maxReservedNanoUsd": null,
+    "analystMaxOutputTokens": 8192,
+    "synthesizerMaxOutputTokens": 16384,
+    "panelIdleTimeoutMs": 180000,
+    "panelTotalTimeoutMs": 600000,
+    "analystTimeoutMs": 120000,
+    "synthesizerTimeoutMs": 180000,
+    "totalTimeoutMs": 900000,
+    "analysisProtocolRetries": 1,
+    "slashCrossProviderDefault": true,
+    "allowCrossProviderForAgent": false,
+    "allowCrossProviderForWorkflow": false,
+    "allowedProfiles": [],
+    "workflowFusionCallCap": 20
+  }
+}
+```
+
+校验：counts ≥ 2；maxPanel 2..=8；counts ≤ maxPanel；minSuccessful ≤ panel count；timeouts 阶段 ≤ total；retries 0 或 1。无效配置不 panic，入口返回 `InvalidConfiguration`。
+
+**预留公式（覆盖 Codex 1byte=1token 峰值）：**
+
+```
+reserved_input  = panelCount * panelMaxTurns * panelReservedInputTokensPerTurn
+reserved_output = panelCount * panelMaxTurns * panelMaxOutputTokensPerTurn
+                + analystMaxOutputTokens * (1 + analysisProtocolRetries)
+                + synthesizerMaxOutputTokens
+reserved_usd    = price(input)*reserved_input + price(output)*reserved_output
+                  + per-request fees * max_calls
+if maxReservedNanoUsd is Some: reserved_usd = min(reserved_usd, maxReservedNanoUsd)
+                  若理论峰值仍大于 session 剩余 → BudgetExceeded，零调用
+```
+
+1 byte = 1 token **只**用于单次调用 usage 缺失时的结算兜底，不用于预留。
+
+---
+
+## 4. 模型解析
+
+`llm-client` `ModelProfile` / `platform-api` `ModelListing` 增加可选 `FusionModelHints { eligible, quality_rank, latency_class, cost_class, judge_eligible }`。
+
+自动预设只收 `eligible=true`。Analyst 额外要求 `judge_eligible && capabilities.structured_output`。**禁止**用模型名、catalog 顺序、provider 顺序当质量。
+
+Hint 表是 checked-in policy；**ID 必须从当前 catalog preset 逐条抄**，抄不到则该行不生效（默认 ineligible）。禁止模糊匹配。
+
+- Quality：跨源时每 profile 先取最高 quality 各 1，再按 rank 补齐；同分：cost 低 → latency 快 → profile 字典序 → model 字典序。
+- Fast：latency → quality → cost → 字典序；默认 2 个。
+- 少于 2 个可用 → `TooFewModels`。无合格 Analyst → `NoJudgeModel`。均在任何 Panel 调用前失败。
+- 自定义 `models` 可含未标 eligible 的模型，但仍要存在、可用、≥2 个不同 ref、不违反 allowlist/跨源策略。按 token 计费却无价格且有硬预算 → 拒绝。
+
+---
+
+## 5. 状态机
+
+```
+Created → ResolvingModels → ReservingBudget → RunningPanels
+       → Analyzing → Deciding
+            ├ Pick → Completed
+            ├ NeedsParent → NeedsParent
+            └ Merge → Synthesizing → Completed | NeedsParent
+Cancel / 预检失败 / 0 成功 / 低于 min → Failed | Cancelled
+```
+
+每个 terminal 只跑一次 finalize：取消子任务、释放 Panel slot、释放 spawn reservation 未使用部分、释放预算余额、flush usage/telemetry、只发一次完成通知。迟到事件不得覆盖 terminal。
+
+Panel：JoinSet + CancellationToken。idle + total timeout。成功数 ≥ min 且 partialOk → 进 Analyst。
+
+Analyst 输入：匿名 P1..Pn，`run_id` 派生稳定洗牌。无 provider/model。非法 JSON 同模型重试 1 次，再失败 → NeedsParent(AnalysisParseFailed)。禁止从文本里抠 JSON。
+
+---
+
+## 6. PR 与任务
+
+每 PR 保持可编译、默认关闭、有测试。提交信息用 `feat(fusion): ...`。
+
+### PR1 — 类型、配置、hints、strict SideQuery（inert）
+
+#### Task 1.1 公共 DTO + trait
+
+**Files:**
+- Create: `lingxi-code/platform-api/src/fusion.rs`
+- Modify: `lingxi-code/platform-api/src/lib.rs`（`mod fusion; pub use fusion::*`）
+
+**Steps:**
+- [ ] 写入 §2 全部类型、`FusionExecutor`、`FusionInheritance`（budget / spawner / side_query / cancel / settings snapshot 的 Arc 句柄）。
+- [ ] 单测：dimensions snake_case / 去重 / 1..=12；recommendation 反序列化；schema_version 默认 1。
+- [ ] `cargo test -p platform-api fusion::`
+
+#### Task 1.2 Settings
+
+**Files:**
+- Modify: `lingxi-code/core/src/settings/schema.rs`（`FusionSettingsJson`、`SettingsJson.fusion`、`MERGE_STRATEGIES`）
+- Modify: 现有 settings 单测模块
+
+**Steps:**
+- [ ] 默认 `enabled=false`。
+- [ ] 测 deep-merge、数组替换、边界值、无效 timeout → 诊断而非 panic。
+- [ ] `cargo test -p core settings::`
+
+#### Task 1.3 QuerySource 三分
+
+**Files:**
+- Modify: `lingxi-code/sidequery/src/purposes.rs`
+
+```rust
+FusionPanel, FusionAnalyst, FusionSynthesizer
+// as_str: "fusion_panel" | "fusion_analyst" | "fusion_synthesizer"
+```
+
+- [ ] roundtrip 单测。现有 variant 行为不变。
+- [ ] `cargo test -p sidequery purposes::`
+
+#### Task 1.4 FusionModelHints
+
+**Files:**
+- Modify: `lingxi-code/llm-client/src/config.rs` `ModelProfile`
+- Modify: `lingxi-code/platform-api` 的 `ModelListing`（若 listing 独立）
+- Create: `lingxi-code/llm-client/src/fusion_hints.rs`（checked-in 表）
+- Modify: `lingxi-code/llm-client/src/catalog/presets.rs` 在组装 ModelProfile 时按 **精确 request_model** 填 hints
+
+**Steps:**
+- [ ] 表内 ID 必须 `catalog` 里存在，否则该行 skip（单测：未知 ID 不 panic）。
+- [ ] 无 hint 的模型 `eligible=false`。
+- [ ] `cargo test -p llm-client fusion_hints::`
+
+#### Task 1.5 strict JSON SideQuery
+
+**Files:**
+- Modify: `lingxi-code/sidequery/src/side_query.rs`（新方法，**不改** `output_format` 语义）
+- Modify: `lingxi-code/sidequery/src/provider_side_query.rs`（走 `ApiService::stream_json_schema`）
+
+```rust
+async fn query_json_schema<T: DeserializeOwned>(
+    &self,
+    request: StrictStructuredQueryRequest,
+    schema: serde_json::Value,
+) -> Result<StrictStructuredQueryResponse<T>, SideQueryError>;
+```
+
+- [ ] provider 不支持 → `StructuredOutputUnsupported`。
+- [ ] 非 JSON / 截断 / 额外文本 → 协议失败，不抠子串。
+- [ ] 现有 `output_format` 单测仍过（宽松路径）。
+- [ ] `cargo test -p sidequery`
+
+**PR1 验收:** 默认 inert；无公开入口；无新 tool 名。
+
+---
+
+### PR2 — fusion crate 状态机（无公开入口）
+
+#### Task 2.1 crate 骨架
+
+**Files:**
+- Create: `lingxi-code/fusion/Cargo.toml`, `src/lib.rs`, `config.rs`, `model_resolver.rs`, `panel.rs`, `analyst.rs`, `decision.rs`, `synthesizer.rs`, `budget.rs`, `orchestrator.rs`, `progress.rs`
+- Modify: `lingxi-code/Cargo.toml` workspace `members` + `default-members` 加 `"fusion"`
+
+依赖：`platform-api`, `sidequery`, `protocol`, `cost`, `core`, `tokio`, `async-trait`, `serde`, `thiserror`, `tracing`。**不要**依赖 `agent` / `tool-agent` / `tasks`。
+
+#### Task 2.2 hidden fusion-panel
+
+**Files:**
+- Modify: `lingxi-code/agent/src/builtins.rs` 增加 `fusion_panel_definition()`（对标 `fork_agent_definition`）
+- Modify: `lingxi-code/agent/src/handle.rs` `lookup_definition`：在 fork 之后、catalog 之前解析 `fusion-panel`，用户同名 agent 不能覆盖
+- Modify: `lingxi-code/agent/src/handle.rs` `agent_listing_entries`：**过滤** `fusion-panel`
+
+定义：
+- `AgentToolPolicy::Explicit`（不是 Except）：`Read, Grep, Glob, Bash, WebFetch`
+- `permission_mode: Bubble`
+- `max_turns: 12`（可被 request 降低，不能超 settings）
+- `schema`: PanelReport JSON Schema 字符串
+- `model: Inherit`（spawn 时被 per-panel override）
+
+- [ ] 单测：listing 不含 fusion-panel；lookup("fusion-panel") 返回 Explicit 五工具。
+- [ ] `BUILTIN_SUBAGENT_TYPES` 测试仍是 4。
+
+#### Task 2.3 SubagentSpawnRequest / 累计 usage
+
+**Files:**
+- Modify: `lingxi-code/platform-api/src/subagent_spawn.rs` additive：
+
+```rust
+pub max_turns_override: Option<u32>,
+pub max_output_tokens_per_turn: Option<u32>,
+pub max_input_bytes_per_turn: Option<u64>,
+pub query_source: Option<sidequery::QuerySource>, // 若 cycle，用 string label
+pub correlation_id: Option<String>,
+```
+
+`SubagentResult::Completed` additive `cumulative_usage: SubagentUsage`（serde default）。
+
+- Modify: `lingxi-code/agent/src/runner.rs`：每轮累加 `llm_client::Usage`；执行 per-turn output/input ceiling；`query_source` 传到 API 调用。
+- [ ] 两轮 fake client：final-turn usage ≠ cumulative；ceiling 截断。
+
+> QuerySource 在 platform-api 可能造成 cycle。优先在 spawn request 上放 `Option<String>` COGS label（`"fusion_panel"`），由 runner 映射到 sidequery::QuerySource。
+
+#### Task 2.4 Orchestrator + fake 测试
+
+**Files:** `lingxi-code/fusion/src/*.rs` + `fusion/src/orchestrator_test.rs`
+
+用 fake `SubagentSpawner` + fake `SideQueryClient`：
+
+- [ ] 3 Panel 并发，互不可见（各 spawn prompt 不含其它 panel 输出）
+- [ ] 1 失败 + partialOk + min=2 → 进 Analyst
+- [ ] min 不足 → MinPanelsNotMet
+- [ ] Pick：synth 调用次数 0，final_text = sanitized candidate_answer
+- [ ] Merge：synth 恰好 1 次，parent model/profile
+- [ ] Analyst 非法 JSON 重试 1 次成功
+- [ ] 两次非法 → NeedsParent(AnalysisParseFailed)
+- [ ] Synth 失败 → NeedsParent(SynthesisFailed)，final_text 为宿主确定性摘要
+- [ ] critical contradiction → 强制 NeedsParent
+- [ ] cancel 各阶段无 slot 泄漏（JoinHandle 全 join）
+- [ ] PanelReport 伪造 system/tool 指令被 guard 清掉后再进 Analyst
+- [ ] `cargo test -p fusion`
+
+**PR2 验收:** 无 Agent listing 变化；无 slash；无 workflow 全局。
+
+---
+
+### PR3 — 硬预算（仍无公开入口）
+
+#### Task 3.1 reservation API
+
+**Files:**
+- Modify: `lingxi-code/platform-api/src/budget.rs`
+
+```rust
+async fn reserve_nano_usd(&self, nano_usd: u64) -> Result<BudgetReservationId, BudgetError>;
+async fn commit_reservation(&self, id: BudgetReservationId, actual_nano_usd: u64) -> Result<(), BudgetError>;
+async fn release_reservation(&self, id: BudgetReservationId);
+```
+
+默认 impl：无 max budget 时 reserve 成功（id 可 no-op）；有 max 但未实现 → `Internal`，Fusion 映射 `BudgetReservationUnavailable`。
+
+- Modify: `lingxi-code/cost/src/budget.rs`：原子 `realized + active_reservations <= max_session_nano_usd`。`check_and_charge` / `check_pre_api_call` 必须看见 reservations。
+- Drop 只发异步 release 信号；正常路径必须显式 release。
+
+#### Task 3.2 预留公式 + 结算
+
+**Files:** `lingxi-code/fusion/src/budget.rs`
+
+- [ ] fixture：按 Codex 原文 1byte=1token×256KiB×12×3 会超的 session，用修正公式可通过。防止有人改回去。
+- [ ] 预留失败 → provider call count = 0。
+- [ ] 两个并发 Fusion 不能一起越过余额。
+- [ ] 每轮 Panel commit 实际 usage；缺失 usage 用保守上界并标 estimated。
+- [ ] 所有 terminal 路径 reservation 归零；不双记。
+- [ ] 按 token 计费无价格 + 有 max budget → 拒绝。
+- [ ] Subscription 美元预留 0，仍受 token/请求/超时限制。
+- [ ] `cargo test -p cost budget::` 与 `cargo test -p fusion budget::`
+
+**PR3 验收:** 仍无公开入口。
+
+---
+
+### PR4 — Agent 入口
+
+#### Task 4.1 AgentToolInput + intercept
+
+**Files:**
+- Modify: `lingxi-code/tools/agent/src/agent.rs`
+
+`AgentTool` 增加 `fusion: Option<Arc<dyn FusionExecutor>>`。
+
+```rust
+impl AgentTool {
+    pub fn with_fusion(self, executor: Arc<dyn FusionExecutor>) -> Self { ... }
+}
+```
+
+`AgentToolInput` additive serde default：
+
+```rust
+pub preset: Option<String>,
+pub models: Option<Vec<String>>,      // "profile:model" 或 "model"
+pub dimensions: Option<Vec<String>>,
+pub max_panel: Option<u8>,
+pub partial_ok: Option<bool>,
+pub cross_provider: Option<bool>,
+```
+
+旧 payload 无这些字段必须仍能反序列化。
+
+`call` 顺序（在普通 spawn 之前）：
+1. 解析 input
+2. `subagent_type == "fusion"`？
+3. 无 executor 或 `!enabled` → 当未知类型 / Disabled（listing 不含则 "Agent type 'fusion' not found"）
+4. 校验 options → `FusionRequest { origin: Agent, cross_provider: 仅当 allowCrossProviderForAgent && 显式 true }`
+5. batch spawn reserve N（见 4.2）
+6. `executor.run`
+7. `Ok(ToolCallResult)`：`model_content = final_text`；`data` 含 runId/status/decision/panel summary/usage/timing/egress。NeedsParent 仍是 Ok。
+
+- Modify: `lingxi-code/tools/agent/src/lib.rs` 保持 `register_all` 不注入 fusion。
+- Modify: `lingxi-code/apps/engine-desktop/src/lib.rs`：构造 `AgentTool::new(ctx).with_fusion(orch)` 再 register（不要改 `register_all` 签名以免 mobile/测试全炸）。
+
+#### Task 4.2 listing + spawn 计数
+
+**Files:**
+- Modify: `lingxi-code/tools/agent/src/agent.rs` prompt/listing 路径：executor.is_some() && settings.enabled 时追加 `SubagentListingEntry { agent_type: "fusion", when_to_use: "...并行多模型审议...约 4–5× 成本...", tools_description: "..." }`
+- Modify: `lingxi-code/platform-api/src/task_registry.rs`
+
+```rust
+fn try_reserve_total_agent_spawns(&self, n: u64, cap: u64) -> Result<u64, u64>;
+fn release_total_agent_spawn_reservations(&self, n: u64);
+```
+
+Fusion wrapper **不计** 1；每个实际 Panel 计 1。预检失败归还未启动的 N。
+
+- [ ] disabled：listing 无 fusion；显式调用 not found 或 Disabled。
+- [ ] enabled：listing 有 fusion；fusion-panel 无。
+- [ ] `BUILTIN_SUBAGENT_TYPES.len()==4`。
+- [ ] spawn counts：1 次 fusion + 3 panel → total_agent_spawns += 3。
+- [ ] `cargo test -p tool-agent`
+- [ ] `cargo test -p test-harness four_builtin_subagent_types`
+
+#### Task 4.3 进度
+
+把 `FusionProgress` 映射到现有 `spawn_with_progress` 字符串 / nested Task cell。阶段名用 §7。
+
+**PR4 验收:** Desktop/CLI Agent 可调；mobile 无 executor。
+
+---
+
+### PR5 — `/fusion` + LocalFusion
+
+#### Task 5.1 TaskType
+
+**Files:**
+- Modify: `lingxi-code/tasks/src/id.rs` 加 `LocalFusion`，`id_prefix = 'f'` → id `/^f[0-9a-z]{8}$/`
+- Modify: `lingxi-code/tasks/src/task_trait.rs` `TaskSpawnInput::LocalFusion { request, conversation_id }`
+- Modify: 所有 `TaskType` / `TaskSpawnInput` exhaustive match（registry、persist、notification、CLI/TUI renderer）
+- Create: `lingxi-code/tasks/src/handlers/local_fusion.rs`
+- Modify: `lingxi-code/test-harness/tests/parity_agent_task_tools.rs` 若锁了 prefix 表，把 `f` 加进去（那是 task prefix，不是 108 commands）
+
+Handler 持有 `Arc<dyn FusionExecutor>` + `Arc<dyn FusionCompletionSink>`（组合根注入，**不要 OnceLock**）。
+
+完成：
+1. TaskNotification 展示 final_text 或 NeedsParent 摘要
+2. spool 写 sanitized FusionResult
+3. sink.publish(conversation_id, result) — 失败不把 Fusion 改成 Failed
+4. 幂等键 `(conversation_id, run_id)`
+
+sink 实现：展示 + `ConversationMessage::user_meta` 一条 fusion-result（XML builder + escape，禁止拼接）。默认不含 PanelReport / 完整 analysis JSON / provider raw error。`is_meta=true` 不进模型上下文。
+
+**不**自动触发父模型下一 turn。
+
+#### Task 5.2 slash 命令
+
+**Files:**
+- Create: `lingxi-code/commands/core/src/fusion.rs`（或 `apps/engine-desktop` 扩展 handler，只要 **不** 写入 `BUILTIN_COMMAND_NAMES`）
+- Modify: `lingxi-code/commands/core/src/lib.rs` / desktop 扩展注册
+- Modify: `lingxi-code/tui/src/command.rs` 广告 `/fusion`（否则 CLI 有、TUI 补全没有）
+- 移动端：不注册，或 unavailable handler
+
+语法：
+
+```
+/fusion [--quality|--fast]
+        [--same-provider|--cross-provider]
+        [--models profile:model,...]
+        [--dimensions evidence_quality,coverage,...]
+        [--partial-ok|--no-partial]
+        [--max-panel N]
+        PROMPT
+```
+
+quality/fast 互斥；same/cross 互斥；未传 provider flag 用 `slashCrossProviderDefault`。立即 `Done { display: task id + preset + egress }`，不注入普通 user message。
+
+- [ ] `BUILTIN_COMMAND_NAMES.len()==108` 仍过
+- [ ] parser 互斥 / 空 prompt
+- [ ] 默认跨 provider；`--same-provider` 同源
+- [ ] 立即返回 `f` + 8 base36
+- [ ] 完成只追加一条 meta；重放不重复
+- [ ] 取消 / resume / read
+- [ ] `cargo test -p command-core` `cargo test -p tui` `cargo test -p tasks`
+
+**PR5 验收:** `/fusion` 在 enabled=false 时也能跑。
+
+---
+
+### PR6 — Workflow、观测、mobile、文档
+
+#### Task 6.1 workflow `fusion()`
+
+**Files:**
+- Modify: `lingxi-code/workflow/src/lib.rs` prelude **追加** `globalThis.fusion`，**不要**改 `__wf_dispatch_batch` 签名或 agent 队列字节
+
+```javascript
+globalThis.fusion = (prompt, opts) => new Promise((res, rej) => {
+  globalThis.__wf_fusion_queue.push({ prompt: String(prompt), opts: opts || {}, res, rej });
+});
+```
+
+Native：`__wf_dispatch_fusion(prompt, optsJson)`。未知字段拒绝。
+
+返回紧凑对象（无原始 PanelReport）。enabled=false → 立即拒绝，零 provider 调用。`crossProvider=true` 未允许 → 拒绝，不暗改 false。每 workflow 最多 `workflowFusionCallCap`（硬上限 20）。
+
+- Modify: `lingxi-code/tasks/src/handlers/local_workflow.rs` host 接到 FusionExecutor。
+- [ ] 既有 `parallel_*` / agent batch 单测字节级仍过
+- [ ] fusion() 基本 / cap / disabled / unknown field
+- [ ] `cargo test -p workflow` `cargo test -p tasks local_workflow`
+
+#### Task 6.2 telemetry
+
+`tengu_fusion_{started,panel_started,panel_completed,panel_failed,analysis_completed,analysis_failed,synthesis_completed,synthesis_failed,completed,failed,cancelled}`
+
+禁止记录 prompt / PanelReport / final_text / evidence locator / URL 内容。
+
+#### Task 6.3 mobile + 文档
+
+- engine-mobile 不注入 executor；若有测试调用 → `UnavailableOnPlatform`
+- 用户文档（CLI help / settings 注释）：成本、跨 provider 外发、Panel Bash 权限、NeedsParent
+- `docs/architecture-flow.md` Layer 3 加上 `fusion` crate
+
+**PR6 验收:** 三入口齐；默认关闭；相关 crate test + clippy 过。
+
+---
+
+## 7. 进度文案（三入口共用）
+
+```
+Resolving models → Reserving budget → Running panels x/N
+→ Analyzing reports → Selecting answer | Synthesizing answer
+→ Completed | Needs parent | Failed | Cancelled
+```
+
+默认 UI 显示匿名 P1..Pn，不显示模型名；详情可显示 egress profile/model。
+
+---
+
+## 8. 组合根（engine-desktop）
+
+1. 构 `FusionOrchestrator`（spawner, side_query, budget, resolver, settings）
+2. `Arc<dyn FusionExecutor>`
+3. `AgentTool::new(ctx).with_fusion(exec.clone())` 替换 `register_all` 的裸 `new`
+4. `LocalFusionHandler` + `FusionCompletionSink` 在 orchestrator 可用后注入
+5. workflow host 持有同一 exec
+6. 注册 `/fusion` handler
+7. mobile：跳过 3–6
+
+---
+
+## 9. 测试命令（每个 PR 结束）
+
+```
+cargo test -p platform-api fusion::
+cargo test -p core settings::
+cargo test -p sidequery
+cargo test -p llm-client fusion_hints::
+cargo test -p fusion
+cargo test -p cost budget::
+cargo test -p tool-agent
+cargo test -p agent fusion_panel
+cargo test -p tasks
+cargo test -p workflow
+cargo test -p command-core
+cargo test -p tui
+cargo test -p test-harness four_builtin_subagent_types
+cargo test -p test-harness -- BUILTIN_COMMAND_NAMES
+cargo clippy -p fusion -p tool-agent -p tasks -p workflow -- -D warnings
+```
+
+不要 `cargo fmt` 整个 workspace。
+
+并发测试用 barrier / 虚拟时钟 / fake provider，不用 `sleep` 断言时序。
+
+---
+
+## 10. Definition of Done
+
+Codex 验收 1–20 全部成立，并额外：
+
+- 修正后的预留公式 fixture 存在，且「旧 1byte=1token 峰值」不会被重新引入
+- `__wf_dispatch_batch` 既有测试仍过
+- task id `/^f[0-9a-z]{8}$/`；run_id 与 task id 不混名
+- 旧 `AgentToolInput` JSON 无 fusion 字段仍能反序列化
+- 真实 provider smoke（同源 + 跨源）若 CI 无凭据，记入发布检查表 Not-tested
+
+---
+
+## 11. 回滚
+
+- `fusion.enabled=false` 关掉 Agent/Workflow
+- `/fusion` 可用本地/远端 policy 停注册或让 handler 直接 Disabled
+- kill switch 向运行中 Fusion 发 cancel，走正常 finalize
+- 历史里已有 fusion-result 当普通 user_meta 显示，不 crash

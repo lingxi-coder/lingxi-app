@@ -34,6 +34,12 @@ pub enum QuerySource {
     WebFetchApply,
     /// Delegated image analysis performed before a non-vision main-model turn.
     VisionDelegation,
+    /// Fusion panel subagent / provider call.
+    FusionPanel,
+    /// Fusion analyst strict JSON side query.
+    FusionAnalyst,
+    /// Fusion synthesizer side query (merge path only).
+    FusionSynthesizer,
     /// Caller-supplied label for purposes not enumerated above.
     Custom(String),
 }
@@ -55,6 +61,9 @@ impl QuerySource {
             Self::SkillExecution => "skill_execution",
             Self::WebFetchApply => "web_fetch_apply",
             Self::VisionDelegation => "vision_delegation",
+            Self::FusionPanel => "fusion_panel",
+            Self::FusionAnalyst => "fusion_analyst",
+            Self::FusionSynthesizer => "fusion_synthesizer",
             Self::Custom(value) => value.as_str(),
         }
     }
@@ -80,5 +89,28 @@ mod tests {
         assert_eq!(json, "\"VisionDelegation\"");
         let back: QuerySource = serde_json::from_str(&json).unwrap();
         assert_eq!(back, QuerySource::VisionDelegation);
+    }
+
+    #[test]
+    fn fusion_sources_roundtrip_and_label() {
+        for (q, label, json) in [
+            (QuerySource::FusionPanel, "fusion_panel", "\"FusionPanel\""),
+            (
+                QuerySource::FusionAnalyst,
+                "fusion_analyst",
+                "\"FusionAnalyst\"",
+            ),
+            (
+                QuerySource::FusionSynthesizer,
+                "fusion_synthesizer",
+                "\"FusionSynthesizer\"",
+            ),
+        ] {
+            assert_eq!(q.as_str(), label);
+            let encoded = serde_json::to_string(&q).unwrap();
+            assert_eq!(encoded, json);
+            let back: QuerySource = serde_json::from_str(&encoded).unwrap();
+            assert_eq!(back, q);
+        }
     }
 }

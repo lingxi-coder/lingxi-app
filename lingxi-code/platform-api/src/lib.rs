@@ -55,6 +55,7 @@ pub mod file_history_sink;
 pub mod filesystem;
 pub mod fork_resume_gate;
 pub mod fork_subagent;
+pub mod fusion;
 pub mod haptics;
 pub mod http;
 mod live_session_words;
@@ -124,6 +125,15 @@ pub use contacts::{Contact, ContactsError, ContactsProvider, ContactsQuery};
 pub use deep_link::{DeepLinkError, DeepLinkOpener};
 pub use device_status::{DeviceStatus, DeviceStatusError, DeviceStatusProvider};
 pub use effect_handler::EffectHandler;
+pub use fusion::{
+    normalize_dimensions, validate_panel_report, EvidenceKind, FusionAnalysis, FusionContradiction,
+    FusionCostClass, FusionDecision, FusionError, FusionExecutor, FusionInheritance,
+    FusionLatencyClass, FusionModelHints, FusionModelRef, FusionNeedsParentReason, FusionOrigin,
+    FusionPreset, FusionProgress, FusionRecommendation, FusionRequest, FusionResult, FusionStage,
+    FusionStatus, FusionTiming, FusionUniqueInsight, FusionUsage, PanelClaim, PanelEvidence,
+    PanelOutcome, PanelPosition, PanelReport, PanelRisk, PanelRunStatus, RiskSeverity,
+    DEFAULT_FUSION_DIMENSIONS, FUSION_MAX_PANEL, FUSION_MIN_PANEL, FUSION_SCHEMA_VERSION,
+};
 pub use file_history_sink::FileHistorySink;
 pub use filesystem::{
     apply_line_window, file_content_from_prefix_bytes, FileContent, FileEvent, FileEventKind,

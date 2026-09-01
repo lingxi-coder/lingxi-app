@@ -6339,6 +6339,7 @@ dependencies = [
  "core",
  "cost",
  "futures-core",
+ "futures-util",
  "hooks",
  "llm-client",
  "platform-api",

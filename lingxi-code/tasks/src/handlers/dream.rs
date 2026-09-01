@@ -335,6 +335,11 @@ impl Task for DreamHandler {
             forked_skill_effort: None,
             frozen_command_denies: Vec::new(),
             resumed_history: None,
+            max_turns_override: None,
+            max_output_tokens_per_turn: None,
+            max_input_bytes_per_turn: None,
+            query_source_label: None,
+            correlation_id: None,
         };
 
         // 4. Bundle the inheritance. Cloning the Arcs preserves pointer
@@ -652,6 +657,7 @@ mod tests {
                         assistant_message_count: 0,
                         response_char_count: 0,
                         last_request_id: None,
+                        cumulative_usage: SubagentUsage::default(),
                     })
                 }
                 Some(CannedResult::Failed(reason)) => Ok(SubagentResult::Failed {

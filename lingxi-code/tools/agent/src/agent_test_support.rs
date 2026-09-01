@@ -252,6 +252,7 @@ impl SubagentSpawner for MockSubagentSpawner {
                 assistant_message_count: 0,
                 response_char_count: 0,
                 last_request_id: None,
+                cumulative_usage: SubagentUsage::default(),
             },
             MockSpawnResponse::CompletedWith {
                 agent_id,
@@ -266,13 +267,14 @@ impl SubagentSpawner for MockSubagentSpawner {
             } => SubagentResult::Completed {
                 agent_id,
                 content,
-                usage,
+                usage: usage.clone(),
                 total_tool_use_count,
                 total_duration_ms,
                 total_tokens,
                 assistant_message_count,
                 response_char_count,
                 last_request_id,
+                cumulative_usage: usage,
             },
             MockSpawnResponse::Failed(reason) => SubagentResult::Failed {
                 agent_id: protocol::AgentId::new(),

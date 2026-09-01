@@ -141,6 +141,11 @@ impl AgentExecutor {
             system_prompt_override: None,
             system_prompt_addendum: None,
             additional_disallowed_tools: Vec::new(),
+            max_turns_override: None,
+            max_output_tokens_per_turn: None,
+            max_input_bytes_per_turn: None,
+            query_source_label: None,
+            correlation_id: None,
         };
 
         let fut = spawner.spawn(req, inherit);
@@ -318,6 +323,7 @@ mod tests {
                 assistant_message_count: 0,
                 response_char_count: 0,
                 last_request_id: None,
+                cumulative_usage: SubagentUsage::default(),
             }))),
         });
         let exec = AgentExecutor::new(Some(spawner.clone()), Duration::from_secs(5));

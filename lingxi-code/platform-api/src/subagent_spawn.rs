@@ -63,7 +63,7 @@ impl ObserverSpec {
 ///
 /// Mirrors `AgentToolInput` in `lingxi-tools::builtin::agent` byte-for-byte
 /// so the trait surface stays insulated from `lingxi-tools`.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct SubagentSpawnRequest {
     /// The subagent type to resolve (built-in or user/project catalog). NOT
     /// validated here — the spawner resolves it with claude-code precedence
@@ -279,6 +279,22 @@ pub struct SubagentSpawnRequest {
     /// already seen and re-fire start hooks for a run that began elsewhere.
     #[serde(default)]
     pub resumed_history: Option<Vec<protocol::ConversationMessage>>,
+    /// Lower the resolved definition's `max_turns` for this spawn (cannot raise it).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_turns_override: Option<u32>,
+    /// Per-turn output token cap forwarded to the API client.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_output_tokens_per_turn: Option<u32>,
+    /// Per-turn input payload cap in bytes (oldest messages dropped first).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_input_bytes_per_turn: Option<u64>,
+    /// COGS query-source label (e.g. `"fusion_panel"`). String to avoid a
+    /// `platform-api` → `sidequery` cycle.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub query_source_label: Option<String>,
+    /// Caller correlation id (Fusion run id + panel index).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub correlation_id: Option<String>,
 }
 
 /// Workflow-scoped model-query stall policy.
@@ -483,6 +499,10 @@ pub enum SubagentResult {
         /// → the cache-eviction hint is skipped, matching claude's truthy guard.
         #[serde(default)]
         last_request_id: Option<String>,
+        /// Cross-turn summed usage. Distinct from the final-turn `usage` field
+        /// (claude-compatible).
+        #[serde(default)]
+        cumulative_usage: SubagentUsage,
     },
     /// The subagent terminated with an error.
     Failed {

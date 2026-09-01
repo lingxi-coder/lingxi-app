@@ -1384,6 +1384,11 @@ fn make_request(
         forked_skill_effort: None,
         frozen_command_denies: Vec::new(),
         resumed_history: None,
+        max_turns_override: None,
+        max_output_tokens_per_turn: None,
+        max_input_bytes_per_turn: None,
+        query_source_label: None,
+        correlation_id: None,
     }
 }
 

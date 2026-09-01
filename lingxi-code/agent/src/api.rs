@@ -230,6 +230,58 @@ pub trait SubagentApiClient: Send + Sync {
         self.messages_create_stream_forced(model, system, messages, tools, forced_tool, effort)
             .await
     }
+
+    /// Like [`Self::messages_create_stream_in`], with Fusion per-turn ceilings
+    /// and a COGS query-source label. The default ignores `opts`.
+    async fn messages_create_stream_in_opts(
+        &self,
+        model: &str,
+        profile: Option<&str>,
+        system: Option<&str>,
+        messages: Vec<protocol::ConversationMessage>,
+        tools: Vec<serde_json::Value>,
+        effort: Option<serde_json::Value>,
+        opts: SubagentApiCallOpts,
+    ) -> Result<BoxStream<'static, Result<LlmEvent, LlmError>>, LlmError> {
+        let _ = opts;
+        self.messages_create_stream_in(model, profile, system, messages, tools, effort)
+            .await
+    }
+
+    /// Like [`Self::messages_create_stream_forced_in`], with Fusion per-turn
+    /// ceilings. The default ignores `opts`.
+    async fn messages_create_stream_forced_in_opts(
+        &self,
+        model: &str,
+        profile: Option<&str>,
+        system: Option<&str>,
+        messages: Vec<protocol::ConversationMessage>,
+        tools: Vec<serde_json::Value>,
+        forced_tool: Option<&str>,
+        effort: Option<serde_json::Value>,
+        opts: SubagentApiCallOpts,
+    ) -> Result<BoxStream<'static, Result<LlmEvent, LlmError>>, LlmError> {
+        let _ = opts;
+        self.messages_create_stream_forced_in(
+            model,
+            profile,
+            system,
+            messages,
+            tools,
+            forced_tool,
+            effort,
+        )
+        .await
+    }
+}
+
+/// Optional per-round-trip Fusion / COGS knobs.
+#[derive(Debug, Clone, Default)]
+pub struct SubagentApiCallOpts {
+    /// Output token cap for this turn.
+    pub max_output_tokens: Option<u32>,
+    /// COGS query-source label.
+    pub query_source_label: Option<String>,
 }
 
 /// Per-spawn API wrapper that enables the workflow query watchdog and routes

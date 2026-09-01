@@ -1,0 +1,28 @@
+[package]
+name = "fusion"
+version = "0.12.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Fusion multi-model deliberation orchestrator"
+
+[dependencies]
+platform-api = { path = "../platform-api" }
+sidequery = { path = "../sidequery" }
+protocol = { path = "../protocol" }
+cost = { path = "../cost" }
+core = { path = "../core" }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+async-trait.workspace = true
+tokio = { workspace = true, features = ["macros", "rt", "sync", "time"] }
+tokio-util.workspace = true
+tracing.workspace = true
+uuid = { version = "1", features = ["v4"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "time"] }
+
+[lints]
+workspace = true

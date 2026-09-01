@@ -66,6 +66,9 @@ pub enum SubagentEvent {
         /// `lastAssistantMessage.requestId`) — used to gate
         /// `tengu_cache_eviction_hint`. `None` on the stub path.
         last_request_id: Option<String>,
+        /// Cross-turn summed usage. Distinct from [`Self::Completed::usage`].
+        #[serde(default)]
+        cumulative_usage: llm_client::Usage,
     },
     /// Agent terminated due to an error.
     Failed {
@@ -1173,6 +1176,7 @@ async fn run_subagent_loop(
     let run_start = std::time::Instant::now();
     let mut total_tool_use_count: u64 = 0;
     let mut last_usage = llm_client::Usage::default();
+    let mut cumulative_usage = llm_client::Usage::default();
     // claude `agentMessages.length` — assistant turns produced across the run
     // (one per round-trip) — and the FINAL turn's provider request id (claude
     // `lastAssistantMessage.requestId`), both surfaced on the terminal
@@ -1299,28 +1303,35 @@ async fn run_subagent_loop(
                     // partial (empty vec); a mid-stream error yields whatever
                     // blocks were finalized.
                     let profile = ctx.model_profile.as_deref();
+                    let messages_for_api = cap_input_bytes(&history, ctx.max_input_bytes_per_turn);
+                    let call_opts = crate::api::SubagentApiCallOpts {
+                        max_output_tokens: ctx.max_output_tokens_per_turn,
+                        query_source_label: ctx.query_source_label.clone(),
+                    };
                     let open_stream = async {
                         if let Some(forced) = force_structured_tool {
                             api_client
-                                .messages_create_stream_forced_in(
+                                .messages_create_stream_forced_in_opts(
                                     &current_model,
                                     profile,
                                     system.as_deref(),
-                                    history.clone(),
+                                    messages_for_api,
                                     tool_schemas.clone(),
                                     Some(forced),
                                     effort_wire.clone(),
+                                    call_opts,
                                 )
                                 .await
                         } else {
                             api_client
-                                .messages_create_stream_in(
+                                .messages_create_stream_in_opts(
                                     &current_model,
                                     profile,
                                     system.as_deref(),
-                                    history.clone(),
+                                    messages_for_api,
                                     tool_schemas.clone(),
                                     effort_wire.clone(),
+                                    call_opts,
                                 )
                                 .await
                         }
@@ -1496,6 +1507,7 @@ async fn run_subagent_loop(
                                     total_duration_ms: elapsed_ms(run_start),
                                     assistant_message_count,
                                     last_request_id: last_request_id.clone(),
+                                    cumulative_usage: cumulative_usage.clone(),
                                 })
                                 .await;
                             return;
@@ -1520,6 +1532,11 @@ async fn run_subagent_loop(
             // (claude `getTokenCountFromUsage` reads the LAST assistant usage — so
             // overwrite, never accumulate, to stay byte-faithful).
             last_usage = response.usage.clone();
+            if let Some(max) = ctx.max_output_tokens_per_turn {
+                last_usage.billable_tokens.output =
+                    last_usage.billable_tokens.output.min(u64::from(max));
+            }
+            accumulate_usage(&mut cumulative_usage, &last_usage);
             emit_progress(
                 &out_tx,
                 agent_id,
@@ -1915,6 +1932,7 @@ async fn run_subagent_loop(
                         total_duration_ms: elapsed_ms(run_start),
                         assistant_message_count,
                         last_request_id: last_request_id.clone(),
+                        cumulative_usage: cumulative_usage.clone(),
                     })
                     .await;
                 // Terminal stop for this turn-set: leave the inner turn loop and
@@ -1948,6 +1966,7 @@ async fn run_subagent_loop(
                     total_duration_ms: elapsed_ms(run_start),
                     assistant_message_count,
                     last_request_id: last_request_id.clone(),
+                    cumulative_usage: cumulative_usage.clone(),
                 })
                 .await;
         }
@@ -2111,6 +2130,7 @@ async fn run_subagent_stub(
                             total_duration_ms: 0,
                             assistant_message_count: 0,
                             last_request_id: None,
+                            cumulative_usage: llm_client::Usage::default(),
                         })
                         .await;
                 }
@@ -2134,6 +2154,7 @@ async fn run_subagent_stub(
                 total_duration_ms: 0,
                 assistant_message_count: 0,
                 last_request_id: None,
+                cumulative_usage: llm_client::Usage::default(),
             })
             .await;
     } else {
@@ -2144,6 +2165,57 @@ async fn run_subagent_stub(
             })
             .await;
     }
+}
+
+fn accumulate_usage(acc: &mut llm_client::Usage, turn: &llm_client::Usage) {
+    acc.billable_tokens.input = acc
+        .billable_tokens
+        .input
+        .saturating_add(turn.billable_tokens.input);
+    acc.billable_tokens.output = acc
+        .billable_tokens
+        .output
+        .saturating_add(turn.billable_tokens.output);
+    acc.billable_tokens.cache_write = acc
+        .billable_tokens
+        .cache_write
+        .saturating_add(turn.billable_tokens.cache_write);
+    acc.billable_tokens.cache_read = acc
+        .billable_tokens
+        .cache_read
+        .saturating_add(turn.billable_tokens.cache_read);
+    acc.billable_tokens.reasoning_output = acc
+        .billable_tokens
+        .reasoning_output
+        .saturating_add(turn.billable_tokens.reasoning_output);
+}
+
+fn cap_input_bytes(
+    messages: &[protocol::ConversationMessage],
+    max_bytes: Option<u64>,
+) -> Vec<protocol::ConversationMessage> {
+    let Some(max) = max_bytes else {
+        return messages.to_vec();
+    };
+    let mut out = Vec::new();
+    let mut used = 0u64;
+    for msg in messages.iter().rev() {
+        let size = serde_json::to_vec(msg)
+            .map(|bytes| bytes.len() as u64)
+            .unwrap_or(0);
+        if !out.is_empty() && used.saturating_add(size) > max {
+            break;
+        }
+        used = used.saturating_add(size);
+        out.push(msg.clone());
+    }
+    out.reverse();
+    if out.is_empty() {
+        if let Some(last) = messages.last() {
+            out.push(last.clone());
+        }
+    }
+    out
 }
 
 #[cfg(test)]

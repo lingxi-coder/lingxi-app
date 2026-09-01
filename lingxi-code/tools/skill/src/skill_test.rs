@@ -1417,6 +1417,7 @@ mod fork_dispatch_tests {
                 assistant_message_count: 0,
                 response_char_count: 0,
                 last_request_id: None,
+                cumulative_usage: SubagentUsage::default(),
             })
         }
         async fn agent_listing(&self) -> Vec<SubagentListingEntry> {

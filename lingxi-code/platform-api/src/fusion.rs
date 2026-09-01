@@ -32,6 +32,10 @@ pub const FUSION_MIN_PANEL: u8 = 2;
 /// OpenRouter-aligned panel cap.
 pub const FUSION_MAX_PANEL: u8 = 8;
 
+/// Hidden panel subagent type. Resolved like `fork` (catalog cannot shadow it)
+/// and never appears in the Agent listing.
+pub const FUSION_PANEL_TYPE: &str = "fusion-panel";
+
 /// Which surface started this Fusion run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

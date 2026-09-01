@@ -1057,6 +1057,11 @@ impl PoolSubagentSpawner {
         if subagent_type == platform_api::fork_subagent::FORK_SUBAGENT_TYPE {
             return crate::builtins::fork_agent_definition();
         }
+        // 0b. Hidden Fusion panel: resolved BEFORE the catalog so a user agent
+        // named `fusion-panel` cannot shadow the synthetic definition.
+        if subagent_type == platform_api::FUSION_PANEL_TYPE {
+            return crate::builtins::fusion_panel_definition();
+        }
         // 1. File catalog (user/project) wins on collision.
         if let Some(catalog) = self.agent_catalog.get() {
             if let Some(def) = catalog
@@ -1322,6 +1327,9 @@ impl PoolSubagentSpawner {
             // live/boot gate mode.
             permission_mode_override: None,
             frozen_command_denies: Vec::new(),
+            max_output_tokens_per_turn: None,
+            max_input_bytes_per_turn: None,
+            query_source_label: None,
         }
     }
 
@@ -1653,6 +1661,14 @@ impl PoolSubagentSpawner {
         // ever APPLIED it — so a settings edit made while a fork was parked could
         // silently widen what the resumed fork was allowed to run.
         ctx.frozen_command_denies = request.frozen_command_denies.clone();
+        ctx.max_output_tokens_per_turn = request.max_output_tokens_per_turn;
+        ctx.max_input_bytes_per_turn = request.max_input_bytes_per_turn;
+        ctx.query_source_label = request.query_source_label.clone();
+        if let Some(turns) = request.max_turns_override {
+            if turns > 0 {
+                ctx.agent_definition.max_turns = ctx.agent_definition.max_turns.min(turns);
+            }
+        }
         // A persistent (background/resumable) agent parks after each turn-set;
         // `is_async` marks background scheduling (vs the foreground one-shot).
         ctx.persistent = persistent;
@@ -1827,6 +1843,9 @@ pub fn tools_description(def: &AgentDefinition) -> String {
 pub fn agent_listing_entries(defs: &[AgentDefinition]) -> Vec<SubagentListingEntry> {
     let mut by_type: HashMap<String, &AgentDefinition> = HashMap::new();
     for def in defs {
+        if def.agent_type == platform_api::FUSION_PANEL_TYPE {
+            continue;
+        }
         // Later-wins: a same-typed definition later in the slice overrides.
         by_type.insert(def.agent_type.clone(), def);
     }
@@ -2098,6 +2117,7 @@ impl SubagentSpawner for PoolSubagentSpawner {
                     total_duration_ms,
                     assistant_message_count,
                     last_request_id,
+                    cumulative_usage,
                 }) => {
                     // Translate the wire usage into the trait rollup. claude
                     // `getTokenCountFromUsage` = input + cache_creation + cache_read
@@ -2127,6 +2147,7 @@ impl SubagentSpawner for PoolSubagentSpawner {
                                 .count() as u64
                         })
                         .unwrap_or(0);
+                    let cbt = cumulative_usage.billable_tokens;
                     break SubagentResult::Completed {
                         agent_id: child_id,
                         content: result,
@@ -2143,6 +2164,17 @@ impl SubagentSpawner for PoolSubagentSpawner {
                         assistant_message_count,
                         response_char_count,
                         last_request_id,
+                        cumulative_usage: SubagentUsage {
+                            total_tokens: cbt
+                                .input
+                                .saturating_add(cbt.cache_write)
+                                .saturating_add(cbt.cache_read)
+                                .saturating_add(cbt.output),
+                            input_tokens: cbt.input,
+                            output_tokens: cbt.output,
+                            cache_creation_input_tokens: cbt.cache_write,
+                            cache_read_input_tokens: cbt.cache_read,
+                        },
                     };
                 }
                 Some(SubagentEvent::Failed {
@@ -2755,6 +2787,11 @@ mod tests {
             forked_skill_effort: None,
             frozen_command_denies: Vec::new(),
             resumed_history: None,
+            max_turns_override: None,
+            max_output_tokens_per_turn: None,
+            max_input_bytes_per_turn: None,
+            query_source_label: None,
+            correlation_id: None,
         };
         let result = tokio::time::timeout(
             std::time::Duration::from_secs(5),
@@ -4487,6 +4524,11 @@ mod tests {
             forked_skill_effort: None,
             frozen_command_denies: Vec::new(),
             resumed_history: None,
+            max_turns_override: None,
+            max_output_tokens_per_turn: None,
+            max_input_bytes_per_turn: None,
+            query_source_label: None,
+            correlation_id: None,
         };
         let inherit = SubagentInheritance {
             tool_invoker: Arc::new(DummyInvoker),
@@ -4544,6 +4586,11 @@ mod tests {
             forked_skill_effort: None,
             frozen_command_denies: Vec::new(),
             resumed_history: None,
+            max_turns_override: None,
+            max_output_tokens_per_turn: None,
+            max_input_bytes_per_turn: None,
+            query_source_label: None,
+            correlation_id: None,
         };
         // Override present → override wins.
         assert_eq!(
@@ -4791,6 +4838,33 @@ mod tests {
         assert!(matches!(def.permission_mode, AgentPermissionMode::Bubble));
     }
 
+    #[tokio::test]
+    async fn lookup_definition_resolves_fusion_panel_over_catalog_shadow() {
+        let runtime = Arc::new(MockRuntimeSpawner::default());
+        let pool = Arc::new(StateMachinePool::new(runtime, 4));
+        let shadow = AgentDefinition {
+            agent_type: platform_api::FUSION_PANEL_TYPE.to_string(),
+            when_to_use: "user shadow".to_string(),
+            ..agent_def(AgentToolPolicy::Explicit(vec!["Write".to_string()]))
+        };
+        let catalog = Arc::new(RwLock::new(vec![shadow]));
+        let spawner = PoolSubagentSpawner::new(pool).with_agent_catalog(catalog);
+        let def = spawner.lookup_definition(platform_api::FUSION_PANEL_TYPE).await;
+        assert_eq!(def.agent_type, "fusion-panel");
+        match def.tools {
+            AgentToolPolicy::Explicit(tools) => {
+                assert_eq!(
+                    tools,
+                    vec!["Read", "Grep", "Glob", "Bash", "WebFetch"]
+                        .into_iter()
+                        .map(str::to_string)
+                        .collect::<Vec<_>>()
+                );
+            }
+            other => panic!("expected Explicit five tools, got {other:?}"),
+        }
+    }
+
     #[test]
     fn make_subagent_context_fork_parent_prompt_skips_notes_trailer() {
         // fork_parent_system_prompt → rendered_system_prompt is the parent's
@@ -5024,9 +5098,12 @@ mod tests {
             })
         });
 
+        defs.push(crate::builtins::fusion_panel_definition());
         let entries = crate::agent_listing_entries(&defs);
         // Override replaces (not adds); the brand-new type is +1.
+        // Hidden fusion-panel is filtered out of the listing.
         assert_eq!(entries.len(), n_builtins + 1);
+        assert!(!entries.iter().any(|e| e.agent_type == "fusion-panel"));
 
         let by: std::collections::HashMap<&str, &SubagentListingEntry> =
             entries.iter().map(|e| (e.agent_type.as_str(), e)).collect();
@@ -5083,6 +5160,11 @@ mod tests {
             forked_skill_effort: None,
             frozen_command_denies: Vec::new(),
             resumed_history: None,
+            max_turns_override: None,
+            max_output_tokens_per_turn: None,
+            max_input_bytes_per_turn: None,
+            query_source_label: None,
+            correlation_id: None,
         };
         // Drive resolve_definition + the override branch directly by replicating
         // the spawn-path logic (spawn() would require a live runner).
@@ -5203,6 +5285,11 @@ mod tests {
             forked_skill_effort: None,
             frozen_command_denies: Vec::new(),
             resumed_history: None,
+            max_turns_override: None,
+            max_output_tokens_per_turn: None,
+            max_input_bytes_per_turn: None,
+            query_source_label: None,
+            correlation_id: None,
         };
 
         // An explicit mode:"plan" call param is IGNORED — a Bubble-default agent
@@ -5315,6 +5402,11 @@ mod tests {
             forked_skill_effort: None,
             frozen_command_denies: Vec::new(),
             resumed_history: None,
+            max_turns_override: None,
+            max_output_tokens_per_turn: None,
+            max_input_bytes_per_turn: None,
+            query_source_label: None,
+            correlation_id: None,
         };
         let ctx = spawner
             .build_subagent_context(&req, inherit, false)
@@ -5385,6 +5477,11 @@ mod tests {
             forked_skill_effort: None,
             frozen_command_denies: Vec::new(),
             resumed_history: None,
+            max_turns_override: None,
+            max_output_tokens_per_turn: None,
+            max_input_bytes_per_turn: None,
+            query_source_label: None,
+            correlation_id: None,
         };
 
         let ctx = spawner
@@ -5445,6 +5542,11 @@ mod tests {
             forked_skill_effort: None,
             frozen_command_denies: Vec::new(),
             resumed_history: None,
+            max_turns_override: None,
+            max_output_tokens_per_turn: None,
+            max_input_bytes_per_turn: None,
+            query_source_label: None,
+            correlation_id: None,
         };
         let mk_inherit = || SubagentInheritance {
             tool_invoker: Arc::new(DummyInvoker),
@@ -5563,6 +5665,11 @@ mod tests {
             forked_skill_effort: None,
             frozen_command_denies: Vec::new(),
             resumed_history: None,
+            max_turns_override: None,
+            max_output_tokens_per_turn: None,
+            max_input_bytes_per_turn: None,
+            query_source_label: None,
+            correlation_id: None,
         };
         let inherit = SubagentInheritance {
             tool_invoker: Arc::new(DummyInvoker),
@@ -5666,6 +5773,11 @@ mod tests {
             forked_skill_effort: None,
             frozen_command_denies: Vec::new(),
             resumed_history: None,
+            max_turns_override: None,
+            max_output_tokens_per_turn: None,
+            max_input_bytes_per_turn: None,
+            query_source_label: None,
+            correlation_id: None,
         };
 
         // Non-fork: env block appended after the body, joined by a blank line,
@@ -5755,6 +5867,11 @@ mod tests {
             forked_skill_effort: None,
             frozen_command_denies: Vec::new(),
             resumed_history: None,
+            max_turns_override: None,
+            max_output_tokens_per_turn: None,
+            max_input_bytes_per_turn: None,
+            query_source_label: None,
+            correlation_id: None,
         };
         let inherit = SubagentInheritance {
             tool_invoker: Arc::new(DummyInvoker),
@@ -6165,6 +6282,11 @@ mod tests {
             forked_skill_effort: None,
             frozen_command_denies: Vec::new(),
             resumed_history: None,
+            max_turns_override: None,
+            max_output_tokens_per_turn: None,
+            max_input_bytes_per_turn: None,
+            query_source_label: None,
+            correlation_id: None,
         };
         let err = spawner
             .spawn_async(

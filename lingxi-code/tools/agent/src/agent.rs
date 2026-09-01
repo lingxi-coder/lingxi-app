@@ -1586,6 +1586,11 @@ prompt: \"{EXAMPLE_MIGRATION_REVIEW_PROMPT}\"\n\
             forked_skill_effort: None,
             frozen_command_denies: Vec::new(),
             resumed_history: None,
+            max_turns_override: None,
+            max_output_tokens_per_turn: None,
+            max_input_bytes_per_turn: None,
+            query_source_label: None,
+            correlation_id: None,
         };
 
         match spawner.spawn_async(request, inherit).await {
@@ -2692,6 +2697,11 @@ Use /mcp to configure and authenticate the required MCP servers.",
             forked_skill_effort: None,
             frozen_command_denies: Vec::new(),
             resumed_history: None,
+            max_turns_override: None,
+            max_output_tokens_per_turn: None,
+            max_input_bytes_per_turn: None,
+            query_source_label: None,
+            correlation_id: None,
         };
 
         // Nested-progress bridge: `spawn_with_progress` feeds one String line per
@@ -2753,6 +2763,7 @@ Use /mcp to configure and authenticate the required MCP servers.",
                 assistant_message_count,
                 response_char_count,
                 last_request_id,
+                ..
             }) => {
                 // Internal back-compat event (kept).
                 Self::emit_completed(&bus, &invocation_id, duration_ms, &effective_type).await;

@@ -132,7 +132,8 @@ pub use fusion::{
     FusionPreset, FusionProgress, FusionRecommendation, FusionRequest, FusionResult, FusionStage,
     FusionStatus, FusionTiming, FusionUniqueInsight, FusionUsage, PanelClaim, PanelEvidence,
     PanelOutcome, PanelPosition, PanelReport, PanelRisk, PanelRunStatus, RiskSeverity,
-    DEFAULT_FUSION_DIMENSIONS, FUSION_MAX_PANEL, FUSION_MIN_PANEL, FUSION_SCHEMA_VERSION,
+    DEFAULT_FUSION_DIMENSIONS, FUSION_MAX_PANEL, FUSION_MIN_PANEL, FUSION_PANEL_TYPE,
+    FUSION_SCHEMA_VERSION,
 };
 pub use file_history_sink::FileHistorySink;
 pub use filesystem::{

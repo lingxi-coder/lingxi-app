@@ -63,6 +63,7 @@ fn terminal_metrics_distinguish_done_error_skipped_and_empty_results() {
             assistant_message_count: 0,
             response_char_count: 0,
             last_request_id: None,
+            cumulative_usage: SubagentUsage::default(),
         }),
     );
     metrics.record_result(
@@ -212,6 +213,7 @@ fn completed_probe_result(agent_id: protocol::AgentId) -> SubagentResult {
         assistant_message_count: 0,
         response_char_count: 0,
         last_request_id: None,
+        cumulative_usage: SubagentUsage::default(),
     }
 }
 
@@ -367,6 +369,7 @@ impl SubagentSpawner for EchoSpawner {
             assistant_message_count: 0,
             response_char_count: 0,
             last_request_id: None,
+            cumulative_usage: SubagentUsage::default(),
         })
     }
 }
@@ -772,6 +775,7 @@ impl SubagentSpawner for TranscriptOverrideSpawner {
             assistant_message_count: 0,
             response_char_count: 0,
             last_request_id: None,
+            cumulative_usage: SubagentUsage::default(),
         })
     }
 }
@@ -892,6 +896,7 @@ async fn run_with_progress_drain_completes_and_does_not_hang() {
                 assistant_message_count: 0,
                 response_char_count: 0,
                 last_request_id: None,
+                cumulative_usage: SubagentUsage::default(),
             })
         }
     }

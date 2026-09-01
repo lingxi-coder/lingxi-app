@@ -375,6 +375,11 @@ impl SkillTool {
             additional_disallowed_tools: desc.disallowed_tools.clone(),
             parent_model_override: None,
             resumed_history: None,
+            max_turns_override: None,
+            max_output_tokens_per_turn: None,
+            max_input_bytes_per_turn: None,
+            query_source_label: None,
+            correlation_id: None,
         };
         let mut invoker_impl = tool_api::tool_invoker_impl::RegistryToolInvoker::new(
             ctx.subagent_registry.clone().ok_or_else(|| {
